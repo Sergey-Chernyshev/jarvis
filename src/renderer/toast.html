@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: transparent; height: 100%; overflow: hidden; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  /* колонка карточек, прижата к низу; запас по краям — под тень и овершут */
+  .stack {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 16px 12px 6px;
+  }
+  /* пилюля в духе Wispr Flow: глухой тёмный фон, крупный радиус */
+  .card {
+    padding: 13px 16px 14px 18px;
+    border-radius: 20px;
+    background: rgba(8, 8, 10, 0.97);
+    backdrop-filter: blur(60px) saturate(180%);
+    -webkit-backdrop-filter: blur(60px) saturate(180%);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    cursor: default;
+    opacity: 0;
+    transform: translateY(26px) scale(0.96);
+    transition: opacity 220ms cubic-bezier(0.21, 1.02, 0.55, 1),
+                transform 260ms cubic-bezier(0.21, 1.27, 0.45, 1); /* лёгкий овершут */
+  }
+  .card.in { opacity: 1; transform: translateY(0) scale(1); }
+  .card.out {
+    opacity: 0;
+    transform: translateY(14px) scale(0.97);
+    transition: opacity 170ms ease-in, transform 170ms ease-in;
+  }
+  .card:hover { border-color: rgba(255, 255, 255, 0.18); }
+
+  .crow { display: flex; align-items: center; gap: 10px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #41c98e; flex: none; }
+  .dot.waiting { background: #f2a33c; }
+  .dot.limit { background: #8b7ec8; }
+  .title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #f0f0f2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+  }
+  .close {
+    appearance: none;
+    position: relative;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: #d9d9de;
+    font-size: 12px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: default;
+    flex: none;
+  }
+  .close:hover { background: rgba(255, 255, 255, 0.1); }
+
+  /* кольцо-таймер: стекает за TTL, на ховере карточки замирает (как таймер) */
+  .ring {
+    position: absolute;
+    inset: 0;
+    transform: rotate(-90deg);
+    pointer-events: none;
+  }
+  .ring circle { fill: none; stroke-width: 1.5; }
+  .ring .track { stroke: rgba(255, 255, 255, 0.14); }
+  .ring .fg {
+    stroke: rgba(255, 255, 255, 0.55);
+    stroke-linecap: round;
+    stroke-dasharray: 72.3; /* 2π·11.5 */
+    stroke-dashoffset: 0;
+    animation: ringDrain var(--ttl, 8000ms) linear forwards;
+  }
+  @keyframes ringDrain { to { stroke-dashoffset: 72.3; } }
+  .card:hover .ring .fg { animation-play-state: paused; }
+
+  .body {
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: #9a9aa2;
+    display: -webkit-box;
+    -webkit-line-clamp: 4; /* ИИ-выжимка ответа — до четырёх строк */
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    margin: 7px 36px 0 18px;
+  }
+  @media (prefers-reduced-motion: reduce) { .card { transition: none; } }
+</style>
+</head>
+<body>
+  <div class="stack" id="stack"></div>
+  <script src="./toast.js"></script>
+</body>
+</html>

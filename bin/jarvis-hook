@@ -1,0 +1,41 @@
+#!/bin/sh
+# jarvis-hook — шим, который дёргают хуки Claude Code.
+# Использование: jarvis-hook <agent> <event>
+# JSON-пейлоад события приходит в stdin (так передаёт Claude Code).
+#
+# Контракт: ВСЕГДА выходит с кодом 0 и мгновенно.
+# Демон не запущен / сокет умер / приложение снесли — молча выходим,
+# чтобы осиротевший конфиг никогда не ломал и не тормозил Claude Code.
+
+# Служебные запуски claude самим Jarvis (resume-ответ, генерация заголовков)
+# не должны попадать в реестр — демон сам ведёт их жизненный цикл.
+[ -n "$JARVIS_IGNORE" ] && exit 0
+
+AGENT="${1:-unknown}"
+EVENT="${2:-unknown}"
+SOCK="${JARVIS_SOCK:-$HOME/.jarvis/run.sock}"
+
+# stdin может отсутствовать при ручном запуске — не виснем на cat
+if [ -t 0 ]; then
+  PAYLOAD='{}'
+else
+  PAYLOAD=$(cat 2>/dev/null)
+fi
+[ -n "$PAYLOAD" ] || PAYLOAD='{}'
+
+# Демона нет — выходим тихо
+[ -S "$SOCK" ] || exit 0
+
+# Терминалы себя подписывают: TERM_PROGRAM (iTerm.app/Apple_Terminal/vscode/…),
+# у JetBrains — TERMINAL_EMULATOR=JetBrains-JediTerm. Родитель хука — сам claude.
+HOST_TERM="${TERM_PROGRAM:-${TERMINAL_EMULATOR:-unknown}}"
+TTY=$(ps -o tty= -p "$PPID" 2>/dev/null | tr -d ' ')
+[ "$TTY" = '??' ] && TTY=''
+
+printf '{"agent":"%s","event":"%s","tmux_pane":"%s","host":"%s","tty":"%s","pid":%d,"payload":%s}' \
+  "$AGENT" "$EVENT" "${TMUX_PANE:-}" "$HOST_TERM" "$TTY" "${PPID:-0}" "$PAYLOAD" \
+| curl -s --max-time 0.3 --unix-socket "$SOCK" \
+    -X POST --data-binary @- \
+    http://jarvis/event >/dev/null 2>&1 || true
+
+exit 0

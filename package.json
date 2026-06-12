@@ -1,0 +1,17 @@
+{
+  "name": "jarvis-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Монитор сессий Claude Code: уведомления и панель статусов",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node scripts/test.mjs",
+    "setup": "node scripts/setup.mjs install",
+    "teardown": "node scripts/setup.mjs uninstall",
+    "status": "node scripts/setup.mjs status"
+  },
+  "devDependencies": {
+    "electron": ">=33.0.0"
+  }
+}

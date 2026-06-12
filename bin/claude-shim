@@ -1,0 +1,60 @@
+#!/bin/sh
+# jarvis claude shim — прозрачно оборачивает интерактивные запуски claude
+# в tmux на отдельном сервере (-L jarvis), чтобы демон мог вставлять ответы.
+# Паттерн pyenv: лежит в ~/.jarvis/shims/claude, каталог стоит первым в PATH.
+#
+# Сквозной exec настоящего бинаря (без обёртки), если:
+#   - уже внутри tmux ($TMUX)
+#   - нет tty на stdin/stdout (пайпы, headless)
+#   - запуск с -p/--print (одноразовый, неинтерактивный)
+#   - взведён предохранитель от рекурсии (JARVIS_SHIM)
+
+JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
+SHIM_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+
+# --- резолв настоящего claude: ищем в PATH без каталога шимов ---
+CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SHIM_DIR" | paste -sd: -)
+REAL=$(PATH="$CLEAN_PATH" command -v claude 2>/dev/null)
+if [ -z "$REAL" ]; then
+  echo "jarvis-shim: настоящий бинарь claude не найден в PATH" >&2
+  exit 127
+fi
+
+# --- решаем, оборачивать ли ---
+wrap=1
+[ -n "$JARVIS_SHIM" ] && wrap=0          # рекурсия
+[ -n "$TMUX" ] && wrap=0                 # уже в tmux
+[ -t 0 ] && [ -t 1 ] || wrap=0           # нет терминала
+for a in "$@"; do
+  case "$a" in
+    -p|--print) wrap=0 ;;
+  esac
+done
+command -v tmux >/dev/null 2>&1 || wrap=0  # tmux не установлен — работаем как раньше
+
+if [ "$wrap" = 0 ]; then
+  JARVIS_SHIM=1 export JARVIS_SHIM
+  exec "$REAL" "$@"
+fi
+
+# --- обёртка в tmux ---
+CONF="$JARVIS_DIR/tmux.conf"
+NAME="$(basename -- "$PWD" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-32)$$"
+
+# tmux склеивает несколько аргументов shell-command через пробел и отдаёт
+# /bin/sh -c — поэтому квотируем каждый аргумент сами и передаём одну строку.
+quoted=''
+for a in "$REAL" "$@"; do
+  q=$(printf '%s' "$a" | sed "s/'/'\\\\''/g")
+  quoted="$quoted '$q'"
+done
+CMD="JARVIS_SHIM=1 exec$quoted"
+
+# iTerm2 умеет control mode: родные табы вместо tmux-рендеринга
+CC=''
+[ "$TERM_PROGRAM" = "iTerm.app" ] && CC='-CC'
+
+# exec: когда claude (а с ним tmux-сессия) завершится, клиент отвалится
+# и терминал вернётся в обычный шелл
+# shellcheck disable=SC2086  # $CC должен расщепляться (пустой или -CC)
+exec tmux $CC -L jarvis -f "$CONF" new-session -s "$NAME" "$CMD"

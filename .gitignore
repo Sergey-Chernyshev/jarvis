@@ -3,3 +3,4 @@ node_modules/
 .idea/
 target/
 dist/
+src-tauri/gen/

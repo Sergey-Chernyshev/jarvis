@@ -1,17 +1,13 @@
 {
   "name": "jarvis-mvp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Монитор сессий Claude Code: уведомления и панель статусов",
-  "main": "src/main.js",
+  "description": "Монитор сессий Claude Code: уведомления и панель статусов (Rust + Tauri)",
   "scripts": {
-    "start": "electron .",
-    "test": "node scripts/test.mjs",
-    "setup": "node scripts/setup.mjs install",
-    "teardown": "node scripts/setup.mjs uninstall",
-    "status": "node scripts/setup.mjs status"
-  },
-  "devDependencies": {
-    "electron": ">=33.0.0"
+    "start": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "setup": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- install",
+    "teardown": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- uninstall",
+    "status": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- status"
   }
 }

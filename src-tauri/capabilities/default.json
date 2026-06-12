@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Панель и тосты: события ядра + запись в буфер обмена",
+  "windows": ["main", "toast"],
+  "permissions": ["core:default", "clipboard-manager:allow-write-text"]
+}

@@ -1,0 +1,40 @@
+[package]
+name = "jarvis"
+version = "0.2.0"
+description = "Монитор сессий Claude Code: меню-бар, панель статусов, уведомления"
+edition = "2021"
+rust-version = "1.77.2"
+default-run = "jarvis"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-clipboard-manager = "2"
+serde = { version = "1", features = ["derive"] }
+# preserve_order: не пересортировывать ключи чужих JSON (~/.claude/settings.json)
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+regex = "1"
+chrono = "0.4"
+libc = "0.2"
+core-foundation = "0.10"
+core-graphics = "0.24"
+objc2 = "0.6"
+
+[[bin]]
+name = "jarvis"
+path = "src/main.rs"
+
+[[bin]]
+name = "jarvis-setup"
+path = "src/bin/setup.rs"
+
+[profile.release]
+# панель — интерактивный UI, собираем с оптимизацией, но без LTO-долгостроя
+opt-level = 2

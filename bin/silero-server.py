@@ -2,7 +2,7 @@
 """Silero TTS сайдкар Jarvis. Только localhost. Текст → WAV, модель в памяти.
 
 Запуск (демон делает сам через venv-python):
-    python silero-server.py --port N --speaker baya --model v4_ru
+    python silero-server.py --port N --speaker xenia --model v4_ru
 
 Контракт:
     GET  /health           → {"ok": true, "model": "v4_ru"}
@@ -34,7 +34,7 @@ from pydantic import BaseModel
 ap = argparse.ArgumentParser()
 ap.add_argument("--port", type=int, required=True)
 ap.add_argument("--model", default="v4_ru")  # v4_ru | v5_ru — свериться на живой системе
-ap.add_argument("--speaker", default="baya")
+ap.add_argument("--speaker", default="xenia")
 ap.add_argument("--rate", default="fast")  # x-slow|slow|medium|fast|x-fast
 args = ap.parse_args()
 

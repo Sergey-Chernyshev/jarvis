@@ -44,7 +44,7 @@ impl Voice {
     ) -> Arc<Self> {
         // для silero — поднимаем сайдкар и берём его base; для piper sidecar=None
         let (sidecar, silero_base) = if cfg.engine == "silero" {
-            let speaker = if cfg.speaker.is_empty() { "baya".to_string() } else { cfg.speaker.clone() };
+            let speaker = if cfg.speaker.is_empty() { "xenia".to_string() } else { cfg.speaker.clone() };
             let sc = Arc::new(sidecar::Sidecar::new(silero_dir, speaker, "v4_ru".into(), SILERO_PORT));
             sc.ensure_started();
             let base = sc.base();
@@ -53,7 +53,7 @@ impl Voice {
             (None, format!("http://127.0.0.1:{SILERO_PORT}"))
         };
         let engine = build_engine(&cfg.engine, piper_bin, silero_base);
-        let speaker = if cfg.speaker.is_empty() && cfg.engine == "silero" { "baya".to_string() } else { cfg.speaker.clone() };
+        let speaker = if cfg.speaker.is_empty() && cfg.engine == "silero" { "xenia".to_string() } else { cfg.speaker.clone() };
         let v = Arc::new(Voice {
             composer: Box::new(TemplateComposer),
             engine,

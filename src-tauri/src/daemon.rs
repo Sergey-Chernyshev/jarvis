@@ -257,6 +257,20 @@ impl Daemon {
     /// применяет к существующей карточке, а не плодит новую (дедуп «закончил»
     /// для одной сессии — не было «одно за другим»).
     pub fn notify_id(&self, id: &str, title: &str, body: &str, session_id: Option<&str>, kind: &str) {
+        self.notify_id_voiced(id, title, body, session_id, kind, None);
+    }
+
+    /// Как notify_id, но голос читает `speak` вместо `body` (если задан): тост
+    /// показывает body (можно с латиницей), а вслух — русское произношение.
+    pub fn notify_id_voiced(
+        &self,
+        id: &str,
+        title: &str,
+        body: &str,
+        session_id: Option<&str>,
+        kind: &str,
+        speak: Option<&str>,
+    ) {
         crate::log::line(&format!(
             "[toast:{kind}] id={id} sid={} «{}» / {}",
             session_id.unwrap_or("-"),
@@ -265,17 +279,18 @@ impl Daemon {
         ));
         windows::toast_add(self, id, title, body, session_id, kind);
 
-        // голос (инкремент 7): озвучиваем РЕАЛЬНОЕ уведомление — тот же текст,
-        // что в тосте. Одна точка на все события; gated по voice-конфигу.
+        // голос (инкремент 7): озвучиваем уведомление. Одна точка на все события;
+        // gated по voice-конфигу. Для «done» читаем `speak` (русское произношение),
+        // иначе — body (нормализатор сайдкара подстрахует латиницу/числа).
         let vcfg = crate::voice::config::VoiceConfig::from_settings(&self.settings.load());
-        let speak = match kind {
+        let on = match kind {
             "done" => vcfg.ev_stop,
             "waiting" => vcfg.ev_notification,
             "limit" => vcfg.ev_stop_failure,
             _ => false,
         };
-        if speak {
-            self.voice.speak_text(title, body, kind);
+        if on {
+            self.voice.speak_text(title, speak.unwrap_or(body), kind);
         }
     }
 
@@ -617,10 +632,13 @@ impl Daemon {
             if d.session(&sid).is_none() {
                 return;
             }
+            // (display — для показа, speak — как читать вслух по-русски)
             let ai = d.ai_toast_summary(&sid).await;
+            let display = ai.as_ref().map(|(d, _)| d.clone());
+            let speak = ai.as_ref().map(|(_, s)| s.clone());
 
-            // строка списка = тот же результат (если выжимка получилась)
-            if let Some(text) = ai.as_deref().filter(|t| !t.is_empty()) {
+            // строка списка = display (если выжимка получилась)
+            if let Some(text) = display.as_deref().filter(|t| !t.is_empty()) {
                 let list = ellipsize(text, 140);
                 if d.with_session(&sid, |s| {
                     s.summary = Some(list);
@@ -635,21 +653,24 @@ impl Daemon {
             }
             let Some(s) = d.session(&sid) else { return };
             let non_empty = |v: Option<String>| v.filter(|t| !t.is_empty());
-            let body = non_empty(ai)
+            let body = non_empty(display)
                 .or_else(|| non_empty(s.summary.clone()))
                 .or_else(|| non_empty(s.task.clone()))
                 .or_else(|| non_empty(s.title.clone()))
                 .unwrap_or_else(|| "Ответ готов".into());
             let title = format!("{} — закончил", s.project.as_deref().unwrap_or("?"));
-            // стабильный id на сессию: повторный «закончил» переиспользует карточку
-            d.notify_id(&format!("done-{sid}"), &title, &body, Some(&sid), "done");
+            // стабильный id на сессию: повторный «закончил» переиспользует карточку.
+            // голос читает `speak` (русское произношение), тост показывает body.
+            d.notify_id_voiced(&format!("done-{sid}"), &title, &body, Some(&sid), "done", speak.as_deref());
         });
     }
 
-    /// ИИ-выжимка финального ответа агента (haiku) → одно русское предложение.
-    /// None — нет claude/квоты, ответ слишком короткий или haiku ушёл в
-    /// англоязычный «мета»-ответ (фильтр по кириллице).
-    async fn ai_toast_summary(self: &std::sync::Arc<Self>, sid: &str) -> Option<String> {
+    /// ИИ-выжимка финального ответа агента (haiku) → пара (display, speak):
+    /// `display` — для тоста/списка (техтермины можно латиницей), `speak` — как
+    /// ПРОИЗНОСИТЬ вслух, только кириллицей (англ. слова транслитерированы, числа
+    /// словами). Так голос не глотает английский — лечим на уровне модели-суммаризатора,
+    /// а не словарём. None — нет claude/квоты/короткий ответ/англоязычный мета-ответ.
+    async fn ai_toast_summary(self: &std::sync::Arc<Self>, sid: &str) -> Option<(String, String)> {
         if claude_bin::resolve_claude_bin().is_none() || !self.busy_take("aisum", sid) {
             return None;
         }
@@ -659,16 +680,33 @@ impl Daemon {
             // длинный ответ режем — haiku отвечает быстрее, а сути хватает
             let reply = ellipsize(&reply, 3000);
             let prompt = format!(
-                "Вот ответ агента:\n{reply}\n\nОпиши простыми словами по-русски, ЧТО по сути изменилось и какой результат для пользователя. Только суть и итог, без технических деталей: не упоминай конкретные имена переменных, файлов, функций, команд. Одно короткое предложение, до 160 символов. Только обычный текст, без markdown, без форматирования, без списков."
+                "Вот ответ агента:\n{reply}\n\nОпиши простыми словами по-русски, ЧТО по сути изменилось и какой результат для пользователя. Только суть и итог, без технических деталей: не упоминай конкретные имена переменных, файлов, функций, команд. Одно короткое предложение, до 160 символов, без markdown.\n\nВерни СТРОГО JSON без пояснений и без ```:\n{{\"display\": \"<текст для показа на экране; английские техтермины можно оставить латиницей>\", \"speak\": \"<тот же смысл, но как ПРОИЗНОСИТЬ вслух по-русски: каждое английское слово транслитерируй кириллицей (GitLab→гитлаб, Docker→докер, commit→коммит), числа пиши словами (3→три)>\"}}"
             );
             let out = claude_bin::run_haiku(&prompt, Duration::from_secs(30)).await?;
-            // squeeze_reply страхует от форматирования (markdown/списки/жирный)
-            let text = ellipsize(&transcript::squeeze_reply(&out), 200);
+            // вытащить {...} (haiku иногда оборачивает в прозу/```)
+            let parsed = (|| {
+                let a = out.find('{')?;
+                let b = out.rfind('}')?;
+                let v: Value = serde_json::from_str(out.get(a..=b)?).ok()?;
+                let disp = ellipsize(&transcript::squeeze_reply(v.get("display")?.as_str()?), 200);
+                let spk = v
+                    .get("speak")
+                    .and_then(Value::as_str)
+                    .map(|t| ellipsize(&one_line(t), 240))
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| disp.clone());
+                (!disp.is_empty()).then_some((disp, spk))
+            })();
+            // фолбэк: JSON не разобрался → обычный текст в оба поля
+            let (display, speak) = parsed.unwrap_or_else(|| {
+                let t = ellipsize(&transcript::squeeze_reply(&out), 200);
+                (t.clone(), t)
+            });
             // нет кириллицы → англоязычный «мета»-ответ: отбрасываем
-            if text.is_empty() || !ru::has_cyrillic(&text) {
+            if display.is_empty() || !ru::has_cyrillic(&display) {
                 return None;
             }
-            Some(text)
+            Some((display, speak))
         }
         .await;
         self.busy_release("aisum", sid);

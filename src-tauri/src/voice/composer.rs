@@ -3,64 +3,9 @@
 //! `TemplateComposer` — шаблонная реализация трейта `Composer`.
 //! Шов для будущей LLM-реализации оставлен через трейт.
 
-use crate::voice::numerals::{count_phrase, duration_words, number_words, plural, Gender};
-
-/// Число словами в родительном падеже (для конструкции «из N задач»), диапазон 0–999.
-///
-/// Полные таблицы склонений не нужны — только те числа, что встречаются в board_total.
-fn number_words_genitive(n: i64) -> String {
-    // Сотни (родительный)
-    const HUNDREDS_GEN: &[&str] = &[
-        "",
-        "ста",
-        "двухсот",
-        "трёхсот",
-        "четырёхсот",
-        "пятисот",
-        "шестисот",
-        "семисот",
-        "восьмисот",
-        "девятисот",
-    ];
-    // Десятки (родительный)
-    const TENS_GEN: &[&str] = &[
-        "", "", "двадцати", "тридцати", "сорока",
-        "пятидесяти", "шестидесяти", "семидесяти", "восьмидесяти", "девяноста",
-    ];
-    // Тинейджеры (родительный)
-    const TEENS_GEN: &[&str] = &[
-        "десяти", "одиннадцати", "двенадцати", "тринадцати", "четырнадцати",
-        "пятнадцати", "шестнадцати", "семнадцати", "восемнадцати", "девятнадцати",
-    ];
-    // Единицы (родительный, м.р.)
-    const UNITS_GEN: &[&str] = &[
-        "ноля", "одного", "двух", "трёх", "четырёх",
-        "пяти", "шести", "семи", "восьми", "девяти",
-    ];
-
-    let mut parts: Vec<&str> = Vec::new();
-
-    let h = (n / 100) as usize;
-    if h > 0 {
-        parts.push(HUNDREDS_GEN[h]);
-    }
-
-    let rem = n % 100;
-    if (10..=19).contains(&rem) {
-        parts.push(TEENS_GEN[(rem - 10) as usize]);
-    } else {
-        let t = (rem / 10) as usize;
-        if t > 1 {
-            parts.push(TENS_GEN[t]);
-        }
-        let u = (rem % 10) as usize;
-        if u > 0 || n == 0 {
-            parts.push(UNITS_GEN[u]);
-        }
-    }
-
-    parts.join(" ")
-}
+use crate::voice::numerals::{
+    count_phrase, duration_words, number_words_genitive, number_words_gender, plural, Gender,
+};
 
 // ---------------------------------------------------------------------------
 // Типы
@@ -168,9 +113,10 @@ impl Composer for TemplateComposer {
             Event::Stop => {
                 let text = match (s.board_done, s.board_total) {
                     (Some(done), Some(total)) if total > 0 => {
+                        // Числитель согласуется с «задача» (ж.р.): «одна», «две».
                         let head = format!(
                             "{project}: {} из {} {}",
-                            number_words(done),
+                            number_words_gender(done, Gender::F),
                             number_words_genitive(total),
                             plural(total, "задача", "задачи", "задач")
                         );
@@ -239,6 +185,36 @@ mod tests {
             u.text
         );
         assert_eq!(u.priority, Priority::Done);
+    }
+
+    #[test]
+    fn stop_board_feminine_numerator_one() {
+        // done=1 → числитель в женском роде: «одна», а не «один»
+        let c = TemplateComposer;
+        let s = SpeechSignals {
+            board_done: Some(1),
+            board_total: Some(6),
+            ..sig(Event::Stop, "Пиксела")
+        };
+        let u = c.compose(&s).expect("должно быть Some");
+        assert_eq!(u.text, "Пиксела: одна из шести задач");
+    }
+
+    #[test]
+    fn stop_board_feminine_numerator_two() {
+        // done=2 → «две», а не «два»
+        let c = TemplateComposer;
+        let s = SpeechSignals {
+            board_done: Some(2),
+            board_total: Some(6),
+            ..sig(Event::Stop, "Пиксела")
+        };
+        let u = c.compose(&s).expect("должно быть Some");
+        assert!(
+            u.text.contains("две из шести задач"),
+            "текст должен содержать «две из шести задач», получено: {:?}",
+            u.text
+        );
     }
 
     // --- Stop: откат к diff, затем голый факт ---

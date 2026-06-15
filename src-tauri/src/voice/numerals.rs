@@ -123,6 +123,65 @@ pub fn number_words_gender(n: i64, g: Gender) -> String {
     parts.join(" ")
 }
 
+/// Число словами в родительном падеже (для конструкции «из N задач»), диапазон 0–999.
+///
+/// Примеры: 6 → «шести», 3 → «трёх», 21 → «двадцати одного», 100 → «ста».
+pub fn number_words_genitive(n: i64) -> String {
+    debug_assert!((0..=999).contains(&n), "number_words_genitive: n должен быть 0..=999");
+
+    // Сотни (родительный)
+    const HUNDREDS_GEN: &[&str] = &[
+        "",
+        "ста",
+        "двухсот",
+        "трёхсот",
+        "четырёхсот",
+        "пятисот",
+        "шестисот",
+        "семисот",
+        "восьмисот",
+        "девятисот",
+    ];
+    // Десятки (родительный)
+    const TENS_GEN: &[&str] = &[
+        "", "", "двадцати", "тридцати", "сорока",
+        "пятидесяти", "шестидесяти", "семидесяти", "восьмидесяти", "девяноста",
+    ];
+    // Тинейджеры (родительный)
+    const TEENS_GEN: &[&str] = &[
+        "десяти", "одиннадцати", "двенадцати", "тринадцати", "четырнадцати",
+        "пятнадцати", "шестнадцати", "семнадцати", "восемнадцати", "девятнадцати",
+    ];
+    // Единицы (родительный, м.р.)
+    const UNITS_GEN: &[&str] = &[
+        "ноля", "одного", "двух", "трёх", "четырёх",
+        "пяти", "шести", "семи", "восьми", "девяти",
+    ];
+
+    let mut parts: Vec<&str> = Vec::new();
+
+    let h = (n / 100) as usize;
+    if h > 0 {
+        parts.push(HUNDREDS_GEN[h]);
+    }
+
+    let rem = n % 100;
+    if (10..=19).contains(&rem) {
+        parts.push(TEENS_GEN[(rem - 10) as usize]);
+    } else {
+        let t = (rem / 10) as usize;
+        if t > 1 {
+            parts.push(TENS_GEN[t]);
+        }
+        let u = (rem % 10) as usize;
+        if u > 0 || n == 0 {
+            parts.push(UNITS_GEN[u]);
+        }
+    }
+
+    parts.join(" ")
+}
+
 /// «одна задача» / «две задачи» / «пять задач».
 ///
 /// Число словами с родом + согласованная форма существительного.
@@ -245,6 +304,28 @@ mod tests {
             count_phrase(5, Gender::F, "задача", "задачи", "задач"),
             "пять задач"
         );
+    }
+
+    // --- number_words_genitive ---
+
+    #[test]
+    fn nwg_6() {
+        assert_eq!(number_words_genitive(6), "шести");
+    }
+
+    #[test]
+    fn nwg_3() {
+        assert_eq!(number_words_genitive(3), "трёх");
+    }
+
+    #[test]
+    fn nwg_21() {
+        assert_eq!(number_words_genitive(21), "двадцати одного");
+    }
+
+    #[test]
+    fn nwg_100() {
+        assert_eq!(number_words_genitive(100), "ста");
     }
 
     // --- duration_words ---

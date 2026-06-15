@@ -11,13 +11,18 @@
     -webkit-font-smoothing: antialiased;
     user-select: none;
   }
-  /* колонка карточек, прижата к низу; запас по краям — под тень и овершут */
+  /* колонка карточек, прижата к низу; высота = контент (НЕ inset:0).
+     inset:0 + justify-content:flex-end ломал измерение: при переполнении
+     карточки уходят вверх за край, а scrollHeight верхний оверфлоу не видит —
+     окно недомеряло высоту и обрезало верхние карточки. bottom:0 + auto-высота
+     даёт корректный scrollHeight. */
   .stack {
     position: absolute;
-    inset: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
     display: flex;
     flex-direction: column;
-    justify-content: flex-end;
     gap: 10px;
     padding: 16px 12px 6px;
   }
@@ -41,7 +46,10 @@
     transform: translateY(14px) scale(0.97);
     transition: opacity 170ms ease-in, transform 170ms ease-in;
   }
-  .card:hover { border-color: rgba(255, 255, 255, 0.18); }
+  /* подсветка рамки — только у карточки под курсором (:hover — когда апп
+     активен; .hot — из нативного поллинга, когда активно чужое приложение).
+     .paused (весь стек) рамку НЕ трогает — иначе не видно, где курсор. */
+  .card:hover, .card.hot { border-color: rgba(255, 255, 255, 0.18); }
 
   .crow { display: flex; align-items: center; gap: 10px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #41c98e; flex: none; }
@@ -74,7 +82,7 @@
     cursor: default;
     flex: none;
   }
-  .close:hover { background: rgba(255, 255, 255, 0.1); }
+  .close:hover, .card.hot .close { background: rgba(255, 255, 255, 0.1); }
 
   /* кольцо-таймер: стекает за TTL, на ховере карточки замирает (как таймер) */
   .ring {
@@ -83,24 +91,27 @@
     transform: rotate(-90deg);
     pointer-events: none;
   }
-  .ring circle { fill: none; stroke-width: 1.5; }
-  .ring .track { stroke: rgba(255, 255, 255, 0.14); }
+  .ring circle { fill: none; stroke-width: 2.5; }
+  .ring .track { stroke: rgba(255, 255, 255, 0.16); }
   .ring .fg {
-    stroke: rgba(255, 255, 255, 0.55);
+    stroke: #d9d9de;
     stroke-linecap: round;
     stroke-dasharray: 72.3; /* 2π·11.5 */
     stroke-dashoffset: 0;
     animation: ringDrain var(--ttl, 8000ms) linear forwards;
   }
   @keyframes ringDrain { to { stroke-dashoffset: 72.3; } }
-  .card:hover .ring .fg { animation-play-state: paused; }
+  /* пауза кольца: :hover работает, когда приложение активно; .paused — из
+     нативного poll'а курсора (когда активно другое приложение) */
+  .card:hover .ring .fg,
+  .card.paused .ring .fg { animation-play-state: paused; }
 
   .body {
     font-size: 12.5px;
     line-height: 1.45;
     color: #9a9aa2;
     display: -webkit-box;
-    -webkit-line-clamp: 4; /* ИИ-выжимка ответа — до четырёх строк */
+    -webkit-line-clamp: 6; /* ИИ-выжимка ответа — до шести строк (короткий текст влезает целиком) */
     -webkit-box-orient: vertical;
     overflow: hidden;
     margin: 7px 36px 0 18px;

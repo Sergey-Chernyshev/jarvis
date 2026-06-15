@@ -235,33 +235,6 @@ pub fn squeeze_reply(t: &str) -> String {
     format!("{}…", chars[..end].iter().collect::<String>())
 }
 
-/// Последний СОДЕРЖАТЕЛЬНЫЙ ответ ассистента: финальные реплики часто короткие
-/// подводки («Теперь preload и рендерер:») — идём с конца к первому осмысленному
-/// тексту, иначе берём самый длинный из хвоста.
-pub fn last_assistant_reply(transcript: &str) -> Option<String> {
-    let entries = read_recent_entries(Path::new(transcript), 128 * 1024);
-    let texts: Vec<String> = chain_from_entries(entries)
-        .iter()
-        .flat_map(to_chat_items)
-        .filter(|i| i.kind == "text" && i.role == "assistant")
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .take(5)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|i| squeeze_reply(&i.text))
-        .filter(|t| !t.is_empty())
-        .collect();
-    for t in texts.iter().rev() {
-        if t.chars().count() >= 60 && !t.trim_end().ends_with(':') && !t.trim_end().ends_with('：') {
-            return Some(t.clone());
-        }
-    }
-    texts.into_iter().max_by_key(|t| t.chars().count())
-}
-
 /// Полный финальный ответ агента: все текст-блоки после последнего промпта юзера.
 pub fn full_final_reply(transcript: &str) -> Option<String> {
     let entries = read_recent_entries(Path::new(transcript), 256 * 1024);

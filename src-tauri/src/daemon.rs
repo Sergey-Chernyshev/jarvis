@@ -18,7 +18,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
-use crate::model::{Question, QuestionItem, QuestionOption, Session, Status};
+use crate::model::{
+    Question, QuestionItem, QuestionOption, Session, Status, Subagent, TaskBoard, TaskItem,
+};
 use crate::util::*;
 use crate::{claude_bin, ru, settings, tail, tmux, transcript, windows};
 
@@ -43,6 +45,9 @@ pub struct Daemon {
     persist_pending: AtomicBool,
     /// In-flight guards фоновых задач: (вид, session_id).
     busy: Mutex<HashSet<(&'static str, String)>>,
+    /// Время последнего РЕАЛЬНОГО prompt-события (хук UserPromptSubmit), мс.
+    /// Так подтверждаем доставку ответа из Jarvis: хук сработал → текст дошёл.
+    last_prompt_at: Mutex<HashMap<String, i64>>,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -51,11 +56,14 @@ enum Effect {
     ResolveGuiApp { sid: String, pid: i64 },
     RefreshMeta { sid: String },
     RefreshTasks { sid: String },
+    /// Выжимка «над чем идёт работа» для строки списка (на промт юзера).
     GenSummary { sid: String },
     /// Уведомление «спрашивает» (карточка вопроса).
     NotifyWaiting { title: String, body: String, sid: String },
-    /// Уведомление «закончил» + ИИ-выжимка полного ответа вдогонку.
-    NotifyDone { sid: String },
+    /// Завершение: одна ИИ-выжимка результата — и в строку списка, и в тост.
+    DoneSummary { sid: String },
+    /// Ручной /compact завершился (session-start, source=compact) — явный тост.
+    NotifyCompact { title: String, sid: String },
     StopFailure { sid: String, payload: Value },
 }
 
@@ -82,6 +90,7 @@ impl Daemon {
             push_pending: AtomicBool::new(false),
             persist_pending: AtomicBool::new(false),
             busy: Mutex::new(HashSet::new()),
+            last_prompt_at: Mutex::new(HashMap::new()),
         }
     }
 
@@ -224,8 +233,21 @@ impl Daemon {
     /// Focus-режимов), кликом открывает чат сессии. Возвращает id карточки.
     pub fn notify(&self, title: &str, body: &str, session_id: Option<&str>, kind: &str) -> String {
         let id = format!("t{}", self.toast_seq.fetch_add(1, Ordering::SeqCst) + 1);
-        windows::toast_add(self, &id, title, body, session_id, kind);
+        self.notify_id(&id, title, body, session_id, kind);
         id
+    }
+
+    /// То же, но со стабильным id: повторное уведомление того же id окно тостов
+    /// применяет к существующей карточке, а не плодит новую (дедуп «закончил»
+    /// для одной сессии — не было «одно за другим»).
+    pub fn notify_id(&self, id: &str, title: &str, body: &str, session_id: Option<&str>, kind: &str) {
+        crate::log::line(&format!(
+            "[toast:{kind}] id={id} sid={} «{}» / {}",
+            session_id.unwrap_or("-"),
+            crate::util::ellipsize(title, 60),
+            crate::util::ellipsize(body, 90),
+        ));
+        windows::toast_add(self, id, title, body, session_id, kind);
     }
 
     /* ================= busy-флаги фоновых задач ================= */
@@ -269,6 +291,16 @@ impl Daemon {
             .to_string();
         let now = now_ms();
         let event = evt_obj.get("event").and_then(Value::as_str).unwrap_or("");
+        // SessionStart несёт source: startup|resume|clear|compact — нас интересует compact.
+        let source = p.get("source").and_then(Value::as_str).unwrap_or("");
+
+        // лог жизненного цикла (tool-события не пишем — их сотни)
+        if matches!(
+            event,
+            "session-start" | "prompt" | "notification" | "stop" | "stop-failure" | "session-end"
+        ) {
+            crate::log::line(&format!("[event] {event} sid={}", ellipsize(&sid, 8)));
+        }
 
         let mut effects: Vec<Effect> = Vec::new();
         {
@@ -279,6 +311,23 @@ impl Daemon {
                 drop(sessions);
                 self.push();
                 return;
+            }
+
+            // Инвариант «одна пана — одна сессия»: если событие пришло из паны,
+            // которую занимала другая (уже мёртвая) сессия, выселяем призрака —
+            // иначе ответ ему уйдёт в живую сессию той же паны.
+            if let Some(pane) = evt_obj
+                .get("tmux_pane")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+            {
+                for g in evict_pane(&mut sessions, &sid, pane) {
+                    crate::log::line(&format!(
+                        "[evict] пана {pane} → sid={}, снят призрак sid={}",
+                        ellipsize(&sid, 8),
+                        ellipsize(&g, 8)
+                    ));
+                }
             }
 
             let s = sessions
@@ -332,10 +381,19 @@ impl Daemon {
                 "session-start" => {
                     s.status = Status::Idle;
                     s.detail = String::new();
+                    // ручной /compact: SessionStart c source=compact — явно говорим, что сжатие готово
+                    if source == "compact" && self.settings.bool("notifyDone") {
+                        effects.push(Effect::NotifyCompact {
+                            title: format!("{} — компакт завершён", s.project.as_deref().unwrap_or("?")),
+                            sid: sid.clone(),
+                        });
+                    }
                     effects.push(Effect::RefreshMeta { sid: sid.clone() });
                 }
 
                 "prompt" => {
+                    // подтверждение доставки: реальный хук UserPromptSubmit сработал
+                    self.last_prompt_at.lock().unwrap().insert(sid.clone(), now);
                     s.status = Status::Working;
                     let txt = ellipsize(
                         &one_line(p.get("prompt").and_then(Value::as_str).unwrap_or("")),
@@ -345,6 +403,8 @@ impl Daemon {
                     if !txt.is_empty() && !txt.starts_with('<') {
                         s.detail = txt.clone();
                         s.last_prompt = Some(txt); // живёт дольше detail
+                        // саммари пересчитывается после каждого промта юзера
+                        effects.push(Effect::GenSummary { sid: sid.clone() });
                     }
                     s.limit_wait = false; // юзер сам продолжил — авто-резюме не нужно
                     effects.push(Effect::RefreshMeta { sid: sid.clone() });
@@ -378,6 +438,12 @@ impl Daemon {
                             parse_todos(self, s, p.get("tool_input"));
                         }
                         effects.push(Effect::RefreshTasks { sid: sid.clone() });
+                    } else if tool == "Task" {
+                        // диспатч сабагента: старт реестра (стоп — на post-tool).
+                        // Источник истины по задачам — оркестратор, мы лишь читаем.
+                        s.status = Status::Working;
+                        subagent_start(s, p.get("tool_input"), now);
+                        track_activity(s, tool, p.get("tool_input"));
                     } else {
                         s.status = Status::Working;
                         track_activity(s, tool, p.get("tool_input"));
@@ -388,11 +454,14 @@ impl Daemon {
                 }
 
                 "post-tool" => {
-                    if p.get("tool_name").and_then(Value::as_str) == Some("AskUserQuestion")
-                        && s.question.is_some()
-                    {
+                    let tool = p.get("tool_name").and_then(Value::as_str).unwrap_or("");
+                    if tool == "AskUserQuestion" && s.question.is_some() {
                         s.question = None; // ответили (в терминале или из панели)
                         s.detail = "ответ получен".into();
+                    }
+                    if tool == "Task" {
+                        // сабагент завершился — закрываем запись в реестре
+                        subagent_stop(s, p.get("tool_input"), now);
                     }
                     s.status = Status::Working; // сессия дышит
                 }
@@ -400,10 +469,14 @@ impl Daemon {
                 "notification" => {
                     // AskUserQuestion дублируется PermissionRequest-уведомлением — вопрос
                     // уже показан карточкой, «Claude needs your permission» его не перетирает
-                    if s.question.is_none() {
-                        let msg = ru::ru_notification(&one_line(
-                            p.get("message").and_then(Value::as_str).unwrap_or(""),
-                        ));
+                    let raw = one_line(p.get("message").and_then(Value::as_str).unwrap_or(""));
+                    // «ждёт твоего ввода» сразу после ответа — дубль тоста «закончил».
+                    // Пока сессия в Done (юзер ещё не реагировал), не пишем второй раз;
+                    // статус оставляем Done, чтобы строка списка так и читалась «готово».
+                    let redundant_idle =
+                        ru::is_idle_input_notification(&raw) && s.status == Status::Done;
+                    if s.question.is_none() && !redundant_idle {
+                        let msg = ru::ru_notification(&raw);
                         let msg = if msg.is_empty() { "Claude ждёт ввода".to_string() } else { msg };
                         // Claude Code повторяет idle-уведомления — не спамим одним и тем же
                         let is_new = !(s.status == Status::Waiting && s.detail == msg);
@@ -423,12 +496,12 @@ impl Daemon {
                     s.status = Status::Done;
                     s.done_at = Some(now); // по нему сортируется список
                     s.detail = "Ответ готов".into();
-                    if self.settings.bool("notifyDone") {
-                        effects.push(Effect::NotifyDone { sid: sid.clone() });
-                    }
                     effects.push(Effect::RefreshMeta { sid: sid.clone() });
                     effects.push(Effect::RefreshTasks { sid: sid.clone() });
-                    effects.push(Effect::GenSummary { sid: sid.clone() });
+                    // одна выжимка результата: строка списка + тост (если включён).
+                    // GenSummary тут не нужен — DoneSummary даёт ту же строку, но
+                    // в стиле «что сделано», как в уведомлении
+                    effects.push(Effect::DoneSummary { sid: sid.clone() });
                 }
 
                 "stop-failure" => {
@@ -479,7 +552,16 @@ impl Daemon {
                 Effect::NotifyWaiting { title, body, sid } => {
                     d.notify(&title, &body, Some(&sid), "waiting");
                 }
-                Effect::NotifyDone { sid } => d.notify_done(sid),
+                Effect::DoneSummary { sid } => d.done_summary(sid),
+                Effect::NotifyCompact { title, sid } => {
+                    d.notify_id(
+                        &format!("compact-{sid}"),
+                        &title,
+                        "История разговора сжата, контекст освобождён",
+                        Some(&sid),
+                        "done",
+                    );
+                }
                 Effect::StopFailure { sid, payload } => {
                     tauri::async_runtime::spawn(async move {
                         crate::limits::on_stop_failure(&d, &sid, &payload);
@@ -489,56 +571,77 @@ impl Daemon {
         }
     }
 
-    /// Тост «закончил» сразу с черновым текстом, затем ИИ-выжимка полного
-    /// ответа (haiku) обновляет карточку.
-    fn notify_done(self: &std::sync::Arc<Self>, sid: String) {
+    /// Завершение ответа: ОДНА ИИ-выжимка результата («что по сути сделано»),
+    /// используемая И в строке списка, И в тосте «закончил». Раньше это были два
+    /// отдельных саммари (gen_summary «над чем работа» + выжимка для тоста) —
+    /// строка списка и уведомление расходились. Теперь источник один.
+    ///
+    /// Текст готовим ДО показа тоста (haiku ~неск. секунд): статус в панели уже
+    /// обновился мгновенно через push, а тост-карточку показываем один раз
+    /// финальной — без плейсхолдера и подмен (любое изменение уже показанной
+    /// карточки читалось как второе уведомление).
+    fn done_summary(self: &std::sync::Arc<Self>, sid: String) {
         let d = self.clone();
         tauri::async_runtime::spawn(async move {
+            if d.session(&sid).is_none() {
+                return;
+            }
+            let ai = d.ai_toast_summary(&sid).await;
+
+            // строка списка = тот же результат (если выжимка получилась)
+            if let Some(text) = ai.as_deref().filter(|t| !t.is_empty()) {
+                let list = ellipsize(text, 140);
+                if d.with_session(&sid, |s| {
+                    s.summary = Some(list);
+                    s.summary_at = Some(now_ms());
+                }) {
+                    d.push();
+                }
+            }
+
+            if !d.settings.bool("notifyDone") {
+                return; // уведомления выключены — строку списка уже обновили
+            }
             let Some(s) = d.session(&sid) else { return };
-            let reply = s
-                .transcript
-                .as_deref()
-                .and_then(transcript::last_assistant_reply);
-            // как JS `a || b || c`: пустая строка падает на следующий фолбэк
             let non_empty = |v: Option<String>| v.filter(|t| !t.is_empty());
-            let body = non_empty(reply)
-                .or_else(|| non_empty(s.task.clone()))
+            let body = non_empty(ai)
                 .or_else(|| non_empty(s.summary.clone()))
+                .or_else(|| non_empty(s.task.clone()))
                 .or_else(|| non_empty(s.title.clone()))
                 .unwrap_or_else(|| "Ответ готов".into());
             let title = format!("{} — закончил", s.project.as_deref().unwrap_or("?"));
-            let toast_id = d.notify(&title, &body, Some(&sid), "done");
-            d.ai_toast_summary(sid, toast_id).await;
+            // стабильный id на сессию: повторный «закончил» переиспользует карточку
+            d.notify_id(&format!("done-{sid}"), &title, &body, Some(&sid), "done");
         });
     }
 
-    /// ИИ-выжимка финального ответа для тоста: haiku, ~4 строки.
-    async fn ai_toast_summary(self: &std::sync::Arc<Self>, sid: String, toast_id: String) {
-        if claude_bin::resolve_claude_bin().is_none() || !self.busy_take("aisum", &sid) {
-            return;
+    /// ИИ-выжимка финального ответа агента (haiku) → одно русское предложение.
+    /// None — нет claude/квоты, ответ слишком короткий или haiku ушёл в
+    /// англоязычный «мета»-ответ (фильтр по кириллице).
+    async fn ai_toast_summary(self: &std::sync::Arc<Self>, sid: &str) -> Option<String> {
+        if claude_bin::resolve_claude_bin().is_none() || !self.busy_take("aisum", sid) {
+            return None;
         }
         let result = async {
-            let s = self.session(&sid)?;
+            let s = self.session(sid)?;
             let reply = transcript::full_final_reply(s.transcript.as_deref()?)?;
-            if reply.chars().count() < 80 {
-                return None; // короткий ответ и так влез целиком
-            }
+            // длинный ответ режем — haiku отвечает быстрее, а сути хватает
+            let reply = ellipsize(&reply, 3000);
             let prompt = format!(
-                "Ответ агента:\n{reply}\n\nЗадача: сожми этот ответ в выжимку до 280 символов по-русски — что сделано и каков итог. Без вступлений, без markdown, технические термины не переводи. Только текст выжимки."
+                "Вот ответ агента:\n{reply}\n\nОпиши простыми словами по-русски, ЧТО по сути изменилось и какой результат для пользователя. Только суть и итог, без технических деталей: не упоминай конкретные имена переменных, файлов, функций, команд. Одно короткое предложение, до 160 символов. Только обычный текст, без markdown, без форматирования, без списков."
             );
-            let out = claude_bin::run_haiku(&prompt, Duration::from_secs(60)).await?;
-            let text = ellipsize(&one_line(&out), 320);
-            if text.is_empty() {
+            let out = claude_bin::run_haiku(&prompt, Duration::from_secs(30)).await?;
+            // squeeze_reply страхует от форматирования (markdown/списки/жирный)
+            let text = ellipsize(&transcript::squeeze_reply(&out), 200);
+            // нет кириллицы → англоязычный «мета»-ответ: отбрасываем
+            if text.is_empty() || !ru::has_cyrillic(&text) {
                 return None;
             }
             Some(text)
         }
         .await;
-        self.busy_release("aisum", &sid);
-        if let Some(text) = result {
-            println!("[jarvis] ai-toast: {}…", ellipsize(&text, 80));
-            windows::toast_update(self, &toast_id, &text);
-        }
+        self.busy_release("aisum", sid);
+        result
     }
 
     /* ================= идентичность сессии ================= */
@@ -712,6 +815,9 @@ impl Daemon {
                 format!("{mark} {}", ellipsize(&one_line(text), 70))
             })
             .collect();
+        let board_items: Vec<(String, String, Option<String>)> =
+            items.into_iter().map(|(text, st)| (text, st, None)).collect();
+        let now = now_ms();
         let mut changed = false;
         self.with_session(sid, |s| {
             if s.task != task || s.task_progress.as_deref() != Some(&progress) {
@@ -720,6 +826,7 @@ impl Daemon {
                 changed = true;
             }
             s.todo_list = Some(todo_list);
+            set_board(s, &board_items, now); // структурная доска из файловых тасков
         });
         if changed {
             self.push();
@@ -727,14 +834,14 @@ impl Daemon {
     }
 
     /// Саммаризация последних задач сессии (haiku) — живой контекст строки
-    /// списка. Обновляется на stop с кулдауном 2 мин.
+    /// списка. Пересчитывается после каждого промта юзера и каждого ответа.
     pub fn gen_summary(self: &std::sync::Arc<Self>, sid: String) {
         let d = self.clone();
         tauri::async_runtime::spawn(async move {
+            // пересчёт после каждого промта и каждого ответа: кулдауна нет,
+            // только пауза, чтобы транскрипт успел дописаться на диск
+            tokio::time::sleep(Duration::from_millis(1200)).await;
             let Some(s) = d.session(&sid) else { return };
-            if s.summary_at.is_some_and(|at| now_ms() - at < 2 * 60 * 1000) {
-                return;
-            }
             let Some(tr) = s.transcript.clone() else { return };
             if claude_bin::resolve_claude_bin().is_none() || !d.busy_take("summary", &sid) {
                 return;
@@ -764,16 +871,19 @@ impl Daemon {
                 .collect::<Vec<_>>()
                 .join("\n");
             let prompt = format!(
-                "Хвост диалога рабочей сессии:\n{convo}\n\nЗадача: одной строкой по-русски (до 90 символов) суммаризируй последние задачи — что просил юзер и что сделал агент. Без кавычек, без вступлений, технические термины не переводи."
+                "Вот хвост рабочего диалога:\n{convo}\n\nНапиши простыми словами по-русски одной короткой строкой, над чем сейчас идёт работа. Только обычный текст: без кавычек, без markdown, без форматирования. Не длиннее 90 символов. Названия кода, файлов и команд оставляй как есть."
             );
             let out = claude_bin::run_haiku(&prompt, Duration::from_secs(90)).await;
             d.busy_release("summary", &sid);
             let Some(out) = out else { return }; // без квоты/сети живём на lastPrompt/title
+            // squeeze_reply страхует от форматирования, если модель его всё же выдала
+            let clean = transcript::squeeze_reply(&out);
             let t = ellipsize(
-                one_line(&out).trim_matches(|c| c == '"' || c == '«' || c == '»'),
+                clean.trim_matches(|c| c == '"' || c == '«' || c == '»'),
                 110,
             );
-            if t.is_empty() {
+            // пустой ответ или англоязычный «мета»-ответ haiku — оставляем как есть
+            if t.is_empty() || !ru::has_cyrillic(&t) {
                 return;
             }
             if d.with_session(&sid, |s| {
@@ -786,6 +896,27 @@ impl Daemon {
     }
 
     /// Отметить «промпт ушёл в сессию» (ответ из панели / авто-резюме).
+    /// Ждём подтверждения доставки ответа: реальный prompt-хук этой сессии,
+    /// случившийся ПОСЛЕ `after`. true — текст дошёл до агента и тот его принял.
+    pub async fn await_prompt_ack(&self, sid: &str, after: i64, timeout: Duration) -> bool {
+        let steps = (timeout.as_millis() / 100).max(1);
+        for _ in 0..steps {
+            let acked = self
+                .last_prompt_at
+                .lock()
+                .unwrap()
+                .get(sid)
+                .copied()
+                .unwrap_or(0)
+                > after;
+            if acked {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        self.last_prompt_at.lock().unwrap().get(sid).copied().unwrap_or(0) > after
+    }
+
     pub fn mark_prompt_sent(self: &std::sync::Arc<Self>, sid: &str, prompt: &str) {
         self.with_session(sid, |s| {
             s.status = Status::Working;
@@ -812,6 +943,15 @@ impl Daemon {
                 if let (Some(pane), Some(alive)) = (&s.tmux_pane, &alive) {
                     if !alive.contains(pane) {
                         changed = true;
+                        // Сессия с доской не исчезает молча: замораживаем доску
+                        // (in_progress → interrupted) и помечаем остановленной —
+                        // план не должен врать. Остальных призраков выселяем.
+                        if s.board.as_ref().is_some_and(|b| !b.tasks.is_empty()) {
+                            freeze_board(s);
+                            s.status = Status::Done;
+                            s.detail = "сессия остановлена".into();
+                            return true;
+                        }
                         return false; // пана мертва — claude умер вместе с ней
                     }
                 }
@@ -821,6 +961,7 @@ impl Daemon {
                 if s.status == Status::Working && now - s.updated_at > 15 * 60 * 1000 {
                     s.status = Status::Idle;
                     s.detail = "связь потеряна — событий нет 15 минут".into();
+                    freeze_board(s); // оборванная связь — задачи «в работе» прерваны
                     changed = true;
                 }
             }
@@ -943,56 +1084,401 @@ fn track_activity(s: &mut Session, name: &str, input: Option<&Value>) {
 /// (бывает и массивом, и JSON-строкой — парсим defensively).
 fn parse_todos(d: &std::sync::Arc<Daemon>, s: &mut Session, input: Option<&Value>) {
     let todos_raw = input.and_then(|i| i.get("todos")).cloned();
+    let had_payload = todos_raw.is_some();
     let todos = match todos_raw {
         Some(Value::String(raw)) => serde_json::from_str::<Value>(&raw).ok(),
         other => other,
     };
-    let Some(Value::Array(todos)) = todos else { return };
-    if todos.is_empty() {
+    let Some(Value::Array(todos)) = todos else {
+        // payload был, но не распарсился в массив — schema drift. Не падаем,
+        // доску не трогаем (degraded), но причину пишем в лог (сценарий 9).
+        if had_payload {
+            crate::log::line("[board] TodoWrite: неизвестная форма tool_input.todos — доска не обновлена");
+        }
         return;
+    };
+    if todos.is_empty() {
+        return; // пустой список — легитимная «очистка», не дрейф схемы
     }
-    let items: Vec<(String, String)> = todos
+    // text доски — content (стабильный заголовок); activeForm держим отдельно
+    // как живую форму («Exploring …») для строки активности in-progress задачи.
+    let items: Vec<(String, String, Option<String>)> = todos
         .iter()
         .filter_map(|t| t.as_object())
         .map(|t| {
-            // как JS `activeForm || content`: пустой activeForm падает на content
-            let text = ["activeForm", "content"]
-                .iter()
-                .find_map(|k| t.get(*k).and_then(Value::as_str).filter(|s| !s.is_empty()))
-                .unwrap_or("")
+            let content = t.get("content").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            let active = t
+                .get("activeForm")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(String::from);
+            let status = t
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("pending")
                 .to_string();
-            let status = t.get("status").and_then(Value::as_str).unwrap_or("").to_string();
-            (text, status)
+            let text = if content.is_empty() { active.clone().unwrap_or_default() } else { content };
+            (text, status, active)
         })
+        .filter(|(text, _, _)| !text.is_empty())
         .collect();
-    // apply_tasks хочет &Arc<Daemon> и лок свободным — а мы под локом редьюсера.
-    // Дублируем его логику инлайном на уже захваченной сессии.
     let total = items.len();
     if total == 0 {
-        return;
+        return; // неизвестная форма payload — доску не трогаем, не падаем (degraded)
     }
-    let done = items.iter().filter(|(_, st)| st == "completed").count();
-    // d.ru, не translator.ru: запускает насос переводов (ru() лишь спавнит
-    // таймер — под локом редьюсера это безопасно)
+    // структурная доска (last-write-wins, длительности переносятся по тексту)
+    set_board(s, &items, now_ms());
+
+    // компактные поля строки/тултипа (как раньше): для показа activeForm || content
+    let disp = |text: &str, af: &Option<String>| af.as_deref().unwrap_or(text).to_string();
+    let done = items.iter().filter(|(_, st, _)| st == "completed").count();
+    // d.ru запускает насос переводов (ru() лишь спавнит таймер — под локом ок)
     let task = items
         .iter()
-        .find(|(_, st)| st == "in_progress")
-        .map(|(text, _)| d.ru(&ellipsize(&one_line(text), 100)));
-    let progress = format!("{done}/{total}");
+        .find(|(_, st, _)| st == "in_progress")
+        .map(|(text, _, af)| d.ru(&ellipsize(&one_line(&disp(text, af)), 100)));
     s.todo_list = Some(
         items
             .iter()
             .take(12)
-            .map(|(text, st)| {
+            .map(|(text, st, af)| {
                 let mark = match st.as_str() {
                     "completed" => '✓',
                     "in_progress" => '▸',
                     _ => '○',
                 };
-                format!("{mark} {}", ellipsize(&one_line(text), 70))
+                format!("{mark} {}", ellipsize(&one_line(&disp(text, af)), 70))
             })
             .collect(),
     );
     s.task = task;
-    s.task_progress = Some(progress);
+    s.task_progress = Some(format!("{done}/{total}"));
+}
+
+/* ================= движок доски задач (инкремент 6) ================= */
+/* Источник истины — оркестратор сессии. Эти функции только ЧИТАЮТ события и
+ * собирают структуру; ни одна не мутирует план агента. */
+
+/// «Task 5», «task#6», «TASK 12» → номер задачи. Иначе None (не привязываем).
+fn task_ref_from(name: &str) -> Option<i64> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"(?i)\btask\s*#?\s*(\d+)").unwrap());
+    re.captures(name)?.get(1)?.as_str().parse().ok()
+}
+
+/// Старт сабагента: PreToolUse(Task). Имя — description, иначе subagent_type.
+fn subagent_start(s: &mut Session, input: Option<&Value>, now: i64) {
+    let Some(inp) = input else { return };
+    let name = inp
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .or_else(|| inp.get("subagent_type").and_then(Value::as_str))
+        .unwrap_or("сабагент")
+        .to_string();
+    let kind = inp
+        .get("subagent_type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(String::from);
+    s.subagents.push(Subagent { name, kind, model: None, started_at: now, stopped_at: None, task_ref: None });
+    // реестр не растёт бесконечно — держим последние 64
+    let n = s.subagents.len();
+    if n > 64 {
+        s.subagents.drain(0..n - 64);
+    }
+    recorrelate(s, now);
+}
+
+/// Стоп сабагента: PostToolUse(Task). Закрываем последний открытый с таким
+/// описанием (а если описания нет — просто последний открытый).
+fn subagent_stop(s: &mut Session, input: Option<&Value>, now: i64) {
+    let name = input.and_then(|i| i.get("description")).and_then(Value::as_str).map(str::trim);
+    let pos = s
+        .subagents
+        .iter()
+        .rposition(|sa| sa.stopped_at.is_none() && name.is_none_or(|n| sa.name == n));
+    if let Some(i) = pos {
+        s.subagents[i].stopped_at = Some(now);
+    }
+    recorrelate(s, now);
+}
+
+/// Пересобрать доску из её же текущих задач + обновлённого реестра сабагентов
+/// (на событие сабагента, без нового TodoWrite). Нет доски — ничего не делаем.
+fn recorrelate(s: &mut Session, now: i64) {
+    let Some(b) = s.board.as_ref() else { return };
+    let items: Vec<(String, String, Option<String>)> = b
+        .tasks
+        .iter()
+        .map(|t| (t.text.clone(), t.status.clone(), t.active_form.clone()))
+        .collect();
+    set_board(s, &items, now);
+}
+
+/// Записать доску из снапшота задач: переносит длительности и коррелирует
+/// сабагентов. Единственное место, где `s.board` присваивается из задач.
+fn set_board(s: &mut Session, items: &[(String, String, Option<String>)], now: i64) {
+    s.board = Some(build_board(s.board.as_ref(), items, &s.subagents, now));
+}
+
+/// Чистая сборка доски: last-write-wins по `items`, перенос started_at/dur_ms
+/// по совпадению текста, эвристическая привязка сабагентов по «Task N».
+fn build_board(
+    prev: Option<&TaskBoard>,
+    items: &[(String, String, Option<String>)],
+    subagents: &[Subagent],
+    now: i64,
+) -> TaskBoard {
+    let mut tasks: Vec<TaskItem> = items
+        .iter()
+        .enumerate()
+        .map(|(i, (text, status, af))| {
+            let prev_t = prev.and_then(|pb| pb.tasks.iter().find(|t| &t.text == text));
+            let was_ip = prev_t.is_some_and(|t| t.status == "in_progress");
+            let mut started_at = None;
+            let mut dur_ms = prev_t.and_then(|t| t.dur_ms);
+            if status == "in_progress" {
+                // переносим момент начала, если задача уже была в работе; иначе now
+                started_at = if was_ip { prev_t.and_then(|t| t.started_at) } else { None }.or(Some(now));
+            } else if status == "completed" && dur_ms.is_none() {
+                if let Some(st) = prev_t.filter(|t| t.status == "in_progress").and_then(|t| t.started_at) {
+                    dur_ms = Some((now - st).max(0));
+                }
+            }
+            TaskItem {
+                n: (i + 1) as i64,
+                text: text.clone(),
+                status: status.clone(),
+                active_form: af.clone(),
+                model: None,
+                dur_ms,
+                started_at,
+            }
+        })
+        .collect();
+
+    // корреляция: уверенно ссылается на «Task N» в диапазоне → бейдж на задаче;
+    // иначе — в отдельную полоску, без выдуманной привязки.
+    let mut strip = Vec::new();
+    for sa in subagents {
+        match task_ref_from(&sa.name).filter(|n| *n >= 1 && (*n as usize) <= tasks.len()) {
+            Some(n) => {
+                let t = &mut tasks[(n - 1) as usize];
+                if t.model.is_none() {
+                    t.model = sa.model.clone();
+                }
+                if t.dur_ms.is_none() {
+                    if let Some(stp) = sa.stopped_at {
+                        t.dur_ms = Some((stp - sa.started_at).max(0));
+                    }
+                }
+            }
+            None => {
+                let mut c = sa.clone();
+                c.task_ref = None;
+                strip.push(c);
+            }
+        }
+    }
+
+    TaskBoard { tasks, subagents: strip, updated_at: now, stopped: false }
+}
+
+/// Текст-инструкция оркестратору для действия с доски. НИЧЕГО не отправляет —
+/// панель префилит этим composer, пользователь правит и шлёт сам. Все шаблоны
+/// (на языке интерфейса) собраны здесь, единым местом. `None` — действие чужое.
+pub fn task_action_text(action: &str, n: i64, title: Option<&str>) -> Option<String> {
+    let q = title
+        .map(|t| one_line(t))
+        .filter(|t| !t.is_empty())
+        .map(|t| format!(" «{}»", ellipsize(&t, 80)))
+        .unwrap_or_default();
+    Some(match action {
+        "goto" => format!("Перейди к задаче {n}{q} сейчас. Остальную очередь пока не трогай — доделаешь после."),
+        "skip" => format!("Пропусти задачу {n}{q} и переходи к следующей по плану. Отметь её пропущенной, если ведёшь чек-лист."),
+        "rerun" => format!("Перезапусти задачу {n}{q} заново, с нуля — предыдущий результат считай неактуальным."),
+        _ => return None,
+    })
+}
+
+/// Сессия умерла: доска заморожена, задачи «в работе» → прерванные.
+fn freeze_board(s: &mut Session) {
+    if let Some(b) = s.board.as_mut() {
+        b.stopped = true;
+        for t in b.tasks.iter_mut() {
+            if t.status == "in_progress" {
+                t.status = "interrupted".into();
+            }
+        }
+    }
+}
+
+/// Инвариант «одна tmux-пана — одна сессия».
+///
+/// Когда событие из паны `pane` приходит для `keep_sid`, любая ДРУГАЯ сессия,
+/// всё ещё числящаяся на этой пане, — призрак: её claude завершился без
+/// `session-end` и был заменён новым в той же пане. Снимаем призраков, иначе
+/// ответ, адресованный призраку, уйдёт в живую сессию той же паны (мисроутинг).
+/// Возвращает id выселенных сессий — для лога и обновления UI.
+fn evict_pane(sessions: &mut HashMap<String, Session>, keep_sid: &str, pane: &str) -> Vec<String> {
+    let ghosts: Vec<String> = sessions
+        .iter()
+        .filter_map(|(id, s)| {
+            (id.as_str() != keep_sid && s.tmux_pane.as_deref() == Some(pane)).then(|| id.clone())
+        })
+        .collect();
+    for g in &ghosts {
+        sessions.remove(g);
+    }
+    ghosts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sess(id: &str, pane: Option<&str>) -> Session {
+        let mut s = Session::new(id.to_string(), 0);
+        s.tmux_pane = pane.map(str::to_string);
+        s
+    }
+
+    #[test]
+    fn evict_pane_drops_ghost_sharing_pane() {
+        let mut m = HashMap::new();
+        m.insert("ghost".into(), sess("ghost", Some("%1"))); // старый claude в %1
+        m.insert("live".into(), sess("live", Some("%1"))); // новый claude в той же %1
+        m.insert("other".into(), sess("other", Some("%2"))); // другая пана — не трогать
+
+        let evicted = evict_pane(&mut m, "live", "%1");
+
+        assert_eq!(evicted, vec!["ghost".to_string()]);
+        assert!(!m.contains_key("ghost"), "призрак должен быть снят");
+        assert!(m.contains_key("live"), "живую сессию не трогаем");
+        assert!(m.contains_key("other"), "сессию на другой пане не трогаем");
+    }
+
+    #[test]
+    fn evict_pane_keeps_parallel_sessions_on_distinct_panes() {
+        let mut m = HashMap::new();
+        m.insert("a".into(), sess("a", Some("%0")));
+        m.insert("b".into(), sess("b", Some("%1")));
+
+        // событие для b из её собственной паны — никого не выселяем
+        let evicted = evict_pane(&mut m, "b", "%1");
+
+        assert!(evicted.is_empty());
+        assert_eq!(m.len(), 2, "две параллельные сессии в разных панах живут обе");
+    }
+
+    /* ----- доска задач (инкремент 6) ----- */
+
+    fn it(text: &str, status: &str) -> (String, String, Option<String>) {
+        (text.to_string(), status.to_string(), None)
+    }
+
+    fn agg(b: &TaskBoard) -> (usize, usize, usize, usize) {
+        let total = b.tasks.len();
+        let done = b.tasks.iter().filter(|t| t.status == "completed").count();
+        let run = b.tasks.iter().filter(|t| t.status == "in_progress").count();
+        let queued = b.tasks.iter().filter(|t| t.status == "pending").count();
+        (total, done, run, queued)
+    }
+
+    #[test]
+    fn board_aggregates_and_numbers_tasks() {
+        let items = [
+            it("Скелет", "completed"),
+            it("Модель", "completed"),
+            it("Контроллеры", "in_progress"),
+            it("CI", "pending"),
+        ];
+        let b = build_board(None, &items, &[], 1000);
+        assert_eq!(agg(&b), (4, 2, 1, 1));
+        assert_eq!(b.tasks[2].n, 3, "номера 1-based позиционные");
+        assert_eq!(b.tasks[2].status, "in_progress");
+        assert_eq!(b.tasks[2].started_at, Some(1000), "in_progress получил старт");
+    }
+
+    #[test]
+    fn board_last_write_wins_replaces_whole_list() {
+        let first = [it("A", "completed"), it("B", "in_progress")];
+        let b1 = build_board(None, &first, &[], 0);
+        // агент переписал план целиком: добавил Task 3, B завершил
+        let second = [it("A", "completed"), it("B", "completed"), it("C", "pending")];
+        let b2 = build_board(Some(&b1), &second, &[], 5000);
+        assert_eq!(b2.tasks.len(), 3, "ровно новый список, без осколков старого");
+        assert_eq!(agg(&b2), (3, 2, 0, 1));
+        // B был in_progress с t=0 → completed на t=5000: длительность зафиксирована
+        assert_eq!(b2.tasks[1].dur_ms, Some(5000));
+    }
+
+    #[test]
+    fn board_carries_started_at_across_snapshots() {
+        let s1 = [it("A", "in_progress")];
+        let b1 = build_board(None, &s1, &[], 1000);
+        // повторный снапшот без смены статуса — старт не сбрасывается на now
+        let b2 = build_board(Some(&b1), &s1, &[], 9000);
+        assert_eq!(b2.tasks[0].started_at, Some(1000));
+    }
+
+    #[test]
+    fn subagent_correlates_by_task_number_else_strip() {
+        let subs = vec![
+            Subagent { name: "Implement Task 3: controllers".into(), kind: Some("general-purpose".into()), model: Some("sonnet".into()), started_at: 0, stopped_at: Some(2000), task_ref: None },
+            Subagent { name: "code-reviewer".into(), kind: Some("code-reviewer".into()), model: Some("opus".into()), started_at: 0, stopped_at: Some(3000), task_ref: None },
+        ];
+        let items = [it("Скелет", "completed"), it("Модель", "completed"), it("Контроллеры", "in_progress")];
+        let b = build_board(None, &items, &subs, 0);
+        // "Task 3" → бейдж на третьей задаче
+        assert_eq!(b.tasks[2].model.as_deref(), Some("sonnet"));
+        assert_eq!(b.tasks[2].dur_ms, Some(2000));
+        // "code-reviewer" без номера → полоска, НЕ привязан наугад
+        assert_eq!(b.subagents.len(), 1, "несопоставленный сабагент уходит в полоску");
+        assert_eq!(b.subagents[0].name, "code-reviewer");
+        assert!(b.tasks.iter().all(|t| t.model.as_deref() != Some("opus")), "opus никуда не прилеплен");
+    }
+
+    #[test]
+    fn subagent_out_of_range_number_not_correlated() {
+        let subs = vec![Subagent { name: "Task 9 — что-то".into(), model: Some("sonnet".into()), started_at: 0, stopped_at: Some(10), ..Default::default() }];
+        let items = [it("A", "completed"), it("B", "in_progress")]; // только 2 задачи
+        let b = build_board(None, &items, &subs, 0);
+        assert_eq!(b.subagents.len(), 1, "номер вне диапазона → не привязан");
+        assert!(b.tasks.iter().all(|t| t.model.is_none()));
+    }
+
+    #[test]
+    fn freeze_marks_in_progress_interrupted() {
+        let items = [it("A", "completed"), it("B", "in_progress"), it("C", "pending")];
+        let mut s = Session::new("x".into(), 0);
+        s.board = Some(build_board(None, &items, &[], 0));
+        freeze_board(&mut s);
+        let b = s.board.unwrap();
+        assert!(b.stopped);
+        assert_eq!(b.tasks[1].status, "interrupted", "была в работе → прервана");
+        assert_eq!(b.tasks[0].status, "completed", "готовую не трогаем");
+        assert_eq!(b.tasks[2].status, "pending", "очередь не трогаем");
+    }
+
+    #[test]
+    fn task_ref_parsing() {
+        assert_eq!(task_ref_from("Implement Task 5: docker"), Some(5));
+        assert_eq!(task_ref_from("TASK#12 review"), Some(12));
+        assert_eq!(task_ref_from("code-reviewer"), None);
+        assert_eq!(task_ref_from("multitask runner"), None, "не ловим внутри слова");
+    }
+
+    #[test]
+    fn task_action_text_generates_and_rejects() {
+        let goto = task_action_text("goto", 5, Some("docker-compose · .env")).unwrap();
+        assert!(goto.contains("задаче 5") && goto.contains("docker-compose"));
+        assert!(task_action_text("skip", 6, None).unwrap().contains("Пропусти задачу 6"));
+        assert!(task_action_text("rerun", 2, None).unwrap().contains("Перезапусти задачу 2"));
+        assert!(task_action_text("blow-up", 1, None).is_none(), "чужое действие → None, ничего не шлём");
+    }
 }

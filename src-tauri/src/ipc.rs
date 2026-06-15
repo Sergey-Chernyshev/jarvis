@@ -93,7 +93,15 @@ pub fn settings_set(app: AppHandle, patch: Value) -> Value {
 
     if let Some(Value::Bool(open)) = rest.remove("openAtLogin") {
         let autolaunch = app.autolaunch();
-        let _ = if open { autolaunch.enable() } else { autolaunch.disable() };
+        let res = if open { autolaunch.enable() } else { autolaunch.disable() };
+        if let Err(e) = res {
+            // не глотаем: видно в консоли `npm run start`, а UI перечитает
+            // реальное is_enabled() и честно покажет, что не сработало
+            eprintln!(
+                "[jarvis:autostart] не смог {} автозапуск: {e}",
+                if open { "включить" } else { "выключить" }
+            );
+        }
     }
 
     if let Some(hotkey) = rest.remove("hotkey") {
@@ -306,6 +314,24 @@ pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) 
     }
 }
 
+/// Действие с доски задач. ГРАНИЦА: ничего не отправляет и не мутирует доску —
+/// возвращает редактируемый текст-инструкцию оркестратору. Панель префилит им
+/// composer; реальная отправка — через `session_reply` после правки юзером.
+/// Доска не меняется, пока не прилетит следующий настоящий `TodoWrite`.
+#[tauri::command]
+pub fn task_action(app: AppHandle, session_id: String, task_ref: i64, action: String) -> Value {
+    let d = Daemon::get(&app);
+    let title = d
+        .session(&session_id)
+        .and_then(|s| s.board)
+        .and_then(|b| b.tasks.into_iter().find(|t| t.n == task_ref))
+        .map(|t| t.text);
+    match crate::daemon::task_action_text(&action, task_ref, title.as_deref()) {
+        Some(text) => json!({ "ok": true, "text": text }),
+        None => err("неизвестное действие"),
+    }
+}
+
 /// Ответ в сессию: tmux-вставка в пану нашего сервера (-L jarvis).
 #[tauri::command]
 pub async fn session_reply(app: AppHandle, session_id: String, text: String) -> Value {
@@ -318,17 +344,59 @@ pub async fn session_reply(app: AppHandle, session_id: String, text: String) -> 
 
     if let Some(pane) = s.tmux_pane {
         if tmux::pane_alive(&pane).await {
-            return match tmux::reply(&pane, &prompt).await {
-                Ok(()) => {
-                    d.mark_prompt_sent(&session_id, &prompt);
-                    println!("[jarvis] reply→tmux {pane} ({})", s.project.as_deref().unwrap_or("?"));
-                    json!({ "ok": true, "channel": "tmux" })
-                }
-                Err(e) => {
-                    eprintln!("[jarvis] reply tmux fail: {e}");
-                    err(format!("tmux: {}", ellipsize(&one_line(&e), 120)))
-                }
-            };
+            // Занята ли сессия в момент отправки. Если да — Claude Code положит
+            // наш ввод в СВОЮ очередь, а prompt-хук придёт лишь когда он до него
+            // дойдёт (после текущего ответа). Быстрый ack тогда невозможен — это
+            // не провал доставки, а «поставлено в очередь». Limit — тоже ждёт.
+            let busy = matches!(s.status, Status::Working | Status::Limit);
+
+            // Первая вставка.
+            let t0 = now_ms();
+            if let Err(e) = tmux::reply(&pane, &prompt).await {
+                eprintln!("[jarvis] reply tmux fail: {e}");
+                return err(format!("tmux: {}", ellipsize(&one_line(&e), 120)));
+            }
+
+            // Свободная сессия обработает сразу — ждём короткое подтверждение.
+            if d.await_prompt_ack(&session_id, t0, std::time::Duration::from_millis(2500)).await {
+                d.mark_prompt_sent(&session_id, &prompt);
+                crate::log::line(&format!("[reply] доставлено sid={} pane={pane}", ellipsize(&session_id, 8)));
+                return json!({ "ok": true, "channel": "tmux" });
+            }
+
+            if busy {
+                // Сессия работала — ввод ушёл в нативную очередь Claude Code.
+                // НЕ ретраим вставку (повтор продублировал бы сообщение в очереди).
+                // Подтверждаем асинхронно: когда Claude дойдёт до ввода, прилетит
+                // prompt-хук — тогда и отметим доставку «из очереди».
+                crate::log::line(&format!("[reply] в очереди (сессия занята) sid={} pane={pane}", ellipsize(&session_id, 8)));
+                let d2 = d.clone();
+                let sid2 = session_id.clone();
+                let p2 = prompt.clone();
+                tauri::async_runtime::spawn(async move {
+                    if d2.await_prompt_ack(&sid2, t0, std::time::Duration::from_secs(300)).await {
+                        d2.mark_prompt_sent(&sid2, &p2);
+                        crate::log::line(&format!("[reply] доставлено из очереди sid={}", ellipsize(&sid2, 8)));
+                    } else {
+                        crate::log::line(&format!("[reply] очередь: 5 мин без подтверждения sid={}", ellipsize(&sid2, 8)));
+                    }
+                });
+                return json!({ "ok": true, "channel": "tmux", "queued": true });
+            }
+
+            // Свободная сессия, но ack не пришёл — вставка могла не успеть
+            // зарегистрироваться. Один ретрай (C-u в reply() чистит строку,
+            // повтор не задваивает текст).
+            let t1 = now_ms();
+            if let Err(e) = tmux::reply(&pane, &prompt).await {
+                return err(format!("tmux: {}", ellipsize(&one_line(&e), 120)));
+            }
+            if d.await_prompt_ack(&session_id, t1, std::time::Duration::from_millis(2500)).await {
+                d.mark_prompt_sent(&session_id, &prompt);
+                crate::log::line(&format!("[reply] доставлено sid={} pane={pane} (2-я попытка)", ellipsize(&session_id, 8)));
+                return json!({ "ok": true, "channel": "tmux", "attempts": 2 });
+            }
+            return err("Агент не подтвердил получение — проверь терминал");
         }
         d.with_session(&session_id, |s| s.tmux_pane = None); // пана умерла
         d.push();

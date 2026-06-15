@@ -57,6 +57,61 @@ pub struct Question {
     pub questions: Vec<QuestionItem>,
 }
 
+/// Одна задача доски. Источник — оркестратор сессии (TodoWrite / Task-тулы),
+/// Jarvis её только читает. `status`: completed | in_progress | pending |
+/// interrupted (последнее — задача была в работе на момент смерти сессии).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TaskItem {
+    /// Позиционный номер (1-based) — то, что в UI показывается как «Task N».
+    pub n: i64,
+    pub text: String,
+    pub status: String,
+    /// «Exploring …» — живая форма для строки активности in-progress задачи.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_form: Option<String>,
+    /// Модель — только из УВЕРЕННО скоррелированного сабагента, иначе None.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Длительность мс: in_progress→completed, best-effort по снапшотам.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dur_ms: Option<i64>,
+    /// Когда задача стала in_progress (для живого таймера), мс.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+}
+
+/// Сабагент сессии. Старт — PreToolUse(Task), стоп — PostToolUse(Task).
+/// `task_ref` = номер задачи, если описание уверенно ссылается на «Task N».
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Subagent {
+    pub name: String,
+    /// subagent_type из tool_input (code-reviewer, general-purpose…).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub started_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_ref: Option<i64>,
+}
+
+/// Доска задач сессии. Появляется в панели только если была хоть раз заполнена.
+/// `stopped` — сессия умерла, доска заморожена (in_progress → interrupted).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TaskBoard {
+    pub tasks: Vec<TaskItem>,
+    /// Сабагенты без уверенной привязки — для отдельной полоски в UI.
+    pub subagents: Vec<Subagent>,
+    pub updated_at: i64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stopped: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Session {
@@ -124,6 +179,14 @@ pub struct Session {
     pub task_progress: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub todo_list: Option<Vec<String>>,
+    /// Структурная доска задач (TodoWrite / Task-тулы). Источник истины —
+    /// оркестратор сессии; Jarvis читает и отображает, не мутирует.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board: Option<TaskBoard>,
+    /// Реестр сабагентов сессии (Task pre/post). Ведётся отдельно от задач;
+    /// привязка к задаче — эвристическая, см. [`TaskBoard`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub subagents: Vec<Subagent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -14,6 +14,17 @@ use std::sync::Mutex;
 
 use crate::util::{ellipsize, jarvis_dir, one_line};
 
+/// Это дженерик-пинг «Claude ждёт твоего ввода» (а не запрос пермишена)?
+/// Он прилетает, как только промпт снова готов — то есть сразу после ответа,
+/// дублируя тост «закончил». Пермишены сюда не попадают.
+pub fn is_idle_input_notification(msg: &str) -> bool {
+    regex::RegexBuilder::new("waiting for your input")
+        .case_insensitive(true)
+        .build()
+        .unwrap()
+        .is_match(msg)
+}
+
 /// Статическая русификация уведомлений Claude Code.
 pub fn ru_notification(msg: &str) -> String {
     use regex::RegexBuilder;
@@ -150,6 +161,13 @@ mod tests {
             "Нужен пермишен: Bash"
         );
         assert_eq!(ru_notification("что-то своё"), "что-то своё");
+    }
+
+    #[test]
+    fn idle_input_classifier() {
+        assert!(is_idle_input_notification("Claude is waiting for your input"));
+        // запрос пермишена — не дженерик-пинг, должен уведомлять всегда
+        assert!(!is_idle_input_notification("Claude needs your permission to use Bash"));
     }
 
     #[test]

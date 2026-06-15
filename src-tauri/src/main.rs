@@ -11,6 +11,7 @@ mod daemon;
 mod history;
 mod ipc;
 mod limits;
+mod log;
 mod macos;
 mod model;
 mod power;
@@ -74,6 +75,7 @@ fn main() {
             ipc::session_set_effort,
             ipc::terminal_ping,
             ipc::question_answer,
+            ipc::task_action,
             ipc::session_reply,
             ipc::terminal_focus,
             ipc::toast_resize,
@@ -217,6 +219,18 @@ fn spawn_timers(d: &Arc<Daemon>) {
             let h = dd.history.clone();
             let _ = tokio::task::spawn_blocking(move || h.scan()).await;
             tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+    });
+
+    // hover над тостами: курсор ловим нативно (mouseenter в WKWebView молчит,
+    // пока активно чужое приложение). Тик 200мс — пауза ощущается мгновенно.
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if let Some(toast) = dd.app.get_webview_window("toast") {
+                macos::poll_toast_hover(&toast);
+            }
         }
     });
 }

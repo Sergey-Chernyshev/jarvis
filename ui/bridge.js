@@ -26,6 +26,8 @@
     sendReply: (sessionId, text) => invoke('session_reply', { sessionId, text }),
     pingTerminal: (sessionId) => invoke('terminal_ping', { sessionId }),
     answerQuestion: (sessionId, choice) => invoke('question_answer', { sessionId, choice }),
+    // действие с доски задач → редактируемый текст-инструкция (НЕ отправка)
+    taskAction: (sessionId, taskRef, action) => invoke('task_action', { sessionId, taskRef, action }),
     getCommands: (sessionId) => invoke('commands_get', { sessionId }),
     setModel: (sessionId, model) => invoke('session_set_model', { sessionId, model }),
     setEffort: (sessionId, level) => invoke('session_set_effort', { sessionId, level }),

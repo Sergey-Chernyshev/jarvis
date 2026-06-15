@@ -96,10 +96,6 @@ pub fn toast_add(d: &Daemon, id: &str, title: &str, body: &str, session_id: Opti
     );
 }
 
-pub fn toast_update(d: &Daemon, id: &str, body: &str) {
-    toast_emit(d, "toast-update", json!({ "id": id, "body": body }));
-}
-
 /* ================= позиционирование и показ панели ================= */
 
 /// Панель — на дисплей с курсором (геометрия — в macos::place_panel:

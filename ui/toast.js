@@ -5,6 +5,7 @@ const stackEl = document.getElementById('stack');
 const TTL = 8000;
 const MAX_CARDS = 4;
 const cards = new Map(); // id → {el, timer}
+let hovering = false; // курсор над окном тостов (из нативного poll'а)
 
 function reportHeight() {
   if (!cards.size) { window.toast.resize(0); return; }
@@ -39,11 +40,58 @@ function armTimer(id) {
   const c = cards.get(id);
   if (!c) return;
   clearTimeout(c.timer);
+  // читаешь (курсор над стеком) — карточка замирает, кольцо на паузе
+  if (hovering) {
+    c.el.classList.add('paused');
+    return;
+  }
+  c.el.classList.remove('paused');
   restartRing(c.el);
   c.timer = setTimeout(() => removeCard(id), TTL);
 }
 
+// карточка под курсором по y (DOM-координата из нативного поллинга) → .hot
+function markHot(y) {
+  for (const [, c] of cards) {
+    const r = c.el.getBoundingClientRect();
+    c.el.classList.toggle('hot', y >= r.top && y < r.bottom);
+  }
+}
+
+// нативный hover: курсор над стеком ставит на паузу ВЕСЬ стек (ничего не
+// исчезнет, пока читаешь), но подсветку и ✕ держим только на карточке под
+// курсором — иначе непонятно, на какую именно наведено.
+window.toast.onHover((h) => {
+  const over = !!(h && h.over);
+  hovering = over;
+  if (!over) {
+    for (const [id, c] of cards) {
+      c.el.classList.remove('hot');
+      armTimer(id); // заново с полного TTL — кольцо стартует с нуля
+    }
+    return;
+  }
+  for (const [, c] of cards) {
+    clearTimeout(c.timer);
+    c.el.classList.add('paused');
+  }
+  markHot(h.y);
+});
+
 window.toast.onAdd((d) => {
+  // дедуп: карточка с таким id уже на экране (стабильный id «done-<sid>» и т.п.)
+  // — обновляем её на месте, а не плодим вторую «одна за другой»
+  const existing = cards.get(d.id);
+  if (existing) {
+    const t = existing.el.querySelector('.title');
+    if (t) t.textContent = d.title || '';
+    const b = existing.el.querySelector('.body');
+    if (b) b.textContent = d.body || '';
+    armTimer(d.id); // таймер заново — карточка «обновилась»
+    reportHeight();
+    return;
+  }
+
   if (cards.size >= MAX_CARDS) {
     removeCard(cards.keys().next().value, true); // самая старая — мгновенно
   }
@@ -100,11 +148,6 @@ window.toast.onAdd((d) => {
     window.toast.click(d.sessionId || null);
     removeCard(d.id);
   });
-  card.addEventListener('mouseenter', () => {
-    const c = cards.get(d.id);
-    if (c) clearTimeout(c.timer); // читаешь — не исчезает
-  });
-  card.addEventListener('mouseleave', () => armTimer(d.id));
 
   stackEl.appendChild(card); // новые — снизу, старые поднимаются
   cards.set(d.id, { el: card, timer: null });
@@ -114,12 +157,13 @@ window.toast.onAdd((d) => {
   requestAnimationFrame(() => requestAnimationFrame(() => card.classList.add('in')));
 });
 
-// ИИ-выжимка догнала тост: меняем тело и даём время дочитать
+// текст приходит готовым в onAdd; onUpdate оставлен как безопасный no-op-путь
+// на случай отложенного обновления тела существующей карточки
 window.toast.onUpdate((d) => {
   const c = cards.get(d.id);
   if (!c) return;
   const body = c.el.querySelector('.body');
   if (body) body.textContent = d.body || '';
-  armTimer(d.id); // таймер заново — текст обновился
+  armTimer(d.id);
   reportHeight();
 });

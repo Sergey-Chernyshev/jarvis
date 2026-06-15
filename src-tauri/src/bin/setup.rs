@@ -64,6 +64,156 @@ fn settings_path() -> PathBuf {
     home().join(".claude/settings.json")
 }
 
+/* ================= Piper: бинарь + русский голос ================= */
+
+/// Релиз rhasspy/piper, ассет macOS arm64. Проверено: gzip-архив, HTTP 200.
+const PIPER_ARCHIVE_URL: &str =
+    "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_macos_aarch64.tar.gz";
+/// Русский голос ru_RU-irina-medium из rhasspy/piper-voices.
+const PIPER_VOICE_ONNX_URL: &str = "https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx";
+const PIPER_VOICE_JSON_URL: &str = "https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/irina/medium/ru_RU-irina-medium.onnx.json";
+
+fn piper_dir() -> PathBuf {
+    jarvis_dir().join("piper")
+}
+
+fn piper_bin() -> PathBuf {
+    piper_dir().join("piper")
+}
+
+fn voices_dir() -> PathBuf {
+    jarvis_dir().join("voices")
+}
+
+fn voice_onnx() -> PathBuf {
+    voices_dir().join("ru.onnx")
+}
+
+fn voice_json() -> PathBuf {
+    voices_dir().join("ru.onnx.json")
+}
+
+fn jarvis_settings_path() -> PathBuf {
+    jarvis_dir().join("settings.json")
+}
+
+/// Скачать `url` в `dst` атомарно: curl в `.tmp`, потом rename.
+fn download_to(url: &str, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst.parent().unwrap()).map_err(|e| format!("mkdir: {e}"))?;
+    let tmp = dst.with_file_name(format!(
+        ".{}.tmp-{}",
+        dst.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    let status = Command::new("curl")
+        .args(["-fSL", "-o"])
+        .arg(&tmp)
+        .arg(url)
+        .status()
+        .map_err(|e| format!("запуск curl: {e}"))?;
+    if !status.success() {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("curl не смог скачать {url}"));
+    }
+    fs::rename(&tmp, dst).map_err(|e| format!("rename: {e}"))?;
+    Ok(())
+}
+
+/// Прописать voice.voicePath в ~/.jarvis/settings.json — только если не задан.
+/// Битый/отсутствующий файл → {}; чужие ключи не трогаем; атомарная запись + бэкап.
+fn set_default_voice_path(onnx: &Path) -> Result<(), String> {
+    let path = jarvis_settings_path();
+    let mut json: Value = if path.exists() {
+        match fs::read_to_string(&path) {
+            Ok(raw) if !raw.trim().is_empty() => serde_json::from_str(&raw).unwrap_or_else(|_| json!({})),
+            _ => json!({}),
+        }
+    } else {
+        json!({})
+    };
+    if !json.is_object() {
+        json = json!({});
+    }
+    // voice.voicePath уже задан непустой строкой — не клобберим.
+    let already = json
+        .pointer("/voice/voicePath")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if already {
+        return Ok(());
+    }
+    if json.get("voice").map(|v| !v.is_object()).unwrap_or(true) {
+        json["voice"] = json!({});
+    }
+    json["voice"]["voicePath"] = json!(onnx.display().to_string());
+
+    if path.exists() {
+        backup(&path);
+    }
+    fs::create_dir_all(jarvis_dir()).map_err(|e| format!("mkdir ~/.jarvis: {e}"))?;
+    atomic_write(&path, &(serde_json::to_string_pretty(&json).unwrap() + "\n"));
+    Ok(())
+}
+
+/// Установить Piper: бинарь + один русский голос. Идемпотентно, атомарно.
+/// Любая ошибка → Err (вызывающий трактует как не-фатальную).
+fn install_piper() -> Result<(), String> {
+    fs::create_dir_all(piper_dir()).map_err(|e| format!("mkdir piper: {e}"))?;
+    fs::create_dir_all(voices_dir()).map_err(|e| format!("mkdir voices: {e}"))?;
+
+    // 1. Бинарь
+    if !piper_bin().exists() {
+        let tmp_arc = piper_dir().join(".piper.tar.gz.tmp");
+        download_to(PIPER_ARCHIVE_URL, &tmp_arc)?;
+        // Архив раскрывается в каталог `piper/` с бинарём внутри.
+        // Распакуем во временный каталог и вытащим именно исполняемый `piper`.
+        let extract_dir = piper_dir().join(".extract.tmp");
+        let _ = fs::remove_dir_all(&extract_dir);
+        fs::create_dir_all(&extract_dir).map_err(|e| format!("mkdir extract: {e}"))?;
+        let status = Command::new("tar")
+            .arg("-xzf")
+            .arg(&tmp_arc)
+            .arg("-C")
+            .arg(&extract_dir)
+            .status()
+            .map_err(|e| format!("запуск tar: {e}"))?;
+        let _ = fs::remove_file(&tmp_arc);
+        if !status.success() {
+            let _ = fs::remove_dir_all(&extract_dir);
+            return Err("tar не смог распаковать архив piper".into());
+        }
+        // Бинарь лежит в piper/piper внутри архива.
+        let src_bin = extract_dir.join("piper/piper");
+        if !src_bin.exists() {
+            let _ = fs::remove_dir_all(&extract_dir);
+            return Err(format!("в архиве нет {}", src_bin.display()));
+        }
+        // Скопировать ВЕСЬ каталог piper/ (там лежат .dylib рядом с бинарём).
+        for entry in fs::read_dir(extract_dir.join("piper"))
+            .map_err(|e| format!("чтение распакованного: {e}"))?
+        {
+            let entry = entry.map_err(|e| format!("элемент: {e}"))?;
+            let to = piper_dir().join(entry.file_name());
+            fs::rename(entry.path(), &to).map_err(|e| format!("перенос {}: {e}", to.display()))?;
+        }
+        let _ = fs::remove_dir_all(&extract_dir);
+        fs::set_permissions(piper_bin(), fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("chmod piper: {e}"))?;
+    }
+
+    // 2. Голос (две части)
+    if !voice_onnx().exists() {
+        download_to(PIPER_VOICE_ONNX_URL, &voice_onnx())?;
+    }
+    if !voice_json().exists() {
+        download_to(PIPER_VOICE_JSON_URL, &voice_json())?;
+    }
+
+    // 3. Прописать путь голоса по умолчанию (если не задан).
+    set_default_voice_path(&voice_onnx())?;
+    Ok(())
+}
+
 /* ================= managed-блок в rc-файлах ================= */
 /* Блок живёт между маркерами и заменяется целиком — merge, не overwrite. */
 
@@ -293,6 +443,12 @@ fn install() {
     // 3. tmux-транспорт: шим claude + конфиг + PATH-блок в rc-файлах
     install_tmux_transport();
 
+    // 4. Piper: бинарь + русский голос (не-фатально — демон не зависит от голоса)
+    match install_piper() {
+        Ok(()) => println!("✓ Piper установлен (~/.jarvis/piper, голос ~/.jarvis/voices)"),
+        Err(e) => eprintln!("⚠ Piper не установлен ({e}); голос Piper недоступен, демон не затронут"),
+    }
+
     println!("\nГотово. Активные сессии Claude Code нужно перезапустить —");
     println!("хуки снимаются снапшотом на старте сессии.");
     println!("Если Claude Code попросит подтвердить изменённые хуки (/hooks) — это наша запись.");
@@ -437,6 +593,18 @@ fn status() {
         println!("  • живые сессии: {}", live.join(", "));
     }
 
+    // Голос: Piper (бинарь + модель) и активный движок из ~/.jarvis/settings.json.
+    let piper_installed = piper_bin().exists() && voice_onnx().exists() && voice_json().exists();
+    let engine = voice_engine();
+    let yn = |b: bool| if b { "да" } else { "нет" };
+    println!("Голос:");
+    println!(
+        "  piper:  установлен={} (бинарь + модель на месте), активен={} (voice.engine={engine})",
+        yn(piper_installed),
+        yn(engine == "piper"),
+    );
+    println!("  silero: Фаза 2 — не установлен");
+
     let (exists, json) = read_settings();
     if !exists {
         println!("Settings: ✗ {} не существует", settings_path().display());
@@ -446,6 +614,20 @@ fn status() {
     for (event, _) in EVENTS {
         println!("  {} {event}", mark(event_installed(&json, event)));
     }
+}
+
+/// Активный голосовой движок из ~/.jarvis/settings.json (voice.engine), дефолт "piper".
+/// Битый/отсутствующий файл — тоже "piper", без паники.
+fn voice_engine() -> String {
+    let path = jarvis_settings_path();
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(_) => return "piper".into(),
+    };
+    serde_json::from_str::<Value>(&raw)
+        .ok()
+        .and_then(|v| v.pointer("/voice/engine").and_then(Value::as_str).map(String::from))
+        .unwrap_or_else(|| "piper".into())
 }
 
 fn main() {

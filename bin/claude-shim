@@ -20,6 +20,12 @@ if [ -z "$REAL" ]; then
   exit 127
 fi
 
+# --- по умолчанию прокси нет: никогда не пробрасываем его в claude ---
+# Чистим в окружении шима — это покрывает сквозной exec ниже.
+# Для tmux-ветки прокси дополнительно снимается внутри CMD (см. ниже),
+# т.к. tmux-пейн наследует env tmux-СЕРВЕРА, а не шима.
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+
 # --- решаем, оборачивать ли ---
 wrap=1
 [ -n "$JARVIS_SHIM" ] && wrap=0          # рекурсия
@@ -48,7 +54,7 @@ for a in "$REAL" "$@"; do
   q=$(printf '%s' "$a" | sed "s/'/'\\\\''/g")
   quoted="$quoted '$q'"
 done
-CMD="JARVIS_SHIM=1 exec$quoted"
+CMD="unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; JARVIS_SHIM=1 exec$quoted"
 
 # iTerm2 умеет control mode: родные табы вместо tmux-рендеринга
 CC=''

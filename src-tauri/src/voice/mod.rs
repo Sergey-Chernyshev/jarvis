@@ -25,7 +25,11 @@ pub struct Voice {
     composer: Box<dyn Composer>,
     engine: Box<dyn TtsEngine>,
     player: Arc<dyn Play>,
-    voice: VoiceSel,
+    // спикер живой (Silero берёт его per-запрос) → меняется из настроек без
+    // перезапуска; путь/частота фиксированы на старте
+    speaker: Mutex<String>,
+    voice_path: String,
+    sample_rate: u32,
     queue: Arc<(Mutex<SpeechQueue>, Condvar)>,
     mute: Arc<AtomicBool>,
     sidecar: Option<Arc<sidecar::Sidecar>>,
@@ -53,7 +57,9 @@ impl Voice {
             composer: Box::new(TemplateComposer),
             engine,
             player: Arc::new(RodioPlayer::new()),
-            voice: VoiceSel { speaker, voice_path: cfg.voice_path.clone(), sample_rate: cfg.sample_rate },
+            speaker: Mutex::new(speaker),
+            voice_path: cfg.voice_path.clone(),
+            sample_rate: cfg.sample_rate,
             queue: Arc::new((Mutex::new(SpeechQueue::new()), Condvar::new())),
             mute: Arc::new(AtomicBool::new(cfg.mute)),
             sidecar,
@@ -61,6 +67,23 @@ impl Voice {
         v.clone().spawn_worker();
         v
     }
+
+    /// Текущий выбор голоса для движка (спикер живой).
+    fn voice_sel(&self) -> VoiceSel {
+        VoiceSel {
+            speaker: self.speaker.lock().unwrap().clone(),
+            voice_path: self.voice_path.clone(),
+            sample_rate: self.sample_rate,
+        }
+    }
+
+    /// Сменить спикера на лету (без перезапуска): Silero берёт его per-запрос.
+    pub fn set_speaker(&self, speaker: &str) {
+        if !speaker.is_empty() {
+            *self.speaker.lock().unwrap() = speaker.to_string();
+        }
+    }
+    pub fn speaker(&self) -> String { self.speaker.lock().unwrap().clone() }
 
     /// Тик супервизора: перезапустить сайдкар, если он умер (no-op для piper).
     pub fn tick(&self) {
@@ -132,8 +155,12 @@ impl Voice {
         cv.notify_one();
     }
 
-    pub fn warmup(&self) { self.engine.warmup(&self.voice); }
+    pub fn warmup(&self) { self.engine.warmup(&self.voice_sel()); }
     pub fn engine_name(&self) -> &'static str { self.engine.name() }
+    /// PID Silero-сайдкара (для метрик диагностики); None для piper/не запущен.
+    pub fn sidecar_pid(&self) -> Option<u32> { self.sidecar.as_ref().and_then(|s| s.pid()) }
+    /// Глубина очереди речи (для метрик).
+    pub fn queue_len(&self) -> usize { self.queue.0.lock().unwrap().len() }
     pub fn engine_available(&self) -> bool { self.engine.available() }
 
     fn spawn_worker(self: Arc<Self>) {
@@ -146,7 +173,8 @@ impl Voice {
             };
             let Some(u) = next else { continue; };
             if self.is_muted() { continue; }
-            match self.engine.synthesize(&u.text, &self.voice) {
+            let vs = self.voice_sel();
+            match self.engine.synthesize(&u.text, &vs) {
                 Ok(wav) => { self.player.play_blocking(wav); }
                 Err(e) => crate::log::line(&format!("[voice] {} молчит: {e}", self.engine.name())),
             }

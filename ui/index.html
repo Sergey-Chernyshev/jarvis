@@ -670,6 +670,9 @@
 
   /* реплика юзера: карточка справа, скруглённая со «срезанным» углом */
   .msg.user { align-items: flex-end; }
+  /* оптимистично показанная (ещё не подтверждённая транскриптом) реплика */
+  .msg.user.pending .bubble { opacity: 0.6; }
+  .msg.user .msg-status { font-size: 10.5px; color: var(--faint); margin-top: 3px; padding-right: 2px; }
   .msg.user .bubble {
     background: rgba(255, 255, 255, 0.07);
     border-radius: 10px 10px 3px 10px;
@@ -1350,6 +1353,13 @@
           <span class="spacer"></span>
           <input type="checkbox" id="openAtLogin" class="toggle">
         </div>
+        <div class="srow">
+          <span class="slabel">Режим логов <span class="shint">собирать метрики (RAM/CPU/события) в jarvis.log</span></span>
+          <span class="spacer"></span>
+          <input type="checkbox" id="diagnostics" class="toggle">
+        </div>
+        <div class="stitle sub">Голос<span class="stitlehint">озвучка событий локальным TTS</span></div>
+        <div id="voiceCard" class="awakecard"></div>
         <div class="stitle sub">Бодрость<span class="stitlehint">не давать маку спать, пока работают агенты</span></div>
         <div id="awakeCard" class="awakecard"></div>
       </div>

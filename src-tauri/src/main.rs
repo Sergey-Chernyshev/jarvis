@@ -77,6 +77,10 @@ fn main() {
             ipc::terminal_ping,
             ipc::question_answer,
             ipc::task_action,
+            ipc::voice_get,
+            ipc::voice_set_speaker,
+            ipc::voice_test,
+            ipc::voice_set_mute,
             ipc::session_reply,
             ipc::terminal_focus,
             ipc::toast_resize,
@@ -192,6 +196,15 @@ fn spawn_timers(d: &Arc<Daemon>) {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let v = dd.voice.clone();
             let _ = tokio::task::spawn_blocking(move || v.tick()).await;
+        }
+    });
+
+    // режим логов/диагностики: раз в 15с пишем метрики (RAM/CPU/счётчики) в лог
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            dd.sample_metrics().await;
         }
     });
 

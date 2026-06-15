@@ -1002,6 +1002,34 @@ impl Daemon {
         }
     }
 
+    /* ================= диагностика / метрики ================= */
+    /* Режим логов из настроек: периодически пишем в jarvis.log RAM/CPU демона и
+     * Silero-сайдкара + счётчики, чтобы потом собрать и разобрать. */
+
+    pub async fn sample_metrics(self: &std::sync::Arc<Self>) {
+        if !self.settings.bool("diagnostics") {
+            return;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if let Some((rss, cpu)) = ps_metrics(std::process::id()).await {
+            parts.push(format!("демон rss={rss:.0}МБ cpu={cpu}%"));
+        }
+        if let Some(pid) = self.voice.sidecar_pid() {
+            if let Some((rss, cpu)) = ps_metrics(pid).await {
+                parts.push(format!("silero rss={rss:.0}МБ cpu={cpu}%"));
+            }
+        }
+        let sessions = self.sessions.lock().unwrap().len();
+        parts.push(format!("сессий={sessions}"));
+        parts.push(format!(
+            "голос={} очередь={} mute={}",
+            self.voice.engine_name(),
+            self.voice.queue_len(),
+            self.voice.is_muted()
+        ));
+        crate::log::line(&format!("[metrics] {}", parts.join(" · ")));
+    }
+
     /* ================= effort-уровни из CLI ================= */
     /* Берём из `claude --help`, чтобы не отставать от релизов. */
 
@@ -1334,6 +1362,20 @@ pub fn task_action_text(action: &str, n: i64, title: Option<&str>) -> Option<Str
         "rerun" => format!("Перезапусти задачу {n}{q} заново, с нуля — предыдущий результат считай неактуальным."),
         _ => return None,
     })
+}
+
+/// RSS (МБ) и CPU (%) процесса по pid через `ps`. None — процесса нет.
+async fn ps_metrics(pid: u32) -> Option<(f64, f64)> {
+    let out = tokio::process::Command::new("ps")
+        .args(["-o", "rss=,pcpu=", "-p", &pid.to_string()])
+        .output()
+        .await
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut it = s.split_whitespace();
+    let rss = it.next()?.parse::<f64>().ok()? / 1024.0;
+    let cpu = it.next()?.parse::<f64>().ok()?;
+    Some((rss, cpu))
 }
 
 /// Сессия умерла: доска заморожена, задачи «в работе» → прерванные.

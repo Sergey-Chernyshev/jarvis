@@ -332,6 +332,50 @@ pub fn task_action(app: AppHandle, session_id: String, task_ref: i64, action: St
     }
 }
 
+/* ================= голос (инкремент 7) ================= */
+
+/// Состояние голоса для настроек: движок, текущий спикер, список спикеров.
+/// НЕ дёргает engine_available (там блокирующий HTTP — нельзя из команды).
+#[tauri::command]
+pub fn voice_get(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    let cfg = crate::voice::config::VoiceConfig::from_settings(&d.settings.load());
+    json!({
+        "engine": cfg.engine,
+        "speaker": d.voice.speaker(),
+        "mute": d.voice.is_muted(),
+        // Silero v4_ru — фиксированный набор; для Piper выбор спикера не применим
+        "speakers": ["aidar", "baya", "kseniya", "xenia", "eugene"],
+    })
+}
+
+/// Сменить спикера на лету (без перезапуска) + сохранить + дать послушать.
+#[tauri::command]
+pub fn voice_set_speaker(app: AppHandle, speaker: String) {
+    let d = Daemon::get(&app);
+    d.voice.set_speaker(&speaker);
+    let mut patch = serde_json::Map::new();
+    patch.insert("speaker".into(), Value::String(speaker.clone()));
+    d.settings.set_voice(patch);
+    d.voice.test_phrase(&format!(
+        "Привет, это голос {speaker}. Пиксела закончила, изменён один файл."
+    ));
+}
+
+/// Проиграть образец текущим голосом (кнопка «Тест» в настройках).
+#[tauri::command]
+pub fn voice_test(app: AppHandle) {
+    Daemon::get(&app)
+        .voice
+        .test_phrase("Проверка голоса. Пиксела: четыре из шести задач, сейчас docker-compose.");
+}
+
+/// Тумблер «без звука» из настроек (мгновенно глушит очередь речи).
+#[tauri::command]
+pub fn voice_set_mute(app: AppHandle, on: bool) {
+    Daemon::get(&app).voice.set_mute(on);
+}
+
 /// Ответ в сессию: tmux-вставка в пану нашего сервера (-L jarvis).
 #[tauri::command]
 pub async fn session_reply(app: AppHandle, session_id: String, text: String) -> Value {

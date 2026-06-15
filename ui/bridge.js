@@ -28,6 +28,11 @@
     answerQuestion: (sessionId, choice) => invoke('question_answer', { sessionId, choice }),
     // действие с доски задач → редактируемый текст-инструкция (НЕ отправка)
     taskAction: (sessionId, taskRef, action) => invoke('task_action', { sessionId, taskRef, action }),
+    // голос (инкремент 7): состояние, выбор спикера, тест, mute
+    voiceGet: () => invoke('voice_get'),
+    voiceSetSpeaker: (speaker) => invoke('voice_set_speaker', { speaker }),
+    voiceTest: () => invoke('voice_test'),
+    voiceSetMute: (on) => invoke('voice_set_mute', { on }),
     getCommands: (sessionId) => invoke('commands_get', { sessionId }),
     setModel: (sessionId, model) => invoke('session_set_model', { sessionId, model }),
     setEffort: (sessionId, level) => invoke('session_set_effort', { sessionId, level }),

@@ -580,6 +580,26 @@ function assistantMsg(it) {
   return msg;
 }
 
+// оптимистично показанные ответы юзера, ждут «эха» из транскрипта (для дедупа)
+let pendingReplies = [];
+
+// сразу показать отправленную реплику в ленте — иначе при занятой сессии она
+// уходит в очередь Claude и в чате до обработки не видна («ничего не происходит»)
+function appendPendingReply(text, queued) {
+  chatlogEl.querySelector('.chatempty')?.remove();
+  toolsGroup = null;
+  const msg = document.createElement('div');
+  msg.className = 'msg user pending';
+  msg.appendChild(userBubble(text));
+  const st = document.createElement('div');
+  st.className = 'msg-status';
+  st.textContent = queued ? 'в очереди — доставлю, как освободится' : 'отправлено';
+  msg.appendChild(st);
+  chatlogEl.appendChild(msg);
+  chatlogEl.scrollTop = chatlogEl.scrollHeight;
+  pendingReplies.push({ text: text.trim(), el: msg });
+}
+
 function appendChatItems(items) {
   const nearBottom =
     chatlogEl.scrollHeight - chatlogEl.scrollTop - chatlogEl.clientHeight < 60;
@@ -591,6 +611,9 @@ function appendChatItems(items) {
     }
     toolsGroup = null;
     if (it.role === 'user') {
+      // реальная реплика из транскрипта пришла — снимаем оптимистичный дубль
+      const pi = pendingReplies.findIndex((p) => p.text === it.text.trim());
+      if (pi >= 0) { pendingReplies[pi].el.remove(); pendingReplies.splice(pi, 1); }
       const msg = document.createElement('div');
       msg.className = 'msg user';
       msg.appendChild(userBubble(it.text));
@@ -843,6 +866,7 @@ async function openChat(sessionId, project) {
   updateChatChannelMark();
   chatlogEl.textContent = '';
   toolsGroup = null;
+  pendingReplies = []; // оптимистичные реплики прошлого чата не тащим в новый
   replyEl.value = ''; // черновик прошлого чата не должен уехать в этот
   hidePalette();
   loadCommands();
@@ -1339,7 +1363,7 @@ async function sendReplyNow() {
     const res = await window.jarvis.sendReply(chatSessionId, text);
     if (res.ok) {
       replyEl.value = '';
-      if (res.queued) showToast('Сессия занята — поставил в очередь, доставлю как освободится');
+      appendPendingReply(text, !!res.queued); // сразу видно в ленте (снимется эхом из транскрипта)
     } else if (res.needsTmux) {
       showToast('Сессия вне tmux — запусти команду из подсказки ниже');
     } else {
@@ -2522,6 +2546,7 @@ async function loadSettings() {
   document.getElementById('notifyWaiting').checked = s.notifyWaiting;
   document.getElementById('autoResume').checked = s.autoResume !== false;
   document.getElementById('openAtLogin').checked = s.openAtLogin;
+  document.getElementById('diagnostics').checked = !!s.diagnostics;
   for (const b of document.querySelectorAll('.segbtn')) {
     b.classList.toggle('active', b.dataset.v === s.position);
   }
@@ -2529,7 +2554,72 @@ async function loadSettings() {
     plugins = await window.jarvis.getPlugins();
     renderPluginRows();
   } catch {}
+  renderVoiceCard();
 }
+
+// карточка «Голос»: движок, выбор спикера (Silero, живой), Тест, Без звука
+async function renderVoiceCard() {
+  const box = document.getElementById('voiceCard');
+  if (!box) return;
+  box.textContent = '';
+  let v = null;
+  try { v = await window.jarvis.voiceGet(); } catch {}
+  if (!v) { box.textContent = ''; const n = document.createElement('div'); n.className = 'ahint'; n.textContent = 'Голос недоступен.'; box.appendChild(n); return; }
+  const spacer = () => Object.assign(document.createElement('span'), { className: 'spacer' });
+
+  const head = document.createElement('div');
+  head.className = 'awakehead';
+  const title = document.createElement('span');
+  title.className = 'atitle';
+  title.textContent = 'Озвучка событий';
+  head.appendChild(title);
+  head.appendChild(spacer());
+  const eng = document.createElement('span');
+  eng.className = 'astatus';
+  eng.textContent = `движок: ${v.engine}`;
+  head.appendChild(eng);
+  box.appendChild(head);
+
+  if (v.engine === 'silero') {
+    const seg = document.createElement('div');
+    seg.className = 'aseg';
+    for (const sp of (v.speakers || [])) {
+      const b = document.createElement('button');
+      b.className = 'asegbtn' + (sp === v.speaker ? ' active' : '');
+      b.textContent = sp;
+      b.addEventListener('click', async () => {
+        await window.jarvis.voiceSetSpeaker(sp); // живая смена + образец голосом
+        renderVoiceCard();
+      });
+      seg.appendChild(b);
+    }
+    box.appendChild(seg);
+  } else {
+    const note = document.createElement('div');
+    note.className = 'ahint';
+    note.textContent = 'Выбор спикера — у Silero. Текущий движок Piper (голос задаётся файлом модели).';
+    box.appendChild(note);
+  }
+
+  const row = document.createElement('div');
+  row.className = 'arow hairtop';
+  const test = document.createElement('button');
+  test.className = 'keycap kbig';
+  test.textContent = 'Тест';
+  test.addEventListener('click', () => window.jarvis.voiceTest());
+  row.appendChild(test);
+  row.appendChild(spacer());
+  const ml = document.createElement('span');
+  ml.className = 'alabel';
+  ml.textContent = 'Без звука';
+  row.appendChild(ml);
+  row.appendChild(stoggle(v.mute, (on) => window.jarvis.voiceSetMute(on)));
+  box.appendChild(row);
+}
+
+document.getElementById('diagnostics').addEventListener('change', (e) => {
+  window.jarvis.setSettings({ diagnostics: e.target.checked });
+});
 
 for (const id of ['notifyDone', 'notifyWaiting', 'autoResume']) {
   document.getElementById(id).addEventListener('change', (e) => {

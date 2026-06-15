@@ -31,6 +31,11 @@ impl Sidecar {
         self.py.exists() && self.script.exists()
     }
 
+    /// PID живого сайдкара (для метрик).
+    pub fn pid(&self) -> Option<u32> {
+        self.child.lock().unwrap().as_ref().map(|c| c.id())
+    }
+
     pub fn base(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }

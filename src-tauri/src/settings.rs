@@ -95,6 +95,20 @@ impl Store {
         out
     }
 
+    /// Deep-set полей в объект "voice" (не затирая остальные voice-ключи).
+    pub fn set_voice(&self, patch: Map<String, Value>) {
+        let all = self.load();
+        let mut voice = all.get("voice").cloned().unwrap_or_else(|| json!({}));
+        if let Some(obj) = voice.as_object_mut() {
+            for (k, v) in patch {
+                obj.insert(k, v);
+            }
+        }
+        let mut root = Map::new();
+        root.insert("voice".into(), voice);
+        self.save(root);
+    }
+
     pub fn set_plugin(&self, id: &str, patch: Map<String, Value>) {
         let all = self.load();
         let mut plugins = all.get("plugins").cloned().unwrap_or_else(|| json!({}));

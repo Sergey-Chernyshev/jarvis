@@ -74,7 +74,11 @@ impl Daemon {
         // голос строим до литерала: cfg читаем из тех же settings.json
         let settings = settings::Store::new();
         let vcfg = crate::voice::config::VoiceConfig::from_settings(&settings.load());
-        let voice = crate::voice::Voice::new(&vcfg, jarvis_dir().join("piper").join("piper"));
+        let voice = crate::voice::Voice::new(
+            &vcfg,
+            jarvis_dir().join("piper").join("piper"),
+            jarvis_dir().join("silero"),
+        );
         // прогрев движка на старте — первая реальная реплика не ловит холодный старт
         {
             let v = voice.clone();

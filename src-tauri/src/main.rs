@@ -138,6 +138,7 @@ fn main() {
                 let d = Daemon::get(app);
                 d.write_state_now(); // реестр переживает перезапуск
                 power::Power::dispose(&d); // снять assertion, вернуть disablesleep
+                d.voice.dispose(); // погасить Silero-сайдкар, если был поднят
                 let _ = std::fs::remove_file(util::sock_path());
             }
         });
@@ -181,6 +182,16 @@ fn spawn_timers(d: &Arc<Daemon>) {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             power::Power::tick(&dd).await;
+        }
+    });
+
+    // супервизор Silero-сайдкара: раз в 5с перезапускаем, если упал (no-op для piper)
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let v = dd.voice.clone();
+            let _ = tokio::task::spawn_blocking(move || v.tick()).await;
         }
     });
 

@@ -6,6 +6,7 @@ pub mod engine;
 pub mod numerals;
 pub mod player;
 pub mod queue;
+pub mod sidecar;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -15,7 +16,11 @@ use engine::{build_engine, TtsEngine, VoiceSel};
 use player::{Play, RodioPlayer};
 use queue::SpeechQueue;
 
+/// Фиксированный порт Silero-сайдкара на localhost.
+const SILERO_PORT: u16 = 8731;
+
 /// Голосовой сервис: композитор + очередь + движок + проигрыватель на фоне.
+/// При engine="silero" владеет супервизором сайдкара (старт/перезапуск/стоп).
 pub struct Voice {
     composer: Box<dyn Composer>,
     engine: Box<dyn TtsEngine>,
@@ -23,21 +28,52 @@ pub struct Voice {
     voice: VoiceSel,
     queue: Arc<(Mutex<SpeechQueue>, Condvar)>,
     mute: Arc<AtomicBool>,
+    sidecar: Option<Arc<sidecar::Sidecar>>,
 }
 
 impl Voice {
-    pub fn new(cfg: &VoiceConfig, piper_bin: std::path::PathBuf) -> Arc<Self> {
-        let engine = build_engine(&cfg.engine, piper_bin);
+    pub fn new(
+        cfg: &VoiceConfig,
+        piper_bin: std::path::PathBuf,
+        silero_dir: std::path::PathBuf,
+    ) -> Arc<Self> {
+        // для silero — поднимаем сайдкар и берём его base; для piper sidecar=None
+        let (sidecar, silero_base) = if cfg.engine == "silero" {
+            let speaker = if cfg.speaker.is_empty() { "baya".to_string() } else { cfg.speaker.clone() };
+            let sc = Arc::new(sidecar::Sidecar::new(silero_dir, speaker, "v4_ru".into(), SILERO_PORT));
+            sc.ensure_started();
+            let base = sc.base();
+            (Some(sc), base)
+        } else {
+            (None, format!("http://127.0.0.1:{SILERO_PORT}"))
+        };
+        let engine = build_engine(&cfg.engine, piper_bin, silero_base);
+        let speaker = if cfg.speaker.is_empty() && cfg.engine == "silero" { "baya".to_string() } else { cfg.speaker.clone() };
         let v = Arc::new(Voice {
             composer: Box::new(TemplateComposer),
             engine,
             player: Arc::new(RodioPlayer::new()),
-            voice: VoiceSel { speaker: cfg.speaker.clone(), voice_path: cfg.voice_path.clone(), sample_rate: cfg.sample_rate },
+            voice: VoiceSel { speaker, voice_path: cfg.voice_path.clone(), sample_rate: cfg.sample_rate },
             queue: Arc::new((Mutex::new(SpeechQueue::new()), Condvar::new())),
             mute: Arc::new(AtomicBool::new(cfg.mute)),
+            sidecar,
         });
         v.clone().spawn_worker();
         v
+    }
+
+    /// Тик супервизора: перезапустить сайдкар, если он умер (no-op для piper).
+    pub fn tick(&self) {
+        if let Some(sc) = &self.sidecar {
+            sc.restart_if_dead();
+        }
+    }
+
+    /// Погасить сайдкар на выходе демона (no-op для piper).
+    pub fn dispose(&self) {
+        if let Some(sc) = &self.sidecar {
+            sc.stop();
+        }
     }
 
     pub fn set_mute(&self, on: bool) {

@@ -26,6 +26,8 @@ libc = "0.2"
 # голос (инкремент 7): проигрывание WAV на системный output
 rodio = "0.19"
 hound = "3"
+# клиент к Silero-сайдкару (localhost HTTP), blocking — зовём из voice-воркера
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 core-foundation = "0.10"
 core-graphics = "0.24"
 objc2 = "0.6"

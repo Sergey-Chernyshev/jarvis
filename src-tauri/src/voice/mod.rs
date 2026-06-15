@@ -28,6 +28,7 @@ pub struct Voice {
     // спикер живой (Silero берёт его per-запрос) → меняется из настроек без
     // перезапуска; путь/частота фиксированы на старте
     speaker: Mutex<String>,
+    rate: Mutex<String>, // темп речи — тоже живой
     voice_path: String,
     sample_rate: u32,
     queue: Arc<(Mutex<SpeechQueue>, Condvar)>,
@@ -58,6 +59,7 @@ impl Voice {
             engine,
             player: Arc::new(RodioPlayer::new()),
             speaker: Mutex::new(speaker),
+            rate: Mutex::new(if cfg.rate.is_empty() { "fast".to_string() } else { cfg.rate.clone() }),
             voice_path: cfg.voice_path.clone(),
             sample_rate: cfg.sample_rate,
             queue: Arc::new((Mutex::new(SpeechQueue::new()), Condvar::new())),
@@ -74,6 +76,7 @@ impl Voice {
             speaker: self.speaker.lock().unwrap().clone(),
             voice_path: self.voice_path.clone(),
             sample_rate: self.sample_rate,
+            rate: self.rate.lock().unwrap().clone(),
         }
     }
 
@@ -84,6 +87,14 @@ impl Voice {
         }
     }
     pub fn speaker(&self) -> String { self.speaker.lock().unwrap().clone() }
+
+    /// Сменить темп речи на лету (x-slow|slow|medium|fast|x-fast).
+    pub fn set_rate(&self, rate: &str) {
+        if matches!(rate, "x-slow" | "slow" | "medium" | "fast" | "x-fast") {
+            *self.rate.lock().unwrap() = rate.to_string();
+        }
+    }
+    pub fn rate(&self) -> String { self.rate.lock().unwrap().clone() }
 
     /// Тик супервизора: перезапустить сайдкар, если он умер (no-op для piper).
     pub fn tick(&self) {

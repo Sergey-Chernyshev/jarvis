@@ -2594,10 +2594,31 @@ async function renderVoiceCard() {
       seg.appendChild(b);
     }
     box.appendChild(seg);
+
+    // скорость речи (живая)
+    const RATE_LABELS = { slow: 'медленно', medium: 'норма', fast: 'быстро', 'x-fast': 'очень' };
+    const rrow = document.createElement('div');
+    rrow.className = 'arow hairtop';
+    const rl = document.createElement('span');
+    rl.className = 'alabel';
+    rl.textContent = 'Скорость';
+    rrow.appendChild(rl);
+    rrow.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+    const rseg = document.createElement('div');
+    rseg.className = 'seg';
+    for (const rt of (v.rates || ['slow', 'medium', 'fast', 'x-fast'])) {
+      const b = document.createElement('button');
+      b.className = 'segbtn' + (rt === v.rate ? ' active' : '');
+      b.textContent = RATE_LABELS[rt] || rt;
+      b.addEventListener('click', async () => { await window.jarvis.voiceSetRate(rt); renderVoiceCard(); });
+      rseg.appendChild(b);
+    }
+    rrow.appendChild(rseg);
+    box.appendChild(rrow);
   } else {
     const note = document.createElement('div');
     note.className = 'ahint';
-    note.textContent = 'Выбор спикера — у Silero. Текущий движок Piper (голос задаётся файлом модели).';
+    note.textContent = 'Выбор спикера и скорости — у Silero. Текущий движок Piper (голос задаётся файлом модели).';
     box.appendChild(note);
   }
 

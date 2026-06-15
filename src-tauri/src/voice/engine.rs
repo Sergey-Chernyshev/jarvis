@@ -18,7 +18,13 @@ impl std::fmt::Display for TtsError {
 }
 
 #[derive(Debug, Clone)]
-pub struct VoiceSel { pub speaker: String, pub voice_path: String, pub sample_rate: u32 }
+pub struct VoiceSel {
+    pub speaker: String,
+    pub voice_path: String,
+    pub sample_rate: u32,
+    /// темп речи Silero (SSML): x-slow|slow|medium|fast|x-fast
+    pub rate: String,
+}
 
 pub trait TtsEngine: Send + Sync {
     fn synthesize(&self, text: &str, voice: &VoiceSel) -> Result<Vec<u8>, TtsError>;
@@ -91,6 +97,7 @@ impl TtsEngine for SileroEngine {
                 "text": text,
                 "speaker": voice.speaker,
                 "sample_rate": voice.sample_rate,
+                "rate": voice.rate,
             }))
             .send()
             .map_err(|e| TtsError::Synthesis(format!("сайдкар недоступен: {e}")))?;
@@ -137,7 +144,7 @@ pub fn build_engine(engine: &str, piper_bin: PathBuf, silero_base: String) -> Bo
 mod tests {
     use super::*;
 
-    fn sel() -> VoiceSel { VoiceSel { speaker: String::new(), voice_path: String::new(), sample_rate: 24000 } }
+    fn sel() -> VoiceSel { VoiceSel { speaker: String::new(), voice_path: String::new(), sample_rate: 24000, rate: "fast".into() } }
 
     #[test]
     fn silero_unreachable_fails_safe() {
@@ -145,7 +152,7 @@ mod tests {
         let e = SileroEngine::new("http://127.0.0.1:1".into());
         assert!(!e.available());
         assert!(e
-            .synthesize("привет", &VoiceSel { speaker: "baya".into(), voice_path: String::new(), sample_rate: 24000 })
+            .synthesize("привет", &VoiceSel { speaker: "baya".into(), voice_path: String::new(), sample_rate: 24000, rate: "fast".into() })
             .is_err());
     }
 

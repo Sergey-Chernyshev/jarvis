@@ -8,6 +8,8 @@ pub struct VoiceConfig {
     pub speaker: String,
     pub voice_path: String,
     pub sample_rate: u32,
+    /// темп речи Silero: x-slow|slow|medium|fast|x-fast
+    pub rate: String,
     pub mute: bool,
     pub verbosity: String,      // "short" | "descriptive"
     pub ev_stop: bool,
@@ -21,7 +23,8 @@ impl Default for VoiceConfig {
     fn default() -> Self {
         VoiceConfig {
             engine: "piper".into(), speaker: String::new(), voice_path: String::new(),
-            sample_rate: 24000, mute: false, verbosity: "short".into(),
+            // лучшие дефолты Silero: 48 кГц + темп «fast» (×1.2 бодрее, не тараторит)
+            sample_rate: 48000, rate: "fast".into(), mute: false, verbosity: "short".into(),
             ev_stop: true, ev_notification: true, ev_stop_failure: true,
             ev_subagent_stop: false, ev_session_end: false,
         }
@@ -41,6 +44,7 @@ impl VoiceConfig {
             speaker: s("speaker", &d.speaker),
             voice_path: s("voicePath", &d.voice_path),
             sample_rate: v.and_then(|v| v.get("sampleRate")).and_then(Value::as_u64).unwrap_or(d.sample_rate as u64) as u32,
+            rate: s("rate", &d.rate),
             mute: b("mute", d.mute),
             verbosity: s("verbosity", &d.verbosity),
             ev_stop: ev("stop", d.ev_stop),
@@ -68,13 +72,13 @@ mod tests {
         assert_eq!(cfg.engine, "silero");
         assert!(!cfg.ev_stop);
         assert!(cfg.ev_notification, "не заданное событие — дефолт вкл");
-        assert_eq!(cfg.sample_rate, 24000);
+        assert_eq!(cfg.sample_rate, 48000);
     }
 
     #[test]
     fn garbage_types_fall_back() {
         let cfg = VoiceConfig::from_settings(&json!({ "voice": { "sampleRate": "oops", "mute": "yes" } }));
-        assert_eq!(cfg.sample_rate, 24000);
+        assert_eq!(cfg.sample_rate, 48000);
         assert!(!cfg.mute);
     }
 }

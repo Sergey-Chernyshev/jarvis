@@ -343,10 +343,24 @@ pub fn voice_get(app: AppHandle) -> Value {
     json!({
         "engine": cfg.engine,
         "speaker": d.voice.speaker(),
+        "rate": d.voice.rate(),
         "mute": d.voice.is_muted(),
         // Silero v4_ru — фиксированный набор; для Piper выбор спикера не применим
         "speakers": ["aidar", "baya", "kseniya", "xenia", "eugene"],
+        // темпы речи (медленнее → быстрее)
+        "rates": ["slow", "medium", "fast", "x-fast"],
     })
+}
+
+/// Сменить темп речи на лету + сохранить + дать послушать.
+#[tauri::command]
+pub fn voice_set_rate(app: AppHandle, rate: String) {
+    let d = Daemon::get(&app);
+    d.voice.set_rate(&rate);
+    let mut patch = serde_json::Map::new();
+    patch.insert("rate".into(), Value::String(rate));
+    d.settings.set_voice(patch);
+    d.voice.test_phrase("Так звучит выбранная скорость. Пиксела закончила, изменён один файл.");
 }
 
 /// Сменить спикера на лету (без перезапуска) + сохранить + дать послушать.

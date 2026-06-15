@@ -79,6 +79,7 @@ fn main() {
             ipc::task_action,
             ipc::voice_get,
             ipc::voice_set_speaker,
+            ipc::voice_set_rate,
             ipc::voice_test,
             ipc::voice_set_mute,
             ipc::session_reply,

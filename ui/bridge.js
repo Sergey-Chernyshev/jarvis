@@ -31,6 +31,7 @@
     // голос (инкремент 7): состояние, выбор спикера, тест, mute
     voiceGet: () => invoke('voice_get'),
     voiceSetSpeaker: (speaker) => invoke('voice_set_speaker', { speaker }),
+    voiceSetRate: (rate) => invoke('voice_set_rate', { rate }),
     voiceTest: () => invoke('voice_test'),
     voiceSetMute: (on) => invoke('voice_set_mute', { on }),
     getCommands: (sessionId) => invoke('commands_get', { sessionId }),

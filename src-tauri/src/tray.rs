@@ -102,6 +102,7 @@ fn menu_signature(d: &Arc<Daemon>) -> String {
     let mut sig = String::new();
     push_items_signature(&d.power.tray_items(d), &mut sig);
     sig.push_str(&format!("|login:{}", autostart_enabled(d)));
+    sig.push_str(if d.voice.is_muted() { "|mute1" } else { "|mute0" });
     sig
 }
 
@@ -139,6 +140,11 @@ fn build_menu(d: &Arc<Daemon>) -> tauri::Result<Menu<Wry>> {
         append_items(d, &menu, &plugin_items)?;
     }
 
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&CheckMenuItem::with_id(
+        app, "voice-mute", "Без звука", true, d.voice.is_muted(), None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(app, "voice-test", "Тест голоса", true, None::<&str>)?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&CheckMenuItem::with_id(
         app, "autostart", "Запускать при старте компьютера", true, autostart_enabled(d), None::<&str>,
@@ -189,6 +195,13 @@ fn on_menu(d: &Arc<Daemon>, id: &str) {
         "show-panel" => windows::show_panel(d),
         "test-notify" => {
             d.notify("Jarvis на связи", "Уведомления работают", None, "done");
+        }
+        "voice-mute" => {
+            d.voice.set_mute(!d.voice.is_muted());
+            refresh_menu(d);
+        }
+        "voice-test" => {
+            d.voice.test_phrase("Проверка голоса. Пиксела: четыре из шести задач, сейчас docker-compose.");
         }
         "autostart" => {
             let autolaunch = d.app.autolaunch();

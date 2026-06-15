@@ -264,6 +264,19 @@ impl Daemon {
             crate::util::ellipsize(body, 90),
         ));
         windows::toast_add(self, id, title, body, session_id, kind);
+
+        // голос (инкремент 7): озвучиваем РЕАЛЬНОЕ уведомление — тот же текст,
+        // что в тосте. Одна точка на все события; gated по voice-конфигу.
+        let vcfg = crate::voice::config::VoiceConfig::from_settings(&self.settings.load());
+        let speak = match kind {
+            "done" => vcfg.ev_stop,
+            "waiting" => vcfg.ev_notification,
+            "limit" => vcfg.ev_stop_failure,
+            _ => false,
+        };
+        if speak {
+            self.voice.speak_text(title, body, kind);
+        }
     }
 
     /* ================= busy-флаги фоновых задач ================= */
@@ -319,8 +332,6 @@ impl Daemon {
         }
 
         let mut effects: Vec<Effect> = Vec::new();
-        // голос: реплику для озвучки собираем под локом, говорим после (fail-safe)
-        let mut voice_say: Option<crate::voice::composer::SpeechSignals> = None;
         {
             let mut sessions = self.sessions.lock().unwrap();
 
@@ -500,7 +511,6 @@ impl Daemon {
                         let is_new = !(s.status == Status::Waiting && s.detail == msg);
                         s.status = Status::Waiting;
                         s.detail = msg.clone();
-                        voice_say = Some(notif_voice_signal(s, &sid, &msg));
                         if is_new && self.settings.bool("notifyWaiting") {
                             effects.push(Effect::NotifyWaiting {
                                 title: format!("{} — нужен ты", s.project.as_deref().unwrap_or("?")),
@@ -521,7 +531,6 @@ impl Daemon {
                     // GenSummary тут не нужен — DoneSummary даёт ту же строку, но
                     // в стиле «что сделано», как в уведомлении
                     effects.push(Effect::DoneSummary { sid: sid.clone() });
-                    voice_say = Some(stop_voice_signal(s, &sid));
                 }
 
                 "stop-failure" => {
@@ -537,19 +546,6 @@ impl Daemon {
 
         self.run_effects(effects);
         self.push();
-
-        // озвучка — после лока и пуша, по конфигу событий (stop/notification)
-        if let Some(sig) = voice_say {
-            let vcfg = crate::voice::config::VoiceConfig::from_settings(&self.settings.load());
-            let on = match sig.event {
-                Some(crate::voice::composer::Event::Notification) => vcfg.ev_notification,
-                Some(crate::voice::composer::Event::Stop) => vcfg.ev_stop,
-                _ => false,
-            };
-            if on {
-                self.voice.speak(sig);
-            }
-        }
     }
 
     fn run_effects(self: &std::sync::Arc<Self>, effects: Vec<Effect>) {
@@ -1352,49 +1348,6 @@ fn freeze_board(s: &mut Session) {
     }
 }
 
-/// Сигнал озвучки завершения хода: доска > diff > голый факт (выбор — в композиторе).
-fn stop_voice_signal(s: &Session, sid: &str) -> crate::voice::composer::SpeechSignals {
-    use crate::voice::composer::{Event, SpeechSignals};
-    let (done, total, active) = match &s.board {
-        Some(b) => {
-            let total = b.tasks.len() as i64;
-            let done = b.tasks.iter().filter(|t| t.status == "completed").count() as i64;
-            let active = b
-                .tasks
-                .iter()
-                .find(|t| t.status == "in_progress")
-                .map(|t| ellipsize(&one_line(&t.text), 60));
-            (Some(done), Some(total), active)
-        }
-        None => (None, None, None),
-    };
-    SpeechSignals {
-        event: Some(Event::Stop),
-        sid: sid.to_string(),
-        project: s.project.clone().unwrap_or_default(),
-        board_done: done,
-        board_total: total,
-        board_active: active,
-        // diff_files намеренно None: s.touched — это ≤3 недавних «области», а не
-        // счётчик изменённых файлов; озвучивать «изменено N файлов» по нему было
-        // бы враньём. Без доски Stop → голый факт «{project} закончил». Реальный
-        // diff-счётчик можно подать сюда позже, когда он появится.
-        diff_files: None,
-        ..Default::default()
-    }
-}
-
-/// Сигнал озвучки «ждёт тебя» (приоритетно): суть — из текста уведомления.
-fn notif_voice_signal(s: &Session, sid: &str, msg: &str) -> crate::voice::composer::SpeechSignals {
-    use crate::voice::composer::{Event, SpeechSignals};
-    SpeechSignals {
-        event: Some(Event::Notification),
-        sid: sid.to_string(),
-        project: s.project.clone().unwrap_or_default(),
-        notification_text: Some(one_line(msg)),
-        ..Default::default()
-    }
-}
 
 /// Инвариант «одна tmux-пана — одна сессия».
 ///

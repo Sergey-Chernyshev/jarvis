@@ -95,6 +95,34 @@ impl Voice {
         }
     }
 
+    /// Озвучить РЕАЛЬНОЕ уведомление: тот же текст, что показал тост (title+body).
+    /// kind: "done"|"waiting"|"limit"|… → приоритет и дедуп. Fail-safe.
+    pub fn speak_text(&self, title: &str, body: &str, kind: &str) {
+        if self.is_muted() {
+            return;
+        }
+        let text = notif_tts_text(title, body);
+        if text.is_empty() {
+            return;
+        }
+        let high = matches!(kind, "waiting" | "limit");
+        let u = Utterance {
+            text,
+            priority: if high { Priority::NeedHuman } else { Priority::Done },
+            // дедуп по содержимому: повтор того же тоста не читаем дважды,
+            // но разные «что сделано» — каждое озвучиваем
+            dedup_key: format!("{kind}:{title}:{body}"),
+            coalesce_group: None,
+        };
+        let (m, cv) = &*self.queue;
+        if m.lock().unwrap().enqueue(u) {
+            if high {
+                self.player.stop(); // «нужен ты»/лимит прерывают текущую «готово»
+            }
+            cv.notify_one();
+        }
+    }
+
     pub fn test_phrase(&self, text: &str) {
         let (m, cv) = &*self.queue;
         m.lock().unwrap().enqueue(Utterance {
@@ -124,4 +152,14 @@ impl Voice {
             }
         });
     }
+}
+
+/// Текст уведомления → фраза для TTS. title «Проект — закончил» разворачиваем,
+/// body чистим от markdown/кода/списков (squeeze_reply), режем до ~240 символов.
+fn notif_tts_text(title: &str, body: &str) -> String {
+    use crate::util::{ellipsize, one_line};
+    let head = title.replace(" — ", ", ").replace('—', ",");
+    let body = crate::transcript::squeeze_reply(body);
+    let joined = if body.trim().is_empty() { head } else { format!("{head}. {body}") };
+    ellipsize(&one_line(&joined), 240)
 }

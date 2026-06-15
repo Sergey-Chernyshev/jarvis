@@ -135,19 +135,7 @@ pub fn on_stop_failure(d: &Arc<Daemon>, sid: &str, payload: &Value) {
         "limit",
     );
     println!("[jarvis] stop-failure ({project}): подтверждённый лимит (sessPct={sess_pct:?})");
-
-    // голос: «упёрся в лимит, сброс через …» — ТОЛЬКО на подтверждённый лимит,
-    // не на транзиентные сбои (те уходят выше по `return`)
-    let vcfg = crate::voice::config::VoiceConfig::from_settings(&d.settings.load());
-    if vcfg.ev_stop_failure {
-        d.voice.speak(crate::voice::composer::SpeechSignals {
-            event: Some(crate::voice::composer::Event::StopFailure),
-            sid: sid.to_string(),
-            project: project.clone(),
-            limit_reset_min: Some(((reset_at - now_ms()) / 60_000).max(0)),
-            ..Default::default()
-        });
-    }
+    // голос лимита идёт сам через notify() выше (kind="limit") — отдельно не дублируем
     d.push();
 }
 

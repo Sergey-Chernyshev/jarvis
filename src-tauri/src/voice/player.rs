@@ -1,8 +1,10 @@
 //! Проигрывание WAV на системный output. Прерываемое: stop текущего sink.
 //! Трейт `Play` — чтобы очередь тестировалась без звуковой карты.
 
+use std::cell::RefCell;
 use std::io::Cursor;
 use std::sync::Mutex;
+use std::time::Duration;
 
 pub trait Play: Send + Sync {
     /// Сыграть WAV-байты СИНХРОННО (блокирует до конца или прерывания). true — доиграло.
@@ -11,7 +13,18 @@ pub trait Play: Send + Sync {
     fn stop(&self);
 }
 
+thread_local! {
+    // OutputStream в rodio 0.19 — !Send, поэтому держим его в thread-local на
+    // потоке-воркере (play_blocking всегда зовётся оттуда). Стрим живёт МЕЖДУ
+    // репликами: не пере-захватываем аудио-устройство на каждую фразу — это и
+    // давало щелчки, паузы между репликами и обрыв хвоста.
+    static OUT: RefCell<Option<(rodio::OutputStream, rodio::OutputStreamHandle)>> =
+        const { RefCell::new(None) };
+}
+
 pub struct RodioPlayer {
+    // Sink — Send+Sync, держим в общем мьютексе, чтобы stop() мог прервать с
+    // другого потока (высокоприоритетная реплика).
     current: Mutex<Option<rodio::Sink>>,
 }
 
@@ -23,31 +36,39 @@ impl RodioPlayer {
 
 impl Play for RodioPlayer {
     fn play_blocking(&self, wav: Vec<u8>) -> bool {
-        // OutputStream is !Send in rodio 0.19, so we keep it local (not in a field).
-        // It must stay alive for the duration of playback.
-        let (_stream, handle) = match rodio::OutputStream::try_default() {
-            Ok(x) => x,
-            Err(e) => {
-                crate::log::line(&format!("[voice] нет аудио-выхода: {e}"));
-                return false;
+        let queued = OUT.with(|cell| {
+            let mut out = cell.borrow_mut();
+            if out.is_none() {
+                match rodio::OutputStream::try_default() {
+                    Ok(x) => *out = Some(x),
+                    Err(e) => {
+                        crate::log::line(&format!("[voice] нет аудио-выхода: {e}"));
+                        return false;
+                    }
+                }
             }
-        };
-        let sink = match rodio::Sink::try_new(&handle) {
-            Ok(s) => s,
-            Err(e) => {
-                crate::log::line(&format!("[voice] sink: {e}"));
-                return false;
-            }
-        };
-        let src = match rodio::Decoder::new(Cursor::new(wav)) {
-            Ok(s) => s,
-            Err(e) => {
-                crate::log::line(&format!("[voice] декод WAV: {e}"));
-                return false;
-            }
-        };
-        sink.append(src);
-        *self.current.lock().unwrap() = Some(sink);
+            let handle = &out.as_ref().unwrap().1;
+            let sink = match rodio::Sink::try_new(handle) {
+                Ok(s) => s,
+                Err(e) => {
+                    crate::log::line(&format!("[voice] sink: {e}"));
+                    return false;
+                }
+            };
+            let src = match rodio::Decoder::new(Cursor::new(wav)) {
+                Ok(s) => s,
+                Err(e) => {
+                    crate::log::line(&format!("[voice] декод WAV: {e}"));
+                    return false;
+                }
+            };
+            sink.append(src);
+            *self.current.lock().unwrap() = Some(sink);
+            true
+        });
+        if !queued {
+            return false;
+        }
         loop {
             let done = {
                 let g = self.current.lock().unwrap();
@@ -56,10 +77,14 @@ impl Play for RodioPlayer {
             if done {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(40));
+            std::thread::sleep(Duration::from_millis(25));
         }
         let interrupted = self.current.lock().unwrap().is_none();
         *self.current.lock().unwrap() = None;
+        // дать железу доиграть последние сэмплы — иначе хвост слова обрывается
+        if !interrupted {
+            std::thread::sleep(Duration::from_millis(80));
+        }
         !interrupted
     }
 

@@ -19,6 +19,7 @@ use std::process::Command;
 const HOOK_SRC: &str = include_str!("../../../bin/jarvis-hook");
 const SHIM_SRC: &str = include_str!("../../../bin/claude-shim");
 const TMUX_CONF_SRC: &str = include_str!("../../../bin/jarvis-tmux.conf");
+const SILERO_SERVER_SRC: &str = include_str!("../../../bin/silero-server.py");
 
 /// Признак «это наша запись» — путь шима в команде.
 /// Ловит и абсолютный путь, и вариант с $HOME.
@@ -211,6 +212,95 @@ fn install_piper() -> Result<(), String> {
 
     // 3. Прописать путь голоса по умолчанию (если не задан).
     set_default_voice_path(&voice_onnx())?;
+    Ok(())
+}
+
+/* ================= Silero: Python-sidecar (venv + torch + модель) ================= */
+
+fn silero_dir() -> PathBuf {
+    jarvis_dir().join("silero")
+}
+
+fn silero_server_py() -> PathBuf {
+    silero_dir().join("silero-server.py")
+}
+
+fn silero_venv() -> PathBuf {
+    silero_dir().join("venv")
+}
+
+fn silero_python() -> PathBuf {
+    silero_venv().join("bin/python")
+}
+
+fn silero_pip() -> PathBuf {
+    silero_venv().join("bin/pip")
+}
+
+/// Прогнать команду, наследуя stdout/stderr (юзер видит прогресс pip).
+/// Ошибка запуска или ненулевой код → Err.
+fn run_inherit(what: &str, cmd: &mut Command) -> Result<(), String> {
+    let status = cmd.status().map_err(|e| format!("запуск {what}: {e}"))?;
+    if !status.success() {
+        return Err(format!("{what} вернул код {}", status.code().unwrap_or(-1)));
+    }
+    Ok(())
+}
+
+/// Установить Silero-сайдкар: server.py + venv с torch(CPU)/fastapi/uvicorn/numpy + прогрев модели.
+/// Веса PyTorch — сотни МБ–ГБ, ставятся один раз. Идемпотентно.
+/// Любая ошибка → Err (вызывающий трактует как не-фатальную).
+fn install_silero() -> Result<(), String> {
+    fs::create_dir_all(silero_dir()).map_err(|e| format!("mkdir silero: {e}"))?;
+
+    // 1. server.py — атомарная запись поверх (держим актуальным).
+    atomic_write(&silero_server_py(), SILERO_SERVER_SRC);
+
+    // 2. venv — если ещё нет интерпретатора.
+    if !silero_python().exists() {
+        run_inherit(
+            "python3 -m venv",
+            Command::new("python3").arg("-m").arg("venv").arg(silero_venv()),
+        )?;
+    }
+
+    // 3. Зависимости — идемпотентно: пропускаем, если уже импортируются.
+    let deps_ok = Command::new(silero_python())
+        .args(["-c", "import torch, fastapi, uvicorn, numpy"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !deps_ok {
+        println!("Silero: ставлю PyTorch CPU в venv — это сотни МБ–ГБ, один раз. Подожди…");
+        run_inherit(
+            "pip install --upgrade pip",
+            Command::new(silero_pip()).args(["install", "--upgrade", "pip"]),
+        )?;
+        run_inherit(
+            "pip install torch+deps",
+            Command::new(silero_pip()).args([
+                "install",
+                "torch",
+                "--index-url",
+                "https://download.pytorch.org/whl/cpu",
+                "fastapi",
+                "uvicorn",
+                "numpy",
+            ]),
+        )?;
+    }
+
+    // 4. Прогрев модели в torch-hub кэш (чтобы первая реальная фраза не качала холодно).
+    run_inherit(
+        "прогрев модели Silero",
+        Command::new(silero_python()).args([
+            "-c",
+            "import torch; torch.hub.load('snakers4/silero-models','silero_tts',language='ru',speaker='v4_ru')",
+        ]),
+    )?;
+
     Ok(())
 }
 
@@ -449,6 +539,12 @@ fn install() {
         Err(e) => eprintln!("⚠ Piper не установлен ({e}); голос Piper недоступен, демон не затронут"),
     }
 
+    // 5. Silero: Python-сайдкар (не-фатально — демон не зависит от голоса)
+    match install_silero() {
+        Ok(()) => println!("✓ Silero установлен (~/.jarvis/silero/venv + модель)"),
+        Err(e) => eprintln!("⚠ Silero не установлен ({e}); engine=\"silero\" будет молчать, демон не затронут"),
+    }
+
     println!("\nГотово. Активные сессии Claude Code нужно перезапустить —");
     println!("хуки снимаются снапшотом на старте сессии.");
     println!("Если Claude Code попросит подтвердить изменённые хуки (/hooks) — это наша запись.");
@@ -603,7 +699,12 @@ fn status() {
         yn(piper_installed),
         yn(engine == "piper"),
     );
-    println!("  silero: Фаза 2 — не установлен");
+    let silero_installed = silero_python().exists() && silero_server_py().exists();
+    println!(
+        "  silero: установлен={} (venv + server.py), активен={} (voice.engine={engine})",
+        yn(silero_installed),
+        yn(engine == "silero"),
+    );
 
     let (exists, json) = read_settings();
     if !exists {

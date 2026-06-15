@@ -26,6 +26,8 @@ pub struct Utterance {
     pub dedup_key: String,
     /// Some → сливается при заторе очереди.
     pub coalesce_group: Option<String>,
+    /// id тоста, который держим открытым на время речи (None — без тоста).
+    pub toast_id: Option<String>,
 }
 
 /// Событие, вызвавшее речь.
@@ -93,6 +95,7 @@ impl Composer for TemplateComposer {
                     priority: Priority::NeedHuman,
                     dedup_key: format!("notif:{}:{gist}", s.sid),
                     coalesce_group: None,
+                    toast_id: None,
                 })
             }
 
@@ -107,6 +110,7 @@ impl Composer for TemplateComposer {
                     priority: Priority::NeedHuman,
                     dedup_key: format!("limit:{}", s.sid),
                     coalesce_group: None,
+                    toast_id: None,
                 })
             }
 
@@ -138,6 +142,7 @@ impl Composer for TemplateComposer {
                     priority: Priority::Done,
                     dedup_key: format!("stop:{}", s.sid),
                     coalesce_group: Some("stop-done".into()),
+                    toast_id: None,
                 })
             }
         }

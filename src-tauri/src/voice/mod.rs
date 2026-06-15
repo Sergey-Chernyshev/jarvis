@@ -34,6 +34,7 @@ pub struct Voice {
     queue: Arc<(Mutex<SpeechQueue>, Condvar)>,
     mute: Arc<AtomicBool>,
     sidecar: Option<Arc<sidecar::Sidecar>>,
+    app: tauri::AppHandle, // для удержания/продления тоста на время речи
 }
 
 impl Voice {
@@ -41,6 +42,7 @@ impl Voice {
         cfg: &VoiceConfig,
         piper_bin: std::path::PathBuf,
         silero_dir: std::path::PathBuf,
+        app: tauri::AppHandle,
     ) -> Arc<Self> {
         // для silero — поднимаем сайдкар и берём его base; для piper sidecar=None
         let (sidecar, silero_base) = if cfg.engine == "silero" {
@@ -65,6 +67,7 @@ impl Voice {
             queue: Arc::new((Mutex::new(SpeechQueue::new()), Condvar::new())),
             mute: Arc::new(AtomicBool::new(cfg.mute)),
             sidecar,
+            app,
         });
         v.clone().spawn_worker();
         v
@@ -130,8 +133,9 @@ impl Voice {
     }
 
     /// Озвучить РЕАЛЬНОЕ уведомление: тот же текст, что показал тост (title+body).
-    /// kind: "done"|"waiting"|"limit"|… → приоритет и дедуп. Fail-safe.
-    pub fn speak_text(&self, title: &str, body: &str, kind: &str) {
+    /// kind: "done"|"waiting"|"limit"|… → приоритет и дедуп. `toast_id` — карточку
+    /// держим открытой, пока говорим, и продлеваем после. Fail-safe.
+    pub fn speak_text(&self, title: &str, body: &str, kind: &str, toast_id: Option<&str>) {
         if self.is_muted() {
             return;
         }
@@ -147,6 +151,7 @@ impl Voice {
             // но разные «что сделано» — каждое озвучиваем
             dedup_key: format!("{kind}:{title}:{body}"),
             coalesce_group: None,
+            toast_id: toast_id.map(String::from),
         };
         let (m, cv) = &*self.queue;
         if m.lock().unwrap().enqueue(u) {
@@ -161,7 +166,7 @@ impl Voice {
         let (m, cv) = &*self.queue;
         m.lock().unwrap().enqueue(Utterance {
             text: text.to_string(), priority: Priority::Done,
-            dedup_key: format!("test:{text}"), coalesce_group: None,
+            dedup_key: format!("test:{text}"), coalesce_group: None, toast_id: None,
         });
         cv.notify_one();
     }
@@ -191,9 +196,17 @@ impl Voice {
                     crate::metrics::record("tts_synth", t_synth, serde_json::json!({
                         "engine": self.engine.name(), "chars": u.text.chars().count(), "bytes": wav.len(),
                     }));
+                    // держим тост открытым на время речи
+                    if let Some(tid) = &u.toast_id {
+                        crate::windows::toast_hold(&self.app, tid);
+                    }
                     let t_play = crate::metrics::now();
                     self.player.play_blocking(wav);
                     crate::metrics::record("tts_play", t_play, serde_json::json!({ "chars": u.text.chars().count() }));
+                    // речь закончилась → закрыть карточку через 3.5с
+                    if let Some(tid) = &u.toast_id {
+                        crate::windows::toast_extend(&self.app, tid, 3500);
+                    }
                 }
                 Err(e) => crate::log::line(&format!("[voice] {} молчит: {e}", self.engine.name())),
             }

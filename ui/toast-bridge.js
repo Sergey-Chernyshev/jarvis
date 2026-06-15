@@ -17,6 +17,9 @@
     // пока приложение неактивно — а тост всплывает именно в этот момент.
     // Не идёт через armed(): на готовность буфера влияют только onAdd/onUpdate.
     onHover: (cb) => { listen('toast-hover', (e) => cb(e.payload)); },
+    // голос держит карточку, пока говорит (hold), и продлевает на N мс после (extend)
+    onHold: (cb) => { listen('toast-hold', (e) => cb(e.payload)); },
+    onExtend: (cb) => { listen('toast-extend', (e) => cb(e.payload)); },
     click: (sessionId) => invoke('toast_click', { sessionId }),
     resize: (h) => invoke('toast_resize', { h }),
   };

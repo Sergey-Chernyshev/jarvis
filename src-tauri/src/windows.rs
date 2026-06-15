@@ -70,6 +70,16 @@ pub fn emit_to_panel<P: Serialize + Clone>(app: &AppHandle, event: &str, payload
     let _ = app.emit_to("main", event, payload.clone());
 }
 
+/// Голос начал говорить эту карточку — держим открытой (не закрываем по TTL).
+pub fn toast_hold(app: &AppHandle, id: &str) {
+    let _ = app.emit_to("toast", "toast-hold", json!({ "id": id }));
+}
+
+/// Голос закончил — карточка живёт ещё `ms` (≈3.5с после речи).
+pub fn toast_extend(app: &AppHandle, id: &str, ms: u64) {
+    let _ = app.emit_to("toast", "toast-extend", json!({ "id": id, "ms": ms }));
+}
+
 /// События тостов до загрузки webview буферятся (аналог did-finish-load
 /// в Electron) — уведомления первых секунд после старта демона не теряются.
 fn toast_emit(d: &Daemon, event: &'static str, payload: serde_json::Value) {

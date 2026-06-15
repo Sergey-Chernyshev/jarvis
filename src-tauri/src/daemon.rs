@@ -79,6 +79,7 @@ impl Daemon {
             &vcfg,
             jarvis_dir().join("piper").join("piper"),
             jarvis_dir().join("silero"),
+            app.clone(),
         );
         // прогрев движка на старте — первая реальная реплика не ловит холодный старт
         {
@@ -291,7 +292,7 @@ impl Daemon {
             _ => false,
         };
         if on {
-            self.voice.speak_text(title, speak.unwrap_or(body), kind);
+            self.voice.speak_text(title, speak.unwrap_or(body), kind, Some(id));
         }
     }
 

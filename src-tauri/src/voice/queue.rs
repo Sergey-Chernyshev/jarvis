@@ -72,11 +72,11 @@ mod tests {
 
     fn done(project: &str) -> Utterance {
         Utterance { text: format!("{project} закончил"), priority: Priority::Done,
-            dedup_key: format!("stop:{project}"), coalesce_group: Some("stop-done".into()) }
+            dedup_key: format!("stop:{project}"), coalesce_group: Some("stop-done".into()), toast_id: None }
     }
     fn wait(project: &str) -> Utterance {
         Utterance { text: format!("{project} ждёт — нужно разрешение"), priority: Priority::NeedHuman,
-            dedup_key: format!("notif:{project}"), coalesce_group: None }
+            dedup_key: format!("notif:{project}"), coalesce_group: None, toast_id: None }
     }
 
     #[test]

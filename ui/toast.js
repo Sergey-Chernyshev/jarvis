@@ -157,6 +157,25 @@ window.toast.onAdd((d) => {
   requestAnimationFrame(() => requestAnimationFrame(() => card.classList.add('in')));
 });
 
+// голос говорит эту карточку → держим её (не закрываем по TTL, пока речь идёт)
+window.toast.onHold((d) => {
+  const c = cards.get(d.id);
+  if (c) clearTimeout(c.timer);
+});
+
+// речь закончилась → карточка живёт ещё d.ms (≈3.5с), кольцо стекает за это время
+window.toast.onExtend((d) => {
+  const c = cards.get(d.id);
+  if (!c) return;
+  clearTimeout(c.timer);
+  if (hovering) { c.el.classList.add('paused'); return; } // под курсором не тикаем
+  c.el.classList.remove('paused');
+  const ms = d.ms || 3500;
+  c.el.style.setProperty('--ttl', `${ms}ms`);
+  restartRing(c.el);
+  c.timer = setTimeout(() => removeCard(d.id), ms);
+});
+
 // текст приходит готовым в onAdd; onUpdate оставлен как безопасный no-op-путь
 // на случай отложенного обновления тела существующей карточки
 window.toast.onUpdate((d) => {

@@ -48,6 +48,8 @@ pub struct Daemon {
     /// Время последнего РЕАЛЬНОГО prompt-события (хук UserPromptSubmit), мс.
     /// Так подтверждаем доставку ответа из Jarvis: хук сработал → текст дошёл.
     last_prompt_at: Mutex<HashMap<String, i64>>,
+    /// Голос (инкремент 7): озвучка событий локальным TTS. Fail-safe.
+    pub voice: std::sync::Arc<crate::voice::Voice>,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -69,10 +71,19 @@ enum Effect {
 
 impl Daemon {
     pub fn new(app: AppHandle) -> Self {
+        // голос строим до литерала: cfg читаем из тех же settings.json
+        let settings = settings::Store::new();
+        let vcfg = crate::voice::config::VoiceConfig::from_settings(&settings.load());
+        let voice = crate::voice::Voice::new(&vcfg, jarvis_dir().join("piper").join("piper"));
+        // прогрев движка на старте — первая реальная реплика не ловит холодный старт
+        {
+            let v = voice.clone();
+            std::thread::spawn(move || v.warmup());
+        }
         Self {
             app,
             sessions: Mutex::new(HashMap::new()),
-            settings: settings::Store::new(),
+            settings,
             translator: ru::Translator::load(),
             usage: std::sync::Arc::new(crate::usage::Usage::load()),
             history: std::sync::Arc::new(crate::history::History::load()),
@@ -91,6 +102,7 @@ impl Daemon {
             persist_pending: AtomicBool::new(false),
             busy: Mutex::new(HashSet::new()),
             last_prompt_at: Mutex::new(HashMap::new()),
+            voice,
         }
     }
 
@@ -303,6 +315,8 @@ impl Daemon {
         }
 
         let mut effects: Vec<Effect> = Vec::new();
+        // голос: реплику для озвучки собираем под локом, говорим после (fail-safe)
+        let mut voice_say: Option<crate::voice::composer::SpeechSignals> = None;
         {
             let mut sessions = self.sessions.lock().unwrap();
 
@@ -482,6 +496,7 @@ impl Daemon {
                         let is_new = !(s.status == Status::Waiting && s.detail == msg);
                         s.status = Status::Waiting;
                         s.detail = msg.clone();
+                        voice_say = Some(notif_voice_signal(s, &sid, &msg));
                         if is_new && self.settings.bool("notifyWaiting") {
                             effects.push(Effect::NotifyWaiting {
                                 title: format!("{} — нужен ты", s.project.as_deref().unwrap_or("?")),
@@ -502,6 +517,7 @@ impl Daemon {
                     // GenSummary тут не нужен — DoneSummary даёт ту же строку, но
                     // в стиле «что сделано», как в уведомлении
                     effects.push(Effect::DoneSummary { sid: sid.clone() });
+                    voice_say = Some(stop_voice_signal(s, &sid));
                 }
 
                 "stop-failure" => {
@@ -517,6 +533,19 @@ impl Daemon {
 
         self.run_effects(effects);
         self.push();
+
+        // озвучка — после лока и пуша, по конфигу событий (stop/notification)
+        if let Some(sig) = voice_say {
+            let vcfg = crate::voice::config::VoiceConfig::from_settings(&self.settings.load());
+            let on = match sig.event {
+                Some(crate::voice::composer::Event::Notification) => vcfg.ev_notification,
+                Some(crate::voice::composer::Event::Stop) => vcfg.ev_stop,
+                _ => false,
+            };
+            if on {
+                self.voice.speak(sig);
+            }
+        }
     }
 
     fn run_effects(self: &std::sync::Arc<Self>, effects: Vec<Effect>) {
@@ -565,6 +594,20 @@ impl Daemon {
                 Effect::StopFailure { sid, payload } => {
                     tauri::async_runtime::spawn(async move {
                         crate::limits::on_stop_failure(&d, &sid, &payload);
+                        // голос: «упёрся в лимит, сброс через …» (reset уже посчитан)
+                        let vcfg = crate::voice::config::VoiceConfig::from_settings(&d.settings.load());
+                        if vcfg.ev_stop_failure {
+                            let reset_at = d.limits.state().reset_at;
+                            let min = (reset_at > 0).then(|| ((reset_at - now_ms()) / 60_000).max(0));
+                            let project = d.session(&sid).and_then(|s| s.project).unwrap_or_default();
+                            d.voice.speak(crate::voice::composer::SpeechSignals {
+                                event: Some(crate::voice::composer::Event::StopFailure),
+                                sid: sid.clone(),
+                                project,
+                                limit_reset_min: min,
+                                ..Default::default()
+                            });
+                        }
                     });
                 }
             }
@@ -1314,6 +1357,46 @@ fn freeze_board(s: &mut Session) {
                 t.status = "interrupted".into();
             }
         }
+    }
+}
+
+/// Сигнал озвучки завершения хода: доска > diff > голый факт (выбор — в композиторе).
+fn stop_voice_signal(s: &Session, sid: &str) -> crate::voice::composer::SpeechSignals {
+    use crate::voice::composer::{Event, SpeechSignals};
+    let (done, total, active) = match &s.board {
+        Some(b) => {
+            let total = b.tasks.len() as i64;
+            let done = b.tasks.iter().filter(|t| t.status == "completed").count() as i64;
+            let active = b
+                .tasks
+                .iter()
+                .find(|t| t.status == "in_progress")
+                .map(|t| ellipsize(&one_line(&t.text), 60));
+            (Some(done), Some(total), active)
+        }
+        None => (None, None, None),
+    };
+    SpeechSignals {
+        event: Some(Event::Stop),
+        sid: sid.to_string(),
+        project: s.project.clone().unwrap_or_default(),
+        board_done: done,
+        board_total: total,
+        board_active: active,
+        diff_files: s.touched.as_ref().map(|t| t.len() as i64).filter(|n| *n > 0),
+        ..Default::default()
+    }
+}
+
+/// Сигнал озвучки «ждёт тебя» (приоритетно): суть — из текста уведомления.
+fn notif_voice_signal(s: &Session, sid: &str, msg: &str) -> crate::voice::composer::SpeechSignals {
+    use crate::voice::composer::{Event, SpeechSignals};
+    SpeechSignals {
+        event: Some(Event::Notification),
+        sid: sid.to_string(),
+        project: s.project.clone().unwrap_or_default(),
+        notification_text: Some(one_line(msg)),
+        ..Default::default()
     }
 }
 

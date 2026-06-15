@@ -63,11 +63,41 @@ pub async fn run_claude(args: &[&str], timeout: Duration) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Системный промпт служебных haiku-вызовов: `claude -p` — это полноценный
+/// агент (с окружением, cwd, git), и на наши запросы он порой отвечает «по-
+/// агентски» по-английски («I'm in a temporary directory…»). Здесь жёстко
+/// переводим его в режим чистой текст-функции с ответом только на русском.
+const HAIKU_SYSTEM: &str = "Ты — функция обработки текста, а не ассистент и не агент. \
+Выполни ровно то, что сказано в сообщении пользователя, и верни ТОЛЬКО готовый результат на русском языке. \
+Запрещено: задавать вопросы, просить уточнений, здороваться, добавлять пояснения и преамбулы, \
+упоминать рабочую папку, git, репозиторий, проект, контекст или их отсутствие, использовать английский язык. \
+Если входных данных мало — всё равно дай максимально короткий разумный ответ строго по присланному тексту.";
+
 /// Headless-вызов haiku одним промптом — общий путь переводов и саммари.
 pub async fn run_haiku(prompt: &str, timeout: Duration) -> Option<String> {
-    run_claude(
-        &["-p", "--no-session-persistence", "--model", "haiku", prompt],
+    crate::log::line(&format!(
+        "[haiku] → {}",
+        crate::util::ellipsize(&crate::util::one_line(prompt), 300)
+    ));
+    let out = run_claude(
+        &[
+            "-p",
+            "--no-session-persistence",
+            "--append-system-prompt",
+            HAIKU_SYSTEM,
+            "--model",
+            "haiku",
+            prompt,
+        ],
         timeout,
     )
-    .await
+    .await;
+    crate::log::line(&format!(
+        "[haiku] ← {}",
+        match &out {
+            Some(s) => crate::util::ellipsize(&crate::util::one_line(s), 300),
+            None => "<нет ответа / таймаут>".into(),
+        }
+    ));
+    out
 }

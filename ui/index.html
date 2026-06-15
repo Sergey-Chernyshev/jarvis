@@ -6,12 +6,16 @@
 <title>Jarvis</title>
 <style>
   :root {
-    /* тонировка поверх нативного вибранси-блюра (vibrancy в main.js) */
-    --bg: rgba(10, 10, 12, 0.62);
+    /* тонировка поверх нативного вибранси-блюра (vibrancy в main.js).
+       плотная (0.85) — как в каноничном дизайн-макете Jarvis: панель тёмная,
+       вибранси едва просвечивает, текст читается без подсветки. */
+    --bg: rgba(10, 10, 12, 0.85);
     --border: rgba(255, 255, 255, 0.08);
     --hairline: rgba(255, 255, 255, 0.06);
     --row-hover: rgba(255, 255, 255, 0.07);
     --text: #e7e7ea;
+    /* яркий текст самих реплик агента — на тёмной подложке читается легко */
+    --text-body: #d6d6db;
     --muted: #76767e;
     --faint: #55555c;
     --keycap-text: #b9b9bf;
@@ -46,6 +50,9 @@
     display: flex;
     flex-direction: column;
     background: var(--bg);
+    /* поверх нативного вибранси добавляем CSS-блюр — стекло гуще */
+    backdrop-filter: blur(12px) saturate(150%);
+    -webkit-backdrop-filter: blur(12px) saturate(150%);
     border: 1px solid var(--border);
     border-radius: 12px; /* под системное скругление окна (roundedCorners) */
     overflow: hidden;
@@ -381,6 +388,20 @@
   .srow .spacer { flex: 1; }
   .serror { padding: 8px 0 2px; font-size: 11px; color: var(--waiting); }
 
+  /* индикатор-точка состояния режима: тускло-серая (выкл) / зелёная с подсветкой (вкл) */
+  .srow .sdot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--faint); opacity: 0.45; flex: none; margin-left: 4px;
+  }
+  .srow .sdot.on { background: var(--done); opacity: 1; box-shadow: 0 0 5px var(--done); }
+  /* зазор между блоками режимов «Не спать» и «Крышка» */
+  .srow.blockgap { margin-top: 10px; }
+  /* раскрывашка «тонкой настройки»: ниже и тусклее обычной строки */
+  .srow.sdisc { height: 32px; cursor: default; }
+  .srow.sdisc .slabel { font-size: 11.5px; color: var(--faint); }
+  /* главная кнопка режима — чуть крупнее обычных keycap */
+  .keycap.kbig { font-size: 11.5px; padding: 3px 11px; }
+
   .toggle {
     appearance: none;
     width: 30px;
@@ -438,15 +459,62 @@
   }
   .segbtn.active { background: rgba(255, 255, 255, 0.1); color: var(--text); }
 
+  /* ---------- бодрость: единая карточка ---------- */
+  .stitle .stitlehint { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--faint); margin-left: 8px; }
+  .awakecard {
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .awakehead { display: flex; align-items: center; gap: 9px; }
+  .awakehead .glyph { flex: none; display: flex; }
+  .awakehead .atitle { font-size: 13px; font-weight: 600; color: var(--text); }
+  .awakehead .spacer { flex: 1; }
+  .awakehead .apulse {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #6CA0FF; flex: none;
+    animation: apulse 2.2s ease-in-out infinite;
+  }
+  @keyframes apulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .4; transform: scale(.8); } }
+  .awakehead .astatus { font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; color: var(--faint); }
+  .awakehead .astatus.on { color: #B9B9BF; }
+  /* сегмент длительности — во всю ширину, 5 равных кнопок */
+  .aseg { display: flex; gap: 4px; margin-top: 11px; }
+  .asegbtn {
+    appearance: none; border: 0; flex: 1; text-align: center;
+    padding: 6px 0; border-radius: 6px;
+    font: inherit; font-size: 12px; font-weight: 500;
+    color: var(--muted); background: transparent;
+    cursor: default; transition: background 120ms ease, color 120ms ease;
+  }
+  .asegbtn:hover { color: var(--text); }
+  .asegbtn.active { color: var(--text); background: rgba(255, 255, 255, 0.13); }
+  .asegbtn.active.off { background: rgba(255, 255, 255, 0.1); }
+  /* строки-подтогглы и крышка внутри карточки */
+  .arow {
+    display: flex; align-items: center; gap: 10px; height: 34px;
+  }
+  .arow.hairtop { border-top: 1px solid rgba(255, 255, 255, 0.05); }
+  .arow .alabel { font-size: 12.5px; color: #B9B9BF; }
+  .arow.lid .alabel { color: var(--text); }
+  .arow .spacer { flex: 1; }
+  .arow .glyph { flex: none; display: flex; }
+  .ahint { font-size: 11px; color: var(--faint); margin-top: 8px; }
+  .ahint code {
+    font-family: var(--mono); color: var(--muted);
+    background: rgba(255, 255, 255, 0.06); border-radius: 4px; padding: 1px 5px;
+  }
+
   /* ---------- chat ---------- */
   .chat { height: 100%; display: flex; flex-direction: column; }
   .chathead {
     display: flex;
     align-items: center;
-    gap: 8px;
-    height: 38px;
-    padding: 0 12px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    gap: 10px;
+    height: 48px;
+    padding: 0 12px 0 10px;
+    border-bottom: 1px solid var(--hairline);
     flex: none;
   }
   .chathead .back {
@@ -456,20 +524,40 @@
     color: var(--muted);
     display: flex;
     align-items: center;
-    padding: 4px;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
     border-radius: 6px;
     cursor: default;
+    flex: none;
   }
   .chathead .back:hover { background: var(--row-hover); color: var(--text); }
-  .chattitle { font-size: 12px; font-weight: 500; color: var(--text); }
+  .chattitle { font-size: 13px; font-weight: 600; color: var(--text); flex: none; }
+  .chathead .spacer { flex: 1; }
+  /* расход/ветка — тихо, моноширинно, у правого края */
   .chatsub {
+    font-family: var(--mono);
     font-size: 11px;
     color: var(--muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    flex: 1;
+    max-width: 280px;
+    font-variant-numeric: tabular-nums;
+    flex: none;
   }
+  .chatdot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex: none;
+    background: var(--idle);
+  }
+  .chatdot.working { background: var(--working); animation: jPulse 2.2s ease-in-out infinite; }
+  .chatdot.waiting { background: var(--waiting); }
+  .chatdot.done { background: var(--done); }
+  .chatdot.limit { background: #8b7ec8; }
 
   /* ---------- экран вопроса (AskUserQuestion), только клавиатура ---------- */
   .qview { height: 100%; display: flex; flex-direction: column; }
@@ -546,107 +634,176 @@
     flex: 1;
     overflow-y: auto;
     min-height: 0;
-    padding: 12px 16px;
+    padding: 16px 18px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 16px;
     user-select: text;
   }
   .chatlog::-webkit-scrollbar { width: 0; }
 
-  .msg { display: flex; max-width: 100%; }
-  .msg .bubble {
-    font-size: 12.5px;
-    line-height: 1.5;
+  .msg { display: flex; flex-direction: column; max-width: 100%; }
+
+  /* реплика агента: метка JARVIS + время сверху, текст широкой колонкой */
+  .msg.assistant { align-items: flex-start; gap: 6px; max-width: 560px; }
+  .mhead { display: flex; align-items: baseline; gap: 8px; }
+  .mwho {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .mtime {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+  }
+  .msg.assistant .bubble {
+    font-size: 14px;
+    line-height: 1.62;
+    color: var(--text-body);
     word-break: break-word;
-    max-width: 82%;
   }
-  .msg.user { justify-content: flex-end; }
+
+  /* реплика юзера: карточка справа, скруглённая со «срезанным» углом */
+  .msg.user { align-items: flex-end; }
   .msg.user .bubble {
-    background: rgba(108, 160, 255, 0.13);
-    border: 1px solid rgba(108, 160, 255, 0.1);
-    border-radius: 10px;
-    padding: 7px 11px;
+    background: rgba(255, 255, 255, 0.07);
+    border-radius: 10px 10px 3px 10px;
+    padding: 10px 13px;
     color: var(--text);
+    font-size: 14px;
+    line-height: 1.55;
     white-space: pre-wrap;
-    max-width: 78%;
+    word-break: break-word;
+    max-width: 440px;
   }
-  .msg.assistant .bubble { color: var(--text); }
+  /* чипы вложений над текстом юзера ([Image #N], @file) */
+  .attachs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .attach {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 6px;
+    padding: 4px 8px;
+  }
+  .attach svg { flex: none; color: var(--muted); }
+  .attach span {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: #9a9aa2;
+  }
 
   /* маркдаун ассистента */
-  .bubble p { margin: 0 0 8px; }
+  .bubble p { margin: 0 0 9px; }
   .bubble p:last-child { margin-bottom: 0; }
-  .bubble .md-h { font-weight: 600; }
-  .bubble ul { margin: 0 0 8px; padding-left: 16px; }
+  .bubble .md-h { font-weight: 600; color: var(--text); }
+  .bubble b, .bubble strong { font-weight: 600; color: var(--text); }
+  .bubble ul { margin: 0 0 9px; padding-left: 16px; }
   .bubble ul:last-child { margin-bottom: 0; }
-  .bubble li { margin: 2px 0; }
+  .bubble li { margin: 3px 0; }
   .bubble code {
     font-family: var(--mono);
-    font-size: 11px;
+    font-size: 12px;
     background: rgba(255, 255, 255, 0.07);
     border-radius: 4px;
-    padding: 1px 4px;
+    padding: 1px 5px;
+    color: #c8c8ce;
   }
   .bubble pre {
     font-family: var(--mono);
-    font-size: 11px;
-    line-height: 1.45;
+    font-size: 12px;
+    line-height: 1.5;
     background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--hairline);
     border-radius: 8px;
     padding: 8px 10px;
-    margin: 0 0 8px;
+    margin: 0 0 9px;
     overflow: auto;
-    max-height: 180px;
+    max-height: 200px;
     white-space: pre;
   }
   .bubble pre:last-child { margin-bottom: 0; }
 
-  /* callout-карточка (★ Insight и подобные блоки) */
-  .callout {
-    border: 1px solid rgba(108, 160, 255, 0.16);
-    border-left: 2px solid var(--working);
-    background: rgba(108, 160, 255, 0.06);
-    border-radius: 8px;
-    padding: 8px 12px;
-    margin: 8px 0;
-  }
-  .callout:last-child { margin-bottom: 0; }
+  /* Insight — свёрнут в тихую строку «✦ Insight · N заметок», раскрывается кликом */
+  .callout { margin: 2px 0; }
   .callout-title {
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.8px;
-    text-transform: uppercase;
-    color: var(--working);
-    margin-bottom: 6px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: default;
+    user-select: none;
+    font-size: 12.5px;
+    color: var(--muted);
   }
-  .callout p:last-child, .callout ul:last-child { margin-bottom: 0; }
+  .callout-title:hover { opacity: 0.8; }
+  .callout-title .istar { flex: none; color: var(--muted); }
+  .callout-title .ichev {
+    flex: none;
+    color: var(--faint);
+    transition: transform 100ms ease;
+  }
+  .callout.open .callout-title .ichev { transform: rotate(90deg); }
+  .callout-body {
+    margin-top: 8px;
+    background: rgba(108, 160, 255, 0.05);
+    border: 1px solid rgba(108, 160, 255, 0.13);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .callout:not(.open) .callout-body { display: none; }
+  .callout-body p, .callout-body li {
+    font-size: 13px;
+    line-height: 1.55;
+    color: #b9b9bf;
+  }
+  .callout-body p:last-child, .callout-body ul:last-child { margin-bottom: 0; }
 
   .md-hr {
     height: 1px;
     background: var(--hairline);
-    margin: 10px 0;
+    margin: 11px 0;
   }
 
-  /* группа тул-вызовов: компактные чипы в строку */
+  /* тул-вызовы: тихая пилюля «✎ изменил file.rs» (иконка · глагол · файл) */
   .msg.tools {
-    display: flex;
+    flex-direction: row;
     flex-wrap: wrap;
-    gap: 4px;
-    padding: 1px 0;
+    align-items: center;
+    gap: 6px 8px;
+    max-width: 560px;
   }
   .msg.tools .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--hairline);
+    border-radius: 6px;
+    padding: 5px 10px;
+    max-width: 360px;
+    min-width: 0;
+  }
+  .msg.tools .chip svg { flex: none; color: var(--muted); }
+  .msg.tools .chip .tverb { font-size: 11.5px; color: var(--muted); white-space: nowrap; flex: none; }
+  .msg.tools .chip .targ {
     font-family: var(--mono);
-    font-size: 10px;
-    color: var(--muted);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.03);
-    border-radius: 5px;
-    padding: 2.5px 7px;
+    font-size: 12px;
+    color: #c8c8ce;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 260px;
+    min-width: 0;
+  }
+  .msg.tools .chip .tcount {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--faint);
     flex: none;
   }
   .chatempty {
@@ -664,13 +821,14 @@
   .chatinput {
     display: flex;
     align-items: center;
-    gap: 9px;
-    height: 44px;
-    padding: 0 16px;
+    gap: 10px;
+    height: 46px;
+    padding: 0 14px;
     border-top: 1px solid var(--hairline);
     flex: none;
-    color: var(--faint);
+    color: var(--muted);
   }
+  .chatinput svg { flex: none; color: var(--muted); }
   .chatinput input {
     flex: 1;
     background: transparent;
@@ -680,7 +838,11 @@
     font-size: 13px;
     color: var(--text);
   }
-  .chatinput input::placeholder { color: var(--faint); }
+  .chatinput input::placeholder { color: var(--muted); }
+  /* подсказка «/ команды» у правого края поля */
+  .chatinput .cmdhintpill { display: flex; align-items: center; gap: 5px; flex: none; }
+  .chatinput .cmdhintpill .keycap { font-size: 10px; padding: 1.5px 6px; }
+  .chatinput .cmdhintpill span:last-child { font-size: 11px; color: var(--muted); }
 
   /* ---------- индикатор «думает / генерирует» ---------- */
   .chatstatus {
@@ -887,6 +1049,143 @@
   .ap-item.sel { background: rgba(108, 160, 255, 0.12); }
   .ap-item .spacer { flex: 1; }
   .ap-item .keycap { font-size: 10px; padding: 1.5px 6px; }
+
+  /* ---------- заготовка: режим чата Диалог/Саммари ---------- */
+  .chatmode-seg { display: flex; gap: 2px; background: rgba(255, 255, 255, 0.05); border-radius: 6px; padding: 2px; flex: none; }
+  .chatmode-btn { appearance: none; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 11px; font-weight: 500; padding: 2.5px 9px; border-radius: 4px; cursor: default; }
+  .chatmode-btn:hover { color: var(--text); }
+  .chatmode-btn.active { background: rgba(255, 255, 255, 0.09); color: var(--text); }
+  .chatsummary { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .chatsummary-stub { max-width: 360px; text-align: center; font-size: 12.5px; line-height: 1.6; color: var(--faint); }
+
+  /* ---------- палитра быстрых команд (/) в главном поиске ---------- */
+  .cpal { padding: 8px 8px; }
+  .cpal-label {
+    padding: 4px 12px 8px; font-size: 10.5px; letter-spacing: 0.8px;
+    text-transform: uppercase; color: var(--faint); font-weight: 600;
+  }
+  .cpal-row {
+    display: flex; align-items: center; gap: 10px; min-height: 38px;
+    padding: 0 12px; border-radius: 8px; cursor: default;
+  }
+  .cpal-row.sel { background: rgba(255, 255, 255, 0.06); }
+  .cpal-row .glyph { display: flex; flex: none; }
+  .cpal-cmd { font-family: var(--mono); font-size: 12.5px; color: var(--text); flex: none; }
+  .cpal-desc { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cpal-row .spacer { flex: 1; }
+  .cpal-args { font-family: var(--mono); font-size: 10.5px; color: var(--faint); flex: none; }
+  .cpal-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 12px 10px 38px; }
+  .cpal-chip {
+    font-family: var(--mono); font-size: 11.5px; color: #b9b9bf;
+    background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px; padding: 4px 11px; cursor: default;
+  }
+  .cpal-chip:hover { background: rgba(255, 255, 255, 0.1); }
+  .cpal-chip.active { color: var(--text); background: rgba(255, 255, 255, 0.12); }
+  .cpal-hint { padding: 8px 12px 2px; font-size: 11px; line-height: 1.6; color: var(--faint); }
+  .cpal-hint code { font-family: var(--mono); color: var(--muted); }
+  /* arg-режим /amf: поля Часы/Минуты + Результаты + пресеты */
+  .cpal-argrow {
+    display: flex; align-items: center; gap: 9px; min-height: 44px;
+    padding: 6px 12px 10px; border-bottom: 1px solid var(--hairline);
+  }
+  .cpal-argrow .glyph { display: flex; flex: none; }
+  .cpal-argrow .atitle { font-size: 13px; font-weight: 600; color: var(--text); flex: none; }
+  .cpal-field {
+    width: 64px; text-align: center; font-family: inherit; font-size: 13px; color: var(--text);
+    background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 7px; padding: 5px 8px; flex: none; outline: none;
+  }
+  .cpal-field:focus { border-color: var(--text); background: rgba(255, 255, 255, 0.09); }
+  .cpal-argrow .spacer { flex: 1; }
+  .cpal-arghint { font-size: 11px; color: var(--faint); white-space: nowrap; }
+  .cpal-results { padding: 10px 10px; }
+  .cpal-resrow {
+    display: flex; align-items: center; gap: 12px; min-height: 46px; padding: 0 12px;
+    border-radius: 10px; background: rgba(255, 255, 255, 0.06); cursor: default;
+  }
+  .cpal-resicon {
+    width: 26px; height: 26px; border-radius: 7px; flex: none;
+    background: linear-gradient(160deg, #C58A4E, #9C6A2E);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  }
+  .cpal-restitle { font-size: 13.5px; font-weight: 500; color: var(--text); }
+  .cpal-resbadge { font-size: 11px; color: var(--muted); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 5px; padding: 2px 7px; }
+  .cpal-presets { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 10px; margin-top: 10px; }
+
+  /* ---------- доска задач (инкремент 6): кнопка + слайд-овер ---------- */
+  .chat { position: relative; } /* якорь для абсолютного слайд-овера */
+  .tasksbtn {
+    appearance: none; display: flex; align-items: center; gap: 7px;
+    padding: 4px 9px 4px 6px; border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.03);
+    color: var(--text); cursor: default; flex: none;
+  }
+  .tasksbtn:hover { background: rgba(255, 255, 255, 0.07); }
+  .tasksbtn.open { background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.14); }
+  .tasksbtn .tasksring { flex: none; }
+  #tasksRingFg { transition: stroke-dashoffset 220ms ease, stroke 160ms ease; }
+  .tasksbtn-count { font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .tasksbtn-label { font-size: 12px; color: var(--muted); }
+
+  .taskpanel-wrap { position: absolute; inset: 0; z-index: 8; }
+  .taskpanel-scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.42); animation: tpFade 160ms ease; }
+  @keyframes tpFade { from { opacity: 0; } to { opacity: 1; } }
+  .taskpanel {
+    position: absolute; top: 0; right: 0; bottom: 0; width: 340px;
+    background: #121216; border-left: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: -20px 0 50px rgba(0, 0, 0, 0.5);
+    display: flex; flex-direction: column;
+    animation: tpSlide 200ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  @keyframes tpSlide { from { transform: translateX(340px); } to { transform: translateX(0); } }
+  .tp-head { padding: 14px 16px 13px; border-bottom: 1px solid var(--hairline); flex: none; }
+  .tp-titlerow { display: flex; align-items: center; gap: 9px; }
+  .tp-title { font-size: 14px; font-weight: 600; color: var(--text); }
+  .tp-sub { font-size: 12px; color: var(--muted); }
+  .tp-titlerow .spacer { flex: 1; }
+  .tp-close { appearance: none; border: 0; background: transparent; display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 6px; cursor: default; }
+  .tp-close:hover { background: rgba(255, 255, 255, 0.08); }
+  .tp-agg { display: flex; align-items: baseline; gap: 8px; margin: 11px 0 7px; }
+  .tp-count { font-family: var(--mono); font-size: 19px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1; }
+  .tp-count .tp-of { color: var(--faint); }
+  .tp-aggtext { font-size: 12px; color: var(--muted); }
+  .tp-bar { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.06); overflow: hidden; }
+  .tp-bar-fill { height: 4px; border-radius: 2px; background: var(--done); width: 0%; transition: width 200ms ease; }
+  .tp-list { flex: 1; overflow-y: auto; min-height: 0; padding: 4px 0; }
+  .tp-row { padding: 10px 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.04); cursor: default; }
+  /* строка не раскрывается → заголовок целиком, верхнее выравнивание */
+  .tp-rowmain { display: flex; align-items: flex-start; gap: 10px; }
+  .tp-ic { display: flex; flex: none; width: 16px; justify-content: center; margin-top: 1px; }
+  .tp-n { font-family: var(--mono); font-size: 11px; color: var(--muted); flex: none; margin-top: 2px; }
+  .tp-title2 { flex: 1; min-width: 0; font-size: 13px; line-height: 1.4; color: var(--text); overflow-wrap: anywhere; }
+  .tp-title2.dim { color: var(--muted); }
+  .tp-right { font-family: var(--mono); font-size: 10.5px; color: var(--faint); flex: none; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .tp-acts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 0 2px 26px; }
+  .tp-act {
+    appearance: none; border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.04);
+    color: #c8c8ce; font: inherit; font-size: 11.5px; border-radius: 6px; padding: 4px 10px; cursor: default;
+  }
+  .tp-act:hover { background: rgba(255, 255, 255, 0.1); }
+  .tp-act.term { color: var(--working); border-color: rgba(108, 160, 255, 0.25); background: rgba(108, 160, 255, 0.07); }
+  .tp-pulse { width: 9px; height: 9px; border-radius: 50%; background: var(--working); animation: apulse 1.6s ease-in-out infinite; }
+  .tp-strip { padding: 9px 16px 12px; border-top: 1px solid var(--hairline); font-size: 11.5px; line-height: 1.5; color: var(--muted); flex: none; }
+  .tp-strip .tp-striplabel { color: var(--faint); }
+
+  /* слайд-овер вариантов ответа: повторяет доску задач, акцент янтарный («ждёт») */
+  .varbtn { border-color: rgba(242, 163, 60, 0.32); background: rgba(242, 163, 60, 0.06); }
+  .varbtn:hover { background: rgba(242, 163, 60, 0.12); }
+  .varbtn.open { background: rgba(242, 163, 60, 0.12); border-color: rgba(242, 163, 60, 0.45); }
+  .varbtn .varbtn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--waiting); flex: none; }
+  .varbtn .varbtn-label { font-size: 12px; color: var(--waiting); }
+  #qPanel .qp-question { font-size: 13px; line-height: 1.4; color: var(--text); padding: 9px 0 1px; }
+  #qPanel .qvfoot .qp-send {
+    appearance: none; margin-left: auto; font: inherit; font-size: 11.5px;
+    color: var(--waiting); background: rgba(242, 163, 60, 0.1);
+    border: 1px solid rgba(242, 163, 60, 0.35); border-radius: 6px; padding: 4px 12px; cursor: default;
+  }
+  #qPanel .qvfoot .qp-send:hover { background: rgba(242, 163, 60, 0.18); }
 </style>
 </head>
 <body>
@@ -919,17 +1218,87 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
           </button>
           <span class="chattitle" id="chatTitle"></span>
-          <span class="chatsub" id="chatSub"></span>
+          <span class="badge" id="chatModel" hidden></span>
           <span class="badge host" id="chatChannel" hidden>вне терминала</span>
+          <span class="spacer"></span>
+          <!-- доска задач: появляется только если у сессии есть план (board) -->
+          <button class="tasksbtn" id="tasksBtn" hidden title="Задачи · показать доску">
+            <svg class="tasksring" width="17" height="17" viewBox="0 0 20 20" fill="none">
+              <circle cx="10" cy="10" r="7" stroke="rgba(255,255,255,.13)" stroke-width="2.2"></circle>
+              <circle id="tasksRingFg" cx="10" cy="10" r="7" stroke="#41C98E" stroke-width="2.2"
+                      stroke-linecap="round" stroke-dasharray="43.98" stroke-dashoffset="43.98"
+                      transform="rotate(-90 10 10)"></circle>
+            </svg>
+            <span class="tasksbtn-count" id="tasksBtnCount">0/0</span>
+            <span class="tasksbtn-label">задач</span>
+          </button>
+          <!-- слайд-овер вариантов: кнопка-триггер, видна когда у сессии есть вопрос -->
+          <button class="tasksbtn varbtn" id="varBtn" hidden title="Выбрать вариант ответа">
+            <span class="varbtn-dot"></span>
+            <span class="varbtn-label" id="varBtnLabel">варианты</span>
+          </button>
+          <!-- заготовка: режим чата Диалог/Саммари (пока ни к чему не привязан) -->
+          <div class="chatmode-seg" id="chatModeSeg">
+            <button class="chatmode-btn active" data-m="dialog">Диалог</button>
+            <button class="chatmode-btn" data-m="summary">Саммари</button>
+          </div>
+          <span class="chatsub" id="chatSub"></span>
+          <span class="chatdot" id="chatDot"></span>
         </div>
         <div class="chatlog" id="chatlog"></div>
+        <div class="chatsummary" id="chatSummary" hidden>
+          <div class="chatsummary-stub">Саммари сессии — заготовка дизайна. Скоро здесь будет сжатый разбор работы по фазам; пока переключатель ни к чему не привязан.</div>
+        </div>
         <div class="chatstatus" id="chatStatus" hidden></div>
         <div class="tmuxhint" id="tmuxHint" hidden></div>
         <div class="cmdpalette" id="cmdPalette" hidden></div>
         <div class="chatinput">
-          <!-- lucide: corner-down-left -->
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>
+          <!-- lucide: plus -->
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
           <input id="reply" placeholder="Ответить агенту…" spellcheck="false" autocomplete="off" />
+          <span class="cmdhintpill"><span class="keycap">/</span><span>команды</span></span>
+        </div>
+        <!-- доска задач: слайд-овер поверх чата (источник — оркестратор, read-only) -->
+        <div class="taskpanel-wrap" id="taskWrap" hidden>
+          <div class="taskpanel-scrim" id="taskScrim"></div>
+          <div class="taskpanel" id="taskPanel">
+            <div class="tp-head">
+              <div class="tp-titlerow">
+                <span class="tp-title">Задачи</span>
+                <span class="tp-sub" id="tpSub"></span>
+                <span class="spacer"></span>
+                <button class="tp-close" id="tpClose" title="Закрыть · Esc">
+                  <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M3 3 L11 11 M11 3 L3 11" stroke="#9A9AA2" stroke-width="1.5" stroke-linecap="round"></path></svg>
+                </button>
+              </div>
+              <div class="tp-agg">
+                <span class="tp-count" id="tpCount">0<span class="tp-of">/0</span></span>
+                <span class="tp-aggtext" id="tpAggText"></span>
+              </div>
+              <div class="tp-bar"><div class="tp-bar-fill" id="tpBarFill"></div></div>
+            </div>
+            <div class="tp-list" id="tpList"></div>
+            <div class="tp-strip" id="tpStrip" hidden></div>
+          </div>
+        </div>
+        <!-- слайд-овер вариантов ответа: поверх чата, по образцу доски задач -->
+        <div class="taskpanel-wrap" id="qWrap" hidden>
+          <div class="taskpanel-scrim" id="qScrim"></div>
+          <div class="taskpanel" id="qPanel">
+            <div class="tp-head">
+              <div class="tp-titlerow">
+                <span class="tp-title">Варианты</span>
+                <span class="tp-sub" id="qpHeader"></span>
+                <span class="spacer"></span>
+                <button class="tp-close" id="qpClose" title="Закрыть · Esc">
+                  <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M3 3 L11 11 M11 3 L3 11" stroke="#9A9AA2" stroke-width="1.5" stroke-linecap="round"></path></svg>
+                </button>
+              </div>
+              <div class="qp-question" id="qpTitle"></div>
+            </div>
+            <div class="qvopts" id="qpOpts"></div>
+            <div class="qvfoot" id="qpFoot"></div>
+          </div>
         </div>
       </div>
       <div class="qview" id="qview" hidden>
@@ -946,7 +1315,7 @@
       <div class="stats" id="stats" hidden></div>
       <div class="history" id="history" hidden></div>
       <div class="settings" id="settings" hidden>
-        <div class="stitle">Настройки</div>
+        <div class="stitle">Основное</div>
         <div class="srow">
           <span class="slabel">Глобальный хоткей</span>
           <span class="spacer"></span>
@@ -977,12 +1346,12 @@
           </div>
         </div>
         <div class="srow">
-          <span class="slabel">Запускать при входе</span>
+          <span class="slabel">Запускать при старте компьютера <span class="shint">автозапуск при входе в систему</span></span>
           <span class="spacer"></span>
           <input type="checkbox" id="openAtLogin" class="toggle">
         </div>
-        <div class="stitle sub">Плагины</div>
-        <div id="pluginRows"></div>
+        <div class="stitle sub">Бодрость<span class="stitlehint">не давать маку спать, пока работают агенты</span></div>
+        <div id="awakeCard" class="awakecard"></div>
       </div>
     </div>
 

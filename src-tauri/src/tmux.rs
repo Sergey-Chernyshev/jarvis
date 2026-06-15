@@ -54,6 +54,9 @@ pub async fn reply(pane: &str, prompt: &str) -> Result<(), String> {
     tmux_j(&["send-keys", "-t", pane, "C-u"]).await?;
     tmux_j(&["set-buffer", "-b", "jarvis-reply", "--", prompt]).await?;
     tmux_j(&["paste-buffer", "-p", "-d", "-b", "jarvis-reply", "-t", pane]).await?;
+    // даём TUI дожевать bracketed-paste, иначе Enter иногда обгоняет вставку
+    // и текст остаётся в строке ввода неотправленным
+    sleep(Duration::from_millis(90)).await;
     tmux_j(&["send-keys", "-t", pane, "Enter"]).await?;
     Ok(())
 }

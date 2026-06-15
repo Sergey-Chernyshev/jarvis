@@ -7,7 +7,8 @@
 use objc2::encode::{Encode, Encoding};
 use objc2::runtime::AnyObject;
 use objc2::{class, msg_send};
-use tauri::WebviewWindow;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use tauri::{Emitter, Manager, WebviewWindow};
 
 const NS_SCREEN_SAVER_WINDOW_LEVEL: isize = 1000;
 /// NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary
@@ -133,6 +134,44 @@ pub fn place_panel(win: &WebviewWindow, w: f64, h: f64, corner: bool) {
             size: CGSize { width: w, height: h },
         };
         let _: () = msg_send![window, setFrame: frame, display: false];
+    });
+}
+
+/// Один тик слежения за курсором над окном тостов.
+///
+/// WKWebView не шлёт mouseenter/:hover, пока наше приложение неактивно, — а
+/// тост всплывает как раз поверх чужого активного окна. Поэтому курсор ловим
+/// нативно: NSEvent.mouseLocation глобален и от активности не зависит. Шлём
+/// `toast-hover` = `{over, x, y}` (DOM-координаты курсора внутри окна, origin
+/// сверху-слева) — чтобы webview hit-тестил конкретную карточку под курсором,
+/// а не подсвечивал стек целиком. Эмитим на смене `over` или сдвиге y > 3px
+/// (внутри окна курсор переезжает между карточками без mouseleave).
+pub fn poll_toast_hover(win: &WebviewWindow) {
+    static OVER: AtomicBool = AtomicBool::new(false);
+    static LAST_Y: AtomicI32 = AtomicI32::new(i32::MIN);
+    let w = win.clone();
+    let _ = win.run_on_main_thread(move || unsafe {
+        let Ok(ptr) = w.ns_window() else { return };
+        let window = ptr as *mut AnyObject;
+        let frame: CGRect = msg_send![window, frame];
+        let m: CGPoint = msg_send![class!(NSEvent), mouseLocation];
+        // окно схлопнуто (карточек нет) — ховер не важен, гасим залипший флаг
+        let over = frame.size.height >= 4.0
+            && m.x >= frame.origin.x
+            && m.x < frame.origin.x + frame.size.width
+            && m.y >= frame.origin.y
+            && m.y < frame.origin.y + frame.size.height;
+        // AppKit: origin снизу-слева, y вверх. DOM: сверху-слева, y вниз.
+        let rel_x = m.x - frame.origin.x;
+        let dom_y = frame.size.height - (m.y - frame.origin.y);
+        let yi = dom_y.round() as i32;
+        let prev_over = OVER.swap(over, Ordering::SeqCst);
+        let prev_y = LAST_Y.swap(yi, Ordering::SeqCst);
+        let moved = over && (prev_y - yi).abs() > 3;
+        if prev_over != over || moved {
+            let payload = serde_json::json!({ "over": over, "x": rel_x, "y": dom_y });
+            let _ = w.app_handle().emit_to("toast", "toast-hover", payload);
+        }
     });
 }
 

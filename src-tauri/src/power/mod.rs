@@ -93,12 +93,14 @@ impl Power {
         let p = &d.power;
         p.last_tick_at.store(now_ms(), Ordering::SeqCst);
 
-        if Self::ka_settings(d)["enabled"].as_bool() != Some(false) {
-            Self::activate_keep_awake(d);
-        }
-        if Self::cs_settings(d)["enabled"].as_bool() != Some(false) {
-            Self::activate_clamshell(d);
-        }
+        // Оба движка грузим ВСЕГДА. «Выключено» теперь = ассерт/флаг не держится,
+        // а не «плагин выгружен» — это убирает путаницу хост-слоя в настройках.
+        // Бонус для безопасности: activate_clamshell внутри запускает
+        // restore_after_restart, который снимает повисший с прошлой жизни
+        // disablesleep. Раньше он не вызывался, если режим был выключен, —
+        // и закрытие крышки оставалось залипшим, снять его было нечем.
+        Self::activate_keep_awake(d);
+        Self::activate_clamshell(d);
         Self::refresh_processes(d);
     }
 
@@ -306,6 +308,20 @@ impl Power {
                     engine.start_process(pid, label)
                 }
                 "stop" => engine.stop_manual(),
+                "off" => {
+                    // Настоящий master-off: гасим И ручной слот, И авто. Авто при
+                    // этом фиксируем выключенным в настройках — иначе ближайший
+                    // working снова поднимет ассерт, и «выключить» не сработает
+                    // (ровно тот баг, на который жаловались).
+                    let mut events = engine.set_auto(false, now);
+                    events.extend(engine.stop_manual());
+                    drop(guard);
+                    let mut patch = Map::new();
+                    patch.insert("auto".into(), Value::Bool(false));
+                    d.settings.set_plugin("keep-awake", patch);
+                    handle_engine_events(d, events);
+                    return json!({ "ok": true });
+                }
                 "set" => {
                     let mut patch = Map::new();
                     let mut events = Vec::new();
@@ -739,14 +755,25 @@ async fn restore_after_restart(d: &Arc<Daemon>) {
     if clamshell::pmset_quiet(false).await {
         clamshell::clear_marker();
         println!("[jarvis:clamshell] демон перезапустился с поднятым disablesleep — восстановил нормальный сон");
-    } else {
-        d.notify(
-            "⌒ Мак не спит с прошлого запуска",
-            "Остался closed-display mode — выключи в меню ◇ → Крышка (спросит пароль)",
-            None,
-            "done",
-        );
+        return;
     }
+    // Тихо снять нельзя (нет sudoers). Усыновляем повисший флаг как armed —
+    // тогда панель и трей честно покажут «не уснёт закрытым» и дадут кнопку
+    // «Выключить» (спросит пароль). Иначе UI врал бы «норм. сон», а мак не спал
+    // и снять его было бы нечем — ровно тот тупик, из-за которого «не отключается».
+    {
+        let mut clam = d.power.clam.lock().unwrap();
+        clam.armed = true;
+        clam.armed_by = Some("manual");
+        clam.last_guard_at = 0;
+    }
+    changed(d);
+    d.notify(
+        "⌒ Мак не спит с прошлого запуска",
+        "Остался запрет сна под крышкой — нажми «Выключить» в ◇ → Крышка (спросит пароль)",
+        None,
+        "done",
+    );
 }
 
 async fn refresh_lid(d: &Arc<Daemon>) {

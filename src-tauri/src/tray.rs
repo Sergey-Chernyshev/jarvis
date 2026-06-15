@@ -141,7 +141,7 @@ fn build_menu(d: &Arc<Daemon>) -> tauri::Result<Menu<Wry>> {
 
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&CheckMenuItem::with_id(
-        app, "autostart", "Запускать при входе", true, autostart_enabled(d), None::<&str>,
+        app, "autostart", "Запускать при старте компьютера", true, autostart_enabled(d), None::<&str>,
     )?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?)?;

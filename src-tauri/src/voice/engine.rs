@@ -48,7 +48,9 @@ impl TtsEngine for PiperEngine {
             .arg("--output_file").arg("-")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
             .spawn().map_err(|e| TtsError::Synthesis(format!("spawn piper: {e}")))?;
-        child.stdin.take().unwrap().write_all(text.as_bytes())
+        child.stdin.take()
+            .ok_or_else(|| TtsError::Synthesis("stdin не захвачен".into()))?
+            .write_all(text.as_bytes())
             .map_err(|e| TtsError::Synthesis(format!("stdin: {e}")))?;
         let out = child.wait_with_output().map_err(|e| TtsError::Synthesis(format!("wait: {e}")))?;
         if !out.status.success() || out.stdout.is_empty() {

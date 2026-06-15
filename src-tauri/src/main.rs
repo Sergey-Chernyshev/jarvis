@@ -26,6 +26,7 @@ mod transcript;
 mod tray;
 mod usage;
 mod util;
+mod voice;
 mod windows;
 
 use std::sync::Arc;

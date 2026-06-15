@@ -13,6 +13,7 @@ mod ipc;
 mod limits;
 mod log;
 mod macos;
+mod metrics;
 mod model;
 mod power;
 mod ru;

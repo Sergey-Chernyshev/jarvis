@@ -118,6 +118,8 @@ pub fn settings_set(app: AppHandle, patch: Value) -> Value {
     if !rest.is_empty() {
         d.settings.save(rest);
     }
+    // тумблер «Режим логов» применяем сразу (без перезапуска)
+    crate::metrics::set_enabled(d.settings.bool("diagnostics"));
     if windows::panel_visible(&d) {
         windows::position_panel(&d); // позиция могла смениться
     }
@@ -410,6 +412,7 @@ pub async fn session_reply(app: AppHandle, session_id: String, text: String) -> 
 
             // Первая вставка.
             let t0 = now_ms();
+            let t_reply = crate::metrics::now();
             if let Err(e) = tmux::reply(&pane, &prompt).await {
                 eprintln!("[jarvis] reply tmux fail: {e}");
                 return err(format!("tmux: {}", ellipsize(&one_line(&e), 120)));
@@ -419,8 +422,10 @@ pub async fn session_reply(app: AppHandle, session_id: String, text: String) -> 
             if d.await_prompt_ack(&session_id, t0, std::time::Duration::from_millis(2500)).await {
                 d.mark_prompt_sent(&session_id, &prompt);
                 crate::log::line(&format!("[reply] доставлено sid={} pane={pane}", ellipsize(&session_id, 8)));
+                crate::metrics::record("reply_ack", t_reply, json!({ "queued": false }));
                 return json!({ "ok": true, "channel": "tmux" });
             }
+            crate::metrics::record("reply_ack", t_reply, json!({ "queued": busy }));
 
             if busy {
                 // Сессия работала — ввод ушёл в нативную очередь Claude Code.

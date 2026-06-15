@@ -73,6 +73,7 @@ impl Daemon {
     pub fn new(app: AppHandle) -> Self {
         // голос строим до литерала: cfg читаем из тех же settings.json
         let settings = settings::Store::new();
+        crate::metrics::set_enabled(settings.bool("diagnostics")); // режим логов = метрики
         let vcfg = crate::voice::config::VoiceConfig::from_settings(&settings.load());
         let voice = crate::voice::Voice::new(
             &vcfg,
@@ -629,6 +630,8 @@ impl Daemon {
     fn done_summary(self: &std::sync::Arc<Self>, sid: String) {
         let d = self.clone();
         tauri::async_runtime::spawn(async move {
+            // тайминг «результат (Stop) → показано уведомление»
+            let t_notify = crate::metrics::now();
             if d.session(&sid).is_none() {
                 return;
             }
@@ -662,6 +665,7 @@ impl Daemon {
             // стабильный id на сессию: повторный «закончил» переиспользует карточку.
             // голос читает `speak` (русское произношение), тост показывает body.
             d.notify_id_voiced(&format!("done-{sid}"), &title, &body, Some(&sid), "done", speak.as_deref());
+            crate::metrics::record("stop_to_notify", t_notify, serde_json::json!({ "sid": sid }));
         });
     }
 
@@ -682,7 +686,9 @@ impl Daemon {
             let prompt = format!(
                 "Вот ответ агента:\n{reply}\n\nОпиши простыми словами по-русски, ЧТО по сути изменилось и какой результат для пользователя. Только суть и итог, без технических деталей: не упоминай конкретные имена переменных, файлов, функций, команд. Одно короткое предложение, до 160 символов, без markdown.\n\nВерни СТРОГО JSON без пояснений и без ```:\n{{\"display\": \"<текст для показа на экране; английские техтермины можно оставить латиницей>\", \"speak\": \"<тот же смысл, но как ПРОИЗНОСИТЬ вслух по-русски: каждое английское слово транслитерируй кириллицей (GitLab→гитлаб, Docker→докер, commit→коммит), числа пиши словами (3→три)>\"}}"
             );
+            let t_haiku = crate::metrics::now();
             let out = claude_bin::run_haiku(&prompt, Duration::from_secs(30)).await?;
+            crate::metrics::record("haiku", t_haiku, serde_json::json!({ "sid": sid, "in_chars": reply.chars().count() }));
             // вытащить {...} (haiku иногда оборачивает в прозу/```)
             let parsed = (|| {
                 let a = out.find('{')?;
@@ -1045,16 +1051,21 @@ impl Daemon {
      * Silero-сайдкара + счётчики, чтобы потом собрать и разобрать. */
 
     pub async fn sample_metrics(self: &std::sync::Arc<Self>) {
-        if !self.settings.bool("diagnostics") {
+        if !crate::metrics::enabled() {
             return;
         }
         let mut parts: Vec<String> = Vec::new();
+        let mut snap = serde_json::Map::new();
         if let Some((rss, cpu)) = ps_metrics(std::process::id()).await {
             parts.push(format!("демон rss={rss:.0}МБ cpu={cpu}%"));
+            snap.insert("daemon_rss_mb".into(), serde_json::json!(rss.round() as i64));
+            snap.insert("daemon_cpu".into(), serde_json::json!(cpu));
         }
         if let Some(pid) = self.voice.sidecar_pid() {
             if let Some((rss, cpu)) = ps_metrics(pid).await {
                 parts.push(format!("silero rss={rss:.0}МБ cpu={cpu}%"));
+                snap.insert("silero_rss_mb".into(), serde_json::json!(rss.round() as i64));
+                snap.insert("silero_cpu".into(), serde_json::json!(cpu));
             }
         }
         let sessions = self.sessions.lock().unwrap().len();
@@ -1065,7 +1076,11 @@ impl Daemon {
             self.voice.queue_len(),
             self.voice.is_muted()
         ));
+        snap.insert("sessions".into(), serde_json::json!(sessions));
+        snap.insert("engine".into(), serde_json::json!(self.voice.engine_name()));
+        snap.insert("voice_queue".into(), serde_json::json!(self.voice.queue_len()));
         crate::log::line(&format!("[metrics] {}", parts.join(" · ")));
+        crate::metrics::snapshot("proc", serde_json::Value::Object(snap));
     }
 
     /* ================= effort-уровни из CLI ================= */

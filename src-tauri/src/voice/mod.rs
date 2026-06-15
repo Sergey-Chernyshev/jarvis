@@ -185,8 +185,16 @@ impl Voice {
             let Some(u) = next else { continue; };
             if self.is_muted() { continue; }
             let vs = self.voice_sel();
+            let t_synth = crate::metrics::now();
             match self.engine.synthesize(&u.text, &vs) {
-                Ok(wav) => { self.player.play_blocking(wav); }
+                Ok(wav) => {
+                    crate::metrics::record("tts_synth", t_synth, serde_json::json!({
+                        "engine": self.engine.name(), "chars": u.text.chars().count(), "bytes": wav.len(),
+                    }));
+                    let t_play = crate::metrics::now();
+                    self.player.play_blocking(wav);
+                    crate::metrics::record("tts_play", t_play, serde_json::json!({ "chars": u.text.chars().count() }));
+                }
                 Err(e) => crate::log::line(&format!("[voice] {} молчит: {e}", self.engine.name())),
             }
         });

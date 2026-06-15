@@ -592,22 +592,10 @@ impl Daemon {
                     );
                 }
                 Effect::StopFailure { sid, payload } => {
+                    // голос «упёрся в лимит» эмитит сам on_stop_failure — только на
+                    // подтверждённый лимит, не на транзиентные сбои
                     tauri::async_runtime::spawn(async move {
                         crate::limits::on_stop_failure(&d, &sid, &payload);
-                        // голос: «упёрся в лимит, сброс через …» (reset уже посчитан)
-                        let vcfg = crate::voice::config::VoiceConfig::from_settings(&d.settings.load());
-                        if vcfg.ev_stop_failure {
-                            let reset_at = d.limits.state().reset_at;
-                            let min = (reset_at > 0).then(|| ((reset_at - now_ms()) / 60_000).max(0));
-                            let project = d.session(&sid).and_then(|s| s.project).unwrap_or_default();
-                            d.voice.speak(crate::voice::composer::SpeechSignals {
-                                event: Some(crate::voice::composer::Event::StopFailure),
-                                sid: sid.clone(),
-                                project,
-                                limit_reset_min: min,
-                                ..Default::default()
-                            });
-                        }
                     });
                 }
             }
@@ -1383,7 +1371,11 @@ fn stop_voice_signal(s: &Session, sid: &str) -> crate::voice::composer::SpeechSi
         board_done: done,
         board_total: total,
         board_active: active,
-        diff_files: s.touched.as_ref().map(|t| t.len() as i64).filter(|n| *n > 0),
+        // diff_files намеренно None: s.touched — это ≤3 недавних «области», а не
+        // счётчик изменённых файлов; озвучивать «изменено N файлов» по нему было
+        // бы враньём. Без доски Stop → голый факт «{project} закончил». Реальный
+        // diff-счётчик можно подать сюда позже, когда он появится.
+        diff_files: None,
         ..Default::default()
     }
 }

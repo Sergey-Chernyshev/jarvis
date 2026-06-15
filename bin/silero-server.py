@@ -12,7 +12,18 @@
 """
 import argparse
 import io
+import os
 import wave
+
+# python.org Python без системных CA → torch.hub по HTTPS падает на верификации.
+# Берём CA-бандл из certifi ДО импорта torch. Делает сайдкар самодостаточным,
+# как бы его ни спавнил демон.
+try:
+    import certifi
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+except Exception:
+    pass
 
 import numpy as np
 import torch
@@ -30,7 +41,8 @@ args = ap.parse_args()
 torch.set_num_threads(2)
 device = torch.device("cpu")
 model, _ = torch.hub.load(
-    "snakers4/silero-models", "silero_tts", language="ru", speaker=args.model
+    "snakers4/silero-models", "silero_tts", language="ru", speaker=args.model,
+    trust_repo=True,  # модель уже в кэше; не спрашивать про доверие к репо
 )
 model.to(device)
 DEFAULT_SPEAKER = args.speaker

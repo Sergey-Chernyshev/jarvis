@@ -76,6 +76,7 @@ impl SileroEngine {
     fn client(timeout: std::time::Duration) -> Result<reqwest::blocking::Client, TtsError> {
         reqwest::blocking::Client::builder()
             .timeout(timeout)
+            .no_proxy() // сайдкар — localhost; системный HTTP_PROXY его не касается
             .build()
             .map_err(|e| TtsError::Synthesis(format!("http client: {e}")))
     }

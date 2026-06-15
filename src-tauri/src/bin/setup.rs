@@ -265,8 +265,11 @@ fn install_silero() -> Result<(), String> {
     }
 
     // 3. Зависимости — идемпотентно: пропускаем, если уже импортируются.
+    //    certifi — CA-бандл (python.org Python без системных сертов), omegaconf —
+    //    нужен silero_tts. На macOS arm64 `pip install torch` уже даёт CPU-сборку,
+    //    поэтому cpu-index не нужен (и он ломал бы доустановку fastapi/numpy).
     let deps_ok = Command::new(silero_python())
-        .args(["-c", "import torch, fastapi, uvicorn, numpy"])
+        .args(["-c", "import torch, fastapi, uvicorn, numpy, certifi, omegaconf"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -281,24 +284,28 @@ fn install_silero() -> Result<(), String> {
         run_inherit(
             "pip install torch+deps",
             Command::new(silero_pip()).args([
-                "install",
-                "torch",
-                "--index-url",
-                "https://download.pytorch.org/whl/cpu",
-                "fastapi",
-                "uvicorn",
-                "numpy",
+                "install", "torch", "fastapi", "uvicorn", "numpy", "certifi", "omegaconf",
             ]),
         )?;
     }
 
-    // 4. Прогрев модели в torch-hub кэш (чтобы первая реальная фраза не качала холодно).
+    // 4. Прогрев модели в torch-hub кэш (первая реальная фраза не качает холодно).
+    //    SSL_CERT_FILE из certifi — иначе torch.hub падает на верификации HTTPS.
+    let ca = Command::new(silero_python())
+        .args(["-c", "import certifi; print(certifi.where())"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
     run_inherit(
         "прогрев модели Silero",
-        Command::new(silero_python()).args([
-            "-c",
-            "import torch; torch.hub.load('snakers4/silero-models','silero_tts',language='ru',speaker='v4_ru')",
-        ]),
+        Command::new(silero_python())
+            .env("SSL_CERT_FILE", &ca)
+            .args([
+                "-c",
+                "import torch; torch.hub.load('snakers4/silero-models','silero_tts',language='ru',speaker='v4_ru',trust_repo=True)",
+            ]),
     )?;
 
     Ok(())

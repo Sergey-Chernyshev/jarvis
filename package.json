@@ -8,6 +8,11 @@
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "setup": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- install",
     "teardown": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- uninstall",
-    "status": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- status"
+    "status": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- status",
+    "tauri": "tauri",
+    "bundle": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2"
   }
 }

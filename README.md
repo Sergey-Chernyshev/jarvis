@@ -260,7 +260,8 @@ CI соберёт universal DMG, подпишет Developer ID, нотаризу
 - `APPLE_ID` — Apple ID для нотаризации.
 - `APPLE_PASSWORD` — app-specific password этого Apple ID.
 - `APPLE_TEAM_ID` — Team ID.
-- `TAURI_SIGNING_PRIVATE_KEY` — содержимое `~/.jarvis/jarvis-updater.key`.
+- `TAURI_SIGNING_PRIVATE_KEY` — содержимое `~/.jarvis-updater.key` (ключ хранится
+  ВНЕ `~/.jarvis`, чтобы переживать снос данных приложения).
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — пароль ключа (пустой, если не задавал).
 
 Локально (без подписи) собрать DMG для проверки: `npm run bundle` (host-арка).

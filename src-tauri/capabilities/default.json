@@ -3,5 +3,10 @@
   "identifier": "default",
   "description": "Панель, тосты и онбординг: события ядра + запись в буфер обмена",
   "windows": ["main", "toast", "onboarding"],
-  "permissions": ["core:default", "clipboard-manager:allow-write-text"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "clipboard-manager:allow-write-text"
+  ]
 }

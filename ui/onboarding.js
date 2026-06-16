@@ -20,7 +20,10 @@
   const hintEl = document.getElementById("hint");
   const proxyEl = document.getElementById("proxy");
   const btn = document.getElementById("action");
-  document.getElementById("close").addEventListener("click", () => appWindow.close());
+  function closeWindow() {
+    invoke("onboarding_close").catch(() => { try { appWindow.close(); } catch {} });
+  }
+  document.getElementById("close").addEventListener("click", closeWindow);
 
   // безопасный многострочный текст (без innerHTML)
   function setLines(el, lines) {
@@ -95,7 +98,7 @@
     btn.disabled = false;
     btn.textContent = "Закрыть";
     btn.classList.add("ok");
-    btn.onclick = () => appWindow.close();
+    btn.onclick = closeWindow;
   });
 
   // первичное состояние

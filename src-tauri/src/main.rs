@@ -110,6 +110,7 @@ fn main() {
             onboarding::onboarding_status,
             onboarding::onboarding_run,
             onboarding::onboarding_open,
+            onboarding::onboarding_close,
             onboarding::integration_get,
             onboarding::integration_remove,
             onboarding::model_delete,

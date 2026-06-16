@@ -43,6 +43,15 @@ pub fn onboarding_open(app: AppHandle) {
     let _ = crate::windows::create_onboarding(&app);
 }
 
+/// Закрыть окно онбординга (кнопка ×) — надёжно, со стороны Rust.
+#[tauri::command]
+pub fn onboarding_close(app: AppHandle) {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("onboarding") {
+        let _ = w.close();
+    }
+}
+
 /// Полная сводка интеграции для карточки настроек.
 #[derive(Serialize)]
 pub struct IntegrationInfo {

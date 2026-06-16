@@ -58,6 +58,7 @@ fn main() {
             None,
         ))
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             ipc::state_get,
             ipc::state_clear,
@@ -115,6 +116,21 @@ fn main() {
             }
 
             spawn_timers(&d);
+
+            // updater: тихая проверка на старте; есть свежий релиз — ставим и просим перезапуск
+            {
+                use tauri_plugin_updater::UpdaterExt;
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Ok(updater) = handle.updater() {
+                        if let Ok(Some(update)) = updater.check().await {
+                            crate::log::line(&format!("[updater] доступна версия {}", update.version));
+                            let _ = update.download_and_install(|_, _| {}, || {}).await;
+                        }
+                    }
+                });
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -193,7 +209,7 @@ fn spawn_timers(d: &Arc<Daemon>) {
         }
     });
 
-    // супервизор Silero-сайдкара: раз в 5с перезапускаем, если упал (no-op для piper)
+    // супервизор Silero-сайдкара: раз в 5с перезапускаем, если упал
     let dd = d.clone();
     tauri::async_runtime::spawn(async move {
         loop {

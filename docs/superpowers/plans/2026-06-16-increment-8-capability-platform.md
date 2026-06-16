@@ -57,6 +57,26 @@ sessions.reply/queue/control/launch/interrupt, settings.set. Выносим те
 ## Порядок коммитов
 По фазе на коммит, сообщение `feat(capability): …` / `feat(agent): …`. Ветка `increment-8-capability-platform`. `master` не трогаем — демон пользователя продолжает работать.
 
+## Статус реализации (2026-06-16, ветка `increment-8-capability-platform`)
+
+**Готово и протестировано (фазы 1–4):**
+- ✅ **Фаза 1** — ядро: `contract`, `grant`, `confirm`, `audit`, `registry`, `gate`. 9 юнит-тестов (грант по классу, подтверждение side-effect, запрет самоэскалации, аудит, провенанс). Приёмочные 4, 6.
+- ✅ **Фаза 2** — read-фасады: sessions.list/get, metrics.query/session, notifications.history, limits.get, tasks.get, settings.get, audit.query, chats.read. Приёмочный 9.
+- ✅ **Фаза 3** — control/settings: sessions.reply, sessions.control, settings.set. Общие ядра вынесены из `ipc.rs` (no dup). Приёмочные 2, 3 (структурно). *Отложено:* sessions.queue/launch/interrupt (новая инфраструктура).
+- ✅ **Фаза 4** — досягаемость: `POST /capability` + `GET /capabilities` в `server.rs`; реестр в `Daemon`; бинарь `jarvis-mcp` (stdio JSON-RPC 2.0, 6 тестов + офлайн smoke). Приёмочные 1, 5 (по сокету), 7.
+- Всего зелёных тестов: **112** (100 app + 6 setup + 6 mcp). `master` не тронут.
+
+**Осталось (фазы 5–7):**
+- ⏳ **Фаза 5 — агент-хост.** Спавн `claude` CLI с `--strict-mcp-config --mcp-config <jarvis-mcp>` + системный промпт; стрим в панель; **PanelConfirmer** (заменяет AutoDeny в `server.rs::handle_capability` — эмитит карточку, ждёт ответа). Не сделано автономно: проверяется только живым запуском CLI (нужна авторизация/прокси пользователя, тратит подписку, может спавнить реальные сессии).
+- 🚫 **Фаза 6 — импорт chat-MCP.** ЗАБЛОКИРОВАНА: внешнего chat-MCP нет в этом репозитории (§14.2). По правилу спеки — остановиться и описать, а не выдумывать форму. Нужен путь к процессу/его транспорт.
+- ⏳ **Фаза 7 — панель чата.** Фронтенд в `ui/`: чат-поверхность + карточки подтверждения. Зависит от фазы 5.
+
+**Как подключить агента (фаза 5), снимок для продолжения.** MCP-конфиг для `claude` CLI:
+```json
+{ "mcpServers": { "jarvis": { "command": "~/.jarvis/bin/jarvis-mcp" } } }
+```
+Запуск (по образцу `claude_bin::run_haiku`): `claude --strict-mcp-config --mcp-config <конфиг> --append-system-prompt <промпт> -p <сообщение>` (+ stream-json для стрима). Установщик (`bin/setup.rs`) должен класть `jarvis-mcp` в `~/.jarvis/bin/`. PanelConfirmer: завести в демоне реестр ожидающих подтверждений (token→oneshot), эмитить `agent:confirm` в панель, IPC `agent_confirm(token, approved)` резолвит; подставить вместо `AutoDeny`.
+
 ## Риски / границы
 - Фазы 1–3 полностью тестируемы и закрывают ядро безопасности — наивысшая уверенность.
 - Фаза 4 (MCP-протокол) тестируется на уровне framing; живая связка с CLI проверяется только запуском (нужна авторизация).

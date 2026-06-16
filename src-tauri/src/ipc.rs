@@ -219,7 +219,7 @@ pub fn session_set_pin(app: AppHandle, session_id: String, pinned: bool) -> Valu
 }
 
 /// Пульт: слэш-команда с аргументом в живую пану + оптимистичное состояние.
-async fn set_via_slash(
+pub(crate) async fn set_via_slash(
     d: &Arc<Daemon>,
     session_id: &str,
     slash: String,
@@ -242,9 +242,13 @@ async fn set_via_slash(
 
 #[tauri::command]
 pub async fn session_set_model(app: AppHandle, session_id: String, model: String) -> Value {
-    let d = Daemon::get(&app);
-    let friendly = friendly_model(&model);
-    set_via_slash(&d, &session_id, format!("/model {model}"), move |s| {
+    set_model_core(&Daemon::get(&app), &session_id, &model).await
+}
+
+/// Ядро смены модели — общее для IPC и капабилити `sessions.control` (инкр. 8).
+pub(crate) async fn set_model_core(d: &Arc<Daemon>, session_id: &str, model: &str) -> Value {
+    let friendly = friendly_model(model);
+    set_via_slash(d, session_id, format!("/model {model}"), move |s| {
         s.model = Some(friendly); // оптимистично; транскрипт подтвердит
         s.model_at = Some(now_ms());
     })
@@ -253,9 +257,13 @@ pub async fn session_set_model(app: AppHandle, session_id: String, model: String
 
 #[tauri::command]
 pub async fn session_set_effort(app: AppHandle, session_id: String, level: String) -> Value {
-    let d = Daemon::get(&app);
-    let lv = level.clone();
-    set_via_slash(&d, &session_id, format!("/effort {level}"), move |s| {
+    set_effort_core(&Daemon::get(&app), &session_id, &level).await
+}
+
+/// Ядро смены effort — общее для IPC и капабилити `sessions.control` (инкр. 8).
+pub(crate) async fn set_effort_core(d: &Arc<Daemon>, session_id: &str, level: &str) -> Value {
+    let lv = level.to_string();
+    set_via_slash(d, session_id, format!("/effort {level}"), move |s| {
         s.effort = Some(lv); // effort снаружи не читается — ведём оптимистично
     })
     .await
@@ -395,7 +403,13 @@ pub fn voice_set_mute(app: AppHandle, on: bool) {
 /// Ответ в сессию: tmux-вставка в пану нашего сервера (-L jarvis).
 #[tauri::command]
 pub async fn session_reply(app: AppHandle, session_id: String, text: String) -> Value {
-    let d = Daemon::get(&app);
+    reply_core(&Daemon::get(&app), session_id, text).await
+}
+
+/// Ядро отправки в сессию — общее для IPC-команды панели и капабилити
+/// `sessions.reply` (инкр. 8). Форма ответа панельная: {ok:true, channel,…} /
+/// {ok:false, error} / {ok:false, needsTmux, resumeCmd}.
+pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String) -> Value {
     let Some(s) = d.session(&session_id) else { return err("Сессия не найдена") };
     let prompt = text.trim().to_string();
     if prompt.is_empty() {

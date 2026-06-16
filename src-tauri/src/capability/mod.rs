@@ -233,6 +233,23 @@ mod tests {
         assert!(names.contains(&"sessions.list"));
     }
 
+    // приёмочный 2/3: control/settings-капабилити имеют правильный класс, значит
+    // гейт ВСЕГДА потребует подтверждения у агента (доказано generic-тестами выше).
+    #[test]
+    fn control_settings_capabilities_have_side_effect_class() {
+        let reg = super::build_registry();
+        assert_eq!(reg.get("sessions.reply").unwrap().meta.class, RiskClass::Control);
+        assert_eq!(reg.get("sessions.control").unwrap().meta.class, RiskClass::Control);
+        assert_eq!(reg.get("settings.set").unwrap().meta.class, RiskClass::Settings);
+        // read-only потребитель НЕ видит их в tools/list
+        let reader = Consumer::custom("reader", &[RiskClass::Read], ConfirmPolicy::Never);
+        let tools = reg.tools_json(&reader.grant);
+        let names: Vec<&str> =
+            tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(!names.contains(&"sessions.reply"));
+        assert!(!names.contains(&"settings.set"));
+    }
+
     // tools/list грант-фильтр: reader не видит control/settings.
     #[test]
     fn tools_list_filtered_by_grant() {

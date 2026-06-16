@@ -111,19 +111,21 @@
 
   /* подвал */
   .foot { margin-top: auto; padding-top: 20px; }
-  /* экран «как пользоваться» (после установки) */
-  .howto { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
-  .tip { display: flex; align-items: center; gap: 13px; padding: 10px 6px; }
+  /* экран «как пользоваться» (после установки) — центрируем по вертикали,
+     чтобы не было пустого провала между подсказками и кнопками */
+  .howto { display: flex; flex-direction: column; justify-content: center; gap: 4px; flex: 1 1 auto; }
+  .tip { display: flex; align-items: center; gap: 14px; padding: 11px 6px; }
   .tip + .tip { border-top: 1px solid var(--hairline); }
   .tip .k {
-    flex: 0 0 auto; min-width: 40px; height: 26px; padding: 0 8px;
-    display: grid; place-items: center; border-radius: 7px;
-    background: rgba(255,255,255,0.07); color: #c9c9cf;
-    font-size: 12px; font-weight: 600; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    flex: 0 0 auto; min-width: 38px; height: 28px; padding: 0 9px;
+    display: grid; place-items: center; border-radius: 8px;
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.07);
+    color: #cfcfd5; font-size: 13px; font-weight: 600;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
   }
   .tip .tx { display: flex; flex-direction: column; min-width: 0; }
   .tip .tx b { font-size: 13px; font-weight: 600; }
-  .tip .tx span { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+  .tip .tx span { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
   .proxy {
     width: 100%; height: 34px; margin-bottom: 10px; padding: 0 12px;
     border: 1px solid var(--border); border-radius: 9px;
@@ -162,7 +164,7 @@
 
       <div class="howto" id="howto" hidden>
         <div class="tip"><span class="k">◇</span><div class="tx"><b>Меню-бар</b><span>Статусы агентов, тихий режим, переустановка</span></div></div>
-        <div class="tip"><span class="k">▾</span><div class="tx"><b>Уведомления</b><span>Тосты снизу и озвучка, когда агент закончил или ждёт тебя</span></div></div>
+        <div class="tip"><span class="k">♪</span><div class="tx"><b>Уведомления</b><span>Тосты снизу и озвучка, когда агент закончил или ждёт тебя</span></div></div>
         <div class="tip"><span class="k">⌘J</span><div class="tx"><b>Панель</b><span>Список сессий и настройки (хоткей задаётся в настройках)</span></div></div>
         <div class="tip"><span class="k">⌘⌥J</span><div class="tx"><b>Тихий режим</b><span>Фон без уведомлений — для разработки</span></div></div>
       </div>

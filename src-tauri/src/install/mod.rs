@@ -101,6 +101,23 @@ fn jarvis_dir() -> PathBuf {
         _ => home().join(".jarvis"),
     }
 }
+
+/// PATH с добавленными Homebrew + nvm путями. GUI-приложение из /Applications
+/// наследует урезанный PATH (без /opt/homebrew/bin и ~/.nvm/.../bin) — поэтому
+/// tmux (Homebrew) и claude (nvm) не находятся. Префиксуем их явно.
+fn augmented_path() -> String {
+    let base = std::env::var("PATH").unwrap_or_default();
+    let mut extra = vec!["/opt/homebrew/bin".to_string(), "/usr/local/bin".to_string()];
+    if let Ok(rd) = fs::read_dir(home().join(".nvm/versions/node")) {
+        for e in rd.flatten() {
+            let bin = e.path().join("bin");
+            if bin.is_dir() {
+                extra.push(bin.display().to_string());
+            }
+        }
+    }
+    format!("{}:{base}", extra.join(":"))
+}
 fn hook_dst() -> PathBuf { jarvis_dir().join("bin/jarvis-hook") }
 fn shims_dir() -> PathBuf { jarvis_dir().join("shims") }
 fn shim_dst() -> PathBuf { shims_dir().join("claude") }
@@ -179,7 +196,7 @@ fn install_silero(progress: &Progress, proxy: Option<&str>) -> Result<(), String
         progress(Step::info("Голос", "создаю Python-venv…"));
         run_inherit(
             "python3 -m venv",
-            Command::new("python3").arg("-m").arg("venv").arg(silero_venv()),
+            Command::new("python3").env("PATH", augmented_path()).arg("-m").arg("venv").arg(silero_venv()),
         )?;
     }
 
@@ -352,6 +369,7 @@ fn event_installed(json: &Value, event: &str) -> bool {
 fn claude_found() -> bool {
     Command::new("/bin/sh")
         .args(["-c", "command -v claude"])
+        .env("PATH", augmented_path())
         .stdout(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
@@ -361,6 +379,7 @@ fn claude_found() -> bool {
 fn tmux_found() -> bool {
     Command::new("tmux")
         .arg("-V")
+        .env("PATH", augmented_path())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -381,6 +400,7 @@ fn rc_files() -> Vec<PathBuf> {
 fn live_tmux_sessions() -> Vec<String> {
     Command::new("tmux")
         .args(["-L", "jarvis", "list-sessions", "-F", "#{session_name}"])
+        .env("PATH", augmented_path())
         .output()
         .ok()
         .filter(|o| o.status.success())

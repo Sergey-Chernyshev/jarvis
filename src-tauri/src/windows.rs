@@ -155,6 +155,11 @@ pub fn position_panel(d: &Arc<Daemon>) {
 /// Тихий режим: трей, клик по уведомлению — показать, не забирая фокус
 /// у кино/терминала.
 pub fn show_panel(d: &Arc<Daemon>) {
+    // пока интеграция не установлена — основное приложение «заперто»: ведём к онбордингу
+    if !crate::install::status().integrated() {
+        let _ = create_onboarding(&d.app);
+        return;
+    }
     let Some(panel) = d.app.get_webview_window("main") else { return };
     d.panel_focus_mode.store(false, std::sync::atomic::Ordering::SeqCst);
     position_panel(d);
@@ -165,6 +170,10 @@ pub fn show_panel(d: &Arc<Daemon>) {
 
 /// Raycast-режим: хоткей — с фокусом, потеря фокуса спрячет панель.
 pub fn show_panel_focused(d: &Arc<Daemon>) {
+    if !crate::install::status().integrated() {
+        let _ = create_onboarding(&d.app);
+        return;
+    }
     let Some(panel) = d.app.get_webview_window("main") else { return };
     d.panel_focus_mode.store(true, std::sync::atomic::Ordering::SeqCst);
     position_panel(d);

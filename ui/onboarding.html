@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:" />
+<title>Настройка Jarvis</title>
+<style>
+  :root {
+    --bg: rgba(10, 10, 12, 0.82);
+    --border: rgba(255, 255, 255, 0.08);
+    --hairline: rgba(255, 255, 255, 0.06);
+    --text: #e7e7ea;
+    --muted: #8b8b93;
+    --faint: #5b5b62;
+    --working: #6ca0ff;
+    --done: #41c98e;
+    --waiting: #f2a33c;
+    --card: rgba(255, 255, 255, 0.04);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: transparent; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+    overflow: hidden;
+  }
+  .shell {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    backdrop-filter: blur(14px) saturate(150%);
+    -webkit-backdrop-filter: blur(14px) saturate(150%);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    overflow: hidden;
+  }
+
+  /* перетаскивание окна + кнопка закрытия */
+  .titlebar { height: 30px; flex: 0 0 auto; position: relative; }
+  .close {
+    position: absolute; top: 9px; right: 12px; width: 13px; height: 13px;
+    border-radius: 50%; border: none; cursor: pointer;
+    background: rgba(255,255,255,0.10); transition: background 120ms;
+  }
+  .close:hover { background: var(--waiting); }
+
+  .body { flex: 1 1 auto; display: flex; flex-direction: column; padding: 4px 30px 26px; }
+
+  /* hero */
+  .hero { text-align: center; padding: 6px 0 22px; }
+  .logo {
+    width: 76px; height: 76px; margin: 0 auto 16px; border-radius: 19px;
+    background: linear-gradient(135deg, #2563eb 0%, #0d9488 100%);
+    box-shadow: 0 10px 30px rgba(13,148,136,0.28), inset 0 1px 0 rgba(255,255,255,0.25);
+    position: relative;
+  }
+  /* стилизованный «J» белым на лого */
+  .logo::after {
+    content: "J"; position: absolute; inset: 0; display: grid; place-items: center;
+    font-size: 42px; font-weight: 600; color: #fff; opacity: 0.95;
+    font-family: "SF Pro Display", -apple-system, sans-serif;
+  }
+  h1 { font-size: 21px; font-weight: 600; letter-spacing: 0.1px; }
+  .sub { margin-top: 7px; font-size: 13px; line-height: 1.45; color: var(--muted); }
+
+  /* шаги */
+  .steps {
+    background: var(--card); border: 1px solid var(--hairline); border-radius: 12px;
+    padding: 6px 4px; margin-top: 4px;
+  }
+  .step { display: flex; align-items: center; gap: 12px; padding: 11px 14px; }
+  .step + .step { border-top: 1px solid var(--hairline); }
+  .ico { width: 18px; height: 18px; flex: 0 0 auto; position: relative; }
+  /* pending — полый кружок */
+  .ico::before {
+    content: ""; position: absolute; inset: 2px; border-radius: 50%;
+    border: 1.5px solid var(--faint); box-sizing: border-box;
+  }
+  .meta { display: flex; flex-direction: column; min-width: 0; }
+  .name { font-size: 13px; font-weight: 500; }
+  .desc { font-size: 11.5px; color: var(--muted); margin-top: 1px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 360px; }
+
+  /* состояния шага */
+  .step[data-state="run"] .ico::before { border: none; }
+  .step[data-state="run"] .ico::after {
+    content: ""; position: absolute; inset: 1px; border-radius: 50%;
+    border: 2px solid rgba(108,160,255,0.25); border-top-color: var(--working);
+    animation: spin 0.7s linear infinite;
+  }
+  .step[data-state="done"] .ico::before { border: none; }
+  .step[data-state="done"] .ico::after {
+    content: ""; position: absolute; left: 2px; top: 8px; width: 5px; height: 9px;
+    border: solid var(--done); border-width: 0 2px 2px 0; transform: rotate(45deg);
+    transform-origin: center;
+  }
+  .step[data-state="warn"] .ico::before { border-color: var(--waiting); }
+  .step[data-state="warn"] .ico::after {
+    content: "!"; position: absolute; inset: 0; display: grid; place-items: center;
+    font-size: 11px; font-weight: 700; color: var(--waiting);
+  }
+  .step[data-state="done"] .name { color: var(--text); }
+  .step[data-state="pending"] .name,
+  .step[data-state="pending"] .desc { opacity: 0.6; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* подвал */
+  .foot { margin-top: auto; padding-top: 20px; }
+  .hint { font-size: 11.5px; color: var(--faint); text-align: center; margin-bottom: 12px; min-height: 14px; }
+  .btn {
+    width: 100%; height: 40px; border: none; border-radius: 10px; cursor: pointer;
+    font-size: 14px; font-weight: 600; color: #fff;
+    background: var(--working); transition: filter 120ms, background 200ms, opacity 120ms;
+    font-family: inherit;
+  }
+  .btn:hover { filter: brightness(1.08); }
+  .btn:active { filter: brightness(0.95); }
+  .btn:disabled { opacity: 0.55; cursor: default; filter: none; }
+  .btn.ok { background: var(--done); }
+  .btn.ghost { background: rgba(255,255,255,0.08); color: var(--text); }
+</style>
+</head>
+<body>
+  <div class="shell">
+    <div class="titlebar" data-tauri-drag-region>
+      <button class="close" id="close" title="Закрыть"></button>
+    </div>
+    <div class="body">
+      <div class="hero">
+        <div class="logo"></div>
+        <h1 id="title">Настроим Jarvis</h1>
+        <div class="sub" id="subtitle">Подключим Jarvis к Claude Code: уведомления,<br/>озвучка и удобный запуск — за один шаг.</div>
+      </div>
+
+      <div class="steps" id="steps"></div>
+
+      <div class="foot">
+        <div class="hint" id="hint"></div>
+        <button class="btn" id="action">Настроить</button>
+      </div>
+    </div>
+  </div>
+  <script src="onboarding.js"></script>
+</body>
+</html>

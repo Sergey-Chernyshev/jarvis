@@ -205,6 +205,34 @@ mod tests {
         assert!(audit.last().unwrap().outcome.starts_with("failed:"));
     }
 
+    // приёмочный 9: нативный реестр собирается, read-капабилити на месте,
+    // видны агенту как инструменты (одна регистрация → виден без правок агента).
+    #[test]
+    fn native_registry_wires_read_capabilities() {
+        let reg = super::build_registry();
+        for id in [
+            "sessions.list",
+            "sessions.get",
+            "metrics.query",
+            "notifications.history",
+            "tasks.get",
+            "settings.get",
+            "audit.query",
+            "chats.read",
+        ] {
+            assert!(reg.get(id).is_some(), "нет капабилити {id}");
+        }
+        // chats.read всегда untrusted (§6)
+        assert_eq!(reg.get("chats.read").unwrap().meta.provenance, Provenance::Untrusted);
+        assert_eq!(reg.get("metrics.query").unwrap().meta.class, RiskClass::Read);
+        // агент видит read-инструменты в проекции tools/list
+        let tools = reg.tools_json(&Consumer::agent().grant);
+        let names: Vec<&str> =
+            tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"metrics.query"));
+        assert!(names.contains(&"sessions.list"));
+    }
+
     // tools/list грант-фильтр: reader не видит control/settings.
     #[test]
     fn tools_list_filtered_by_grant() {

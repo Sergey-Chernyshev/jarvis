@@ -50,6 +50,9 @@ pub struct Daemon {
     last_prompt_at: Mutex<HashMap<String, i64>>,
     /// Голос (инкремент 7): озвучка событий локальным TTS. Fail-safe.
     pub voice: std::sync::Arc<crate::voice::Voice>,
+    /// Реестр капабилити (инкремент 8): источник истины для агента/панели/MCP.
+    /// Гейт безопасности проходится при каждом вызове через `capability::invoke`.
+    pub caps: crate::capability::DaemonRegistry,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -109,6 +112,7 @@ impl Daemon {
             busy: Mutex::new(HashSet::new()),
             last_prompt_at: Mutex::new(HashMap::new()),
             voice,
+            caps: crate::capability::build_registry(),
         }
     }
 

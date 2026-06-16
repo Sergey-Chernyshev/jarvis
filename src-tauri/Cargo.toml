@@ -40,6 +40,11 @@ path = "src/main.rs"
 name = "jarvis-setup"
 path = "src/bin/setup.rs"
 
+# MCP-сервер-мост для агента (инкр. 8): stdio JSON-RPC → unix-сокет демона
+[[bin]]
+name = "jarvis-mcp"
+path = "src/bin/jarvis-mcp.rs"
+
 [profile.release]
 # панель — интерактивный UI, собираем с оптимизацией, но без LTO-долгостроя
 opt-level = 2

@@ -4,7 +4,8 @@
   "private": true,
   "description": "Монитор сессий Claude Code: уведомления и панель статусов (Rust + Tauri)",
   "scripts": {
-    "start": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis",
+    "start": "JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis",
+    "start:prod": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "setup": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- install",
     "teardown": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- uninstall",

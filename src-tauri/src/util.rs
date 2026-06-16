@@ -3,9 +3,14 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Каталог данных Jarvis: ~/.jarvis
+/// Каталог данных Jarvis: $JARVIS_DIR или ~/.jarvis.
+/// Переопределение через env даёт изоляцию dev-сборки от продовой
+/// (`npm start` запускается с JARVIS_DIR=~/.jarvis-dev).
 pub fn jarvis_dir() -> std::path::PathBuf {
-    home_dir().join(".jarvis")
+    match std::env::var("JARVIS_DIR") {
+        Ok(d) if !d.is_empty() => std::path::PathBuf::from(d),
+        _ => home_dir().join(".jarvis"),
+    }
 }
 
 /// Каталог Claude Code: ~/.claude

@@ -35,31 +35,39 @@ pub struct IntegrationInfo {
     status: Status,
     foreign_hooks: usize,
     models: Vec<Artifact>,
+    quiet: bool,
 }
 
-fn integration_info() -> IntegrationInfo {
+fn integration_info(app: &AppHandle) -> IntegrationInfo {
     IntegrationInfo {
         status: install::status(),
         foreign_hooks: install::foreign_hook_count(),
         models: install::model_artifacts(),
+        quiet: crate::daemon::Daemon::get(app).is_quiet(),
     }
 }
 
 #[tauri::command]
-pub fn integration_get() -> IntegrationInfo {
-    integration_info()
+pub fn integration_get(app: AppHandle) -> IntegrationInfo {
+    integration_info(&app)
 }
 
 /// Умный откат: снять наши хуки/шим/tmux/PATH (чужие хуки и Silero не трогаем).
 #[tauri::command]
-pub fn integration_remove() -> IntegrationInfo {
+pub fn integration_remove(app: AppHandle) -> IntegrationInfo {
     install::uninstall(&|_step| {}); // быстрый, без сети/Silero
-    integration_info()
+    integration_info(&app)
 }
 
 /// Удалить голосовой артефакт по id и вернуть обновлённую сводку.
 #[tauri::command]
-pub fn model_delete(id: String) -> Result<IntegrationInfo, String> {
+pub fn model_delete(app: AppHandle, id: String) -> Result<IntegrationInfo, String> {
     install::delete_model(&id)?;
-    Ok(integration_info())
+    Ok(integration_info(&app))
+}
+
+/// Включить/выключить тихий режим (разработчик) из настроек.
+#[tauri::command]
+pub fn quiet_set(app: AppHandle, on: bool) {
+    crate::daemon::Daemon::get(&app).set_quiet(on);
 }

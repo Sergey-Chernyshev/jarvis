@@ -103,6 +103,7 @@ fn menu_signature(d: &Arc<Daemon>) -> String {
     push_items_signature(&d.power.tray_items(d), &mut sig);
     sig.push_str(&format!("|login:{}", autostart_enabled(d)));
     sig.push_str(if d.voice.is_muted() { "|mute1" } else { "|mute0" });
+    sig.push_str(if d.is_quiet() { "|q1" } else { "|q0" });
     sig
 }
 
@@ -148,6 +149,9 @@ fn build_menu(d: &Arc<Daemon>) -> tauri::Result<Menu<Wry>> {
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&CheckMenuItem::with_id(
         app, "autostart", "Запускать при старте компьютера", true, autostart_enabled(d), None::<&str>,
+    )?)?;
+    menu.append(&CheckMenuItem::with_id(
+        app, "quiet", "Тихий режим (разработчик) · ⌘⌥J", true, d.is_quiet(), None::<&str>,
     )?)?;
     menu.append(&MenuItem::with_id(app, "reinstall", "Переустановить интеграцию…", true, None::<&str>)?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
@@ -209,6 +213,9 @@ fn on_menu(d: &Arc<Daemon>, id: &str) {
             let enabled = autolaunch.is_enabled().unwrap_or(false);
             let _ = if enabled { autolaunch.disable() } else { autolaunch.enable() };
             refresh_menu(d);
+        }
+        "quiet" => {
+            d.toggle_quiet(); // тумблер тихого режима; перерисует меню сам
         }
         "reinstall" => {
             let _ = windows::create_onboarding(&d.app);

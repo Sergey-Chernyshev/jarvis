@@ -95,6 +95,13 @@ impl Store {
         out
     }
 
+    /// Установить верхнеуровневый ключ (merge поверх остального).
+    pub fn set_top(&self, key: &str, value: Value) {
+        let mut root = Map::new();
+        root.insert(key.to_string(), value);
+        self.save(root);
+    }
+
     /// Deep-set полей в объект "voice" (не затирая остальные voice-ключи).
     pub fn set_voice(&self, patch: Map<String, Value>) {
         let all = self.load();

@@ -8,7 +8,7 @@ use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt;
-use tauri_plugin_global_shortcut::GlobalShortcutExt;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
 use crate::daemon::Daemon;
 use crate::model::Status;
@@ -83,6 +83,29 @@ pub fn register_hotkey(d: &Arc<Daemon>, accelerator: &str) -> Result<(), String>
         return Err(format!("Сочетание {accelerator} занято системой"));
     }
     Ok(())
+}
+
+/// Аккселератор тумблера тихого режима: настройка `quietHotkey`, дефолт ⌘⌥J.
+pub fn quiet_accelerator(d: &Arc<Daemon>) -> String {
+    let s = d.settings.string("quietHotkey");
+    if s.is_empty() { "Command+Alt+J".to_string() } else { s }
+}
+
+/// Совпал ли сработавший shortcut с хоткеем тихого режима.
+pub fn is_quiet_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
+    quiet_accelerator(d)
+        .parse::<Shortcut>()
+        .map(|s| &s == shortcut)
+        .unwrap_or(false)
+}
+
+/// Зарегистрировать хоткей тихого режима на старте (best-effort).
+pub fn register_quiet_hotkey(d: &Arc<Daemon>) {
+    let accel = quiet_accelerator(d);
+    let gs = d.app.global_shortcut();
+    if !gs.is_registered(accel.as_str()) {
+        let _ = gs.register(accel.as_str());
+    }
 }
 
 #[tauri::command]

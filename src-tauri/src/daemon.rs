@@ -36,6 +36,9 @@ pub struct Daemon {
     pub power: crate::power::Power,
     pub tail: tail::TailHandle,
     pub panel_focus_mode: AtomicBool,
+    /// Тихий режим (разработчик): демон жив и копит статистику с хуков, но наружу
+    /// ничего — ни тостов, ни голоса, ни авто-показа. Панель открываема вручную.
+    pub quiet: AtomicBool,
     pub effort_levels: Mutex<Vec<String>>,
     toast_seq: AtomicU64,
     /// Окно тостов загрузилось и слушает события (до этого — буферим).
@@ -77,6 +80,7 @@ impl Daemon {
         // голос строим до литерала: cfg читаем из тех же settings.json
         let settings = settings::Store::new();
         crate::metrics::set_enabled(settings.bool("diagnostics")); // режим логов = метрики
+        let quiet0 = settings.bool("quietMode"); // читаем до move в литерал
         let vcfg = crate::voice::config::VoiceConfig::from_settings(&settings.load());
         let voice = crate::voice::Voice::new(
             &vcfg,
@@ -100,6 +104,7 @@ impl Daemon {
             power: crate::power::Power::new(),
             tail: tail::TailHandle::new(),
             panel_focus_mode: AtomicBool::new(false),
+            quiet: AtomicBool::new(quiet0),
             effort_levels: Mutex::new(
                 ["low", "medium", "high", "xhigh", "max"].map(String::from).to_vec(),
             ),
@@ -250,6 +255,24 @@ impl Daemon {
 
     /* ================= уведомления (собственные тосты) ================= */
 
+    /* ================= тихий режим (разработчик) ================= */
+
+    pub fn is_quiet(&self) -> bool {
+        self.quiet.load(Ordering::SeqCst)
+    }
+
+    /// Переключить тихий режим (хоткей/меню): персист + обновление галки в трее.
+    pub fn toggle_quiet(self: &std::sync::Arc<Self>) {
+        self.set_quiet(!self.is_quiet());
+    }
+
+    pub fn set_quiet(self: &std::sync::Arc<Self>, on: bool) {
+        self.quiet.store(on, Ordering::SeqCst);
+        self.settings.set_top("quietMode", Value::Bool(on));
+        crate::log::line(&format!("[quiet] тихий режим: {}", if on { "ВКЛ" } else { "выкл" }));
+        crate::tray::update(self, &self.snapshot()); // перерисовать меню (галка)
+    }
+
     /// Тост снизу экрана: приходит всегда (не зависит от разрешений macOS и
     /// Focus-режимов), кликом открывает чат сессии. Возвращает id карточки.
     pub fn notify(&self, title: &str, body: &str, session_id: Option<&str>, kind: &str) -> String {
@@ -282,6 +305,10 @@ impl Daemon {
             crate::util::ellipsize(title, 60),
             crate::util::ellipsize(body, 90),
         ));
+        // тихий режим: статистика уже записана выше по потоку, наружу — ничего
+        if self.is_quiet() {
+            return;
+        }
         windows::toast_add(self, id, title, body, session_id, kind);
 
         // голос (инкремент 7): озвучиваем уведомление. Одна точка на все события;

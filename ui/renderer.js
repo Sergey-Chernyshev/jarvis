@@ -2619,6 +2619,14 @@ async function renderIntegrationCard() {
     box.appendChild(h);
   }
 
+  // тумблер тихого режима (разработчик)
+  box.appendChild(arow('Тихий режим (разработчик)',
+    stoggle(!!info.quiet, (v) => window.jarvis.quietSet(v)), { hairtop: true }));
+  const qhint = document.createElement('div');
+  qhint.className = 'ahint';
+  qhint.textContent = 'Фон копит статистику с хуков, но без тостов/голоса/показа. Тумблер — ⌘⌥J.';
+  box.appendChild(qhint);
+
   // кнопки
   const brow = document.createElement('div');
   brow.className = 'abtnrow';

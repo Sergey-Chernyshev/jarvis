@@ -41,16 +41,30 @@ use tauri::Manager;
 use daemon::Daemon;
 
 fn main() {
-    tauri::Builder::default()
-        // одна копия демона; вторая — просто показывает панель первой
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+    let mut builder = tauri::Builder::default();
+
+    // single-instance — только в проде; в dev-сборке (JARVIS_DEV=1) НЕ ставим,
+    // чтобы dev и установленный прод крутились рядом, не гася друг друга.
+    if std::env::var("JARVIS_DEV").is_err() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             windows::show_panel(&Daemon::get(app));
-        }))
+        }));
+    }
+
+    builder
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
-                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                        windows::toggle_hotkey_panel(&Daemon::get(app));
+                .with_handler(|app, shortcut, event| {
+                    if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        return;
+                    }
+                    let d = Daemon::get(app);
+                    // отдельный хоткей тихого режима (по умолчанию ⌘⌥J) — тумблер;
+                    // всё прочее — панель.
+                    if ipc::is_quiet_hotkey(&d, shortcut) {
+                        d.toggle_quiet();
+                    } else {
+                        windows::toggle_hotkey_panel(&d);
                     }
                 })
                 .build(),
@@ -99,6 +113,7 @@ fn main() {
             onboarding::integration_get,
             onboarding::integration_remove,
             onboarding::model_delete,
+            onboarding::quiet_set,
         ])
         .setup(|app| {
             // чистое меню-бар приложение: без иконки в доке
@@ -127,6 +142,7 @@ fn main() {
             if let Err(e) = ipc::register_hotkey(&d, &d.settings.string("hotkey")) {
                 eprintln!("[jarvis] хоткей не зарегистрировался: {e}");
             }
+            ipc::register_quiet_hotkey(&d); // тумблер тихого режима (⌘⌥J)
 
             spawn_timers(&d);
 

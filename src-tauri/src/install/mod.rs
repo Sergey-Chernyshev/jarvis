@@ -94,7 +94,13 @@ impl Status {
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").expect("нет $HOME"))
 }
-fn jarvis_dir() -> PathBuf { home().join(".jarvis") }
+/// $JARVIS_DIR или ~/.jarvis (изоляция dev-сборки — как и в util::jarvis_dir).
+fn jarvis_dir() -> PathBuf {
+    match std::env::var("JARVIS_DIR") {
+        Ok(d) if !d.is_empty() => PathBuf::from(d),
+        _ => home().join(".jarvis"),
+    }
+}
 fn hook_dst() -> PathBuf { jarvis_dir().join("bin/jarvis-hook") }
 fn shims_dir() -> PathBuf { jarvis_dir().join("shims") }
 fn shim_dst() -> PathBuf { shims_dir().join("claude") }

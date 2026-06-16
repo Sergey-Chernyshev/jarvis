@@ -19,11 +19,14 @@
   const subEl = document.getElementById("subtitle");
   const hintEl = document.getElementById("hint");
   const proxyEl = document.getElementById("proxy");
+  const howtoEl = document.getElementById("howto");
+  const settingsBtn = document.getElementById("settings");
   const btn = document.getElementById("action");
   function closeWindow() {
     invoke("onboarding_close").catch(() => { try { appWindow.close(); } catch {} });
   }
   document.getElementById("close").addEventListener("click", closeWindow);
+  settingsBtn.addEventListener("click", () => invoke("onboarding_open_settings"));
 
   // безопасный многострочный текст (без innerHTML)
   function setLines(el, lines) {
@@ -70,6 +73,11 @@
   function startRun() {
     if (running) return;
     running = true;
+    // вернуть вид установки (на случай повторного запуска из done-состояния)
+    howtoEl.hidden = true;
+    settingsBtn.hidden = true;
+    stepsEl.hidden = false;
+    proxyEl.hidden = false;
     for (const p of PHASES) setRow(p.key, "pending", p.desc);
     btn.disabled = true;
     btn.textContent = "Устанавливаю…";
@@ -89,17 +97,22 @@
     else if (s.state === "warn") setRow(s.phase, "warn", s.msg);
   });
 
-  // завершение
-  listen("onboarding:done", () => {
+  // завершение — показываем «как пользоваться»
+  function showDone() {
     running = false;
     titleEl.textContent = "Готово!";
-    setLines(subEl, ["Jarvis подключён к Claude Code.", "Перезапусти активные сессии — и всё заработает."]);
+    setLines(subEl, ["Jarvis подключён к Claude Code.", "Вот как им пользоваться."]);
+    stepsEl.hidden = true;
+    proxyEl.hidden = true;
     hintEl.textContent = "";
+    howtoEl.hidden = false;
+    settingsBtn.hidden = false;
     btn.disabled = false;
-    btn.textContent = "Закрыть";
+    btn.textContent = "Готово";
     btn.classList.add("ok");
     btn.onclick = closeWindow;
-  });
+  }
+  listen("onboarding:done", showDone);
 
   // первичное состояние
   async function init() {
@@ -110,9 +123,11 @@
     const integrated = st && st.hooks && st.shim; // мирроринг Status::integrated()
     if (integrated) {
       titleEl.textContent = "Jarvis настроен";
-      setLines(subEl, ["Интеграция с Claude Code на месте.", "Можно переустановить, если что-то сломалось."]);
-      for (const p of PHASES) setRow(p.key, "done", "установлено");
-      if (st && !st.silero) setRow("Голос", "warn", "Silero не установлен");
+      setLines(subEl, ["Интеграция на месте. Вот как пользоваться,", "или переустанови, если что-то сломалось."]);
+      stepsEl.hidden = true;
+      proxyEl.hidden = true;
+      howtoEl.hidden = false;
+      settingsBtn.hidden = false;
       btn.textContent = "Переустановить";
     } else {
       btn.textContent = "Настроить";

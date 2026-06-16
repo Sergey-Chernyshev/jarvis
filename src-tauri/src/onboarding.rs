@@ -52,6 +52,13 @@ pub fn onboarding_close(app: AppHandle) {
     }
 }
 
+/// Открыть панель и переключить на вкладку настроек (кнопка из онбординга).
+#[tauri::command]
+pub fn onboarding_open_settings(app: AppHandle) {
+    crate::windows::show_panel(&crate::daemon::Daemon::get(&app));
+    let _ = app.emit_to("main", "goto-settings", ());
+}
+
 /// Полная сводка интеграции для карточки настроек.
 #[derive(Serialize)]
 pub struct IntegrationInfo {

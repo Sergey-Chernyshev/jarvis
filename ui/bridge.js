@@ -53,6 +53,7 @@
     onboardingOpen: () => invoke('onboarding_open'),
     modelDelete: (id) => invoke('model_delete', { id }),
     quietSet: (on) => invoke('quiet_set', { on }),
+    onGotoSettings: (cb) => on('goto-settings', cb),
   };
 
   // navigator.clipboard в WKWebView капризен (secure context, жесты) —

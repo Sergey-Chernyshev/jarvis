@@ -2526,6 +2526,9 @@ tabSettingsEl.addEventListener('click', () => {
   if (view === 'settings') { setView('list'); render(); } else setView('settings');
 });
 
+// кнопка «Открыть настройки» из окна онбординга
+window.jarvis.onGotoSettings(() => setView('settings'));
+
 /* ---------- настройки ---------- */
 
 const hotkeyBtn = document.getElementById('hotkey');

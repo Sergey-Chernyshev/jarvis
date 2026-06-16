@@ -28,6 +28,7 @@ except Exception:
 import numpy as np
 import torch
 import uvicorn
+from typing import Optional
 from fastapi import FastAPI, Response
 from pydantic import BaseModel
 
@@ -148,9 +149,9 @@ app = FastAPI()
 
 class Req(BaseModel):
     text: str
-    speaker: str | None = None
+    speaker: Optional[str] = None  # PEP 604 «str | None» не работает на Python 3.9 (системный python3 macOS)
     sample_rate: int = 48000
-    rate: str | None = None  # x-slow|slow|medium|fast|x-fast
+    rate: Optional[str] = None  # x-slow|slow|medium|fast|x-fast
 
 
 @app.get("/health")

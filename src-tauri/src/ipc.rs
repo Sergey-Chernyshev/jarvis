@@ -355,7 +355,7 @@ pub fn voice_get(app: AppHandle) -> Value {
         "speaker": d.voice.speaker(),
         "rate": d.voice.rate(),
         "mute": d.voice.is_muted(),
-        // Silero v4_ru — фиксированный набор; для Piper выбор спикера не применим
+        // Silero v4_ru — фиксированный набор спикеров
         "speakers": ["aidar", "baya", "kseniya", "xenia", "eugene"],
         // темпы речи (медленнее → быстрее)
         "rates": ["slow", "medium", "fast", "x-fast"],

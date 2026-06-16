@@ -4,9 +4,8 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VoiceConfig {
-    pub engine: String,         // "piper" | "silero"
+    pub engine: String,         // "silero" (единственный движок)
     pub speaker: String,
-    pub voice_path: String,
     pub sample_rate: u32,
     /// темп речи Silero: x-slow|slow|medium|fast|x-fast
     pub rate: String,
@@ -22,7 +21,7 @@ pub struct VoiceConfig {
 impl Default for VoiceConfig {
     fn default() -> Self {
         VoiceConfig {
-            engine: "piper".into(), speaker: String::new(), voice_path: String::new(),
+            engine: "silero".into(), speaker: String::new(),
             // лучшие дефолты Silero: 48 кГц + темп «fast» (×1.2 бодрее, не тараторит)
             sample_rate: 48000, rate: "fast".into(), mute: false, verbosity: "short".into(),
             ev_stop: true, ev_notification: true, ev_stop_failure: true,
@@ -42,7 +41,6 @@ impl VoiceConfig {
         VoiceConfig {
             engine: s("engine", &d.engine),
             speaker: s("speaker", &d.speaker),
-            voice_path: s("voicePath", &d.voice_path),
             sample_rate: v.and_then(|v| v.get("sampleRate")).and_then(Value::as_u64).unwrap_or(d.sample_rate as u64) as u32,
             rate: s("rate", &d.rate),
             mute: b("mute", d.mute),

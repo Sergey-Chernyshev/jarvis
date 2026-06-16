@@ -20,49 +20,39 @@ use queue::SpeechQueue;
 const SILERO_PORT: u16 = 8731;
 
 /// Голосовой сервис: композитор + очередь + движок + проигрыватель на фоне.
-/// При engine="silero" владеет супервизором сайдкара (старт/перезапуск/стоп).
+/// Владеет супервизором Silero-сайдкара (старт/перезапуск/стоп).
 pub struct Voice {
     composer: Box<dyn Composer>,
     engine: Box<dyn TtsEngine>,
     player: Arc<dyn Play>,
     // спикер живой (Silero берёт его per-запрос) → меняется из настроек без
-    // перезапуска; путь/частота фиксированы на старте
+    // перезапуска; частота фиксирована на старте
     speaker: Mutex<String>,
     rate: Mutex<String>, // темп речи — тоже живой
-    voice_path: String,
     sample_rate: u32,
     queue: Arc<(Mutex<SpeechQueue>, Condvar)>,
     mute: Arc<AtomicBool>,
-    sidecar: Option<Arc<sidecar::Sidecar>>,
+    sidecar: Arc<sidecar::Sidecar>,
     app: tauri::AppHandle, // для удержания/продления тоста на время речи
 }
 
 impl Voice {
     pub fn new(
         cfg: &VoiceConfig,
-        piper_bin: std::path::PathBuf,
         silero_dir: std::path::PathBuf,
         app: tauri::AppHandle,
     ) -> Arc<Self> {
-        // для silero — поднимаем сайдкар и берём его base; для piper sidecar=None
-        let (sidecar, silero_base) = if cfg.engine == "silero" {
-            let speaker = if cfg.speaker.is_empty() { "xenia".to_string() } else { cfg.speaker.clone() };
-            let sc = Arc::new(sidecar::Sidecar::new(silero_dir, speaker, "v4_ru".into(), SILERO_PORT));
-            sc.ensure_started();
-            let base = sc.base();
-            (Some(sc), base)
-        } else {
-            (None, format!("http://127.0.0.1:{SILERO_PORT}"))
-        };
-        let engine = build_engine(&cfg.engine, piper_bin, silero_base);
-        let speaker = if cfg.speaker.is_empty() && cfg.engine == "silero" { "xenia".to_string() } else { cfg.speaker.clone() };
+        // Silero — единственный движок: поднимаем сайдкар и берём его base.
+        let speaker = if cfg.speaker.is_empty() { "xenia".to_string() } else { cfg.speaker.clone() };
+        let sidecar = Arc::new(sidecar::Sidecar::new(silero_dir, speaker.clone(), "v4_ru".into(), SILERO_PORT));
+        sidecar.ensure_started();
+        let engine = build_engine(sidecar.base());
         let v = Arc::new(Voice {
             composer: Box::new(TemplateComposer),
             engine,
             player: Arc::new(RodioPlayer::new()),
             speaker: Mutex::new(speaker),
             rate: Mutex::new(if cfg.rate.is_empty() { "fast".to_string() } else { cfg.rate.clone() }),
-            voice_path: cfg.voice_path.clone(),
             sample_rate: cfg.sample_rate,
             queue: Arc::new((Mutex::new(SpeechQueue::new()), Condvar::new())),
             mute: Arc::new(AtomicBool::new(cfg.mute)),
@@ -77,7 +67,6 @@ impl Voice {
     fn voice_sel(&self) -> VoiceSel {
         VoiceSel {
             speaker: self.speaker.lock().unwrap().clone(),
-            voice_path: self.voice_path.clone(),
             sample_rate: self.sample_rate,
             rate: self.rate.lock().unwrap().clone(),
         }
@@ -99,18 +88,14 @@ impl Voice {
     }
     pub fn rate(&self) -> String { self.rate.lock().unwrap().clone() }
 
-    /// Тик супервизора: перезапустить сайдкар, если он умер (no-op для piper).
+    /// Тик супервизора: перезапустить Silero-сайдкар, если он умер.
     pub fn tick(&self) {
-        if let Some(sc) = &self.sidecar {
-            sc.restart_if_dead();
-        }
+        self.sidecar.restart_if_dead();
     }
 
-    /// Погасить сайдкар на выходе демона (no-op для piper).
+    /// Погасить Silero-сайдкар на выходе демона.
     pub fn dispose(&self) {
-        if let Some(sc) = &self.sidecar {
-            sc.stop();
-        }
+        self.sidecar.stop();
     }
 
     pub fn set_mute(&self, on: bool) {
@@ -173,8 +158,8 @@ impl Voice {
 
     pub fn warmup(&self) { self.engine.warmup(&self.voice_sel()); }
     pub fn engine_name(&self) -> &'static str { self.engine.name() }
-    /// PID Silero-сайдкара (для метрик диагностики); None для piper/не запущен.
-    pub fn sidecar_pid(&self) -> Option<u32> { self.sidecar.as_ref().and_then(|s| s.pid()) }
+    /// PID Silero-сайдкара (для метрик диагностики); None, если ещё не запущен.
+    pub fn sidecar_pid(&self) -> Option<u32> { self.sidecar.pid() }
     /// Глубина очереди речи (для метрик).
     pub fn queue_len(&self) -> usize { self.queue.0.lock().unwrap().len() }
     pub fn engine_available(&self) -> bool { self.engine.available() }

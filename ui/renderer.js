@@ -2615,11 +2615,6 @@ async function renderVoiceCard() {
     }
     rrow.appendChild(rseg);
     box.appendChild(rrow);
-  } else {
-    const note = document.createElement('div');
-    note.className = 'ahint';
-    note.textContent = 'Выбор спикера и скорости — у Silero. Текущий движок Piper (голос задаётся файлом модели).';
-    box.appendChild(note);
   }
 
   const row = document.createElement('div');

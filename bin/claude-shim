@@ -3,14 +3,29 @@
 # в tmux на отдельном сервере (-L jarvis), чтобы демон мог вставлять ответы.
 # Паттерн pyenv: лежит в ~/.jarvis/shims/claude, каталог стоит первым в PATH.
 #
+# Шим — ТОЛЬКО транспорт. Он НЕ хранит прокси и НЕ лезет в конфиг: сетевой
+# маршрут (прокси-туннель или шлюз) задаёшь СНАРУЖИ, в своём терминале:
+#   export HTTPS_PROXY=...   (и/или ANTHROPIC_BASE_URL=..., NODE_EXTRA_CA_CERTS=...)
+# Шим просто форвардит эти переменные в настоящий claude — в том числе через
+# границу tmux: пейн наследует env tmux-СЕРВЕРА, а не шима, поэтому набор
+# сетевых переменных мы прокидываем явным export внутрь команды пейна.
+# Ничего секретного на диск jarvis не пишет.
+#
+# Разовое выключение (например, когда поднят VPN и прокси не нужен):
+#   JARVIS_PROXY=off claude ...   → сетевые переменные снимаются для этого запуска.
+#
 # Сквозной exec настоящего бинаря (без обёртки), если:
 #   - уже внутри tmux ($TMUX)
 #   - нет tty на stdin/stdout (пайпы, headless)
 #   - запуск с -p/--print (одноразовый, неинтерактивный)
+#   - подкоманда auth/setup-token (одноразовый логин, незачем tmux)
 #   - взведён предохранитель от рекурсии (JARVIS_SHIM)
 
 JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
 SHIM_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+
+# Сетевые переменные, которые шим уважает и пробрасывает как есть.
+NET_VARS="HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy ANTHROPIC_BASE_URL NODE_EXTRA_CA_CERTS"
 
 # --- резолв настоящего claude: ищем в PATH без каталога шимов ---
 CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SHIM_DIR" | paste -sd: -)
@@ -20,11 +35,9 @@ if [ -z "$REAL" ]; then
   exit 127
 fi
 
-# --- по умолчанию прокси нет: никогда не пробрасываем его в claude ---
-# Чистим в окружении шима — это покрывает сквозной exec ниже.
-# Для tmux-ветки прокси дополнительно снимается внутри CMD (см. ниже),
-# т.к. tmux-пейн наследует env tmux-СЕРВЕРА, а не шима.
-unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+# --- разовый off-тумблер: снять сетевые переменные для этого запуска ---
+# shellcheck disable=SC2086  # NET_VARS должен расщепляться на имена
+case "${JARVIS_PROXY:-}" in off|0|no|none) unset $NET_VARS ;; esac
 
 # --- решаем, оборачивать ли ---
 wrap=1
@@ -34,11 +47,13 @@ wrap=1
 for a in "$@"; do
   case "$a" in
     -p|--print) wrap=0 ;;
+    auth|setup-token) wrap=0 ;;          # одноразовый логин — мимо tmux
   esac
 done
 command -v tmux >/dev/null 2>&1 || wrap=0  # tmux не установлен — работаем как раньше
 
 if [ "$wrap" = 0 ]; then
+  # Сквозной exec наследует окружение шима (= твоего терминала) как есть.
   JARVIS_SHIM=1 export JARVIS_SHIM
   exec "$REAL" "$@"
 fi
@@ -54,7 +69,17 @@ for a in "$REAL" "$@"; do
   q=$(printf '%s' "$a" | sed "s/'/'\\\\''/g")
   quoted="$quoted '$q'"
 done
-CMD="unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; JARVIS_SHIM=1 exec$quoted"
+
+# Пейн наследует env tmux-СЕРВЕРА, а не шима, поэтому реально заданные сетевые
+# переменные форвардим явным export прямо в команду пейна.
+PRE=''
+for v in $NET_VARS; do
+  eval "val=\${$v:-}"
+  [ -n "$val" ] || continue
+  q=$(printf '%s' "$val" | sed "s/'/'\\\\''/g")
+  PRE="${PRE}export $v='$q'; "
+done
+CMD="${PRE}JARVIS_SHIM=1 exec$quoted"
 
 # iTerm2 умеет control mode: родные табы вместо tmux-рендеринга
 CC=''

@@ -80,7 +80,6 @@ impl Daemon {
         let vcfg = crate::voice::config::VoiceConfig::from_settings(&settings.load());
         let voice = crate::voice::Voice::new(
             &vcfg,
-            jarvis_dir().join("piper").join("piper"),
             jarvis_dir().join("silero"),
             app.clone(),
         );

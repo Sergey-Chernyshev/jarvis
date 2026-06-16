@@ -18,6 +18,8 @@
     --card: rgba(255, 255, 255, 0.04);
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  /* атрибут hidden должен побеждать display из классов (.howto{display:flex} и т.п.) */
+  [hidden] { display: none !important; }
   html, body { height: 100%; background: transparent; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;

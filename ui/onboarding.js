@@ -18,6 +18,7 @@
   const titleEl = document.getElementById("title");
   const subEl = document.getElementById("subtitle");
   const hintEl = document.getElementById("hint");
+  const proxyEl = document.getElementById("proxy");
   const btn = document.getElementById("action");
   document.getElementById("close").addEventListener("click", () => appWindow.close());
 
@@ -71,7 +72,7 @@
     btn.textContent = "Устанавливаю…";
     btn.classList.remove("ok");
     hintEl.textContent = "";
-    invoke("onboarding_run");
+    invoke("onboarding_run", { proxy: (proxyEl.value || "").trim() });
   }
 
   // прогресс установки
@@ -99,8 +100,10 @@
 
   // первичное состояние
   async function init() {
-    let st = null;
-    try { st = await invoke("onboarding_status"); } catch {}
+    let info = null;
+    try { info = await invoke("integration_get"); } catch {}
+    const st = info && info.status;
+    if (info && info.proxy) proxyEl.value = info.proxy; // префилл сохранённого прокси
     const integrated = st && st.hooks && st.shim; // мирроринг Status::integrated()
     if (integrated) {
       titleEl.textContent = "Jarvis настроен";

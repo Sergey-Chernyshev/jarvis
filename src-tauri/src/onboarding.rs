@@ -14,11 +14,25 @@ pub fn onboarding_status() -> Status {
 }
 
 #[tauri::command]
-pub fn onboarding_run(app: AppHandle) {
-    std::thread::spawn(move || {
-        install::install(&|step: Step| {
-            let _ = app.emit_to("onboarding", "onboarding:progress", step);
+pub fn onboarding_run(app: AppHandle, proxy: Option<String>) {
+    let d = crate::daemon::Daemon::get(&app);
+    // прокси: из аргумента, иначе из сохранённых настроек; непустой — сохраняем
+    let proxy = proxy
+        .filter(|p| !p.trim().is_empty())
+        .or_else(|| {
+            let s = d.settings.string("proxy");
+            (!s.is_empty()).then_some(s)
         });
+    if let Some(p) = &proxy {
+        d.settings.set_top("proxy", serde_json::Value::String(p.clone()));
+    }
+    std::thread::spawn(move || {
+        install::install(
+            &|step: Step| {
+                let _ = app.emit_to("onboarding", "onboarding:progress", step);
+            },
+            proxy.as_deref(),
+        );
         let _ = app.emit_to("onboarding", "onboarding:done", install::status());
     });
 }
@@ -36,14 +50,17 @@ pub struct IntegrationInfo {
     foreign_hooks: usize,
     models: Vec<Artifact>,
     quiet: bool,
+    proxy: String,
 }
 
 fn integration_info(app: &AppHandle) -> IntegrationInfo {
+    let d = crate::daemon::Daemon::get(app);
     IntegrationInfo {
         status: install::status(),
         foreign_hooks: install::foreign_hook_count(),
         models: install::model_artifacts(),
-        quiet: crate::daemon::Daemon::get(app).is_quiet(),
+        quiet: d.is_quiet(),
+        proxy: d.settings.string("proxy"),
     }
 }
 

@@ -24,7 +24,9 @@ fn print_step(s: Step) {
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("install") => {
-            install::install(&print_step);
+            // прокси для скачивания моделей — из env (HTTPS_PROXY) или флага
+            let proxy = std::env::var("HTTPS_PROXY").ok().or_else(|| std::env::var("HTTP_PROXY").ok());
+            install::install(&print_step, proxy.as_deref());
             println!("\nГотово. Активные сессии Claude Code перезапусти — хуки берутся");
             println!("снапшотом на старте сессии. Шим в текущем шелле: exec zsh (или новая вкладка).");
         }

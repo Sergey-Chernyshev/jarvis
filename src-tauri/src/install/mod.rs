@@ -125,10 +125,50 @@ fn run_inherit(what: &str, cmd: &mut Command) -> Result<(), String> {
     Ok(())
 }
 
+/// Проставить proxy-окружение команде (для pip/torch), если задан.
+fn set_proxy(cmd: &mut Command, proxy: Option<&str>) {
+    if let Some(p) = proxy {
+        if !p.is_empty() {
+            cmd.env("HTTP_PROXY", p).env("HTTPS_PROXY", p);
+        }
+    }
+}
+
+/// Запустить shell-команду, слив stdout+stderr, и стримить прогресс скачивания.
+/// pip с `--progress-bar raw` печатает строки `Progress <done> of <total>` —
+/// парсим их в проценты и шлём минималистичный `Step::info`.
+fn run_streamed(label: &str, shell_cmd: &str, proxy: Option<&str>, progress: &Progress, what: &str) -> Result<(), String> {
+    use std::io::{BufRead, BufReader};
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(format!("{shell_cmd} 2>&1"));
+    set_proxy(&mut cmd, proxy);
+    cmd.stdout(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("запуск {label}: {e}"))?;
+    let out = child.stdout.take().ok_or_else(|| format!("{label}: нет stdout"))?;
+    let mut last: i16 = -10;
+    for line in BufReader::new(out).lines().map_while(Result::ok) {
+        if let Some(rest) = line.strip_prefix("Progress ") {
+            let nums: Vec<u64> = rest.split(" of ").filter_map(|s| s.trim().parse::<u64>().ok()).collect();
+            if nums.len() == 2 && nums[1] > 0 {
+                let pct = ((nums[0] as f64 / nums[1] as f64) * 100.0).round() as i16;
+                if (pct - last).abs() >= 4 || pct >= 100 {
+                    last = pct;
+                    progress(Step::info("Голос", format!("{what} — {pct}%")));
+                }
+            }
+        }
+    }
+    let status = child.wait().map_err(|e| format!("wait {label}: {e}"))?;
+    if !status.success() {
+        return Err(format!("{label} код {}", status.code().unwrap_or(-1)));
+    }
+    Ok(())
+}
+
 /// Установить Silero-сайдкар: server.py + venv с torch(CPU)/fastapi/uvicorn/numpy
 /// + прогрев модели. Веса PyTorch — сотни МБ–ГБ, ставятся один раз. Идемпотентно.
-/// `progress` зовётся для долгих под-шагов (чтобы UI не выглядел зависшим).
-fn install_silero(progress: &Progress) -> Result<(), String> {
+/// `proxy` (если задан) идёт в окружение pip/torch. `progress` стримит проценты.
+fn install_silero(progress: &Progress, proxy: Option<&str>) -> Result<(), String> {
     fs::create_dir_all(silero_dir()).map_err(|e| format!("mkdir silero: {e}"))?;
 
     // 1. server.py — атомарная запись поверх (держим актуальным).
@@ -152,22 +192,28 @@ fn install_silero(progress: &Progress) -> Result<(), String> {
         .map(|s| s.success())
         .unwrap_or(false);
     if !deps_ok {
-        progress(Step::info("Голос", "ставлю PyTorch CPU в venv — сотни МБ–ГБ, это надолго…"));
-        run_inherit(
-            "pip install --upgrade pip",
-            Command::new(silero_pip()).args(["install", "--upgrade", "pip"]),
-        )?;
-        run_inherit(
-            "pip install torch+deps",
-            Command::new(silero_pip()).args([
-                "install", "torch", "fastapi", "uvicorn", "numpy", "certifi", "omegaconf",
-            ]),
-        )?;
+        progress(Step::info("Голос", "ставлю PyTorch CPU — сотни МБ–ГБ, это надолго…"));
+        let mut up = Command::new(silero_pip());
+        up.args(["install", "--upgrade", "pip"]);
+        set_proxy(&mut up, proxy);
+        run_inherit("pip install --upgrade pip", &mut up)?;
+
+        // основная установка — со стримом процентов (pip --progress-bar raw)
+        let proxy_arg = match proxy {
+            Some(p) if !p.is_empty() => format!("--proxy '{p}' "),
+            _ => String::new(),
+        };
+        let cmd = format!(
+            "'{}' install --progress-bar raw {}torch fastapi uvicorn numpy certifi omegaconf",
+            silero_pip().display(),
+            proxy_arg,
+        );
+        run_streamed("pip install torch+deps", &cmd, proxy, progress, "Скачиваю PyTorch")?;
     }
 
-    // 4. Прогрев модели в torch-hub кэш. SSL_CERT_FILE из certifi — иначе
-    //    torch.hub падает на верификации HTTPS.
-    progress(Step::info("Голос", "прогрев модели Silero…"));
+    // 4. Прогрев + скачивание модели через torch.hub. SSL_CERT_FILE из certifi —
+    //    иначе torch.hub падает на верификации HTTPS. Прокси — в окружение.
+    progress(Step::info("Голос", "скачиваю модель Silero…"));
     let ca = Command::new(silero_python())
         .args(["-c", "import certifi; print(certifi.where())"])
         .output()
@@ -175,15 +221,14 @@ fn install_silero(progress: &Progress) -> Result<(), String> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
-    run_inherit(
-        "прогрев модели Silero",
-        Command::new(silero_python())
-            .env("SSL_CERT_FILE", &ca)
-            .args([
-                "-c",
-                "import torch; torch.hub.load('snakers4/silero-models','silero_tts',language='ru',speaker='v4_ru',trust_repo=True)",
-            ]),
-    )?;
+    let mut warm = Command::new(silero_python());
+    warm.env("SSL_CERT_FILE", &ca);
+    set_proxy(&mut warm, proxy);
+    warm.args([
+        "-c",
+        "import torch; torch.hub.load('snakers4/silero-models','silero_tts',language='ru',speaker='v4_ru',trust_repo=True)",
+    ]);
+    run_inherit("прогрев модели Silero", &mut warm)?;
 
     Ok(())
 }
@@ -420,9 +465,10 @@ pub fn status_report() -> String {
     out
 }
 
-/// Установить интеграцию. Шлёт шаги в `progress`. Каждая фаза fail-safe —
-/// сбой одной (например, голоса) не валит остальные и не паникует.
-pub fn install(progress: &Progress) {
+/// Установить интеграцию. Шлёт шаги в `progress`. `proxy` (если задан) идёт в
+/// окружение pip/torch — чтобы скачивать модели из-под прокси. Каждая фаза
+/// fail-safe: сбой одной (например, голоса) не валит остальные и не паникует.
+pub fn install(progress: &Progress, proxy: Option<&str>) {
     // --- Фаза «Хуки» ---
     progress(Step::start("Хуки"));
     write_executable(&hook_dst(), HOOK_SRC);
@@ -476,7 +522,7 @@ pub fn install(progress: &Progress) {
 
     // --- Фаза «Голос» (Silero) — не-фатально ---
     progress(Step::start("Голос"));
-    match install_silero(progress) {
+    match install_silero(progress, proxy) {
         Ok(()) => progress(Step::done("Голос", "Silero установлен (venv + модель)")),
         Err(e) => progress(Step::warn("Голос", format!("Silero не установлен ({e}); демон не затронут"))),
     }

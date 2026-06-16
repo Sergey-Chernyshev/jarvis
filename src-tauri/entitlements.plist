@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Сетевой клиент: updater тянет манифест/артефакты по HTTPS. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- Jarvis спавнит дочерние процессы (claude, tmux, python-сайдкар).
+         Под hardened runtime спавн разрешён; здесь явных доп-энтайтлментов
+         не требуется. PyTorch грузится в ОТДЕЛЬНОМ venv-python — под
+         hardened runtime приложения не попадает. -->
+</dict>
+</plist>

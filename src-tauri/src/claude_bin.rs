@@ -54,6 +54,11 @@ pub async fn run_claude(args: &[&str], timeout: Duration) -> Option<String> {
         // ВАЖНО: прокси НЕ убирать. Прямой заход на api.anthropic.com с этой
         // сети режется на эдже (403 «Request not allowed»); HTTP(S)_PROXY —
         // обязательная точка egress, без неё haiku всегда падает в фолбэк.
+        //
+        // Пропускаем user-настройки (--setting-sources ниже), поэтому полезный
+        // perf-флаг возвращаем как настоящую env-переменную (читается отдельно
+        // от settings): не делать необязательных служебных модельных вызовов.
+        .env("DISABLE_NON_ESSENTIAL_MODEL_CALLS", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -86,11 +91,20 @@ pub async fn run_haiku(prompt: &str, timeout: Duration) -> Option<String> {
         &[
             "-p",
             "--no-session-persistence",
-            // суммаризатору MCP не нужен, а `claude -p` иначе коннектит ВСЕ
-            // MCP-серверы из settings.json на КАЖДЫЙ вызов — это ~10с и весь
-            // разброс задержки. strict-mcp-config без --mcp-config = ноль MCP.
-            // auth/env-настройки не трогаются (в отличие от --settings).
+            // Служебному вызову не нужны ни MCP, ни плагины, ни скилы, ни хуки —
+            // а `claude -p` иначе грузит всё это на КАЖДЫЙ вызов (boot CLI и есть
+            // главный оверхед, 11–20с). Срезаем:
+            //  • --strict-mcp-config        — ноль MCP-серверов;
+            //  • --disable-slash-commands   — отключить все скилы;
+            //  • --setting-sources project,local — пропустить user-настройки,
+            //    где лежит огромный enabledPlugins и хуки (в temp-папке демона
+            //    нет project/local → не грузится ничего лишнего).
+            // Auth (OAuth/keychain) читается независимо от sources — НЕ ломается
+            // (в отличие от --bare, который keychain не читает).
             "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--setting-sources",
+            "project,local",
             "--append-system-prompt",
             HAIKU_SYSTEM,
             "--model",

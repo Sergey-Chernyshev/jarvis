@@ -202,36 +202,66 @@ Assertion живёт в процессе демона: краш = автосня
 «готово», повтор idle-уведомления не озвучивается дважды, а затор `Stop`-реплик
 коалесцируется («Пиксела и Рекрю закончили»).
 
-**Движок — на выбор, флагом в конфиге** `~/.jarvis/settings.json`:
+**Конфиг голоса** в `~/.jarvis/settings.json`:
 
 ```json
-"voice": { "engine": "piper", "mute": false,
+"voice": { "engine": "silero", "mute": false,
            "events": { "stop": true, "notification": true, "stopFailure": true } }
 ```
 
-Сменил `engine` и перезапустил демон — голос меняется **без правок кода**. Два
-движка за единым трейтом `TtsEngine`:
-
-- **Piper** (готов) — лёгкий, быстрый: бинарь + ~десятки МБ модели, ставится
-  установщиком в `~/.jarvis/`. Минус — слабее на русском и заметно коверкает
-  английские вставки.
-- **Silero** (готов) — лучший русский и смешанная речь. Работает как локальный
-  **Python-сайдкар** (FastAPI, модель `v4_ru` в памяти), которым демон рулит сам:
-  поднимает при `engine="silero"`, перезапускает при падении, гасит на выходе;
-  слушает только `127.0.0.1`. Спикеры: `aidar` · `baya` · `kseniya` · `xenia` ·
-  `eugene` (поле `voice.speaker`). Минус — тяжёлая установка: **PyTorch CPU в
-  venv, сотни МБ–ГБ** (осознанная цена), и чуть медленнее холодный старт.
+Движок за трейтом `TtsEngine` — **Silero** (лучший русский и смешанная речь).
+Работает как локальный **Python-сайдкар** (FastAPI, модель `v4_ru` в памяти),
+которым демон рулит сам: поднимает на старте, перезапускает при падении, гасит на
+выходе; слушает только `127.0.0.1`. Спикеры: `aidar` · `baya` · `kseniya` ·
+`xenia` · `eugene` (поле `voice.speaker`). Цена — тяжёлая установка: **PyTorch CPU
+в venv, сотни МБ–ГБ**, и чуть медленнее холодный старт.
 
 Меню-бар: тумблер **«Без звука»** (мгновенно глушит очередь; баннеры-уведомления
-остаются) и **«Тест голоса»** (образец текущим движком). Установка обоих движков
-— `npm run setup` (Piper лёгкий; Silero тянет PyTorch — установщик предупредит о
-весе); состояние движков — `npm run status`. Переключение: правишь
-`voice.engine` в `~/.jarvis/settings.json` и перезапускаешь демон.
+остаются) и **«Тест голоса»** (образец текущим движком). Установка — `npm run
+setup` (Silero тянет PyTorch — установщик предупредит о весе); состояние —
+`npm run status`.
 
 **Граница: это вывод-only — «Jarvis говорит».** Голосовой ввод (микрофон,
 wake-word, STT, ответ агенту голосом) — **следующая фаза, отдельная спека.**
 Если сбой/отсутствие движка — демон работает как раньше, Claude Code не затронут,
 причина в логе.
+
+## Установка из релиза
+
+1. Скачай `Jarvis_x.y.z_universal.dmg` со страницы releases.
+2. Открой DMG, перетащи **Jarvis** в **Applications**, запусти из Launchpad.
+3. При первом запуске Jarvis предложит доустановить интеграцию с Claude Code и
+   голос (Фаза 2). Пока её нет — поставь интеграцию из исходников: `npm run setup`.
+
+Обновления приложение проверяет само (встроенный updater).
+
+## Релиз (для мейнтейнера)
+
+Сборка/подпись/нотаризация/публикация автоматизированы в GitHub Actions
+(`.github/workflows/release.yml`), триггер — пуш тега:
+
+```bash
+git tag v0.2.1
+git push origin v0.2.1
+```
+
+CI соберёт universal DMG, подпишет Developer ID, нотаризует и создаст **черновик**
+релиза с DMG, `.app.tar.gz(.sig)` и `latest.json`. Опубликуй черновик вручную.
+
+Перед первым релизом поправь `plugins.updater.endpoints` в
+`src-tauri/tauri.conf.json` (`OWNER/REPO` → твой репозиторий) и заведи
+**GitHub Secrets** (Settings → Secrets and variables → Actions):
+
+- `APPLE_CERTIFICATE` — Developer ID Application `.p12` в base64 (`base64 -i cert.p12 | pbcopy`).
+- `APPLE_CERTIFICATE_PASSWORD` — пароль от `.p12`.
+- `APPLE_SIGNING_IDENTITY` — напр. `Developer ID Application: Имя (TEAMID)`.
+- `APPLE_ID` — Apple ID для нотаризации.
+- `APPLE_PASSWORD` — app-specific password этого Apple ID.
+- `APPLE_TEAM_ID` — Team ID.
+- `TAURI_SIGNING_PRIVATE_KEY` — содержимое `~/.jarvis/jarvis-updater.key`.
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — пароль ключа (пустой, если не задавал).
+
+Локально (без подписи) собрать DMG для проверки: `npm run bundle` (host-арка).
 
 ## Что куда пишется
 
@@ -245,7 +275,6 @@ wake-word, STT, ответ агенту голосом) — **следующая
 - `~/.jarvis/state.json` — реестр сессий (переживает перезапуск демона)
 - `~/.jarvis/usage.json` / `history.json` / `translations.json` — кэши статистики, истории, переводов
 - `~/.jarvis/clamshell.json` — маркер поднятого disablesleep (fail-safe «Крышки»)
-- `~/.jarvis/piper/` + `~/.jarvis/voices/` — голос Piper: бинарь и русская модель
 - `~/.jarvis/silero/` — голос Silero: `silero-server.py` + `venv/` (PyTorch, тяжёлый)
 - `/etc/sudoers.d/jarvis-pmset` — опционально, по явной установке: тихий `pmset disablesleep`
 

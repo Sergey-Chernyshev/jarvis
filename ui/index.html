@@ -501,6 +501,28 @@
   .arow .spacer { flex: 1; }
   .arow .glyph { flex: none; display: flex; }
   .ahint { font-size: 11px; color: var(--faint); margin-top: 8px; }
+  /* интеграция/модели: статусы + кнопки действий */
+  .istat { display: flex; align-items: center; gap: 8px; height: 32px; font-size: 12.5px; color: #B9B9BF; }
+  .istat.hairtop { border-top: 1px solid rgba(255, 255, 255, 0.05); }
+  .istat .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--faint); }
+  .istat.on .dot { background: var(--done); }
+  .istat.warn .dot { background: var(--waiting); }
+  .istat .spacer { flex: 1; }
+  .istat .sz { font-family: var(--mono); font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .abtnrow { display: flex; gap: 8px; margin-top: 12px; }
+  .abtn {
+    appearance: none; border: 1px solid rgba(255,255,255,0.10); flex: 1;
+    padding: 8px 12px; border-radius: 8px; font: inherit; font-size: 12.5px; font-weight: 600;
+    color: var(--text); background: rgba(255,255,255,0.05); cursor: default;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease, filter 120ms ease;
+  }
+  .abtn:hover { background: rgba(255,255,255,0.09); }
+  .abtn.primary { background: #6CA0FF; border-color: transparent; color: #fff; }
+  .abtn.primary:hover { filter: brightness(1.08); }
+  .abtn.danger { color: #f2545b; }
+  .abtn.danger:hover { background: rgba(242,84,91,0.12); border-color: rgba(242,84,91,0.40); }
+  .abtn.small { flex: 0 0 auto; padding: 5px 11px; font-size: 11.5px; font-weight: 500; }
+  .abtn:disabled { opacity: .5; }
   .ahint code {
     font-family: var(--mono); color: var(--muted);
     background: rgba(255, 255, 255, 0.06); border-radius: 4px; padding: 1px 5px;
@@ -1362,6 +1384,9 @@
         <div id="voiceCard" class="awakecard"></div>
         <div class="stitle sub">Бодрость<span class="stitlehint">не давать маку спать, пока работают агенты</span></div>
         <div id="awakeCard" class="awakecard"></div>
+        <div class="stitle sub">Интеграция<span class="stitlehint">подключение к Claude Code и место на диске</span></div>
+        <div id="integrationCard" class="awakecard"></div>
+        <div id="modelsCard" class="awakecard"></div>
       </div>
     </div>
 

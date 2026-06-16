@@ -47,6 +47,11 @@
     onLimitState: (cb) => on('limit-state', cb),
     getSessionUsage: (id) => invoke('usage_session', { id }),
     getHistory: () => invoke('history_get'),
+    // интеграция и модели (настройки)
+    integrationGet: () => invoke('integration_get'),
+    integrationRemove: () => invoke('integration_remove'),
+    onboardingOpen: () => invoke('onboarding_open'),
+    modelDelete: (id) => invoke('model_delete', { id }),
   };
 
   // navigator.clipboard в WKWebView капризен (secure context, жесты) —

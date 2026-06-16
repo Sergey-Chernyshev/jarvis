@@ -2555,6 +2555,139 @@ async function loadSettings() {
     renderPluginRows();
   } catch {}
   renderVoiceCard();
+  renderIntegrationCard();
+}
+
+/* ── формат размера на диске ── */
+function fmtBytes(n) {
+  if (!n) return '0 МБ';
+  const mb = n / (1024 * 1024);
+  if (mb >= 1024) return (mb / 1024).toFixed(mb >= 10240 ? 0 : 1) + ' ГБ';
+  return Math.max(1, Math.round(mb)) + ' МБ';
+}
+
+/* ── карточка «Интеграция»: статус компонентов + удалить/переустановить ──
+ *    + вложенная карточка моделей голоса (место/удаление). */
+async function renderIntegrationCard() {
+  const box = document.getElementById('integrationCard');
+  const mbox = document.getElementById('modelsCard');
+  if (!box) return;
+  let info = null;
+  try { info = await window.jarvis.integrationGet(); } catch {}
+  if (!info) { box.textContent = ''; return; }
+  const st = info.status || {};
+  const integrated = st.hooks && st.shim;
+
+  box.textContent = '';
+
+  // шапка
+  const head = document.createElement('div');
+  head.className = 'awakehead';
+  const title = document.createElement('span');
+  title.className = 'atitle';
+  title.textContent = 'Claude Code';
+  head.appendChild(title);
+  head.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+  const status = document.createElement('span');
+  status.className = integrated ? 'astatus on' : 'astatus';
+  status.textContent = integrated ? 'подключено' : 'не подключено';
+  head.appendChild(status);
+  box.appendChild(head);
+
+  // строки компонентов
+  const rows = [
+    ['hooks', 'Хуки событий', st.hooks],
+    ['shim', 'Шим запуска claude', st.shim],
+    ['tmux_conf', 'tmux-транспорт', st.tmux_conf],
+    ['path_block', 'PATH-блок в shell', st.path_block],
+  ];
+  for (const [, label, ok] of rows) {
+    const r = document.createElement('div');
+    r.className = 'istat hairtop' + (ok ? ' on' : '');
+    r.appendChild(Object.assign(document.createElement('span'), { className: 'dot' }));
+    r.appendChild(Object.assign(document.createElement('span'), { textContent: label }));
+    r.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+    r.appendChild(Object.assign(document.createElement('span'), { className: 'sz', textContent: ok ? 'есть' : '—' }));
+    box.appendChild(r);
+  }
+
+  // пометка про чужие хуки
+  if (info.foreign_hooks > 0) {
+    const h = document.createElement('div');
+    h.className = 'ahint';
+    h.textContent = `При удалении сохранятся ${info.foreign_hooks} чужих хук(ов) — трогаем только свои.`;
+    box.appendChild(h);
+  }
+
+  // кнопки
+  const brow = document.createElement('div');
+  brow.className = 'abtnrow';
+  const setup = document.createElement('button');
+  setup.className = 'abtn primary';
+  setup.textContent = integrated ? 'Переустановить' : 'Настроить';
+  setup.addEventListener('click', () => { window.jarvis.onboardingOpen(); });
+  brow.appendChild(setup);
+
+  if (integrated) {
+    const rm = document.createElement('button');
+    rm.className = 'abtn danger';
+    rm.textContent = 'Удалить интеграцию';
+    let armed = false;
+    rm.addEventListener('click', async () => {
+      if (!armed) { armed = true; rm.textContent = 'Точно удалить?'; setTimeout(() => { armed = false; rm.textContent = 'Удалить интеграцию'; }, 3000); return; }
+      rm.disabled = true; rm.textContent = 'Удаляю…';
+      try { await window.jarvis.integrationRemove(); } catch {}
+      renderIntegrationCard();
+    });
+    brow.appendChild(rm);
+  }
+  box.appendChild(brow);
+
+  // вложенная карточка моделей
+  renderModelsCard(mbox, info.models || []);
+}
+
+/* ── карточка «Голос: модели и место» ── */
+function renderModelsCard(box, models) {
+  if (!box) return;
+  box.textContent = '';
+  if (!models.length) { box.hidden = true; return; }
+  box.hidden = false;
+
+  const head = document.createElement('div');
+  head.className = 'awakehead';
+  head.appendChild(Object.assign(document.createElement('span'), { className: 'atitle', textContent: 'Модели голоса' }));
+  head.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+  const total = models.reduce((a, m) => a + (m.bytes || 0), 0);
+  head.appendChild(Object.assign(document.createElement('span'), { className: 'astatus on', textContent: fmtBytes(total) }));
+  box.appendChild(head);
+
+  for (const m of models) {
+    const r = document.createElement('div');
+    r.className = 'istat hairtop on';
+    r.appendChild(Object.assign(document.createElement('span'), { className: 'dot' }));
+    r.appendChild(Object.assign(document.createElement('span'), { textContent: m.label }));
+    r.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+    r.appendChild(Object.assign(document.createElement('span'), { className: 'sz', textContent: fmtBytes(m.bytes) }));
+    const del = document.createElement('button');
+    del.className = 'abtn danger small';
+    del.style.marginLeft = '10px';
+    del.textContent = 'Удалить';
+    let armed = false;
+    del.addEventListener('click', async () => {
+      if (!armed) { armed = true; del.textContent = 'Точно?'; setTimeout(() => { armed = false; del.textContent = 'Удалить'; }, 3000); return; }
+      del.disabled = true; del.textContent = '…';
+      try { await window.jarvis.modelDelete(m.id); } catch {}
+      renderIntegrationCard();
+    });
+    r.appendChild(del);
+    box.appendChild(r);
+  }
+
+  const hint = document.createElement('div');
+  hint.className = 'ahint';
+  hint.textContent = 'После удаления голос недоступен, пока не переустановишь интеграцию.';
+  box.appendChild(hint);
 }
 
 // карточка «Голос»: движок, выбор спикера (Silero, живой), Тест, Без звука

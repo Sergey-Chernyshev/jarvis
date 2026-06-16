@@ -45,21 +45,25 @@ npm install -D @tauri-apps/cli@^2
 ```
 Expected: в `package.json` появляется `devDependencies.@tauri-apps/cli`, создаётся `node_modules/.bin/tauri`.
 
-- [ ] **Step 2: Добавить второй rust-target для universal**
+- [ ] **Step 2: Universal — только в CI (локально host arm64)**
 
-Run:
+Rust здесь из Homebrew (без rustup), кросс-target `x86_64` локально не добавить.
+Решение: локально собираем host (arm64) для дымового теста, а **universal**
+делает CI (там rustup ставит обе арки — Task 6). Локально ничего добавлять не надо.
+
+Run (только убедиться, что хост — arm64):
 ```bash
-rustup target add x86_64-apple-darwin
-rustup target list --installed | grep apple-darwin
+rustc -vV | grep host
 ```
-Expected: в списке и `aarch64-apple-darwin`, и `x86_64-apple-darwin`.
+Expected: `host: aarch64-apple-darwin`.
 
 - [ ] **Step 3: Добавить npm-скрипты `tauri` и `bundle`**
 
-В `package.json` в объект `scripts` добавить:
+В `package.json` в объект `scripts` добавить (локальный `bundle` — host arm64,
+universal собирает CI):
 ```json
     "tauri": "tauri",
-    "bundle": "tauri build --target universal-apple-darwin"
+    "bundle": "tauri build"
 ```
 
 - [ ] **Step 4: Проверить, что CLI видит проект**
@@ -243,30 +247,37 @@ Create `src-tauri/entitlements.plist`:
 </plist>
 ```
 
-- [ ] **Step 2: Собрать неподписанный universal DMG**
+- [ ] **Step 2: Собрать неподписанный DMG (host arm64)**
+
+ВАЖНО (порядок): `createUpdaterArtifacts: true` (Task 3) требует, чтобы в
+`tauri.conf.json` уже была секция `plugins.updater` (Task 5 Step 3) и был задан
+`TAURI_SIGNING_PRIVATE_KEY` — иначе бандлер падает «plugins > updater doesn't
+exist». Поэтому сначала выполни Task 5 Steps 1–4 (Cargo-зависимость + конфиг +
+ключ + main.rs), затем эту сборку — она даст и DMG, и updater-артефакты сразу.
 
 Run:
 ```bash
 cd /Users/se.chernyshev/jarvis
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.jarvis/jarvis-updater.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 npm run bundle
 ```
-Expected: длинная сборка (обе арки) завершается успехом; в конце путь к `.dmg`. Предупреждение про отсутствие signing identity — норм (неподписанная сборка).
+Expected: сборка завершается успехом; в конце путь к `.dmg`. Предупреждение про отсутствие signing identity — норм (неподписанная сборка).
 
 - [ ] **Step 3: Проверить артефакты**
 
 Run:
 ```bash
-ls -lh src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
-ls -lh src-tauri/target/universal-apple-darwin/release/bundle/macos/Jarvis.app/Contents/MacOS/
-lipo -info src-tauri/target/universal-apple-darwin/release/bundle/macos/Jarvis.app/Contents/MacOS/jarvis
+ls -lh src-tauri/target/release/bundle/dmg/*.dmg
+lipo -info src-tauri/target/release/bundle/macos/Jarvis.app/Contents/MacOS/jarvis
 ```
-Expected: есть `Jarvis_0.2.0_universal.dmg`; `lipo -info` показывает обе архитектуры `x86_64 arm64`.
+Expected: есть `Jarvis_0.2.0_aarch64.dmg`; `lipo -info` показывает `arm64` (локально host; universal делает CI).
 
 - [ ] **Step 4: Дымовой тест приложения из бандла**
 
 Run:
 ```bash
-open src-tauri/target/universal-apple-darwin/release/bundle/macos/Jarvis.app
+open src-tauri/target/release/bundle/macos/Jarvis.app
 sleep 3; pgrep -f 'Jarvis.app/Contents/MacOS/jarvis' && echo "запущено"
 osascript -e 'tell application "Jarvis" to quit' 2>/dev/null || pkill -f 'Jarvis.app/Contents/MacOS/jarvis'
 ```
@@ -351,7 +362,7 @@ cd /Users/se.chernyshev/jarvis
 export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.jarvis/jarvis-updater.key)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 npm run bundle 2>&1 | tail -20
-ls src-tauri/target/universal-apple-darwin/release/bundle/macos/*.tar.gz*
+ls src-tauri/target/release/bundle/macos/*.tar.gz*
 ```
 Expected: компиляция с плагином проходит; рядом с `.app` появляются `Jarvis.app.tar.gz` и `Jarvis.app.tar.gz.sig`.
 

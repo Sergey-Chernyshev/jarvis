@@ -95,6 +95,10 @@ fn main() {
             ipc::toast_click,
             onboarding::onboarding_status,
             onboarding::onboarding_run,
+            onboarding::onboarding_open,
+            onboarding::integration_get,
+            onboarding::integration_remove,
+            onboarding::model_delete,
         ])
         .setup(|app| {
             // чистое меню-бар приложение: без иконки в доке

@@ -558,6 +558,88 @@ pub fn uninstall(progress: &Progress) {
     }
 }
 
+/* ================= модели голоса: учёт места и удаление ================= */
+
+/// Артефакт на диске (модель/окружение) с занятым местом.
+#[derive(Debug, Clone, Serialize)]
+pub struct Artifact {
+    pub id: String,
+    pub label: String,
+    pub hint: String,
+    pub bytes: u64,
+}
+
+fn torch_hub_dir() -> PathBuf {
+    home().join(".cache/torch/hub")
+}
+
+/// Рекурсивный размер каталога в байтах (по файлам, без раздувания на симлинках).
+fn dir_size(p: &Path) -> u64 {
+    let mut total = 0;
+    let Ok(rd) = fs::read_dir(p) else { return 0 };
+    for e in rd.flatten() {
+        match e.file_type() {
+            Ok(ft) if ft.is_dir() => total += dir_size(&e.path()),
+            Ok(ft) if ft.is_file() => total += e.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => {}
+        }
+    }
+    total
+}
+
+/// Голосовые артефакты на диске (что есть — то и показываем).
+pub fn model_artifacts() -> Vec<Artifact> {
+    let mut v = Vec::new();
+    let s = silero_dir();
+    if s.exists() {
+        v.push(Artifact {
+            id: "silero".into(),
+            label: "Silero + PyTorch (venv)".into(),
+            hint: s.display().to_string(),
+            bytes: dir_size(&s),
+        });
+    }
+    let t = torch_hub_dir();
+    if t.exists() {
+        v.push(Artifact {
+            id: "torch-hub".into(),
+            label: "Кэш моделей torch".into(),
+            hint: t.display().to_string(),
+            bytes: dir_size(&t),
+        });
+    }
+    v
+}
+
+/// Удалить голосовой артефакт по id. После удаления голос недоступен до переустановки.
+pub fn delete_model(id: &str) -> Result<(), String> {
+    let path = match id {
+        "silero" => silero_dir(),
+        "torch-hub" => torch_hub_dir(),
+        other => return Err(format!("неизвестная модель: {other}")),
+    };
+    if path.exists() {
+        fs::remove_dir_all(&path).map_err(|e| format!("удаление {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Сколько в ~/.claude/settings.json ЧУЖИХ хуков (не наших) — их откат сохранит.
+pub fn foreign_hook_count() -> usize {
+    let Ok((true, json)) = read_settings() else { return 0 };
+    let Some(hooks) = json.get("hooks").and_then(Value::as_object) else { return 0 };
+    let mut n = 0;
+    for arr in hooks.values() {
+        let Some(groups) = arr.as_array() else { continue };
+        for g in groups {
+            if let Some(gh) = g.get("hooks").and_then(Value::as_array) {
+                n += gh.iter().filter(|h| !is_ours(h)).count();
+            }
+        }
+    }
+    n
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

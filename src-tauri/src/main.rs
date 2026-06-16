@@ -5,6 +5,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[allow(dead_code)] // проекции/фасады подключаются по фазам (инкр. 8)
+mod capability;
 mod claude_bin;
 mod commands_catalog;
 mod daemon;

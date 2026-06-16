@@ -51,18 +51,10 @@ pub async fn run_claude(args: &[&str], timeout: Duration) -> Option<String> {
     cmd.args(args)
         .current_dir(std::env::temp_dir())
         .env("JARVIS_IGNORE", "1")
-        .stdin(Stdio::null());
-    // ГЛАВНЫЙ рычаг скорости: демон унаследовал HTTP(S)_PROXY от запускающей
-    // оболочки, и haiku-запросы к api.anthropic.com шли через медленный корп-
-    // прокси (11–20с/вызов). api.anthropic.com доступен напрямую — обходим
-    // прокси для служебных вызовов (так же делают рабочие сессии: `unset …_PROXY`).
-    for v in [
-        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-        "http_proxy", "https_proxy", "all_proxy",
-    ] {
-        cmd.env_remove(v);
-    }
-    cmd.stdin(Stdio::null())
+        // ВАЖНО: прокси НЕ убирать. Прямой заход на api.anthropic.com с этой
+        // сети режется на эдже (403 «Request not allowed»); HTTP(S)_PROXY —
+        // обязательная точка egress, без неё haiku всегда падает в фолбэк.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);

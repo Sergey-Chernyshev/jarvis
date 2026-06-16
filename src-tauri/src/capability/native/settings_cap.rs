@@ -21,4 +21,27 @@ pub fn register(reg: &mut DaemonRegistry) {
         },
         make_handler(|d: Arc<Daemon>, _args: Value| async move { Ok(d.settings.load()) }),
     );
+
+    reg.register(
+        CapabilityMeta {
+            id: "settings.set",
+            class: RiskClass::Settings,
+            provenance: Provenance::Trusted,
+            description: "Изменить незащищённый конфиг. Поле 'patch' — объект ключ→значение. Security-ключи (гранты/плагины/политика) запрещены гейтом.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "patch": { "type": "object", "description": "ключи и новые значения" } },
+                "required": ["patch"]
+            }),
+        },
+        // gate уже отклонит security-ключи ДО хендлера (запрет самоэскалации, §7)
+        make_handler(|d: Arc<Daemon>, args: Value| async move {
+            let patch = args
+                .get("patch")
+                .and_then(|p| p.as_object())
+                .cloned()
+                .ok_or_else(|| "нужен объект 'patch'".to_string())?;
+            Ok(d.settings.save(patch))
+        }),
+    );
 }

@@ -7,6 +7,7 @@ use super::DaemonRegistry;
 
 mod audit_cap;
 mod chats;
+mod control;
 mod metrics;
 mod notifications;
 mod sessions;
@@ -23,8 +24,10 @@ pub fn register_all(reg: &mut DaemonRegistry) {
     settings_cap::register(reg);
     audit_cap::register(reg);
     chats::register(reg);
-    // фаза 3 — control/settings (sessions.reply/queue/control/launch/interrupt,
-    // settings.set) добавятся здесь же.
+    // фаза 3 — control/settings
+    control::register(reg); // sessions.reply, sessions.control
+    // settings.set регистрируется в settings_cap::register выше.
+    // sessions.queue/launch/interrupt — отдельная инфраструктура (см. план, отложено).
 }
 
 /// Достать строковый аргумент из JSON-объекта или вернуть внятную ошибку.

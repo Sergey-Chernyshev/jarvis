@@ -83,6 +83,11 @@ pub async fn run_haiku(prompt: &str, timeout: Duration) -> Option<String> {
         &[
             "-p",
             "--no-session-persistence",
+            // суммаризатору MCP не нужен, а `claude -p` иначе коннектит ВСЕ
+            // MCP-серверы из settings.json на КАЖДЫЙ вызов — это ~10с и весь
+            // разброс задержки. strict-mcp-config без --mcp-config = ноль MCP.
+            // auth/env-настройки не трогаются (в отличие от --settings).
+            "--strict-mcp-config",
             "--append-system-prompt",
             HAIKU_SYSTEM,
             "--model",

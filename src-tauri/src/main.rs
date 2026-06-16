@@ -11,6 +11,7 @@ mod claude_bin;
 mod commands_catalog;
 mod daemon;
 mod history;
+mod install;
 mod ipc;
 mod limits;
 mod log;

@@ -17,6 +17,8 @@ pub const PANEL_W: f64 = 820.0;
 pub const PANEL_H: f64 = 620.0;
 pub const TOAST_W: f64 = 440.0;
 pub const TOAST_MAX_H: f64 = 480.0;
+pub const ONBOARD_W: f64 = 480.0;
+pub const ONBOARD_H: f64 = 600.0;
 
 pub fn create_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
@@ -41,6 +43,39 @@ pub fn create_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .accept_first_mouse(true)
         .build()?;
     macos::float_above_everything(&win);
+    Ok(win)
+}
+
+/// Окно онбординга первого запуска (стеклянное, по центру). Повторный вызов из
+/// меню — показать и сфокусировать существующее, а не плодить копии.
+pub fn create_onboarding(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    if let Some(win) = app.get_webview_window("onboarding") {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(win);
+    }
+    let win = WebviewWindowBuilder::new(app, "onboarding", WebviewUrl::App("onboarding.html".into()))
+        .title("Jarvis")
+        .inner_size(ONBOARD_W, ONBOARD_H)
+        .visible(true)
+        .decorations(false)
+        .transparent(true)
+        .effects(WindowEffectsConfig {
+            effects: vec![Effect::UnderWindowBackground],
+            state: Some(EffectState::Active),
+            radius: Some(16.0),
+            color: None,
+        })
+        .resizable(false)
+        .minimizable(false)
+        .maximizable(false)
+        .skip_taskbar(true)
+        .shadow(true)
+        .center()
+        .theme(Some(Theme::Dark))
+        .accept_first_mouse(true)
+        .build()?;
+    let _ = win.set_focus();
     Ok(win)
 }
 

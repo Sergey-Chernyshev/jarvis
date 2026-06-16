@@ -149,6 +149,7 @@ fn build_menu(d: &Arc<Daemon>) -> tauri::Result<Menu<Wry>> {
     menu.append(&CheckMenuItem::with_id(
         app, "autostart", "Запускать при старте компьютера", true, autostart_enabled(d), None::<&str>,
     )?)?;
+    menu.append(&MenuItem::with_id(app, "reinstall", "Переустановить интеграцию…", true, None::<&str>)?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?)?;
     Ok(menu)
@@ -208,6 +209,9 @@ fn on_menu(d: &Arc<Daemon>, id: &str) {
             let enabled = autolaunch.is_enabled().unwrap_or(false);
             let _ = if enabled { autolaunch.disable() } else { autolaunch.enable() };
             refresh_menu(d);
+        }
+        "reinstall" => {
+            let _ = windows::create_onboarding(&d.app);
         }
         "quit" => {
             d.app.exit(0); // уборка — в RunEvent::Exit

@@ -18,6 +18,7 @@ mod log;
 mod macos;
 mod metrics;
 mod model;
+mod onboarding;
 mod power;
 mod ru;
 mod screen_prompt;
@@ -92,6 +93,8 @@ fn main() {
             ipc::toast_resize,
             ipc::toast_ready,
             ipc::toast_click,
+            onboarding::onboarding_status,
+            onboarding::onboarding_run,
         ])
         .setup(|app| {
             // чистое меню-бар приложение: без иконки в доке
@@ -104,6 +107,11 @@ fn main() {
             windows::create_panel(app.handle())?;
             windows::create_toast(app.handle())?;
             tray::init(&d)?;
+
+            // первый запуск без интеграции с Claude Code — предложить настроить
+            if !install::status().integrated() {
+                let _ = windows::create_onboarding(app.handle());
+            }
 
             // unix-сокет — канал событий от хуков
             tauri::async_runtime::spawn(server::serve(d.clone()));

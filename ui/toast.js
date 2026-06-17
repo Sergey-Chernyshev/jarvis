@@ -144,6 +144,19 @@ window.toast.onAdd((d) => {
     card.appendChild(body);
   }
 
+  // действие «Продолжить» — шлёт в сессию «продолжай» (напр. после прерывания сном)
+  if (d.sessionId) {
+    const cont = document.createElement('button');
+    cont.className = 'cont';
+    cont.textContent = 'Продолжить';
+    cont.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.toast.continueSession(d.sessionId);
+      removeCard(d.id);
+    });
+    card.appendChild(cont);
+  }
+
   card.addEventListener('click', () => {
     window.toast.click(d.sessionId || null);
     removeCard(d.id);

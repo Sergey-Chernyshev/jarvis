@@ -59,10 +59,17 @@ fn main() {
                         return;
                     }
                     let d = Daemon::get(app);
-                    // отдельный хоткей тихого режима (по умолчанию ⌘⌥J) — тумблер;
+                    // ⌘⌥J — тихий режим; ⌘⌥C — «Продолжить» последнюю сессию;
                     // всё прочее — панель.
                     if ipc::is_quiet_hotkey(&d, shortcut) {
                         d.toggle_quiet();
+                    } else if ipc::is_continue_hotkey(&d, shortcut) {
+                        if let Some(sid) = d.last_session() {
+                            let h = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let _ = ipc::session_continue(h, sid).await;
+                            });
+                        }
                     } else {
                         windows::toggle_hotkey_panel(&d);
                     }
@@ -104,6 +111,7 @@ fn main() {
             ipc::voice_set_mute,
             ipc::voice_set_duck,
             ipc::session_reply,
+            ipc::session_continue,
             ipc::terminal_focus,
             ipc::toast_resize,
             ipc::toast_ready,
@@ -149,6 +157,7 @@ fn main() {
                 eprintln!("[jarvis] хоткей не зарегистрировался: {e}");
             }
             ipc::register_quiet_hotkey(&d); // тумблер тихого режима (⌘⌥J)
+            ipc::register_continue_hotkey(&d); // «Продолжить» последнюю сессию (⌘⌥C)
 
             spawn_timers(&d);
 

@@ -51,6 +51,8 @@ pub struct Daemon {
     /// Время последнего РЕАЛЬНОГО prompt-события (хук UserPromptSubmit), мс.
     /// Так подтверждаем доставку ответа из Jarvis: хук сработал → текст дошёл.
     last_prompt_at: Mutex<HashMap<String, i64>>,
+    /// Сессия последнего уведомления — цель хоткея «Продолжить».
+    last_session: Mutex<Option<String>>,
     /// Голос (инкремент 7): озвучка событий локальным TTS. Fail-safe.
     pub voice: std::sync::Arc<crate::voice::Voice>,
     /// Реестр капабилити (инкремент 8): источник истины для агента/панели/MCP.
@@ -115,6 +117,7 @@ impl Daemon {
             persist_pending: AtomicBool::new(false),
             busy: Mutex::new(HashSet::new()),
             last_prompt_at: Mutex::new(HashMap::new()),
+            last_session: Mutex::new(None),
             voice,
             caps: crate::capability::build_registry(),
         }
@@ -261,6 +264,11 @@ impl Daemon {
         self.quiet.load(Ordering::SeqCst)
     }
 
+    /// Сессия последнего уведомления — цель хоткея «Продолжить».
+    pub fn last_session(&self) -> Option<String> {
+        self.last_session.lock().unwrap().clone()
+    }
+
     /// Переключить тихий режим (хоткей/меню): персист + обновление галки в трее.
     pub fn toggle_quiet(self: &std::sync::Arc<Self>) {
         self.set_quiet(!self.is_quiet());
@@ -305,6 +313,10 @@ impl Daemon {
             crate::util::ellipsize(title, 60),
             crate::util::ellipsize(body, 90),
         ));
+        // цель хоткея/кнопки «Продолжить» — сессия последнего уведомления
+        if let Some(sid) = session_id {
+            *self.last_session.lock().unwrap() = Some(sid.to_string());
+        }
         // тихий режим: статистика уже записана выше по потоку, наружу — ничего
         if self.is_quiet() {
             return;

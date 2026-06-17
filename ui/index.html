@@ -361,17 +361,26 @@
   .urow .unum.money { width: 76px; }
   .urow .unum.money.api { color: var(--done); }
 
-  /* ---------- settings ---------- */
-  .settings { padding: 16px 22px 68px; }
+  /* ---------- settings (минимализм: единые сгруппированные карточки) ---------- */
+  .settings { padding: 18px 20px 60px; }
   .settings .stitle {
-    font-size: 10.5px;
-    letter-spacing: 0.8px;
-    text-transform: uppercase;
-    color: var(--faint);
+    font-size: 12px;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--muted);
     font-weight: 600;
-    margin-bottom: 8px;
+    margin: 0 4px 9px;
   }
-  .settings .stitle.sub { margin-top: 20px; }
+  .settings .stitle.sub { margin-top: 24px; }
+  .settings .stitlehint { font-weight: 400; color: var(--faint); font-size: 11px; margin-left: 8px; }
+  /* карточка-группа: всё единым стилем */
+  .scard {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 12px;
+    padding: 0 14px;
+  }
+  .scard + .stitle { } /* зазор задаёт .stitle.sub */
   .srow.sub { padding-left: 18px; }
   .srow .sval { font-size: 12.5px; color: var(--faint); }
   .srow .sval.on { color: var(--done); }
@@ -380,9 +389,8 @@
     align-items: center;
     gap: 10px;
     height: 46px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   }
-  .srow:last-child { border-bottom: none; }
+  .scard > .srow:not(:first-child) { border-top: 1px solid rgba(255, 255, 255, 0.05); }
   .slabel { font-size: 13px; color: var(--text); }
   .shint { font-size: 10.5px; color: var(--faint); margin-left: 6px; }
   .srow .spacer { flex: 1; }
@@ -462,9 +470,9 @@
   /* ---------- бодрость: единая карточка ---------- */
   .stitle .stitlehint { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--faint); margin-left: 8px; }
   .awakecard {
-    background: rgba(255, 255, 255, 0.025);
+    background: rgba(255, 255, 255, 0.03);
     border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 10px;
+    border-radius: 12px;
     padding: 12px 14px;
   }
   .awakehead { display: flex; align-items: center; gap: 9px; }
@@ -1341,6 +1349,7 @@
       <div class="history" id="history" hidden></div>
       <div class="settings" id="settings" hidden>
         <div class="stitle">Основное</div>
+        <div class="scard">
         <div class="srow">
           <span class="slabel">Глобальный хоткей</span>
           <span class="spacer"></span>
@@ -1379,6 +1388,7 @@
           <span class="slabel">Режим логов <span class="shint">собирать метрики (RAM/CPU/события) в jarvis.log</span></span>
           <span class="spacer"></span>
           <input type="checkbox" id="diagnostics" class="toggle">
+        </div>
         </div>
         <div class="stitle sub">Голос<span class="stitlehint">озвучка событий локальным TTS</span></div>
         <div id="voiceCard" class="awakecard"></div>

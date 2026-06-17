@@ -129,9 +129,12 @@ fn main() {
             windows::create_toast(app.handle())?;
             tray::init(&d)?;
 
-            // первый запуск без интеграции с Claude Code — предложить настроить
+            // первый запуск без интеграции — онбординг; иначе показываем панель,
+            // чтобы запуск приложения был видимым (а не «ничего не открылось»).
             if !install::status().integrated() {
                 let _ = windows::create_onboarding(app.handle());
+            } else {
+                windows::show_panel(&d);
             }
 
             // unix-сокет — канал событий от хуков

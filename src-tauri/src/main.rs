@@ -102,6 +102,7 @@ fn main() {
             ipc::voice_set_rate,
             ipc::voice_test,
             ipc::voice_set_mute,
+            ipc::voice_set_duck,
             ipc::session_reply,
             ipc::terminal_focus,
             ipc::toast_resize,

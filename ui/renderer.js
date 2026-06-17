@@ -2775,6 +2775,10 @@ async function renderVoiceCard() {
   row.appendChild(ml);
   row.appendChild(stoggle(v.mute, (on) => window.jarvis.voiceSetMute(on)));
   box.appendChild(row);
+
+  // пауза чужого медиа на время озвучки (как Siri)
+  box.appendChild(arow('Пауза чужого звука',
+    stoggle(v.duck !== false, (on) => window.jarvis.voiceSetDuck(on)), { hairtop: true }));
 }
 
 document.getElementById('diagnostics').addEventListener('change', (e) => {

@@ -22,6 +22,10 @@ const HOOK_SRC: &str = include_str!("../../../bin/jarvis-hook");
 const SHIM_SRC: &str = include_str!("../../../bin/claude-shim");
 const TMUX_CONF_SRC: &str = include_str!("../../../bin/jarvis-tmux.conf");
 const SILERO_SERVER_SRC: &str = include_str!("../../../bin/silero-server.py");
+// MediaRemote-адаптер (BSD-3, ungive/mediaremote-adapter): пауза ЛЮБОГО медиа на
+// время озвучки. Системный perl энтайтлен на MediaRemote — он dlopen-ит фреймворк.
+const MRA_PL_SRC: &str = include_str!("../../../bin/mediaremote-adapter/mediaremote-adapter.pl");
+const MRA_FW_SRC: &[u8] = include_bytes!("../../../bin/mediaremote-adapter/MediaRemoteAdapter.framework/MediaRemoteAdapter");
 
 /// Признак «это наша запись» — путь шима в команде.
 const MARKER: &str = ".jarvis/bin/jarvis-hook";
@@ -128,6 +132,22 @@ fn jarvis_settings_path() -> PathBuf { jarvis_dir().join("settings.json") }
 /* ================= Silero: Python-sidecar (venv + torch + модель) ================= */
 
 fn silero_dir() -> PathBuf { jarvis_dir().join("silero") }
+
+/* ===== MediaRemote-адаптер: пауза чужого медиа на время озвучки ===== */
+fn mra_dir() -> PathBuf { jarvis_dir().join("mediaremote-adapter") }
+
+/// Положить perl-скрипт + фреймворк адаптера в ~/.jarvis. Идемпотентно.
+fn install_mediaremote() {
+    let fw = mra_dir().join("MediaRemoteAdapter.framework");
+    if fs::create_dir_all(&fw).is_err() {
+        return;
+    }
+    atomic_write(&mra_dir().join("mediaremote-adapter.pl"), MRA_PL_SRC);
+    let bin = fw.join("MediaRemoteAdapter");
+    if fs::write(&bin, MRA_FW_SRC).is_ok() {
+        let _ = fs::set_permissions(&bin, fs::Permissions::from_mode(0o755));
+    }
+}
 fn silero_server_py() -> PathBuf { silero_dir().join("silero-server.py") }
 fn silero_venv() -> PathBuf { silero_dir().join("venv") }
 fn silero_python() -> PathBuf { silero_venv().join("bin/python") }
@@ -539,6 +559,9 @@ pub fn install(progress: &Progress, proxy: Option<&str>) {
     // --- Фаза «Транспорт» (шим claude + tmux.conf + PATH-блок) ---
     progress(Step::start("Транспорт"));
     install_tmux_transport(progress);
+
+    // медиа-адаптер для паузы чужого звука (мгновенно, тихо)
+    install_mediaremote();
 
     // --- Фаза «Голос» (Silero) — не-фатально ---
     progress(Step::start("Голос"));

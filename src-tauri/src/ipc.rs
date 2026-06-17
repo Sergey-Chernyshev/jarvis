@@ -378,6 +378,7 @@ pub fn voice_get(app: AppHandle) -> Value {
         "speaker": d.voice.speaker(),
         "rate": d.voice.rate(),
         "mute": d.voice.is_muted(),
+        "duck": d.voice.duck_enabled(),
         // Silero v4_ru — фиксированный набор спикеров
         "speakers": ["aidar", "baya", "kseniya", "xenia", "eugene"],
         // темпы речи (медленнее → быстрее)
@@ -421,6 +422,16 @@ pub fn voice_test(app: AppHandle) {
 #[tauri::command]
 pub fn voice_set_mute(app: AppHandle, on: bool) {
     Daemon::get(&app).voice.set_mute(on);
+}
+
+/// Пауза чужого медиа на время озвучки — тумблер + сохранить.
+#[tauri::command]
+pub fn voice_set_duck(app: AppHandle, on: bool) {
+    let d = Daemon::get(&app);
+    d.voice.set_duck(on);
+    let mut patch = serde_json::Map::new();
+    patch.insert("duckOthers".into(), Value::Bool(on));
+    d.settings.set_voice(patch);
 }
 
 /// Ответ в сессию: tmux-вставка в пану нашего сервера (-L jarvis).

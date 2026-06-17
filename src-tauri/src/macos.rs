@@ -189,3 +189,38 @@ pub fn place_toast(win: &WebviewWindow, w: f64, h: f64) {
         let _: () = msg_send![window, setFrame: frame, display: true];
     });
 }
+
+/* ===== аудио-шторка: пауза ЛЮБОГО чужого медиа на время озвучки =====
+ * Через ungive/mediaremote-adapter: системный /usr/bin/perl энтайтлен на
+ * MediaRemote, dlopen-ит наш фреймворк и шлёт pause/play текущему now-playing
+ * (браузер/YouTube/Spotify/Music/Яндекс — что угодно). На macOS 26 это
+ * единственный рабочий путь (прямые MediaRemote-команды закрыты энтайтлментом). */
+
+fn mra_run(args: &[&str]) -> Option<String> {
+    let dir = crate::util::jarvis_dir().join("mediaremote-adapter");
+    let pl = dir.join("mediaremote-adapter.pl");
+    if !pl.exists() {
+        return None;
+    }
+    let fw = dir.join("MediaRemoteAdapter.framework");
+    let out = std::process::Command::new("/usr/bin/perl")
+        .arg(&pl)
+        .arg(&fw)
+        .args(args)
+        .output()
+        .ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Играет ли сейчас какое-либо медиа (now-playing).
+pub fn media_is_playing() -> bool {
+    mra_run(&["get"]).map(|s| s.contains("\"playing\":true")).unwrap_or(false)
+}
+/// Пауза текущего now-playing (любой источник).
+pub fn media_pause() {
+    let _ = mra_run(&["send", "1"]);
+}
+/// Возобновить now-playing.
+pub fn media_play() {
+    let _ = mra_run(&["send", "0"]);
+}

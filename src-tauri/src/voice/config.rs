@@ -10,6 +10,7 @@ pub struct VoiceConfig {
     /// темп речи Silero: x-slow|slow|medium|fast|x-fast
     pub rate: String,
     pub mute: bool,
+    pub duck_others: bool,      // пауза чужого медиа на время озвучки
     pub verbosity: String,      // "short" | "descriptive"
     pub ev_stop: bool,
     pub ev_notification: bool,
@@ -23,7 +24,7 @@ impl Default for VoiceConfig {
         VoiceConfig {
             engine: "silero".into(), speaker: String::new(),
             // лучшие дефолты Silero: 48 кГц + темп «fast» (×1.2 бодрее, не тараторит)
-            sample_rate: 48000, rate: "fast".into(), mute: false, verbosity: "short".into(),
+            sample_rate: 48000, rate: "fast".into(), mute: false, duck_others: true, verbosity: "short".into(),
             ev_stop: true, ev_notification: true, ev_stop_failure: true,
             ev_subagent_stop: false, ev_session_end: false,
         }
@@ -44,6 +45,7 @@ impl VoiceConfig {
             sample_rate: v.and_then(|v| v.get("sampleRate")).and_then(Value::as_u64).unwrap_or(d.sample_rate as u64) as u32,
             rate: s("rate", &d.rate),
             mute: b("mute", d.mute),
+            duck_others: b("duckOthers", d.duck_others),
             verbosity: s("verbosity", &d.verbosity),
             ev_stop: ev("stop", d.ev_stop),
             ev_notification: ev("notification", d.ev_notification),

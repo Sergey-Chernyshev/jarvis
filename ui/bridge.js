@@ -34,6 +34,7 @@
     voiceSetRate: (rate) => invoke('voice_set_rate', { rate }),
     voiceTest: () => invoke('voice_test'),
     voiceSetMute: (on) => invoke('voice_set_mute', { on }),
+    voiceSetDuck: (on) => invoke('voice_set_duck', { on }),
     getCommands: (sessionId) => invoke('commands_get', { sessionId }),
     setModel: (sessionId, model) => invoke('session_set_model', { sessionId, model }),
     setEffort: (sessionId, level) => invoke('session_set_effort', { sessionId, level }),

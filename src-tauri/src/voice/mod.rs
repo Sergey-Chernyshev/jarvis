@@ -32,6 +32,8 @@ pub struct Voice {
     sample_rate: u32,
     queue: Arc<(Mutex<SpeechQueue>, Condvar)>,
     mute: Arc<AtomicBool>,
+    duck: AtomicBool,        // настройка: паузить чужое медиа на время озвучки
+    ducked: AtomicBool,      // сейчас держим чужое медиа на паузе (мы поставили)
     sidecar: Arc<sidecar::Sidecar>,
     app: tauri::AppHandle, // для удержания/продления тоста на время речи
 }
@@ -56,6 +58,8 @@ impl Voice {
             sample_rate: cfg.sample_rate,
             queue: Arc::new((Mutex::new(SpeechQueue::new()), Condvar::new())),
             mute: Arc::new(AtomicBool::new(cfg.mute)),
+            duck: AtomicBool::new(cfg.duck_others),
+            ducked: AtomicBool::new(false),
             sidecar,
             app,
         });
@@ -88,6 +92,47 @@ impl Voice {
     }
     pub fn rate(&self) -> String { self.rate.lock().unwrap().clone() }
 
+    /* ===== аудио-шторка: пауза чужого медиа на время озвучки ===== */
+
+    pub fn set_duck(&self, on: bool) {
+        self.duck.store(on, Ordering::SeqCst);
+        if !on { self.force_unduck(); }
+    }
+    pub fn duck_enabled(&self) -> bool { self.duck.load(Ordering::SeqCst) }
+
+    /// Включено и что-то играет → пауза (запоминаем, что паузили мы).
+    fn ensure_ducked(&self) {
+        if self.duck.load(Ordering::SeqCst)
+            && !self.ducked.load(Ordering::SeqCst)
+            && crate::macos::media_is_playing()
+        {
+            crate::macos::media_pause();
+            self.ducked.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Немедленно вернуть медиа, если мы его паузили.
+    fn force_unduck(&self) {
+        if self.ducked.swap(false, Ordering::SeqCst) {
+            crate::macos::media_play();
+        }
+    }
+
+    /// После реплики: если очередь пуста — вернуть медиа с дебаунсом 400мс
+    /// (чтобы между подряд идущими тостами не мигало пауза→плей→пауза).
+    fn maybe_unduck(self: &Arc<Self>) {
+        if !self.ducked.load(Ordering::SeqCst) {
+            return;
+        }
+        let me = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            if me.queue.0.lock().unwrap().is_empty() {
+                me.force_unduck();
+            }
+        });
+    }
+
     /// Тик супервизора: перезапустить Silero-сайдкар, если он умер.
     pub fn tick(&self) {
         self.sidecar.restart_if_dead();
@@ -95,12 +140,16 @@ impl Voice {
 
     /// Погасить Silero-сайдкар на выходе демона.
     pub fn dispose(&self) {
+        self.force_unduck(); // не оставить чужое медиа на паузе
         self.sidecar.stop();
     }
 
     pub fn set_mute(&self, on: bool) {
         self.mute.store(on, Ordering::SeqCst);
-        if on { self.player.stop(); } // мгновенно глушим текущую
+        if on {
+            self.player.stop(); // мгновенно глушим текущую
+            self.force_unduck(); // замьютили Jarvis → вернуть чужое медиа
+        }
     }
     pub fn is_muted(&self) -> bool { self.mute.load(Ordering::SeqCst) }
 
@@ -185,9 +234,11 @@ impl Voice {
                     if let Some(tid) = &u.toast_id {
                         crate::windows::toast_hold(&self.app, tid);
                     }
+                    self.ensure_ducked(); // зашторить чужое медиа на время речи
                     let t_play = crate::metrics::now();
                     self.player.play_blocking(wav);
                     crate::metrics::record("tts_play", t_play, serde_json::json!({ "chars": u.text.chars().count() }));
+                    self.maybe_unduck(); // очередь пуста → вернуть медиа (с дебаунсом)
                     // речь закончилась → закрыть карточку через 3.5с
                     if let Some(tid) = &u.toast_id {
                         crate::windows::toast_extend(&self.app, tid, 3500);

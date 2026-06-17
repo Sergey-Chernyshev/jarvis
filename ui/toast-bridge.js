@@ -22,5 +22,6 @@
     onExtend: (cb) => { listen('toast-extend', (e) => cb(e.payload)); },
     click: (sessionId) => invoke('toast_click', { sessionId }),
     resize: (h) => invoke('toast_resize', { h }),
+    continueSession: (sessionId) => invoke('session_continue', { sessionId }),
   };
 })();

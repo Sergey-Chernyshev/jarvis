@@ -108,6 +108,27 @@ pub fn register_quiet_hotkey(d: &Arc<Daemon>) {
     }
 }
 
+/// Аккселератор «Продолжить»: настройка `continueHotkey`, дефолт ⌘⌥C.
+pub fn continue_accelerator(d: &Arc<Daemon>) -> String {
+    let s = d.settings.string("continueHotkey");
+    if s.is_empty() { "Command+Alt+C".to_string() } else { s }
+}
+
+pub fn is_continue_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
+    continue_accelerator(d)
+        .parse::<Shortcut>()
+        .map(|s| &s == shortcut)
+        .unwrap_or(false)
+}
+
+pub fn register_continue_hotkey(d: &Arc<Daemon>) {
+    let accel = continue_accelerator(d);
+    let gs = d.app.global_shortcut();
+    if !gs.is_registered(accel.as_str()) {
+        let _ = gs.register(accel.as_str());
+    }
+}
+
 #[tauri::command]
 pub fn settings_set(app: AppHandle, patch: Value) -> Value {
     let d = Daemon::get(&app);
@@ -438,6 +459,13 @@ pub fn voice_set_duck(app: AppHandle, on: bool) {
 #[tauri::command]
 pub async fn session_reply(app: AppHandle, session_id: String, text: String) -> Value {
     reply_core(&Daemon::get(&app), session_id, text).await
+}
+
+/// Продолжить сессию (кнопка на тосте / хоткей): послать «продолжай» — например
+/// после прерывания сном. Под капотом — обычная доставка в пану.
+#[tauri::command]
+pub async fn session_continue(app: AppHandle, session_id: String) -> Value {
+    reply_core(&Daemon::get(&app), session_id, "продолжай".into()).await
 }
 
 /// Ядро отправки в сессию — общее для IPC-команды панели и капабилити

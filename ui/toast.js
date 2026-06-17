@@ -144,8 +144,9 @@ window.toast.onAdd((d) => {
     card.appendChild(body);
   }
 
-  // действие «Продолжить» — шлёт в сессию «продолжай» (напр. после прерывания сном)
-  if (d.sessionId) {
+  // действие «Продолжить» — только для застрявших сессий (ждёт / лимит /
+  // оборвалась, напр. сном), но НЕ для нормально завершённых (done).
+  if (d.sessionId && d.kind !== 'done') {
     const cont = document.createElement('button');
     cont.className = 'cont';
     cont.textContent = 'Продолжить';

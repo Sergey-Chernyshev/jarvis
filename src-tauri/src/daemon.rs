@@ -35,7 +35,6 @@ pub struct Daemon {
     pub limits: crate::limits::Limits,
     pub power: crate::power::Power,
     pub tail: tail::TailHandle,
-    pub panel_focus_mode: AtomicBool,
     /// Тихий режим (разработчик): демон жив и копит статистику с хуков, но наружу
     /// ничего — ни тостов, ни голоса, ни авто-показа. Панель открываема вручную.
     pub quiet: AtomicBool,
@@ -105,7 +104,6 @@ impl Daemon {
             limits: crate::limits::Limits::new(),
             power: crate::power::Power::new(),
             tail: tail::TailHandle::new(),
-            panel_focus_mode: AtomicBool::new(false),
             quiet: AtomicBool::new(quiet0),
             effort_levels: Mutex::new(
                 ["low", "medium", "high", "xhigh", "max"].map(String::from).to_vec(),
@@ -165,7 +163,16 @@ impl Daemon {
     }
 
     pub fn write_state_now(&self) {
-        let arr: Vec<Session> = self.sessions.lock().unwrap().values().cloned().collect();
+        // Провизорные (adopted) сессии не персистим — они всегда заново выводятся
+        // из живого tmux на следующей сверке, иначе протухнут в state.json.
+        let arr: Vec<Session> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|s| !s.adopted)
+            .cloned()
+            .collect();
         let _ = std::fs::create_dir_all(jarvis_dir());
         if let Ok(json) = serde_json::to_string(&arr) {
             let _ = std::fs::write(Self::state_file(), json + "\n");
@@ -1048,11 +1055,15 @@ impl Daemon {
     /* Жёстко убитый терминал не шлёт SessionEnd. Раз в 30с сверяем tmux-паны;
      * working-сессии без событий 15 минут считаем потерянными. */
 
-    pub async fn sweep_sessions(self: &std::sync::Arc<Self>) {
-        let alive = match tmux::list_panes().await {
-            Ok(set) => set,                                   // None — tmux не установлен
-            Err(()) => Some(std::collections::HashSet::new()), // ошибка = сервер пуст
+    pub async fn reconcile_sessions(self: &std::sync::Arc<Self>) {
+        // Двунаправленная сверка с живым tmux: удаляем мёртвые паны И подхватываем
+        // живые осиротевшие (поднятые мимо демона — например, пока он был убит).
+        let meta = match tmux::list_panes_meta().await {
+            Ok(m) => m,                       // None — tmux не установлен (реестр не трогаем)
+            Err(()) => Some(Vec::new()),      // ошибка = сервер пуст
         };
+        let alive: Option<std::collections::HashSet<String>> =
+            meta.as_ref().map(|v| v.iter().map(|p| p.pane_id.clone()).collect());
         let mut changed = false;
         {
             let mut sessions = self.sessions.lock().unwrap();
@@ -1080,6 +1091,13 @@ impl Daemon {
                     s.status = Status::Idle;
                     s.detail = "связь потеряна — событий нет 15 минут".into();
                     freeze_board(s); // оборванная связь — задачи «в работе» прерваны
+                    changed = true;
+                }
+            }
+
+            // --- адопт: живые паны, не закреплённые ни за одной сессией ---
+            if let Some(panes) = &meta {
+                if adopt_live_panes(&mut sessions, panes, now) > 0 {
                     changed = true;
                 }
             }
@@ -1494,6 +1512,49 @@ fn freeze_board(s: &mut Session) {
 /// `session-end` и был заменён новым в той же пане. Снимаем призраков, иначе
 /// ответ, адресованный призраку, уйдёт в живую сессию той же паны (мисроутинг).
 /// Возвращает id выселенных сессий — для лога и обновления UI.
+/// Подхват живых tmux-пан, не закреплённых ни за одной сессией реестра. Для
+/// каждой такой паны заводим провизорную сессию (ключ `pane:<id>`, `adopted`,
+/// `status=Idle` → кнопка «Продолжить» скрыта, звук/уведомление не дёргаются).
+/// Сама выселится через [`evict_pane`], как только из её паны прилетит настоящий
+/// хук с реальным `session_id`. Возвращает число подхваченных пан.
+fn adopt_live_panes(
+    sessions: &mut HashMap<String, Session>,
+    panes: &[crate::tmux::PaneInfo],
+    now: i64,
+) -> usize {
+    let claimed: std::collections::HashSet<String> =
+        sessions.values().filter_map(|s| s.tmux_pane.clone()).collect();
+    let mut adopted = 0;
+    for p in panes {
+        if claimed.contains(&p.pane_id) {
+            continue; // пана уже за настоящей/восстановленной сессией
+        }
+        let id = format!("pane:{}", p.pane_id);
+        if sessions.contains_key(&id) {
+            continue; // подхвачена в прошлом цикле
+        }
+        let mut s = Session::new(id.clone(), now);
+        s.adopted = true;
+        s.status = Status::Idle;
+        s.detail = "восстановлена".into();
+        s.tmux_pane = Some(p.pane_id.clone());
+        if !p.session_name.is_empty() {
+            s.tmux_name = Some(p.session_name.clone());
+        }
+        if !p.cwd.is_empty() {
+            s.project = Some(basename(&p.cwd));
+            s.cwd = Some(p.cwd.clone());
+        }
+        if p.pid > 0 {
+            s.pid = Some(p.pid);
+        }
+        crate::log::line(&format!("[adopt] пана {} → {}", p.pane_id, id));
+        sessions.insert(id, s);
+        adopted += 1;
+    }
+    adopted
+}
+
 fn evict_pane(sessions: &mut HashMap<String, Session>, keep_sid: &str, pane: &str) -> Vec<String> {
     let ghosts: Vec<String> = sessions
         .iter()
@@ -1543,6 +1604,64 @@ mod tests {
 
         assert!(evicted.is_empty());
         assert_eq!(m.len(), 2, "две параллельные сессии в разных панах живут обе");
+    }
+
+    /* ----- адопт живых пан при рестарте демона ----- */
+
+    fn pane(id: &str, name: &str, cwd: &str, pid: i64) -> crate::tmux::PaneInfo {
+        crate::tmux::PaneInfo {
+            pane_id: id.to_string(),
+            session_name: name.to_string(),
+            cwd: cwd.to_string(),
+            pid,
+        }
+    }
+
+    #[test]
+    fn adopt_picks_up_unclaimed_pane_as_provisional() {
+        let mut m = HashMap::new();
+        m.insert("real".into(), sess("real", Some("%1"))); // уже известна
+
+        let panes = vec![
+            pane("%1", "proj-1", "/home/u/proj", 100), // занята → пропустить
+            pane("%2", "other-2", "/home/u/other", 200), // осиротевшая → адопт
+        ];
+        let n = adopt_live_panes(&mut m, &panes, 42);
+
+        assert_eq!(n, 1, "подхватили ровно одну осиротевшую пану");
+        let s = m.get("pane:%2").expect("провизорная сессия заведена");
+        assert!(s.adopted);
+        assert_eq!(s.status, Status::Idle, "нейтральный статус — без кнопки/звука");
+        assert_eq!(s.tmux_pane.as_deref(), Some("%2"));
+        assert_eq!(s.tmux_name.as_deref(), Some("other-2"));
+        assert_eq!(s.cwd.as_deref(), Some("/home/u/other"));
+        assert_eq!(s.project.as_deref(), Some("other"));
+        assert_eq!(s.pid, Some(200));
+        assert!(m.contains_key("real"), "настоящую сессию не трогаем");
+    }
+
+    #[test]
+    fn adopt_is_idempotent_across_cycles() {
+        let mut m = HashMap::new();
+        let panes = vec![pane("%5", "p", "/tmp/p", 9)];
+        assert_eq!(adopt_live_panes(&mut m, &panes, 0), 1);
+        assert_eq!(adopt_live_panes(&mut m, &panes, 0), 0, "второй проход не дублирует");
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn real_hook_evicts_adopted_provisional() {
+        // провизорная держит пану %3; настоящий хук из той же паны её выселяет
+        let mut m = HashMap::new();
+        adopt_live_panes(&mut m, &[pane("%3", "p", "/tmp/p", 7)], 0);
+        assert!(m.contains_key("pane:%3"));
+
+        m.insert("real-sid".into(), sess("real-sid", Some("%3")));
+        let evicted = evict_pane(&mut m, "real-sid", "%3");
+
+        assert_eq!(evicted, vec!["pane:%3".to_string()], "провизорная снимается");
+        assert!(m.contains_key("real-sid"));
+        assert!(!m.contains_key("pane:%3"));
     }
 
     /* ----- доска задач (инкремент 6) ----- */

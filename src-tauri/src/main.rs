@@ -181,20 +181,25 @@ fn main() {
             if window.label() != "main" {
                 return;
             }
-            let d = Daemon::get(window.app_handle());
             match event {
                 // ⌘W и крестик — просто прячем, демон живёт
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
                     let _ = window.hide();
                 }
-                // raycast-режим: потеря фокуса — спрятаться
+                // клик вне панели — спрятать. Но с задержкой и перепроверкой:
+                // навигация стрелками перерисовывает DOM (render() пересоздаёт и
+                // рефокусит queryEl), отчего WKWebView даёт ложный blur→focus за
+                // один кадр. Гасим только если фокус реально ушёл из приложения и
+                // не вернулся за 120 мс — иначе панель моргала бы на каждой стрелке.
                 tauri::WindowEvent::Focused(false) => {
-                    if d.panel_focus_mode.load(std::sync::atomic::Ordering::SeqCst)
-                        && window.is_visible().unwrap_or(false)
-                    {
-                        let _ = window.hide();
-                    }
+                    let w = window.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(120));
+                        if !w.is_focused().unwrap_or(false) && w.is_visible().unwrap_or(false) {
+                            let _ = w.hide();
+                        }
+                    });
                 }
                 _ => {}
             }
@@ -214,11 +219,11 @@ fn main() {
 
 /// Все периодические задачи демона — расписание из Electron-версии.
 fn spawn_timers(d: &Arc<Daemon>) {
-    // чистка умерших сессий: сразу и раз в 30с
+    // сверка с живым tmux (удаление мёртвых + адопт живых осиротевших): сразу и раз в 30с
     let dd = d.clone();
     tauri::async_runtime::spawn(async move {
         loop {
-            dd.sweep_sessions().await;
+            dd.reconcile_sessions().await;
             tokio::time::sleep(Duration::from_secs(30)).await;
         }
     });

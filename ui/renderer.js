@@ -210,7 +210,7 @@ function render() {
 
   list.forEach((s, i) => {
     const row = document.createElement('div');
-    row.className = `row ${s.status}${i === sel ? ' selected' : ''}`;
+    row.className = `row ${s.status}${s.adopted ? ' adopted' : ''}${i === sel ? ' selected' : ''}`;
     row.title = [s.cwd, s.title, ...(s.todoList || [])].filter(Boolean).join('\n');
 
     const dot = document.createElement('span');
@@ -239,6 +239,16 @@ function render() {
       hostBadge.textContent = host;
     }
 
+    // подхвачена сканом живого tmux (рестарт демона) — настоящий статус неизвестен,
+    // пока не прилетит первый хук; помечаем нейтрально, без действий
+    let adoptedBadge = null;
+    if (s.adopted) {
+      adoptedBadge = document.createElement('span');
+      adoptedBadge.className = 'badge adopted';
+      adoptedBadge.textContent = 'восстановлена';
+      adoptedBadge.title = 'Подхвачена из tmux после перезапуска — ждём первое событие';
+    }
+
     const summary = document.createElement('span');
     summary.className = 'summary';
     // контекст по убыванию точности: текущая задача → саммари последних задач → промпт → ai-title
@@ -261,6 +271,7 @@ function render() {
     if (branch) row.appendChild(branch);
     row.appendChild(badge);
     if (hostBadge) row.appendChild(hostBadge);
+    if (adoptedBadge) row.appendChild(adoptedBadge);
     row.append(summary);
 
     if (s.pinned) { // чистая метка-закладка; клик — открепить (пин ставится ⌘P)

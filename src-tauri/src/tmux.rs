@@ -85,22 +85,54 @@ pub async fn paste_slash(pane: &str, text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Живые паны сервера jarvis. Ok(None) — tmux не установлен (паны не проверяем),
-/// Err → сервер пуст (любая ошибка tmux трактуется как «пан нет»).
-pub async fn list_panes() -> Result<Option<std::collections::HashSet<String>>, ()> {
+/// Метаданные живой паны для адопта осиротевших сессий при рестарте демона.
+#[derive(Debug, Clone)]
+pub struct PaneInfo {
+    pub pane_id: String,
+    pub session_name: String,
+    pub cwd: String,
+    pub pid: i64,
+}
+
+/// Живые паны сервера jarvis с метаданными (id, имя сессии, cwd, pid процесса
+/// паны). Семантика арм: `Ok(Some)` — успех, `Ok(None)` — tmux не установлен
+/// (реестр не трогаем), `Err` — ошибка/пустой сервер.
+/// Разделитель полей — таб: ни id, ни имя сессии, ни pid его не содержат, а путь
+/// идёт последним полем.
+pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
     let mut cmd = tokio::process::Command::new("tmux");
-    cmd.args(["-L", "jarvis", "list-panes", "-a", "-F", "#{pane_id}"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
+    cmd.args([
+        "-L",
+        "jarvis",
+        "list-panes",
+        "-a",
+        "-F",
+        "#{pane_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}",
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .kill_on_drop(true);
     match tokio::time::timeout(Duration::from_secs(4), cmd.output()).await {
         Ok(Ok(out)) if out.status.success() => Ok(Some(
             String::from_utf8_lossy(&out.stdout)
                 .lines()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
+                .filter_map(|line| {
+                    let mut it = line.splitn(4, '\t');
+                    let pane_id = it.next()?.trim();
+                    if pane_id.is_empty() {
+                        return None;
+                    }
+                    let session_name = it.next().unwrap_or("").trim().to_string();
+                    let pid = it.next().unwrap_or("").trim().parse::<i64>().unwrap_or(0);
+                    let cwd = it.next().unwrap_or("").trim().to_string();
+                    Some(PaneInfo {
+                        pane_id: pane_id.to_string(),
+                        session_name,
+                        cwd,
+                        pid,
+                    })
+                })
                 .collect(),
         )),
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),

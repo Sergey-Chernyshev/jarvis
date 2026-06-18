@@ -165,6 +165,9 @@
     flex: none;
   }
   .row.selected { background: var(--row-hover); }
+  /* подхваченная из tmux: приглушаем — это не «живой» статус, а ожидание события */
+  .row.adopted { opacity: 0.66; }
+  .row.adopted .dot { background: var(--faint); }
 
   .dot {
     width: 7px;
@@ -210,6 +213,7 @@
   }
 
   .badge.host { color: var(--faint); border-color: rgba(255, 255, 255, 0.06); }
+  .badge.adopted { color: var(--faint); border-color: rgba(255, 255, 255, 0.06); text-transform: none; }
 
   .gitbranch {
     font-family: var(--mono);

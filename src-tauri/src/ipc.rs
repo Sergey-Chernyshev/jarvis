@@ -680,3 +680,9 @@ pub async fn agent_send(app: AppHandle, message: String, session_id: Option<Stri
 
     json!({ "ok": true })
 }
+
+/// Открыть (или сфокусировать) окно чата с агентом (фаза 7).
+#[tauri::command]
+pub fn agent_chat_open(app: AppHandle) {
+    let _ = windows::create_agent_chat(&app);
+}

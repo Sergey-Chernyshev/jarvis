@@ -19,6 +19,8 @@ pub const TOAST_W: f64 = 440.0;
 pub const TOAST_MAX_H: f64 = 480.0;
 pub const ONBOARD_W: f64 = 480.0;
 pub const ONBOARD_H: f64 = 600.0;
+pub const AGENT_W: f64 = 460.0;
+pub const AGENT_H: f64 = 600.0;
 
 pub fn create_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
@@ -67,6 +69,40 @@ pub fn create_onboarding(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             color: None,
         })
         .resizable(false)
+        .minimizable(false)
+        .maximizable(false)
+        .skip_taskbar(true)
+        .shadow(true)
+        .center()
+        .theme(Some(Theme::Dark))
+        .accept_first_mouse(true)
+        .build()?;
+    let _ = win.set_focus();
+    Ok(win)
+}
+
+/// Окно чата с агентом (фаза 7): стеклянное, по центру, ресайзится. Повторный
+/// вызов — показать существующее, а не плодить копии.
+pub fn create_agent_chat(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    if let Some(win) = app.get_webview_window("agent-chat") {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(win);
+    }
+    let win = WebviewWindowBuilder::new(app, "agent-chat", WebviewUrl::App("agent-chat.html".into()))
+        .title("Jarvis · агент")
+        .inner_size(AGENT_W, AGENT_H)
+        .min_inner_size(360.0, 380.0)
+        .visible(true)
+        .decorations(false)
+        .transparent(true)
+        .effects(WindowEffectsConfig {
+            effects: vec![Effect::UnderWindowBackground],
+            state: Some(EffectState::Active),
+            radius: Some(16.0),
+            color: None,
+        })
+        .resizable(true)
         .minimizable(false)
         .maximizable(false)
         .skip_taskbar(true)

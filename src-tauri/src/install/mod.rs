@@ -123,6 +123,50 @@ fn augmented_path() -> String {
     format!("{}:{base}", extra.join(":"))
 }
 fn hook_dst() -> PathBuf { jarvis_dir().join("bin/jarvis-hook") }
+fn mcp_dst() -> PathBuf { jarvis_dir().join("bin/jarvis-mcp") }
+fn mcp_config_dst() -> PathBuf { jarvis_dir().join("jarvis-mcp.json") }
+
+/// Выдать/прочитать токен агента в ~/.jarvis/tokens.json (0600). Самодостаточно:
+/// install/mod.rs компилируется и в jarvis-setup (без `crate::capability`), поэтому
+/// логику токена дублируем минимально. Формат совпадает с `capability::tokens::TokenStore`
+/// (ключ "agent", 64-симв. hex) — приложение читает этот же файл.
+fn ensure_agent_token() -> String {
+    let path = jarvis_dir().join("tokens.json");
+    let mut v: Value = fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}));
+    if let Some(t) = v.get("agent").and_then(|t| t.as_str()) {
+        return t.to_string();
+    }
+    let mut buf = [0u8; 32];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = f.read_exact(&mut buf);
+    }
+    let tok: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("agent".into(), json!(tok));
+    }
+    let _ = fs::create_dir_all(jarvis_dir());
+    if fs::write(&path, serde_json::to_string_pretty(&v).unwrap_or_default() + "\n").is_ok() {
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    tok
+}
+
+/// MCP-конфиг для `claude --strict-mcp-config --mcp-config <это>` (R5): единственный
+/// сервер — наш мост; токен агента (R2) — в env, чтобы мост предъявлял его демону.
+pub fn build_mcp_config(mcp_bin: &str, token: &str) -> Value {
+    json!({
+        "mcpServers": {
+            "jarvis": {
+                "command": mcp_bin,
+                "env": { "JARVIS_TOKEN": token }
+            }
+        }
+    })
+}
 fn shims_dir() -> PathBuf { jarvis_dir().join("shims") }
 fn shim_dst() -> PathBuf { shims_dir().join("claude") }
 fn tmux_conf_dst() -> PathBuf { jarvis_dir().join("tmux.conf") }
@@ -512,6 +556,27 @@ pub fn install(progress: &Progress, proxy: Option<&str>) {
     // --- Фаза «Хуки» ---
     progress(Step::start("Хуки"));
     write_executable(&hook_dst(), HOOK_SRC);
+
+    // R5: мост агента (jarvis-mcp) + токен + MCP-конфиг. Fail-safe: сбой не валит
+    // установку интеграции — просто агент будет недоступен. jarvis-mcp — это
+    // компилируемый бинарь-сиблинг текущего exe (в dev и в бандле .app).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let src = dir.join("jarvis-mcp");
+            if src.exists() {
+                let _ = fs::create_dir_all(mcp_dst().parent().unwrap());
+                if fs::copy(&src, mcp_dst()).is_ok() {
+                    let _ = fs::set_permissions(&mcp_dst(), fs::Permissions::from_mode(0o755));
+                }
+                let token = ensure_agent_token();
+                let cfg = build_mcp_config(&mcp_dst().to_string_lossy(), &token);
+                atomic_write(&mcp_config_dst(), &(serde_json::to_string_pretty(&cfg).unwrap() + "\n"));
+            } else {
+                eprintln!("[jarvis:install] jarvis-mcp рядом с exe не найден — агент будет недоступен");
+            }
+        }
+    }
+
     if !claude_found() {
         progress(Step::info("Хуки", "claude не найден в PATH — хуки подхватятся, когда появится"));
     }
@@ -740,6 +805,13 @@ mod tests {
     use super::*;
 
     const DIR: &str = "/Users/test/.jarvis/shims";
+
+    #[test]
+    fn mcp_config_has_token_and_command() {
+        let cfg = super::build_mcp_config("/x/.jarvis/bin/jarvis-mcp", "feedface");
+        assert_eq!(cfg["mcpServers"]["jarvis"]["command"], "/x/.jarvis/bin/jarvis-mcp");
+        assert_eq!(cfg["mcpServers"]["jarvis"]["env"]["JARVIS_TOKEN"], "feedface");
+    }
 
     #[test]
     fn merge_into_empty() {

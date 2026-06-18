@@ -68,8 +68,22 @@ impl SocketCall for CurlSocket {
 }
 
 fn sock_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    std::path::Path::new(&home).join(".jarvis").join("run.sock")
+    // Та же логика, что util::sock_path в демоне: JARVIS_SOCK → JARVIS_DIR →
+    // ~/.jarvis. Без этого мост всегда бил бы в прод-сокет, и агент из dev-сборки
+    // (JARVIS_DIR=~/.jarvis-dev) попадал бы не в свой демон.
+    if let Ok(s) = std::env::var("JARVIS_SOCK") {
+        if !s.is_empty() {
+            return std::path::PathBuf::from(s);
+        }
+    }
+    let dir = match std::env::var("JARVIS_DIR") {
+        Ok(d) if !d.is_empty() => std::path::PathBuf::from(d),
+        _ => {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            std::path::Path::new(&home).join(".jarvis")
+        }
+    };
+    dir.join("run.sock")
 }
 
 /// Чистое ядро диспетчера JSON-RPC. `None` — для нотификаций (ответ не нужен).

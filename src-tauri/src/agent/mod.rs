@@ -279,6 +279,9 @@ impl ClaudeCliHost {
             .current_dir(std::env::temp_dir())
             .env("JARVIS_IGNORE", "1")
             .env("DISABLE_NON_ESSENTIAL_MODEL_CALLS", "1")
+            // jarvis-mcp (его спавнит claude) наследует сокет НАШЕГО демона —
+            // иначе в dev-сборке агент бил бы в прод-сокет (JARVIS_SOCK→JARVIS_DIR).
+            .env("JARVIS_SOCK", crate::util::sock_path())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())

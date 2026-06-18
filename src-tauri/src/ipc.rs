@@ -665,7 +665,10 @@ pub async fn agent_send(app: AppHandle, message: String, session_id: Option<Stri
     let tools: Vec<String> = reg
         .list_for(&agent.grant)
         .into_iter()
-        .map(|m| format!("mcp__jarvis__{}", m.id))
+        // Claude называет MCP-инструменты mcp__<server>__<tool>, заменяя точки в
+        // id на подчёркивания (проверено живым смоуком: sessions.reply →
+        // mcp__jarvis__sessions_reply). Без этого --tools не совпадал бы с реальными.
+        .map(|m| format!("mcp__jarvis__{}", m.id.replace('.', "_")))
         .collect();
 
     let host = ClaudeCliHost { app: app.clone(), mcp_config };

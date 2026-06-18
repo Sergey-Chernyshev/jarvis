@@ -2,18 +2,37 @@
 //! вызов любой капабилити, кем бы ни инициирован. Живёт в слое истины, не в
 //! транспорте, поэтому необходим всем проекциям (MCP-сервер, in-process).
 //!
-//! Порядок проверок: грант по классу → запрет самоэскалации (settings.set по
-//! защищённому ключу) → подтверждение side-effect → исполнение → аудит.
+//! Порядок проверок: реестр (notfound) → грант по классу (+ поимённый denylist)
+//! → запрет самоэскалации (класс Settings: security-ключи всем + allowlist для
+//! agent/plugin) → подтверждение side-effect (дедлайн 60с) → исполнение
+//! (дедлайн 30с) → аудит каждого исхода.
 
+use std::time::Duration;
 use std::time::Instant;
 
 use serde_json::Value;
 
 use super::audit::{AuditEntry, AuditSink};
 use super::confirm::Confirmer;
-use super::contract::{CallOutput, GateError};
-use super::grant::{Consumer, SECURITY_KEYS};
+use super::contract::{CallOutput, GateError, RiskClass};
+use super::grant::{Consumer, SettingsWrite, SECURITY_KEYS, SETTINGS_ALLOWLIST};
 use super::registry::Registry;
+
+/// Дедлайны гейта (R3). Default — боевые; тесты подставляют короткие.
+#[derive(Clone, Copy, Debug)]
+pub struct GateConfig {
+    pub confirm_timeout: Duration,
+    pub handler_timeout: Duration,
+}
+
+impl Default for GateConfig {
+    fn default() -> Self {
+        GateConfig {
+            confirm_timeout: Duration::from_secs(60),
+            handler_timeout: Duration::from_secs(30),
+        }
+    }
+}
 
 /// Прогнать вызов капабилити через все проверки и (при успехе) исполнить.
 #[allow(clippy::too_many_arguments)]
@@ -25,6 +44,7 @@ pub async fn invoke<C>(
     args: Value,
     confirmer: &dyn Confirmer,
     audit: &dyn AuditSink,
+    cfg: GateConfig,
 ) -> Result<CallOutput, GateError> {
     let t0 = Instant::now();
 
@@ -53,54 +73,72 @@ pub async fn invoke<C>(
         ms,
     };
 
-    // 1. Грант по классу.
-    if !consumer.grant.allows(meta.class) {
+    // 1. Грант по классу (+ поимённый denylist, напр. audit.query агенту).
+    if !consumer.grant.allows_id(meta.id, meta.class) {
         audit.record(&entry_for("denied:class".into(), t0.elapsed().as_millis()));
         return Err(GateError::Denied(format!(
-            "грант '{}' не разрешает класс {}",
-            consumer.id,
-            meta.class.as_str()
+            "грант '{}' не разрешает {} ({})",
+            consumer.id, meta.id, meta.class.as_str()
         )));
     }
 
-    // 2. Запрет самоэскалации: settings.set не вправе трогать security-ключи.
-    if meta.id == "settings.set" {
-        if let Some(key) = touched_security_key(&args) {
+    // 2. Самоэскалация (R7): для класса Settings — security-ключи запрещены ВСЕМ;
+    //    agent/plugin (SettingsWrite::Allowlist) — только ключи из allowlist.
+    if meta.class == RiskClass::Settings {
+        if let Some(key) = touched_key(&args, |k| SECURITY_KEYS.contains(&k)) {
             audit.record(&entry_for("denied:security-key".into(), t0.elapsed().as_millis()));
             return Err(GateError::Denied(format!(
                 "ключ '{key}' защищён — меняется только пользователем через UI"
             )));
         }
+        if consumer.grant.write == SettingsWrite::Allowlist {
+            if let Some(key) = touched_key(&args, |k| !SETTINGS_ALLOWLIST.contains(&k)) {
+                audit.record(&entry_for("denied:settings-key".into(), t0.elapsed().as_millis()));
+                return Err(GateError::Denied(format!(
+                    "ключ '{key}' не в allowlist — агент/плагин не вправе его менять"
+                )));
+            }
+        }
     }
 
-    // 3. Подтверждение side-effect.
+    // 3. Подтверждение side-effect — с дедлайном (R3): нет ответа → Rejected.
     if consumer.grant.needs_confirm(meta.class) {
-        let approved = confirmer.confirm(meta, &args).await;
+        let approved = match tokio::time::timeout(cfg.confirm_timeout, confirmer.confirm(meta, &args)).await {
+            Ok(a) => a,
+            Err(_) => {
+                audit.record(&entry_for("rejected:timeout".into(), t0.elapsed().as_millis()));
+                return Err(GateError::Rejected);
+            }
+        };
         if !approved {
             audit.record(&entry_for("rejected".into(), t0.elapsed().as_millis()));
             return Err(GateError::Rejected);
         }
     }
 
-    // 4. Исполнение через слой капабилити.
-    match (entry.handler)(ctx, args.clone()).await {
-        Ok(value) => {
+    // 4. Исполнение — с дедлайном (R3, fail-safe liveness; эффект at-least-once).
+    match tokio::time::timeout(cfg.handler_timeout, (entry.handler)(ctx, args.clone())).await {
+        Err(_) => {
+            audit.record(&entry_for("failed:timeout".into(), t0.elapsed().as_millis()));
+            Err(GateError::Failed("timeout".into()))
+        }
+        Ok(Ok(value)) => {
             audit.record(&entry_for("ok".into(), t0.elapsed().as_millis()));
             Ok(CallOutput { value, provenance: meta.provenance })
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             audit.record(&entry_for(format!("failed:{e}"), t0.elapsed().as_millis()));
             Err(GateError::Failed(e))
         }
     }
 }
 
-/// Если аргументы `settings.set` пытаются изменить защищённый ключ — вернуть его.
-/// Принимаем обе формы: `{patch:{...}}` и `{...}` напрямую.
-fn touched_security_key(args: &Value) -> Option<String> {
+/// Первый ключ patch (или корня), удовлетворяющий предикату. Принимаем обе формы:
+/// `{patch:{...}}` и `{...}` напрямую.
+fn touched_key(args: &Value, pred: impl Fn(&str) -> bool) -> Option<String> {
     let obj = args
         .get("patch")
         .and_then(|p| p.as_object())
         .or_else(|| args.as_object())?;
-    obj.keys().find(|k| SECURITY_KEYS.contains(&k.as_str())).cloned()
+    obj.keys().find(|k| pred(k.as_str())).cloned()
 }

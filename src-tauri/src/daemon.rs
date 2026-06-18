@@ -57,6 +57,10 @@ pub struct Daemon {
     /// Реестр капабилити (инкремент 8): источник истины для агента/панели/MCP.
     /// Гейт безопасности проходится при каждом вызове через `capability::invoke`.
     pub caps: crate::capability::DaemonRegistry,
+    /// Токены потребителей сокета (R2): резолв token → Consumer (panel недостижим).
+    pub tokens: crate::capability::tokens::TokenStore,
+    /// Реестр ожидающих подтверждений агента (R4) — вне локов Daemon.
+    pub pending: std::sync::Arc<crate::capability::confirm_panel::PendingConfirms>,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -118,6 +122,8 @@ impl Daemon {
             last_session: Mutex::new(None),
             voice,
             caps: crate::capability::build_registry(),
+            tokens: crate::capability::tokens::TokenStore::new(),
+            pending: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
         }
     }
 
@@ -358,6 +364,20 @@ impl Daemon {
     /// Снапшот одной сессии (для эффектов, которым лок не нужен).
     pub fn session(&self, sid: &str) -> Option<Session> {
         self.sessions.lock().unwrap().get(sid).cloned()
+    }
+
+    /// Человекочитаемая метка сессии для карточек подтверждения (проект + кратко).
+    /// Использует поле `Session::project` (уже basename cwd, выставляется редьюсером).
+    /// Нет сессии → короткая форма id.
+    pub fn session_label(&self, sid: &str) -> String {
+        match self.session(sid) {
+            Some(s) => {
+                // project уже содержит basename(cwd) — выставляется в reduce()
+                let proj = s.project.as_deref().unwrap_or("?");
+                format!("{proj} · {}", ellipsize(sid, 8))
+            }
+            None => format!("сессия {}", ellipsize(sid, 8)),
+        }
     }
 
     /// Мутация одной сессии под локом; true — сессия существовала.

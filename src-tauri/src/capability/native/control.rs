@@ -1,6 +1,10 @@
 //! Control-капабилити сессий (§6) — class Control, поэтому гейт ВСЕГДА требует
 //! подтверждения для агента (§8). Делегируют в общие ядра `ipc::reply_core` /
 //! `set_model_core` / `set_effort_core` — тот же путь, что у панели (no dup).
+//!
+//! Мягкие провалы бизнес-логики ({ok:false, needsTmux, …}) возвращаются как
+//! Ok(value) — структура сохраняется нетронутой (нужна рендереру). Только
+//! невалидные входные данные дают Err (до исполнения).
 
 use std::sync::Arc;
 
@@ -33,7 +37,7 @@ pub fn register(reg: &mut DaemonRegistry) {
         make_handler(|d: Arc<Daemon>, args: Value| async move {
             let sid = arg_str(&args, "session_id")?;
             let text = arg_str(&args, "text")?;
-            panel_result(ipc::reply_core(&d, sid, text).await)
+            Ok(ipc::reply_core(&d, sid, text).await)
         }),
     );
 
@@ -62,27 +66,7 @@ pub fn register(reg: &mut DaemonRegistry) {
             } else {
                 return Err("нужно поле 'model' или 'effort'".into());
             };
-            panel_result(res)
+            Ok(res)
         }),
     );
-}
-
-/// Привести панельный ответ ({ok:bool,…}) к Result капабилити: ok→значение,
-/// иначе — внятная ошибка (включая needsTmux).
-fn panel_result(v: Value) -> Result<Value, String> {
-    if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
-        return Ok(v);
-    }
-    let msg = v
-        .get("error")
-        .and_then(|e| e.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            v.get("needsTmux")
-                .and_then(|b| b.as_bool())
-                .filter(|&b| b)
-                .map(|_| "сессия не в tmux — управление недоступно".to_string())
-        })
-        .unwrap_or_else(|| "не удалось выполнить".to_string());
-    Err(msg)
 }

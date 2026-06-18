@@ -4,7 +4,7 @@
 //! рендерер не знает, что под мостом сменился рантайм. Формы ошибок — тоже:
 //! { ok:false, error } / { ok:false, needsTmux, resumeCmd }.
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::sync::Arc;
 use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt;
@@ -130,7 +130,7 @@ pub fn register_continue_hotkey(d: &Arc<Daemon>) {
 }
 
 #[tauri::command]
-pub fn settings_set(app: AppHandle, patch: Value) -> Value {
+pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
     let d = Daemon::get(&app);
     let Some(patch) = patch.as_object() else { return err("bad patch") };
     let mut rest = patch.clone();
@@ -153,14 +153,12 @@ pub fn settings_set(app: AppHandle, patch: Value) -> Value {
             if let Err(e) = register_hotkey(&d, hk) {
                 return err(e);
             }
-            let mut m = Map::new();
-            m.insert("hotkey".into(), json!(hk));
-            d.settings.save(m);
+            let _ = via_gate_panel(&d, "settings.set", json!({ "patch": { "hotkey": hk } })).await;
         }
     }
 
     if !rest.is_empty() {
-        d.settings.save(rest);
+        let _ = via_gate_panel(&d, "settings.set", json!({ "patch": Value::Object(rest) })).await;
     }
     // тумблер «Режим логов» применяем сразу (без перезапуска)
     crate::metrics::set_enabled(d.settings.bool("diagnostics"));
@@ -286,7 +284,8 @@ pub(crate) async fn set_via_slash(
 
 #[tauri::command]
 pub async fn session_set_model(app: AppHandle, session_id: String, model: String) -> Value {
-    set_model_core(&Daemon::get(&app), &session_id, &model).await
+    let d = Daemon::get(&app);
+    via_gate_panel(&d, "sessions.control", json!({ "session_id": session_id, "model": model })).await
 }
 
 /// Ядро смены модели — общее для IPC и капабилити `sessions.control` (инкр. 8).
@@ -301,7 +300,8 @@ pub(crate) async fn set_model_core(d: &Arc<Daemon>, session_id: &str, model: &st
 
 #[tauri::command]
 pub async fn session_set_effort(app: AppHandle, session_id: String, level: String) -> Value {
-    set_effort_core(&Daemon::get(&app), &session_id, &level).await
+    let d = Daemon::get(&app);
+    via_gate_panel(&d, "sessions.control", json!({ "session_id": session_id, "effort": level })).await
 }
 
 /// Ядро смены effort — общее для IPC и капабилити `sessions.control` (инкр. 8).
@@ -455,17 +455,43 @@ pub fn voice_set_duck(app: AppHandle, on: bool) {
     d.settings.set_voice(patch);
 }
 
+/// Прогнать действие панели через гейт (Consumer::panel) и вернуть структурный
+/// панельный Value. Панель авто-одобряет (ConfirmPolicy::Never), confirmer не
+/// вызывается. На Ok — отдаём value капабилити как есть (сохраняя needsTmux/channel);
+/// на Denied/Rejected/Failed/NotFound — панельная ошибка.
+pub(crate) async fn via_gate_panel(d: &Arc<Daemon>, id: &str, args: Value) -> Value {
+    use crate::capability::{self, confirm::AutoApprove, grant::Consumer, GateError};
+    match capability::invoke(
+        &d.caps,
+        d.clone(),
+        &Consumer::panel(),
+        id,
+        args,
+        &AutoApprove,
+        &capability::audit::FileAudit,
+        capability::GateConfig::default(),
+    )
+    .await
+    {
+        Ok(o) => o.value,
+        Err(GateError::Failed(m)) => err(&m),
+        Err(e) => err(e.to_string()),
+    }
+}
+
 /// Ответ в сессию: tmux-вставка в пану нашего сервера (-L jarvis).
 #[tauri::command]
 pub async fn session_reply(app: AppHandle, session_id: String, text: String) -> Value {
-    reply_core(&Daemon::get(&app), session_id, text).await
+    let d = Daemon::get(&app);
+    via_gate_panel(&d, "sessions.reply", json!({ "session_id": session_id, "text": text })).await
 }
 
 /// Продолжить сессию (кнопка на тосте / хоткей): послать «продолжай» — например
 /// после прерывания сном. Под капотом — обычная доставка в пану.
 #[tauri::command]
 pub async fn session_continue(app: AppHandle, session_id: String) -> Value {
-    reply_core(&Daemon::get(&app), session_id, "продолжай".into()).await
+    let d = Daemon::get(&app);
+    via_gate_panel(&d, "sessions.reply", json!({ "session_id": session_id, "text": "продолжай" })).await
 }
 
 /// Ядро отправки в сессию — общее для IPC-команды панели и капабилити
@@ -600,6 +626,16 @@ pub fn toast_click(app: AppHandle, session_id: Option<String>) {
     if let Some(sid) = session_id {
         windows::emit_to_panel(&d.app, "open-session", &sid);
     }
+}
+
+/// Решение пользователя по карточке подтверждения агента (R4). In-process —
+/// вызывается ТОЛЬКО из панели (на сокет не выставлено): агент не может сам себя
+/// одобрить.
+#[tauri::command]
+pub fn agent_confirm(app: AppHandle, nonce: String, approved: bool) -> Value {
+    let d = Daemon::get(&app);
+    let known = d.pending.resolve(&nonce, approved);
+    json!({ "ok": known })
 }
 
 /* ================= служебное ================= */

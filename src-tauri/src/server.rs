@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
-use crate::capability::{self, confirm::AutoDeny, grant::Consumer};
+use crate::capability::{self, grant::Consumer, tokens::TokenStore};
 use crate::daemon::Daemon;
 use crate::util::sock_path;
 
@@ -77,22 +77,35 @@ async fn get_capabilities(State(d): State<Arc<Daemon>>) -> Response {
     ([("content-type", "application/json")], body).into_response()
 }
 
-/// POST /capability — вызов капабилити через гейт. Тело: {consumer, id, args}.
+/// Идентичность сокет-потребителя ТОЛЬКО по токену. panel недостижим извне.
+fn consumer_for(store: &TokenStore, token: Option<&str>) -> Option<Consumer> {
+    store.resolve(token?)
+}
+
+/// POST /capability — вызов капабилити через гейт. Тело: {id, args}.
 /// Это межпроцессная проекция слоя истины (§5): MCP-сервер агента ходит сюда,
 /// гейт (грант/провенанс/аудит) — в демоне, обойти его нельзя.
-///
-/// TODO(фаза 5): подтверждение side-effect требует UI-карточки в панели. Пока
-/// её нет — confirmer = AutoDeny: read работает, control/settings безопасно
-/// отклоняются (а не висят/исполняются молча). PanelConfirmer заменит здесь.
-async fn handle_capability(State(d): State<Arc<Daemon>>, body: Bytes) -> Response {
+/// Идентичность потребителя — ТОЛЬКО по токену из заголовка x-jarvis-token (INV-PANEL).
+async fn handle_capability(
+    State(d): State<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Response {
+    let token = headers.get("x-jarvis-token").and_then(|v| v.to_str().ok());
+    let Some(consumer) = consumer_for(&d.tokens, token) else {
+        return (StatusCode::UNAUTHORIZED, "{\"ok\":false,\"error\":\"нет/неизвестен токен\",\"code\":\"unauthorized\"}").into_response();
+    };
+
     let Ok(req) = serde_json::from_slice::<Value>(&body) else {
         return (StatusCode::BAD_REQUEST, "bad json").into_response();
     };
     let id = req.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
     let args = req.get("args").cloned().unwrap_or_else(|| json!({}));
-    let consumer = match req.get("consumer").and_then(|v| v.as_str()) {
-        Some("panel") => Consumer::panel(),
-        _ => Consumer::agent(),
+
+    let confirmer = crate::capability::confirm_panel::PanelConfirmer {
+        app: d.app.clone(),
+        pending: d.pending.clone(),
+        daemon: d.clone(),
     };
 
     let result = capability::invoke(
@@ -101,8 +114,9 @@ async fn handle_capability(State(d): State<Arc<Daemon>>, body: Bytes) -> Respons
         &consumer,
         &id,
         args,
-        &AutoDeny,
+        &confirmer,
         &capability::audit::FileAudit,
+        capability::GateConfig::default(),
     )
     .await;
 
@@ -121,5 +135,22 @@ fn handle_event(d: &Arc<Daemon>, body: Bytes) -> Response {
             StatusCode::NO_CONTENT.into_response()
         }
         Err(_) => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_or_unknown_token_has_no_consumer() {
+        let store = crate::capability::tokens::TokenStore::at(
+            std::env::temp_dir().join(format!("jarvis-srv-{}.json", std::process::id())),
+        );
+        let agent = store.ensure_agent_token();
+        assert!(consumer_for(&store, None).is_none(), "нет токена → нет потребителя");
+        assert!(consumer_for(&store, Some("bogus")).is_none());
+        // INV-PANEL: валидный agent-токен даёт agent, НИКОГДА не panel
+        assert_eq!(consumer_for(&store, Some(&agent)).unwrap().id, "agent");
     }
 }

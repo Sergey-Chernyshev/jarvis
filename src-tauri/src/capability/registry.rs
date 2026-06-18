@@ -53,7 +53,7 @@ impl<C> Registry<C> {
 
     /// Список метаданных, отфильтрованный грантом (для tools/list).
     pub fn list_for(&self, grant: &Grant) -> Vec<&CapabilityMeta> {
-        self.entries.values().map(|e| &e.meta).filter(|m| grant.allows(m.class)).collect()
+        self.entries.values().map(|e| &e.meta).filter(|m| grant.allows_id(m.id, m.class)).collect()
     }
 
     /// Проекция в MCP tool-определения, отфильтрованная грантом (§5).

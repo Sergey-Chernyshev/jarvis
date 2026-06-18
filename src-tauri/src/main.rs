@@ -115,6 +115,7 @@ fn main() {
             ipc::session_reply,
             ipc::session_continue,
             ipc::agent_confirm,
+            ipc::agent_chat_open,
             ipc::terminal_focus,
             ipc::toast_resize,
             ipc::toast_ready,

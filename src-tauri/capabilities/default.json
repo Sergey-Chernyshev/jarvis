@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Панель, тосты и онбординг: события ядра + запись в буфер обмена",
-  "windows": ["main", "toast", "onboarding"],
+  "windows": ["main", "toast", "onboarding", "agent-chat"],
   "permissions": [
     "core:default",
     "core:window:allow-close",

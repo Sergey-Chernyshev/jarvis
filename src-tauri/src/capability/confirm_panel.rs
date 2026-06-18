@@ -126,8 +126,8 @@ impl Confirmer for PanelConfirmer {
             let _guard = Guard { pending: &self.pending, nonce: nonce.clone() };
 
             let rx = self.pending.register(nonce.clone());
-            let _ = self.app.emit_to(
-                "main",
+            // глобально — карточку ловит окно чата агента (agent-chat), а не только панель
+            let _ = self.app.emit(
                 "agent:confirm",
                 json!({
                     "nonce": nonce,

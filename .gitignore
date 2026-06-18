@@ -4,3 +4,4 @@ node_modules/
 target/
 dist/
 src-tauri/gen/
+.worktrees/

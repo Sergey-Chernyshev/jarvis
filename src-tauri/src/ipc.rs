@@ -644,3 +644,36 @@ pub fn agent_confirm(app: AppHandle, nonce: String, approved: bool) -> Value {
 pub fn reconcile_limit(d: &Arc<Daemon>) {
     limits::reconcile(d);
 }
+
+/* ================= агент-хост (фаза 5) ================= */
+
+/// Отправить сообщение агенту и немедленно вернуть `{ok:true}`.
+///
+/// Потоковые события поступают через канал `agent:event` (тип `AgentEvent`).
+/// `session_id` — необязателен; при наличии используется для возобновления (--resume).
+#[tauri::command]
+pub async fn agent_send(app: AppHandle, message: String, session_id: Option<String>) -> Value {
+    use crate::agent::ClaudeCliHost;
+    use crate::capability::{build_registry, grant::Consumer};
+    use crate::util::jarvis_dir;
+
+    let mcp_config = jarvis_dir().join("jarvis-mcp.json").to_string_lossy().to_string();
+
+    // Собрать список инструментов из реестра капабилити агента
+    let reg = build_registry();
+    let agent = Consumer::agent();
+    let tools: Vec<String> = reg
+        .list_for(&agent.grant)
+        .into_iter()
+        .map(|m| format!("mcp__jarvis__{}", m.id))
+        .collect();
+
+    let host = ClaudeCliHost { app: app.clone(), mcp_config };
+    let resume = session_id.clone();
+
+    tauri::async_runtime::spawn(async move {
+        host.run(&message, &tools, resume.as_deref()).await;
+    });
+
+    json!({ "ok": true })
+}

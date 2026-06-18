@@ -7,6 +7,8 @@
 
 #[allow(dead_code)] // проекции/фасады подключаются по фазам (инкр. 8)
 mod capability;
+#[allow(dead_code)] // UI-потребитель подключается в фазе 7 (chat UI)
+mod agent;
 mod claude_bin;
 mod commands_catalog;
 mod daemon;
@@ -126,6 +128,7 @@ fn main() {
             onboarding::integration_remove,
             onboarding::model_delete,
             onboarding::quiet_set,
+            ipc::agent_send,
         ])
         .setup(|app| {
             // чистое меню-бар приложение: без иконки в доке

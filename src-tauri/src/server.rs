@@ -103,6 +103,7 @@ async fn handle_capability(State(d): State<Arc<Daemon>>, body: Bytes) -> Respons
         args,
         &AutoDeny,
         &capability::audit::FileAudit,
+        capability::GateConfig::default(),
     )
     .await;
 

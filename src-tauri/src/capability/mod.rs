@@ -21,7 +21,7 @@ pub mod native;
 
 pub use confirm::{AutoApprove, AutoDeny, Confirmer};
 pub use contract::{CallOutput, CapabilityMeta, GateError, Provenance, RiskClass};
-pub use gate::invoke;
+pub use gate::{invoke, GateConfig};
 pub use grant::{ConfirmPolicy, Consumer, Grant, SettingsWrite};
 pub use registry::{make_handler, Registry};
 
@@ -44,6 +44,7 @@ mod tests {
     use super::audit::MemAudit;
     use super::confirm::{AutoApprove, AutoDeny};
     use super::contract::{CapabilityMeta, GateError, Provenance, RiskClass};
+    use super::gate::GateConfig;
     use super::grant::{ConfirmPolicy, Consumer};
     use super::registry::{make_handler, Registry};
     use serde_json::json;
@@ -91,6 +92,19 @@ mod tests {
             },
             make_handler(|_ctx: (), _args| async move { Err("сервис недоступен".to_string()) }),
         );
+        reg.register(
+            CapabilityMeta {
+                id: "slow.read",
+                class: RiskClass::Read,
+                provenance: Provenance::Trusted,
+                description: "висит дольше дедлайна хендлера",
+                input_schema: json!({"type":"object"}),
+            },
+            make_handler(|_ctx: (), _args| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                Ok(json!({"slept": true}))
+            }),
+        );
         reg
     }
 
@@ -99,7 +113,7 @@ mod tests {
     async fn read_auto_allowed_records_audit() {
         let reg = test_registry();
         let audit = MemAudit::new();
-        let out = super::invoke(&reg, (), &Consumer::agent(), "echo.read", json!({"x":1}), &AutoApprove, &audit)
+        let out = super::invoke(&reg, (), &Consumer::agent(), "echo.read", json!({"x":1}), &AutoApprove, &audit, GateConfig::default())
             .await
             .expect("read должен пройти");
         assert_eq!(out.value, json!({"echo":{"x":1}}));
@@ -113,7 +127,7 @@ mod tests {
     async fn control_with_approval_executes() {
         let reg = test_registry();
         let audit = MemAudit::new();
-        let out = super::invoke(&reg, (), &Consumer::agent(), "echo.control", json!({"to":"recrew"}), &AutoApprove, &audit)
+        let out = super::invoke(&reg, (), &Consumer::agent(), "echo.control", json!({"to":"recrew"}), &AutoApprove, &audit, GateConfig::default())
             .await
             .expect("control с approve должен пройти");
         assert_eq!(out.value, json!({"did":{"to":"recrew"}}));
@@ -125,7 +139,7 @@ mod tests {
     async fn control_without_approval_rejected() {
         let reg = test_registry();
         let audit = MemAudit::new();
-        let err = super::invoke(&reg, (), &Consumer::agent(), "echo.control", json!({}), &AutoDeny, &audit)
+        let err = super::invoke(&reg, (), &Consumer::agent(), "echo.control", json!({}), &AutoDeny, &audit, GateConfig::default())
             .await
             .unwrap_err();
         assert_eq!(err, GateError::Rejected);
@@ -139,7 +153,7 @@ mod tests {
         let audit = MemAudit::new();
         // потребитель только с read — control запрещён
         let reader = Consumer::custom("reader", &[RiskClass::Read], ConfirmPolicy::Always);
-        let err = super::invoke(&reg, (), &reader, "echo.control", json!({}), &AutoApprove, &audit)
+        let err = super::invoke(&reg, (), &reader, "echo.control", json!({}), &AutoApprove, &audit, GateConfig::default())
             .await
             .unwrap_err();
         assert!(matches!(err, GateError::Denied(_)));
@@ -159,6 +173,7 @@ mod tests {
             json!({ "patch": { "grants": { "agent": "admin" } } }),
             &AutoApprove,
             &audit,
+            GateConfig::default(),
         )
         .await
         .unwrap_err();
@@ -179,6 +194,7 @@ mod tests {
             json!({ "patch": { "hotkey": "Cmd+J" } }),
             &AutoApprove,
             &audit,
+            GateConfig::default(),
         )
         .await
         .expect("обычный ключ должен пройти");
@@ -191,7 +207,7 @@ mod tests {
     async fn unknown_capability_not_found() {
         let reg = test_registry();
         let audit = MemAudit::new();
-        let err = super::invoke(&reg, (), &Consumer::agent(), "nope.nope", json!({}), &AutoApprove, &audit)
+        let err = super::invoke(&reg, (), &Consumer::agent(), "nope.nope", json!({}), &AutoApprove, &audit, GateConfig::default())
             .await
             .unwrap_err();
         assert!(matches!(err, GateError::NotFound(_)));
@@ -203,7 +219,7 @@ mod tests {
     async fn handler_failure_surfaced() {
         let reg = test_registry();
         let audit = MemAudit::new();
-        let err = super::invoke(&reg, (), &Consumer::agent(), "boom.read", json!({}), &AutoApprove, &audit)
+        let err = super::invoke(&reg, (), &Consumer::agent(), "boom.read", json!({}), &AutoApprove, &audit, GateConfig::default())
             .await
             .unwrap_err();
         assert!(matches!(err, GateError::Failed(_)));
@@ -266,5 +282,49 @@ mod tests {
         assert!(names.contains(&"boom.read"));
         assert!(!names.contains(&"echo.control"));
         assert!(!names.contains(&"settings.set"));
+    }
+
+    fn fast_cfg() -> super::gate::GateConfig {
+        super::gate::GateConfig {
+            confirm_timeout: std::time::Duration::from_millis(80),
+            handler_timeout: std::time::Duration::from_millis(80),
+        }
+    }
+
+    // R3: хендлер дольше дедлайна → Failed(timeout), аудит failed:timeout.
+    #[tokio::test]
+    async fn handler_timeout_fails_safely() {
+        let reg = test_registry();
+        let audit = MemAudit::new();
+        let err = super::invoke(&reg, (), &Consumer::agent(), "slow.read", json!({}), &AutoApprove, &audit, fast_cfg())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GateError::Failed(_)));
+        assert_eq!(audit.last().unwrap().outcome, "failed:timeout");
+    }
+
+    // R3: подтверждение дольше дедлайна → Rejected, аудит rejected:timeout.
+    #[tokio::test]
+    async fn confirm_timeout_rejects() {
+        struct SlowConfirm;
+        impl super::confirm::Confirmer for SlowConfirm {
+            fn confirm<'a>(
+                &'a self,
+                _m: &'a CapabilityMeta,
+                _a: &'a serde_json::Value,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+                Box::pin(async {
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    true
+                })
+            }
+        }
+        let reg = test_registry();
+        let audit = MemAudit::new();
+        let err = super::invoke(&reg, (), &Consumer::agent(), "echo.control", json!({}), &SlowConfirm, &audit, fast_cfg())
+            .await
+            .unwrap_err();
+        assert_eq!(err, GateError::Rejected);
+        assert_eq!(audit.last().unwrap().outcome, "rejected:timeout");
     }
 }

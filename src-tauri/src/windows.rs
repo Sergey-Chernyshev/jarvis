@@ -161,7 +161,6 @@ pub fn show_panel(d: &Arc<Daemon>) {
         return;
     }
     let Some(panel) = d.app.get_webview_window("main") else { return };
-    d.panel_focus_mode.store(false, std::sync::atomic::Ordering::SeqCst);
     position_panel(d);
     emit_to_panel(&d.app, "panel-shown", &json!(null));
     macos::show_inactive(&panel);
@@ -175,7 +174,6 @@ pub fn show_panel_focused(d: &Arc<Daemon>) {
         return;
     }
     let Some(panel) = d.app.get_webview_window("main") else { return };
-    d.panel_focus_mode.store(true, std::sync::atomic::Ordering::SeqCst);
     position_panel(d);
     emit_to_panel(&d.app, "panel-shown", &json!(null));
     let _ = panel.show();

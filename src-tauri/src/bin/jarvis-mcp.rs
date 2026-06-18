@@ -52,6 +52,9 @@ impl SocketCall for CurlSocket {
         let url = format!("http://localhost{path}");
         let mut cmd = std::process::Command::new("curl");
         cmd.arg("-s").arg("--unix-socket").arg(&sock).arg("-X").arg(method);
+        if let Ok(tok) = std::env::var("JARVIS_TOKEN") {
+            cmd.arg("-H").arg(format!("x-jarvis-token: {tok}"));
+        }
         if let Some(b) = body {
             cmd.arg("-H").arg("content-type: application/json").arg("-d").arg(b);
         }
@@ -100,7 +103,7 @@ fn handle_rpc(req: &Value, call: &dyn SocketCall) -> Option<Value> {
             let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            let payload = json!({ "consumer": "agent", "id": name, "args": args });
+            let payload = json!({ "id": name, "args": args });
             let body = serde_json::to_string(&payload).unwrap_or_default();
             match call.call("POST", "/capability", Some(&body)) {
                 Ok(resp) => Some(tool_result(&id, &resp)),

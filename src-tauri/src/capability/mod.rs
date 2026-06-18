@@ -15,13 +15,14 @@ pub mod contract;
 pub mod gate;
 pub mod grant;
 pub mod registry;
+pub mod tokens;
 
 pub mod native;
 
 pub use confirm::{AutoApprove, AutoDeny, Confirmer};
 pub use contract::{CallOutput, CapabilityMeta, GateError, Provenance, RiskClass};
 pub use gate::invoke;
-pub use grant::{ConfirmPolicy, Consumer, Grant};
+pub use grant::{ConfirmPolicy, Consumer, Grant, SettingsWrite};
 pub use registry::{make_handler, Registry};
 
 use std::sync::Arc;

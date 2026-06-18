@@ -3,7 +3,6 @@
 //! Панель (in-process) токена не требует и здесь не резолвится: Consumer::panel()
 //! не выдаётся ни по какому токену (INV-PANEL).
 
-use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 

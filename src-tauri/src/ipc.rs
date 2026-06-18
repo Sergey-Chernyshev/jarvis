@@ -475,7 +475,7 @@ pub(crate) async fn via_gate_panel(d: &Arc<Daemon>, id: &str, args: Value) -> Va
     {
         Ok(o) => o.value,
         Err(GateError::Failed(m)) => err(&m),
-        Err(e) => err(&e.to_string()),
+        Err(e) => err(e.to_string()),
     }
 }
 

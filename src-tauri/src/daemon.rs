@@ -353,6 +353,20 @@ impl Daemon {
         self.sessions.lock().unwrap().get(sid).cloned()
     }
 
+    /// Человекочитаемая метка сессии для карточек подтверждения (проект + кратко).
+    /// Использует поле `Session::project` (уже basename cwd, выставляется редьюсером).
+    /// Нет сессии → короткая форма id.
+    pub fn session_label(&self, sid: &str) -> String {
+        match self.session(sid) {
+            Some(s) => {
+                // project уже содержит basename(cwd) — выставляется в reduce()
+                let proj = s.project.as_deref().unwrap_or("?");
+                format!("{proj} · {}", ellipsize(sid, 8))
+            }
+            None => format!("сессия {}", ellipsize(sid, 8)),
+        }
+    }
+
     /// Мутация одной сессии под локом; true — сессия существовала.
     pub fn with_session(&self, sid: &str, f: impl FnOnce(&mut Session)) -> bool {
         let mut sessions = self.sessions.lock().unwrap();

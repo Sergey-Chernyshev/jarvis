@@ -16,6 +16,9 @@ nonce-реестром вне локов и привязкой к цели (INV-
 тот же `invoke(Consumer::panel(), …)`. Установщик кладёт `jarvis-mcp` + токен.
 
 **Tech Stack:** Rust, Tauri 2, axum (unix-сокет), tokio (`full`), serde_json.
+**Тесты:** крейт `jarvis` — БИНАРНЫЙ (нет lib-таргета), юнит-тесты ядра живут в
+`--bin jarvis` (а не `--lib`). Команды прогона: `cargo test -p jarvis --bin jarvis
+<фильтр>` для capability/server/install; `cargo test -p jarvis --bin jarvis-mcp` для моста.
 Токены — `/dev/urandom`→hex (без новых зависимостей). Без сети, без LLM.
 
 **Спека:** `docs/superpowers/specs/2026-06-18-increment-8-v2-capability-platform-rework-design.md`.
@@ -233,7 +236,7 @@ mod tests {
   временно НЕ запускаем; компиляцию закрывает Task 2. Перейти к Task 2, затем
   вернуться и прогнать:
 
-Run: `cargo test -p jarvis --lib capability::tokens`
+Run: `cargo test -p jarvis --bin jarvis capability::tokens`
 Expected (после Task 2): PASS (4 теста).
 
 - [ ] **Step 4: Commit (вместе с Task 2).** См. конец Task 2.
@@ -394,7 +397,7 @@ pub const SETTINGS_ALLOWLIST: &[&str] = &[
 
 - [ ] **Step 4: Прогнать тесты grant + tokens.**
 
-Run: `cargo test -p jarvis --lib capability::grant capability::tokens`
+Run: `cargo test -p jarvis --bin jarvis capability::grant capability::tokens`
 Expected: PASS (4 + 4).
 
 - [ ] **Step 5: Commit.**
@@ -481,7 +484,7 @@ git commit -m "feat(cap): R2 токены потребителя + грант п
 
 - [ ] **Step 2: Запустить — провал компиляции** (`invoke` ещё без `GateConfig`).
 
-Run: `cargo test -p jarvis --lib capability::tests::handler_timeout_fails_safely`
+Run: `cargo test -p jarvis --bin jarvis capability::tests::handler_timeout_fails_safely`
 Expected: FAIL (компиляция: не тот арность `invoke` / нет `GateConfig`).
 
 - [ ] **Step 3: Добавить `GateConfig` и таймауты в `gate.rs`.** В начало (после
@@ -587,7 +590,7 @@ pub use gate::{invoke, GateConfig};
 
 - [ ] **Step 6: Прогнать ядро гейта целиком.**
 
-Run: `cargo test -p jarvis --lib capability::`
+Run: `cargo test -p jarvis --bin jarvis capability::`
 Expected: PASS (прежние 11 + 2 новых = 13).
 
 - [ ] **Step 7: Commit.**
@@ -665,7 +668,7 @@ git commit -m "feat(cap): R3 таймауты гейта (confirm 60с/handler 3
 
 - [ ] **Step 2: Запустить — провал** (логика ещё id-based).
 
-Run: `cargo test -p jarvis --lib capability::tests::agent_settings_non_allowlisted_denied`
+Run: `cargo test -p jarvis --bin jarvis capability::tests::agent_settings_non_allowlisted_denied`
 Expected: FAIL (проходит как ok — allowlist не применяется).
 
 - [ ] **Step 3: Заменить блок «2. Запрет самоэскалации»** в `gate.rs`. Импорт
@@ -727,7 +730,7 @@ fn touched_key(args: &Value, pred: impl Fn(&str) -> bool) -> Option<String> {
 
 - [ ] **Step 4: Прогнать.**
 
-Run: `cargo test -p jarvis --lib capability::`
+Run: `cargo test -p jarvis --bin jarvis capability::`
 Expected: PASS (13 + 3 = 16).
 
 - [ ] **Step 5: Commit.**
@@ -762,7 +765,7 @@ git commit -m "feat(cap): R7 самоэскалация по классу + allo
 
 - [ ] **Step 2: Запустить — провал** (list_for фильтрует только по классу).
 
-Run: `cargo test -p jarvis --lib capability::tests::agent_tools_exclude_audit_query`
+Run: `cargo test -p jarvis --bin jarvis capability::tests::agent_tools_exclude_audit_query`
 Expected: FAIL (audit.query присутствует).
 
 - [ ] **Step 3: Заменить `list_for`** в `registry.rs` на проверку по id:
@@ -780,7 +783,7 @@ Expected: FAIL (audit.query присутствует).
 
 - [ ] **Step 4: Прогнать.**
 
-Run: `cargo test -p jarvis --lib capability::`
+Run: `cargo test -p jarvis --bin jarvis capability::`
 Expected: PASS (17).
 
 - [ ] **Step 5: Commit.**
@@ -904,7 +907,7 @@ mod tests {
 
 - [ ] **Step 3: Прогнать.**
 
-Run: `cargo test -p jarvis --lib capability::confirm_panel`
+Run: `cargo test -p jarvis --bin jarvis capability::confirm_panel`
 Expected: PASS (3).
 
 - [ ] **Step 4: Добавить `PanelConfirmer`** (реализует `Confirmer`; держит
@@ -1384,7 +1387,7 @@ hotkey) на проход через гейт. Конкретно: блок `if 
 - [ ] **Step 4: Собрать целиком** (теперь PanelConfirmer из Task 6 тоже
   компилируется — `session_label` есть).
 
-Run: `cargo build -p jarvis && cargo test -p jarvis --lib capability::`
+Run: `cargo build -p jarvis && cargo test -p jarvis --bin jarvis capability::`
 Expected: компиляция + все тесты гейта PASS (17).
 
 - [ ] **Step 5: Дымовой ручной прогон** (dev-сборка на `~/.jarvis`): открыть панель,

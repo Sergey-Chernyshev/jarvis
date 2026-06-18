@@ -105,6 +105,16 @@ mod tests {
                 Ok(json!({"slept": true}))
             }),
         );
+        reg.register(
+            CapabilityMeta {
+                id: "settings.other",
+                class: RiskClass::Settings,
+                provenance: Provenance::Trusted,
+                description: "другая settings-капа (для теста class-based)",
+                input_schema: json!({"type":"object"}),
+            },
+            make_handler(|_ctx: (), _args| async move { Ok(json!({"ok":true})) }),
+        );
         reg
     }
 
@@ -326,5 +336,39 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, GateError::Rejected);
         assert_eq!(audit.last().unwrap().outcome, "rejected:timeout");
+    }
+
+    // R7: агент пишет ключ ВНЕ allowlist → отказ (даже не security-ключ).
+    #[tokio::test]
+    async fn agent_settings_non_allowlisted_denied() {
+        let reg = test_registry();
+        let audit = MemAudit::new();
+        let err = super::invoke(&reg, (), &Consumer::agent(), "settings.set",
+            json!({"patch":{"someInternal":1}}), &AutoApprove, &audit, GateConfig::default())
+            .await.unwrap_err();
+        assert!(matches!(err, GateError::Denied(_)));
+        assert_eq!(audit.last().unwrap().outcome, "denied:settings-key");
+    }
+
+    // R7: класс-based — ВТОРАЯ settings-капа с другим id тоже под allowlist.
+    #[tokio::test]
+    async fn class_based_escalation_covers_other_settings_cap() {
+        let reg = test_registry();
+        let audit = MemAudit::new();
+        let err = super::invoke(&reg, (), &Consumer::agent(), "settings.other",
+            json!({"patch":{"grants":{"agent":"admin"}}}), &AutoApprove, &audit, GateConfig::default())
+            .await.unwrap_err();
+        assert!(matches!(err, GateError::Denied(_)));
+    }
+
+    // R7: панель (SettingsWrite::All) НЕ ограничена allowlist.
+    #[tokio::test]
+    async fn panel_settings_not_restricted_by_allowlist() {
+        let reg = test_registry();
+        let audit = MemAudit::new();
+        let out = super::invoke(&reg, (), &Consumer::panel(), "settings.set",
+            json!({"patch":{"someInternal":1}}), &AutoApprove, &audit, GateConfig::default())
+            .await.expect("панель пишет любой не-security ключ");
+        assert_eq!(out.value, json!({"ok":true}));
     }
 }

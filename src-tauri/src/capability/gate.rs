@@ -12,8 +12,8 @@ use serde_json::Value;
 
 use super::audit::{AuditEntry, AuditSink};
 use super::confirm::Confirmer;
-use super::contract::{CallOutput, GateError};
-use super::grant::{Consumer, SECURITY_KEYS};
+use super::contract::{CallOutput, GateError, RiskClass};
+use super::grant::{Consumer, SettingsWrite, SECURITY_KEYS, SETTINGS_ALLOWLIST};
 use super::registry::Registry;
 
 /// Дедлайны гейта (R3). Default — боевые; тесты подставляют короткие.
@@ -71,23 +71,31 @@ pub async fn invoke<C>(
         ms,
     };
 
-    // 1. Грант по классу.
-    if !consumer.grant.allows(meta.class) {
+    // 1. Грант по классу (+ поимённый denylist, напр. audit.query агенту).
+    if !consumer.grant.allows_id(meta.id, meta.class) {
         audit.record(&entry_for("denied:class".into(), t0.elapsed().as_millis()));
         return Err(GateError::Denied(format!(
-            "грант '{}' не разрешает класс {}",
-            consumer.id,
-            meta.class.as_str()
+            "грант '{}' не разрешает {} ({})",
+            consumer.id, meta.id, meta.class.as_str()
         )));
     }
 
-    // 2. Запрет самоэскалации: settings.set не вправе трогать security-ключи.
-    if meta.id == "settings.set" {
-        if let Some(key) = touched_security_key(&args) {
+    // 2. Самоэскалация (R7): для класса Settings — security-ключи запрещены ВСЕМ;
+    //    agent/plugin (SettingsWrite::Allowlist) — только ключи из allowlist.
+    if meta.class == RiskClass::Settings {
+        if let Some(key) = touched_key(&args, |k| SECURITY_KEYS.contains(&k)) {
             audit.record(&entry_for("denied:security-key".into(), t0.elapsed().as_millis()));
             return Err(GateError::Denied(format!(
                 "ключ '{key}' защищён — меняется только пользователем через UI"
             )));
+        }
+        if consumer.grant.write == SettingsWrite::Allowlist {
+            if let Some(key) = touched_key(&args, |k| !SETTINGS_ALLOWLIST.contains(&k)) {
+                audit.record(&entry_for("denied:settings-key".into(), t0.elapsed().as_millis()));
+                return Err(GateError::Denied(format!(
+                    "ключ '{key}' не в allowlist — агент/плагин не вправе его менять"
+                )));
+            }
         }
     }
 
@@ -123,12 +131,12 @@ pub async fn invoke<C>(
     }
 }
 
-/// Если аргументы `settings.set` пытаются изменить защищённый ключ — вернуть его.
-/// Принимаем обе формы: `{patch:{...}}` и `{...}` напрямую.
-fn touched_security_key(args: &Value) -> Option<String> {
+/// Первый ключ patch (или корня), удовлетворяющий предикату. Принимаем обе формы:
+/// `{patch:{...}}` и `{...}` напрямую.
+fn touched_key(args: &Value, pred: impl Fn(&str) -> bool) -> Option<String> {
     let obj = args
         .get("patch")
         .and_then(|p| p.as_object())
         .or_else(|| args.as_object())?;
-    obj.keys().find(|k| SECURITY_KEYS.contains(&k.as_str())).cloned()
+    obj.keys().find(|k| pred(k.as_str())).cloned()
 }

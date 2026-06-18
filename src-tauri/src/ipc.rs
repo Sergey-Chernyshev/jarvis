@@ -602,6 +602,16 @@ pub fn toast_click(app: AppHandle, session_id: Option<String>) {
     }
 }
 
+/// Решение пользователя по карточке подтверждения агента (R4). In-process —
+/// вызывается ТОЛЬКО из панели (на сокет не выставлено): агент не может сам себя
+/// одобрить.
+#[tauri::command]
+pub fn agent_confirm(app: AppHandle, nonce: String, approved: bool) -> Value {
+    let d = Daemon::get(&app);
+    let known = d.pending.resolve(&nonce, approved);
+    json!({ "ok": known })
+}
+
 /* ================= служебное ================= */
 
 /// Снять ложный лимит-баннер по официальному usage (таймер из main).

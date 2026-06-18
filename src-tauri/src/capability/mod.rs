@@ -281,6 +281,17 @@ mod tests {
         assert!(!names.contains(&"settings.set"));
     }
 
+    // R4/least-priv: агент НЕ видит audit.query в tools/list (denied_ids).
+    #[test]
+    fn agent_tools_exclude_audit_query() {
+        let reg = super::build_registry();
+        let tools = reg.tools_json(&Consumer::agent().grant);
+        let names: Vec<&str> =
+            tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"metrics.query"));
+        assert!(!names.contains(&"audit.query"), "аудит агенту не проецируется");
+    }
+
     // tools/list грант-фильтр: reader не видит control/settings.
     #[test]
     fn tools_list_filtered_by_grant() {

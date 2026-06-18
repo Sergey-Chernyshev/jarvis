@@ -16,6 +16,7 @@ pub mod gate;
 pub mod grant;
 pub mod registry;
 pub mod tokens;
+pub mod confirm_panel;
 
 pub mod native;
 

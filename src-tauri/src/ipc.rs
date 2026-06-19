@@ -170,14 +170,27 @@ pub fn register_mute_hotkey(d: &Arc<Daemon>) {
 /// глобально всё время. Идемпотентно: трогаем только при смене состояния.
 pub fn set_select_hotkeys(d: &Arc<Daemon>, on: bool) {
     let gs = d.app.global_shortcut();
+    let mut touched = 0;
+    let mut failed = 0;
     for n in 1..=9 {
         let accel = format!("Command+Alt+{n}");
         let reg = gs.is_registered(accel.as_str());
         if on && !reg {
-            let _ = gs.register(accel.as_str());
+            touched += 1;
+            if gs.register(accel.as_str()).is_err() {
+                failed += 1;
+            }
         } else if !on && reg {
+            touched += 1;
             let _ = gs.unregister(accel.as_str());
         }
+    }
+    if touched > 0 {
+        crate::log::line(&format!(
+            "[select] ⌘⌥1-9 {}{}",
+            if on { "включены (вопрос активен)" } else { "сняты" },
+            if failed > 0 { format!(", провал: {failed}") } else { String::new() },
+        ));
     }
 }
 
@@ -449,6 +462,7 @@ pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) 
                 });
                 d.push();
             }
+            windows::toast_remove(&d, &format!("q-{session_id}")); // снять «липкую» карточку
             ok()
         }
         Err(e) => err(ellipsize(&one_line(&e), 100)),

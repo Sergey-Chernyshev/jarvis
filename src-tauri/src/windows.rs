@@ -151,6 +151,11 @@ pub fn toast_extend(app: &AppHandle, id: &str, ms: u64) {
     let _ = app.emit_to("toast", "toast-extend", json!({ "id": id, "ms": ms }));
 }
 
+/// Снять карточку тоста по id (вопрос ответили → убрать «липкую» карточку).
+pub fn toast_remove(d: &Daemon, id: &str) {
+    toast_emit(d, "toast-remove", json!({ "id": id }));
+}
+
 /// События тостов до загрузки webview буферятся (аналог did-finish-load
 /// в Electron) — уведомления первых секунд после старта демона не теряются.
 fn toast_emit(d: &Daemon, event: &'static str, payload: serde_json::Value) {

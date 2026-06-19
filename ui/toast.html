@@ -105,6 +105,8 @@
      нативного poll'а курсора (когда активно другое приложение) */
   .card:hover .ring .fg,
   .card.paused .ring .fg { animation-play-state: paused; }
+  /* «липкая» карточка вопроса: таймера нет → кольцо-индикатор прячем */
+  .card.sticky .ring { display: none; }
 
   .body {
     font-size: 12.5px;

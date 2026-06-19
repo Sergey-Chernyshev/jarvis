@@ -165,14 +165,18 @@ pub fn register_mute_hotkey(d: &Arc<Daemon>) {
     }
 }
 
-/// Выбор варианта вопроса: ⌘⌥1 … ⌘⌥9 (фиксированные, регистрируются на старте).
-/// Срабатывают, только когда есть активный вопрос (иначе — no-op в handler'е).
-pub fn register_select_hotkeys(d: &Arc<Daemon>) {
+/// Выбор варианта вопроса: ⌘⌥1 … ⌘⌥9. Регистрируем ДИНАМИЧЕСКИ — только пока
+/// есть активный вопрос (зовётся из do_push), чтобы не перехватывать ⌘⌥-цифры
+/// глобально всё время. Идемпотентно: трогаем только при смене состояния.
+pub fn set_select_hotkeys(d: &Arc<Daemon>, on: bool) {
     let gs = d.app.global_shortcut();
     for n in 1..=9 {
         let accel = format!("Command+Alt+{n}");
-        if !gs.is_registered(accel.as_str()) {
+        let reg = gs.is_registered(accel.as_str());
+        if on && !reg {
             let _ = gs.register(accel.as_str());
+        } else if !on && reg {
+            let _ = gs.unregister(accel.as_str());
         }
     }
 }

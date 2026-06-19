@@ -169,6 +169,8 @@ impl Daemon {
 
     fn do_push(self: &std::sync::Arc<Self>) {
         let list = self.snapshot();
+        // ⌘⌥1..9 для выбора варианта — только пока есть открытый вопрос
+        crate::ipc::set_select_hotkeys(self, list.iter().any(|s| s.question.is_some()));
         self.power.on_sessions(self, &list); // плагины первыми — бейджи к трею уже свежие
         windows::emit_to_panel(&self.app, "state", &list);
         windows::emit_to_panel(&self.app, "plugins", &self.power.statuses(self));

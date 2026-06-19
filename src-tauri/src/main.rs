@@ -171,7 +171,8 @@ fn main() {
             ipc::register_continue_hotkey(&d); // «Продолжить» последнюю сессию (⌘⌥C)
             ipc::register_repeat_hotkey(&d); // повторить последнее уведомление (⌘⌥R)
             ipc::register_mute_hotkey(&d); // без звука / mute (⌘⌥M)
-            ipc::register_select_hotkeys(&d); // выбор варианта вопроса (⌘⌥1..9)
+            // ⌘⌥1..9 (выбор варианта) регистрируются динамически в do_push,
+            // только пока висит активный вопрос — см. ipc::set_select_hotkeys
 
             spawn_timers(&d);
 

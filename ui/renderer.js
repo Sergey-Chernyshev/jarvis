@@ -175,7 +175,16 @@ function orderedSessions() {
   const known = new Set(displayOrder);
   for (const s of state.filter((x) => !known.has(x.id)).sort(sortCmp)) displayOrder.push(s.id);
   const ordered = displayOrder.map((id) => byId.get(id));
-  return [...ordered.filter((s) => s.pinned), ...ordered.filter((s) => !s.pinned)];
+  // подхваченные из tmux (adopted) — это плейсхолдеры до первого хука: их
+  // created_at = момент рестарта, поэтому по свежести они всплыли бы наверх и
+  // забили список. Держим их в самом низу, реальные сессии — выше.
+  const real = ordered.filter((s) => !s.adopted);
+  const placeholders = ordered.filter((s) => s.adopted);
+  return [
+    ...real.filter((s) => s.pinned),
+    ...real.filter((s) => !s.pinned),
+    ...placeholders,
+  ];
 }
 
 function filtered() {
@@ -188,6 +197,10 @@ function filtered() {
 
 function render() {
   if (view !== 'list') return;
+  // hover-выбор разоружаем на каждую перерисовку: дальше его снова взведёт только
+  // реальное mousemove (см. listEl.mousemove). Иначе фон-обновления (data push)
+  // пересоздают строки под неподвижным курсором → mouseenter таскает выделение.
+  palHoverEnabled = false;
   // палитра быстрых команд: «/» в главном поиске вместо списка сессий
   if (argMode || queryEl.value.trim().startsWith('/')) { renderCmdPalette(); return; }
   argMode = null;
@@ -285,7 +298,10 @@ function render() {
 
     row.appendChild(time);
     row.addEventListener('mouseenter', () => {
-      if (sel !== i) { sel = i; render(); }
+      // hover двигает выбор только при реальном движении мыши (Raycast-стиль):
+      // стрелки и фон-перерисовки выделение не теряют
+      if (!palHoverEnabled || sel === i) return;
+      sel = i; render();
     });
     row.addEventListener('click', () => openSession(s));
     listEl.appendChild(row);

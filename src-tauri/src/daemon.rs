@@ -87,6 +87,8 @@ enum Effect {
     GenSummary { sid: String },
     /// Уведомление «спрашивает» (карточка вопроса).
     NotifyWaiting { title: String, body: String, sid: String },
+    /// Снять карточку тоста по id (вопрос ответили → убрать «липкую» карточку).
+    RemoveToast { id: String },
     /// Завершение: одна ИИ-выжимка результата — и в строку списка, и в тост.
     DoneSummary { sid: String },
     /// Ручной /compact завершился (session-start, source=compact) — явный тост.
@@ -461,7 +463,11 @@ impl Daemon {
             .map(|sid| (sid.clone(), sessions.get(&sid).and_then(|s| s.question.as_ref())
                 .map(|q| q.questions.first().map(|x| x.multi_select).unwrap_or(false)).unwrap_or(false)))
         };
-        let Some((sid, multi)) = target else { return };
+        let Some((sid, multi)) = target else {
+            crate::log::line(&format!("[select] ⌘⌥{n}: нет активного вопроса"));
+            return;
+        };
+        crate::log::line(&format!("[select] ⌘⌥{n} → sid={} multi={multi}", ellipsize(&sid, 8)));
         let h = self.app.clone();
         tauri::async_runtime::spawn(async move {
             let _ = crate::ipc::question_answer(
@@ -695,6 +701,7 @@ impl Daemon {
                     if tool == "AskUserQuestion" && s.question.is_some() {
                         s.question = None; // ответили (в терминале или из панели)
                         s.detail = "ответ получен".into();
+                        effects.push(Effect::RemoveToast { id: format!("q-{sid}") });
                     }
                     if tool == "Task" {
                         // сабагент завершился — закрываем запись в реестре
@@ -787,8 +794,15 @@ impl Daemon {
                 Effect::RefreshTasks { sid } => d.refresh_tasks(sid),
                 Effect::GenSummary { sid } => d.gen_summary(sid),
                 Effect::NotifyWaiting { title, body, sid } => {
-                    d.notify(&title, &body, Some(&sid), "waiting");
+                    // у вопроса — стабильный id `q-<sid>`: карточка «липкая» (не
+                    // тикает по TTL, ждёт выбор) и снимается RemoveToast при ответе.
+                    if d.session(&sid).is_some_and(|s| s.question.is_some()) {
+                        d.notify_id(&format!("q-{sid}"), &title, &body, Some(&sid), "waiting");
+                    } else {
+                        d.notify(&title, &body, Some(&sid), "waiting");
+                    }
                 }
+                Effect::RemoveToast { id } => windows::toast_remove(&d, &id),
                 Effect::DoneSummary { sid } => d.done_summary(sid),
                 Effect::NotifyCompact { title, sid } => {
                     d.notify_id(

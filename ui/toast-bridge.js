@@ -20,6 +20,8 @@
     // голос держит карточку, пока говорит (hold), и продлевает на N мс после (extend)
     onHold: (cb) => { listen('toast-hold', (e) => cb(e.payload)); },
     onExtend: (cb) => { listen('toast-extend', (e) => cb(e.payload)); },
+    // снять карточку по id (вопрос ответили) — не через armed(), это не буфер
+    onRemove: (cb) => { listen('toast-remove', (e) => cb(e.payload)); },
     click: (sessionId) => invoke('toast_click', { sessionId }),
     resize: (h) => invoke('toast_resize', { h }),
     continueSession: (sessionId) => invoke('session_continue', { sessionId }),

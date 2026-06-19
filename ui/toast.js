@@ -40,6 +40,8 @@ function armTimer(id) {
   const c = cards.get(id);
   if (!c) return;
   clearTimeout(c.timer);
+  // вопрос — «липкая» карточка: ждёт твой выбор, по таймеру не исчезает
+  if (c.sticky) return;
   // читаешь (курсор над стеком) — карточка замирает, кольцо на паузе
   if (hovering) {
     c.el.classList.add('paused');
@@ -99,6 +101,7 @@ window.toast.onAdd((d) => {
   // карточка смены режима: компактная, по центру, с «поп»-анимацией, живёт недолго
   const isMode = d.kind === 'mode';
   const ttl = isMode ? 1900 : TTL;
+  let sticky = false; // вопрос — «липкая» карточка (не исчезает по таймеру)
 
   const card = document.createElement('div');
   card.className = `card${isMode ? ' mode' : ''}`;
@@ -156,6 +159,8 @@ window.toast.onAdd((d) => {
     // Выбор — глобальным хоткеем ⌘⌥1..9 (через демон) или кликом по варианту.
     const opts = d.question && Array.isArray(d.question.options) ? d.question.options : null;
     if (opts && opts.length) {
+      sticky = true; // ждём выбор — карточка не тикает по TTL
+      card.classList.add('sticky');
       const list = document.createElement('div');
       list.className = 'opts';
       opts.slice(0, 9).forEach((o, i) => {
@@ -191,8 +196,9 @@ window.toast.onAdd((d) => {
     }
 
     // действие «Продолжить» — только для застрявших сессий (ждёт / лимит /
-    // оборвалась, напр. сном), но НЕ для нормально завершённых (done).
-    if (d.sessionId && d.kind !== 'done') {
+    // оборвалась, напр. сном), но НЕ для нормально завершённых (done) и НЕ для
+    // вопросов (там действие — выбрать вариант, «Продолжить» не к месту).
+    if (d.sessionId && d.kind !== 'done' && !(opts && opts.length)) {
       const cont = document.createElement('button');
       cont.className = 'cont';
       cont.textContent = 'Продолжить';
@@ -211,12 +217,15 @@ window.toast.onAdd((d) => {
   }
 
   stackEl.appendChild(card); // новые — снизу, старые поднимаются
-  cards.set(d.id, { el: card, timer: null, ttl });
+  cards.set(d.id, { el: card, timer: null, ttl, sticky });
   armTimer(d.id);
 
   reportHeight();
   requestAnimationFrame(() => requestAnimationFrame(() => card.classList.add('in')));
 });
+
+// вопрос ответили (хоткеем/панелью/в терминале) → снять «липкую» карточку
+window.toast.onRemove((d) => removeCard(d.id));
 
 // голос говорит эту карточку → держим её (не закрываем по TTL, пока речь идёт)
 window.toast.onHold((d) => {

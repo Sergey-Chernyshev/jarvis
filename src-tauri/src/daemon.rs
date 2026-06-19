@@ -1089,7 +1089,7 @@ impl Daemon {
         // какой транскрипт чей). Тяжёлый I/O — только для незакреплённых пан:
         // снимаем claimed под коротким локом, в steady-state (всё закреплено)
         // карта пустая и файлы не читаем.
-        let enrich = match &meta {
+        let (enrich, starts) = match &meta {
             Some(panes) => {
                 let claimed: std::collections::HashSet<String> = self
                     .sessions
@@ -1103,9 +1103,21 @@ impl Daemon {
                     .map(|p| p.pane_id.clone())
                     .filter(|id| !claimed.contains(id))
                     .collect();
-                build_enrichment(panes, &unclaimed)
+                let enrich = build_enrichment(panes, &unclaimed);
+                // возраст плейсхолдеров — по старту процесса claude (только незакреплённые)
+                let pids: Vec<i64> = panes
+                    .iter()
+                    .filter(|p| unclaimed.contains(&p.pane_id) && p.pid > 0)
+                    .map(|p| p.pid)
+                    .collect();
+                let by_pid = proc_start_times(&pids);
+                let starts: std::collections::HashMap<String, i64> = panes
+                    .iter()
+                    .filter_map(|p| by_pid.get(&p.pid).map(|&t| (p.pane_id.clone(), t)))
+                    .collect();
+                (enrich, starts)
             }
-            None => std::collections::HashMap::new(),
+            None => (std::collections::HashMap::new(), std::collections::HashMap::new()),
         };
 
         let mut changed = false;
@@ -1143,7 +1155,7 @@ impl Daemon {
             // --- адопт: живые паны, не закреплённые ни за одной сессией ---
             if let Some(panes) = &meta {
                 let before = sessions.len();
-                refresh_sids = adopt_live_panes(&mut sessions, panes, now, &enrich);
+                refresh_sids = adopt_live_panes(&mut sessions, panes, now, &enrich, &starts);
                 if sessions.len() != before {
                     changed = true;
                 }
@@ -1568,6 +1580,39 @@ struct Enrichment {
     model: Option<String>,
 }
 
+/// Время старта процессов (epoch-мс) по pid — один вызов `ps` на все pid сразу.
+/// Нужно, чтобы у подхваченных плейсхолдеров был РЕАЛЬНЫЙ возраст сессии (а не
+/// момент рестарта демона): тогда три «ticksly» в списке различимы по времени и
+/// видно, какие давно висят. lstart ("Tue Jun 16 19:38:59 2026") парсим в
+/// локальном времени; непарсимое/недоступное просто опускаем.
+fn proc_start_times(pids: &[i64]) -> std::collections::HashMap<i64, i64> {
+    use chrono::{Local, NaiveDateTime, TimeZone};
+    let mut out = std::collections::HashMap::new();
+    if pids.is_empty() {
+        return out;
+    }
+    let list = pids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+    let Ok(o) = std::process::Command::new("ps")
+        .args(["-o", "pid=,lstart=", "-p", &list])
+        .output()
+    else {
+        return out;
+    };
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        let Some((pid_s, rest)) = line.trim().split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(pid) = pid_s.trim().parse::<i64>() else { continue };
+        let Ok(naive) = NaiveDateTime::parse_from_str(rest.trim(), "%a %b %e %T %Y") else {
+            continue;
+        };
+        if let Some(dt) = Local.from_local_datetime(&naive).single() {
+            out.insert(pid, dt.timestamp_millis());
+        }
+    }
+    out
+}
+
 /// Карта `pane_id → Enrichment` для НЕзакреплённых пан, чей cwd содержит ровно
 /// одну живую пану. При нескольких живых сессиях в одном cwd транскрипт
 /// неоднозначен (нет хука, чтобы связать пану и session_id) — такие пропускаем,
@@ -1633,6 +1678,7 @@ fn adopt_live_panes(
     panes: &[crate::tmux::PaneInfo],
     now: i64,
     enrich: &std::collections::HashMap<String, Enrichment>,
+    starts: &std::collections::HashMap<String, i64>,
 ) -> Vec<String> {
     let claimed: std::collections::HashSet<String> =
         sessions.values().filter_map(|s| s.tmux_pane.clone()).collect();
@@ -1686,8 +1732,15 @@ fn adopt_live_panes(
         let mut s = Session::new(id.clone(), now);
         s.adopted = true;
         s.status = Status::Idle;
+        // время — старт процесса claude (а не момент рестарта демона): даёт
+        // реальный возраст, различает однопроектные сессии и сортирует их.
+        if let Some(&start) = starts.get(&p.pane_id) {
+            s.created_at = start;
+            s.updated_at = start;
+            s.done_at = Some(start);
+        }
         // detail оставляем пустым: бейдж «восстановлена» в UI уже несёт смысл,
-        // дублировать его в строке активности незачем (summary → «простаивает»).
+        // дублировать его в строке активности незачем (summary → имя tmux-сессии).
         s.tmux_pane = Some(p.pane_id.clone());
         if !p.session_name.is_empty() {
             s.tmux_name = Some(p.session_name.clone());
@@ -1778,6 +1831,9 @@ mod tests {
     fn no_enrich() -> std::collections::HashMap<String, Enrichment> {
         std::collections::HashMap::new()
     }
+    fn no_starts() -> std::collections::HashMap<String, i64> {
+        std::collections::HashMap::new()
+    }
 
     #[test]
     fn adopt_picks_up_unclaimed_pane_as_provisional() {
@@ -1788,7 +1844,7 @@ mod tests {
             pane("%1", "proj-1", "/home/u/proj", 100), // занята → пропустить
             pane("%2", "other-2", "/home/u/other", 200), // осиротевшая → адопт
         ];
-        let refreshed = adopt_live_panes(&mut m, &panes, 42, &no_enrich());
+        let refreshed = adopt_live_panes(&mut m, &panes, 42, &no_enrich(), &no_starts());
 
         assert!(refreshed.is_empty(), "без обогащения refresh-список пуст");
         let s = m.get("pane:%2").expect("провизорная сессия заведена");
@@ -1818,7 +1874,7 @@ mod tests {
             },
         );
 
-        let refreshed = adopt_live_panes(&mut m, &panes, 999, &enrich);
+        let refreshed = adopt_live_panes(&mut m, &panes, 999, &enrich, &no_starts());
 
         assert_eq!(refreshed, vec!["real-sid-xyz".to_string()], "обогащённую дотягиваем");
         assert!(!m.contains_key("pane:%4"), "плейсхолдер не заводим");
@@ -1843,18 +1899,35 @@ mod tests {
             Enrichment { session_id: "real-sid-xyz".into(), transcript: "/t/x.jsonl".into(), mtime: 1, model: None },
         );
 
-        let refreshed = adopt_live_panes(&mut m, &panes, 0, &enrich);
+        let refreshed = adopt_live_panes(&mut m, &panes, 0, &enrich, &no_starts());
         assert!(refreshed.is_empty());
         assert_eq!(m.len(), 1, "пана занята → ничего не добавили");
+    }
+
+    #[test]
+    fn adopt_placeholder_takes_process_start_time() {
+        // три паны в одном проекте → плейсхолдеры; время берётся из старта
+        // процесса (различает их в списке), а не из момента рестарта (now=999).
+        let mut m = HashMap::new();
+        let panes = vec![pane("%a", "ticksly-1", "/u/ticksly", 11)];
+        let mut starts = std::collections::HashMap::new();
+        starts.insert("%a".to_string(), 1700i64);
+
+        adopt_live_panes(&mut m, &panes, 999, &no_enrich(), &starts);
+
+        let s = m.get("pane:%a").expect("плейсхолдер заведён");
+        assert_eq!(s.created_at, 1700, "время = старт процесса, не момент рестарта");
+        assert_eq!(s.done_at, Some(1700), "сортировка по реальному возрасту");
+        assert_eq!(s.tmux_name.as_deref(), Some("ticksly-1"), "имя tmux для различения");
     }
 
     #[test]
     fn adopt_is_idempotent_across_cycles() {
         let mut m = HashMap::new();
         let panes = vec![pane("%5", "p", "/tmp/p", 9)];
-        adopt_live_panes(&mut m, &panes, 0, &no_enrich());
+        adopt_live_panes(&mut m, &panes, 0, &no_enrich(), &no_starts());
         assert!(m.contains_key("pane:%5"));
-        adopt_live_panes(&mut m, &panes, 0, &no_enrich());
+        adopt_live_panes(&mut m, &panes, 0, &no_enrich(), &no_starts());
         assert_eq!(m.len(), 1, "второй проход не дублирует");
     }
 
@@ -1862,7 +1935,7 @@ mod tests {
     fn real_hook_evicts_adopted_provisional() {
         // провизорная держит пану %3; настоящий хук из той же паны её выселяет
         let mut m = HashMap::new();
-        adopt_live_panes(&mut m, &[pane("%3", "p", "/tmp/p", 7)], 0, &no_enrich());
+        adopt_live_panes(&mut m, &[pane("%3", "p", "/tmp/p", 7)], 0, &no_enrich(), &no_starts());
         assert!(m.contains_key("pane:%3"));
 
         m.insert("real-sid".into(), sess("real-sid", Some("%3")));

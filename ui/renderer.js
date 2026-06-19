@@ -269,7 +269,11 @@ function render() {
     const ctx = s.task
       ? `${s.taskProgress ? s.taskProgress + ' · ' : ''}${s.task}`
       : (s.summary || s.lastPrompt || s.title || '');
-    if (s.status === 'working' || s.status === 'waiting') {
+    if (s.adopted) {
+      // несколько подхваченных сессий одного проекта неразличимы по имени —
+      // показываем имя tmux-сессии, чтобы их можно было отличить и закрыть нужную
+      summary.textContent = s.tmuxName || live;
+    } else if (s.status === 'working' || s.status === 'waiting') {
       summary.textContent = ctx && ctx !== live ? `${ctx} — ${live}` : (ctx || live);
     } else {
       summary.textContent = ctx || live;

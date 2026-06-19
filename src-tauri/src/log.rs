@@ -21,6 +21,9 @@ fn stamp() -> String {
 
 /// Дописать строку в лог (и продублировать в stdout — его ловит nohup).
 pub fn line(msg: &str) {
+    if cfg!(test) {
+        return; // юнит-тесты не должны писать в боевой ~/.jarvis/jarvis.log
+    }
     println!("{msg}"); // stdout → daemon.log при запуске под nohup
     let path = log_path();
     let _ = std::fs::create_dir_all(jarvis_dir());

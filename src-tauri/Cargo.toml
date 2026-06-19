@@ -46,6 +46,17 @@ path = "src/bin/setup.rs"
 name = "jarvis-mcp"
 path = "src/bin/jarvis-mcp.rs"
 
+# STT: Whisper-движок через whisper-rs (Metal, компилирует whisper.cpp через CMake).
+# Требует: cmake ≥ 3.x (brew install cmake) + Xcode CLT.
+# Без этих инструментов — cargo build --features whisper-native не запустится.
+[features]
+whisper-native = ["dep:whisper-rs"]
+
+[dependencies.whisper-rs]
+version = "0.16"
+features = ["metal"]
+optional = true
+
 [profile.release]
 # панель — интерактивный UI, собираем с оптимизацией, но без LTO-долгостроя
 opt-level = 2

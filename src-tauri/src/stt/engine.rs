@@ -73,10 +73,13 @@ impl SttEngine for NullEngine {
     }
 }
 
-/// Собрать движок по конфигу. Phase 1: все arms → NullEngine (реальные движки — фазы 2-3).
+/// Собрать движок по конфигу.
+/// - "whisper-turbo" → WhisperEngine (Phase 2; Metal; требует cmake для компиляции).
+/// - "qwen3-0.6b" / "qwen3-1.7b" → NullEngine (Phase 3, пока не реализован).
 pub fn build_engine(cfg: &crate::stt::config::SttConfig) -> Box<dyn SttEngine> {
     match cfg.engine.as_str() {
-        "whisper-turbo" | "qwen3-0.6b" | "qwen3-1.7b" => Box::new(NullEngine),
+        "whisper-turbo" => Box::new(crate::stt::engine_whisper::WhisperEngine::new()),
+        "qwen3-0.6b" | "qwen3-1.7b" => Box::new(NullEngine),
         _ => Box::new(NullEngine),
     }
 }
@@ -90,10 +93,11 @@ mod tests {
         SttConfig { engine: engine.into(), ..SttConfig::default() }
     }
 
-    // build_engine выбирает движок по конфигу — все arms → NullEngine (Phase 1)
+    // build_engine выбирает движок по конфигу
     #[test]
-    fn build_engine_whisper_turbo_is_null() {
-        assert_eq!(build_engine(&cfg("whisper-turbo")).name(), "none");
+    fn build_engine_whisper_turbo_name() {
+        // Phase 2: "whisper-turbo" → WhisperEngine (name = "whisper-turbo")
+        assert_eq!(build_engine(&cfg("whisper-turbo")).name(), "whisper-turbo");
     }
 
     #[test]

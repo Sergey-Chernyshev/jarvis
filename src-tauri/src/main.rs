@@ -35,6 +35,8 @@ mod usage;
 mod util;
 mod voice;
 mod windows;
+#[allow(dead_code)] // STT-потребители подключаются в фазах 4-6 (инкр. 9)
+mod stt;
 
 use std::sync::Arc;
 use std::time::Duration;

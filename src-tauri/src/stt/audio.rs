@@ -8,7 +8,9 @@
 //!  - `downmix_to_mono`   — усреднение интерлив. каналов → моно
 //!  - `resample_to_16k`   — ресемпл через rubato FftFixedIn
 
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -16,113 +18,148 @@ use cpal::{
 };
 use rubato::{FftFixedIn, Resampler};
 
-/// Активная сессия захвата аудио. Дропнуть = остановить стрим.
+/// Активная сессия захвата. `cpal::Stream` — `!Send`, поэтому он живёт НА
+/// отдельном потоке захвата; сюда (и в `Daemon`) попадают только Send-ручки
+/// (стоп-канал + JoinHandle). Иначе `Daemon` стал бы `!Send` и развалил
+/// axum-хендлеры и async-таски, которым нужен `Arc<Daemon>: Send`.
 pub struct CaptureSession {
-    stream: cpal::Stream,
-    buffer: Arc<Mutex<Vec<f32>>>,
-    src_rate: u32,
-    channels: u16,
+    stop: mpsc::Sender<()>,
+    join: Option<JoinHandle<Result<(Vec<f32>, u32, u16), String>>>,
 }
 
 impl CaptureSession {
     /// Начать захват. `device` — имя устройства или None → системный дефолт.
+    /// Стрим строится и крутится на потоке захвата; `start()` ждёт подтверждения
+    /// старта (или ошибки) прежде чем вернуть управление.
     pub fn start(device: Option<&str>) -> Result<Self, String> {
-        let host = cpal::default_host();
+        let device = device.map(|s| s.to_string());
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
 
-        let input_device = match device {
-            None => host
-                .default_input_device()
-                .ok_or_else(|| "нет дефолтного устройства ввода".to_string())?,
-            Some(name) => host
-                .input_devices()
-                .map_err(|e| format!("enumerate devices: {e}"))?
-                .find(|d| d.name().map(|n| n == name).unwrap_or(false))
-                .ok_or_else(|| format!("устройство '{}' не найдено", name))?,
-        };
+        let join = std::thread::spawn(move || -> Result<(Vec<f32>, u32, u16), String> {
+            let (stream, buffer, src_rate, channels) = match build_stream(device.as_deref()) {
+                Ok(x) => x,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e.clone()));
+                    return Err(e);
+                }
+            };
+            if let Err(e) = stream.play() {
+                let msg = format!("stream.play: {e}");
+                let _ = ready_tx.send(Err(msg.clone()));
+                return Err(msg);
+            }
+            let _ = ready_tx.send(Ok(()));
+            // ждём «отпустили клавишу»
+            let _ = stop_rx.recv();
+            drop(stream); // остановить захват — на этом же потоке
+            let raw = buffer.lock().map(|mut b| std::mem::take(&mut *b)).unwrap_or_default();
+            Ok((raw, src_rate, channels))
+        });
 
-        let config = input_device
-            .default_input_config()
-            .map_err(|e| format!("default_input_config: {e}"))?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(CaptureSession { stop: stop_tx, join: Some(join) }),
+            Ok(Err(e)) => {
+                let _ = join.join();
+                Err(e)
+            }
+            Err(_) => Err("поток захвата не стартовал".into()),
+        }
+    }
 
-        let src_rate = config.sample_rate().0;
-        let channels = config.channels();
-        let sample_format = config.sample_format();
-        let stream_config: cpal::StreamConfig = config.into();
+    /// Остановить захват, вернуть 16кГц моно f32-буфер.
+    pub fn finish(mut self) -> Result<Vec<f32>, String> {
+        let _ = self.stop.send(());
+        let (raw, src_rate, channels) = self
+            .join
+            .take()
+            .ok_or_else(|| "нет потока захвата".to_string())?
+            .join()
+            .map_err(|_| "поток захвата упал".to_string())??;
+        let mono = downmix_to_mono(&raw, channels);
+        resample_to_16k(&mono, src_rate)
+    }
+}
 
-        let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
-        let buf_clone = Arc::clone(&buffer);
+/// Построить cpal-стрим (вызывается ТОЛЬКО на потоке захвата — стрим его не
+/// покидает). Возвращает стрим + общий буфер + параметры формата.
+fn build_stream(
+    device: Option<&str>,
+) -> Result<(cpal::Stream, Arc<Mutex<Vec<f32>>>, u32, u16), String> {
+    let host = cpal::default_host();
+    let input_device = match device {
+        None => host
+            .default_input_device()
+            .ok_or_else(|| "нет дефолтного устройства ввода".to_string())?,
+        Some(name) => host
+            .input_devices()
+            .map_err(|e| format!("enumerate devices: {e}"))?
+            .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+            .ok_or_else(|| format!("устройство '{}' не найдено", name))?,
+    };
 
-        let err_fn = |e| eprintln!("[audio] stream error: {e}");
+    let config = input_device
+        .default_input_config()
+        .map_err(|e| format!("default_input_config: {e}"))?;
 
-        let stream = match sample_format {
-            SampleFormat::F32 => input_device
+    let src_rate = config.sample_rate().0;
+    let channels = config.channels();
+    let sample_format = config.sample_format();
+    let stream_config: cpal::StreamConfig = config.into();
+
+    let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+    let err_fn = |e| eprintln!("[audio] stream error: {e}");
+
+    let stream = match sample_format {
+        SampleFormat::F32 => {
+            let buf = Arc::clone(&buffer);
+            input_device
                 .build_input_stream(
                     &stream_config,
                     move |data: &[f32], _| {
-                        if let Ok(mut b) = buf_clone.lock() {
+                        if let Ok(mut b) = buf.lock() {
                             b.extend_from_slice(data);
                         }
                     },
                     err_fn,
                     None,
                 )
-                .map_err(|e| format!("build_input_stream f32: {e}"))?,
-            SampleFormat::I16 => {
-                let buf2 = Arc::clone(&buffer);
-                input_device
-                    .build_input_stream(
-                        &stream_config,
-                        move |data: &[i16], _| {
-                            if let Ok(mut b) = buf2.lock() {
-                                b.extend(data.iter().map(|&s| s as f32 / i16::MAX as f32));
-                            }
-                        },
-                        err_fn,
-                        None,
-                    )
-                    .map_err(|e| format!("build_input_stream i16: {e}"))?
-            }
-            SampleFormat::U16 => {
-                let buf3 = Arc::clone(&buffer);
-                input_device
-                    .build_input_stream(
-                        &stream_config,
-                        move |data: &[u16], _| {
-                            if let Ok(mut b) = buf3.lock() {
-                                b.extend(
-                                    data.iter()
-                                        .map(|&s| (s as f32 - 32768.0) / 32768.0),
-                                );
-                            }
-                        },
-                        err_fn,
-                        None,
-                    )
-                    .map_err(|e| format!("build_input_stream u16: {e}"))?
-            }
-            other => return Err(format!("неподдерживаемый формат сэмплов: {other:?}")),
-        };
+                .map_err(|e| format!("build_input_stream f32: {e}"))?
+        }
+        SampleFormat::I16 => {
+            let buf = Arc::clone(&buffer);
+            input_device
+                .build_input_stream(
+                    &stream_config,
+                    move |data: &[i16], _| {
+                        if let Ok(mut b) = buf.lock() {
+                            b.extend(data.iter().map(|&s| s as f32 / i16::MAX as f32));
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| format!("build_input_stream i16: {e}"))?
+        }
+        SampleFormat::U16 => {
+            let buf = Arc::clone(&buffer);
+            input_device
+                .build_input_stream(
+                    &stream_config,
+                    move |data: &[u16], _| {
+                        if let Ok(mut b) = buf.lock() {
+                            b.extend(data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0));
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| format!("build_input_stream u16: {e}"))?
+        }
+        other => return Err(format!("неподдерживаемый формат сэмплов: {other:?}")),
+    };
 
-        stream.play().map_err(|e| format!("stream.play: {e}"))?;
-
-        Ok(CaptureSession { stream, buffer, src_rate, channels })
-    }
-
-    /// Остановить захват, вернуть 16кГц моно f32-буфер.
-    pub fn finish(self) -> Result<Vec<f32>, String> {
-        // Дропаем стрим → захват останавливается
-        drop(self.stream);
-
-        let raw = self
-            .buffer
-            .lock()
-            .map_err(|e| format!("buffer lock: {e}"))?
-            .drain(..)
-            .collect::<Vec<f32>>();
-
-        let mono = downmix_to_mono(&raw, self.channels);
-        resample_to_16k(&mono, self.src_rate)
-    }
+    Ok((stream, buffer, src_rate, channels))
 }
 
 // ─── Чистые DSP-функции ──────────────────────────────────────────────────────

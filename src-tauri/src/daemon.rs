@@ -61,6 +61,10 @@ pub struct Daemon {
     pub tokens: crate::capability::tokens::TokenStore,
     /// Реестр ожидающих подтверждений агента (R4) — вне локов Daemon.
     pub pending: std::sync::Arc<crate::capability::confirm_panel::PendingConfirms>,
+    /// STT-сервис (инкремент 9): распознавание речи. Fail-safe.
+    pub stt: std::sync::Arc<crate::stt::SttService>,
+    /// PTT-диктовка (инкремент 9): потребитель SttService + хоткей.
+    pub dictation: std::sync::Arc<crate::stt::dictation::Dictation>,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -97,6 +101,10 @@ impl Daemon {
             let v = voice.clone();
             std::thread::spawn(move || v.warmup());
         }
+        // STT-сервис + PTT-диктовка (инкремент 9)
+        let stt_cfg = crate::stt::config::SttConfig::from_settings(&settings.load());
+        let stt = crate::stt::SttService::new(stt_cfg);
+        let dictation = crate::stt::dictation::Dictation::new(stt.clone());
         Self {
             app,
             sessions: Mutex::new(HashMap::new()),
@@ -124,6 +132,8 @@ impl Daemon {
             caps: crate::capability::build_registry(),
             tokens: crate::capability::tokens::TokenStore::new(),
             pending: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
+            stt,
+            dictation,
         }
     }
 

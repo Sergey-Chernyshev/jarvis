@@ -2,6 +2,7 @@
 //! внутренних потребителей (диктовка, голосовой агент). Fail-safe: ошибки
 //! движка — не паника, а Err-результат.
 
+pub mod audio;
 pub mod config;
 pub mod engine;
 pub mod engine_whisper;

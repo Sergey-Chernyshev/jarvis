@@ -116,6 +116,20 @@ impl Store {
         self.save(root);
     }
 
+    /// Deep-set полей в объект "stt" (не затирая остальные stt-ключи).
+    pub fn set_stt(&self, patch: Map<String, Value>) {
+        let all = self.load();
+        let mut stt = all.get("stt").cloned().unwrap_or_else(|| json!({}));
+        if let Some(obj) = stt.as_object_mut() {
+            for (k, v) in patch {
+                obj.insert(k, v);
+            }
+        }
+        let mut root = Map::new();
+        root.insert("stt".into(), stt);
+        self.save(root);
+    }
+
     pub fn set_plugin(&self, id: &str, patch: Map<String, Value>) {
         let all = self.load();
         let mut plugins = all.get("plugins").cloned().unwrap_or_else(|| json!({}));

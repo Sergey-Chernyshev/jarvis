@@ -144,6 +144,9 @@ fn main() {
             onboarding::model_delete,
             onboarding::quiet_set,
             ipc::agent_send,
+            ipc::stt_get,
+            ipc::stt_set_engine,
+            ipc::stt_test,
         ])
         .setup(|app| {
             // чистое меню-бар приложение: без иконки в доке

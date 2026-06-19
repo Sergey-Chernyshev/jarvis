@@ -55,6 +55,10 @@
     modelDelete: (id) => invoke('model_delete', { id }),
     quietSet: (on) => invoke('quiet_set', { on }),
     onGotoSettings: (cb) => on('goto-settings', cb),
+    // STT — диктовка (инкремент 9): состояние, выбор движка, тест
+    sttGet: () => invoke('stt_get'),
+    sttSetEngine: (engine) => invoke('stt_set_engine', { engine }),
+    sttTest: () => invoke('stt_test'),
   };
 
   // navigator.clipboard в WKWebView капризен (secure context, жесты) —

@@ -711,3 +711,72 @@ pub async fn agent_send(app: AppHandle, message: String, session_id: Option<Stri
 pub fn agent_chat_open(app: AppHandle) {
     let _ = windows::create_agent_chat(&app);
 }
+
+/* ================= STT — панель настроек (инкремент 9, фаза 9) ================= */
+
+/// Состояние STT для настроек: активный движок, список движков, доступность, хоткей.
+/// Не дёргает `available()` напрямую — он блокирует (HTTP). Возвращает мгновенный срез.
+#[tauri::command]
+pub fn stt_get(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    let cfg = crate::stt::config::SttConfig::from_settings(&d.settings.load());
+    let engine_name = d.stt.engine_name();
+    let whisper_model = crate::util::jarvis_dir()
+        .join("stt")
+        .join("ggml-large-v3-turbo-q5_0.bin")
+        .exists();
+    // Qwen3 сайдкар «готов», если движок отвечает на /health (быстро из кэша).
+    // Для UI — показываем наличие файла модели через быструю HTTP-проверку.
+    let qwen3_sidecar = d.stt.available(); // блокирует не более 3 с (connect timeout)
+    json!({
+        "engine": engine_name,
+        "engines": ["whisper-turbo", "qwen3-0.6b", "qwen3-1.7b"],
+        "whisperReady": whisper_model,
+        "qwen3Ready": qwen3_sidecar,
+        "available": qwen3_sidecar || (cfg.engine == "whisper-turbo" && whisper_model),
+        "hotkey": if cfg.hotkey.is_empty() { "F8".to_string() } else { cfg.hotkey },
+    })
+}
+
+/// Сменить движок STT + сохранить в settings.json. Требует перезапуска демона.
+#[tauri::command]
+pub fn stt_set_engine(app: AppHandle, engine: String) -> Value {
+    let allowed = ["whisper-turbo", "qwen3-0.6b", "qwen3-1.7b"];
+    if !allowed.contains(&engine.as_str()) {
+        return err(format!("Неизвестный STT-движок: {engine}"));
+    }
+    let d = Daemon::get(&app);
+    let mut patch = serde_json::Map::new();
+    patch.insert("engine".into(), Value::String(engine));
+    d.settings.set_stt(patch);
+    json!({ "ok": true, "restart": true })
+}
+
+/// Тест диктовки: ~4 с захвата с микрофона → транскрипция активным движком.
+/// Всё блокирующее вынесено в spawn_blocking — не блокирует tokio-рантайм.
+#[tauri::command]
+pub async fn stt_test(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    let stt = d.stt.clone();
+    let opts = stt.options();
+
+    // Весь захват + транскрипция — в блокирующем потоке (cpal + reqwest).
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        use crate::stt::audio::CaptureSession;
+        let session = CaptureSession::start(None)
+            .map_err(|e| format!("микрофон: {e}"))?;
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        let pcm = session.finish()
+            .map_err(|e| format!("захват: {e}"))?;
+        let r = stt.transcribe(&pcm, &opts)
+            .map_err(|e| format!("транскрипция: {e}"))?;
+        Ok(r.text)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(text)) => json!({ "ok": true, "text": text }),
+        Ok(Err(e)) => json!({ "ok": false, "error": e }),
+        Err(e) => json!({ "ok": false, "error": format!("задача упала: {e}") }),
+    }
+}

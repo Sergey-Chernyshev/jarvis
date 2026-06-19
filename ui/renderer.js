@@ -2584,6 +2584,7 @@ async function loadSettings() {
     plugins = await window.jarvis.getPlugins();
     renderPluginRows();
   } catch {}
+  renderSttCard();
   renderVoiceCard();
   renderIntegrationCard();
 }
@@ -2806,6 +2807,126 @@ async function renderVoiceCard() {
   // пауза чужого медиа на время озвучки (как Siri)
   box.appendChild(arow('Пауза чужого звука',
     stoggle(v.duck !== false, (on) => window.jarvis.voiceSetDuck(on)), { hairtop: true }));
+}
+
+// ── карточка «Голосовой ввод (диктовка)» — STT (инкремент 9) ──────────────────
+async function renderSttCard() {
+  const box = document.getElementById('stt-card-root');
+  if (!box) return;
+  box.textContent = '';
+
+  let v = null;
+  try { v = await window.jarvis.sttGet(); } catch {}
+
+  const spacer = () => Object.assign(document.createElement('span'), { className: 'spacer' });
+
+  // шапка: заголовок + текущий движок
+  const head = document.createElement('div');
+  head.className = 'awakehead';
+  const title = document.createElement('span');
+  title.className = 'atitle';
+  title.textContent = 'Голосовой ввод (диктовка)';
+  head.appendChild(title);
+  head.appendChild(spacer());
+  const engLabel = document.createElement('span');
+  engLabel.className = v && v.available ? 'astatus on' : 'astatus';
+  engLabel.textContent = v ? (v.available ? 'доступен' : 'недоступен') : 'нет данных';
+  head.appendChild(engLabel);
+  box.appendChild(head);
+
+  if (!v) {
+    const hint = document.createElement('div');
+    hint.className = 'ahint';
+    hint.textContent = 'STT-данные недоступны.';
+    box.appendChild(hint);
+    return;
+  }
+
+  // выбор движка (select)
+  const engRow = document.createElement('div');
+  engRow.className = 'arow hairtop';
+  const engRowLabel = document.createElement('span');
+  engRowLabel.className = 'alabel';
+  engRowLabel.textContent = 'Движок';
+  engRow.appendChild(engRowLabel);
+  engRow.appendChild(spacer());
+  const sel = document.createElement('select');
+  sel.style.cssText = 'background:transparent;border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:var(--text);font:inherit;font-size:12px;padding:3px 7px;outline:none;';
+  for (const eng of (v.engines || ['whisper-turbo', 'qwen3-0.6b', 'qwen3-1.7b'])) {
+    const opt = document.createElement('option');
+    opt.value = eng;
+    opt.textContent = eng;
+    if (eng === v.engine) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  sel.addEventListener('change', async () => {
+    const r = await window.jarvis.sttSetEngine(sel.value);
+    if (r && r.restart) showToast('Движок изменён — перезапусти Jarvis для применения');
+    renderSttCard();
+  });
+  engRow.appendChild(sel);
+  box.appendChild(engRow);
+
+  // статус моделей
+  const sttStatusRows = [
+    ['whisper-turbo', 'Модель Whisper-turbo', v.whisperReady],
+    [v.engine.startsWith('qwen3') ? v.engine : 'qwen3', 'Сайдкар Qwen3-ASR', v.qwen3Ready],
+  ];
+  for (const [, label, ready] of sttStatusRows) {
+    const r = document.createElement('div');
+    r.className = 'istat hairtop' + (ready ? ' on' : '');
+    r.appendChild(Object.assign(document.createElement('span'), { className: 'dot' }));
+    r.appendChild(Object.assign(document.createElement('span'), { textContent: label }));
+    r.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+    r.appendChild(Object.assign(document.createElement('span'), {
+      className: 'sz', textContent: ready ? 'готово' : '—',
+    }));
+    box.appendChild(r);
+  }
+
+  // хоткей диктовки
+  const hkRow = document.createElement('div');
+  hkRow.className = 'arow hairtop';
+  const hkLabel = document.createElement('span');
+  hkLabel.className = 'alabel';
+  hkLabel.textContent = `Зажми ${v.hotkey || 'F8'}, чтобы диктовать`;
+  hkRow.appendChild(hkLabel);
+  hkRow.appendChild(spacer());
+  const hkCap = document.createElement('span');
+  hkCap.className = 'keycap';
+  hkCap.textContent = v.hotkey || 'F8';
+  hkRow.appendChild(hkCap);
+  box.appendChild(hkRow);
+
+  // кнопка теста
+  const testRow = document.createElement('div');
+  testRow.className = 'abtnrow';
+  const testBtn = document.createElement('button');
+  testBtn.className = 'abtn small';
+  testBtn.textContent = 'Тест (4 сек)';
+  const resultEl = document.createElement('span');
+  resultEl.className = 'ahint';
+  resultEl.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+  testBtn.addEventListener('click', async () => {
+    testBtn.disabled = true;
+    testBtn.textContent = 'Запись…';
+    resultEl.textContent = '';
+    try {
+      const res = await window.jarvis.sttTest();
+      if (res && res.ok) {
+        resultEl.textContent = res.text || '(пусто)';
+      } else {
+        resultEl.textContent = res ? res.error : 'ошибка';
+      }
+    } catch (e) {
+      resultEl.textContent = String(e);
+    }
+    testBtn.disabled = false;
+    testBtn.textContent = 'Тест (4 сек)';
+  });
+  testRow.appendChild(testBtn);
+  testRow.appendChild(resultEl);
+  box.appendChild(testRow);
 }
 
 document.getElementById('diagnostics').addEventListener('change', (e) => {

@@ -5,6 +5,8 @@
 pub mod config;
 pub mod engine;
 pub mod engine_whisper;
+pub mod sidecar;
+pub mod engine_qwen3;
 
 use std::sync::Arc;
 
@@ -118,16 +120,17 @@ mod tests {
         assert_eq!(svc.engine_name(), "mock");
     }
 
-    // SttService с NullEngine (через build_engine с дефолтным конфигом): available()==false
+    // SttService с Qwen3Engine (дефолтный конфиг engine=qwen3-0.6b): available()==false
+    // когда сайдкар не запущен (порт 8732 закрыт в тестах)
     #[test]
-    fn null_engine_service_not_available() {
+    fn qwen3_engine_service_not_available() {
         let svc = SttService::new(SttConfig::default());
         assert!(!svc.available());
     }
 
-    // SttService с NullEngine: transcribe → Err
+    // SttService с Qwen3Engine: transcribe → Err когда сайдкар не запущен
     #[test]
-    fn null_engine_service_transcribe_errors() {
+    fn qwen3_engine_service_transcribe_errors() {
         let svc = SttService::new(SttConfig::default());
         let result = svc.transcribe(&[0.0f32; 16], &SttOptions::default());
         assert!(result.is_err());
@@ -157,10 +160,10 @@ mod tests {
         assert_eq!(opts.task, SttTask::Translate);
     }
 
-    // SttService::new строит правильно из конфига
+    // SttService::new строит правильно из конфига — дефолт = qwen3-0.6b (Phase 3)
     #[test]
-    fn new_service_engine_name_is_none_for_default_config() {
+    fn new_service_engine_name_is_qwen3_for_default_config() {
         let svc = SttService::new(SttConfig::default());
-        assert_eq!(svc.engine_name(), "none");
+        assert_eq!(svc.engine_name(), "qwen3-0.6b");
     }
 }

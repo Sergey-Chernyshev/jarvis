@@ -15,19 +15,59 @@ use std::sync::Arc;
 
 use config::SttConfig;
 use engine::{SttEngine, SttOptions, SttResult};
+use sidecar::SttSidecar;
+
+/// Фиксированный порт STT-сайдкара (Qwen3-ASR MLX) на localhost.
+const STT_PORT: u16 = 8732;
 
 /// Сервис распознавания речи. Владеет движком и конфигом.
+/// Для qwen3-движков также владеет супервизором MLX-сайдкара (старт/тик/стоп):
+/// движок — лишь HTTP-клиент, кто-то должен поднять процесс на 127.0.0.1:8732.
 /// Создаётся один раз через `SttService::new`, живёт в Arc.
 pub struct SttService {
     engine: Box<dyn SttEngine>,
     config: SttConfig,
+    /// Сайдкар: Some только для qwen3-* (None для whisper — там движок из файла модели).
+    sidecar: Option<Arc<SttSidecar>>,
 }
 
 impl SttService {
     /// Создать сервис с заданной конфигурацией (движок инициализируется немедленно).
+    /// Для qwen3-движка поднимает MLX-сайдкар и подключает движок к его base().
     pub fn new(cfg: SttConfig) -> Arc<Self> {
+        if cfg.engine.starts_with("qwen3") {
+            let dir = crate::util::jarvis_dir().join("stt-mlx");
+            let sidecar = Arc::new(SttSidecar::new(
+                &dir.to_string_lossy(),
+                &cfg.engine,
+                STT_PORT,
+            ));
+            // Запуск fail-safe: не установлен/не стартовал → движок просто вернёт Err.
+            let _ = sidecar.ensure_started();
+            let engine = engine::build_qwen3_engine(sidecar.base(), &cfg.engine);
+            return Arc::new(SttService { engine, config: cfg, sidecar: Some(sidecar) });
+        }
         let engine = engine::build_engine(&cfg);
-        Arc::new(SttService { engine, config: cfg })
+        Arc::new(SttService { engine, config: cfg, sidecar: None })
+    }
+
+    /// Тик супервизора: перезапустить MLX-сайдкар, если он умер (qwen3-only).
+    pub fn tick(&self) {
+        if let Some(s) = &self.sidecar {
+            s.restart_if_dead();
+        }
+    }
+
+    /// Погасить MLX-сайдкар на выходе демона (qwen3-only; no-op для whisper).
+    pub fn dispose(&self) {
+        if let Some(s) = &self.sidecar {
+            s.stop();
+        }
+    }
+
+    /// PID MLX-сайдкара (для метрик диагностики); None, если не qwen3 или не запущен.
+    pub fn sidecar_pid(&self) -> Option<u32> {
+        self.sidecar.as_ref().and_then(|s| s.pid())
     }
 
     /// Транскрибировать буфер PCM (16кГц моно f32). Опции — из `options()` или явные.
@@ -94,6 +134,7 @@ mod tests {
         Arc::new(SttService {
             engine: Box::new(MockEngine { result_text: text.to_string() }),
             config: cfg,
+            sidecar: None,
         })
     }
 

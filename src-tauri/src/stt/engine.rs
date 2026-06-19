@@ -77,13 +77,22 @@ impl SttEngine for NullEngine {
 /// - "whisper-turbo" → WhisperEngine (Phase 2; Metal; требует cmake для компиляции).
 /// - "qwen3-0.6b" / "qwen3-1.7b" → Qwen3Engine (Phase 3; MLX Python sidecar).
 pub fn build_engine(cfg: &crate::stt::config::SttConfig) -> Box<dyn SttEngine> {
-    use crate::stt::engine_qwen3::Qwen3Engine;
     match cfg.engine.as_str() {
         "whisper-turbo" => Box::new(crate::stt::engine_whisper::WhisperEngine::new()),
-        "qwen3-0.6b" => Box::new(Qwen3Engine::new("http://127.0.0.1:8732".to_string(), "qwen3-0.6b".to_string())),
-        "qwen3-1.7b" => Box::new(Qwen3Engine::new("http://127.0.0.1:8732".to_string(), "qwen3-1.7b".to_string())),
+        "qwen3-0.6b" | "qwen3-1.7b" => {
+            // Дефолтный base; в проде SttService::new пробрасывает base сайдкара
+            // через build_qwen3_engine. Здесь — для тестов/whisper-симметрии.
+            build_qwen3_engine("http://127.0.0.1:8732".to_string(), &cfg.engine)
+        }
         _ => Box::new(NullEngine),
     }
+}
+
+/// Собрать Qwen3-движок с явным base (URL сайдкара). `name` — "qwen3-0.6b"|"qwen3-1.7b";
+/// прочее тоже маппится на qwen3 (движок сам нормализует через `name()`).
+pub fn build_qwen3_engine(base: String, name: &str) -> Box<dyn SttEngine> {
+    use crate::stt::engine_qwen3::Qwen3Engine;
+    Box::new(Qwen3Engine::new(base, name.to_string()))
 }
 
 #[cfg(test)]

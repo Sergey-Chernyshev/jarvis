@@ -169,11 +169,22 @@ pub fn toast_flush(d: &Daemon) {
     }
 }
 
-pub fn toast_add(d: &Daemon, id: &str, title: &str, body: &str, session_id: Option<&str>, kind: &str) {
+pub fn toast_add(
+    d: &Daemon,
+    id: &str,
+    title: &str,
+    body: &str,
+    session_id: Option<&str>,
+    kind: &str,
+    question: Option<&serde_json::Value>,
+) {
     toast_emit(
         d,
         "toast-add",
-        json!({ "id": id, "title": title, "body": body, "sessionId": session_id, "kind": kind }),
+        json!({
+            "id": id, "title": title, "body": body,
+            "sessionId": session_id, "kind": kind, "question": question,
+        }),
     );
 }
 

@@ -56,11 +56,17 @@
     border: 1px solid var(--border);
     border-radius: 12px; /* под системное скругление окна (roundedCorners) */
     overflow: hidden;
-    transition: opacity 120ms ease-out, transform 120ms ease-out;
   }
-  .panel.entering { opacity: 0; transform: scale(0.98); }
+  /* вход — одноразовая keyframe-анимация, НЕ transition: transition тянет opacity
+     «вниз→вверх» при повторном показе уже видимой панели (просадка = «моргание»);
+     keyframe всегда играет вперёд 0→1, дип невозможен. */
+  .panel.entering { animation: panelIn 130ms ease-out both; }
+  @keyframes panelIn {
+    from { opacity: 0; transform: scale(0.98); }
+    to   { opacity: 1; transform: scale(1); }
+  }
   @media (prefers-reduced-motion: reduce) {
-    .panel { transition: none; }
+    .panel.entering { animation: none; }
   }
 
   /* ---------- command row ---------- */
@@ -1358,6 +1364,31 @@
           <span class="slabel">Глобальный хоткей</span>
           <span class="spacer"></span>
           <button class="keycap" id="hotkey">⌘ J</button>
+        </div>
+        <div class="srow">
+          <span class="slabel">Продолжить последнюю сессию</span>
+          <span class="spacer"></span>
+          <button class="keycap" id="continueHotkey" data-hk="continueHotkey">⌘ ⌥ C</button>
+        </div>
+        <div class="srow">
+          <span class="slabel">Повторить уведомление</span>
+          <span class="spacer"></span>
+          <button class="keycap" id="repeatHotkey" data-hk="repeatHotkey">⌘ ⌥ R</button>
+        </div>
+        <div class="srow">
+          <span class="slabel">Без звука (mute)</span>
+          <span class="spacer"></span>
+          <button class="keycap" id="muteHotkey" data-hk="muteHotkey">⌘ ⌥ M</button>
+        </div>
+        <div class="srow">
+          <span class="slabel">Тихий режим</span>
+          <span class="spacer"></span>
+          <button class="keycap" id="quietHotkey" data-hk="quietHotkey">⌘ ⌥ J</button>
+        </div>
+        <div class="srow shint">
+          <span class="slabel">Выбор варианта в уведомлении</span>
+          <span class="spacer"></span>
+          <span class="keycap static">⌘ ⌥ 1–9</span>
         </div>
         <div class="serror" id="hotkeyError" hidden></div>
         <div class="srow">

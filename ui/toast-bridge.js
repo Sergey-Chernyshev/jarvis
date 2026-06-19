@@ -23,5 +23,8 @@
     click: (sessionId) => invoke('toast_click', { sessionId }),
     resize: (h) => invoke('toast_resize', { h }),
     continueSession: (sessionId) => invoke('session_continue', { sessionId }),
+    // ответ на вопрос кликом по варианту (выбор клавишами идёт мимо — глобальный хоткей)
+    answerQuestion: (sessionId, indices, multiSelect) =>
+      invoke('question_answer', { sessionId, choice: { indices, multiSelect } }),
   };
 })();

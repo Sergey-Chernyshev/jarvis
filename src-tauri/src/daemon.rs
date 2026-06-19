@@ -24,6 +24,18 @@ use crate::model::{
 use crate::util::*;
 use crate::{claude_bin, ru, settings, tail, tmux, transcript, windows};
 
+/// Снимок последнего уведомления для хоткея «повторить»: всё нужное, чтобы
+/// заново показать карточку и переозвучить (включая варианты вопроса).
+#[derive(Clone)]
+struct LastToast {
+    title: String,
+    body: String,
+    sid: Option<String>,
+    kind: String,
+    speak: String,
+    question: Option<Value>,
+}
+
 pub struct Daemon {
     pub app: AppHandle,
     pub sessions: Mutex<HashMap<String, Session>>,
@@ -52,6 +64,8 @@ pub struct Daemon {
     last_prompt_at: Mutex<HashMap<String, i64>>,
     /// Сессия последнего уведомления — цель хоткея «Продолжить».
     last_session: Mutex<Option<String>>,
+    /// Последнее уведомление — для хоткея «повторить» (пере-показ + переозвучка).
+    last_toast: Mutex<Option<LastToast>>,
     /// Голос (инкремент 7): озвучка событий локальным TTS. Fail-safe.
     pub voice: std::sync::Arc<crate::voice::Voice>,
     /// Реестр капабилити (инкремент 8): источник истины для агента/панели/MCP.
@@ -120,6 +134,7 @@ impl Daemon {
             busy: Mutex::new(HashSet::new()),
             last_prompt_at: Mutex::new(HashMap::new()),
             last_session: Mutex::new(None),
+            last_toast: Mutex::new(None),
             voice,
             caps: crate::capability::build_registry(),
             tokens: crate::capability::tokens::TokenStore::new(),
@@ -284,7 +299,13 @@ impl Daemon {
 
     /// Переключить тихий режим (хоткей/меню): персист + обновление галки в трее.
     pub fn toggle_quiet(self: &std::sync::Arc<Self>) {
-        self.set_quiet(!self.is_quiet());
+        let on = !self.is_quiet();
+        self.set_quiet(on);
+        if on {
+            self.mode_toast("🌙", "Тихий режим");
+        } else {
+            self.mode_toast("☀️", "Обычный режим");
+        }
     }
 
     pub fn set_quiet(self: &std::sync::Arc<Self>, on: bool) {
@@ -330,11 +351,49 @@ impl Daemon {
         if let Some(sid) = session_id {
             *self.last_session.lock().unwrap() = Some(sid.to_string());
         }
+
+        // вопрос (AskUserQuestion): тянем варианты из сессии → тост покажет их
+        // списком, а голос прочитает «вопрос + Вариант N: label. описание».
+        let qitem = session_id
+            .and_then(|sid| self.session(sid))
+            .and_then(|s| s.question)
+            .and_then(|q| q.questions.into_iter().next());
+        let question = qitem.as_ref().map(|qi| {
+            serde_json::json!({
+                "multiSelect": qi.multi_select,
+                "question": qi.question,
+                "options": qi.options.iter()
+                    .map(|o| serde_json::json!({ "label": o.label, "description": o.description }))
+                    .collect::<Vec<_>>(),
+            })
+        });
+        let speak_text = match &qitem {
+            Some(qi) => {
+                let mut t = if qi.question.is_empty() { String::new() } else { qi.question.clone() };
+                for (i, o) in qi.options.iter().enumerate() {
+                    t.push_str(&format!(". Вариант {}: {}. {}", i + 1, o.label, o.description));
+                }
+                t
+            }
+            None => speak.unwrap_or(body).to_string(),
+        };
+
+        // запоминаем для хоткея «повторить» (даже в тихом режиме — ⌘⌥-повтор
+        // показывает явно по запросу пользователя)
+        *self.last_toast.lock().unwrap() = Some(LastToast {
+            title: title.to_string(),
+            body: body.to_string(),
+            sid: session_id.map(str::to_string),
+            kind: kind.to_string(),
+            speak: speak_text.clone(),
+            question: question.clone(),
+        });
+
         // тихий режим: статистика уже записана выше по потоку, наружу — ничего
         if self.is_quiet() {
             return;
         }
-        windows::toast_add(self, id, title, body, session_id, kind);
+        windows::toast_add(self, id, title, body, session_id, kind, question.as_ref());
 
         // голос (инкремент 7): озвучиваем уведомление. Одна точка на все события;
         // gated по voice-конфигу. Для «done» читаем `speak` (русское произношение),
@@ -347,8 +406,69 @@ impl Daemon {
             _ => false,
         };
         if on {
-            self.voice.speak_text(title, speak.unwrap_or(body), kind, Some(id));
+            self.voice.speak_text(title, &speak_text, kind, Some(id));
         }
+    }
+
+    /* ================= режимы и повтор (хоткеи) ================= */
+
+    /// Анимированная карточка смены режима — показывается ВСЕГДА (даже в тихом
+    /// режиме), иначе непонятно, что включил. Без озвучки и без записи в
+    /// last_toast (повторять смену режима незачем).
+    pub fn mode_toast(self: &std::sync::Arc<Self>, icon: &str, label: &str) {
+        let id = format!("mode-{}", self.toast_seq.fetch_add(1, Ordering::SeqCst) + 1);
+        windows::toast_add(self, &id, &format!("{icon}  {label}"), "", None, "mode", None);
+    }
+
+    /// Переключить «без звука» (mute) хоткеем: глушит/возвращает голос + карточка.
+    pub fn toggle_mute(self: &std::sync::Arc<Self>) {
+        let on = !self.voice.is_muted();
+        self.voice.set_mute(on);
+        crate::log::line(&format!("[mute] без звука: {}", if on { "ВКЛ" } else { "выкл" }));
+        if on {
+            self.mode_toast("🔇", "Без звука");
+        } else {
+            self.mode_toast("🔔", "Звук включён");
+        }
+    }
+
+    /// Повторить последнее уведомление: пере-показ карточки + переозвучка.
+    pub fn repeat_last_toast(self: &std::sync::Arc<Self>) {
+        let Some(lt) = self.last_toast.lock().unwrap().clone() else { return };
+        let id = format!("repeat-{}", self.toast_seq.fetch_add(1, Ordering::SeqCst) + 1);
+        windows::toast_add(self, &id, &lt.title, &lt.body, lt.sid.as_deref(), &lt.kind, lt.question.as_ref());
+        // переозвучка по явному запросу (mute внутри speak_text всё равно уважается)
+        self.voice.speak_text(&lt.title, &lt.speak, &lt.kind, Some(&id));
+    }
+
+    /// Ответ на активный вопрос хоткеем ⌘⌥N: вариант `n` (1-based).
+    pub fn answer_question_hotkey(self: &std::sync::Arc<Self>, n: u32) {
+        // активный вопрос: предпочитаем сессию последнего уведомления, иначе —
+        // самую свежую сессию с открытым вопросом.
+        let target = {
+            let sessions = self.sessions.lock().unwrap();
+            let has_q = |id: &str| sessions.get(id).is_some_and(|s| s.question.is_some());
+            let last = self.last_session.lock().unwrap().clone().filter(|s| has_q(s));
+            last.or_else(|| {
+                sessions
+                    .iter()
+                    .filter(|(_, s)| s.question.is_some())
+                    .max_by_key(|(_, s)| s.updated_at)
+                    .map(|(id, _)| id.clone())
+            })
+            .map(|sid| (sid.clone(), sessions.get(&sid).and_then(|s| s.question.as_ref())
+                .map(|q| q.questions.first().map(|x| x.multi_select).unwrap_or(false)).unwrap_or(false)))
+        };
+        let Some((sid, multi)) = target else { return };
+        let h = self.app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = crate::ipc::question_answer(
+                h,
+                sid,
+                serde_json::json!({ "indices": [n], "multiSelect": multi }),
+            )
+            .await;
+        });
     }
 
     /* ================= busy-флаги фоновых задач ================= */

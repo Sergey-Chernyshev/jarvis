@@ -129,6 +129,61 @@ pub fn register_continue_hotkey(d: &Arc<Daemon>) {
     }
 }
 
+/// Аккселератор «повторить уведомление»: настройка `repeatHotkey`, дефолт ⌘⌥R.
+pub fn repeat_accelerator(d: &Arc<Daemon>) -> String {
+    let s = d.settings.string("repeatHotkey");
+    if s.is_empty() { "Command+Alt+R".to_string() } else { s }
+}
+
+pub fn is_repeat_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
+    repeat_accelerator(d).parse::<Shortcut>().map(|s| &s == shortcut).unwrap_or(false)
+}
+
+pub fn register_repeat_hotkey(d: &Arc<Daemon>) {
+    let accel = repeat_accelerator(d);
+    let gs = d.app.global_shortcut();
+    if !gs.is_registered(accel.as_str()) {
+        let _ = gs.register(accel.as_str());
+    }
+}
+
+/// Аккселератор «без звука» (mute): настройка `muteHotkey`, дефолт ⌘⌥M.
+pub fn mute_accelerator(d: &Arc<Daemon>) -> String {
+    let s = d.settings.string("muteHotkey");
+    if s.is_empty() { "Command+Alt+M".to_string() } else { s }
+}
+
+pub fn is_mute_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
+    mute_accelerator(d).parse::<Shortcut>().map(|s| &s == shortcut).unwrap_or(false)
+}
+
+pub fn register_mute_hotkey(d: &Arc<Daemon>) {
+    let accel = mute_accelerator(d);
+    let gs = d.app.global_shortcut();
+    if !gs.is_registered(accel.as_str()) {
+        let _ = gs.register(accel.as_str());
+    }
+}
+
+/// Выбор варианта вопроса: ⌘⌥1 … ⌘⌥9 (фиксированные, регистрируются на старте).
+/// Срабатывают, только когда есть активный вопрос (иначе — no-op в handler'е).
+pub fn register_select_hotkeys(d: &Arc<Daemon>) {
+    let gs = d.app.global_shortcut();
+    for n in 1..=9 {
+        let accel = format!("Command+Alt+{n}");
+        if !gs.is_registered(accel.as_str()) {
+            let _ = gs.register(accel.as_str());
+        }
+    }
+}
+
+/// Если shortcut — это ⌘⌥<цифра>, вернуть номер варианта (1..9).
+pub fn is_select_hotkey(shortcut: &Shortcut) -> Option<u32> {
+    (1..=9).find(|n| {
+        format!("Command+Alt+{n}").parse::<Shortcut>().map(|s| &s == shortcut).unwrap_or(false)
+    })
+}
+
 #[tauri::command]
 pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
     let d = Daemon::get(&app);
@@ -155,6 +210,34 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
             }
             let _ = via_gate_panel(&d, "settings.set", json!({ "patch": { "hotkey": hk } })).await;
         }
+    }
+
+    // прочие глобальные хоткеи (тихий/продолжить/повтор/без звука): перепривязка
+    // с откатом на прежний при занятом сочетании — как у главного хоткея.
+    for (key, old) in [
+        ("quietHotkey", quiet_accelerator(&d)),
+        ("continueHotkey", continue_accelerator(&d)),
+        ("repeatHotkey", repeat_accelerator(&d)),
+        ("muteHotkey", mute_accelerator(&d)),
+    ] {
+        let removed = rest.remove(key);
+        let Some(hk) = removed
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+        else {
+            continue;
+        };
+        if hk != old {
+            let gs = d.app.global_shortcut();
+            let _ = gs.unregister(old.as_str());
+            if gs.register(hk.as_str()).is_err() {
+                let _ = gs.register(old.as_str());
+                return err(format!("Сочетание {hk} занято системой"));
+            }
+        }
+        let _ = via_gate_panel(&d, "settings.set", json!({ "patch": { key: hk } })).await;
     }
 
     if !rest.is_empty() {

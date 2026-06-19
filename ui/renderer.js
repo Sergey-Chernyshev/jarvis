@@ -125,7 +125,7 @@ function setView(next) {
   if (next === 'settings') loadSettings();
   if (next === 'stats') renderStats();
   if (next === 'history') renderHistory();
-  else if (recording) { recording = false; hotkeyBtn.classList.remove('recording'); }
+  else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
   if (next === 'list') queryEl.focus();
 }
 
@@ -1785,10 +1785,12 @@ window.jarvis.onOpenSession(async (id) => {
 // Анимация появления в стиле Raycast: scale(.98)→1 + fade, 120ms.
 // Порядок строк пересобираем ТОЛЬКО здесь — при открытии панели, не во время просмотра.
 window.jarvis.onShown(() => {
+  // перезапуск входной анимации на каждый показ: снять класс → форс-рефлоу → вернуть.
+  // keyframe стартует с opacity:0 (fill both держит 0 до показа окна), поэтому
+  // реверс-fade и «моргание» исключены, даже если панель уже была видима.
+  panelEl.classList.remove('entering');
+  void panelEl.offsetWidth;
   panelEl.classList.add('entering');
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    panelEl.classList.remove('entering');
-  }));
   // Окно при скрытии не уничтожается — view и открытый чат живы. Возвращаем
   // на то же место (клик мимо / Cmd+J прячут панель как есть). Чат или вопрос
   // уже закрытой сессии (могла завершиться, пока панель была спрятана) —
@@ -1806,9 +1808,6 @@ window.jarvis.onShown(() => {
     render();
   }
 });
-requestAnimationFrame(() => requestAnimationFrame(() => {
-  panelEl.classList.remove('entering');
-}));
 
 queryEl.addEventListener('input', () => {
   if (view === 'history') { renderHistory(); return; }
@@ -2565,6 +2564,25 @@ window.jarvis.onGotoSettings(() => setView('settings'));
 const hotkeyBtn = document.getElementById('hotkey');
 const hotkeyErr = document.getElementById('hotkeyError');
 let recording = false;
+let recordingKey = 'hotkey'; // какой хоткей записываем (settings-ключ)
+let recordingBtn = hotkeyBtn; // кнопка, что сейчас в режиме записи
+
+// дефолты «прочих» хоткеев — чтобы кнопки показывали реальное значение
+const HK_DEFAULTS = {
+  continueHotkey: 'Command+Alt+C',
+  repeatHotkey: 'Command+Alt+R',
+  muteHotkey: 'Command+Alt+M',
+  quietHotkey: 'Command+Alt+J',
+};
+
+function startRecording(btn, key) {
+  recording = true;
+  recordingKey = key;
+  recordingBtn = btn;
+  hotkeyErr.hidden = true;
+  btn.classList.add('recording');
+  btn.textContent = 'нажми сочетание…';
+}
 
 function displayHotkey(acc) {
   return acc
@@ -2576,6 +2594,10 @@ function displayHotkey(acc) {
 async function loadSettings() {
   const s = await window.jarvis.getSettings();
   hotkeyBtn.textContent = displayHotkey(s.hotkey);
+  for (const btn of document.querySelectorAll('.keycap[data-hk]')) {
+    const key = btn.dataset.hk;
+    btn.textContent = displayHotkey(s[key] || HK_DEFAULTS[key] || '');
+  }
   document.getElementById('notifyDone').checked = s.notifyDone;
   document.getElementById('notifyWaiting').checked = s.notifyWaiting;
   document.getElementById('autoResume').checked = s.autoResume !== false;
@@ -2861,12 +2883,10 @@ function accelFromEvent(e) {
   return [...mods, key].join('+');
 }
 
-hotkeyBtn.addEventListener('click', () => {
-  recording = true;
-  hotkeyErr.hidden = true;
-  hotkeyBtn.classList.add('recording');
-  hotkeyBtn.textContent = 'нажми сочетание…';
-});
+hotkeyBtn.addEventListener('click', () => startRecording(hotkeyBtn, 'hotkey'));
+for (const btn of document.querySelectorAll('.keycap[data-hk]')) {
+  btn.addEventListener('click', () => startRecording(btn, btn.dataset.hk));
+}
 
 /* ---------- клавиатура ---------- */
 
@@ -2875,15 +2895,15 @@ window.addEventListener('keydown', async (e) => {
     e.preventDefault();
     if (e.key === 'Escape') {
       recording = false;
-      hotkeyBtn.classList.remove('recording');
+      recordingBtn.classList.remove('recording');
       loadSettings();
       return;
     }
     const acc = accelFromEvent(e);
     if (!acc) return; // ждём полный аккорд
     recording = false;
-    hotkeyBtn.classList.remove('recording');
-    const res = await window.jarvis.setSettings({ hotkey: acc });
+    recordingBtn.classList.remove('recording');
+    const res = await window.jarvis.setSettings({ [recordingKey]: acc });
     if (!res.ok) {
       hotkeyErr.textContent = res.error || 'Не удалось назначить';
       hotkeyErr.hidden = false;

@@ -61,8 +61,8 @@ fn main() {
                         return;
                     }
                     let d = Daemon::get(app);
-                    // ⌘⌥J — тихий режим; ⌘⌥C — «Продолжить» последнюю сессию;
-                    // всё прочее — панель.
+                    // ⌘⌥J — тихий; ⌘⌥C — «Продолжить»; ⌘⌥R — повтор увед.;
+                    // ⌘⌥M — без звука; ⌘⌥1..9 — выбор варианта; прочее — панель.
                     if ipc::is_quiet_hotkey(&d, shortcut) {
                         d.toggle_quiet();
                     } else if ipc::is_continue_hotkey(&d, shortcut) {
@@ -72,6 +72,12 @@ fn main() {
                                 let _ = ipc::session_continue(h, sid).await;
                             });
                         }
+                    } else if ipc::is_repeat_hotkey(&d, shortcut) {
+                        d.repeat_last_toast();
+                    } else if ipc::is_mute_hotkey(&d, shortcut) {
+                        d.toggle_mute();
+                    } else if let Some(n) = ipc::is_select_hotkey(shortcut) {
+                        d.answer_question_hotkey(n);
                     } else {
                         windows::toggle_hotkey_panel(&d);
                     }
@@ -163,6 +169,9 @@ fn main() {
             }
             ipc::register_quiet_hotkey(&d); // тумблер тихого режима (⌘⌥J)
             ipc::register_continue_hotkey(&d); // «Продолжить» последнюю сессию (⌘⌥C)
+            ipc::register_repeat_hotkey(&d); // повторить последнее уведомление (⌘⌥R)
+            ipc::register_mute_hotkey(&d); // без звука / mute (⌘⌥M)
+            ipc::register_select_hotkeys(&d); // выбор варианта вопроса (⌘⌥1..9)
 
             spawn_timers(&d);
 

@@ -57,17 +57,23 @@ impl SttSidecar {
         {
             return Ok(());
         }
-        match Command::new(&self.py)
-            .arg(&self.script)
+        let mut cmd = Command::new(&self.py);
+        cmd.arg(&self.script)
             .arg("--port")
             .arg(self.port.to_string())
             .arg("--model")
             .arg(&self.model)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
+            .stderr(Stdio::null());
+        // huggingface.co заблокирован на части сетей (напр. RU) → тянем модель
+        // через зеркало, если HF_ENDPOINT не задан явно снаружи. XET-протокол
+        // отключаем — он ломал соединение (`[Errno 22]`) на этой сети.
+        if std::env::var("HF_ENDPOINT").is_err() {
+            cmd.env("HF_ENDPOINT", "https://hf-mirror.com");
+        }
+        cmd.env("HF_HUB_DISABLE_XET", "1");
+        match cmd.spawn() {
             Ok(c) => {
                 *g = Some(c);
                 crate::log::line(&format!("[stt] сайдкар запущен на :{}", self.port));

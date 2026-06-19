@@ -5,9 +5,14 @@
     <!-- Сетевой клиент: updater тянет манифест/артефакты по HTTPS. -->
     <key>com.apple.security.network.client</key>
     <true/>
+    <!-- Микрофон (инкр. 9, §10): голосовая диктовка через STT-движок.
+         Обязателен для захвата аудио через CoreAudio/CPAL под hardened runtime.
+         Пользователь видит системный диалог разрешения при первом запуске диктовки. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
     <!-- Jarvis спавнит дочерние процессы (claude, tmux, python-сайдкар).
          Под hardened runtime спавн разрешён; здесь явных доп-энтайтлментов
-         не требуется. PyTorch грузится в ОТДЕЛЬНОМ venv-python — под
-         hardened runtime приложения не попадает. -->
+         не требуется. PyTorch/MLX грузятся в ОТДЕЛЬНЫХ venv-python — под
+         hardened runtime приложения не попадают. -->
 </dict>
 </plist>

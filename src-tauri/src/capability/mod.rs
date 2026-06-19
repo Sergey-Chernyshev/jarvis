@@ -383,4 +383,61 @@ mod tests {
             .await.expect("панель пишет любой не-security ключ");
         assert_eq!(out.value, json!({"ok":true}));
     }
+
+    // Phase 7 / §10: stt.transcribe зарегистрирована в нативном реестре.
+    #[test]
+    fn build_registry_includes_stt_transcribe() {
+        let reg = super::build_registry();
+        let entry = reg.get("stt.transcribe");
+        assert!(entry.is_some(), "stt.transcribe должна быть в реестре");
+        let meta = &entry.unwrap().meta;
+        assert_eq!(meta.class, RiskClass::Control, "класс STT — Control (доступ к микрофону)");
+        assert_eq!(meta.provenance, Provenance::Trusted, "провенанс STT — Trusted");
+    }
+
+    // Phase 7 / §10: агент НЕ видит stt.transcribe в tools/list (denied_ids).
+    #[test]
+    fn agent_tools_exclude_stt_transcribe() {
+        let reg = super::build_registry();
+        let tools = reg.tools_json(&Consumer::agent().grant);
+        let names: Vec<&str> =
+            tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(!names.contains(&"stt.transcribe"), "stt.transcribe агенту не проецируется");
+        // При этом обычные Control-капабилити — sessions.reply — агент видит.
+        assert!(names.contains(&"sessions.reply"), "sessions.reply агент видит как Control");
+    }
+
+    // Phase 7 / §10: панель ВИДИТ stt.transcribe (denied_ids у панели пуст).
+    #[test]
+    fn panel_tools_include_stt_transcribe() {
+        let reg = super::build_registry();
+        let tools = reg.tools_json(&Consumer::panel().grant);
+        let names: Vec<&str> =
+            tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"stt.transcribe"), "панель видит stt.transcribe");
+    }
+
+    // Phase 7 / §10: плагин с Control-классом ВИДИТ stt.transcribe.
+    #[test]
+    fn plugin_with_control_sees_stt_transcribe() {
+        let reg = super::build_registry();
+        let plugin = Consumer::plugin("voice-plugin", &[RiskClass::Control]);
+        let tools = reg.tools_json(&plugin.grant);
+        let names: Vec<&str> =
+            tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"stt.transcribe"),
+            "плагин с Control-грантом видит stt.transcribe");
+    }
+
+    // Phase 7 / §10: плагин БЕЗ Control-класса НЕ видит stt.transcribe.
+    #[test]
+    fn plugin_without_control_cannot_see_stt_transcribe() {
+        let reg = super::build_registry();
+        let plugin = Consumer::plugin("read-only-plugin", &[RiskClass::Read]);
+        let tools = reg.tools_json(&plugin.grant);
+        let names: Vec<&str> =
+            tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(!names.contains(&"stt.transcribe"),
+            "плагин без Control не видит stt.transcribe");
+    }
 }

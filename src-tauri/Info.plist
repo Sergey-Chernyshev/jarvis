@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Микрофон (инкр. 9, §10): обязательное описание для App Store / notarization.
+         macOS показывает эту строку в системном диалоге разрешения микрофона при
+         первой попытке захвата аудио через диктовку Jarvis. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Jarvis использует микрофон для голосовой диктовки.</string>
+</dict>
+</plist>

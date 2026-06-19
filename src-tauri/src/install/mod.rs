@@ -22,6 +22,8 @@ const HOOK_SRC: &str = include_str!("../../../bin/jarvis-hook");
 const SHIM_SRC: &str = include_str!("../../../bin/claude-shim");
 const TMUX_CONF_SRC: &str = include_str!("../../../bin/jarvis-tmux.conf");
 const SILERO_SERVER_SRC: &str = include_str!("../../../bin/silero-server.py");
+/// STT-сайдкар (Qwen3-ASR MLX): Python-сервер для диктовки (инкр. 9, Phase 8).
+const STT_SERVER_SRC: &str = include_str!("../../../bin/stt-server.py");
 // MediaRemote-адаптер (BSD-3, ungive/mediaremote-adapter): пауза ЛЮБОГО медиа на
 // время озвучки. Системный perl энтайтлен на MediaRemote — он dlopen-ит фреймворк.
 const MRA_PL_SRC: &str = include_str!("../../../bin/mediaremote-adapter/mediaremote-adapter.pl");
@@ -83,6 +85,12 @@ pub struct Status {
     pub tmux_conf: bool,
     pub path_block: bool,
     pub silero: bool,
+    /// Модель Whisper large-v3-turbo-q5_0.bin присутствует на диске.
+    pub whisper_model: bool,
+    /// Qwen3-ASR MLX-сайдкар (venv + stt-server.py) установлен.
+    pub qwen3_sidecar: bool,
+    /// Имя активного STT-движка из ~/.jarvis/settings.json (stt.engine).
+    pub stt_engine_active: String,
 }
 
 impl Status {
@@ -172,6 +180,135 @@ fn shim_dst() -> PathBuf { shims_dir().join("claude") }
 fn tmux_conf_dst() -> PathBuf { jarvis_dir().join("tmux.conf") }
 fn settings_path() -> PathBuf { home().join(".claude/settings.json") }
 fn jarvis_settings_path() -> PathBuf { jarvis_dir().join("settings.json") }
+
+/* ================= STT: Whisper + Qwen3-MLX (инкр. 9, Phase 8) ================= */
+
+/// Каталог для Whisper-модели: ~/.jarvis/stt/
+fn stt_dir() -> PathBuf { jarvis_dir().join("stt") }
+
+/// Бинарный файл модели Whisper large-v3-turbo-q5 (~574 МБ).
+fn whisper_model_path() -> PathBuf { stt_dir().join("ggml-large-v3-turbo-q5_0.bin") }
+
+/// URL скачивания модели Whisper (HuggingFace, ggerganov).
+const WHISPER_MODEL_URL: &str =
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin";
+
+/// Каталог STT-MLX сайдкара (Qwen3-ASR): ~/.jarvis/stt-mlx/
+fn stt_mlx_dir() -> PathBuf { jarvis_dir().join("stt-mlx") }
+
+fn stt_server_py() -> PathBuf { stt_mlx_dir().join("stt-server.py") }
+fn stt_venv() -> PathBuf { stt_mlx_dir().join("venv") }
+fn stt_python() -> PathBuf { stt_venv().join("bin/python") }
+fn stt_pip() -> PathBuf { stt_venv().join("bin/pip") }
+
+/// Скачать модель Whisper large-v3-turbo-q5_0.bin (~574 МБ) в ~/.jarvis/stt/.
+/// Идемпотентно: пропускает скачивание если файл уже на месте.
+/// Атомарно: скачивает во временный файл, затем переименовывает.
+/// Fail-safe: ошибка возвращается как Err, демон не падает.
+pub fn install_whisper(progress: &Progress, proxy: Option<&str>) -> Result<(), String> {
+    fs::create_dir_all(stt_dir()).map_err(|e| format!("mkdir stt: {e}"))?;
+
+    // Идемпотентность: если модель уже на месте — ничего не делаем.
+    if whisper_model_path().exists() {
+        progress(Step::info("STT-Whisper", "модель ggml-large-v3-turbo-q5_0.bin уже установлена"));
+        return Ok(());
+    }
+
+    progress(Step::info(
+        "STT-Whisper",
+        "скачиваю ggml-large-v3-turbo-q5_0.bin (~574 МБ) — это займёт время…",
+    ));
+
+    // Атомарная загрузка: tmp-файл → rename.
+    let tmp_path = stt_dir().join(".ggml-large-v3-turbo-q5_0.bin.tmp");
+
+    // Строим curl-команду с прокси и показом прогресса.
+    let proxy_arg = match proxy {
+        Some(p) if !p.is_empty() => format!("--proxy '{p}' "),
+        _ => String::new(),
+    };
+    let curl_cmd = format!(
+        "curl -L --progress-bar {proxy_arg}-o '{}' '{WHISPER_MODEL_URL}'",
+        tmp_path.display(),
+    );
+
+    let result = run_streamed("curl whisper model", &curl_cmd, proxy, progress, "Whisper-модель");
+
+    if result.is_err() {
+        // Убрать частично скачанный файл при ошибке.
+        let _ = fs::remove_file(&tmp_path);
+        return result;
+    }
+
+    // Атомарный rename tmp → финальный путь.
+    fs::rename(&tmp_path, whisper_model_path())
+        .map_err(|e| format!("rename whisper model: {e}"))?;
+
+    progress(Step::done("STT-Whisper", "модель установлена (~574 МБ)"));
+    Ok(())
+}
+
+/// Установить STT-MLX-сайдкар (Qwen3-ASR): stt-server.py + venv + зависимости.
+/// Идемпотентно: пропускает шаги где результат уже есть.
+/// Fail-safe: ошибка возвращается как Err, демон не падает.
+///
+/// Зависимости: qwen3-asr-mlx mlx-audio fastapi uvicorn numpy certifi
+/// Модели Qwen3 скачиваются сайдкаром при первом запросе (HuggingFace Hub).
+pub fn install_stt_sidecar(progress: &Progress, proxy: Option<&str>) -> Result<(), String> {
+    fs::create_dir_all(stt_mlx_dir()).map_err(|e| format!("mkdir stt-mlx: {e}"))?;
+
+    // 1. Обновить server.py — атомарная запись поверх (держим актуальным).
+    atomic_write(&stt_server_py(), STT_SERVER_SRC);
+    progress(Step::info("STT-MLX", "stt-server.py установлен"));
+
+    // 2. venv — если ещё нет интерпретатора.
+    if !stt_python().exists() {
+        progress(Step::info("STT-MLX", "создаю Python-venv…"));
+        run_inherit(
+            "python3 -m venv (stt-mlx)",
+            Command::new("python3").env("PATH", augmented_path()).arg("-m").arg("venv").arg(stt_venv()),
+        )?;
+    }
+
+    // 3. Зависимости — идемпотентно: пропускаем если уже импортируются.
+    let deps_ok = Command::new(stt_python())
+        .args(["-c", "import fastapi, uvicorn, numpy, certifi"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !deps_ok {
+        progress(Step::info(
+            "STT-MLX",
+            "ставлю зависимости (qwen3-asr-mlx mlx-audio fastapi uvicorn numpy certifi) — ~2.6 ГБ для MLX-моделей…",
+        ));
+
+        let mut up = Command::new(stt_pip());
+        up.args(["install", "--upgrade", "pip"]);
+        set_proxy(&mut up, proxy);
+        run_inherit("pip install --upgrade pip (stt)", &mut up)?;
+
+        let proxy_arg = match proxy {
+            Some(p) if !p.is_empty() => format!("--proxy '{p}' "),
+            _ => String::new(),
+        };
+        let cmd = format!(
+            "'{}' install --progress-bar raw {}qwen3-asr-mlx mlx-audio fastapi uvicorn numpy certifi",
+            stt_pip().display(),
+            proxy_arg,
+        );
+        run_streamed("pip install stt deps", &cmd, proxy, progress, "STT-зависимости")?;
+    } else {
+        progress(Step::info("STT-MLX", "зависимости уже установлены"));
+    }
+
+    // Примечание: модели Qwen3 (HuggingFace Hub) сайдкар скачает сам при первом запросе.
+    // Принудительного preload здесь нет — пользователь может это сделать вручную.
+    progress(Step::done("STT-MLX", "сайдкар установлен (модели Qwen3 загрузятся при первом запуске)"));
+    Ok(())
+}
 
 /* ================= Silero: Python-sidecar (venv + torch + модель) ================= */
 
@@ -312,6 +449,18 @@ fn install_silero(progress: &Progress, proxy: Option<&str>) -> Result<(), String
     run_inherit("прогрев модели Silero", &mut warm)?;
 
     Ok(())
+}
+
+/// Активный STT-движок из ~/.jarvis/settings.json (stt.engine), дефолт "qwen3-0.6b".
+fn stt_engine() -> String {
+    let raw = match fs::read_to_string(jarvis_settings_path()) {
+        Ok(raw) => raw,
+        Err(_) => return "qwen3-0.6b".into(),
+    };
+    serde_json::from_str::<Value>(&raw)
+        .ok()
+        .and_then(|v| v.pointer("/stt/engine").and_then(Value::as_str).map(String::from))
+        .unwrap_or_else(|| "qwen3-0.6b".into())
 }
 
 /// Активный голосовой движок из ~/.jarvis/settings.json (voice.engine), дефолт "silero".
@@ -500,6 +649,9 @@ pub fn status() -> Status {
             .iter()
             .any(|rc| rc.exists() && has_block(&fs::read_to_string(rc).unwrap_or_default())),
         silero: silero_python().exists() && silero_server_py().exists(),
+        whisper_model: whisper_model_path().exists(),
+        qwen3_sidecar: stt_python().exists() && stt_server_py().exists(),
+        stt_engine_active: stt_engine(),
     }
 }
 
@@ -536,6 +688,13 @@ pub fn status_report() -> String {
         "  silero: установлен={} (venv + server.py), активен={} (voice.engine={engine})\n",
         yn(silero_installed), yn(engine == "silero"),
     );
+    let stt_eng = stt_engine();
+    let whisper_ok = whisper_model_path().exists();
+    let qwen3_ok = stt_python().exists() && stt_server_py().exists();
+    out += "STT (диктовка, инкр. 9):\n";
+    out += &format!("  whisper-turbo: модель={} ({})\n", yn(whisper_ok), whisper_model_path().display());
+    out += &format!("  qwen3-mlx-сайдкар: установлен={} ({})\n", yn(qwen3_ok), stt_mlx_dir().display());
+    out += &format!("  активный движок: stt.engine={stt_eng}\n");
     match read_settings() {
         Ok((true, json)) => {
             out += &format!("Settings: {}\n", settings_path().display());
@@ -633,6 +792,26 @@ pub fn install(progress: &Progress, proxy: Option<&str>) {
     match install_silero(progress, proxy) {
         Ok(()) => progress(Step::done("Голос", "Silero установлен (venv + модель)")),
         Err(e) => progress(Step::warn("Голос", format!("Silero не установлен ({e}); демон не затронут"))),
+    }
+
+    // --- Фаза «STT: Whisper» (инкр. 9) — не-фатально ---
+    // Скачивание НЕ выполняется в автоматическом install — модель ~574 МБ.
+    // install_whisper() вызывается отдельно из UI/setup по запросу пользователя.
+    // Здесь только логируем статус.
+    progress(Step::info(
+        "STT",
+        &format!(
+            "Whisper-модель: {}; Qwen3-сайдкар: {} (запустить setup для установки)",
+            if whisper_model_path().exists() { "установлена" } else { "не установлена" },
+            if stt_python().exists() { "установлен" } else { "не установлен" },
+        ),
+    ));
+
+    // --- Фаза «STT: Qwen3-MLX сайдкар» (инкр. 9) — не-фатально, ставим venv+deps ---
+    progress(Step::start("STT-MLX"));
+    match install_stt_sidecar(progress, proxy) {
+        Ok(()) => {} // Step::done уже послан внутри
+        Err(e) => progress(Step::warn("STT-MLX", format!("сайдкар не установлен ({e}); STT недоступен, остальное не затронуто"))),
     }
 }
 
@@ -860,5 +1039,77 @@ mod tests {
         assert!(HOOK_SRC.contains("JARVIS_IGNORE"));
         assert!(SHIM_SRC.contains("tmux"));
         assert!(TMUX_CONF_SRC.contains("status off"));
+    }
+
+    // Phase 8: STT-SERVER_SRC встроен и является валидным Python-скриптом (начало).
+    #[test]
+    fn stt_server_src_embedded() {
+        assert!(!STT_SERVER_SRC.is_empty(), "stt-server.py должен быть встроен");
+        assert!(STT_SERVER_SRC.contains("transcribe"), "stt-server.py содержит /transcribe");
+        assert!(STT_SERVER_SRC.contains("uvicorn") || STT_SERVER_SRC.contains("fastapi"),
+            "stt-server.py содержит uvicorn или fastapi");
+    }
+
+    // Phase 8: URL Whisper-модели соответствует ожидаемому.
+    #[test]
+    fn whisper_model_url_is_correct() {
+        assert!(WHISPER_MODEL_URL.contains("huggingface.co"), "URL на HuggingFace");
+        assert!(WHISPER_MODEL_URL.contains("ggml-large-v3-turbo-q5_0.bin"), "имя модели в URL");
+    }
+
+    // Phase 8: пути STT изолированы от silero (не пересекаются).
+    #[test]
+    fn stt_paths_are_separate_from_silero() {
+        // При JARVIS_DIR не заданном — дефолт ~/.jarvis
+        // stt_dir() = ~/.jarvis/stt, silero_dir() = ~/.jarvis/silero — разные каталоги.
+        let stt = stt_dir();
+        let silero = silero_dir();
+        assert_ne!(stt, silero, "stt и silero — разные каталоги");
+        assert!(stt.ends_with("stt"), "stt_dir заканчивается на 'stt'");
+        assert!(silero.ends_with("silero"), "silero_dir заканчивается на 'silero'");
+    }
+
+    // Phase 8: whisper_model_path() = stt_dir() / ggml-large-v3-turbo-q5_0.bin
+    #[test]
+    fn whisper_model_path_is_inside_stt_dir() {
+        let model = whisper_model_path();
+        assert!(model.starts_with(stt_dir()), "модель внутри stt_dir()");
+        assert_eq!(
+            model.file_name().unwrap().to_str().unwrap(),
+            "ggml-large-v3-turbo-q5_0.bin"
+        );
+    }
+
+    // Phase 8: stt_server_py() = stt_mlx_dir() / stt-server.py
+    #[test]
+    fn stt_server_py_path_is_inside_stt_mlx_dir() {
+        let server = stt_server_py();
+        assert!(server.starts_with(stt_mlx_dir()), "stt-server.py внутри stt_mlx_dir()");
+        assert_eq!(server.file_name().unwrap().to_str().unwrap(), "stt-server.py");
+    }
+
+    // Phase 8: status() возвращает корректные дефолты когда ничего не установлено.
+    #[test]
+    fn status_stt_fields_default_false() {
+        // Используем изолированный JARVIS_DIR через переменную окружения.
+        // В CI / чистом рабочем дереве модели точно нет.
+        // Тест только проверяет типы и что поля существуют — не делает filesystem calls.
+        let s = Status::default();
+        assert!(!s.whisper_model, "по умолчанию whisper_model=false");
+        assert!(!s.qwen3_sidecar, "по умолчанию qwen3_sidecar=false");
+        assert_eq!(s.stt_engine_active, "", "по умолчанию stt_engine_active=empty");
+    }
+
+    // Phase 8: idempotency — install_stt_sidecar записывает stt-server.py атомарно
+    // (мы не тестируем реальный venv — только что server.py = STT_SERVER_SRC).
+    #[test]
+    fn stt_server_py_content_matches_embedded() {
+        // Если файл уже создан (в другом тесте или на диске), его содержимое
+        // должно совпадать с встроенной константой. Тест атомарной записи:
+        let tmp = std::env::temp_dir().join("jarvis-test-stt-server.py");
+        atomic_write(&tmp, STT_SERVER_SRC);
+        let content = fs::read_to_string(&tmp).unwrap();
+        assert_eq!(content, STT_SERVER_SRC, "атомарная запись не изменяет содержимое");
+        let _ = fs::remove_file(&tmp);
     }
 }

@@ -72,7 +72,9 @@ impl Consumer {
                 confirm: ConfirmPolicy::Always,
                 write: SettingsWrite::Allowlist,
                 // аудит — поверхность эксфильтрации/разведки (спека §11): агенту не даём.
-                denied_ids: ["audit.query"].into_iter().collect(),
+                // stt.transcribe — доступ к микрофону (§10): агент не вправе слушать
+                // речь пользователя без явного гранта; внутренняя диктовка идёт напрямую.
+                denied_ids: ["audit.query", "stt.transcribe"].into_iter().collect(),
             },
         }
     }
@@ -149,6 +151,39 @@ mod tests {
         assert!(g.allows(RiskClass::Read));
         assert!(!g.allows_id("audit.query", RiskClass::Read), "агенту аудит не виден");
         assert_eq!(g.write, SettingsWrite::Allowlist);
+    }
+
+    #[test]
+    fn agent_excludes_stt_transcribe() {
+        let g = Consumer::agent().grant;
+        // Агент имеет класс Control, но stt.transcribe — в denied_ids → недоступна.
+        assert!(g.allows(RiskClass::Control), "класс Control агенту разрешён");
+        assert!(!g.allows_id("stt.transcribe", RiskClass::Control), "stt.transcribe агенту запрещена поимённо");
+    }
+
+    #[test]
+    fn panel_sees_stt_transcribe() {
+        let g = Consumer::panel().grant;
+        // Панель — это сам пользователь, denied_ids пуст → stt.transcribe доступна.
+        assert!(g.allows_id("stt.transcribe", RiskClass::Control), "панель видит stt.transcribe");
+    }
+
+    #[test]
+    fn plugin_with_control_grant_can_access_stt_transcribe() {
+        // Плагин с Control в гранте — stt.transcribe НЕ в denied_ids плагина,
+        // т.е. пройдёт gate (при наличии класса Control).
+        let c = Consumer::plugin("voice-plugin", &[RiskClass::Control]);
+        assert!(c.grant.allows(RiskClass::Control));
+        assert!(c.grant.allows_id("stt.transcribe", RiskClass::Control),
+            "плагин с Control-грантом может вызвать stt.transcribe");
+    }
+
+    #[test]
+    fn plugin_without_control_cannot_access_stt_transcribe() {
+        // Плагин без Control → класс не разрешён → stt.transcribe недоступна.
+        let c = Consumer::plugin("read-only-plugin", &[RiskClass::Read]);
+        assert!(!c.grant.allows_id("stt.transcribe", RiskClass::Control),
+            "плагин без Control-класса не может вызвать stt.transcribe");
     }
 
     #[test]

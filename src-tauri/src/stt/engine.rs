@@ -75,11 +75,13 @@ impl SttEngine for NullEngine {
 
 /// Собрать движок по конфигу.
 /// - "whisper-turbo" → WhisperEngine (Phase 2; Metal; требует cmake для компиляции).
-/// - "qwen3-0.6b" / "qwen3-1.7b" → NullEngine (Phase 3, пока не реализован).
+/// - "qwen3-0.6b" / "qwen3-1.7b" → Qwen3Engine (Phase 3; MLX Python sidecar).
 pub fn build_engine(cfg: &crate::stt::config::SttConfig) -> Box<dyn SttEngine> {
+    use crate::stt::engine_qwen3::Qwen3Engine;
     match cfg.engine.as_str() {
         "whisper-turbo" => Box::new(crate::stt::engine_whisper::WhisperEngine::new()),
-        "qwen3-0.6b" | "qwen3-1.7b" => Box::new(NullEngine),
+        "qwen3-0.6b" => Box::new(Qwen3Engine::new("http://127.0.0.1:8732".to_string(), "qwen3-0.6b".to_string())),
+        "qwen3-1.7b" => Box::new(Qwen3Engine::new("http://127.0.0.1:8732".to_string(), "qwen3-1.7b".to_string())),
         _ => Box::new(NullEngine),
     }
 }
@@ -101,13 +103,15 @@ mod tests {
     }
 
     #[test]
-    fn build_engine_qwen3_06b_is_null() {
-        assert_eq!(build_engine(&cfg("qwen3-0.6b")).name(), "none");
+    fn build_engine_qwen3_06b_name() {
+        // Phase 3: "qwen3-0.6b" → Qwen3Engine
+        assert_eq!(build_engine(&cfg("qwen3-0.6b")).name(), "qwen3-0.6b");
     }
 
     #[test]
-    fn build_engine_qwen3_17b_is_null() {
-        assert_eq!(build_engine(&cfg("qwen3-1.7b")).name(), "none");
+    fn build_engine_qwen3_17b_name() {
+        // Phase 3: "qwen3-1.7b" → Qwen3Engine
+        assert_eq!(build_engine(&cfg("qwen3-1.7b")).name(), "qwen3-1.7b");
     }
 
     #[test]

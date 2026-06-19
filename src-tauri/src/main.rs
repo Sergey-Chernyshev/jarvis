@@ -59,10 +59,22 @@ fn main() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                    use tauri_plugin_global_shortcut::ShortcutState;
+                    let d = Daemon::get(app);
+
+                    // PTT-диктовка обрабатывается на ОБОИХ событиях (Pressed + Released).
+                    if ipc::is_dictation_hotkey(&d, shortcut) {
+                        match event.state() {
+                            ShortcutState::Pressed => d.dictation.on_press(),
+                            ShortcutState::Released => d.dictation.on_release(),
+                        }
                         return;
                     }
-                    let d = Daemon::get(app);
+
+                    // Остальные хоткеи — только на Pressed.
+                    if event.state() != ShortcutState::Pressed {
+                        return;
+                    }
                     // ⌘⌥J — тихий режим; ⌘⌥C — «Продолжить» последнюю сессию;
                     // всё прочее — панель.
                     if ipc::is_quiet_hotkey(&d, shortcut) {
@@ -165,6 +177,7 @@ fn main() {
             }
             ipc::register_quiet_hotkey(&d); // тумблер тихого режима (⌘⌥J)
             ipc::register_continue_hotkey(&d); // «Продолжить» последнюю сессию (⌘⌥C)
+            ipc::register_dictation_hotkey(&d); // PTT-диктовка (F8)
 
             spawn_timers(&d);
 

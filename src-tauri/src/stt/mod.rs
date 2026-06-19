@@ -4,10 +4,12 @@
 
 pub mod audio;
 pub mod config;
+pub mod dictation;
 pub mod engine;
-pub mod engine_whisper;
-pub mod sidecar;
 pub mod engine_qwen3;
+pub mod engine_whisper;
+pub mod insert;
+pub mod sidecar;
 
 use std::sync::Arc;
 

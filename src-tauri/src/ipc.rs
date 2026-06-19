@@ -129,6 +129,31 @@ pub fn register_continue_hotkey(d: &Arc<Daemon>) {
     }
 }
 
+/// Аккселератор диктовки: из `SttConfig.hotkey`, дефолт "F8".
+pub fn dictation_accelerator(d: &Arc<Daemon>) -> String {
+    let cfg = crate::stt::config::SttConfig::from_settings(&d.settings.load());
+    if cfg.hotkey.is_empty() { "F8".to_string() } else { cfg.hotkey }
+}
+
+/// Совпал ли сработавший shortcut с хоткеем диктовки.
+pub fn is_dictation_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
+    dictation_accelerator(d)
+        .parse::<Shortcut>()
+        .map(|s| &s == shortcut)
+        .unwrap_or(false)
+}
+
+/// Зарегистрировать хоткей диктовки на старте (best-effort).
+pub fn register_dictation_hotkey(d: &Arc<Daemon>) {
+    let accel = dictation_accelerator(d);
+    let gs = d.app.global_shortcut();
+    if !gs.is_registered(accel.as_str()) {
+        if let Err(e) = gs.register(accel.as_str()) {
+            crate::log::line(&format!("[dictation] хоткей {accel} не зарегистрировался: {e:?}"));
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
     let d = Daemon::get(&app);

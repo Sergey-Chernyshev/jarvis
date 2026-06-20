@@ -4,7 +4,9 @@
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 pub struct SttSidecar {
     py: PathBuf,      // {dir}/venv/bin/python
@@ -12,6 +14,13 @@ pub struct SttSidecar {
     model: String,
     pub port: u16,
     child: Mutex<Option<Child>>,
+    /// Должен ли сайдкар сейчас работать. true между использованием и idle-stop;
+    /// false после простоя. Супервизор НЕ перезапускает сайдкар, пока active=false
+    /// (иначе тут же отменил бы idle-stop). MLX-модель резидентна (~1.3 ГБ) только
+    /// пока процесс жив → остановка по простою возвращает память.
+    active: AtomicBool,
+    /// Время последнего использования (transcribe/warm) — отсчёт простоя.
+    last_use: Mutex<Instant>,
 }
 
 impl SttSidecar {
@@ -23,7 +32,22 @@ impl SttSidecar {
             model: model.to_string(),
             port,
             child: Mutex::new(None),
+            active: AtomicBool::new(false),
+            last_use: Mutex::new(Instant::now()),
         }
+    }
+
+    /// Отметить использование (сдвинуть отсчёт простоя). Зовётся на каждой
+    /// диктовке/прогреве, чтобы активный сайдкар не глушился под нагрузкой.
+    pub fn touch(&self) {
+        if let Ok(mut t) = self.last_use.lock() {
+            *t = Instant::now();
+        }
+    }
+
+    /// Активен ли сайдкар (поднят и не заглушён по простою).
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
     }
 
     pub fn installed(&self) -> bool {
@@ -48,6 +72,9 @@ impl SttSidecar {
                 self.py, self.script
             ));
         }
+        // намерение работать: активируем и сдвигаем отсчёт простоя
+        self.active.store(true, Ordering::SeqCst);
+        self.touch();
         let mut g = self.child.lock().unwrap();
         // ещё жив? try_wait → None значит процесс не завершился
         if g
@@ -83,8 +110,13 @@ impl SttSidecar {
         }
     }
 
-    /// Перезапуск, если процесс умер (вызывается тиком супервизора).
+    /// Перезапуск, если процесс умер (вызывается тиком супервизора). НО только
+    /// если сайдкар должен работать (active): после idle-stop не воскрешаем —
+    /// иначе простой-остановка была бы бессмысленной.
     pub fn restart_if_dead(&self) {
+        if !self.active.load(Ordering::SeqCst) {
+            return; // заглушён по простою — не поднимаем сами
+        }
         let dead = {
             let mut g = self.child.lock().unwrap();
             // нет процесса или try_wait отдал статус завершения → мёртв
@@ -95,7 +127,29 @@ impl SttSidecar {
         }
     }
 
+    /// Заглушить сайдкар, если он активен и простаивает дольше `limit`.
+    /// Возвращает true, если остановили (для лога/метрик). Освобождает
+    /// резидентную модель (~1.3 ГБ для qwen3-0.6b).
+    pub fn idle_stop_if_due(&self, limit: Duration) -> bool {
+        if !self.active.load(Ordering::SeqCst) {
+            return false; // уже заглушён
+        }
+        let idle = self.last_use.lock().map(|t| t.elapsed()).unwrap_or_default();
+        if idle >= limit {
+            self.stop();
+            crate::log::line(&format!(
+                "[stt] сайдкар заглушён по простою ({}с) — память модели возвращена",
+                idle.as_secs()
+            ));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Остановить сайдкар и снять флаг active (явная остановка/idle-stop/выход).
     pub fn stop(&self) {
+        self.active.store(false, Ordering::SeqCst);
         if let Some(mut c) = self.child.lock().unwrap().take() {
             let _ = c.kill();
             let _ = c.wait();
@@ -115,5 +169,33 @@ mod tests {
         let r = s.ensure_started();
         assert!(r.is_err(), "ensure_started должен возвращать Err когда не установлен");
         assert_eq!(s.base(), "http://127.0.0.1:8732");
+    }
+
+    #[test]
+    fn new_sidecar_is_inactive() {
+        let s = SttSidecar::new("/nope", "qwen3-0.6b", 8732);
+        assert!(!s.is_active(), "свежий сайдкар не активен (лениво)");
+    }
+
+    #[test]
+    fn ensure_started_failure_keeps_inactive() {
+        // не установлен → ensure_started падает ДО активации → active остаётся false
+        let s = SttSidecar::new("/nope", "qwen3-0.6b", 8732);
+        let _ = s.ensure_started();
+        assert!(!s.is_active());
+    }
+
+    #[test]
+    fn idle_stop_noop_when_inactive() {
+        let s = SttSidecar::new("/nope", "qwen3-0.6b", 8732);
+        assert!(!s.idle_stop_if_due(Duration::from_secs(0)), "неактивный сайдкар не глушим");
+    }
+
+    #[test]
+    fn restart_if_dead_noop_when_inactive() {
+        // после idle-stop (active=false) супервизор не воскрешает сайдкар
+        let s = SttSidecar::new("/nope", "qwen3-0.6b", 8732);
+        s.restart_if_dead();
+        assert!(!s.is_active(), "restart_if_dead на неактивном — no-op");
     }
 }

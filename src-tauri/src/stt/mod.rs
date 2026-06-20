@@ -14,6 +14,7 @@ pub mod mic_permission; // инкр.10: безопасная проверка р
 pub mod sidecar;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use config::SttConfig;
 use engine::{SttEngine, SttOptions, SttResult};
@@ -21,6 +22,25 @@ use sidecar::SttSidecar;
 
 /// Фиксированный порт STT-сайдкара (Qwen3-ASR MLX) на localhost.
 const STT_PORT: u16 = 8732;
+
+/// Простой STT-сайдкара, после которого глушим процесс и возвращаем память
+/// модели (~1.3 ГБ для qwen3-0.6b). На следующей диктовке поднимаем лениво.
+const IDLE_LIMIT: Duration = Duration::from_secs(600); // 10 минут
+
+/// Максимум ожидания готовности модели после ленивого подъёма (cold-start).
+const READY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Подождать, пока движок не станет доступен (модель загрузилась), но не дольше
+/// `timeout`. Тёплый сайдкар проходит первую проверку мгновенно.
+fn wait_ready(engine: &dyn SttEngine, timeout: Duration) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if engine.available() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
 
 /// Сервис распознавания речи. Владеет движком и конфигом.
 /// Для qwen3-движков также владеет супервизором MLX-сайдкара (старт/тик/стоп):
@@ -53,10 +73,13 @@ impl SttService {
         Arc::new(SttService { engine, config: cfg, sidecar: None })
     }
 
-    /// Тик супервизора: перезапустить MLX-сайдкар, если он умер (qwen3-only).
+    /// Тик супервизора (qwen3-only): сначала пробуем заглушить по простою
+    /// (вернуть ~1.3 ГБ резидентной модели), иначе — перезапуск, если умер.
     pub fn tick(&self) {
         if let Some(s) = &self.sidecar {
-            s.restart_if_dead();
+            if !s.idle_stop_if_due(IDLE_LIMIT) {
+                s.restart_if_dead();
+            }
         }
     }
 
@@ -73,8 +96,24 @@ impl SttService {
     }
 
     /// Транскрибировать буфер PCM (16кГц моно f32). Опции — из `options()` или явные.
+    ///
+    /// Лениво поднимает сайдкар, если он был заглушён по простою (idle-stop), и
+    /// ждёт загрузки модели (cold-start). Когда сайдкар уже тёплый — задержки нет.
     pub fn transcribe(&self, pcm: &[f32], opts: &SttOptions) -> Result<SttResult, String> {
-        self.engine.transcribe(pcm, opts)
+        if let Some(s) = &self.sidecar {
+            // поднять после idle-stop (no-op, если уже работает) + отметить использование
+            s.ensure_started()?;
+            // дождаться готовности модели: питон грузит её синхронно при старте,
+            // до этого HTTP не отвечает. Тёплый сайдкар проходит проверку сразу.
+            wait_ready(self.engine.as_ref(), READY_TIMEOUT);
+            s.touch();
+        }
+        let r = self.engine.transcribe(pcm, opts);
+        // длинная транскрипция тоже считается использованием — продлеваем активность
+        if let Some(s) = &self.sidecar {
+            s.touch();
+        }
+        r
     }
 
     /// Имя активного движка (для UI/логов).

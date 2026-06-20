@@ -59,7 +59,10 @@ if [ "$wrap" = 0 ]; then
 fi
 
 # --- обёртка в tmux ---
+# -f с несуществующим файлом не валит tmux, но молча сбрасывает на дефолты
+# (видна status-строка, колесо → стрелки). Подключаем конфиг только если он есть.
 CONF="$JARVIS_DIR/tmux.conf"
+[ -f "$CONF" ] && CONF_OPT="-f $CONF" || CONF_OPT=''
 NAME="$(basename -- "$PWD" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-32)$$"
 
 # tmux склеивает несколько аргументов shell-command через пробел и отдаёт
@@ -88,4 +91,5 @@ CC=''
 # exec: когда claude (а с ним tmux-сессия) завершится, клиент отвалится
 # и терминал вернётся в обычный шелл
 # shellcheck disable=SC2086  # $CC должен расщепляться (пустой или -CC)
-exec tmux $CC -L jarvis -f "$CONF" new-session -s "$NAME" "$CMD"
+# shellcheck disable=SC2086  # $CC и $CONF_OPT должны расщепляться (могут быть пустыми)
+exec tmux $CC -L jarvis $CONF_OPT new-session -s "$NAME" "$CMD"

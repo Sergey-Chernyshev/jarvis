@@ -27,8 +27,10 @@ const SILERO_SERVER_SRC: &str = include_str!("../../../bin/silero-server.py");
 const MRA_PL_SRC: &str = include_str!("../../../bin/mediaremote-adapter/mediaremote-adapter.pl");
 const MRA_FW_SRC: &[u8] = include_bytes!("../../../bin/mediaremote-adapter/MediaRemoteAdapter.framework/MediaRemoteAdapter");
 
-/// Признак «это наша запись» — путь шима в команде.
-const MARKER: &str = ".jarvis/bin/jarvis-hook";
+/// Признак «это наша запись» — путь шима в команде. Матчим без префикса каталога
+/// данных, чтобы распознавать И прод (`.jarvis/bin/jarvis-hook`), И дев
+/// (`.jarvis-dev/bin/jarvis-hook`) — иначе install/uninstall не видят dev-хуки.
+const MARKER: &str = "bin/jarvis-hook";
 
 /// Событие Claude Code → аргумент шима.
 const EVENTS: [(&str, &str); 8] = [
@@ -641,7 +643,15 @@ fn install_tmux_transport(progress: &Progress) {
         progress(Step::warn("Транспорт", "tmux не найден (brew install tmux) — ввод-транспорт пропущен; уведомления работают"));
         return;
     }
-    write_executable(&shim_dst(), SHIM_SRC);
+    // Запекаем актуальный JARVIS_DIR в шим: в рантайме (обычный терминал) env
+    // JARVIS_DIR не выставлен, а dev-сборка живёт в ~/.jarvis-dev. Без подмены
+    // дефолта шим искал бы tmux.conf в ~/.jarvis и падал (No such file).
+    let shim = SHIM_SRC.replacen(
+        "JARVIS_DIR=\"${JARVIS_DIR:-$HOME/.jarvis}\"",
+        &format!("JARVIS_DIR=\"${{JARVIS_DIR:-{}}}\"", jarvis_dir().display()),
+        1,
+    );
+    write_executable(&shim_dst(), &shim);
     fs::write(tmux_conf_dst(), TMUX_CONF_SRC).expect("запись tmux.conf");
 
     let shims = shims_dir().display().to_string();

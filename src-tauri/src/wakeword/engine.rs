@@ -7,6 +7,8 @@
 use super::config::WakeConfig;
 
 /// Кадр для детектора — ровно 80 мс @16кГц моно (1280 сэмплов).
+/// Контрактная константа: используется тестами и ort-движком (под фичей).
+#[allow(dead_code)]
 pub const WAKE_FRAME_LEN: usize = crate::stt::hub::FRAME_LEN;
 
 /// Единый интерфейс детектора фразы. Stateful: кормится кадрами по 80 мс.

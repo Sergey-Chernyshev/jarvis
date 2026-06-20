@@ -11,6 +11,8 @@
 use super::config::VerifyConfig;
 
 /// Единый интерфейс верификатора. `Sync` — вызывается из consumer-потока wake.
+/// `enroll` — шов под будущий enrollment-флоу (в v1 не вызывается из прод-кода).
+#[allow(dead_code)]
 pub trait SpeakerVerifier: Send + Sync {
     /// Включена ли реальная проверка. false → гейт всегда пропускает.
     fn enabled(&self) -> bool;

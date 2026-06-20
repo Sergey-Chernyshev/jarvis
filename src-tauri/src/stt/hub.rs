@@ -16,8 +16,8 @@
 //! capture-потоке и НЕ покидает его; наружу (в `Daemon`) попадают только Send-ручки.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -33,6 +33,13 @@ pub const FRAME_LEN: usize = 1280;
 pub const PREROLL_SAMPLES: usize = (DST_RATE as usize) * 2;
 /// Входной чанк ресемплера (native frames) — баланс латентности/качества.
 const RESAMPLE_CHUNK_IN: usize = 1024;
+/// Ёмкость native-канала (capture→proc): при застое proc realtime-callback
+/// роняет кадр (try_send), а не растит память без предела.
+const NATIVE_CHAN_CAP: usize = 256;
+/// Ёмкость канала подписчика: ограничивает рост памяти при зависшем потребителе.
+/// 4096 кадров ≈ 5.5 мин (≈21 МБ) — с запасом для диктовки; wake-тап вычитывает
+/// быстро и до предела не доходит.
+const SUB_CHAN_CAP: usize = 4096;
 
 /// Видимое состояние источника (для индикатора «слушаю» и панели).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,13 +139,18 @@ impl Pipeline {
     pub fn preroll_snapshot(&self) -> Vec<f32> {
         self.preroll.iter().copied().collect()
     }
+
+    /// Очистить преролл (на mute — не держим пред-mute аудио).
+    pub fn clear_preroll(&mut self) {
+        self.preroll.clear();
+    }
 }
 
 // ─── Подписчики (веер) ───────────────────────────────────────────────────────
 
 struct Subscriber {
     id: u64,
-    tx: Sender<Arc<[f32]>>,
+    tx: SyncSender<Arc<[f32]>>,
 }
 
 struct HubSession {
@@ -169,6 +181,16 @@ pub struct AudioHub {
     muted: Arc<AtomicBool>,
     state: AtomicU8,
     next_id: AtomicU64,
+    /// Сериализует переходы захвата (subscribe/unsubscribe/restart), чтобы рост
+    /// спроса 0→1 не вклинился между падением 1→0 и его stop_capture (иначе
+    /// подписчик остался бы без захвата — «глухой»). Порядок: lifecycle → inner.
+    lifecycle: Mutex<()>,
+    /// Сколько 16к-кадров выдано всего — растёт, пока устройство живо (даже в
+    /// тишине cpal шлёт нули). Застой при работающем не-mute захвате = устройство
+    /// отвалилось → watchdog (`tick`) перезапускает захват.
+    frames_seen: AtomicU64,
+    last_frames: AtomicU64,
+    stalls: AtomicU32,
     app: Option<tauri::AppHandle>,
 }
 
@@ -185,19 +207,39 @@ impl AudioHub {
             muted: Arc::new(AtomicBool::new(false)),
             state: AtomicU8::new(AudioState::Idle as u8),
             next_id: AtomicU64::new(1),
+            lifecycle: Mutex::new(()),
+            frames_seen: AtomicU64::new(0),
+            last_frames: AtomicU64::new(0),
+            stalls: AtomicU32::new(0),
             app,
         })
     }
 
-    pub fn set_device(&self, device: Option<String>) {
-        if let Ok(mut g) = self.inner.lock() {
+    /// Сменить устройство ввода. Если захват идёт — перезапустить на новом
+    /// устройстве (иначе смена применится при следующем старте).
+    pub fn set_device(self: &Arc<Self>, device: Option<String>) {
+        let _lc = self.lifecycle.lock().unwrap();
+        let running = {
+            let mut g = self.inner.lock().unwrap();
             g.device = device;
+            g.threads.is_some()
+        };
+        if running {
+            self.restart_capture();
         }
     }
 
-    /// Жёсткий mute: при включении кадр НЕ входит в конвейер ни для кого.
+    /// Жёсткий mute: при включении кадр НЕ входит в конвейер ни для кого, и
+    /// накопленный преролл (до 2с до mute) очищается — приватность.
     pub fn set_muted(&self, on: bool) {
         self.muted.store(on, Ordering::SeqCst);
+        if on {
+            if let Ok(mut g) = self.inner.lock() {
+                if let Some(s) = g.session.as_mut() {
+                    s.pipeline.clear_preroll();
+                }
+            }
+        }
         self.refresh_state();
     }
     pub fn is_muted(&self) -> bool {
@@ -232,7 +274,7 @@ impl AudioHub {
         };
         // не перетираем терминальные Denied/NoDevice, выставленные стартом
         let cur = self.state();
-        if !(matches!(cur, AudioState::Denied | AudioState::NoDevice) && !running) {
+        if !matches!(cur, AudioState::Denied | AudioState::NoDevice) || running {
             self.set_state(s);
         }
     }
@@ -242,9 +284,11 @@ impl AudioHub {
     }
 
     /// Подписаться на поток кадров. Возвращает (id, Receiver). Поднимает «спрос»
-    /// и при необходимости запускает захват.
+    /// и при необходимости запускает захват. Под `lifecycle` — чтобы subscribe и
+    /// unsubscribe не разъехались (см. поле `lifecycle`).
     fn subscribe(self: &Arc<Self>) -> (u64, Receiver<Arc<[f32]>>) {
-        let (tx, rx) = mpsc::channel();
+        let _lc = self.lifecycle.lock().unwrap();
+        let (tx, rx) = mpsc::sync_channel(SUB_CHAN_CAP);
         let id = self.new_id();
         {
             let mut g = self.inner.lock().unwrap();
@@ -256,6 +300,7 @@ impl AudioHub {
     }
 
     fn unsubscribe(self: &Arc<Self>, id: u64) {
+        let _lc = self.lifecycle.lock().unwrap();
         let stop_now = {
             let mut g = self.inner.lock().unwrap();
             g.subs.retain(|s| s.id != id);
@@ -272,8 +317,10 @@ impl AudioHub {
     /// Открыть сессию захвата (для PTT/STT). `with_preroll` — приклеить снимок
     /// преролла к началу записи (бесшовный wake→STT).
     pub fn open_capture(self: &Arc<Self>, with_preroll: bool) -> CaptureSession {
-        let preroll = if with_preroll { self.preroll() } else { Vec::new() };
+        // Подписываемся ПЕРЕД снимком преролла: кадры между снимком и подпиской
+        // не теряются (их ловит rx), начало реплики сохранно.
         let (id, rx) = self.subscribe();
+        let preroll = if with_preroll { self.preroll() } else { Vec::new() };
         CaptureSession { hub: self.clone(), id, rx, preroll }
     }
 
@@ -320,8 +367,65 @@ impl AudioHub {
         if frames.is_empty() {
             return;
         }
+        // Перепроверка mute перед раздачей: закрывает суб-кадровую гонку (mute
+        // включили, пока буфер был в обработке) — заглушённое аудио не уходит никому.
+        if self.muted.load(Ordering::SeqCst) {
+            return;
+        }
+        // watchdog-счётчик живости (растёт и в тишине — cpal шлёт нули)
+        self.frames_seen.fetch_add(frames.len() as u64, Ordering::Relaxed);
         for frame in frames {
-            g.subs.retain(|s| s.tx.send(frame.clone()).is_ok());
+            // try_send: отставший потребитель теряет кадр (не растим память без
+            // предела), отвалившийся (Receiver уронен) — выбывает из веера.
+            g.subs.retain(|s| !matches!(s.tx.try_send(frame.clone()), Err(mpsc::TrySendError::Disconnected(_))));
+        }
+    }
+
+    /// Watchdog: при работающем не-заглушённом захвате кадры обязаны расти.
+    /// Два тика без новых кадров ⇒ устройство отвалилось (macOS не сигналит
+    /// дисконнект явно) ⇒ перезапуск захвата с текущего дефолтного устройства.
+    pub fn tick(self: &Arc<Self>) {
+        // под lifecycle: рестарт/стоп watchdog не разъезжается с subscribe/unsubscribe
+        let _lc = self.lifecycle.lock().unwrap();
+        let running = self.inner.lock().map(|g| g.threads.is_some()).unwrap_or(false);
+        if !running || self.is_muted() {
+            self.last_frames.store(self.frames_seen.load(Ordering::Relaxed), Ordering::Relaxed);
+            self.stalls.store(0, Ordering::Relaxed);
+            return;
+        }
+        // Runtime-отзыв разрешения микрофона: cpal продолжает слать ТИШИНУ (нули),
+        // поэтому watchdog по кадрам это не поймает — проверяем TCC явно.
+        if matches!(
+            crate::stt::mic_permission::status(),
+            crate::stt::mic_permission::MicAuth::Denied | crate::stt::mic_permission::MicAuth::Restricted
+        ) {
+            crate::log::line("[audio] разрешение микрофона отозвано — останавливаю захват");
+            self.stop_capture();
+            self.set_state(AudioState::Denied);
+            return;
+        }
+        let now = self.frames_seen.load(Ordering::Relaxed);
+        let prev = self.last_frames.swap(now, Ordering::Relaxed);
+        if now == prev {
+            let s = self.stalls.fetch_add(1, Ordering::Relaxed) + 1;
+            if s >= 2 {
+                crate::log::line("[audio] захват завис (устройство отвалилось?) — перезапуск");
+                self.stalls.store(0, Ordering::Relaxed);
+                self.restart_capture();
+            }
+        } else {
+            self.stalls.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Остановить и (если есть спрос) поднять захват заново — для watchdog.
+    /// Подписки/спрос не трогаем: их получатели продолжат жить, новые кадры
+    /// потекут после рестарта.
+    fn restart_capture(self: &Arc<Self>) {
+        self.stop_capture();
+        let demand = self.inner.lock().map(|g| g.demand).unwrap_or(0);
+        if demand > 0 {
+            self.ensure_running();
         }
     }
 
@@ -349,7 +453,7 @@ impl AudioHub {
         }
 
         let stop = Arc::new(AtomicBool::new(false));
-        let (native_tx, native_rx) = mpsc::channel::<Vec<f32>>();
+        let (native_tx, native_rx) = mpsc::sync_channel::<Vec<f32>>(NATIVE_CHAN_CAP);
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(u32, u16), String>>();
         let muted_flag = self.muted_handle();
 
@@ -374,7 +478,13 @@ impl AudioHub {
             };
             hub.refresh_state();
             while let Ok(buf) = native_rx.recv() {
-                hub.ingest(&buf, rate, channels);
+                // fail-safe: паника в DSP/ресемпле не убивает поток (кадр пропущен)
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    hub.ingest(&buf, rate, channels)
+                }));
+                if res.is_err() {
+                    crate::log::line("[audio] паника в ingest — кадр пропущен (демон жив)");
+                }
             }
         });
 
@@ -468,7 +578,7 @@ impl Drop for WakeTap {
 
 fn capture_thread(
     device: Option<&str>,
-    native_tx: Sender<Vec<f32>>,
+    native_tx: SyncSender<Vec<f32>>,
     ready_tx: Sender<Result<(u32, u16), String>>,
     stop: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
@@ -513,7 +623,8 @@ fn capture_thread(
                         return; // жёсткий mute у источника
                     }
                     let buf: Vec<f32> = data.iter().map($conv).collect();
-                    let _ = tx.send(buf);
+                    // try_send: при застое proc роняем кадр (realtime-safe), не блокируемся
+                    let _ = tx.try_send(buf);
                 },
                 err_fn,
                 None,
@@ -676,5 +787,23 @@ mod tests {
         assert_eq!(AudioState::Listening.as_str(), "listening");
         assert_eq!(AudioState::Muted.as_str(), "muted");
         assert_eq!(AudioState::from_u8(3), AudioState::Denied);
+    }
+
+    #[test]
+    fn watchdog_tick_noop_when_not_running() {
+        let hub = AudioHub::new(None, None);
+        // не работает захват → tick безопасен, состояние не ломается
+        hub.tick();
+        hub.tick();
+        assert_eq!(hub.state(), AudioState::Idle);
+    }
+
+    #[test]
+    fn frames_seen_grows_on_ingest() {
+        let hub = AudioHub::new(None, None);
+        let _tap = hub.subscribe_wake();
+        let before = hub.frames_seen.load(Ordering::Relaxed);
+        hub.ingest(&sine(FRAME_LEN * 3, 0.01), 16_000, 1);
+        assert!(hub.frames_seen.load(Ordering::Relaxed) > before, "ingest растит счётчик живости");
     }
 }

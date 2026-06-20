@@ -89,8 +89,9 @@ impl OwwEngine {
         let keep = MEL_LOOKBACK.min(buf.len());
         self.raw_tail = buf[buf.len() - keep..].to_vec();
 
-        // int16-значения как f32 (модель обучена на int16 PCM, кастованном в float)
-        let mel_in: Vec<f32> = window.iter().map(|&s| s * 32768.0).collect();
+        // int16-значения как f32 (модель обучена на int16 PCM, кастованном в float).
+        // Масштаб 32767 (i16::MAX) — симметричный инверс нормализации [-1,1].
+        let mel_in: Vec<f32> = window.iter().map(|&s| s * i16::MAX as f32).collect();
         let n = mel_in.len() as i64;
         let mel_out = run_flat(&mut self.melspec, "input", vec![1, n], mel_in)?;
         // [frames,32], трансформ x/10+2

@@ -65,6 +65,11 @@ pub struct Daemon {
     pub stt: std::sync::Arc<crate::stt::SttService>,
     /// PTT-диктовка (инкремент 9): потребитель SttService + хоткей.
     pub dictation: std::sync::Arc<crate::stt::dictation::Dictation>,
+    /// Общий аудио-вход (инкремент 10): ЕДИНЫЙ владелец захвата + веер + преролл
+    /// + жёсткий mute. Потребители — диктовка и wake-word. Fail-safe.
+    pub audio: std::sync::Arc<crate::stt::hub::AudioHub>,
+    /// Wake-word (инкремент 10): always-on детектор фразы → STT-захват → агент.
+    pub wake: std::sync::Arc<crate::wakeword::WakeWord>,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -101,10 +106,23 @@ impl Daemon {
             let v = voice.clone();
             std::thread::spawn(move || v.warmup());
         }
-        // STT-сервис + PTT-диктовка (инкремент 9)
-        let stt_cfg = crate::stt::config::SttConfig::from_settings(&settings.load());
+        // STT-сервис + общий аудио-вход + PTT-диктовка + wake-word (инкр. 9–10)
+        let root = settings.load();
+        let stt_cfg = crate::stt::config::SttConfig::from_settings(&root);
+        let audio_device = stt_cfg.audio_device.clone();
         let stt = crate::stt::SttService::new(stt_cfg);
-        let dictation = crate::stt::dictation::Dictation::new(stt.clone());
+        // Единый владелец захвата; mute восстанавливаем из настроек.
+        let audio = crate::stt::hub::AudioHub::new(audio_device, Some(app.clone()));
+        if root.get("stt").and_then(|s| s.get("mute")).and_then(|v| v.as_bool()).unwrap_or(false) {
+            audio.set_muted(true);
+        }
+        let dictation = crate::stt::dictation::Dictation::new(stt.clone(), audio.clone());
+        // Wake-word: действие = STT-захват(преролл)→агент; verifier — NullVerifier (v1).
+        let wake_cfg = crate::wakeword::config::WakeConfig::from_settings(&root);
+        let verify_cfg = crate::wakeword::config::VerifyConfig::from_settings(&root);
+        let wake_action: std::sync::Arc<dyn crate::wakeword::action::WakeAction> =
+            crate::wakeword::action::AgentWakeAction::new(audio.clone(), stt.clone(), app.clone());
+        let wake = crate::wakeword::WakeWord::new(audio.clone(), wake_cfg, verify_cfg, wake_action);
         Self {
             app,
             sessions: Mutex::new(HashMap::new()),
@@ -134,6 +152,8 @@ impl Daemon {
             pending: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
             stt,
             dictation,
+            audio,
+            wake,
         }
     }
 

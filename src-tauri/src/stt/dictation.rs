@@ -9,19 +9,22 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::audio::CaptureSession;
+use super::hub::{AudioHub, CaptureSession};
 use super::SttService;
 
 /// PTT-потребитель диктовки. Живёт в Arc внутри Daemon.
+/// С инкр.10 захват идёт через общий `AudioHub` (единая зона ответственности),
+/// а не через собственный cpal-стрим.
 pub struct Dictation {
     service: Arc<SttService>,
+    hub: Arc<AudioHub>,
     /// Активная сессия захвата аудио (None = не пишем).
     capturing: Mutex<Option<CaptureSession>>,
 }
 
 impl Dictation {
-    pub fn new(service: Arc<SttService>) -> Arc<Self> {
-        Arc::new(Dictation { service, capturing: Mutex::new(None) })
+    pub fn new(service: Arc<SttService>, hub: Arc<AudioHub>) -> Arc<Self> {
+        Arc::new(Dictation { service, hub, capturing: Mutex::new(None) })
     }
 
     /// Начать захват аудио при нажатии хоткея. Идемпотентно: если захват уже
@@ -38,16 +41,9 @@ impl Dictation {
             // Уже пишем — идемпотентный пропуск.
             return;
         }
-        let device = self.service.config().audio_device.as_deref();
-        match CaptureSession::start(device) {
-            Ok(session) => {
-                *guard = Some(session);
-                crate::log::line("[dictation] запись начата");
-            }
-            Err(e) => {
-                crate::log::line(&format!("[dictation] CaptureSession::start: {e}"));
-            }
-        }
+        // Захват через общий хаб (без преролла — PTT пишет с момента нажатия).
+        *guard = Some(self.hub.open_capture(false));
+        crate::log::line("[dictation] запись начата");
     }
 
     /// Остановить захват, транскрибировать и вставить текст. Если захват не
@@ -125,7 +121,9 @@ mod tests {
     fn make_dictation() -> Arc<Dictation> {
         // SttService с дефолтным конфигом (qwen3-0.6b, но сайдкар не запущен).
         let svc = SttService::new(SttConfig::default());
-        Dictation::new(svc)
+        // Хаб без AppHandle; в тестах ensure_running() — no-op (живой микрофон не трогаем).
+        let hub = super::super::hub::AudioHub::new(None, None);
+        Dictation::new(svc, hub)
     }
 
     // on_release без предшествующего on_press — no-op (не паникует)

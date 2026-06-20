@@ -58,10 +58,21 @@ path = "src/bin/jarvis-mcp.rs"
 # Без этих инструментов — cargo build --features whisper-native не запустится.
 [features]
 whisper-native = ["dep:whisper-rs"]
+# wake-word через openWakeWord/ort (инкр. 10). ВЫКЛ по умолчанию: дефолтная сборка
+# НЕ тянет onnxruntime и компилируется офлайн. Для работы нужны 3 ONNX-модели
+# (ставит установщик) и нативный onnxruntime (download-binaries при сети либо
+# bundled signed dylib + ORT_DYLIB_PATH для hardened runtime).
+wakeword-ort = ["dep:ort"]
 
 [dependencies.whisper-rs]
 version = "0.16"
 features = ["metal"]
+optional = true
+
+# ort запинен =2.0.0-rc.10: links=onnxruntime ⇒ одна версия ort на бинарь
+# (совместимость с будущим voice_activity_detector). Только под фичей wakeword-ort.
+[dependencies.ort]
+version = "=2.0.0-rc.10"
 optional = true
 
 [profile.release]

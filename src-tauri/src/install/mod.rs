@@ -91,6 +91,8 @@ pub struct Status {
     pub qwen3_sidecar: bool,
     /// Имя активного STT-движка из ~/.jarvis/settings.json (stt.engine).
     pub stt_engine_active: String,
+    /// 3 ONNX-модели wake-word (инкр. 10) на месте (~3.5 МБ).
+    pub wakeword_models: bool,
 }
 
 impl Status {
@@ -245,6 +247,60 @@ pub fn install_whisper(progress: &Progress, proxy: Option<&str>) -> Result<(), S
         .map_err(|e| format!("rename whisper model: {e}"))?;
 
     progress(Step::done("STT-Whisper", "модель установлена (~574 МБ)"));
+    Ok(())
+}
+
+/// Каталог моделей wake-word: ~/.jarvis/wakeword/
+fn wakeword_dir() -> PathBuf {
+    jarvis_dir().join("wakeword")
+}
+
+/// 3 ONNX-модели openWakeWord (release v0.5.1, ~3.5 МБ суммарно): общий мел +
+/// общий эмбеддер + детектор фразы hey_jarvis.
+const WAKEWORD_MODELS: [(&str, &str); 3] = [
+    (
+        "melspectrogram.onnx",
+        "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.onnx",
+    ),
+    (
+        "embedding_model.onnx",
+        "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx",
+    ),
+    (
+        "hey_jarvis_v0.1.onnx",
+        "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/hey_jarvis_v0.1.onnx",
+    ),
+];
+
+/// Все ли 3 модели wake-word на месте.
+fn wakeword_models_present() -> bool {
+    WAKEWORD_MODELS.iter().all(|(f, _)| wakeword_dir().join(f).exists())
+}
+
+/// Скачать 3 ONNX-модели wake-word в ~/.jarvis/wakeword/.
+/// Идемпотентно (пропуск существующих), атомарно (tmp→rename), fail-safe.
+pub fn install_wakeword(progress: &Progress, proxy: Option<&str>) -> Result<(), String> {
+    fs::create_dir_all(wakeword_dir()).map_err(|e| format!("mkdir wakeword: {e}"))?;
+    let proxy_arg = match proxy {
+        Some(p) if !p.is_empty() => format!("--proxy '{p}' "),
+        _ => String::new(),
+    };
+    for (name, url) in WAKEWORD_MODELS {
+        let dst = wakeword_dir().join(name);
+        if dst.exists() {
+            progress(Step::info("wake-word", format!("{name} уже на месте")));
+            continue;
+        }
+        let tmp = wakeword_dir().join(format!(".{name}.tmp"));
+        let cmd = format!("curl -L --progress-bar {proxy_arg}-o '{}' '{url}'", tmp.display());
+        let r = run_streamed("curl wakeword model", &cmd, proxy, progress, name);
+        if r.is_err() {
+            let _ = fs::remove_file(&tmp);
+            return r;
+        }
+        fs::rename(&tmp, &dst).map_err(|e| format!("rename {name}: {e}"))?;
+        progress(Step::done("wake-word", format!("{name} установлена")));
+    }
     Ok(())
 }
 
@@ -652,6 +708,7 @@ pub fn status() -> Status {
         whisper_model: whisper_model_path().exists(),
         qwen3_sidecar: stt_python().exists() && stt_server_py().exists(),
         stt_engine_active: stt_engine(),
+        wakeword_models: wakeword_models_present(),
     }
 }
 
@@ -695,6 +752,12 @@ pub fn status_report() -> String {
     out += &format!("  whisper-turbo: модель={} ({})\n", yn(whisper_ok), whisper_model_path().display());
     out += &format!("  qwen3-mlx-сайдкар: установлен={} ({})\n", yn(qwen3_ok), stt_mlx_dir().display());
     out += &format!("  активный движок: stt.engine={stt_eng}\n");
+    out += "Wake-word (инкр. 10):\n";
+    out += &format!(
+        "  модели openWakeWord: {} ({})\n",
+        yn(wakeword_models_present()),
+        wakeword_dir().display()
+    );
     match read_settings() {
         Ok((true, json)) => {
             out += &format!("Settings: {}\n", settings_path().display());

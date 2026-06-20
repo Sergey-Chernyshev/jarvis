@@ -8,7 +8,9 @@ pub mod dictation;
 pub mod engine;
 pub mod engine_qwen3;
 pub mod engine_whisper;
+pub mod hub; // инкр.10: единый владелец захвата + веер + преролл + жёсткий mute
 pub mod insert;
+pub mod mic_permission; // инкр.10: безопасная проверка разрешения микрофона (TCC)
 pub mod sidecar;
 
 use std::sync::Arc;

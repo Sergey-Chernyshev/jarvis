@@ -130,6 +130,21 @@ impl Store {
         self.save(root);
     }
 
+    /// Deep-set полей в произвольный объект-блок верхнего уровня (инкр. 10:
+    /// "wake"/"verification"), не затирая остальные ключи блока.
+    pub fn set_block(&self, block: &str, patch: Map<String, Value>) {
+        let all = self.load();
+        let mut obj = all.get(block).cloned().unwrap_or_else(|| json!({}));
+        if let Some(o) = obj.as_object_mut() {
+            for (k, v) in patch {
+                o.insert(k, v);
+            }
+        }
+        let mut root = Map::new();
+        root.insert(block.into(), obj);
+        self.save(root);
+    }
+
     pub fn set_plugin(&self, id: &str, patch: Map<String, Value>) {
         let all = self.load();
         let mut plugins = all.get("plugins").cloned().unwrap_or_else(|| json!({}));

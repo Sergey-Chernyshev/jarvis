@@ -758,13 +758,13 @@ pub fn stt_set_engine(app: AppHandle, engine: String) -> Value {
 pub async fn stt_test(app: AppHandle) -> Value {
     let d = Daemon::get(&app);
     let stt = d.stt.clone();
+    let hub = d.audio.clone();
     let opts = stt.options();
 
     // Весь захват + транскрипция — в блокирующем потоке (cpal + reqwest).
+    // Захват идёт через общий AudioHub (единая зона ответственности, инкр. 10).
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        use crate::stt::audio::CaptureSession;
-        let session = CaptureSession::start(None)
-            .map_err(|e| format!("микрофон: {e}"))?;
+        let session = hub.open_capture(false);
         std::thread::sleep(std::time::Duration::from_secs(4));
         let pcm = session.finish()
             .map_err(|e| format!("захват: {e}"))?;
@@ -779,4 +779,48 @@ pub async fn stt_test(app: AppHandle) -> Value {
         Ok(Err(e)) => json!({ "ok": false, "error": e }),
         Err(e) => json!({ "ok": false, "error": format!("задача упала: {e}") }),
     }
+}
+
+// ─── Wake-word + общий аудио-вход (инкр. 10) ─────────────────────────────────
+
+/// Статус wake-word + аудио-входа для панели.
+#[tauri::command]
+pub fn wake_get(app: AppHandle) -> Value {
+    Daemon::get(&app).wake.status()
+}
+
+/// Вкл/выкл always-on детектор. Поднимает/гасит consumer-поток и аудио-захват.
+#[tauri::command]
+pub fn wake_set_enabled(app: AppHandle, on: bool) -> Value {
+    let d = Daemon::get(&app);
+    let mut patch = serde_json::Map::new();
+    patch.insert("enabled".into(), json!(on));
+    d.settings.set_block("wake", patch);
+    d.wake.set_enabled(on);
+    json!({ "ok": true, "status": d.wake.status() })
+}
+
+/// Установить порог срабатывания (0..1). Переконфигурирует детектор вживую.
+#[tauri::command]
+pub fn wake_set_threshold(app: AppHandle, threshold: f64) -> Value {
+    let d = Daemon::get(&app);
+    let mut patch = serde_json::Map::new();
+    patch.insert("threshold".into(), json!(threshold.clamp(0.0, 1.0)));
+    d.settings.set_block("wake", patch);
+    let root = d.settings.load();
+    let wcfg = crate::wakeword::config::WakeConfig::from_settings(&root);
+    let vcfg = crate::wakeword::config::VerifyConfig::from_settings(&root);
+    d.wake.reconfigure(wcfg, vcfg);
+    json!({ "ok": true, "status": d.wake.status() })
+}
+
+/// Жёсткий mute общего аудио-входа (мгновенно глушит захват у источника).
+#[tauri::command]
+pub fn audio_set_mute(app: AppHandle, on: bool) -> Value {
+    let d = Daemon::get(&app);
+    d.audio.set_muted(on);
+    let mut patch = serde_json::Map::new();
+    patch.insert("mute".into(), json!(on));
+    d.settings.set_stt(patch);
+    json!({ "ok": true, "muted": on, "state": d.audio.state().as_str() })
 }

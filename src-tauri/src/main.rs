@@ -37,6 +37,7 @@ mod voice;
 mod windows;
 #[allow(dead_code)] // STT-потребители подключаются в фазах 4-6 (инкр. 9)
 mod stt;
+mod wakeword; // инкремент 10: wake-word детектор + шов верификации
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -147,6 +148,11 @@ fn main() {
             ipc::stt_get,
             ipc::stt_set_engine,
             ipc::stt_test,
+            ipc::wake_get,
+            ipc::wake_set_enabled,
+            ipc::wake_set_threshold,
+            ipc::audio_set_mute,
+            onboarding::wake_install_models,
         ])
         .setup(|app| {
             // чистое меню-бар приложение: без иконки в доке
@@ -236,6 +242,8 @@ fn main() {
                 power::Power::dispose(&d); // снять assertion, вернуть disablesleep
                 d.voice.dispose(); // погасить Silero-сайдкар, если был поднят
                 d.stt.dispose(); // погасить Qwen3-MLX-сайдкар, если был поднят
+                d.wake.dispose(); // остановить wake-word consumer-поток
+                d.audio.dispose(); // остановить общий аудио-захват (drop cpal Stream)
                 let _ = std::fs::remove_file(util::sock_path());
             }
         });
@@ -299,6 +307,16 @@ fn spawn_timers(d: &Arc<Daemon>) {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let s = dd.stt.clone();
             let _ = tokio::task::spawn_blocking(move || s.tick()).await;
+        }
+    });
+
+    // супервизор wake-word (инкр. 10): раз в 5с поднимаем consumer-поток, если умер
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let w = dd.wake.clone();
+            let _ = tokio::task::spawn_blocking(move || w.tick()).await;
         }
     });
 

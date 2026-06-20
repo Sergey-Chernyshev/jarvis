@@ -2556,6 +2556,25 @@ tabSettingsEl.addEventListener('click', () => {
 // кнопка «Открыть настройки» из окна онбординга
 window.jarvis.onGotoSettings(() => setView('settings'));
 
+// Wake-word (инкр. 10): живой индикатор «слушаю»/срабатывание + рефреш после установки
+window.jarvis.onAudioState((p) => {
+  const pill = document.getElementById('wake-status-pill');
+  if (!pill || !p) return;
+  let txt = 'выключено', cls = '';
+  if (p.muted || p.state === 'muted') txt = 'заглушено';
+  else if (p.state === 'denied') txt = 'нет доступа к микрофону';
+  else if (p.state === 'listening') { txt = 'слушаю'; cls = 'on'; }
+  else if (p.state === 'no-device') txt = 'нет устройства';
+  pill.textContent = txt;
+  pill.className = 'astatus' + (cls ? ' ' + cls : '');
+});
+window.jarvis.onWake((p) => {
+  if (!p || p.phase !== 'detected') return;
+  const pill = document.getElementById('wake-status-pill');
+  if (pill) { pill.textContent = 'сработало!'; pill.className = 'astatus on'; }
+});
+window.jarvis.onWakeInstallDone(() => { try { renderWakeCard(); } catch {} });
+
 /* ---------- настройки ---------- */
 
 const hotkeyBtn = document.getElementById('hotkey');
@@ -2585,6 +2604,7 @@ async function loadSettings() {
     renderPluginRows();
   } catch {}
   renderSttCard();
+  renderWakeCard();
   renderVoiceCard();
   renderIntegrationCard();
 }
@@ -2810,6 +2830,140 @@ async function renderVoiceCard() {
 }
 
 // ── карточка «Голосовой ввод (диктовка)» — STT (инкремент 9) ──────────────────
+// ── Wake-word (инкремент 10): тумблер, mute, порог, тест фразы, модели ──
+function wakeStatusLabel(v) {
+  if (!v) return ['нет данных', ''];
+  if (v.muted) return ['заглушено', ''];
+  if (v.audio_state === 'denied') return ['нет доступа к микрофону', ''];
+  if (v.listening) return ['слушаю', 'on'];
+  if (v.enabled) return ['включено', 'on'];
+  return ['выключено', ''];
+}
+
+async function renderWakeCard() {
+  const box = document.getElementById('wake-card-root');
+  if (!box) return;
+  box.textContent = '';
+
+  let v = null;
+  try { v = await window.jarvis.wakeGet(); } catch {}
+
+  const spacer = () => Object.assign(document.createElement('span'), { className: 'spacer' });
+  const row = (cls) => { const d = document.createElement('div'); d.className = cls || 'arow'; return d; };
+  const label = (t) => { const s = document.createElement('span'); s.className = 'alabel'; s.textContent = t; return s; };
+
+  // шапка: заголовок + статус «слушаю»
+  const head = row('awakehead');
+  const title = document.createElement('span');
+  title.className = 'atitle';
+  title.textContent = 'Wake-word («Hey Jarvis»)';
+  head.appendChild(title);
+  head.appendChild(spacer());
+  const [stxt, scls] = wakeStatusLabel(v);
+  const pill = document.createElement('span');
+  pill.className = 'astatus' + (scls ? ' ' + scls : '');
+  pill.id = 'wake-status-pill';
+  pill.textContent = stxt;
+  head.appendChild(pill);
+  box.appendChild(head);
+
+  if (!v) {
+    const hint = document.createElement('div');
+    hint.className = 'ahint';
+    hint.textContent = 'Данные wake-word недоступны.';
+    box.appendChild(hint);
+    return;
+  }
+
+  // тумблер вкл/выкл
+  const enRow = row('arow hairtop');
+  enRow.appendChild(label('Активация по фразе'));
+  enRow.appendChild(spacer());
+  const enToggle = document.createElement('input');
+  enToggle.type = 'checkbox';
+  enToggle.className = 'toggle';
+  enToggle.checked = !!v.enabled;
+  enToggle.addEventListener('change', async () => {
+    await window.jarvis.wakeSetEnabled(enToggle.checked);
+    renderWakeCard();
+  });
+  enRow.appendChild(enToggle);
+  box.appendChild(enRow);
+
+  // жёсткий mute (всегда доступен — глушит микрофон у источника)
+  const muteRow = row('arow');
+  muteRow.appendChild(label('Заглушить микрофон (mute)'));
+  muteRow.appendChild(spacer());
+  const muteToggle = document.createElement('input');
+  muteToggle.type = 'checkbox';
+  muteToggle.className = 'toggle';
+  muteToggle.checked = !!v.muted;
+  muteToggle.addEventListener('change', async () => {
+    await window.jarvis.audioSetMute(muteToggle.checked);
+    renderWakeCard();
+  });
+  muteRow.appendChild(muteToggle);
+  box.appendChild(muteRow);
+
+  // порог срабатывания
+  const thRow = row('arow');
+  thRow.appendChild(label('Порог срабатывания'));
+  thRow.appendChild(spacer());
+  const thVal = document.createElement('span');
+  thVal.className = 'ahint';
+  thVal.style.marginRight = '8px';
+  thVal.textContent = Number(v.threshold ?? 0.5).toFixed(2);
+  const th = document.createElement('input');
+  th.type = 'range';
+  th.min = '0'; th.max = '1'; th.step = '0.05';
+  th.value = String(v.threshold ?? 0.5);
+  th.addEventListener('input', () => { thVal.textContent = Number(th.value).toFixed(2); });
+  th.addEventListener('change', async () => { await window.jarvis.wakeSetThreshold(Number(th.value)); });
+  thRow.appendChild(thVal);
+  thRow.appendChild(th);
+  box.appendChild(thRow);
+
+  // модели openWakeWord
+  const mRow = row('arow');
+  mRow.appendChild(label('Модели openWakeWord'));
+  mRow.appendChild(spacer());
+  if (v.model_present) {
+    const ok = document.createElement('span');
+    ok.className = 'astatus on';
+    ok.textContent = 'на месте';
+    mRow.appendChild(ok);
+  } else {
+    const btn = document.createElement('button');
+    btn.className = 'abtn';
+    btn.textContent = 'Скачать (~3.5 МБ)';
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; btn.textContent = 'Скачиваю…';
+      await window.jarvis.wakeInstallModels();
+    });
+    mRow.appendChild(btn);
+  }
+  box.appendChild(mRow);
+
+  // верификация говорящего — шов (выключено)
+  const vRow = row('arow');
+  vRow.appendChild(label('Верификация говорящего'));
+  vRow.appendChild(spacer());
+  const vState = document.createElement('span');
+  vState.className = 'ahint';
+  vState.textContent = 'выключено · шов (реализация позже)';
+  vRow.appendChild(vState);
+  box.appendChild(vRow);
+
+  // честная подсказка
+  const hint = document.createElement('div');
+  hint.className = 'ahint';
+  hint.style.marginTop = '6px';
+  hint.textContent = v.model_present
+    ? 'Скажи «Hey Jarvis» — индикатор покажет «слушаю» при срабатывании. Работает офлайн.'
+    : 'Скачай модели, затем включи активацию. Без моделей детектор инертен.';
+  box.appendChild(hint);
+}
+
 async function renderSttCard() {
   const box = document.getElementById('stt-card-root');
   if (!box) return;

@@ -14,6 +14,7 @@ mod sessions;
 mod settings_cap;
 mod stt_cap;
 mod tasks;
+mod wakeword_cap;
 
 /// Зарегистрировать все нативные капабилити в боевом реестре.
 pub fn register_all(reg: &mut DaemonRegistry) {
@@ -31,6 +32,8 @@ pub fn register_all(reg: &mut DaemonRegistry) {
     // sessions.queue/launch/interrupt — отдельная инфраструктура (см. план, отложено).
     // фаза 7 (инкр. 9) — STT: доступ к микрофону через гейт (denied для агента по умолчанию).
     stt_cap::register(reg);
+    // инкр. 10 — wake-word: только статус (Read).
+    wakeword_cap::register(reg);
 }
 
 /// Достать строковый аргумент из JSON-объекта или вернуть внятную ошибку.

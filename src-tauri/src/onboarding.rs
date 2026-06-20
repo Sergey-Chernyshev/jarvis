@@ -104,3 +104,31 @@ pub fn model_delete(app: AppHandle, id: String) -> Result<IntegrationInfo, Strin
 pub fn quiet_set(app: AppHandle, on: bool) {
     crate::daemon::Daemon::get(&app).set_quiet(on);
 }
+
+/// Скачать 3 ONNX-модели wake-word (инкр. 10) с прогрессом в панель. Фоном,
+/// fail-safe; по завершении — событие `wake_install_done` со статусом.
+#[tauri::command]
+pub fn wake_install_models(app: AppHandle) {
+    let d = crate::daemon::Daemon::get(&app);
+    let proxy = {
+        let s = d.settings.string("proxy");
+        (!s.is_empty()).then_some(s)
+    };
+    std::thread::spawn(move || {
+        let r = install::install_wakeword(
+            &|step: Step| {
+                let _ = app.emit_to("main", "wake_install_progress", step);
+            },
+            proxy.as_deref(),
+        );
+        let _ = app.emit_to(
+            "main",
+            "wake_install_done",
+            serde_json::json!({
+                "ok": r.is_ok(),
+                "error": r.err(),
+                "models_present": install::status().wakeword_models,
+            }),
+        );
+    });
+}

@@ -59,6 +59,16 @@
     sttGet: () => invoke('stt_get'),
     sttSetEngine: (engine) => invoke('stt_set_engine', { engine }),
     sttTest: () => invoke('stt_test'),
+
+    // Wake-word + общий аудио-вход (инкремент 10)
+    wakeGet: () => invoke('wake_get'),
+    wakeSetEnabled: (val) => invoke('wake_set_enabled', { on: val }),
+    wakeSetThreshold: (threshold) => invoke('wake_set_threshold', { threshold }),
+    audioSetMute: (val) => invoke('audio_set_mute', { on: val }),
+    wakeInstallModels: () => invoke('wake_install_models'),
+    onAudioState: (cb) => on('audio_state', cb),
+    onWake: (cb) => on('wake', cb),
+    onWakeInstallDone: (cb) => on('wake_install_done', cb),
   };
 
   // navigator.clipboard в WKWebView капризен (secure context, жесты) —

@@ -320,6 +320,17 @@ fn spawn_timers(d: &Arc<Daemon>) {
         }
     });
 
+    // watchdog общего аудио-входа (инкр. 10): раз в 5с проверяем живость захвата
+    // (устройство могло отвалиться без явной ошибки) и перезапускаем при застое
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let a = dd.audio.clone();
+            let _ = tokio::task::spawn_blocking(move || a.tick()).await;
+        }
+    });
+
     // режим логов/диагностики: раз в 15с пишем метрики (RAM/CPU/счётчики) в лог
     let dd = d.clone();
     tauri::async_runtime::spawn(async move {

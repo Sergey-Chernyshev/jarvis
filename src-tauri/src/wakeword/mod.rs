@@ -84,7 +84,18 @@ struct WakeSession {
 
 impl WakeSession {
     fn on_frame(&mut self, frame: &[f32]) {
-        let score = self.engine.push_frame(frame).unwrap_or(0.0);
+        // fail-safe: паника движка (напр. баг в ort-инференсе) не валит поток —
+        // кадр трактуем как «тишина» и сбрасываем движок.
+        let score = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.engine.push_frame(frame)
+        })) {
+            Ok(s) => s.unwrap_or(0.0),
+            Err(_) => {
+                crate::log::line("[wake] паника движка — кадр пропущен, сброс");
+                self.engine.reset();
+                0.0
+            }
+        };
         if self.detector.feed(score) {
             // снимок аудио срабатывания (преролл) — для верификации и STT-захвата
             let preroll = self.hub.preroll();
@@ -117,6 +128,10 @@ pub struct WakeWord {
     verifier: Arc<dyn SpeakerVerifier>,
     action: Arc<dyn WakeAction>,
     inner: Mutex<Inner>,
+    /// Сериализует переходы жизненного цикла (start/stop/tick/set_enabled/
+    /// reconfigure), чтобы супервизорный tick не разъехался с IPC-вызовом и не
+    /// оставил «осиротевший» consumer-поток с включённым микрофоном после выключения.
+    transition: Mutex<()>,
 }
 
 impl WakeWord {
@@ -136,6 +151,7 @@ impl WakeWord {
                 verify_cfg,
                 running: None,
             }),
+            transition: Mutex::new(()),
         });
         if wake_cfg.enabled {
             svc.start();
@@ -143,10 +159,20 @@ impl WakeWord {
         svc
     }
 
-    /// Запустить consumer-поток (идемпотентно).
+    /// Запустить consumer-поток (идемпотентно). Публичная обёртка под lock перехода.
     pub fn start(self: &Arc<Self>) {
+        let _t = self.transition.lock().unwrap();
+        self.start_locked();
+    }
+
+    /// Спавн consumer-потока. Вызывать ТОЛЬКО держа `transition`.
+    fn start_locked(self: &Arc<Self>) {
         let mut g = self.inner.lock().unwrap();
         if g.running.is_some() {
+            return;
+        }
+        // защита: не поднимать поток, если выключено (tick/гонка)
+        if !g.wake_cfg.enabled {
             return;
         }
         let stop = Arc::new(AtomicBool::new(false));
@@ -165,6 +191,12 @@ impl WakeWord {
 
     /// Остановить consumer-поток (идемпотентно).
     pub fn stop(&self) {
+        let _t = self.transition.lock().unwrap();
+        self.stop_locked();
+    }
+
+    /// Останов. Вызывать ТОЛЬКО держа `transition`.
+    fn stop_locked(&self) {
         let running = { self.inner.lock().unwrap().running.take() };
         if let Some(mut r) = running {
             r.stop.store(true, Ordering::SeqCst);
@@ -175,47 +207,46 @@ impl WakeWord {
         }
     }
 
-    /// Вкл/выкл из настроек/панели. Поднимает/гасит поток.
+    /// Вкл/выкл из настроек/панели. Поднимает/гасит поток (атомарно к tick).
     pub fn set_enabled(self: &Arc<Self>, on: bool) {
-        {
-            let mut g = self.inner.lock().unwrap();
-            g.wake_cfg.enabled = on;
-        }
+        let _t = self.transition.lock().unwrap();
+        self.inner.lock().unwrap().wake_cfg.enabled = on;
         if on {
-            self.start();
+            self.start_locked();
         } else {
-            self.stop();
+            self.stop_locked();
         }
     }
 
     /// Переконфигурировать вживую (порог/модель/верификация). Если включён —
-    /// перезапускаем поток, чтобы подхватить новый движок/порог.
+    /// перезапускаем поток, чтобы подхватить новый движок/порог (атомарно к tick).
     pub fn reconfigure(self: &Arc<Self>, wake_cfg: WakeConfig, verify_cfg: VerifyConfig) {
-        let was_running;
+        let _t = self.transition.lock().unwrap();
+        let enabled = wake_cfg.enabled;
         {
             let mut g = self.inner.lock().unwrap();
-            was_running = g.running.is_some();
-            g.wake_cfg = wake_cfg.clone();
+            g.wake_cfg = wake_cfg;
             g.verify_cfg = verify_cfg;
         }
-        if was_running {
-            self.stop();
-        }
-        if wake_cfg.enabled {
-            self.start();
+        self.stop_locked();
+        if enabled {
+            self.start_locked();
         }
     }
 
     /// Тик-супервизор: если включён, но поток умер (паника/выход) — поднять заново.
+    /// Под `transition`, поэтому не разъезжается с конкурентным set_enabled/reconfigure
+    /// (перепроверяем enabled внутри критической секции перед рестартом).
     pub fn tick(self: &Arc<Self>) {
+        let _t = self.transition.lock().unwrap();
         let need_restart = {
             let g = self.inner.lock().unwrap();
             g.wake_cfg.enabled
                 && g.running.as_ref().map(|r| r.join.as_ref().map(|j| j.is_finished()).unwrap_or(true)).unwrap_or(true)
         };
         if need_restart {
-            self.stop();
-            self.start();
+            self.stop_locked();
+            self.start_locked(); // start_locked сам перепроверит enabled
         }
     }
 
@@ -264,8 +295,14 @@ fn run_loop(
     stop: Arc<AtomicBool>,
 ) {
     let tap = hub.subscribe_wake();
+    let engine = build_engine(&wake_cfg);
+    crate::log::line(&format!(
+        "[wake] consumer-поток: движок «{}», порог {:.2}",
+        engine.name(),
+        wake_cfg.threshold
+    ));
     let mut session = WakeSession {
-        engine: build_engine(&wake_cfg),
+        engine,
         detector: Detector::new(wake_cfg.threshold, wake_cfg.debounce),
         verifier,
         verify_cfg,

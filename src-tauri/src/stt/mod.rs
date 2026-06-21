@@ -100,6 +100,9 @@ impl SttService {
     /// Лениво поднимает сайдкар, если он был заглушён по простою (idle-stop), и
     /// ждёт загрузки модели (cold-start). Когда сайдкар уже тёплый — задержки нет.
     pub fn transcribe(&self, pcm: &[f32], opts: &SttOptions) -> Result<SttResult, String> {
+        // Страж «в полёте» на весь transcribe (включая cold-start ожидание):
+        // пока он жив, idle-stop из tick не убьёт сайдкар под нами (анти-гонка).
+        let _guard = self.sidecar.as_ref().map(|s| s.use_guard());
         if let Some(s) = &self.sidecar {
             // поднять после idle-stop (no-op, если уже работает) + отметить использование
             s.ensure_started()?;

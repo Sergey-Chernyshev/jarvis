@@ -30,19 +30,24 @@ impl Dictation {
     /// Начать захват аудио при нажатии хоткея. Идемпотентно: если захват уже
     /// идёт (двойное срабатывание или авто-повтор клавиши) — пропуск.
     pub fn on_press(&self) {
-        let mut guard = match self.capturing.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                crate::log::line(&format!("[dictation] on_press lock: {e}"));
+        {
+            let mut guard = match self.capturing.lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    crate::log::line(&format!("[dictation] on_press lock: {e}"));
+                    return;
+                }
+            };
+            if guard.is_some() {
+                // Уже пишем — идемпотентный пропуск.
                 return;
             }
-        };
-        if guard.is_some() {
-            // Уже пишем — идемпотентный пропуск.
-            return;
-        }
-        // Захват через общий хаб (без преролла — PTT пишет с момента нажатия).
-        *guard = Some(self.hub.open_capture(false));
+            // Захват через общий хаб (без преролла — PTT пишет с момента нажатия).
+            *guard = Some(self.hub.open_capture(false));
+        } // лок захвата отпущен ДО прогрева (spawn питона его не держит)
+        // Греем STT-модель ПОКА человек говорит: к отпусканию клавиши она уже
+        // загружена (прячет cold-start после idle-stop). Неблокирующий вызов.
+        self.service.warm();
         crate::log::line("[dictation] запись начата");
     }
 

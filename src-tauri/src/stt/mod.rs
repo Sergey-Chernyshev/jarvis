@@ -73,6 +73,16 @@ impl SttService {
         Arc::new(SttService { engine, config: cfg, sidecar: None })
     }
 
+    /// Прогреть сайдкар заранее (на нажатии клавиши диктовки), чтобы модель
+    /// грузилась, ПОКА человек говорит — к отпусканию она уже готова и cold-start
+    /// после idle-stop незаметен. Неблокирующий: `ensure_started` спавнит питон,
+    /// модель грузится в нём асинхронно; повторный/тёплый вызов — no-op.
+    pub fn warm(&self) {
+        if let Some(s) = &self.sidecar {
+            let _ = s.ensure_started();
+        }
+    }
+
     /// Тик супервизора (qwen3-only): сначала пробуем заглушить по простою
     /// (вернуть ~1.3 ГБ резидентной модели), иначе — перезапуск, если умер.
     pub fn tick(&self) {
@@ -192,6 +202,14 @@ mod tests {
         assert_eq!(r.text, "привет мир");
         assert_eq!(r.segments.len(), 1);
         assert_eq!(r.segments[0].lang, Some("ru".into()));
+    }
+
+    // warm() безопасен для whisper-движка (sidecar=None → no-op, без spawn)
+    #[test]
+    fn warm_noop_for_sidecarless_engine() {
+        let svc = service_with_mock("x"); // sidecar=None
+        svc.warm(); // не паникует, ничего не поднимает
+        svc.warm();
     }
 
     // SttService с мок-движком: available()==true

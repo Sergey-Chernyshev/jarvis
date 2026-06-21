@@ -4,7 +4,17 @@
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// RAII-страж активного синтеза: пока жив — idle-stop не глушит сайдкар.
+pub struct UseGuard<'a>(&'a AtomicI64);
+impl Drop for UseGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 pub struct Sidecar {
     py: PathBuf,     // ~/.jarvis/silero/venv/bin/python
@@ -13,6 +23,12 @@ pub struct Sidecar {
     model: String,
     pub port: u16,
     child: Mutex<Option<Child>>,
+    /// Должен ли сайдкар работать. true между синтезом и idle-stop; false после
+    /// простоя. Супервизор не воскрешает заглушённый. Озвучка частая в активные
+    /// периоды, но в долгие тихие (нет агентов) — глушим и возвращаем процесс.
+    active: AtomicBool,
+    last_use: Mutex<Instant>,
+    in_use: AtomicI64,
 }
 
 impl Sidecar {
@@ -24,7 +40,35 @@ impl Sidecar {
             model,
             port,
             child: Mutex::new(None),
+            active: AtomicBool::new(false),
+            last_use: Mutex::new(Instant::now()),
+            in_use: AtomicI64::new(0),
         }
+    }
+
+    /// Отметить использование (сдвинуть отсчёт простоя).
+    pub fn touch(&self) {
+        if let Ok(mut t) = self.last_use.lock() {
+            *t = Instant::now();
+        }
+    }
+
+    /// Активен ли сайдкар (поднят и не заглушён по простою). Диагностика/тесты.
+    #[allow(dead_code)]
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    /// Страж синтеза «в полёте» — idle-stop не глушит, пока он жив.
+    pub fn use_guard(&self) -> UseGuard<'_> {
+        self.in_use.fetch_add(1, Ordering::SeqCst);
+        UseGuard(&self.in_use)
+    }
+
+    /// Число синтезов «в полёте» (для тестов/диагностики).
+    #[allow(dead_code)]
+    pub fn in_use_count(&self) -> i64 {
+        self.in_use.load(Ordering::SeqCst)
     }
 
     pub fn installed(&self) -> bool {
@@ -47,6 +91,9 @@ impl Sidecar {
             crate::log::line("[voice] silero: сайдкар не установлен");
             return;
         }
+        // намерение работать: активируем и сдвигаем отсчёт простоя
+        self.active.store(true, Ordering::SeqCst);
+        self.touch();
         let mut g = self.child.lock().unwrap();
         // ещё жив? try_wait → None значит процесс не завершился
         if g
@@ -77,8 +124,12 @@ impl Sidecar {
         }
     }
 
-    /// Перезапуск, если процесс умер (вызывается тиком супервизора).
+    /// Перезапуск, если процесс умер (тик супервизора). Только если сайдкар
+    /// должен работать (active): после idle-stop не воскрешаем.
     pub fn restart_if_dead(&self) {
+        if !self.active.load(Ordering::SeqCst) {
+            return;
+        }
         let dead = {
             let mut g = self.child.lock().unwrap();
             // нет процесса или try_wait отдал статус завершения → мёртв
@@ -89,7 +140,31 @@ impl Sidecar {
         }
     }
 
+    /// Заглушить, если активен, не идёт синтез и простой ≥ `limit`. Возвращает
+    /// процесс системе (Silero ~38МБ + питон). Озвучка возобновляется лениво.
+    pub fn idle_stop_if_due(&self, limit: Duration) -> bool {
+        if !self.active.load(Ordering::SeqCst) {
+            return false;
+        }
+        if self.in_use.load(Ordering::SeqCst) > 0 {
+            return false; // идёт синтез — не глушим (анти-гонка)
+        }
+        let idle = self.last_use.lock().map(|t| t.elapsed()).unwrap_or_default();
+        if idle >= limit {
+            self.stop();
+            crate::log::line(&format!(
+                "[voice] silero: сайдкар заглушён по простою ({}с)",
+                idle.as_secs()
+            ));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Остановить и снять active (явная остановка/idle-stop/выход).
     pub fn stop(&self) {
+        self.active.store(false, Ordering::SeqCst);
         if let Some(mut c) = self.child.lock().unwrap().take() {
             let _ = c.kill();
             let _ = c.wait();
@@ -101,11 +176,42 @@ impl Sidecar {
 mod tests {
     use super::*;
 
+    fn fake() -> Sidecar {
+        Sidecar::new(PathBuf::from("/nope"), "baya".into(), "v4_ru".into(), 8731)
+    }
+
     #[test]
     fn not_installed_when_paths_missing() {
-        let s = Sidecar::new(PathBuf::from("/nope"), "baya".into(), "v4_ru".into(), 8731);
+        let s = fake();
         assert!(!s.installed());
         s.ensure_started(); // не паникует — просто пишет в лог
         assert_eq!(s.base(), "http://127.0.0.1:8731");
+    }
+
+    #[test]
+    fn ensure_started_failure_keeps_inactive() {
+        // не установлен → ensure_started выходит ДО активации
+        let s = fake();
+        s.ensure_started();
+        assert!(!s.is_active());
+    }
+
+    #[test]
+    fn idle_stop_and_restart_noop_when_inactive() {
+        let s = fake();
+        assert!(!s.idle_stop_if_due(Duration::from_secs(0)), "неактивный — не глушим");
+        s.restart_if_dead(); // не воскрешает заглушённый
+        assert!(!s.is_active());
+    }
+
+    #[test]
+    fn use_guard_counts_in_flight() {
+        let s = fake();
+        assert_eq!(s.in_use_count(), 0);
+        {
+            let _g = s.use_guard();
+            assert_eq!(s.in_use_count(), 1);
+        }
+        assert_eq!(s.in_use_count(), 0);
     }
 }

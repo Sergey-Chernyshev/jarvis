@@ -19,6 +19,25 @@ use queue::SpeechQueue;
 /// Фиксированный порт Silero-сайдкара на localhost.
 const SILERO_PORT: u16 = 8731;
 
+/// Простой TTS-сайдкара, после которого глушим процесс (вернуть ~38МБ модели +
+/// питон). Озвучка частая в активные периоды; глушим только в долгую тишину.
+const VOICE_IDLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(600); // 10 минут
+
+/// Ожидание готовности модели после ленивого подъёма (Silero грузится быстро).
+const VOICE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Подождать готовности движка (модель загрузилась), но не дольше `timeout`.
+/// Тёплый сайдкар проходит первую проверку мгновенно.
+fn wait_ready(engine: &dyn TtsEngine, timeout: std::time::Duration) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if engine.available() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+}
+
 /// Голосовой сервис: композитор + очередь + движок + проигрыватель на фоне.
 /// Владеет супервизором Silero-сайдкара (старт/перезапуск/стоп).
 pub struct Voice {
@@ -133,9 +152,12 @@ impl Voice {
         });
     }
 
-    /// Тик супервизора: перезапустить Silero-сайдкар, если он умер.
+    /// Тик супервизора: сперва глушим по простою (вернуть процесс/память в тихие
+    /// периоды), иначе — перезапуск, если умер.
     pub fn tick(&self) {
-        self.sidecar.restart_if_dead();
+        if !self.sidecar.idle_stop_if_due(VOICE_IDLE_LIMIT) {
+            self.sidecar.restart_if_dead();
+        }
     }
 
     /// Погасить Silero-сайдкар на выходе демона.
@@ -224,6 +246,12 @@ impl Voice {
             let Some(u) = next else { continue; };
             if self.is_muted() { continue; }
             let vs = self.voice_sel();
+            // Лениво поднять сайдкар (после idle-stop) + дождаться готовности
+            // модели; страж держит активность на время синтеза (анти-гонка с tick).
+            self.sidecar.ensure_started();
+            self.sidecar.touch();
+            wait_ready(self.engine.as_ref(), VOICE_READY_TIMEOUT);
+            let _use = self.sidecar.use_guard();
             let t_synth = crate::metrics::now();
             match self.engine.synthesize(&u.text, &vs) {
                 Ok(wav) => {

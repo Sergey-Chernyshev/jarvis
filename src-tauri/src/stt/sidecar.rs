@@ -4,9 +4,18 @@
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// RAII-страж активного использования сайдкара: пока жив хотя бы один — idle-stop
+/// не срабатывает (иначе tick мог бы убить сайдкар прямо во время transcribe).
+pub struct UseGuard<'a>(&'a AtomicI64);
+impl Drop for UseGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 pub struct SttSidecar {
     py: PathBuf,      // {dir}/venv/bin/python
@@ -21,6 +30,8 @@ pub struct SttSidecar {
     active: AtomicBool,
     /// Время последнего использования (transcribe/warm) — отсчёт простоя.
     last_use: Mutex<Instant>,
+    /// Число transcribe «в полёте». idle-stop не глушит сайдкар, пока > 0.
+    in_use: AtomicI64,
 }
 
 impl SttSidecar {
@@ -34,7 +45,19 @@ impl SttSidecar {
             child: Mutex::new(None),
             active: AtomicBool::new(false),
             last_use: Mutex::new(Instant::now()),
+            in_use: AtomicI64::new(0),
         }
+    }
+
+    /// Взять страж использования на время transcribe (см. `UseGuard`).
+    pub fn use_guard(&self) -> UseGuard<'_> {
+        self.in_use.fetch_add(1, Ordering::SeqCst);
+        UseGuard(&self.in_use)
+    }
+
+    /// Число transcribe «в полёте» (для тестов/диагностики).
+    pub fn in_use_count(&self) -> i64 {
+        self.in_use.load(Ordering::SeqCst)
     }
 
     /// Отметить использование (сдвинуть отсчёт простоя). Зовётся на каждой
@@ -134,6 +157,9 @@ impl SttSidecar {
         if !self.active.load(Ordering::SeqCst) {
             return false; // уже заглушён
         }
+        if self.in_use.load(Ordering::SeqCst) > 0 {
+            return false; // идёт transcribe — не глушим под нагрузкой (анти-гонка)
+        }
         let idle = self.last_use.lock().map(|t| t.elapsed()).unwrap_or_default();
         if idle >= limit {
             self.stop();
@@ -197,5 +223,18 @@ mod tests {
         let s = SttSidecar::new("/nope", "qwen3-0.6b", 8732);
         s.restart_if_dead();
         assert!(!s.is_active(), "restart_if_dead на неактивном — no-op");
+    }
+
+    #[test]
+    fn use_guard_counts_in_flight() {
+        let s = SttSidecar::new("/nope", "qwen3-0.6b", 8732);
+        assert_eq!(s.in_use_count(), 0);
+        {
+            let _g1 = s.use_guard();
+            assert_eq!(s.in_use_count(), 1);
+            let _g2 = s.use_guard();
+            assert_eq!(s.in_use_count(), 2, "вложенные transcribe считаются");
+        }
+        assert_eq!(s.in_use_count(), 0, "Drop стражей возвращает счётчик в 0");
     }
 }

@@ -200,12 +200,6 @@ pub struct Session {
 
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
-    /// Провизорная сессия, подхваченная сканом живого tmux (а не из хука):
-    /// `session_id` ещё неизвестен, статус нейтральный. Снимется `evict_pane`,
-    /// как только из её паны прилетит первый настоящий хук. В `state.json` не
-    /// пишется — всегда заново выводится из живого tmux.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub adopted: bool,
     /// Имя, которым уже подписали tmux-окно (не дёргаем rename повторно).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub renamed_to: Option<String>,

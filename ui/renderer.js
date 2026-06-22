@@ -175,15 +175,9 @@ function orderedSessions() {
   const known = new Set(displayOrder);
   for (const s of state.filter((x) => !known.has(x.id)).sort(sortCmp)) displayOrder.push(s.id);
   const ordered = displayOrder.map((id) => byId.get(id));
-  // подхваченные из tmux (adopted) — это плейсхолдеры до первого хука: их
-  // created_at = момент рестарта, поэтому по свежести они всплыли бы наверх и
-  // забили список. Держим их в самом низу, реальные сессии — выше.
-  const real = ordered.filter((s) => !s.adopted);
-  const placeholders = ordered.filter((s) => s.adopted);
   return [
-    ...real.filter((s) => s.pinned),
-    ...real.filter((s) => !s.pinned),
-    ...placeholders,
+    ...ordered.filter((s) => s.pinned),
+    ...ordered.filter((s) => !s.pinned),
   ];
 }
 
@@ -223,7 +217,7 @@ function render() {
 
   list.forEach((s, i) => {
     const row = document.createElement('div');
-    row.className = `row ${s.status}${s.adopted ? ' adopted' : ''}${i === sel ? ' selected' : ''}`;
+    row.className = `row ${s.status}${i === sel ? ' selected' : ''}`;
     row.title = [s.cwd, s.title, ...(s.todoList || [])].filter(Boolean).join('\n');
 
     const dot = document.createElement('span');
@@ -252,16 +246,6 @@ function render() {
       hostBadge.textContent = host;
     }
 
-    // подхвачена сканом живого tmux (рестарт демона) — настоящий статус неизвестен,
-    // пока не прилетит первый хук; помечаем нейтрально, без действий
-    let adoptedBadge = null;
-    if (s.adopted) {
-      adoptedBadge = document.createElement('span');
-      adoptedBadge.className = 'badge adopted';
-      adoptedBadge.textContent = 'восстановлена';
-      adoptedBadge.title = 'Подхвачена из tmux после перезапуска — ждём первое событие';
-    }
-
     const summary = document.createElement('span');
     summary.className = 'summary';
     // контекст по убыванию точности: текущая задача → саммари последних задач → промпт → ai-title
@@ -269,11 +253,7 @@ function render() {
     const ctx = s.task
       ? `${s.taskProgress ? s.taskProgress + ' · ' : ''}${s.task}`
       : (s.summary || s.lastPrompt || s.title || '');
-    if (s.adopted) {
-      // несколько подхваченных сессий одного проекта неразличимы по имени —
-      // показываем имя tmux-сессии, чтобы их можно было отличить и закрыть нужную
-      summary.textContent = s.tmuxName || live;
-    } else if (s.status === 'working' || s.status === 'waiting') {
+    if (s.status === 'working' || s.status === 'waiting') {
       summary.textContent = ctx && ctx !== live ? `${ctx} — ${live}` : (ctx || live);
     } else {
       summary.textContent = ctx || live;
@@ -288,7 +268,6 @@ function render() {
     if (branch) row.appendChild(branch);
     row.appendChild(badge);
     if (hostBadge) row.appendChild(hostBadge);
-    if (adoptedBadge) row.appendChild(adoptedBadge);
     row.append(summary);
 
     if (s.pinned) { // чистая метка-закладка; клик — открепить (пин ставится ⌘P)

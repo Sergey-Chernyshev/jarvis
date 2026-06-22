@@ -6,13 +6,13 @@
   "license": "MIT",
   "scripts": {
     "start": "JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis",
-    "start:prod": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis",
+    "start:prod": "cargo run --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort --bin jarvis",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "setup": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- install",
     "teardown": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- uninstall",
     "status": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- status",
     "tauri": "tauri",
-    "bundle": "tauri build"
+    "bundle": "tauri build --features wakeword-ort"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.2"

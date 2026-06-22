@@ -212,7 +212,7 @@ A pre-1.0 MVP. What's stable is in the "Features" section above. Deliberate boun
 - **Effort** can't be read from outside → the panel keeps optimistic state.
 - **Claude Code's hook schema drifts between versions.** If events stop arriving after a `claude` update, compare against the current hooks docs and fix `EVENTS`/the format in `src-tauri/src/bin/setup.rs`.
 - A hard-killed terminal (no `SessionEnd`) leaves a session hanging — the panel's "Clear" button removes done/idle ones.
-- **Wake-word** ("Hey Jarvis") — behind the `wakeword-ort` feature flag, inert by default. *In progress.*
+- **Wake-word** ("Hey Jarvis") — voice activation (openWakeWord/`ort`), enabled in release builds (the DMG, `npm run bundle` / `start:prod`); **off by default** in the panel, the detector model (non-commercial — see License) is fetched on demand. No speaker verification yet (v1 is a seam). The dev build `npm start` omits the feature — the detector is inert.
 - **Agent chat** (the capability platform, MCP bridge `jarvis-mcp`) — the bridge exists, the UI isn't shipped. *In progress.*
 
 ## Versioning

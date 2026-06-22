@@ -125,7 +125,7 @@ function setView(next) {
   if (next === 'settings') loadSettings();
   if (next === 'stats') renderStats();
   if (next === 'history') renderHistory();
-  else if (recording) { recording = false; hotkeyBtn.classList.remove('recording'); }
+  else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
   if (next === 'list') queryEl.focus();
 }
 
@@ -175,15 +175,9 @@ function orderedSessions() {
   const known = new Set(displayOrder);
   for (const s of state.filter((x) => !known.has(x.id)).sort(sortCmp)) displayOrder.push(s.id);
   const ordered = displayOrder.map((id) => byId.get(id));
-  // подхваченные из tmux (adopted) — это плейсхолдеры до первого хука: их
-  // created_at = момент рестарта, поэтому по свежести они всплыли бы наверх и
-  // забили список. Держим их в самом низу, реальные сессии — выше.
-  const real = ordered.filter((s) => !s.adopted);
-  const placeholders = ordered.filter((s) => s.adopted);
   return [
-    ...real.filter((s) => s.pinned),
-    ...real.filter((s) => !s.pinned),
-    ...placeholders,
+    ...ordered.filter((s) => s.pinned),
+    ...ordered.filter((s) => !s.pinned),
   ];
 }
 
@@ -223,7 +217,7 @@ function render() {
 
   list.forEach((s, i) => {
     const row = document.createElement('div');
-    row.className = `row ${s.status}${s.adopted ? ' adopted' : ''}${i === sel ? ' selected' : ''}`;
+    row.className = `row ${s.status}${i === sel ? ' selected' : ''}`;
     row.title = [s.cwd, s.title, ...(s.todoList || [])].filter(Boolean).join('\n');
 
     const dot = document.createElement('span');
@@ -252,16 +246,6 @@ function render() {
       hostBadge.textContent = host;
     }
 
-    // подхвачена сканом живого tmux (рестарт демона) — настоящий статус неизвестен,
-    // пока не прилетит первый хук; помечаем нейтрально, без действий
-    let adoptedBadge = null;
-    if (s.adopted) {
-      adoptedBadge = document.createElement('span');
-      adoptedBadge.className = 'badge adopted';
-      adoptedBadge.textContent = 'восстановлена';
-      adoptedBadge.title = 'Подхвачена из tmux после перезапуска — ждём первое событие';
-    }
-
     const summary = document.createElement('span');
     summary.className = 'summary';
     // контекст по убыванию точности: текущая задача → саммари последних задач → промпт → ai-title
@@ -284,7 +268,6 @@ function render() {
     if (branch) row.appendChild(branch);
     row.appendChild(badge);
     if (hostBadge) row.appendChild(hostBadge);
-    if (adoptedBadge) row.appendChild(adoptedBadge);
     row.append(summary);
 
     if (s.pinned) { // чистая метка-закладка; клик — открепить (пин ставится ⌘P)
@@ -1781,10 +1764,12 @@ window.jarvis.onOpenSession(async (id) => {
 // Анимация появления в стиле Raycast: scale(.98)→1 + fade, 120ms.
 // Порядок строк пересобираем ТОЛЬКО здесь — при открытии панели, не во время просмотра.
 window.jarvis.onShown(() => {
+  // перезапуск входной анимации на каждый показ: снять класс → форс-рефлоу → вернуть.
+  // keyframe стартует с opacity:0 (fill both держит 0 до показа окна), поэтому
+  // реверс-fade и «моргание» исключены, даже если панель уже была видима.
+  panelEl.classList.remove('entering');
+  void panelEl.offsetWidth;
   panelEl.classList.add('entering');
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    panelEl.classList.remove('entering');
-  }));
   // Окно при скрытии не уничтожается — view и открытый чат живы. Возвращаем
   // на то же место (клик мимо / Cmd+J прячут панель как есть). Чат или вопрос
   // уже закрытой сессии (могла завершиться, пока панель была спрятана) —
@@ -1802,9 +1787,6 @@ window.jarvis.onShown(() => {
     render();
   }
 });
-requestAnimationFrame(() => requestAnimationFrame(() => {
-  panelEl.classList.remove('entering');
-}));
 
 queryEl.addEventListener('input', () => {
   if (view === 'history') { renderHistory(); return; }
@@ -2580,6 +2562,25 @@ window.jarvis.onWakeInstallDone(() => { try { renderWakeCard(); } catch {} });
 const hotkeyBtn = document.getElementById('hotkey');
 const hotkeyErr = document.getElementById('hotkeyError');
 let recording = false;
+let recordingKey = 'hotkey'; // какой хоткей записываем (settings-ключ)
+let recordingBtn = hotkeyBtn; // кнопка, что сейчас в режиме записи
+
+// дефолты «прочих» хоткеев — чтобы кнопки показывали реальное значение
+const HK_DEFAULTS = {
+  continueHotkey: 'Command+Alt+C',
+  repeatHotkey: 'Command+Alt+R',
+  muteHotkey: 'Command+Alt+M',
+  quietHotkey: 'Command+Alt+J',
+};
+
+function startRecording(btn, key) {
+  recording = true;
+  recordingKey = key;
+  recordingBtn = btn;
+  hotkeyErr.hidden = true;
+  btn.classList.add('recording');
+  btn.textContent = 'нажми сочетание…';
+}
 
 function displayHotkey(acc) {
   return acc
@@ -2591,6 +2592,10 @@ function displayHotkey(acc) {
 async function loadSettings() {
   const s = await window.jarvis.getSettings();
   hotkeyBtn.textContent = displayHotkey(s.hotkey);
+  for (const btn of document.querySelectorAll('.keycap[data-hk]')) {
+    const key = btn.dataset.hk;
+    btn.textContent = displayHotkey(s[key] || HK_DEFAULTS[key] || '');
+  }
   document.getElementById('notifyDone').checked = s.notifyDone;
   document.getElementById('notifyWaiting').checked = s.notifyWaiting;
   document.getElementById('autoResume').checked = s.autoResume !== false;
@@ -3132,12 +3137,10 @@ function accelFromEvent(e) {
   return [...mods, key].join('+');
 }
 
-hotkeyBtn.addEventListener('click', () => {
-  recording = true;
-  hotkeyErr.hidden = true;
-  hotkeyBtn.classList.add('recording');
-  hotkeyBtn.textContent = 'нажми сочетание…';
-});
+hotkeyBtn.addEventListener('click', () => startRecording(hotkeyBtn, 'hotkey'));
+for (const btn of document.querySelectorAll('.keycap[data-hk]')) {
+  btn.addEventListener('click', () => startRecording(btn, btn.dataset.hk));
+}
 
 /* ---------- клавиатура ---------- */
 
@@ -3146,15 +3149,15 @@ window.addEventListener('keydown', async (e) => {
     e.preventDefault();
     if (e.key === 'Escape') {
       recording = false;
-      hotkeyBtn.classList.remove('recording');
+      recordingBtn.classList.remove('recording');
       loadSettings();
       return;
     }
     const acc = accelFromEvent(e);
     if (!acc) return; // ждём полный аккорд
     recording = false;
-    hotkeyBtn.classList.remove('recording');
-    const res = await window.jarvis.setSettings({ hotkey: acc });
+    recordingBtn.classList.remove('recording');
+    const res = await window.jarvis.setSettings({ [recordingKey]: acc });
     if (!res.ok) {
       hotkeyErr.textContent = res.error || 'Не удалось назначить';
       hotkeyErr.hidden = false;

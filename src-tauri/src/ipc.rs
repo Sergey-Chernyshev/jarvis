@@ -154,6 +154,78 @@ pub fn register_dictation_hotkey(d: &Arc<Daemon>) {
     }
 }
 
+/// Аккселератор «повторить уведомление»: настройка `repeatHotkey`, дефолт ⌘⌥R.
+pub fn repeat_accelerator(d: &Arc<Daemon>) -> String {
+    let s = d.settings.string("repeatHotkey");
+    if s.is_empty() { "Command+Alt+R".to_string() } else { s }
+}
+
+pub fn is_repeat_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
+    repeat_accelerator(d).parse::<Shortcut>().map(|s| &s == shortcut).unwrap_or(false)
+}
+
+pub fn register_repeat_hotkey(d: &Arc<Daemon>) {
+    let accel = repeat_accelerator(d);
+    let gs = d.app.global_shortcut();
+    if !gs.is_registered(accel.as_str()) {
+        let _ = gs.register(accel.as_str());
+    }
+}
+
+/// Аккселератор «без звука» (mute): настройка `muteHotkey`, дефолт ⌘⌥M.
+pub fn mute_accelerator(d: &Arc<Daemon>) -> String {
+    let s = d.settings.string("muteHotkey");
+    if s.is_empty() { "Command+Alt+M".to_string() } else { s }
+}
+
+pub fn is_mute_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
+    mute_accelerator(d).parse::<Shortcut>().map(|s| &s == shortcut).unwrap_or(false)
+}
+
+pub fn register_mute_hotkey(d: &Arc<Daemon>) {
+    let accel = mute_accelerator(d);
+    let gs = d.app.global_shortcut();
+    if !gs.is_registered(accel.as_str()) {
+        let _ = gs.register(accel.as_str());
+    }
+}
+
+/// Выбор варианта вопроса: ⌘⌥1 … ⌘⌥9. Регистрируем ДИНАМИЧЕСКИ — только пока
+/// есть активный вопрос (зовётся из do_push), чтобы не перехватывать ⌘⌥-цифры
+/// глобально всё время. Идемпотентно: трогаем только при смене состояния.
+pub fn set_select_hotkeys(d: &Arc<Daemon>, on: bool) {
+    let gs = d.app.global_shortcut();
+    let mut touched = 0;
+    let mut failed = 0;
+    for n in 1..=9 {
+        let accel = format!("Command+Alt+{n}");
+        let reg = gs.is_registered(accel.as_str());
+        if on && !reg {
+            touched += 1;
+            if gs.register(accel.as_str()).is_err() {
+                failed += 1;
+            }
+        } else if !on && reg {
+            touched += 1;
+            let _ = gs.unregister(accel.as_str());
+        }
+    }
+    if touched > 0 {
+        crate::log::line(&format!(
+            "[select] ⌘⌥1-9 {}{}",
+            if on { "включены (вопрос активен)" } else { "сняты" },
+            if failed > 0 { format!(", провал: {failed}") } else { String::new() },
+        ));
+    }
+}
+
+/// Если shortcut — это ⌘⌥<цифра>, вернуть номер варианта (1..9).
+pub fn is_select_hotkey(shortcut: &Shortcut) -> Option<u32> {
+    (1..=9).find(|n| {
+        format!("Command+Alt+{n}").parse::<Shortcut>().map(|s| &s == shortcut).unwrap_or(false)
+    })
+}
+
 #[tauri::command]
 pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
     let d = Daemon::get(&app);
@@ -180,6 +252,34 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
             }
             let _ = via_gate_panel(&d, "settings.set", json!({ "patch": { "hotkey": hk } })).await;
         }
+    }
+
+    // прочие глобальные хоткеи (тихий/продолжить/повтор/без звука): перепривязка
+    // с откатом на прежний при занятом сочетании — как у главного хоткея.
+    for (key, old) in [
+        ("quietHotkey", quiet_accelerator(&d)),
+        ("continueHotkey", continue_accelerator(&d)),
+        ("repeatHotkey", repeat_accelerator(&d)),
+        ("muteHotkey", mute_accelerator(&d)),
+    ] {
+        let removed = rest.remove(key);
+        let Some(hk) = removed
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+        else {
+            continue;
+        };
+        if hk != old {
+            let gs = d.app.global_shortcut();
+            let _ = gs.unregister(old.as_str());
+            if gs.register(hk.as_str()).is_err() {
+                let _ = gs.register(old.as_str());
+                return err(format!("Сочетание {hk} занято системой"));
+            }
+        }
+        let _ = via_gate_panel(&d, "settings.set", json!({ "patch": { key: hk } })).await;
     }
 
     if !rest.is_empty() {
@@ -387,6 +487,7 @@ pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) 
                 });
                 d.push();
             }
+            windows::toast_remove(&d, &format!("q-{session_id}")); // снять «липкую» карточку
             ok()
         }
         Err(e) => err(ellipsize(&one_line(&e), 100)),

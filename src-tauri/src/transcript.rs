@@ -268,27 +268,6 @@ pub fn project_dir_for(cwd: &str) -> PathBuf {
     home_dir().join(".claude").join("projects").join(encoded)
 }
 
-/// Самый свежий транскрипт проекта (по mtime) и его mtime в epoch-мс. Имя файла
-/// = session_id. Для адопта осиротевших сессий, когда в cwd ровно одна живая
-/// пана (иначе какой именно транскрипт — неоднозначно, см. reconcile).
-pub fn newest_transcript(cwd: &str) -> Option<(PathBuf, i64)> {
-    let dir = project_dir_for(cwd);
-    let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
-    for e in fs::read_dir(&dir).ok()?.flatten() {
-        let p = e.path();
-        if p.extension().is_some_and(|x| x == "jsonl") {
-            if let Ok(m) = fs::metadata(&p).and_then(|md| md.modified()) {
-                if best.as_ref().map_or(true, |(_, bm)| m > *bm) {
-                    best = Some((p, m));
-                }
-            }
-        }
-    }
-    let (p, m) = best?;
-    let ms = m.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as i64;
-    Some((p, ms))
-}
-
 /// transcript_path из хука бывает форкнут (диалог уезжает в новый файл) —
 /// читаем модель из самого свежего транскрипта в каталоге проекта.
 pub fn read_model_from_project(cwd: &str) -> Option<String> {

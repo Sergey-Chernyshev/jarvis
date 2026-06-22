@@ -54,15 +54,16 @@
   /* hero */
   .hero { text-align: center; padding: 6px 0 22px; }
   .logo {
-    width: 76px; height: 76px; margin: 0 auto 16px; border-radius: 19px;
-    background: linear-gradient(135deg, #2563eb 0%, #0d9488 100%);
-    box-shadow: 0 10px 30px rgba(13,148,136,0.28), inset 0 1px 0 rgba(255,255,255,0.25);
+    width: 72px; height: 72px; margin: 0 auto 16px; border-radius: 19px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
     position: relative;
   }
-  /* стилизованный «J» белым на лого */
+  /* тонкая моно-«J» — в одном языке с клавишами (.k) и карточками, без градиента */
   .logo::after {
     content: "J"; position: absolute; inset: 0; display: grid; place-items: center;
-    font-size: 42px; font-weight: 600; color: #fff; opacity: 0.95;
+    font-size: 38px; font-weight: 400; color: #cfcfd5;
     font-family: "SF Pro Display", -apple-system, sans-serif;
   }
   h1 { font-size: 21px; font-weight: 600; letter-spacing: 0.1px; }
@@ -123,6 +124,12 @@
     color: #cfcfd5; font-size: 13px; font-weight: 600;
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
   }
+  /* строки-фичи (не хоткеи) — мягкая моно-иконка, выровнена как клавиша, но без чипа */
+  .tip .ic {
+    flex: 0 0 auto; min-width: 38px; height: 28px;
+    display: grid; place-items: center; color: #9a9aa2;
+  }
+  .tip .ic svg { width: 19px; height: 19px; display: block; }
   .tip .tx { display: flex; flex-direction: column; min-width: 0; }
   .tip .tx b { font-size: 13px; font-weight: 600; }
   .tip .tx span { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
@@ -163,8 +170,8 @@
       <div class="steps" id="steps"></div>
 
       <div class="howto" id="howto" hidden>
-        <div class="tip"><span class="k">◇</span><div class="tx"><b>Меню-бар</b><span>Статусы агентов, тихий режим, переустановка</span></div></div>
-        <div class="tip"><span class="k">♪</span><div class="tx"><b>Уведомления</b><span>Тосты снизу и озвучка, когда агент закончил или ждёт тебя</span></div></div>
+        <div class="tip"><span class="ic" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.75" y="3.75" width="14.5" height="12.5" rx="2.5"/><line x1="2.75" y1="7.5" x2="17.25" y2="7.5"/><circle cx="14.4" cy="5.6" r="0.7" fill="currentColor" stroke="none"/></svg></span><div class="tx"><b>Меню-бар</b><span>Статусы агентов, тихий режим, переустановка</span></div></div>
+        <div class="tip"><span class="ic" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M14.8 12.4c-.6-.7-1.4-1.8-1.4-4.5a3.4 3.4 0 0 0-6.8 0c0 2.7-.8 3.8-1.4 4.5-.3.3-.1.85.4.85h8.8c.5 0 .7-.55.4-.85Z"/><path d="M8.6 15.2a1.5 1.5 0 0 0 2.8 0"/><path d="M10 4.5V2.9"/></svg></span><div class="tx"><b>Уведомления</b><span>Тосты снизу и озвучка, когда агент закончил или ждёт тебя</span></div></div>
         <div class="tip"><span class="k">⌘J</span><div class="tx"><b>Панель</b><span>Список сессий и настройки (хоткей задаётся в настройках)</span></div></div>
         <div class="tip"><span class="k">⌘⌥J</span><div class="tx"><b>Тихий режим</b><span>Фон без уведомлений — для разработки</span></div></div>
       </div>

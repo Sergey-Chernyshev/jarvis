@@ -13,7 +13,12 @@
 
 AGENT="${1:-unknown}"
 EVENT="${2:-unknown}"
-SOCK="${JARVIS_SOCK:-$HOME/.jarvis/run.sock}"
+# Сокет — рядом с самим хуком: он установлен как <JARVIS_DIR>/bin/jarvis-hook,
+# значит демон слушает <JARVIS_DIR>/run.sock. Так хук знает свой демон по своему
+# расположению (dev → ~/.jarvis-dev, prod → ~/.jarvis) и не привязан жёстко к
+# ~/.jarvis. JARVIS_SOCK переопределяет явно (тесты / спец-кейсы).
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd)
+SOCK="${JARVIS_SOCK:-${SELF_DIR:-$HOME/.jarvis}/run.sock}"
 
 # stdin может отсутствовать при ручном запуске — не виснем на cat
 if [ -t 0 ]; then

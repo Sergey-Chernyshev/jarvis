@@ -76,8 +76,8 @@ fn main() {
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
-                    // ⌘⌥J — тихий режим; ⌘⌥C — «Продолжить» последнюю сессию;
-                    // всё прочее — панель.
+                    // ⌘⌥J — тихий; ⌘⌥C — «Продолжить»; ⌘⌥R — повтор увед.;
+                    // ⌘⌥M — без звука; ⌘⌥1..9 — выбор варианта; прочее — панель.
                     if ipc::is_quiet_hotkey(&d, shortcut) {
                         d.toggle_quiet();
                     } else if ipc::is_continue_hotkey(&d, shortcut) {
@@ -87,6 +87,12 @@ fn main() {
                                 let _ = ipc::session_continue(h, sid).await;
                             });
                         }
+                    } else if ipc::is_repeat_hotkey(&d, shortcut) {
+                        d.repeat_last_toast();
+                    } else if ipc::is_mute_hotkey(&d, shortcut) {
+                        d.toggle_mute();
+                    } else if let Some(n) = ipc::is_select_hotkey(shortcut) {
+                        d.answer_question_hotkey(n);
                     } else {
                         windows::toggle_hotkey_panel(&d);
                     }
@@ -187,6 +193,10 @@ fn main() {
             ipc::register_quiet_hotkey(&d); // тумблер тихого режима (⌘⌥J)
             ipc::register_continue_hotkey(&d); // «Продолжить» последнюю сессию (⌘⌥C)
             ipc::register_dictation_hotkey(&d); // PTT-диктовка (F8)
+            ipc::register_repeat_hotkey(&d); // повторить последнее уведомление (⌘⌥R)
+            ipc::register_mute_hotkey(&d); // без звука / mute (⌘⌥M)
+            // ⌘⌥1..9 (выбор варианта) регистрируются динамически в do_push,
+            // только пока висит активный вопрос — см. ipc::set_select_hotkeys
 
             spawn_timers(&d);
 
@@ -251,7 +261,7 @@ fn main() {
 
 /// Все периодические задачи демона — расписание из Electron-версии.
 fn spawn_timers(d: &Arc<Daemon>) {
-    // сверка с живым tmux (удаление мёртвых + адопт живых осиротевших): сразу и раз в 30с
+    // сверка живости сессий (мёртвый pid/пана → выселяем): сразу и раз в 30с
     let dd = d.clone();
     tauri::async_runtime::spawn(async move {
         loop {

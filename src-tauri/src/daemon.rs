@@ -24,6 +24,18 @@ use crate::model::{
 use crate::util::*;
 use crate::{claude_bin, ru, settings, tail, tmux, transcript, windows};
 
+/// Снимок последнего уведомления для хоткея «повторить»: всё нужное, чтобы
+/// заново показать карточку и переозвучить (включая варианты вопроса).
+#[derive(Clone)]
+struct LastToast {
+    title: String,
+    body: String,
+    sid: Option<String>,
+    kind: String,
+    speak: String,
+    question: Option<Value>,
+}
+
 pub struct Daemon {
     pub app: AppHandle,
     pub sessions: Mutex<HashMap<String, Session>>,
@@ -52,6 +64,8 @@ pub struct Daemon {
     last_prompt_at: Mutex<HashMap<String, i64>>,
     /// Сессия последнего уведомления — цель хоткея «Продолжить».
     last_session: Mutex<Option<String>>,
+    /// Последнее уведомление — для хоткея «повторить» (пере-показ + переозвучка).
+    last_toast: Mutex<Option<LastToast>>,
     /// Голос (инкремент 7): озвучка событий локальным TTS. Fail-safe.
     pub voice: std::sync::Arc<crate::voice::Voice>,
     /// Реестр капабилити (инкремент 8): источник истины для агента/панели/MCP.
@@ -82,6 +96,8 @@ enum Effect {
     GenSummary { sid: String },
     /// Уведомление «спрашивает» (карточка вопроса).
     NotifyWaiting { title: String, body: String, sid: String },
+    /// Снять карточку тоста по id (вопрос ответили → убрать «липкую» карточку).
+    RemoveToast { id: String },
     /// Завершение: одна ИИ-выжимка результата — и в строку списка, и в тост.
     DoneSummary { sid: String },
     /// Ручной /compact завершился (session-start, source=compact) — явный тост.
@@ -146,6 +162,7 @@ impl Daemon {
             busy: Mutex::new(HashSet::new()),
             last_prompt_at: Mutex::new(HashMap::new()),
             last_session: Mutex::new(None),
+            last_toast: Mutex::new(None),
             voice,
             caps: crate::capability::build_registry(),
             tokens: crate::capability::tokens::TokenStore::new(),
@@ -184,6 +201,8 @@ impl Daemon {
 
     fn do_push(self: &std::sync::Arc<Self>) {
         let list = self.snapshot();
+        // ⌘⌥1..9 для выбора варианта — только пока есть открытый вопрос
+        crate::ipc::set_select_hotkeys(self, list.iter().any(|s| s.question.is_some()));
         self.power.on_sessions(self, &list); // плагины первыми — бейджи к трею уже свежие
         windows::emit_to_panel(&self.app, "state", &list);
         windows::emit_to_panel(&self.app, "plugins", &self.power.statuses(self));
@@ -199,16 +218,7 @@ impl Daemon {
     }
 
     pub fn write_state_now(&self) {
-        // Провизорные (adopted) сессии не персистим — они всегда заново выводятся
-        // из живого tmux на следующей сверке, иначе протухнут в state.json.
-        let arr: Vec<Session> = self
-            .sessions
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|s| !s.adopted)
-            .cloned()
-            .collect();
+        let arr: Vec<Session> = self.sessions.lock().unwrap().values().cloned().collect();
         let _ = std::fs::create_dir_all(jarvis_dir());
         if let Ok(json) = serde_json::to_string(&arr) {
             let _ = std::fs::write(Self::state_file(), json + "\n");
@@ -314,7 +324,13 @@ impl Daemon {
 
     /// Переключить тихий режим (хоткей/меню): персист + обновление галки в трее.
     pub fn toggle_quiet(self: &std::sync::Arc<Self>) {
-        self.set_quiet(!self.is_quiet());
+        let on = !self.is_quiet();
+        self.set_quiet(on);
+        if on {
+            self.mode_toast("🌙", "Тихий режим");
+        } else {
+            self.mode_toast("☀️", "Обычный режим");
+        }
     }
 
     pub fn set_quiet(self: &std::sync::Arc<Self>, on: bool) {
@@ -360,11 +376,49 @@ impl Daemon {
         if let Some(sid) = session_id {
             *self.last_session.lock().unwrap() = Some(sid.to_string());
         }
+
+        // вопрос (AskUserQuestion): тянем варианты из сессии → тост покажет их
+        // списком, а голос прочитает «вопрос + Вариант N: label. описание».
+        let qitem = session_id
+            .and_then(|sid| self.session(sid))
+            .and_then(|s| s.question)
+            .and_then(|q| q.questions.into_iter().next());
+        let question = qitem.as_ref().map(|qi| {
+            serde_json::json!({
+                "multiSelect": qi.multi_select,
+                "question": qi.question,
+                "options": qi.options.iter()
+                    .map(|o| serde_json::json!({ "label": o.label, "description": o.description }))
+                    .collect::<Vec<_>>(),
+            })
+        });
+        let speak_text = match &qitem {
+            Some(qi) => {
+                let mut t = if qi.question.is_empty() { String::new() } else { qi.question.clone() };
+                for (i, o) in qi.options.iter().enumerate() {
+                    t.push_str(&format!(". Вариант {}: {}. {}", i + 1, o.label, o.description));
+                }
+                t
+            }
+            None => speak.unwrap_or(body).to_string(),
+        };
+
+        // запоминаем для хоткея «повторить» (даже в тихом режиме — ⌘⌥-повтор
+        // показывает явно по запросу пользователя)
+        *self.last_toast.lock().unwrap() = Some(LastToast {
+            title: title.to_string(),
+            body: body.to_string(),
+            sid: session_id.map(str::to_string),
+            kind: kind.to_string(),
+            speak: speak_text.clone(),
+            question: question.clone(),
+        });
+
         // тихий режим: статистика уже записана выше по потоку, наружу — ничего
         if self.is_quiet() {
             return;
         }
-        windows::toast_add(self, id, title, body, session_id, kind);
+        windows::toast_add(self, id, title, body, session_id, kind, question.as_ref());
 
         // голос (инкремент 7): озвучиваем уведомление. Одна точка на все события;
         // gated по voice-конфигу. Для «done» читаем `speak` (русское произношение),
@@ -377,8 +431,73 @@ impl Daemon {
             _ => false,
         };
         if on {
-            self.voice.speak_text(title, speak.unwrap_or(body), kind, Some(id));
+            self.voice.speak_text(title, &speak_text, kind, Some(id));
         }
+    }
+
+    /* ================= режимы и повтор (хоткеи) ================= */
+
+    /// Анимированная карточка смены режима — показывается ВСЕГДА (даже в тихом
+    /// режиме), иначе непонятно, что включил. Без озвучки и без записи в
+    /// last_toast (повторять смену режима незачем).
+    pub fn mode_toast(self: &std::sync::Arc<Self>, icon: &str, label: &str) {
+        let id = format!("mode-{}", self.toast_seq.fetch_add(1, Ordering::SeqCst) + 1);
+        windows::toast_add(self, &id, &format!("{icon}  {label}"), "", None, "mode", None);
+    }
+
+    /// Переключить «без звука» (mute) хоткеем: глушит/возвращает голос + карточка.
+    pub fn toggle_mute(self: &std::sync::Arc<Self>) {
+        let on = !self.voice.is_muted();
+        self.voice.set_mute(on);
+        crate::log::line(&format!("[mute] без звука: {}", if on { "ВКЛ" } else { "выкл" }));
+        if on {
+            self.mode_toast("🔇", "Без звука");
+        } else {
+            self.mode_toast("🔔", "Звук включён");
+        }
+    }
+
+    /// Повторить последнее уведомление: пере-показ карточки + переозвучка.
+    pub fn repeat_last_toast(self: &std::sync::Arc<Self>) {
+        let Some(lt) = self.last_toast.lock().unwrap().clone() else { return };
+        let id = format!("repeat-{}", self.toast_seq.fetch_add(1, Ordering::SeqCst) + 1);
+        windows::toast_add(self, &id, &lt.title, &lt.body, lt.sid.as_deref(), &lt.kind, lt.question.as_ref());
+        // переозвучка по явному запросу (mute внутри speak_text всё равно уважается)
+        self.voice.speak_text(&lt.title, &lt.speak, &lt.kind, Some(&id));
+    }
+
+    /// Ответ на активный вопрос хоткеем ⌘⌥N: вариант `n` (1-based).
+    pub fn answer_question_hotkey(self: &std::sync::Arc<Self>, n: u32) {
+        // активный вопрос: предпочитаем сессию последнего уведомления, иначе —
+        // самую свежую сессию с открытым вопросом.
+        let target = {
+            let sessions = self.sessions.lock().unwrap();
+            let has_q = |id: &str| sessions.get(id).is_some_and(|s| s.question.is_some());
+            let last = self.last_session.lock().unwrap().clone().filter(|s| has_q(s));
+            last.or_else(|| {
+                sessions
+                    .iter()
+                    .filter(|(_, s)| s.question.is_some())
+                    .max_by_key(|(_, s)| s.updated_at)
+                    .map(|(id, _)| id.clone())
+            })
+            .map(|sid| (sid.clone(), sessions.get(&sid).and_then(|s| s.question.as_ref())
+                .map(|q| q.questions.first().map(|x| x.multi_select).unwrap_or(false)).unwrap_or(false)))
+        };
+        let Some((sid, multi)) = target else {
+            crate::log::line(&format!("[select] ⌘⌥{n}: нет активного вопроса"));
+            return;
+        };
+        crate::log::line(&format!("[select] ⌘⌥{n} → sid={} multi={multi}", ellipsize(&sid, 8)));
+        let h = self.app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = crate::ipc::question_answer(
+                h,
+                sid,
+                serde_json::json!({ "indices": [n], "multiSelect": multi }),
+            )
+            .await;
+        });
     }
 
     /* ================= busy-флаги фоновых задач ================= */
@@ -603,6 +722,7 @@ impl Daemon {
                     if tool == "AskUserQuestion" && s.question.is_some() {
                         s.question = None; // ответили (в терминале или из панели)
                         s.detail = "ответ получен".into();
+                        effects.push(Effect::RemoveToast { id: format!("q-{sid}") });
                     }
                     if tool == "Task" {
                         // сабагент завершился — закрываем запись в реестре
@@ -695,8 +815,15 @@ impl Daemon {
                 Effect::RefreshTasks { sid } => d.refresh_tasks(sid),
                 Effect::GenSummary { sid } => d.gen_summary(sid),
                 Effect::NotifyWaiting { title, body, sid } => {
-                    d.notify(&title, &body, Some(&sid), "waiting");
+                    // у вопроса — стабильный id `q-<sid>`: карточка «липкая» (не
+                    // тикает по TTL, ждёт выбор) и снимается RemoveToast при ответе.
+                    if d.session(&sid).is_some_and(|s| s.question.is_some()) {
+                        d.notify_id(&format!("q-{sid}"), &title, &body, Some(&sid), "waiting");
+                    } else {
+                        d.notify(&title, &body, Some(&sid), "waiting");
+                    }
                 }
+                Effect::RemoveToast { id } => windows::toast_remove(&d, &id),
                 Effect::DoneSummary { sid } => d.done_summary(sid),
                 Effect::NotifyCompact { title, sid } => {
                     d.notify_id(
@@ -1106,58 +1233,42 @@ impl Daemon {
      * working-сессии без событий 15 минут считаем потерянными. */
 
     pub async fn reconcile_sessions(self: &std::sync::Arc<Self>) {
-        // Двунаправленная сверка с живым tmux: удаляем мёртвые паны И подхватываем
-        // живые осиротевшие (поднятые мимо демона — например, пока он был убит).
-        let meta = match tmux::list_panes_meta().await {
-            Ok(m) => m,                       // None — tmux не установлен (реестр не трогаем)
-            Err(()) => Some(Vec::new()),      // ошибка = сервер пуст
-        };
-        let alive: Option<std::collections::HashSet<String>> =
-            meta.as_ref().map(|v| v.iter().map(|p| p.pane_id.clone()).collect());
-
-        // Обогащение из транскрипта для cwd с ОДНОЙ живой паной (там однозначно,
-        // какой транскрипт чей). Тяжёлый I/O — только для незакреплённых пан:
-        // снимаем claimed под коротким локом, в steady-state (всё закреплено)
-        // карта пустая и файлы не читаем.
-        let enrich = match &meta {
-            Some(panes) => {
-                let claimed: std::collections::HashSet<String> = self
-                    .sessions
-                    .lock()
-                    .unwrap()
-                    .values()
-                    .filter_map(|s| s.tmux_pane.clone())
-                    .collect();
-                let unclaimed: std::collections::HashSet<String> = panes
-                    .iter()
-                    .map(|p| p.pane_id.clone())
-                    .filter(|id| !claimed.contains(id))
-                    .collect();
-                build_enrichment(panes, &unclaimed)
-            }
-            None => std::collections::HashMap::new(),
+        // Сверка с живым tmux: удаляем сессии, чья пана умерла (жёстко убитый
+        // терминал не шлёт SessionEnd); working без событий 15 минут — потеряна.
+        // Сессии заводятся ТОЛЬКО из хуков — здесь ничего не подхватываем.
+        let alive: Option<std::collections::HashSet<String>> = match tmux::list_panes_meta().await {
+            Ok(Some(panes)) => Some(panes.iter().map(|p| p.pane_id.clone()).collect()),
+            Ok(None) => None,                                  // tmux не установлен — реестр не трогаем
+            Err(()) => Some(std::collections::HashSet::new()), // ошибка = сервер пуст
         };
 
         let mut changed = false;
-        let mut refresh_sids: Vec<String> = Vec::new();
         {
             let mut sessions = self.sessions.lock().unwrap();
             let now = now_ms();
             sessions.retain(|_, s| {
-                if let (Some(pane), Some(alive)) = (&s.tmux_pane, &alive) {
-                    if !alive.contains(pane) {
-                        changed = true;
-                        // Сессия с доской не исчезает молча: замораживаем доску
-                        // (in_progress → interrupted) и помечаем остановленной —
-                        // план не должен врать. Остальных призраков выселяем.
-                        if s.board.as_ref().is_some_and(|b| !b.tasks.is_empty()) {
-                            freeze_board(s);
-                            s.status = Status::Done;
-                            s.detail = "сессия остановлена".into();
-                            return true;
-                        }
-                        return false; // пана мертва — claude умер вместе с ней
+                // Жив ли claude? Главный критерий — его процесс (pid = $PPID хука).
+                // Ловит и не-tmux сессии (IDE-терминал, pane=None), и фантомы из
+                // state.json после рестарта демона — чего проверка по tmux-пане не
+                // умеет. Нет pid (старые записи) → судим по пане, как раньше.
+                let dead = match s.pid {
+                    Some(pid) if pid > 0 => !pid_alive(pid),
+                    _ => (s.tmux_pane.as_ref())
+                        .zip(alive.as_ref())
+                        .is_some_and(|(pane, set)| !set.contains(pane)),
+                };
+                if dead {
+                    changed = true;
+                    // Сессия с доской не исчезает молча: замораживаем доску
+                    // (in_progress → interrupted) и помечаем остановленной —
+                    // план не должен врать. Остальных призраков выселяем.
+                    if s.board.as_ref().is_some_and(|b| !b.tasks.is_empty()) {
+                        freeze_board(s);
+                        s.status = Status::Done;
+                        s.detail = "сессия остановлена".into();
+                        return true;
                     }
+                    return false; // claude мёртв — сессии нет
                 }
                 true
             });
@@ -1169,21 +1280,6 @@ impl Daemon {
                     changed = true;
                 }
             }
-
-            // --- адопт: живые паны, не закреплённые ни за одной сессией ---
-            if let Some(panes) = &meta {
-                let before = sessions.len();
-                refresh_sids = adopt_live_panes(&mut sessions, panes, now, &enrich);
-                if sessions.len() != before {
-                    changed = true;
-                }
-            }
-        }
-        // Обогащённые из транскрипта — дотягиваем тайтл/ветку/доску, как от хука
-        // (тот же путь refresh_*). Делаем после снятия лока — они спавнят async.
-        for sid in &refresh_sids {
-            self.refresh_meta(sid.clone());
-            self.refresh_tasks(sid.clone());
         }
         if changed {
             self.push();
@@ -1587,152 +1683,15 @@ fn freeze_board(s: &mut Session) {
     }
 }
 
-
-/// Данные обогащения подхваченной паны из свежего транскрипта: реальный
-/// `session_id` (= имя файла), путь, mtime (для сортировки), модель. Заполняется
-/// только для cwd с одной живой паной (см. [`build_enrichment`]).
-struct Enrichment {
-    session_id: String,
-    transcript: String,
-    mtime: i64,
-    model: Option<String>,
-}
-
-/// Карта `pane_id → Enrichment` для НЕзакреплённых пан, чей cwd содержит ровно
-/// одну живую пану. При нескольких живых сессиях в одном cwd транскрипт
-/// неоднозначен (нет хука, чтобы связать пану и session_id) — такие пропускаем,
-/// они подхватятся плейсхолдером. I/O (readdir+чтение модели) — только здесь,
-/// и только для незакреплённых, чтобы в steady-state ничего не читать.
-fn build_enrichment(
-    panes: &[crate::tmux::PaneInfo],
-    unclaimed: &std::collections::HashSet<String>,
-) -> std::collections::HashMap<String, Enrichment> {
-    let mut out = std::collections::HashMap::new();
-    if unclaimed.is_empty() {
-        return out;
+/// Жив ли процесс с таким pid. `kill(pid, 0)`: 0 — жив; EPERM — жив, но чужой
+/// (всё равно существует); ESRCH — мёртв. Дёшево, без spawn. Используется в
+/// reconcile для уборки сессий, чей claude завершился.
+fn pid_alive(pid: i64) -> bool {
+    if pid <= 0 {
+        return true; // нет валидного pid — не нам судить, оставляем
     }
-    // сколько ЖИВЫХ пан на каждый cwd (по всем панам, не только незакреплённым)
-    let mut by_cwd: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for p in panes {
-        if !p.cwd.is_empty() {
-            *by_cwd.entry(p.cwd.as_str()).or_default() += 1;
-        }
-    }
-    for p in panes {
-        if !unclaimed.contains(&p.pane_id) || p.cwd.is_empty() {
-            continue;
-        }
-        if by_cwd.get(p.cwd.as_str()) != Some(&1) {
-            continue; // мульти-сессионный cwd — однозначно не определить транскрипт
-        }
-        let Some((path, mtime)) = crate::transcript::newest_transcript(&p.cwd) else {
-            continue;
-        };
-        let Some(sid) = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-        else {
-            continue;
-        };
-        out.insert(
-            p.pane_id.clone(),
-            Enrichment {
-                session_id: sid,
-                transcript: path.to_string_lossy().into_owned(),
-                mtime,
-                model: crate::transcript::read_model_from_project(&p.cwd),
-            },
-        );
-    }
-    out
-}
-
-/// Подхват живых tmux-пан, не закреплённых ни за одной сессией реестра.
-///
-/// Однозначный cwd (одна живая пана) + найденный транскрипт → заводим НАСТОЯЩУЮ
-/// сессию (ключ = реальный `session_id`, время по mtime, путь транскрипта → её
-/// дотянет `refresh_meta`/`refresh_tasks`); первый же хук обновит её по тому же
-/// ключу — бесшовно, без плейсхолдера. Иначе — провизорная сессия (ключ
-/// `pane:<id>`, `adopted`, `status=Idle`), которая выселится через [`evict_pane`]
-/// при первом хуке. Возвращает session_id обогащённых сессий — их надо
-/// дотянуть refresh-эффектами после снятия лока.
-fn adopt_live_panes(
-    sessions: &mut HashMap<String, Session>,
-    panes: &[crate::tmux::PaneInfo],
-    now: i64,
-    enrich: &std::collections::HashMap<String, Enrichment>,
-) -> Vec<String> {
-    let claimed: std::collections::HashSet<String> =
-        sessions.values().filter_map(|s| s.tmux_pane.clone()).collect();
-    let mut refresh = Vec::new();
-    for p in panes {
-        if claimed.contains(&p.pane_id) {
-            continue; // пана уже за настоящей/восстановленной сессией
-        }
-
-        if let Some(en) = enrich.get(&p.pane_id) {
-            // настоящая сессия из транскрипта (cwd однозначен)
-            if sessions.contains_key(&en.session_id) {
-                continue; // уже известна (из state.json/хука)
-            }
-            let mut s = Session::new(en.session_id.clone(), now);
-            // время — из mtime транскрипта, чтобы место в списке было верным
-            s.created_at = en.mtime;
-            s.updated_at = en.mtime;
-            s.done_at = Some(en.mtime);
-            s.status = Status::Idle;
-            s.tmux_pane = Some(p.pane_id.clone());
-            s.transcript = Some(en.transcript.clone());
-            if en.model.is_some() {
-                s.model = en.model.clone();
-            }
-            if !p.session_name.is_empty() {
-                s.tmux_name = Some(p.session_name.clone());
-            }
-            if !p.cwd.is_empty() {
-                s.project = Some(basename(&p.cwd));
-                s.cwd = Some(p.cwd.clone());
-            }
-            if p.pid > 0 {
-                s.pid = Some(p.pid);
-            }
-            crate::log::line(&format!(
-                "[adopt+] пана {} → sid={} (из транскрипта)",
-                p.pane_id,
-                ellipsize(&en.session_id, 8)
-            ));
-            sessions.insert(en.session_id.clone(), s);
-            refresh.push(en.session_id.clone());
-            continue;
-        }
-
-        // плейсхолдер: мульти-сессионный cwd или транскрипт не найден
-        let id = format!("pane:{}", p.pane_id);
-        if sessions.contains_key(&id) {
-            continue; // подхвачена в прошлом цикле
-        }
-        let mut s = Session::new(id.clone(), now);
-        s.adopted = true;
-        s.status = Status::Idle;
-        // detail оставляем пустым: бейдж «восстановлена» в UI уже несёт смысл,
-        // дублировать его в строке активности незачем (summary → «простаивает»).
-        s.tmux_pane = Some(p.pane_id.clone());
-        if !p.session_name.is_empty() {
-            s.tmux_name = Some(p.session_name.clone());
-        }
-        if !p.cwd.is_empty() {
-            s.project = Some(basename(&p.cwd));
-            s.cwd = Some(p.cwd.clone());
-        }
-        if p.pid > 0 {
-            s.pid = Some(p.pid);
-        }
-        crate::log::line(&format!("[adopt] пана {} → {}", p.pane_id, id));
-        sessions.insert(id, s);
-    }
-    refresh
+    let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Инвариант «одна tmux-пана — одна сессия».
@@ -1793,114 +1752,11 @@ mod tests {
         assert_eq!(m.len(), 2, "две параллельные сессии в разных панах живут обе");
     }
 
-    /* ----- адопт живых пан при рестарте демона ----- */
-
-    fn pane(id: &str, name: &str, cwd: &str, pid: i64) -> crate::tmux::PaneInfo {
-        crate::tmux::PaneInfo {
-            pane_id: id.to_string(),
-            session_name: name.to_string(),
-            cwd: cwd.to_string(),
-            pid,
-        }
-    }
-
-    // пустая карта обогащения → все паны идут плейсхолдерами (как мульти-сессионные)
-    fn no_enrich() -> std::collections::HashMap<String, Enrichment> {
-        std::collections::HashMap::new()
-    }
-
     #[test]
-    fn adopt_picks_up_unclaimed_pane_as_provisional() {
-        let mut m = HashMap::new();
-        m.insert("real".into(), sess("real", Some("%1"))); // уже известна
-
-        let panes = vec![
-            pane("%1", "proj-1", "/home/u/proj", 100), // занята → пропустить
-            pane("%2", "other-2", "/home/u/other", 200), // осиротевшая → адопт
-        ];
-        let refreshed = adopt_live_panes(&mut m, &panes, 42, &no_enrich());
-
-        assert!(refreshed.is_empty(), "без обогащения refresh-список пуст");
-        let s = m.get("pane:%2").expect("провизорная сессия заведена");
-        assert!(s.adopted);
-        assert_eq!(s.status, Status::Idle, "нейтральный статус — без кнопки/звука");
-        assert_eq!(s.tmux_pane.as_deref(), Some("%2"));
-        assert_eq!(s.tmux_name.as_deref(), Some("other-2"));
-        assert_eq!(s.cwd.as_deref(), Some("/home/u/other"));
-        assert_eq!(s.project.as_deref(), Some("other"));
-        assert_eq!(s.pid, Some(200));
-        assert!(m.contains_key("real"), "настоящую сессию не трогаем");
-        assert!(!m.contains_key("pane:%1"), "занятую пану не дублируем");
-    }
-
-    #[test]
-    fn adopt_enriches_single_pane_cwd_as_real_session() {
-        let mut m = HashMap::new();
-        let panes = vec![pane("%4", "solo", "/home/u/solo", 300)];
-        let mut enrich = std::collections::HashMap::new();
-        enrich.insert(
-            "%4".to_string(),
-            Enrichment {
-                session_id: "real-sid-xyz".into(),
-                transcript: "/t/real-sid-xyz.jsonl".into(),
-                mtime: 1234,
-                model: Some("opus".into()),
-            },
-        );
-
-        let refreshed = adopt_live_panes(&mut m, &panes, 999, &enrich);
-
-        assert_eq!(refreshed, vec!["real-sid-xyz".to_string()], "обогащённую дотягиваем");
-        assert!(!m.contains_key("pane:%4"), "плейсхолдер не заводим");
-        let s = m.get("real-sid-xyz").expect("настоящая сессия по реальному sid");
-        assert!(!s.adopted, "это настоящая сессия, не плейсхолдер");
-        assert_eq!(s.created_at, 1234, "время из mtime транскрипта (для сортировки)");
-        assert_eq!(s.done_at, Some(1234));
-        assert_eq!(s.transcript.as_deref(), Some("/t/real-sid-xyz.jsonl"));
-        assert_eq!(s.model.as_deref(), Some("opus"));
-        assert_eq!(s.tmux_pane.as_deref(), Some("%4"));
-    }
-
-    #[test]
-    fn adopt_skips_enriched_sid_already_known() {
-        // настоящая сессия уже в реестре (из хука) на той же пане → не дублируем
-        let mut m = HashMap::new();
-        m.insert("real-sid-xyz".into(), sess("real-sid-xyz", Some("%4")));
-        let panes = vec![pane("%4", "solo", "/home/u/solo", 300)];
-        let mut enrich = std::collections::HashMap::new();
-        enrich.insert(
-            "%4".to_string(),
-            Enrichment { session_id: "real-sid-xyz".into(), transcript: "/t/x.jsonl".into(), mtime: 1, model: None },
-        );
-
-        let refreshed = adopt_live_panes(&mut m, &panes, 0, &enrich);
-        assert!(refreshed.is_empty());
-        assert_eq!(m.len(), 1, "пана занята → ничего не добавили");
-    }
-
-    #[test]
-    fn adopt_is_idempotent_across_cycles() {
-        let mut m = HashMap::new();
-        let panes = vec![pane("%5", "p", "/tmp/p", 9)];
-        adopt_live_panes(&mut m, &panes, 0, &no_enrich());
-        assert!(m.contains_key("pane:%5"));
-        adopt_live_panes(&mut m, &panes, 0, &no_enrich());
-        assert_eq!(m.len(), 1, "второй проход не дублирует");
-    }
-
-    #[test]
-    fn real_hook_evicts_adopted_provisional() {
-        // провизорная держит пану %3; настоящий хук из той же паны её выселяет
-        let mut m = HashMap::new();
-        adopt_live_panes(&mut m, &[pane("%3", "p", "/tmp/p", 7)], 0, &no_enrich());
-        assert!(m.contains_key("pane:%3"));
-
-        m.insert("real-sid".into(), sess("real-sid", Some("%3")));
-        let evicted = evict_pane(&mut m, "real-sid", "%3");
-
-        assert_eq!(evicted, vec!["pane:%3".to_string()], "провизорная снимается");
-        assert!(m.contains_key("real-sid"));
-        assert!(!m.contains_key("pane:%3"));
+    fn pid_alive_detects_self_and_dead() {
+        assert!(pid_alive(std::process::id() as i64), "свой процесс жив");
+        assert!(pid_alive(0), "нет валидного pid → не судим (true)");
+        assert!(!pid_alive(2_000_000_000), "заведомо несуществующий pid мёртв");
     }
 
     /* ----- доска задач (инкремент 6) ----- */

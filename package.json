@@ -3,6 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "description": "Монитор сессий Claude Code: уведомления и панель статусов (Rust + Tauri)",
+  "license": "MIT",
   "scripts": {
     "start": "JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis",
     "start:prod": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis",

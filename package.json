@@ -5,8 +5,8 @@
   "description": "Монитор сессий Claude Code: уведомления и панель статусов (Rust + Tauri)",
   "license": "MIT",
   "scripts": {
-    "start": "JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis",
-    "start:prod": "cargo run --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort --bin jarvis",
+    "start": "JARVIS_DEV_SIGN=1 cargo build --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort --bin jarvis && codesign --force --sign - --entitlements src-tauri/entitlements.plist src-tauri/target/release/jarvis && JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 src-tauri/target/release/jarvis",
+    "start:prod": "JARVIS_DEV_SIGN=1 cargo build --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort --bin jarvis && codesign --force --sign - --entitlements src-tauri/entitlements.plist src-tauri/target/release/jarvis && src-tauri/target/release/jarvis",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "setup": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- install",
     "teardown": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- uninstall",

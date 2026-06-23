@@ -33,6 +33,8 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 core-foundation = "0.10"
 core-graphics = "0.24"
 objc2 = "0.6"
+# блоки Objective-C для AVCaptureDevice.requestAccessForMediaType:completionHandler:
+block2 = "0.6"
 # base64 для stt.transcribe capability (кодирование PCM в аргументах MCP)
 base64 = "0.22"
 # аудио-захват (инкр. 9, фаза 4): микрофон через CPAL + ресемпл 16кГц

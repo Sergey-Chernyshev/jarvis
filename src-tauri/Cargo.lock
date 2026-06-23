@@ -2221,6 +2221,7 @@ dependencies = [
  "arboard",
  "axum",
  "base64 0.22.1",
+ "block2",
  "chrono",
  "core-foundation",
  "core-graphics 0.24.0",

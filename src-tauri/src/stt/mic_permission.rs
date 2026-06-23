@@ -58,6 +58,23 @@ mod imp {
             }
         }
     }
+
+    /// Показать системный диалог запроса доступа к микрофону. Реальный промпт
+    /// появляется только при `NotDetermined` (и только если есть встроенный
+    /// `NSMicrophoneUsageDescription` — в .app или в dev-бинаре с встроенным
+    /// Info.plist); иначе коллбэк просто отдаёт текущее решение. Fire-and-forget:
+    /// коллбэк игнорируем — захват откроется по факту разрешения.
+    pub fn request() {
+        use block2::RcBlock;
+        use objc2::runtime::Bool;
+        unsafe {
+            let cls = class!(AVCaptureDevice);
+            let media: *const AnyObject = AVMediaTypeAudio;
+            let handler = RcBlock::new(|_granted: Bool| {});
+            let _: () =
+                msg_send![cls, requestAccessForMediaType: media, completionHandler: &*handler];
+        }
+    }
 }
 
 #[cfg(not(all(target_os = "macos", not(test))))]
@@ -67,11 +84,18 @@ mod imp {
     pub fn status() -> MicAuth {
         MicAuth::Authorized
     }
+    /// Не-macOS / тесты: промпта нет — no-op.
+    pub fn request() {}
 }
 
 /// Текущий статус разрешения микрофона.
 pub fn status() -> MicAuth {
     imp::status()
+}
+
+/// Запросить доступ к микрофону (системный диалог при `NotDetermined`).
+pub fn request() {
+    imp::request()
 }
 
 #[cfg(test)]

@@ -191,6 +191,14 @@ pub struct AudioHub {
     frames_seen: AtomicU64,
     last_frames: AtomicU64,
     stalls: AtomicU32,
+    /// Кадры с РЕАЛЬНОЙ энергией (не цифровая тишина). Если захват жив
+    /// (`frames_seen` растёт), но этот счётчик стоит — микрофон отдаёт тишину
+    /// (типично для неподписанного бинаря без доступа TCC) → watchdog поднимет
+    /// `mic_silent`, чтобы провал был виден, а не молчал.
+    nonzero_frames: AtomicU64,
+    last_nonzero: AtomicU64,
+    silent_ticks: AtomicU32,
+    mic_silent: AtomicBool,
     app: Option<tauri::AppHandle>,
 }
 
@@ -211,6 +219,10 @@ impl AudioHub {
             frames_seen: AtomicU64::new(0),
             last_frames: AtomicU64::new(0),
             stalls: AtomicU32::new(0),
+            nonzero_frames: AtomicU64::new(0),
+            last_nonzero: AtomicU64::new(0),
+            silent_ticks: AtomicU32::new(0),
+            mic_silent: AtomicBool::new(false),
             app,
         })
     }
@@ -252,14 +264,28 @@ impl AudioHub {
     fn set_state(&self, s: AudioState) {
         let prev = self.state.swap(s as u8, Ordering::SeqCst);
         if prev != s as u8 {
-            if let Some(app) = self.app.as_ref() {
-                crate::windows::emit_to_panel(
-                    app,
-                    "audio_state",
-                    &serde_json::json!({ "state": s.as_str(), "muted": self.is_muted() }),
-                );
-            }
+            self.notify_panel();
         }
+    }
+
+    /// Отправить панели текущее аудио-состояние (+ mute, + флаг «микрофон молчит»).
+    fn notify_panel(&self) {
+        if let Some(app) = self.app.as_ref() {
+            crate::windows::emit_to_panel(
+                app,
+                "audio_state",
+                &serde_json::json!({
+                    "state": self.state().as_str(),
+                    "muted": self.is_muted(),
+                    "mic_silent": self.is_mic_silent(),
+                }),
+            );
+        }
+    }
+
+    /// Захват «жив», но микрофон отдаёт цифровую тишину (нет реального доступа).
+    pub fn is_mic_silent(&self) -> bool {
+        self.mic_silent.load(Ordering::Relaxed)
     }
 
     /// Пересчитать видимое состояние из факта работы + mute.
@@ -374,6 +400,11 @@ impl AudioHub {
         }
         // watchdog-счётчик живости (растёт и в тишине — cpal шлёт нули)
         self.frames_seen.fetch_add(frames.len() as u64, Ordering::Relaxed);
+        // счётчик кадров с РЕАЛЬНОЙ энергией: отличает живой микрофон от цифровой
+        // тишины (нет доступа TCC у неподписанного бинаря — macOS шлёт нули).
+        if interleaved.iter().any(|&s| s.abs() > 1e-4) {
+            self.nonzero_frames.fetch_add(frames.len() as u64, Ordering::Relaxed);
+        }
         for frame in frames {
             // try_send: отставший потребитель теряет кадр (не растим память без
             // предела), отвалившийся (Receiver уронен) — выбывает из веера.
@@ -390,7 +421,12 @@ impl AudioHub {
         let running = self.inner.lock().map(|g| g.threads.is_some()).unwrap_or(false);
         if !running || self.is_muted() {
             self.last_frames.store(self.frames_seen.load(Ordering::Relaxed), Ordering::Relaxed);
+            self.last_nonzero.store(self.nonzero_frames.load(Ordering::Relaxed), Ordering::Relaxed);
             self.stalls.store(0, Ordering::Relaxed);
+            self.silent_ticks.store(0, Ordering::Relaxed);
+            if self.mic_silent.swap(false, Ordering::Relaxed) {
+                self.notify_panel();
+            }
             return;
         }
         // Runtime-отзыв разрешения микрофона: cpal продолжает слать ТИШИНУ (нули),
@@ -407,14 +443,36 @@ impl AudioHub {
         let now = self.frames_seen.load(Ordering::Relaxed);
         let prev = self.last_frames.swap(now, Ordering::Relaxed);
         if now == prev {
+            // устройство не шлёт даже тишину ⇒ отвалилось → перезапуск
             let s = self.stalls.fetch_add(1, Ordering::Relaxed) + 1;
             if s >= 2 {
                 crate::log::line("[audio] захват завис (устройство отвалилось?) — перезапуск");
                 self.stalls.store(0, Ordering::Relaxed);
                 self.restart_capture();
             }
-        } else {
-            self.stalls.store(0, Ordering::Relaxed);
+            return;
+        }
+        self.stalls.store(0, Ordering::Relaxed);
+
+        // Детектор тишины: захват жив (кадры растут), но реальной энергии нет
+        // несколько тиков подряд ⇒ микрофон отдаёт цифровую тишину (типично для
+        // неподписанного бинаря без доступа TCC). Рестарт не поможет — поднимаем
+        // видимый флаг и пишем понятную причину в лог (провал перестаёт молчать).
+        let now_nz = self.nonzero_frames.load(Ordering::Relaxed);
+        let prev_nz = self.last_nonzero.swap(now_nz, Ordering::Relaxed);
+        let got_audio = now_nz != prev_nz;
+        let (ticks, silent) = silence_decide(self.silent_ticks.load(Ordering::Relaxed), got_audio);
+        self.silent_ticks.store(ticks, Ordering::Relaxed);
+        if silent && !self.mic_silent.swap(true, Ordering::Relaxed) {
+            crate::log::line(
+                "[audio] микрофон не даёт звука (тишина) — вероятно нет доступа к микрофону (TCC). \
+                 Wake-word и диктовка не услышат. Выдай доступ: Системные настройки → \
+                 Конфиденциальность → Микрофон (или запусти подписанное приложение).",
+            );
+            self.notify_panel();
+        } else if got_audio && self.mic_silent.swap(false, Ordering::Relaxed) {
+            crate::log::line("[audio] микрофон снова даёт звук");
+            self.notify_panel();
         }
     }
 
@@ -449,7 +507,14 @@ impl AudioHub {
                 crate::log::line("[audio] разрешение микрофона не выдано — захват не открыт");
                 return;
             }
-            _ => {}
+            crate::stt::mic_permission::MicAuth::NotDetermined => {
+                // ещё не спрашивали — показать системный диалог (нужен встроенный
+                // NSMicrophoneUsageDescription: .app или dev-бинарь с Info.plist).
+                // Старт НЕ блокируем: разрешит — кадры пойдут; нет — watchdog
+                // поймает тишину и поднимет mic_silent.
+                crate::stt::mic_permission::request();
+            }
+            crate::stt::mic_permission::MicAuth::Authorized => {}
         }
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -516,6 +581,19 @@ impl AudioHub {
     /// Погасить захват на выходе демона.
     pub fn dispose(self: &Arc<Self>) {
         self.stop_capture();
+    }
+}
+
+/// Чистое решение детектора тишины (тестируемо без потоков/микрофона). Вход —
+/// текущий счётчик «тихих» тиков и был ли звук в этом тике; выход — (новый
+/// счётчик, поднимать ли флаг «тишина»). 2 тика (≈10с при 5с-тике) чистой тишины
+/// при живом захвате ⇒ микрофон молчит.
+fn silence_decide(silent_ticks: u32, got_audio: bool) -> (u32, bool) {
+    if got_audio {
+        (0, false)
+    } else {
+        let t = silent_ticks.saturating_add(1);
+        (t, t >= 2)
     }
 }
 
@@ -796,6 +874,30 @@ mod tests {
         hub.tick();
         hub.tick();
         assert_eq!(hub.state(), AudioState::Idle);
+    }
+
+    #[test]
+    fn silence_decide_flags_after_two_silent_ticks() {
+        let (t1, f1) = silence_decide(0, false);
+        assert_eq!((t1, f1), (1, false), "первый тихий тик — ещё не флаг");
+        let (t2, f2) = silence_decide(t1, false);
+        assert_eq!((t2, f2), (2, true), "две тишины подряд → флаг");
+        let (t3, f3) = silence_decide(t2, true);
+        assert_eq!((t3, f3), (0, false), "звук сбрасывает счётчик и флаг");
+    }
+
+    #[test]
+    fn nonzero_frames_only_grows_on_real_energy() {
+        let hub = AudioHub::new(None, None);
+        let _tap = hub.subscribe_wake();
+        let before = hub.nonzero_frames.load(Ordering::Relaxed);
+        // цифровая тишина (нули) — nonzero НЕ растёт, frames_seen растёт
+        hub.ingest(&vec![0.0f32; FRAME_LEN * 2], 16_000, 1);
+        assert_eq!(hub.nonzero_frames.load(Ordering::Relaxed), before, "тишина не растит nonzero");
+        assert!(hub.frames_seen.load(Ordering::Relaxed) > 0, "frames_seen растёт даже в тишине");
+        // реальная энергия — nonzero растёт
+        hub.ingest(&sine(FRAME_LEN * 2, 0.05), 16_000, 1);
+        assert!(hub.nonzero_frames.load(Ordering::Relaxed) > before, "звук растит nonzero");
     }
 
     #[test]

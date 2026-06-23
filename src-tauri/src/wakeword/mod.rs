@@ -268,6 +268,8 @@ impl WakeWord {
             "model_present": models_present(),
             "verification_enabled": g.verify_cfg.enabled,
             "audio_state": self.hub.state().as_str(),
+            "mic": crate::stt::mic_permission::status().as_str(),
+            "mic_silent": self.hub.is_mic_silent(),
         })
     }
 }

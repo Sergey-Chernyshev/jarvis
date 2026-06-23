@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Встраивается в RAW бинарь `jarvis` (секция __TEXT,__info_plist) ТОЛЬКО при
+         dev-запуске `npm start` (JARVIS_DEV_SIGN=1) — см. build.rs. Нужно, чтобы
+         macOS показал диалог разрешения микрофона при `cargo run` (нет .app-бандла).
+         Продакшн .app использует СВОЙ Info.plist (src-tauri/Info.plist) и эту секцию
+         не трогает. -->
+    <key>CFBundleIdentifier</key>
+    <string>app.jarvis.monitor.dev</string>
+    <key>CFBundleName</key>
+    <string>Jarvis (dev)</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Jarvis (dev) использует микрофон для wake-word и голосовой диктовки.</string>
+</dict>
+</plist>

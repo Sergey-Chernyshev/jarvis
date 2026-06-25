@@ -59,6 +59,10 @@
     sttGet: () => invoke('stt_get'),
     sttSetEngine: (engine) => invoke('stt_set_engine', { engine }),
     sttTest: () => invoke('stt_test'),
+    sttInstallWhisper: () => invoke('stt_install_whisper'),
+    sttInstallSidecar: () => invoke('stt_install_sidecar'),
+    onSttInstallProgress: (cb) => on('stt_install_progress', cb),
+    onSttInstallDone: (cb) => on('stt_install_done', cb),
 
     // Wake-word + общий аудио-вход (инкремент 10)
     wakeGet: () => invoke('wake_get'),

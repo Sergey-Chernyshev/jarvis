@@ -105,6 +105,68 @@ pub fn quiet_set(app: AppHandle, on: bool) {
     crate::daemon::Daemon::get(&app).set_quiet(on);
 }
 
+/// Скачать модель Whisper large-v3-turbo-q5 (~574 МБ) по запросу из настроек.
+/// Раньше скачивания не было вообще — теперь панель ПРЕДЛАГАЕТ загрузку (по
+/// умолчанию ничего не тянем, как и просил пользователь). Фоном, fail-safe:
+/// прогресс → `stt_install_progress`, финал → `stt_install_done` (kind=whisper).
+#[tauri::command]
+pub fn stt_install_whisper(app: AppHandle) {
+    let d = crate::daemon::Daemon::get(&app);
+    let proxy = {
+        let s = d.settings.string("proxy");
+        (!s.is_empty()).then_some(s)
+    };
+    std::thread::spawn(move || {
+        let r = install::install_whisper(
+            &|step: Step| {
+                let _ = app.emit_to("main", "stt_install_progress", step);
+            },
+            proxy.as_deref(),
+        );
+        let _ = app.emit_to(
+            "main",
+            "stt_install_done",
+            serde_json::json!({
+                "kind": "whisper",
+                "ok": r.is_ok(),
+                "error": r.err(),
+                "ready": install::status().whisper_model,
+            }),
+        );
+    });
+}
+
+/// Установить Qwen3-ASR MLX-сайдкар (venv + зависимости, ~2.6 ГБ) по запросу из
+/// настроек. Сами веса Qwen3 догрузятся сайдкаром при первом запросе. Фоном,
+/// fail-safe; прогресс → `stt_install_progress`, финал → `stt_install_done`
+/// (kind=qwen3).
+#[tauri::command]
+pub fn stt_install_sidecar(app: AppHandle) {
+    let d = crate::daemon::Daemon::get(&app);
+    let proxy = {
+        let s = d.settings.string("proxy");
+        (!s.is_empty()).then_some(s)
+    };
+    std::thread::spawn(move || {
+        let r = install::install_stt_sidecar(
+            &|step: Step| {
+                let _ = app.emit_to("main", "stt_install_progress", step);
+            },
+            proxy.as_deref(),
+        );
+        let _ = app.emit_to(
+            "main",
+            "stt_install_done",
+            serde_json::json!({
+                "kind": "qwen3",
+                "ok": r.is_ok(),
+                "error": r.err(),
+                "ready": install::status().qwen3_sidecar,
+            }),
+        );
+    });
+}
+
 /// Скачать 3 ONNX-модели wake-word (инкр. 10) с прогрессом в панель. Фоном,
 /// fail-safe; по завершении — событие `wake_install_done` со статусом.
 #[tauri::command]

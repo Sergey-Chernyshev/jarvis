@@ -829,11 +829,15 @@ pub fn stt_get(app: AppHandle) -> Value {
     // Qwen3 сайдкар «готов», если движок отвечает на /health (быстро из кэша).
     // Для UI — показываем наличие файла модели через быструю HTTP-проверку.
     let qwen3_sidecar = d.stt.available(); // блокирует не более 3 с (connect timeout)
+    // Установлен ли сайдкар на диске (venv + stt-server.py) — отдельно от health:
+    // панель предлагает «Установить», если файлов нет, даже когда демон не отвечает.
+    let qwen3_installed = crate::install::status().qwen3_sidecar;
     json!({
         "engine": engine_name,
         "engines": ["whisper-turbo", "qwen3-0.6b", "qwen3-1.7b"],
         "whisperReady": whisper_model,
         "qwen3Ready": qwen3_sidecar,
+        "qwen3Installed": qwen3_installed,
         "available": qwen3_sidecar || (cfg.engine == "whisper-turbo" && whisper_model),
         "hotkey": if cfg.hotkey.is_empty() { "F8".to_string() } else { cfg.hotkey },
     })

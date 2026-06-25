@@ -2556,6 +2556,18 @@ window.jarvis.onWake((p) => {
   if (pill) { pill.textContent = 'сработало!'; pill.className = 'astatus on'; }
 });
 window.jarvis.onWakeInstallDone(() => { try { renderWakeCard(); } catch {} });
+// STT-модели качаются по запросу (кнопка в карточке) — прогресс в строку,
+// финал перерисовывает карточку, ошибку показываем тостом.
+window.jarvis.onSttInstallProgress((step) => {
+  const el = document.getElementById('stt-install-progress');
+  if (el && step && step.msg) el.textContent = step.msg;
+});
+window.jarvis.onSttInstallDone((p) => {
+  try {
+    if (p && !p.ok && p.error) showToast('STT: не удалось — ' + p.error);
+    renderSttCard();
+  } catch {}
+});
 
 /* ---------- настройки ---------- */
 
@@ -3026,22 +3038,52 @@ async function renderSttCard() {
   engRow.appendChild(sel);
   box.appendChild(engRow);
 
-  // статус моделей
-  const sttStatusRows = [
-    ['whisper-turbo', 'Модель Whisper-turbo', v.whisperReady],
-    [v.engine.startsWith('qwen3') ? v.engine : 'qwen3', 'Сайдкар Qwen3-ASR', v.qwen3Ready],
-  ];
-  for (const [, label, ready] of sttStatusRows) {
+  // статус моделей + предложение скачать недостающее (по умолчанию ничего не
+  // тянем — пользователь жмёт кнопку сам; качается в фоне через события).
+  // Строка с галкой/кнопкой: если модели нет — показываем кнопку «Скачать».
+  const sttModelRow = (label, ready, onInstall, installLabel, idleLabel = '—') => {
     const r = document.createElement('div');
     r.className = 'istat hairtop' + (ready ? ' on' : '');
     r.appendChild(Object.assign(document.createElement('span'), { className: 'dot' }));
     r.appendChild(Object.assign(document.createElement('span'), { textContent: label }));
     r.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
-    r.appendChild(Object.assign(document.createElement('span'), {
-      className: 'sz', textContent: ready ? 'готово' : '—',
-    }));
+    if (ready || !onInstall) {
+      r.appendChild(Object.assign(document.createElement('span'), {
+        className: 'sz', textContent: ready ? 'готово' : idleLabel,
+      }));
+    } else {
+      const btn = document.createElement('button');
+      btn.className = 'abtn small';
+      btn.textContent = installLabel;
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.textContent = 'Качаю…';
+        try { await onInstall(); } catch (e) { showToast(String(e)); btn.disabled = false; btn.textContent = installLabel; }
+      });
+      r.appendChild(btn);
+    }
     box.appendChild(r);
-  }
+  };
+
+  sttModelRow(
+    'Модель Whisper-turbo', v.whisperReady,
+    () => window.jarvis.sttInstallWhisper(), 'Скачать (~574 МБ)',
+  );
+  // Qwen3: «готово» = сайдкар отвечает на health; если файлов нет — предлагаем
+  // установить (venv + зависимости ~2.6 ГБ, веса догрузятся при первом запросе).
+  sttModelRow(
+    'Сайдкар Qwen3-ASR', v.qwen3Ready,
+    v.qwen3Installed ? null : () => window.jarvis.sttInstallSidecar(),
+    'Установить (~2.6 ГБ)',
+    v.qwen3Installed ? 'установлен' : '—',
+  );
+
+  // строка прогресса скачивания/установки STT (обновляется событиями)
+  const prog = document.createElement('div');
+  prog.id = 'stt-install-progress';
+  prog.className = 'ahint';
+  prog.style.marginTop = '4px';
+  box.appendChild(prog);
 
   // хоткей диктовки
   const hkRow = document.createElement('div');

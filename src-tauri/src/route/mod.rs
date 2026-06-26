@@ -8,3 +8,4 @@
 //! до-исполнительные.
 
 pub mod score;
+pub mod stage;

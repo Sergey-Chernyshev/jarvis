@@ -236,5 +236,17 @@ mod tests {
         // LLM вернул id вне списка кандидатов → не доверяем, в пикер
         assert_eq!(decide_action(d, Some(("zzz".into(), 0.99))), Action::Pick(vec!["a".into(), "b".into()]));
     }
+
+    // Инвариант безопасности (спека §Безопасность): резолв пикера/отмены — НЕ
+    // MCP-капабилити, иначе недоверенный голос-агент мог бы сам себя выбрать.
+    // Они доступны только как in-process #[tauri::command] (voice_pick_resolve /
+    // voice_stage_cancel), не спроецированы агенту.
+    #[test]
+    fn voice_resolution_is_not_an_mcp_capability() {
+        let reg = crate::capability::build_registry();
+        for id in ["voice.pick", "voice.stage", "voice.route", "route.pick", "sessions.pick"] {
+            assert!(reg.get(id).is_none(), "{id} не должен существовать как MCP-капабилити");
+        }
+    }
 }
 

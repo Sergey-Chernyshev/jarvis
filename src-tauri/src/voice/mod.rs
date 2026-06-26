@@ -227,6 +227,26 @@ impl Voice {
         cv.notify_one();
     }
 
+    /// Разговорная реплика ассистента (п/п-2): БЕЗ контент-дедупа (повторные
+    /// ответы — «не расслышал», дважды «сколько времени» — не глотаются), без
+    /// тоста, Priority::Done. Уникальный dedup_key — счётчик.
+    pub fn say(&self, text: &str) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let (m, cv) = &*self.queue;
+        let added = m.lock().unwrap().enqueue(Utterance {
+            text: text.to_string(),
+            priority: Priority::Done,
+            dedup_key: format!("say:{n}"),
+            coalesce_group: None,
+            toast_id: None,
+        });
+        if added {
+            cv.notify_one();
+        }
+    }
+
     pub fn warmup(&self) { self.engine.warmup(&self.voice_sel()); }
     pub fn engine_name(&self) -> &'static str { self.engine.name() }
     /// PID Silero-сайдкара (для метрик диагностики); None, если ещё не запущен.

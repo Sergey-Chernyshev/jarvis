@@ -7,6 +7,7 @@
 //! истёкшего НЕотменённого stage-окна или тапа пикера — обе границы согласия
 //! до-исполнительные.
 
+pub mod hud;
 pub mod pick;
 pub mod score;
 pub mod stage;

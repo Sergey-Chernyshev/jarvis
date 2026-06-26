@@ -11,6 +11,7 @@ mod capability;
 mod agent;
 mod claude_bin;
 mod commands_catalog;
+mod convo; // голосовой разговор: снапшот → Haiku-план → скилы → голосовой ответ (п/п-2)
 mod daemon;
 mod history;
 mod install;

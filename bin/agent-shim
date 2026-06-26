@@ -1,0 +1,118 @@
+#!/bin/sh
+# jarvis agent shim — прозрачно оборачивает интерактивные запуски агента
+# (claude ИЛИ codex) в tmux на отдельном сервере (-L jarvis), чтобы демон мог
+# вставлять ответы. Паттерн pyenv: один скрипт ставится под двумя именами
+# ~/.jarvis/shims/{claude,codex}, каталог стоит первым в PATH. Имя выбирается по
+# basename "$0" — поведение per-agent.
+#
+# Шим — ТОЛЬКО транспорт. Он НЕ хранит прокси и НЕ лезет в конфиг: сетевой
+# маршрут задаёшь СНАРУЖИ, в своём терминале:
+#   export HTTPS_PROXY=...   (и/или ANTHROPIC_BASE_URL=..., NODE_EXTRA_CA_CERTS=...)
+# Шим синхронизирует эти переменные с tmux-pane: если в терминале переменная
+# задана — экспортирует её, если не задана — явно снимает stale-значение из
+# долгоживущего tmux-сервера. Ничего секретного на диск Jarvis не пишет.
+# Codex берёт egress-прокси из тех же env (HTTP(S)_PROXY); ANTHROPIC_BASE_URL —
+# только для claude.
+#
+# Сквозной exec настоящего бинаря (без обёртки), если:
+#   - JARVIS_TMUX=off|0|no|false|plain|disable
+#   - уже внутри tmux ($TMUX)
+#   - нет tty на stdin/stdout (пайпы, headless)
+#   - неинтерактивная подкоманда (claude: -p/--print, auth; codex: exec/login/…)
+#   - взведён предохранитель от рекурсии (JARVIS_SHIM)
+
+JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
+SHIM_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+BIN_NAME=$(basename -- "$0")
+
+# Codex: установщик запекает сюда '--dangerously-bypass-hook-trust', если флаг
+# поддерживается (свежая машина без записанного hook-trust). Claude игнорирует.
+CODEX_BYPASS=''
+
+# Сетевые переменные, которые шим синхронизирует с текущим терминалом.
+NET_VARS="HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy"
+[ "$BIN_NAME" = claude ] && NET_VARS="$NET_VARS ANTHROPIC_BASE_URL NODE_EXTRA_CA_CERTS"
+
+# --- резолв настоящего бинаря: ищем в PATH без каталога шимов ---
+CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SHIM_DIR" | paste -sd: -)
+REAL=$(PATH="$CLEAN_PATH" command -v "$BIN_NAME" 2>/dev/null)
+if [ -z "$REAL" ]; then
+  echo "jarvis-shim: настоящий бинарь $BIN_NAME не найден в PATH" >&2
+  exit 127
+fi
+
+# --- решаем, оборачивать ли ---
+wrap=1
+case "${JARVIS_TMUX:-}" in off|0|no|false|plain|disable) wrap=0 ;; esac
+[ -n "$JARVIS_SHIM" ] && wrap=0          # рекурсия
+[ -n "$TMUX" ] && wrap=0                 # уже в tmux
+[ -t 0 ] && [ -t 1 ] || wrap=0           # нет терминала
+case "$BIN_NAME" in
+  codex)
+    # codex: -p = ПРОФИЛЬ (не print!). Неинтерактив — это сабкоманды (argv[1]).
+    case "${1:-}" in
+      exec|e|login|logout|mcp|mcp-server|app-server|completion|doctor|resume|fork|apply|review|cloud|features|update|sandbox|help|-h|--help|--version) wrap=0 ;;
+    esac
+    ;;
+  *)
+    # claude: -p/--print одноразовый; auth/setup-token — логин (мимо tmux).
+    for a in "$@"; do
+      case "$a" in
+        -p|--print) wrap=0 ;;
+        auth|setup-token) wrap=0 ;;
+      esac
+    done
+    ;;
+esac
+command -v tmux >/dev/null 2>&1 || wrap=0  # tmux не установлен — работаем как раньше
+
+if [ "$wrap" = 0 ]; then
+  # Сквозной exec наследует окружение шима (= твоего терминала) как есть.
+  JARVIS_SHIM=1 export JARVIS_SHIM
+  exec "$REAL" "$@"
+fi
+
+# --- обёртка в tmux ---
+# -f с несуществующим файлом не валит tmux, но молча сбрасывает на дефолты
+# (видна status-строка, колесо → стрелки). Подключаем конфиг только если он есть.
+CONF="$JARVIS_DIR/tmux.conf"
+[ -f "$CONF" ] && CONF_OPT="-f $CONF" || CONF_OPT=''
+NAME="$(basename -- "$PWD" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-32)$$"
+
+# Codex на свежей машине: хуки не доверены (trusted_hash в config.toml). Флаг
+# (если запечён установщиком) снимает требование trust для этого запуска.
+EXTRA=''
+[ "$BIN_NAME" = codex ] && EXTRA="$CODEX_BYPASS"
+
+# tmux склеивает несколько аргументов shell-command через пробел и отдаёт
+# /bin/sh -c — поэтому квотируем каждый аргумент сами и передаём одну строку.
+# shellcheck disable=SC2086  # $EXTRA должен расщепляться (пустой или один флаг)
+quoted=''
+for a in "$REAL" $EXTRA "$@"; do
+  q=$(printf '%s' "$a" | sed "s/'/'\\\\''/g")
+  quoted="$quoted '$q'"
+done
+
+# Пейн наследует env tmux-СЕРВЕРА, а не шима, поэтому синхронизируем сетевые
+# переменные явно: заданные в текущем терминале экспортируем, отсутствующие
+# снимаем, чтобы stale proxy/API из tmux-сервера не протекали в агента.
+PRE=''
+for v in $NET_VARS; do
+  eval "val=\${$v:-}"
+  if [ -n "$val" ]; then
+    q=$(printf '%s' "$val" | sed "s/'/'\\\\''/g")
+    PRE="${PRE}export $v='$q'; "
+  else
+    PRE="${PRE}unset $v; "
+  fi
+done
+CMD="${PRE}JARVIS_SHIM=1 exec$quoted"
+
+# iTerm2 умеет control mode: родные табы вместо tmux-рендеринга
+CC=''
+[ "$TERM_PROGRAM" = "iTerm.app" ] && CC='-CC'
+
+# exec: когда агент (а с ним tmux-сессия) завершится, клиент отвалится
+# и терминал вернётся в обычный шелл
+# shellcheck disable=SC2086  # $CC и $CONF_OPT должны расщепляться (могут быть пустыми)
+exec tmux $CC -L jarvis $CONF_OPT new-session -s "$NAME" "$CMD"

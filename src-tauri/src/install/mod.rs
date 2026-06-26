@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const HOOK_SRC: &str = include_str!("../../../bin/jarvis-hook");
-const SHIM_SRC: &str = include_str!("../../../bin/claude-shim");
+const SHIM_SRC: &str = include_str!("../../../bin/agent-shim");
 const TMUX_CONF_SRC: &str = include_str!("../../../bin/jarvis-tmux.conf");
 const SILERO_SERVER_SRC: &str = include_str!("../../../bin/silero-server.py");
 /// STT-сайдкар (Qwen3-ASR MLX): Python-сервер для диктовки (инкр. 9, Phase 8).
@@ -44,6 +44,21 @@ const EVENTS: [(&str, &str); 8] = [
     ("Stop", "stop"),
     ("StopFailure", "stop-failure"),
     ("SessionEnd", "session-end"),
+];
+
+/// Событие Codex → аргумент шима. PermissionRequest→waiting, SubagentStart/Stop
+/// →доска. У Codex нет Notification/StopFailure/SessionEnd. (Дублируется с
+/// backend::CODEX_EVENTS осознанно: install/mod.rs компилируется отдельным
+/// бинарём jarvis-setup без остального крейта.)
+const CODEX_EVENTS: [(&str, &str); 8] = [
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt"),
+    ("PreToolUse", "pre-tool"),
+    ("PostToolUse", "post-tool"),
+    ("Stop", "stop"),
+    ("PermissionRequest", "permission"),
+    ("SubagentStart", "subagent-start"),
+    ("SubagentStop", "subagent-stop"),
 ];
 
 /* ================= публичные типы (прогресс/статус) ================= */
@@ -181,9 +196,41 @@ pub fn build_mcp_config(mcp_bin: &str, token: &str) -> Value {
 }
 fn shims_dir() -> PathBuf { jarvis_dir().join("shims") }
 fn shim_dst() -> PathBuf { shims_dir().join("claude") }
+fn codex_shim_dst() -> PathBuf { shims_dir().join("codex") }
 fn tmux_conf_dst() -> PathBuf { jarvis_dir().join("tmux.conf") }
 fn settings_path() -> PathBuf { home().join(".claude/settings.json") }
+/// Codex: $CODEX_HOME или ~/.codex; файл регистрации хуков.
+fn codex_home() -> PathBuf {
+    match std::env::var("CODEX_HOME") {
+        Ok(d) if !d.is_empty() => PathBuf::from(d),
+        _ => home().join(".codex"),
+    }
+}
+fn codex_hooks_path() -> PathBuf { codex_home().join("hooks.json") }
 fn jarvis_settings_path() -> PathBuf { jarvis_dir().join("settings.json") }
+
+/// Установлен ли `codex` в PATH (минуя наш шим).
+fn codex_found() -> bool {
+    Command::new("/bin/sh")
+        .args(["-c", "command -v codex"])
+        .env("PATH", augmented_path())
+        .stdout(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Поддерживает ли установленный codex `--dangerously-bypass-hook-trust`
+/// (feature-detect один раз при установке — чтобы не дёргать `codex --help`
+/// на каждый интерактивный запуск из шима).
+fn codex_supports_bypass_hook_trust() -> bool {
+    Command::new("/bin/sh")
+        .args(["-c", "codex --help 2>/dev/null | grep -q -- --dangerously-bypass-hook-trust"])
+        .env("PATH", augmented_path())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
 
 /* ================= STT: Whisper + Qwen3-MLX (инкр. 9, Phase 8) ================= */
 
@@ -752,14 +799,13 @@ fn remove_block(content: &str) -> String {
 
 /* ================= helpers ================= */
 
-/// Прочитать ~/.claude/settings.json. (есть_ли_файл, json).
-/// Битый/нечитаемый файл → Err (НЕ выходим из процесса — зовётся в демоне).
-fn read_settings() -> Result<(bool, Value), String> {
-    let path = settings_path();
+/// Прочитать файл регистрации хуков (settings.json claude / hooks.json codex).
+/// (есть_ли_файл, json). Битый/нечитаемый → Err (НЕ выходим — зовётся в демоне).
+fn read_hooks_file(path: &Path) -> Result<(bool, Value), String> {
     if !path.exists() {
         return Ok((false, json!({})));
     }
-    let raw = fs::read_to_string(&path)
+    let raw = fs::read_to_string(path)
         .map_err(|e| format!("не смог прочитать {}: {e}", path.display()))?;
     if raw.trim().is_empty() {
         return Ok((true, json!({})));
@@ -767,6 +813,95 @@ fn read_settings() -> Result<(bool, Value), String> {
     serde_json::from_str(&raw)
         .map(|v| (true, v))
         .map_err(|_| format!("{} содержит невалидный JSON — не трогаю", path.display()))
+}
+
+/// Прочитать ~/.claude/settings.json.
+fn read_settings() -> Result<(bool, Value), String> {
+    read_hooks_file(&settings_path())
+}
+
+/// Смержить наши хуки (метка = claude|codex) в файл регистрации агента.
+/// Идемпотентно: уже-наши пропускаем; бэкап перед записью; чужие сохраняем.
+fn install_hooks_into(path: &Path, label: &str, events: &[(&str, &str)], progress: &Progress) {
+    match read_hooks_file(path) {
+        Ok((exists, mut json)) => {
+            if exists {
+                backup(path);
+            }
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if !json.is_object() {
+                json = json!({});
+            }
+            if json.get("hooks").map(|h| !h.is_object()).unwrap_or(true) {
+                json["hooks"] = json!({});
+            }
+            let mut added = Vec::new();
+            for (event, arg) in events {
+                if event_installed(&json, event) {
+                    continue;
+                }
+                let hooks = json["hooks"].as_object_mut().unwrap();
+                let arr = hooks.entry(*event).or_insert_with(|| json!([]));
+                if !arr.is_array() {
+                    *arr = json!([]);
+                }
+                arr.as_array_mut().unwrap().push(json!({
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("{} {label} {arg}", hook_dst().display()),
+                        "timeout": 5,
+                    }],
+                }));
+                added.push(*event);
+            }
+            if !added.is_empty() {
+                atomic_write(path, &(serde_json::to_string_pretty(&json).unwrap() + "\n"));
+                progress(Step::done("Хуки", format!("{label}: добавлены {}", added.join(", "))));
+            } else {
+                progress(Step::done("Хуки", format!("{label}: уже установлены")));
+            }
+        }
+        Err(e) => progress(Step::warn("Хуки", format!("{e} — пропускаю хуки {label}"))),
+    }
+}
+
+/// Снять наши хуки (любой метки — MARKER агент-агностичен) из файла агента.
+fn uninstall_hooks_from(path: &Path, progress: &Progress) {
+    match read_hooks_file(path) {
+        Ok((true, mut json)) if json.get("hooks").and_then(Value::as_object).is_some() => {
+            backup(path);
+            let mut removed = Vec::new();
+            let hooks = json["hooks"].as_object_mut().unwrap();
+            let events: Vec<String> = hooks.keys().cloned().collect();
+            for event in events {
+                let Some(arr) = hooks.get_mut(&event).and_then(Value::as_array_mut) else { continue };
+                let before = arr.len();
+                for group in arr.iter_mut() {
+                    if let Some(gh) = group.get_mut("hooks").and_then(Value::as_array_mut) {
+                        gh.retain(|h| !is_ours(h));
+                    }
+                }
+                arr.retain(|g| g.get("hooks").and_then(Value::as_array).is_some_and(|h| !h.is_empty()));
+                if arr.len() != before {
+                    removed.push(event.clone());
+                }
+                if arr.is_empty() {
+                    hooks.remove(&event);
+                }
+            }
+            if hooks.is_empty() {
+                json.as_object_mut().unwrap().remove("hooks");
+            }
+            atomic_write(path, &(serde_json::to_string_pretty(&json).unwrap() + "\n"));
+            if !removed.is_empty() {
+                progress(Step::done("Хуки", format!("{}: удалены {}", path.display(), removed.join(", "))));
+            }
+        }
+        Ok(_) => {} // файла/хуков нет — тихо
+        Err(e) => progress(Step::warn("Хуки", e)),
+    }
 }
 
 fn atomic_write(file: &Path, content: &str) {
@@ -941,6 +1076,20 @@ pub fn status_report() -> String {
         Ok((false, _)) => out += &format!("Settings: ✗ {} не существует\n", settings_path().display()),
         Err(e) => out += &format!("Settings: ⚠ {e}\n"),
     }
+    out += &format!("Codex:    {}\n", if codex_found() { "✓ найден в PATH" } else { "✗ не найден" });
+    if codex_found() {
+        match read_hooks_file(&codex_hooks_path()) {
+            Ok((true, json)) => {
+                out += &format!("  hooks.json: {}\n", codex_hooks_path().display());
+                for (event, _) in CODEX_EVENTS {
+                    out += &format!("    {} {event}\n", mark(event_installed(&json, event)));
+                }
+            }
+            Ok((false, _)) => out += &format!("  hooks.json: ✗ {} не существует\n", codex_hooks_path().display()),
+            Err(e) => out += &format!("  hooks.json: ⚠ {e}\n"),
+        }
+        out += &format!("  {} шим codex ({})\n", mark(codex_shim_dst().exists()), codex_shim_dst().display());
+    }
     out
 }
 
@@ -975,45 +1124,11 @@ pub fn install(progress: &Progress, proxy: Option<&str>) {
     if !claude_found() {
         progress(Step::info("Хуки", "claude не найден в PATH — хуки подхватятся, когда появится"));
     }
-    match read_settings() {
-        Ok((exists, mut json)) => {
-            if exists {
-                backup(&settings_path());
-            }
-            let _ = fs::create_dir_all(home().join(".claude"));
-            if !json.is_object() {
-                json = json!({});
-            }
-            if json.get("hooks").map(|h| !h.is_object()).unwrap_or(true) {
-                json["hooks"] = json!({});
-            }
-            let mut added = Vec::new();
-            for (event, arg) in EVENTS {
-                if event_installed(&json, event) {
-                    continue;
-                }
-                let hooks = json["hooks"].as_object_mut().unwrap();
-                let arr = hooks.entry(event).or_insert_with(|| json!([]));
-                if !arr.is_array() {
-                    *arr = json!([]);
-                }
-                arr.as_array_mut().unwrap().push(json!({
-                    "hooks": [{
-                        "type": "command",
-                        "command": format!("{} claude {arg}", hook_dst().display()),
-                        "timeout": 5,
-                    }],
-                }));
-                added.push(event);
-            }
-            if !added.is_empty() {
-                atomic_write(&settings_path(), &(serde_json::to_string_pretty(&json).unwrap() + "\n"));
-                progress(Step::done("Хуки", format!("добавлены: {}", added.join(", "))));
-            } else {
-                progress(Step::done("Хуки", "уже установлены"));
-            }
-        }
-        Err(e) => progress(Step::warn("Хуки", format!("{e} — пропускаю хуки"))),
+    // Claude — всегда (хуки ждут появления claude). Codex — только если установлен
+    // (иначе незачем создавать ~/.codex/hooks.json для несуществующего CLI).
+    install_hooks_into(&settings_path(), "claude", &EVENTS, progress);
+    if codex_found() {
+        install_hooks_into(&codex_hooks_path(), "codex", &CODEX_EVENTS, progress);
     }
 
     // --- Фаза «Транспорт» (шим claude + tmux.conf + PATH-блок) ---
@@ -1059,12 +1174,24 @@ fn install_tmux_transport(progress: &Progress) {
     // Запекаем актуальный JARVIS_DIR в шим: в рантайме (обычный терминал) env
     // JARVIS_DIR не выставлен, а dev-сборка живёт в ~/.jarvis-dev. Без подмены
     // дефолта шим искал бы tmux.conf в ~/.jarvis и падал (No such file).
-    let shim = SHIM_SRC.replacen(
+    let mut shim = SHIM_SRC.replacen(
         "JARVIS_DIR=\"${JARVIS_DIR:-$HOME/.jarvis}\"",
         &format!("JARVIS_DIR=\"${{JARVIS_DIR:-{}}}\"", jarvis_dir().display()),
         1,
     );
-    write_executable(&shim_dst(), &shim);
+    // Codex: запекаем флаг bypass-hook-trust, если он поддерживается (feature-detect
+    // один раз при установке — чтобы шим не дёргал `codex --help` на каждый запуск).
+    let bypass = if codex_found() && codex_supports_bypass_hook_trust() {
+        "--dangerously-bypass-hook-trust"
+    } else {
+        ""
+    };
+    shim = shim.replacen("CODEX_BYPASS=''", &format!("CODEX_BYPASS='{bypass}'"), 1);
+    write_executable(&shim_dst(), &shim); // ~/.jarvis/shims/claude
+    if codex_found() {
+        // тот же скрипт под именем codex — поведение выбирается по basename "$0".
+        write_executable(&codex_shim_dst(), &shim);
+    }
     fs::write(tmux_conf_dst(), TMUX_CONF_SRC).expect("запись tmux.conf");
 
     let shims = shims_dir().display().to_string();
@@ -1079,46 +1206,21 @@ fn install_tmux_transport(progress: &Progress) {
             atomic_write(&rc, &merged);
         }
     }
-    progress(Step::done("Транспорт", "шим claude + tmux.conf + PATH-блок"));
+    progress(Step::done(
+        "Транспорт",
+        if codex_found() { "шим claude+codex + tmux.conf + PATH-блок" } else { "шим claude + tmux.conf + PATH-блок" },
+    ));
 }
 
 /// Снять интеграцию. Шлёт шаги в `progress`.
 pub fn uninstall(progress: &Progress) {
     progress(Step::start("Хуки"));
-    match read_settings() {
-        Ok((true, mut json)) if json.get("hooks").and_then(Value::as_object).is_some() => {
-            backup(&settings_path());
-            let mut removed = Vec::new();
-            let hooks = json["hooks"].as_object_mut().unwrap();
-            let events: Vec<String> = hooks.keys().cloned().collect();
-            for event in events {
-                let Some(arr) = hooks.get_mut(&event).and_then(Value::as_array_mut) else { continue };
-                let before = arr.len();
-                for group in arr.iter_mut() {
-                    if let Some(gh) = group.get_mut("hooks").and_then(Value::as_array_mut) {
-                        gh.retain(|h| !is_ours(h));
-                    }
-                }
-                arr.retain(|g| g.get("hooks").and_then(Value::as_array).is_some_and(|h| !h.is_empty()));
-                if arr.len() != before {
-                    removed.push(event.clone());
-                }
-                if arr.is_empty() {
-                    hooks.remove(&event);
-                }
-            }
-            if hooks.is_empty() {
-                json.as_object_mut().unwrap().remove("hooks");
-            }
-            atomic_write(&settings_path(), &(serde_json::to_string_pretty(&json).unwrap() + "\n"));
-            progress(Step::done("Хуки", if removed.is_empty() { "наших хуков не нашлось".into() } else { format!("удалены: {}", removed.join(", ")) }));
-        }
-        Ok(_) => progress(Step::done("Хуки", "записей Jarvis нет")),
-        Err(e) => progress(Step::warn("Хуки", e)),
-    }
+    uninstall_hooks_from(&settings_path(), progress);
+    uninstall_hooks_from(&codex_hooks_path(), progress);
+    progress(Step::done("Хуки", "записи Jarvis сняты (claude + codex)"));
 
     progress(Step::start("Транспорт"));
-    for f in [hook_dst(), jarvis_dir().join("run.sock"), shim_dst(), tmux_conf_dst()] {
+    for f in [hook_dst(), jarvis_dir().join("run.sock"), shim_dst(), codex_shim_dst(), tmux_conf_dst()] {
         let _ = fs::remove_file(&f);
     }
     let _ = fs::remove_dir(shims_dir());
@@ -1417,6 +1519,43 @@ mod tests {
         assert!(HOOK_SRC.contains("JARVIS_IGNORE"));
         assert!(SHIM_SRC.contains("tmux"));
         assert!(TMUX_CONF_SRC.contains("status off"));
+    }
+
+    #[test]
+    fn agent_shim_is_generalized() {
+        // SHIM_SRC теперь bin/agent-shim: basename-диспатч + bypass-слот.
+        assert!(SHIM_SRC.contains("BIN_NAME=$(basename"), "шим выбирает поведение по basename");
+        assert!(SHIM_SRC.contains("CODEX_BYPASS"), "есть слот для bypass-hook-trust");
+        assert!(SHIM_SRC.contains("command -v \"$BIN_NAME\""), "резолвит реальный бинарь по имени");
+    }
+
+    #[test]
+    fn codex_events_shape() {
+        assert_eq!(CODEX_EVENTS.len(), 8);
+        assert!(CODEX_EVENTS.iter().any(|(e, a)| *e == "Stop" && *a == "stop"));
+        assert!(CODEX_EVENTS.iter().any(|(e, a)| *e == "PermissionRequest" && *a == "permission"));
+        assert!(CODEX_EVENTS.iter().any(|(e, _)| *e == "SubagentStart"));
+        // у Codex нет Notification/StopFailure/SessionEnd
+        assert!(!CODEX_EVENTS.iter().any(|(e, _)| *e == "Notification"));
+    }
+
+    #[test]
+    fn codex_hooks_writer_uses_codex_label() {
+        let dir = std::env::temp_dir().join(format!("jarvis-codex-hk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("hooks.json");
+        let noop = |_s: Step| {};
+        install_hooks_into(&path, "codex", &CODEX_EVENTS, &noop);
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let stop = v["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap().to_string();
+        assert!(stop.contains(" codex stop"), "метка codex в команде: {stop}");
+        assert!(v["hooks"]["PermissionRequest"].is_array(), "есть PermissionRequest");
+        assert!(v["hooks"].get("Notification").is_none(), "у codex нет Notification");
+        // идемпотентность: второй проход не дублирует
+        install_hooks_into(&path, "codex", &CODEX_EVENTS, &noop);
+        let v2: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v2["hooks"]["Stop"].as_array().unwrap().len(), 1, "Stop не дублируется");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // Phase 8: STT-SERVER_SRC встроен и является валидным Python-скриптом (начало).

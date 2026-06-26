@@ -108,10 +108,20 @@ fn trigger_agent(app: tauri::AppHandle, message: String) {
         .into_iter()
         .map(|m| format!("mcp__jarvis__{}", m.id.replace('.', "_")))
         .collect();
-    let host = ClaudeCliHost { app, mcp_config };
-    tauri::async_runtime::spawn(async move {
-        host.run(&message, &tools, None).await;
-    });
+    // выбор хоста по доступности («auto», как в ipc::agent_send): Claude иначе Codex
+    if crate::claude_bin::resolve_claude_bin().is_some() {
+        let host = ClaudeCliHost { app, mcp_config };
+        tauri::async_runtime::spawn(async move {
+            host.run(&message, &tools, None).await;
+        });
+    } else if crate::backend::codex::resolve_codex_bin().is_some() {
+        if let Some((mcp_bin, token)) = crate::ipc::read_mcp_bin_token(&mcp_config) {
+            let host = crate::backend::codex_agent::CodexCliHost { app, mcp_bin, token };
+            tauri::async_runtime::spawn(async move {
+                host.run(&message, &tools, None).await;
+            });
+        }
+    }
 }
 
 #[cfg(test)]

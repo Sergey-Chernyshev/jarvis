@@ -332,8 +332,13 @@ pub fn chat_close(app: AppHandle) {
 #[tauri::command]
 pub fn commands_get(app: AppHandle, session_id: String) -> Value {
     let d = Daemon::get(&app);
-    let cwd = d.session(&session_id).and_then(|s| s.cwd);
-    serde_json::to_value(d.commands.get_for_cwd(cwd.as_deref())).unwrap_or_else(|_| json!([]))
+    let Some(s) = d.session(&session_id) else { return json!([]) };
+    // Палитра слэш-команд claude-специфична (BUILTINS + ~/.claude/commands). У Codex
+    // слэш-набор иной — не показываем чужие команды (codex-каталог — будущее).
+    if crate::backend::Agent::from_opt(s.agent.as_deref()) == crate::backend::Agent::Codex {
+        return json!([]);
+    }
+    serde_json::to_value(d.commands.get_for_cwd(s.cwd.as_deref())).unwrap_or_else(|_| json!([]))
 }
 
 #[tauri::command]

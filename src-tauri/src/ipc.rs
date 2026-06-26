@@ -816,6 +816,13 @@ pub fn voice_stage_cancel(app: AppHandle, nonce: String) -> Value {
     json!({ "ok": cancelled })
 }
 
+/// Текущее аудио-состояние — тост тянет его на загрузке (audio_state эмитится
+/// лишь на изменении: ранний denied/тишина мог уйти до готовности webview; VR-3).
+#[tauri::command]
+pub fn voice_audio_state(app: AppHandle) -> Value {
+    Daemon::get(&app).audio.audio_state_payload()
+}
+
 /* ================= служебное ================= */
 
 /// Снять ложный лимит-баннер по официальному usage (таймер из main).

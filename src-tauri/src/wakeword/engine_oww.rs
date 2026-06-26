@@ -91,11 +91,27 @@ impl OwwEngine {
 
         // int16-значения как f32 (модель обучена на int16 PCM, кастованном в float).
         // Масштаб 32767 (i16::MAX) — симметричный инверс нормализации [-1,1].
-        let mel_in: Vec<f32> = window.iter().map(|&s| s * i16::MAX as f32).collect();
+        // ВРЕМЕННО: входной гейн (JARVIS_WAKE_GAIN) для проверки гипотезы «тихий вход».
+        let gain: f32 = std::env::var("JARVIS_WAKE_GAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let mel_in: Vec<f32> = window
+            .iter()
+            .map(|&s| (s * gain).clamp(-1.0, 1.0) * i16::MAX as f32)
+            .collect();
         let n = mel_in.len() as i64;
         let mel_out = run_flat(&mut self.melspec, "input", vec![1, n], mel_in)?;
         // [frames,32], трансформ x/10+2
         let frames = mel_out.len() / MEL_BINS;
+        if std::env::var_os("JARVIS_WAKE_DEBUG").is_some() {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static N: AtomicU32 = AtomicU32::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+            if n % 13 == 0 {
+                crate::log::line(&format!(
+                    "[oww:dbg] окно_сэмплов={} mel_out_len={} кадров/чанк={} mel_buf={} emb_buf={}",
+                    window.len(), mel_out.len(), frames, self.mel.len(), self.emb.len()
+                ));
+            }
+        }
         for fr in 0..frames {
             let mut row = [0f32; MEL_BINS];
             for b in 0..MEL_BINS {
@@ -143,6 +159,32 @@ impl OwwEngine {
         }
         let name = self.clf_input_name.clone();
         let out = run_flat(&mut self.clf, &name, vec![1, CLF_WINDOW as i64, EMB_DIM as i64], clf_in)?;
+        if std::env::var_os("JARVIS_WAKE_DEBUG").is_some() {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static N: AtomicU32 = AtomicU32::new(0);
+            static MAX_PK: AtomicU32 = AtomicU32::new(0);
+            static MAX_SC: AtomicU32 = AtomicU32::new(0);
+            let fpk = frame.iter().fold(0f32, |a, &s| a.max(s.abs()));
+            let sc = out.first().copied().unwrap_or(0.0);
+            // running max over окно (peak/score), b/c per-call snapshot misses loud moments
+            if fpk > f32::from_bits(MAX_PK.load(Ordering::Relaxed)) {
+                MAX_PK.store(fpk.to_bits(), Ordering::Relaxed);
+            }
+            if sc > f32::from_bits(MAX_SC.load(Ordering::Relaxed)) {
+                MAX_SC.store(sc.to_bits(), Ordering::Relaxed);
+            }
+            let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+            if n % 13 == 0 {
+                let mpk = f32::from_bits(MAX_PK.swap(0, Ordering::Relaxed));
+                let msc = f32::from_bits(MAX_SC.swap(0, Ordering::Relaxed));
+                let (elo, ehi) = self.emb.back().map(|e| {
+                    e.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)))
+                }).unwrap_or((0.0, 0.0));
+                crate::log::line(&format!(
+                    "[oww:num] МАКС_peak за 1с={mpk:.4} МАКС_score={msc:.5} emb=[{elo:.2}..{ehi:.2}]"
+                ));
+            }
+        }
         Ok(out.first().copied())
     }
 }
@@ -196,12 +238,23 @@ fn run_flat(
     shape: Vec<i64>,
     data: Vec<f32>,
 ) -> Result<Vec<f32>, String> {
+    let in_shape_dbg = if std::env::var_os("JARVIS_WAKE_DEBUG").is_some() { shape.clone() } else { Vec::new() };
     let tensor = Tensor::from_array((shape, data)).map_err(|e| format!("tensor: {e}"))?;
     let outputs = session
         .run(ort::inputs![input_name => tensor])
         .map_err(|e| format!("run: {e}"))?;
-    let (_shape, data) = outputs[0]
+    let (out_shape, data) = outputs[0]
         .try_extract_tensor::<f32>()
         .map_err(|e| format!("extract: {e}"))?;
+    if std::env::var_os("JARVIS_WAKE_DEBUG").is_some() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        if N.fetch_add(1, Ordering::Relaxed) < 40 {
+            crate::log::line(&format!(
+                "[oww:shape] in='{input_name}' in_shape={in_shape_dbg:?} out_shape={out_shape:?} out_len={}",
+                data.len()
+            ));
+        }
+    }
     Ok(data.to_vec())
 }

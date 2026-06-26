@@ -4,17 +4,14 @@
 # Паттерн pyenv: лежит в ~/.jarvis/shims/claude, каталог стоит первым в PATH.
 #
 # Шим — ТОЛЬКО транспорт. Он НЕ хранит прокси и НЕ лезет в конфиг: сетевой
-# маршрут (прокси-туннель или шлюз) задаёшь СНАРУЖИ, в своём терминале:
+# маршрут задаёшь СНАРУЖИ, в своём терминале:
 #   export HTTPS_PROXY=...   (и/или ANTHROPIC_BASE_URL=..., NODE_EXTRA_CA_CERTS=...)
-# Шим просто форвардит эти переменные в настоящий claude — в том числе через
-# границу tmux: пейн наследует env tmux-СЕРВЕРА, а не шима, поэтому набор
-# сетевых переменных мы прокидываем явным export внутрь команды пейна.
-# Ничего секретного на диск jarvis не пишет.
-#
-# Разовое выключение (например, когда поднят VPN и прокси не нужен):
-#   JARVIS_PROXY=off claude ...   → сетевые переменные снимаются для этого запуска.
+# Шим синхронизирует эти переменные с tmux-pane: если в терминале переменная
+# задана — экспортирует её, если не задана — явно снимает stale-значение из
+# долгоживущего tmux-сервера. Ничего секретного на диск Jarvis не пишет.
 #
 # Сквозной exec настоящего бинаря (без обёртки), если:
+#   - JARVIS_TMUX=off|0|no|false|plain|disable
 #   - уже внутри tmux ($TMUX)
 #   - нет tty на stdin/stdout (пайпы, headless)
 #   - запуск с -p/--print (одноразовый, неинтерактивный)
@@ -24,7 +21,7 @@
 JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
 SHIM_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
-# Сетевые переменные, которые шим уважает и пробрасывает как есть.
+# Сетевые переменные, которые шим синхронизирует с текущим терминалом.
 NET_VARS="HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy ANTHROPIC_BASE_URL NODE_EXTRA_CA_CERTS"
 
 # --- резолв настоящего claude: ищем в PATH без каталога шимов ---
@@ -35,12 +32,9 @@ if [ -z "$REAL" ]; then
   exit 127
 fi
 
-# --- разовый off-тумблер: снять сетевые переменные для этого запуска ---
-# shellcheck disable=SC2086  # NET_VARS должен расщепляться на имена
-case "${JARVIS_PROXY:-}" in off|0|no|none) unset $NET_VARS ;; esac
-
 # --- решаем, оборачивать ли ---
 wrap=1
+case "${JARVIS_TMUX:-}" in off|0|no|false|plain|disable) wrap=0 ;; esac
 [ -n "$JARVIS_SHIM" ] && wrap=0          # рекурсия
 [ -n "$TMUX" ] && wrap=0                 # уже в tmux
 [ -t 0 ] && [ -t 1 ] || wrap=0           # нет терминала
@@ -73,14 +67,18 @@ for a in "$REAL" "$@"; do
   quoted="$quoted '$q'"
 done
 
-# Пейн наследует env tmux-СЕРВЕРА, а не шима, поэтому реально заданные сетевые
-# переменные форвардим явным export прямо в команду пейна.
+# Пейн наследует env tmux-СЕРВЕРА, а не шима, поэтому синхронизируем сетевые
+# переменные явно: заданные в текущем терминале экспортируем, отсутствующие
+# снимаем, чтобы stale proxy/API из tmux-сервера не протекали в Claude.
 PRE=''
 for v in $NET_VARS; do
   eval "val=\${$v:-}"
-  [ -n "$val" ] || continue
-  q=$(printf '%s' "$val" | sed "s/'/'\\\\''/g")
-  PRE="${PRE}export $v='$q'; "
+  if [ -n "$val" ]; then
+    q=$(printf '%s' "$val" | sed "s/'/'\\\\''/g")
+    PRE="${PRE}export $v='$q'; "
+  else
+    PRE="${PRE}unset $v; "
+  fi
 done
 CMD="${PRE}JARVIS_SHIM=1 exec$quoted"
 

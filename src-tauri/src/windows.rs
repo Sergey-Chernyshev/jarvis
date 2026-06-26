@@ -141,6 +141,12 @@ pub fn emit_to_panel<P: Serialize + Clone>(app: &AppHandle, event: &str, payload
     let _ = app.emit_to("main", event, payload.clone());
 }
 
+/// Эмит события напрямую в окно `toast` (для прямых эмиттеров вне `Daemon`,
+/// напр. AudioHub — он держит только `AppHandle`, не буфер тостов).
+pub fn emit_to_toast_window<P: Serialize + Clone>(app: &AppHandle, event: &str, payload: &P) {
+    let _ = app.emit_to("toast", event, payload.clone());
+}
+
 /// Голос начал говорить эту карточку — держим открытой (не закрываем по TTL).
 pub fn toast_hold(app: &AppHandle, id: &str) {
     let _ = app.emit_to("toast", "toast-hold", json!({ "id": id }));
@@ -166,10 +172,12 @@ fn toast_emit(d: &Daemon, event: &'static str, payload: serde_json::Value) {
     }
 }
 
-/// Эмит голосового HUD-события (`voice-hud`) в окно `toast`. Через тот же буфер,
-/// что toast-* — ранние фазы цикла не теряются, пока webview тоста грузится.
+/// Эмит голосового HUD-события (`voice-hud`) в окно `toast`. НАПРЯМУЮ (не через
+/// буфер ранних тостов): фазы цикла — реалтайм, проигрывать «протухшую» фазу с
+/// прошлого запуска бессмысленно; а буфер флашится по armed()=onAdd+onUpdate, и
+/// voice-hud мог флашнуться ДО регистрации своего слушателя (F1).
 pub fn hud_emit(d: &Daemon, payload: serde_json::Value) {
-    toast_emit(d, "voice-hud", payload);
+    let _ = d.app.emit_to("toast", "voice-hud", payload);
 }
 
 /// Мост тостов загрузился: доливаем накопленное в исходном порядке.

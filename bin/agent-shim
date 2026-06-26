@@ -33,6 +33,10 @@ CODEX_BYPASS=''
 NET_VARS="HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy"
 [ "$BIN_NAME" = claude ] && NET_VARS="$NET_VARS ANTHROPIC_BASE_URL NODE_EXTRA_CA_CERTS"
 
+# Разовый off-тумблер: снять сетевые переменные для этого запуска (например, под VPN).
+# shellcheck disable=SC2086  # NET_VARS должен расщепляться на имена
+case "${JARVIS_PROXY:-}" in off|0|no|none) unset $NET_VARS ;; esac
+
 # --- резолв настоящего бинаря: ищем в PATH без каталога шимов ---
 CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SHIM_DIR" | paste -sd: -)
 REAL=$(PATH="$CLEAN_PATH" command -v "$BIN_NAME" 2>/dev/null)
@@ -50,8 +54,10 @@ case "${JARVIS_TMUX:-}" in off|0|no|false|plain|disable) wrap=0 ;; esac
 case "$BIN_NAME" in
   codex)
     # codex: -p = ПРОФИЛЬ (не print!). Неинтерактив — это сабкоманды (argv[1]).
+    # resume/fork НЕ здесь: они поднимают интерактивный TUI и должны оборачиваться
+    # в tmux (иначе resumeCmd из tmux_needed не вернёт сессию под управление).
     case "${1:-}" in
-      exec|e|login|logout|mcp|mcp-server|app-server|completion|doctor|resume|fork|apply|review|cloud|features|update|sandbox|help|-h|--help|--version) wrap=0 ;;
+      exec|e|login|logout|mcp|mcp-server|app-server|completion|doctor|apply|review|cloud|features|update|sandbox|help|-h|--help|--version) wrap=0 ;;
     esac
     ;;
   *)

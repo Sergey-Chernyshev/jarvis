@@ -1024,33 +1024,45 @@ impl Daemon {
 
             let entries = transcript::read_recent_entries(std::path::Path::new(&tr), 64 * 1024);
 
-            // ветка лежит в метаданных каждой записи
-            let branch = entries.iter().rev().find_map(|e| {
-                e.get("gitBranch")
-                    .and_then(Value::as_str)
-                    .filter(|b| !b.is_empty() && *b != "HEAD")
-                    .map(String::from)
-            });
-            // Claude Code сам пишет заголовок сессии — type:ai-title / summary
-            let raw_title = entries.iter().rev().find_map(|e| {
-                let t = match e.get("type").and_then(Value::as_str) {
-                    Some("ai-title") => e.get("aiTitle"),
-                    Some("summary") => e.get("summary"),
-                    _ => None,
-                };
-                t.and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-                    .map(String::from)
-            });
+            let is_codex = crate::backend::Agent::from_opt(snap.agent.as_deref())
+                == crate::backend::Agent::Codex;
+
+            // ветка: Claude — gitBranch в каждой записи; в rollout Codex её нет.
+            let branch = if is_codex {
+                None
+            } else {
+                entries.iter().rev().find_map(|e| {
+                    e.get("gitBranch")
+                        .and_then(Value::as_str)
+                        .filter(|b| !b.is_empty() && *b != "HEAD")
+                        .map(String::from)
+                })
+            };
+            // заголовок: Claude — type:ai-title/summary; Codex — первая user-реплика.
+            let raw_title = if is_codex {
+                crate::backend::codex_transcript::extract_title(&entries)
+            } else {
+                entries.iter().rev().find_map(|e| {
+                    let t = match e.get("type").and_then(Value::as_str) {
+                        Some("ai-title") => e.get("aiTitle"),
+                        Some("summary") => e.get("summary"),
+                        _ => None,
+                    };
+                    t.and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(String::from)
+                })
+            };
             let title = raw_title.map(|t| d.ru(&ellipsize(&one_line(&t), 60)));
 
-            // модель — бесплатно из транскрипта; не перетираем свежий ручной
-            // выбор (modelAt) — транскрипт догонит позже
+            // модель: Claude — из транскрипта; Codex УЖЕ имеет модель из payload —
+            // НЕ перетираем Claude-майнингом из ~/.claude/projects. Свежий ручной
+            // выбор (modelAt) тоже не трогаем.
             let model_fresh = snap
                 .model_at
                 .is_some_and(|at| now_ms() - at <= 30_000);
-            let model = if model_fresh {
+            let model = if model_fresh || is_codex {
                 None
             } else {
                 entries

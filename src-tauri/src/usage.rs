@@ -30,6 +30,7 @@ fn price(model: &str) -> (f64, f64) {
     match model {
         "Opus" | "Fable" => (15.0, 75.0), // у Fable публичного прайса нет — как Opus
         "Haiku" => (1.0, 5.0),
+        "GPT-5" | "Codex" => (1.25, 10.0), // ОЦЕНКА OpenAI gpt-5-класс ($/1M)
         _ => (3.0, 15.0), // Sonnet и дефолт
     }
 }
@@ -200,6 +201,10 @@ fn state_file() -> PathBuf {
 
 fn projects_dir() -> PathBuf {
     claude_dir().join("projects")
+}
+
+fn codex_sessions_dir() -> PathBuf {
+    crate::util::codex_dir().join("sessions")
 }
 
 impl Usage {
@@ -429,6 +434,14 @@ impl Usage {
                 self.state.lock().unwrap().offsets.insert(file, next);
             }
         }
+        // Codex rollouts: token_count.last_token_usage (per-turn) → та же агрегация.
+        for file in Self::list_codex_rollouts() {
+            let prev = self.state.lock().unwrap().offsets.get(&file).copied().unwrap_or(0);
+            let next = self.parse_codex_file_part(&file, prev);
+            if next != prev {
+                self.state.lock().unwrap().offsets.insert(file, next);
+            }
+        }
         {
             let mut seen = self.msg_seen.lock().unwrap();
             if seen.len() > 6000 {
@@ -438,6 +451,96 @@ impl Usage {
         self.state.lock().unwrap().backfilled = true;
         self.persist();
         self.scanning.store(false, Ordering::SeqCst);
+    }
+
+    /// Все rollout-файлы Codex: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl.
+    fn list_codex_rollouts() -> Vec<String> {
+        fn walk(dir: &Path, out: &mut Vec<String>) {
+            let Ok(rd) = fs::read_dir(dir) else { return };
+            for e in rd.filter_map(|e| e.ok()) {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "jsonl") {
+                    out.push(p.to_string_lossy().into_owned());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&codex_sessions_dir(), &mut out);
+        out
+    }
+
+    /// Разбор rollout Codex: `event_msg.token_count.last_token_usage` (per-turn,
+    /// НЕ total — иначе двойной счёт). model — последний `turn_context.model`;
+    /// cwd/sid — из `session_meta`. billing="codex". Маппинг в общий `Tok`:
+    /// input_tokens включает cached (конвенция OpenAI) → input = input−cached,
+    /// cr = cached, out = output+reasoning, cw = 0 (Codex не делит cache-creation).
+    fn parse_codex_file_part(&self, file: &str, from_offset: u64) -> u64 {
+        let Ok(meta) = fs::metadata(file) else { return from_offset };
+        let size = meta.len();
+        if size <= from_offset {
+            return from_offset;
+        }
+        let Ok(mut f) = fs::File::open(file) else { return from_offset };
+        if f.seek(SeekFrom::Start(from_offset)).is_err() {
+            return from_offset;
+        }
+        let mut buf = Vec::with_capacity((size - from_offset) as usize);
+        if f.read_to_end(&mut buf).is_err() {
+            return from_offset;
+        }
+        let text = String::from_utf8_lossy(&buf);
+        let Some(last_nl) = text.rfind('\n') else { return from_offset };
+        let consumed = text[..=last_nl].len() as u64;
+        let text = &text[..last_nl];
+
+        let mut cwd: Option<String> = None;
+        let mut sid = String::from("unknown");
+        let mut model = String::new();
+        for line in text.split('\n') {
+            if line.contains("\"session_meta\"") {
+                if let Ok(v) = serde_json::from_str::<Value>(line) {
+                    if let Some(p) = v.get("payload") {
+                        cwd = p.get("cwd").and_then(Value::as_str).map(String::from);
+                        if let Some(id) = p.get("id").and_then(Value::as_str) {
+                            sid = id.to_string();
+                        }
+                    }
+                }
+                continue;
+            }
+            if line.contains("\"turn_context\"") {
+                if let Ok(v) = serde_json::from_str::<Value>(line) {
+                    if let Some(m) = v.get("payload").and_then(|p| p.get("model")).and_then(Value::as_str) {
+                        model = m.to_string();
+                    }
+                }
+                continue;
+            }
+            if !line.contains("\"token_count\"") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+            let Some(lt) = v.pointer("/payload/info/last_token_usage") else { continue };
+            let num = |k: &str| lt.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+            let ts = v
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(crate::transcript::parse_ts)
+                .unwrap_or_else(now_ms);
+            let cached = num("cached_input_tokens");
+            let tok = Tok {
+                input: (num("input_tokens") - cached).max(0.0),
+                out: num("output_tokens") + num("reasoning_output_tokens"),
+                cw: 0.0,
+                cr: cached,
+            };
+            let friendly = crate::backend::backend(crate::backend::Agent::Codex).friendly_model(&model);
+            let project = cwd.as_deref().map(basename).unwrap_or_else(|| "другое".into());
+            Self::add_record(&mut self.state.lock().unwrap(), ts, &friendly, &project, "codex", &sid, tok);
+        }
+        from_offset + consumed
     }
 
     pub fn backfilled(&self) -> bool {

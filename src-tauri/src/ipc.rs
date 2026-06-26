@@ -302,15 +302,17 @@ pub fn chat_open(app: AppHandle, session_id: String) -> Value {
     let Some(tr) = s.transcript else {
         return err("Нет транскрипта — сессия ещё не слала событий (перезапусти claude)");
     };
-    let items: Vec<transcript::ChatItem> = transcript::chain_from_entries(
-        transcript::read_recent_entries(std::path::Path::new(&tr), 512 * 1024),
-    )
-    .iter()
-    .flat_map(transcript::to_chat_items)
-    .collect();
+    // Парсер транскрипта — по бэкенду сессии (Claude JSONL vs Codex rollout).
+    let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
+    let be = crate::backend::backend(agent);
+    let items: Vec<transcript::ChatItem> = be
+        .read_entries(std::path::Path::new(&tr), 512 * 1024)
+        .iter()
+        .flat_map(|e| be.to_chat_items(e))
+        .collect();
     let tail_start = items.len().saturating_sub(80);
     let items = &items[tail_start..];
-    d.tail.start(app.clone(), session_id.clone(), tr.clone());
+    d.tail.start(app.clone(), agent, session_id.clone(), tr.clone());
     println!(
         "[jarvis] chat:open {} items={} file={}",
         ellipsize(&session_id, 8),

@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tauri::AppHandle;
 
-use crate::transcript::to_chat_items;
+use crate::backend::{backend, Agent};
 use crate::windows;
 
 pub struct TailHandle {
@@ -28,14 +28,14 @@ impl TailHandle {
         }
     }
 
-    pub fn start(&self, app: AppHandle, session_id: String, file: String) {
+    pub fn start(&self, app: AppHandle, agent: Agent, session_id: String, file: String) {
         self.stop();
-        let handle = tauri::async_runtime::spawn(tail_loop(app, session_id, PathBuf::from(file)));
+        let handle = tauri::async_runtime::spawn(tail_loop(app, agent, session_id, PathBuf::from(file)));
         *self.current.lock().unwrap() = Some(handle);
     }
 }
 
-async fn tail_loop(app: AppHandle, session_id: String, file: PathBuf) {
+async fn tail_loop(app: AppHandle, agent: Agent, session_id: String, file: PathBuf) {
     // стартуем с текущего конца: историю уже отдал chat:open
     let mut offset: u64 = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
     let mut rest = String::new();
@@ -63,7 +63,7 @@ async fn tail_loop(app: AppHandle, session_id: String, file: PathBuf) {
                 continue;
             }
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                items.extend(to_chat_items(&v));
+                items.extend(backend(agent).to_chat_items(&v));
             }
         }
         if !items.is_empty() {

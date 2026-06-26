@@ -166,6 +166,12 @@ fn toast_emit(d: &Daemon, event: &'static str, payload: serde_json::Value) {
     }
 }
 
+/// Эмит голосового HUD-события (`voice-hud`) в окно `toast`. Через тот же буфер,
+/// что toast-* — ранние фазы цикла не теряются, пока webview тоста грузится.
+pub fn hud_emit(d: &Daemon, payload: serde_json::Value) {
+    toast_emit(d, "voice-hud", payload);
+}
+
 /// Мост тостов загрузился: доливаем накопленное в исходном порядке.
 pub fn toast_flush(d: &Daemon) {
     d.toast_ready.store(true, std::sync::atomic::Ordering::SeqCst);

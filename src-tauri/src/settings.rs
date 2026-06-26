@@ -64,6 +64,12 @@ impl Store {
         let _ = fs::create_dir_all(jarvis_dir());
         if let Err(err) = fs::write(file(), serde_json::to_string_pretty(&merged).unwrap() + "\n") {
             eprintln!("[jarvis] не смог записать настройки: {err}");
+        } else {
+            // settings.json может хранить секрет (proxy с паролем) — закрываем права
+            // только владельцу (как tokens.json). Не маскируем proxy при отдаче в UI:
+            // окно онбординга префиллит и шлёт его обратно (round-trip сломался бы).
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(file(), fs::Permissions::from_mode(0o600));
         }
         merged
     }

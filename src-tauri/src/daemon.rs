@@ -567,7 +567,7 @@ impl Daemon {
         // лог жизненного цикла (tool-события не пишем — их сотни)
         if matches!(
             event,
-            "session-start" | "prompt" | "notification" | "stop" | "stop-failure" | "session-end"
+            "session-start" | "prompt" | "notification" | "permission" | "stop" | "stop-failure" | "session-end"
         ) {
             crate::log::line(&format!("[event] {event} sid={}", ellipsize(&sid, 8)));
         }
@@ -614,6 +614,17 @@ impl Daemon {
             }
             if let Some(agent) = evt_obj.get("agent").and_then(Value::as_str) {
                 s.agent = Some(agent.to_string());
+            }
+            // Codex кладёт модель в КАЖДЫЙ хук-payload — ставим напрямую (у Claude
+            // модель майнится из транскрипта в refresh_meta). Не перетираем свежий
+            // ручной выбор: тот же 30с-guard по model_at, что и в refresh_meta.
+            let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
+            if agent == crate::backend::Agent::Codex {
+                if let Some(m) = p.get("model").and_then(Value::as_str).filter(|m| !m.is_empty()) {
+                    if s.model_at.is_none_or(|t| now - t > 30_000) {
+                        s.model = Some(crate::backend::backend(agent).friendly_model(m));
+                    }
+                }
             }
             if let Some(pane) = evt_obj.get("tmux_pane").and_then(Value::as_str) {
                 if !pane.is_empty() && s.tmux_pane.as_deref() != Some(pane) {
@@ -780,6 +791,41 @@ impl Daemon {
                         sid: sid.clone(),
                         payload: Value::Object(p.clone()),
                     });
+                }
+
+                // Codex: PermissionRequest — агент ждёт подтверждения инструмента
+                // (аналог Claude notification, но без поля message). → Waiting.
+                "permission" => {
+                    let tool = p.get("tool_name").and_then(Value::as_str).unwrap_or("");
+                    let msg = if tool.is_empty() {
+                        "Codex ждёт подтверждения".to_string()
+                    } else {
+                        format!("Codex: подтвердить {tool}")
+                    };
+                    let is_new = !(s.status == Status::Waiting && s.detail == msg);
+                    s.status = Status::Waiting;
+                    s.detail = msg.clone();
+                    if is_new && self.settings.bool("notifyWaiting") {
+                        effects.push(Effect::NotifyWaiting {
+                            title: format!("{} — нужен ты", s.project.as_deref().unwrap_or("?")),
+                            body: msg,
+                            sid: sid.clone(),
+                        });
+                    }
+                }
+
+                // Codex SubagentStart/Stop: agent_type/agent_id (нет tool_input как у
+                // Claude Task). Лепим синтетический input под subagent_start/stop.
+                "subagent-start" => {
+                    s.status = Status::Working;
+                    let at = p.get("agent_type").and_then(Value::as_str).unwrap_or("сабагент");
+                    let inp = serde_json::json!({ "subagent_type": at, "description": at });
+                    subagent_start(s, Some(&inp), now);
+                }
+                "subagent-stop" => {
+                    let at = p.get("agent_type").and_then(Value::as_str).filter(|x| !x.is_empty());
+                    let inp = at.map(|a| serde_json::json!({ "description": a }));
+                    subagent_stop(s, inp.as_ref(), now);
                 }
 
                 _ => {}
@@ -1756,6 +1802,21 @@ mod tests {
 
         assert!(evicted.is_empty());
         assert_eq!(m.len(), 2, "две параллельные сессии в разных панах живут обе");
+    }
+
+    #[test]
+    fn subagent_codex_shape_start_and_stop() {
+        // Codex SubagentStart/Stop несут agent_type (не tool_input как Claude Task);
+        // reduce лепит синтетический input — проверяем, что контракт держится.
+        let mut s = sess("x", None);
+        let inp = serde_json::json!({ "subagent_type": "code-reviewer", "description": "code-reviewer" });
+        subagent_start(&mut s, Some(&inp), 100);
+        assert_eq!(s.subagents.len(), 1);
+        assert_eq!(s.subagents[0].name, "code-reviewer");
+        assert_eq!(s.subagents[0].kind.as_deref(), Some("code-reviewer"));
+        assert!(s.subagents[0].stopped_at.is_none());
+        subagent_stop(&mut s, Some(&serde_json::json!({ "description": "code-reviewer" })), 200);
+        assert_eq!(s.subagents[0].stopped_at, Some(200));
     }
 
     #[test]

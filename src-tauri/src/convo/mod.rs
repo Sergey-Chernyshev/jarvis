@@ -6,4 +6,5 @@
 //! Многоход/VAD/барж-ин — вехи 2b/2c.
 
 pub mod plan;
+pub mod skills;
 pub mod snapshot;

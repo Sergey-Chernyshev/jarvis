@@ -2,7 +2,14 @@
 //! Reads → данные; route/control → consent. Чистая часть (меню, валидация)
 //! юнит-тестируема; `dispatch` (исполнение) добавляется в оркестраторе.
 
-use serde_json::Value;
+use std::path::Path;
+use std::sync::Arc;
+
+use serde_json::{json, Value};
+
+use crate::convo::plan::Action;
+use crate::daemon::Daemon;
+use crate::route::SfGuard;
 
 /// Исход исполнения скила.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +67,47 @@ pub fn skills_menu() -> String {
 - keep_awake{minutes|off} — не давать маку уснуть. args: {\"minutes\":<1..600>} или {\"off\":true}\n\
 - mute{on|off} — звук Джарвиса. args: {\"on\":<true|false>}"
         .to_string()
+}
+
+/// Прочитать хвост транскрипта сессии (как `chats.read`, in-process).
+fn read_chat(d: &Arc<Daemon>, id: &str) -> SkillOutcome {
+    let Some(s) = d.session(id) else {
+        return SkillOutcome::Rejected("сессия не найдена".into());
+    };
+    let Some(tr) = s.transcript else {
+        return SkillOutcome::Rejected("нет транскрипта сессии".into());
+    };
+    let items: Vec<crate::transcript::ChatItem> = crate::transcript::chain_from_entries(
+        crate::transcript::read_recent_entries(Path::new(&tr), 512 * 1024),
+    )
+    .iter()
+    .flat_map(crate::transcript::to_chat_items)
+    .collect();
+    let start = items.len().saturating_sub(40);
+    SkillOutcome::Data(json!({ "session_id": id, "project": s.project, "items": &items[start..] }))
+}
+
+/// Исполнить действие плана. reads → Data; route → Staged (через route::*).
+/// control (set_model/set_effort/keep_awake/mute) — добавляется в Task 6.
+/// `guard` уезжает в route (держит single-flight весь stage-window); для прочих
+/// веток дропается по выходу.
+pub async fn dispatch(d: &Arc<Daemon>, action: &Action, guard: SfGuard) -> SkillOutcome {
+    match action.skill.as_str() {
+        "time" => SkillOutcome::Data(json!({ "now": crate::convo::now_string() })),
+        "session_chat" => match action.args.get("id").and_then(Value::as_str) {
+            Some(id) => read_chat(d, id),
+            None => SkillOutcome::Rejected("нет id".into()),
+        },
+        "route" => match action.args.get("prompt").and_then(Value::as_str) {
+            Some(prompt) => {
+                // полный путь п/п-1: скоринг → stage-then-send / пикер; guard внутрь
+                crate::route::route_transcript(d.clone(), prompt.to_string(), guard).await;
+                SkillOutcome::Staged
+            }
+            None => SkillOutcome::Rejected("нет prompt".into()),
+        },
+        other => SkillOutcome::Rejected(format!("неизвестный скил: {other}")),
+    }
 }
 
 #[cfg(test)]

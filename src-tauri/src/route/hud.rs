@@ -15,6 +15,10 @@ pub enum Phase {
     Listening { secs: u32 },
     /// Распознали реплику.
     Heard { text: String },
+    /// Мозг думает (идёт вызов Haiku).
+    Thinking,
+    /// Голосовой ответ ассистента (п/п-2): показываем текст того, что озвучиваем.
+    Reply { text: String },
     /// Стейдж: отправлю в `label` через `secs` с, текст — `text`, отмена по `nonce`.
     Staged { nonce: String, label: String, text: String, secs: u32 },
     /// Доставлено (или поставлено в очередь, если `queued`).
@@ -43,6 +47,8 @@ pub fn hud_payload(p: Phase) -> Value {
             v
         }
         Phase::Heard { text } => base("heard", "Услышал", &text),
+        Phase::Thinking => base("thinking", "Думаю…", ""),
+        Phase::Reply { text } => base("reply", "Jarvis", &text),
         Phase::Staged { nonce, label, text, secs } => {
             let mut v = base("staged", "Отправлю", &text);
             v["nonce"] = json!(nonce);

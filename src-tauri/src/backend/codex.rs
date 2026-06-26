@@ -57,21 +57,20 @@ impl Backend for CodexBackend {
         // Codex rollout линейный (без uuid/parentUuid) → просто хвост JSONL.
         crate::transcript::read_recent_entries(file, max_bytes)
     }
-    fn to_chat_items(&self, _entry: &Value) -> Vec<ChatItem> {
-        // инкремент 3: парсер rollout (session_meta/turn_context/response_item/event_msg)
-        Vec::new()
+    fn to_chat_items(&self, entry: &Value) -> Vec<ChatItem> {
+        super::codex_transcript::to_chat_items(entry)
     }
-    fn extract_title(&self, _entries: &[Value]) -> Option<String> {
-        None // инкремент 3
+    fn extract_title(&self, entries: &[Value]) -> Option<String> {
+        super::codex_transcript::extract_title(entries)
     }
     fn extract_branch(&self, _entries: &[Value]) -> Option<String> {
-        None // инкремент 3 (session_meta.git.branch)
+        None // session_meta.git отсутствует в rollout — ветка недоступна
     }
-    fn extract_model(&self, _entries: &[Value]) -> Option<String> {
-        None // инкремент 3 (turn_context.model)
+    fn extract_model(&self, entries: &[Value]) -> Option<String> {
+        super::codex_transcript::extract_model(entries)
     }
     fn transcript_dir_for(&self, _cwd: &str) -> Option<PathBuf> {
-        None // инкремент 3 (индекс из session_index.jsonl)
+        None // Codex не кодирует cwd в путь; индекс — инкремент 6 (history)
     }
     fn resume_cmd(&self, sid: &str) -> String {
         format!("codex resume {sid}")

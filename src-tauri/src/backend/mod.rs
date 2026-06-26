@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use crate::transcript::ChatItem;
 
 pub mod codex;
+pub mod codex_transcript;
 
 /// Какой CLI-агент стоит за сессией/вызовом.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

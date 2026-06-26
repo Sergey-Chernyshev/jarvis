@@ -109,6 +109,7 @@ echo '{"session_id":"t1","cwd":"'$PWD'"}' | ~/.jarvis/bin/jarvis-hook claude sto
 
 `npm run setup` ставит PATH-шим `~/.jarvis/shims/claude` (паттерн pyenv, managed-блок в `~/.zshrc` между маркерами jarvis). После `exec zsh` каждый интерактивный запуск `claude` прозрачно оборачивается в tmux на **отдельном сервере** (`-L jarvis`, конфиг `~/.jarvis/tmux.conf`): без статус-бара, мышь скроллит, личный tmux не затрагивается. В iTerm2 — control mode (`-CC`), родные табы. Headless-запуски (`-p`, пайпы, `$TMUX`) не оборачиваются. Вставка: `set-buffer → paste-buffer -p → send-keys Enter` (многострочные промпты доходят одним куском). Палитра команд (`/` в поле ответа) даёт доступ к остальным слэш-командам.
 
+- Отключить tmux-обёртку через консоль: разово `JARVIS_TMUX=off claude`, на вкладку `export JARVIS_TMUX=off`, вернуть — `unset JARVIS_TMUX`.
 - Сессия вне tmux помечена «вне tmux» — управлять ей нельзя; панель подскажет, как завести её в tmux (`claude --resume <session_id>`).
 - Закрыл окно терминала — агент жив: tmux-сессия уходит в detach, Jarvis продолжает следить. Переподключиться: `tmux -L jarvis attach -t <имя>`.
 - **Модель** видна бесплатно (пишется в transcript каждым ходом ассистента). **Effort** снаружи не читается — панель ведёт оптимистичное состояние, подсвечивая то, что выставила сама.

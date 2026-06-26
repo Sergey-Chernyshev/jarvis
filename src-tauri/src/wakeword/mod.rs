@@ -96,6 +96,7 @@ impl WakeSession {
                 0.0
             }
         };
+        wake_dbg(score);
         if self.detector.feed(score) {
             // снимок аудио срабатывания (преролл) — для верификации и STT-захвата
             let preroll = self.hub.preroll();
@@ -106,6 +107,30 @@ impl WakeSession {
             }
             self.engine.reset();
         }
+    }
+}
+
+/// Диагностика скоринга wake (включается `JARVIS_WAKE_DEBUG=1`). Раз в ~1с пишет
+/// пиковый скор и счётчик кадров — видно, текут ли кадры и какие скоры выдаёт
+/// движок (отличает «движок молчит» от «близко к порогу» от «дребезг/кулдаун»).
+#[inline]
+fn wake_dbg(score: f32) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("JARVIS_WAKE_DEBUG").is_some()) {
+        return;
+    }
+    static N: AtomicU32 = AtomicU32::new(0);
+    static MAX: AtomicU32 = AtomicU32::new(0);
+    let cur = f32::from_bits(MAX.load(Ordering::Relaxed));
+    if score > cur {
+        MAX.store(score.to_bits(), Ordering::Relaxed);
+    }
+    let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+    if n % 13 == 0 {
+        let mx = f32::from_bits(MAX.swap(0, Ordering::Relaxed));
+        crate::log::line(&format!("[wake:dbg] кадров={n} пик-скор за ~1с={mx:.4}"));
     }
 }
 

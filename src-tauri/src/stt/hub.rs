@@ -405,6 +405,24 @@ impl AudioHub {
         if interleaved.iter().any(|&s| s.abs() > 1e-4) {
             self.nonzero_frames.fetch_add(frames.len() as u64, Ordering::Relaxed);
         }
+        // ДИАГНОСТИКА (JARVIS_WAKE_DEBUG): пик НАТИВНОГО буфера ДО downmix/ресемпла,
+        // формат входа — изолирует «тихий микрофон» от «аттенюации в нашем тракте».
+        if std::env::var_os("JARVIS_WAKE_DEBUG").is_some() {
+            use std::sync::atomic::AtomicU32;
+            static N: AtomicU32 = AtomicU32::new(0);
+            static MX: AtomicU32 = AtomicU32::new(0);
+            let pk = interleaved.iter().fold(0f32, |a, &s| a.max(s.abs()));
+            if pk > f32::from_bits(MX.load(Ordering::Relaxed)) {
+                MX.store(pk.to_bits(), Ordering::Relaxed);
+            }
+            let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+            if n % 50 == 0 {
+                let mx = f32::from_bits(MX.swap(0, Ordering::Relaxed));
+                crate::log::line(&format!(
+                    "[audio:dbg] native_peak_МАКС={mx:.4} src_rate={src_rate} channels={channels}"
+                ));
+            }
+        }
         for frame in frames {
             // try_send: отставший потребитель теряет кадр (не растим память без
             // предела), отвалившийся (Receiver уронен) — выбывает из веера.

@@ -197,6 +197,209 @@ fn whisper_model_path() -> PathBuf { stt_dir().join("ggml-large-v3-turbo-q5_0.bi
 const WHISPER_MODEL_URL: &str =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin";
 
+/* ===== Гибридная загрузка: huggingface.co/github — через прокси, CDN — напрямую =====
+ *
+ * В части сетей (корп. прокси) huggingface.co доступен ТОЛЬКО через прокси, а CDN
+ * с самими весами (Xet/LFS, *.cdn.hf.co; GitHub-релизы → objects.githubusercontent.com)
+ * через прокси РВЁТ CONNECT и качается только напрямую. Поэтому проходим цепочку
+ * редиректов вручную и выбираем канал по хосту каждого хопа. На reqwest (а не curl):
+ * нет утечки пароля прокси в argv, и нет наследования env-прокси для прямого хопа. */
+
+/// Хосты CDN, к которым ходим НАПРЯМУЮ (в обход прокси).
+fn is_direct_cdn_host(host: &str) -> bool {
+    host.ends_with(".cdn.hf.co")
+        || host.ends_with(".xethub.hf.co")
+        || host.ends_with(".githubusercontent.com")
+        || host.starts_with("cdn-lfs")
+}
+
+/// reqwest-клиент с ручной проходкой редиректов. `direct=true` → без прокси (CDN);
+/// иначе через `proxy` (если задан) — для huggingface.co/github.com.
+fn dl_client(proxy: Option<&str>, direct: bool) -> Result<reqwest::blocking::Client, String> {
+    let mut b = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .user_agent("jarvis-installer");
+    b = match proxy {
+        Some(p) if !direct && !p.is_empty() => {
+            b.proxy(reqwest::Proxy::all(p).map_err(|e| format!("proxy: {e}"))?)
+        }
+        _ => b.no_proxy(),
+    };
+    b.build().map_err(|e| format!("http client: {e}"))
+}
+
+/// Скачать `url` в `dst` атомарно, маршрутизируя каналы по хосту каждого редиректа.
+/// `expected` (если задан) сверяется с финальным размером. Прогресс — проценты по
+/// Content-Length. tmp→rename. Fail-safe: при ошибке tmp удаляется, возвращается Err.
+fn fetch_to_file(
+    url: &str,
+    dst: &Path,
+    proxy: Option<&str>,
+    progress: &Progress,
+    label: &str,
+    expected: Option<u64>,
+) -> Result<(), String> {
+    use std::io::{Read, Write};
+    let mut current = reqwest::Url::parse(url).map_err(|e| format!("{label}: url: {e}"))?;
+    for _hop in 0..8 {
+        let host = current.host_str().unwrap_or("").to_string();
+        let direct = is_direct_cdn_host(&host);
+        let client = dl_client(proxy, direct)?;
+        let resp = client
+            .get(current.clone())
+            .send()
+            .map_err(|e| format!("{label}: запрос к {host}: {e}"))?;
+        let status = resp.status();
+        if status.is_redirection() {
+            let loc = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| format!("{label}: редирект {status} без Location"))?;
+            current = current.join(loc).map_err(|e| format!("{label}: bad Location: {e}"))?;
+            continue;
+        }
+        if !status.is_success() {
+            return Err(format!("{label}: HTTP {status} от {host}"));
+        }
+
+        // успех — стримим тело в tmp с прогрессом по Content-Length
+        let total = resp.content_length().or(expected);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("{label}: mkdir: {e}"))?;
+        }
+        let tmp = dst.with_file_name(format!(
+            ".{}.tmp-{}",
+            dst.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id()
+        ));
+        let mut file = fs::File::create(&tmp).map_err(|e| format!("{label}: create tmp: {e}"))?;
+        let mut resp = resp;
+        let mut buf = [0u8; 65536];
+        let mut done: u64 = 0;
+        let mut last_pct: i64 = -10;
+        loop {
+            let n = match resp.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(format!("{label}: чтение тела: {e}"));
+                }
+            };
+            if let Err(e) = file.write_all(&buf[..n]) {
+                let _ = fs::remove_file(&tmp);
+                return Err(format!("{label}: запись: {e}"));
+            }
+            done += n as u64;
+            if let Some(t) = total {
+                if t > 0 {
+                    let pct = ((done as f64 / t as f64) * 100.0) as i64;
+                    if pct - last_pct >= 4 || pct >= 100 {
+                        last_pct = pct;
+                        progress(Step::info("Модель", format!("{label} — {pct}%")));
+                    }
+                }
+            }
+        }
+        drop(file);
+
+        // проверка целостности по ожидаемому размеру (если знаем)
+        if let Some(exp) = expected {
+            if exp > 0 {
+                let got = fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+                if got != exp {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(format!("{label}: размер {got} != ожидаемого {exp}"));
+                }
+            }
+        }
+        fs::rename(&tmp, dst).map_err(|e| format!("{label}: rename: {e}"))?;
+        return Ok(());
+    }
+    Err(format!("{label}: слишком много редиректов"))
+}
+
+/// Список файлов репозитория HF (`api/models/<repo>/tree/main`) — через прокси.
+/// Возвращает пары (относительный путь, размер). Для LFS размер — из `lfs.size`.
+fn hf_tree(repo: &str, proxy: Option<&str>) -> Result<Vec<(String, u64)>, String> {
+    let url = format!("https://huggingface.co/api/models/{repo}/tree/main?recursive=1");
+    let mut b = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(60))
+        .user_agent("jarvis-installer");
+    b = match proxy {
+        Some(p) if !p.is_empty() => {
+            b.proxy(reqwest::Proxy::all(p).map_err(|e| format!("proxy: {e}"))?)
+        }
+        _ => b.no_proxy(),
+    };
+    let client = b.build().map_err(|e| format!("http client: {e}"))?;
+    let resp = client.get(&url).send().map_err(|e| format!("tree {repo}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("tree {repo}: HTTP {}", resp.status()));
+    }
+    let arr: Vec<Value> = resp.json().map_err(|e| format!("tree {repo}: json: {e}"))?;
+    let mut files = Vec::new();
+    for f in &arr {
+        if f.get("type").and_then(Value::as_str) == Some("directory") {
+            continue;
+        }
+        let path = f.get("path").and_then(Value::as_str).unwrap_or("");
+        if path.is_empty() {
+            continue;
+        }
+        let size = f
+            .get("lfs")
+            .and_then(|l| l.get("size"))
+            .and_then(Value::as_u64)
+            .or_else(|| f.get("size").and_then(Value::as_u64))
+            .unwrap_or(0);
+        files.push((path.to_string(), size));
+    }
+    if files.is_empty() {
+        return Err(format!("tree {repo}: пустой список файлов"));
+    }
+    Ok(files)
+}
+
+/// Репозиторий mlx-community для ключа STT-движка Qwen.
+fn qwen_repo(key: &str) -> Option<&'static str> {
+    match key {
+        "qwen3-0.6b" => Some("mlx-community/Qwen3-ASR-0.6B-8bit"),
+        "qwen3-1.7b" => Some("mlx-community/Qwen3-ASR-1.7B-4bit"),
+        _ => None,
+    }
+}
+
+/// Предзагрузить веса Qwen3 в локальную папку сайдкара `models/<key>/` (гибридом).
+/// Сайдкар возьмёт их локально (по `config.json`) и не пойдёт в HF. Идемпотентно:
+/// пропускает файлы, чей размер уже совпал. Fail-safe.
+pub fn preload_qwen(key: &str, progress: &Progress, proxy: Option<&str>) -> Result<(), String> {
+    let repo = qwen_repo(key).ok_or_else(|| format!("неизвестная модель Qwen: {key}"))?;
+    if qwen_weights_present(key) {
+        progress(Step::info("STT-Qwen", format!("{key}: веса уже на месте")));
+        return Ok(());
+    }
+    let dir = qwen_weights_dir(key);
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {key}: {e}"))?;
+    progress(Step::info("STT-Qwen", format!("{key}: получаю список файлов…")));
+    let files = hf_tree(repo, proxy)?;
+    progress(Step::info("STT-Qwen", format!("{key}: {} файлов, качаю (~1 ГБ)…", files.len())));
+    for (path, size) in &files {
+        let out = dir.join(path);
+        if out.exists() && *size > 0 && fs::metadata(&out).map(|m| m.len()).unwrap_or(0) == *size {
+            continue; // уже скачан и размер совпал
+        }
+        let url = format!("https://huggingface.co/{repo}/resolve/main/{path}");
+        let exp = if *size > 0 { Some(*size) } else { None };
+        fetch_to_file(&url, &out, proxy, progress, &format!("{key}/{path}"), exp)?;
+    }
+    progress(Step::done("STT-Qwen", format!("{key}: веса установлены (локально, без HF)")));
+    Ok(())
+}
+
 /// Каталог STT-MLX сайдкара (Qwen3-ASR): ~/.jarvis/stt-mlx/
 fn stt_mlx_dir() -> PathBuf { jarvis_dir().join("stt-mlx") }
 
@@ -223,30 +426,8 @@ pub fn install_whisper(progress: &Progress, proxy: Option<&str>) -> Result<(), S
         "скачиваю ggml-large-v3-turbo-q5_0.bin (~574 МБ) — это займёт время…",
     ));
 
-    // Атомарная загрузка: tmp-файл → rename.
-    let tmp_path = stt_dir().join(".ggml-large-v3-turbo-q5_0.bin.tmp");
-
-    // Строим curl-команду с прокси и показом прогресса.
-    let proxy_arg = match proxy {
-        Some(p) if !p.is_empty() => format!("--proxy '{p}' "),
-        _ => String::new(),
-    };
-    let curl_cmd = format!(
-        "curl -L --progress-bar {proxy_arg}-o '{}' '{WHISPER_MODEL_URL}'",
-        tmp_path.display(),
-    );
-
-    let result = run_streamed("curl whisper model", &curl_cmd, proxy, progress, "Whisper-модель");
-
-    if result.is_err() {
-        // Убрать частично скачанный файл при ошибке.
-        let _ = fs::remove_file(&tmp_path);
-        return result;
-    }
-
-    // Атомарный rename tmp → финальный путь.
-    fs::rename(&tmp_path, whisper_model_path())
-        .map_err(|e| format!("rename whisper model: {e}"))?;
+    // Гибридная загрузка: HF-resolve через прокси → CDN-блоб напрямую (атомарно).
+    fetch_to_file(WHISPER_MODEL_URL, &whisper_model_path(), proxy, progress, "Whisper-модель", None)?;
 
     progress(Step::done("STT-Whisper", "модель установлена (~574 МБ)"));
     Ok(())
@@ -283,24 +464,14 @@ fn wakeword_models_present() -> bool {
 /// Идемпотентно (пропуск существующих), атомарно (tmp→rename), fail-safe.
 pub fn install_wakeword(progress: &Progress, proxy: Option<&str>) -> Result<(), String> {
     fs::create_dir_all(wakeword_dir()).map_err(|e| format!("mkdir wakeword: {e}"))?;
-    let proxy_arg = match proxy {
-        Some(p) if !p.is_empty() => format!("--proxy '{p}' "),
-        _ => String::new(),
-    };
     for (name, url) in WAKEWORD_MODELS {
         let dst = wakeword_dir().join(name);
         if dst.exists() {
             progress(Step::info("wake-word", format!("{name} уже на месте")));
             continue;
         }
-        let tmp = wakeword_dir().join(format!(".{name}.tmp"));
-        let cmd = format!("curl -L --progress-bar {proxy_arg}-o '{}' '{url}'", tmp.display());
-        let r = run_streamed("curl wakeword model", &cmd, proxy, progress, name);
-        if r.is_err() {
-            let _ = fs::remove_file(&tmp);
-            return r;
-        }
-        fs::rename(&tmp, &dst).map_err(|e| format!("rename {name}: {e}"))?;
+        // GitHub-релиз → редирект на objects.githubusercontent.com (CDN, напрямую).
+        fetch_to_file(url, &dst, proxy, progress, name, None)?;
         progress(Step::done("wake-word", format!("{name} установлена")));
     }
     Ok(())
@@ -1328,5 +1499,54 @@ mod tests {
         assert!(d.ends_with("qwen3-0.6b"), "каталог заканчивается на ключ модели");
         let s = d.to_string_lossy();
         assert!(s.contains("stt-mlx") && s.contains("models"), "путь внутри stt-mlx/models: {s}");
+    }
+
+    // --- Инкр.2: гибридная загрузка ---
+
+    #[test]
+    fn direct_cdn_hosts_detected() {
+        // CDN-хосты (качаем напрямую, в обход прокси)
+        assert!(is_direct_cdn_host("us.aws.cdn.hf.co"));
+        assert!(is_direct_cdn_host("cas-bridge.xethub.hf.co"));
+        assert!(is_direct_cdn_host("objects.githubusercontent.com"));
+        assert!(is_direct_cdn_host("cdn-lfs-us-1.huggingface.co"));
+        // не-CDN (идут через прокси)
+        assert!(!is_direct_cdn_host("huggingface.co"));
+        assert!(!is_direct_cdn_host("github.com"));
+        assert!(!is_direct_cdn_host(""));
+    }
+
+    #[test]
+    fn qwen_repo_mapping() {
+        assert_eq!(qwen_repo("qwen3-0.6b"), Some("mlx-community/Qwen3-ASR-0.6B-8bit"));
+        assert_eq!(qwen_repo("qwen3-1.7b"), Some("mlx-community/Qwen3-ASR-1.7B-4bit"));
+        assert_eq!(qwen_repo("whisper-turbo"), None);
+        assert_eq!(qwen_repo("nonsense"), None);
+    }
+
+    // Сетевой смоук: реально дёргает HF tree + качает мелкий файл гибридом.
+    // Не герметичен (нужны сеть/прокси) → #[ignore]; запуск вручную:
+    //   HTTP_PROXY=… cargo test --bin jarvis smoke_hf_hybrid -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn smoke_hf_hybrid() {
+        let proxy = std::env::var("HTTP_PROXY").ok();
+        let files = hf_tree("mlx-community/Qwen3-ASR-0.6B-8bit", proxy.as_deref())
+            .expect("hf_tree должен вернуть список файлов");
+        assert!(files.iter().any(|(p, _)| p == "config.json"), "в дереве есть config.json");
+        assert!(files.iter().any(|(p, _)| p == "model.safetensors"), "в дереве есть веса");
+        let tmp = std::env::temp_dir().join("jarvis-smoke-config.json");
+        let _ = fs::remove_file(&tmp);
+        fetch_to_file(
+            "https://huggingface.co/mlx-community/Qwen3-ASR-0.6B-8bit/resolve/main/config.json",
+            &tmp,
+            proxy.as_deref(),
+            &|_| {},
+            "smoke",
+            None,
+        )
+        .expect("fetch config.json через прокси");
+        assert!(fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0) > 1000, "config.json скачан");
+        let _ = fs::remove_file(&tmp);
     }
 }

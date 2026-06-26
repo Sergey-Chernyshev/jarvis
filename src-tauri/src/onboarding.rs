@@ -194,3 +194,36 @@ pub fn wake_install_models(app: AppHandle) {
         );
     });
 }
+
+/// Скачать веса Qwen3 (`qwen3-0.6b`/`qwen3-1.7b`) в локальную папку сайдкара —
+/// гибридной загрузкой (HF через прокси, CDN напрямую). Сайдкар затем берёт их
+/// локально, без похода в HF. Фоном, fail-safe; прогресс → `stt_install_progress`,
+/// финал → `stt_install_done` (kind = ключ модели).
+#[tauri::command]
+pub fn stt_install_qwen(app: AppHandle, key: String) {
+    let d = crate::daemon::Daemon::get(&app);
+    let proxy = {
+        let s = d.settings.string("proxy");
+        (!s.is_empty()).then_some(s)
+    };
+    std::thread::spawn(move || {
+        let r = install::preload_qwen(
+            &key,
+            &|step: Step| {
+                let _ = app.emit_to("main", "stt_install_progress", step);
+            },
+            proxy.as_deref(),
+        );
+        let ready = install::qwen_weights_present(&key);
+        let _ = app.emit_to(
+            "main",
+            "stt_install_done",
+            serde_json::json!({
+                "kind": key,
+                "ok": r.is_ok(),
+                "error": r.err(),
+                "ready": ready,
+            }),
+        );
+    });
+}

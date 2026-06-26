@@ -9,6 +9,8 @@
 mod capability;
 #[allow(dead_code)] // UI-потребитель подключается в фазе 7 (chat UI)
 mod agent;
+#[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
+mod backend;
 mod claude_bin;
 mod commands_catalog;
 mod daemon;

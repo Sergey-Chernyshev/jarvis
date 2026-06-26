@@ -18,6 +18,14 @@ pub fn claude_dir() -> std::path::PathBuf {
     home_dir().join(".claude")
 }
 
+/// Каталог Codex: $CODEX_HOME или ~/.codex.
+pub fn codex_dir() -> std::path::PathBuf {
+    match std::env::var("CODEX_HOME") {
+        Ok(d) if !d.is_empty() => std::path::PathBuf::from(d),
+        _ => home_dir().join(".codex"),
+    }
+}
+
 pub fn home_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()))
 }

@@ -419,8 +419,14 @@ pub async fn session_set_model(app: AppHandle, session_id: String, model: String
 }
 
 /// Ядро смены модели — общее для IPC и капабилити `sessions.control` (инкр. 8).
+/// Claude: слэш `/model <id>` (+ confirm). Codex: `/model` открывает объединённый
+/// пикер модель+reasoning (отдельного `/effort` нет) — слэш с аргументом best-effort.
 pub(crate) async fn set_model_core(d: &Arc<Daemon>, session_id: &str, model: &str) -> Value {
-    let friendly = friendly_model(model);
+    let agent = d
+        .session(session_id)
+        .map(|s| crate::backend::Agent::from_opt(s.agent.as_deref()))
+        .unwrap_or_default();
+    let friendly = crate::backend::backend(agent).friendly_model(model);
     set_via_slash(d, session_id, format!("/model {model}"), move |s| {
         s.model = Some(friendly); // оптимистично; транскрипт подтвердит
         s.model_at = Some(now_ms());
@@ -435,7 +441,17 @@ pub async fn session_set_effort(app: AppHandle, session_id: String, level: Strin
 }
 
 /// Ядро смены effort — общее для IPC и капабилити `sessions.control` (инкр. 8).
+/// У Codex отдельного `/effort` НЕТ (reasoning меняется внутри `/model`-пикера),
+/// поэтому для codex-сессии это не-операция с понятным сообщением; UI и так
+/// прячет effort-пикер (has_separate_effort=false).
 pub(crate) async fn set_effort_core(d: &Arc<Daemon>, session_id: &str, level: &str) -> Value {
+    let agent = d
+        .session(session_id)
+        .map(|s| crate::backend::Agent::from_opt(s.agent.as_deref()))
+        .unwrap_or_default();
+    if agent == crate::backend::Agent::Codex {
+        return err("Codex: reasoning effort меняется через /model-пикер (отдельной команды нет)");
+    }
     let lv = level.to_string();
     set_via_slash(d, session_id, format!("/effort {level}"), move |s| {
         s.effort = Some(lv); // effort снаружи не читается — ведём оптимистично

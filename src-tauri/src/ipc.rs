@@ -24,9 +24,11 @@ fn err(msg: impl Into<String>) -> Value {
 }
 
 /// Вне tmux мы не вставляем текст — сессией нельзя управлять, пока она не в
-/// tmux. Подсказываем команду: shim завернёт `claude --resume` в наш сервер.
-fn tmux_needed(session_id: &str) -> Value {
-    json!({ "ok": false, "needsTmux": true, "resumeCmd": format!("claude --resume {session_id}") })
+/// tmux. Подсказываем команду resume по агенту: shim завернёт её в наш сервер
+/// (`claude --resume …` либо `codex resume …`).
+fn tmux_needed(agent: crate::backend::Agent, session_id: &str) -> Value {
+    let cmd = crate::backend::backend(agent).resume_cmd(session_id);
+    json!({ "ok": false, "needsTmux": true, "resumeCmd": cmd })
 }
 
 /* ================= состояние и панель ================= */
@@ -395,9 +397,10 @@ pub(crate) async fn set_via_slash(
     apply: impl FnOnce(&mut crate::model::Session),
 ) -> Value {
     let Some(s) = d.session(session_id) else { return err("Сессия не найдена") };
-    let Some(pane) = s.tmux_pane else { return tmux_needed(session_id) };
+    let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
+    let Some(pane) = s.tmux_pane else { return tmux_needed(agent, session_id) };
     if !tmux::pane_alive(&pane).await {
-        return tmux_needed(session_id);
+        return tmux_needed(agent, session_id);
     }
     match tmux::paste_slash(&pane, &slash).await {
         Ok(()) => {
@@ -694,7 +697,11 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
         d.with_session(&session_id, |s| s.tmux_pane = None); // пана умерла
         d.push();
     }
-    tmux_needed(&session_id)
+    let agent = d
+        .session(&session_id)
+        .map(|s| crate::backend::Agent::from_opt(s.agent.as_deref()))
+        .unwrap_or_default();
+    tmux_needed(agent, &session_id)
 }
 
 /// Лесенка «показать терминал»: tmux → вкладка по tty (Terminal/iTerm2) →

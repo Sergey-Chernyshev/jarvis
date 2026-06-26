@@ -42,8 +42,12 @@ pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
                     continue;
                 }
                 let text = b.get("text").and_then(Value::as_str).unwrap_or("");
-                // служебные инъекции <...> — как в Claude-парсере
-                if text.is_empty() || text.starts_with('<') {
+                // служебные инъекции: <...> (как Claude) + впрыск AGENTS.md, который
+                // Codex кладёт первым user-блоком как «# AGENTS.md instructions …».
+                if text.is_empty()
+                    || text.starts_with('<')
+                    || text.starts_with("# AGENTS.md instructions")
+                {
                     continue;
                 }
                 out.push(ChatItem { role, kind: "text", text: text.to_string(), ts });

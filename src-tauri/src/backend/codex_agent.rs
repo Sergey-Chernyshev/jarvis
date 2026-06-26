@@ -19,19 +19,13 @@ pub enum CodexLine {
     Kill(String),
 }
 
-/// Встроенные инструменты Codex (выполнение команд/патчей) — для agent-host
-/// запрещены: единственный разрешённый инструмент — наш MCP.
-fn is_builtin_tool(item_type: &str) -> bool {
-    matches!(
-        item_type,
-        "command_execution" | "local_shell" | "exec" | "shell" | "apply_patch" | "custom_tool_call"
-    )
-}
-
 /// Разобрать одну newline-JSON строку потока `codex exec --json`.
 /// Маппинг: thread.started→Init, item.completed{agent_message}→Delta,
-/// mcp_tool_call(jarvis)→ToolUse, turn.completed→Done. Любой встроенный
-/// инструмент или чужой MCP → Kill. Битый JSON → пустые события (не паникуем).
+/// mcp_tool_call(jarvis)→ToolUse, turn.completed→Done. **Allowlist (fail-closed):**
+/// разрешены только item.type ∈ {agent_message, reasoning, todo_list, mcp_tool_call}
+/// — ВСЁ остальное (command_execution, file_change, web_search, новые типы) → Kill.
+/// Это и есть Codex-замена INV-TOOLS (init без tools[], поэтому по item). Битый
+/// JSON → пустые события (не паникуем).
 pub fn classify_codex_line(line: &str) -> CodexLine {
     let line = line.trim();
     if line.is_empty() {
@@ -50,30 +44,40 @@ pub fn classify_codex_line(line: &str) -> CodexLine {
         "item.started" | "item.completed" => {
             let Some(item) = v.get("item") else { return CodexLine::Events(vec![]) };
             let it = item.get("type").and_then(Value::as_str).unwrap_or("");
-            if is_builtin_tool(it) {
-                return CodexLine::Kill(format!(
-                    "codex использовал встроенный инструмент '{it}' — agent-host убит (разрешён только mcp__jarvis__*)"
-                ));
-            }
-            if it == "mcp_tool_call" {
-                let server = item.get("server").and_then(Value::as_str).unwrap_or("");
-                if server != "jarvis" {
-                    return CodexLine::Kill(format!(
-                        "codex вызвал чужой MCP-сервер '{server}' — agent-host убит"
-                    ));
+            match it {
+                // текст ассистента — только на completed (чтобы не дублировать started)
+                "agent_message" => {
+                    if typ == "item.completed" {
+                        let text = item.get("text").and_then(Value::as_str).unwrap_or("");
+                        if !text.is_empty() {
+                            return CodexLine::Events(vec![AgentEvent::Delta { text: text.to_string() }]);
+                        }
+                    }
+                    CodexLine::Events(vec![])
                 }
-                let name = item.get("tool").and_then(Value::as_str).unwrap_or("").to_string();
-                let input = item.get("arguments").cloned().unwrap_or(Value::Object(Default::default()));
-                return CodexLine::Events(vec![AgentEvent::ToolUse { name, input }]);
-            }
-            // текст ассистента — только на completed (чтобы не дублировать started)
-            if it == "agent_message" && typ == "item.completed" {
-                let text = item.get("text").and_then(Value::as_str).unwrap_or("");
-                if !text.is_empty() {
-                    return CodexLine::Events(vec![AgentEvent::Delta { text: text.to_string() }]);
+                // безвредные не-инструментальные item'ы
+                "reasoning" | "todo_list" => CodexLine::Events(vec![]),
+                // наш MCP — разрешён; чужой — kill. ToolUse только на completed (без дублей)
+                "mcp_tool_call" => {
+                    let server = item.get("server").and_then(Value::as_str).unwrap_or("");
+                    if server != "jarvis" {
+                        return CodexLine::Kill(format!(
+                            "codex вызвал чужой MCP-сервер '{server}' — agent-host убит"
+                        ));
+                    }
+                    if typ == "item.completed" {
+                        let name = item.get("tool").and_then(Value::as_str).unwrap_or("").to_string();
+                        let input = item.get("arguments").cloned().unwrap_or(Value::Object(Default::default()));
+                        return CodexLine::Events(vec![AgentEvent::ToolUse { name, input }]);
+                    }
+                    CodexLine::Events(vec![])
                 }
+                // ВСЁ остальное — встроенный инструмент (command_execution, file_change,
+                // web_search, …) или неизвестный тип → kill (fail-closed allowlist).
+                other => CodexLine::Kill(format!(
+                    "codex использовал встроенный инструмент '{other}' — agent-host убит (разрешён только mcp__jarvis__*)"
+                )),
             }
-            CodexLine::Events(vec![]) // reasoning, error, ...
         }
         "turn.completed" => CodexLine::Events(vec![AgentEvent::Done { result: String::new(), session_id: String::new() }]),
         _ => CodexLine::Events(vec![]),
@@ -132,8 +136,9 @@ impl CodexCliHost {
         }
         args.extend([
             "--json".into(),
-            "-s".into(),
-            "read-only".into(),
+            // sandbox через -c (а НЕ -s): -s не принимается сабкомандой `exec resume`
+            "-c".into(),
+            "sandbox_mode=\"read-only\"".into(),
             "-c".into(),
             format!("mcp_servers.jarvis.command=\"{}\"", self.mcp_bin),
             "-c".into(),
@@ -211,13 +216,19 @@ mod tests {
     }
 
     #[test]
-    fn builtin_shell_triggers_kill() {
-        for it in ["command_execution", "local_shell", "exec", "shell", "apply_patch"] {
-            let line = format!(r#"{{"type":"item.started","item":{{"type":"{it}","id":"i1"}}}}"#);
+    fn allowlist_kills_builtins_and_unknown() {
+        // реальные exec --json типы инструментов + неизвестный → kill (fail-closed)
+        for it in ["command_execution", "file_change", "web_search", "some_future_tool"] {
+            let line = format!(r#"{{"type":"item.completed","item":{{"type":"{it}","id":"i1"}}}}"#);
             match classify_codex_line(&line) {
                 CodexLine::Kill(msg) => assert!(msg.contains(it), "kill называет инструмент: {msg}"),
-                _ => panic!("встроенный инструмент '{it}' должен убивать"),
+                _ => panic!("'{it}' должен убивать (allowlist fail-closed)"),
             }
+        }
+        // разрешённые не-инструменты — НЕ убивают
+        for it in ["reasoning", "todo_list"] {
+            let line = format!(r#"{{"type":"item.completed","item":{{"type":"{it}"}}}}"#);
+            assert_eq!(classify_codex_line(&line), CodexLine::Events(vec![]), "'{it}' разрешён");
         }
     }
 

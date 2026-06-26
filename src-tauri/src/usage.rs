@@ -207,6 +207,26 @@ fn codex_sessions_dir() -> PathBuf {
     crate::util::codex_dir().join("sessions")
 }
 
+/// cwd + session_id из ПЕРВОЙ строки rollout (session_meta). Нужно при
+/// инкрементальном скане: session_meta уже ниже from_offset, иначе токены
+/// уходят в "unknown"/"другое".
+fn codex_meta_head(file: &str) -> (Option<String>, String) {
+    use std::io::BufRead;
+    let Ok(f) = fs::File::open(file) else { return (None, "unknown".into()) };
+    let mut first = String::new();
+    if std::io::BufReader::new(f).read_line(&mut first).is_err() {
+        return (None, "unknown".into());
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(first.trim()) {
+        if let Some(p) = v.get("payload") {
+            let cwd = p.get("cwd").and_then(Value::as_str).map(String::from);
+            let sid = p.get("id").and_then(Value::as_str).unwrap_or("unknown").to_string();
+            return (cwd, sid);
+        }
+    }
+    (None, "unknown".into())
+}
+
 impl Usage {
     pub fn load() -> Self {
         let mut state: State = fs::read_to_string(state_file())
@@ -495,8 +515,8 @@ impl Usage {
         let consumed = text[..=last_nl].len() as u64;
         let text = &text[..last_nl];
 
-        let mut cwd: Option<String> = None;
-        let mut sid = String::from("unknown");
+        // cwd/sid из первой строки (session_meta) — переживают инкрементальный скан
+        let (mut cwd, mut sid) = codex_meta_head(file);
         let mut model = String::new();
         for line in text.split('\n') {
             if line.contains("\"session_meta\"") {

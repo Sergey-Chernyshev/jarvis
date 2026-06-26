@@ -25,6 +25,8 @@ pub enum Phase {
     Sent { label: String, queued: bool },
     /// Пикер: выбери сессию. `options` = (session_id, label).
     Picker { nonce: String, options: Vec<(String, String)> },
+    /// Подтверждение управляющего действия (п/п-2): Да/Отмена по `nonce`.
+    Confirm { nonce: String, text: String },
     /// Отменено пользователем / по таймауту.
     Cancelled,
     /// Ошибка доставки/захвата/распознавания.
@@ -70,6 +72,11 @@ pub fn hud_payload(p: Phase) -> Value {
             let mut v = base("picker", "В какую сессию?", "");
             v["nonce"] = json!(nonce);
             v["options"] = json!(opts);
+            v
+        }
+        Phase::Confirm { nonce, text } => {
+            let mut v = base("confirm", "Подтвердить?", &text);
+            v["nonce"] = json!(nonce);
             v
         }
         Phase::Cancelled => base("cancelled", "Отменено", ""),
@@ -122,6 +129,18 @@ mod tests {
         assert_eq!(v["phase"], "picker");
         assert_eq!(v["options"][0]["sessionId"], "sid-1");
         assert_eq!(v["options"][1]["label"], "b");
+    }
+
+    #[test]
+    fn confirm_thinking_reply_payloads() {
+        let c = hud_payload(Phase::Confirm { nonce: "n".into(), text: "переключить на opus?".into() });
+        assert_eq!(c["phase"], "confirm");
+        assert_eq!(c["nonce"], "n");
+        assert_eq!(c["body"], "переключить на opus?");
+        assert_eq!(hud_payload(Phase::Thinking)["phase"], "thinking");
+        let r = hud_payload(Phase::Reply { text: "сейчас 14:05".into() });
+        assert_eq!(r["phase"], "reply");
+        assert_eq!(r["body"], "сейчас 14:05");
     }
 
     #[test]

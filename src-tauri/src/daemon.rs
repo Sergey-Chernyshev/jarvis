@@ -88,6 +88,9 @@ pub struct Daemon {
     pub picks: std::sync::Arc<crate::route::pick::PendingPicks>,
     /// Голосовая маршрутизация: буфер отложенной отправки (stage-then-send).
     pub stage: std::sync::Arc<crate::route::stage::StageBuffer>,
+    /// Голосовой разговор (п/п-2): ожидающие confirm управления (yes/no из тоста).
+    /// Отдельный инстанс от `pending` (агент-гейт) — резолвится своим IPC.
+    pub vconfirm: std::sync::Arc<crate::capability::confirm_panel::PendingConfirms>,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -177,6 +180,7 @@ impl Daemon {
             wake,
             picks: std::sync::Arc::new(crate::route::pick::PendingPicks::new()),
             stage: std::sync::Arc::new(crate::route::stage::StageBuffer::new()),
+            vconfirm: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
         }
     }
 

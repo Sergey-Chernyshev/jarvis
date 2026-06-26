@@ -84,6 +84,10 @@ pub struct Daemon {
     pub audio: std::sync::Arc<crate::stt::hub::AudioHub>,
     /// Wake-word (инкремент 10): always-on детектор фразы → STT-захват → агент.
     pub wake: std::sync::Arc<crate::wakeword::WakeWord>,
+    /// Голосовая маршрутизация: ожидающие выборы пикера (резолв из in-process IPC).
+    pub picks: std::sync::Arc<crate::route::pick::PendingPicks>,
+    /// Голосовая маршрутизация: буфер отложенной отправки (stage-then-send).
+    pub stage: std::sync::Arc<crate::route::stage::StageBuffer>,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -171,6 +175,8 @@ impl Daemon {
             dictation,
             audio,
             wake,
+            picks: std::sync::Arc::new(crate::route::pick::PendingPicks::new()),
+            stage: std::sync::Arc::new(crate::route::stage::StageBuffer::new()),
         }
     }
 

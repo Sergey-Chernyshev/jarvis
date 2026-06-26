@@ -764,6 +764,28 @@ pub fn agent_confirm(app: AppHandle, nonce: String, approved: bool) -> Value {
     json!({ "ok": known })
 }
 
+/// Голосовая маршрутизация: тап по варианту пикера в тосте → доставить выбор
+/// ждущему роутеру (`session_id == None` → отмена выбора). In-process (НЕ в
+/// MCP-реестре): голосовой агент не может сам себя выбрать.
+#[tauri::command]
+pub fn voice_pick_resolve(app: AppHandle, nonce: String, session_id: Option<String>) -> Value {
+    let d = Daemon::get(&app);
+    let known = d.picks.resolve(&nonce, session_id);
+    json!({ "ok": known })
+}
+
+/// Голосовая маршрутизация: «Отменить» на staged-карточке → снять отложенную
+/// отправку ДО tmux-пасты. true — если успели до истечения окна.
+#[tauri::command]
+pub fn voice_stage_cancel(app: AppHandle, nonce: String) -> Value {
+    let d = Daemon::get(&app);
+    let cancelled = d.stage.cancel(&nonce);
+    if cancelled {
+        crate::route::hud::emit(&d, crate::route::hud::Phase::Cancelled);
+    }
+    json!({ "ok": cancelled })
+}
+
 /* ================= служебное ================= */
 
 /// Снять ложный лимит-баннер по официальному usage (таймер из main).

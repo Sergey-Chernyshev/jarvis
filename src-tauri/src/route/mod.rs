@@ -7,8 +7,10 @@
 //! истёкшего НЕотменённого stage-окна или тапа пикера — обе границы согласия
 //! до-исполнительные.
 
+pub mod classify;
 pub mod hud;
 pub mod pick;
+pub mod prompt;
 pub mod score;
 pub mod stage;
 
@@ -96,11 +98,21 @@ pub async fn route_transcript(d: Arc<Daemon>, transcript: String) {
     let scored = score::rank(&text, &sessions);
     let decision = score::decide(&scored);
 
-    // Stage 9 заменит `None` на узкий LLM-tie-break для ветки Ambiguous.
-    let tie: Option<(String, f32)> = None;
-
     let label_of = |id: &str| -> String {
         scored.iter().find(|s| s.session_id == id).map(|s| s.label.clone()).unwrap_or_default()
+    };
+
+    // Узкий LLM-tie-break — ТОЛЬКО на близких кандидатах (Клод ловит парафраз,
+    // напр. «фронтенд» → frontend, что substring-скорер не видит). Ошибка/
+    // таймаут/низкая уверенность/выбор вне списка → decide_action отдаёт в пикер.
+    let tie = if let Decision::Ambiguous(cands) = &decision {
+        let candidates: Vec<classify::Candidate> = cands
+            .iter()
+            .map(|id| classify::Candidate { session_id: id.clone(), label: label_of(id) })
+            .collect();
+        classify::classify_ambiguous(&text, &candidates).await
+    } else {
+        None
     };
 
     match decide_action(decision, tie) {

@@ -111,6 +111,8 @@ In a session's chat the **"Reply"** field inserts text straight into the session
 
 `npm run setup` installs a PATH shim `~/.jarvis/shims/claude` (pyenv pattern, a managed block in `~/.zshrc` between jarvis markers). After `exec zsh`, every interactive `claude` launch is transparently wrapped in tmux on a **separate server** (`-L jarvis`, config `~/.jarvis/tmux.conf`): no status bar, mouse scrolls, your personal tmux untouched. In iTerm2 — control mode (`-CC`), native tabs. Headless runs (`-p`, pipes, `$TMUX`) are not wrapped. Insertion: `set-buffer → paste-buffer -p → send-keys Enter` (multi-line prompts arrive as one chunk). The command palette (`/` in the reply field) reaches the session's other slash commands.
 
+**Codex CLI** is wrapped by the same mechanism: if `codex` is found during `npm run setup`, Jarvis installs hooks into `~/.codex/hooks.json` (label `codex`) and a shim `~/.jarvis/shims/codex` (one `agent-shim` script, behavior chosen by `basename "$0"`). Interactive `codex` sessions appear in the panel with a `codex` badge: status, toasts, voice, chat, reply-in-session, `codex resume`. Model and reasoning are changed via Codex's `/model` picker (there is no separate `/effort`). **Headless `codex exec` does NOT fire hooks** — such runs aren't monitored (by design, like `claude -p`). On a fresh machine Codex hooks require trust (`~/.codex/config.toml [hooks.state]`); the Codex shim adds `--dangerously-bypass-hook-trust` — this **disables trust verification for all Codex hooks** on interactive launch, so keep that trade-off in mind.
+
 - A session outside tmux is flagged "outside tmux" — it can't be controlled; the panel shows how to bring it in (`claude --resume <session_id>`).
 - Close the terminal window and the agent lives on: the tmux session detaches, Jarvis keeps watching. Reattach: `tmux -L jarvis attach -t <name>`.
 - **Model** is free to read (written to the transcript on every assistant turn). **Effort** can't be read from outside — the panel keeps optimistic state, highlighting what it set itself.
@@ -208,7 +210,7 @@ The frontend (panel `ui/index.html` + `ui/renderer.js`, toasts `ui/toast.*`) run
 
 A pre-1.0 MVP. What's stable is in the "Features" section above. Deliberate boundaries and known issues:
 
-- **macOS-only**, **Claude Code (CLI)** only (Codex is out of scope); the remote and reply need **tmux**.
+- **macOS-only**; **Claude Code (CLI)** and **Codex (CLI)** are supported — **interactive** sessions are monitored (headless `claude -p` / `codex exec` don't fire hooks — not monitored); the remote and reply need **tmux**.
 - **Effort** can't be read from outside → the panel keeps optimistic state.
 - **Claude Code's hook schema drifts between versions.** If events stop arriving after a `claude` update, compare against the current hooks docs and fix `EVENTS`/the format in `src-tauri/src/bin/setup.rs`.
 - A hard-killed terminal (no `SessionEnd`) leaves a session hanging — the panel's "Clear" button removes done/idle ones.

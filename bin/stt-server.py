@@ -57,6 +57,77 @@ else:
 #   model.transcribe(audio: np.ndarray|str|Path, language="ru") -> TranscriptionResult(.text)
 from qwen3_asr_mlx import Qwen3ASR  # type: ignore[import]
 
+# --- Поддержка КВАНТОВАННЫХ (MLX) весов текстового декодера --------------------
+# qwen3-asr-mlx 0.1.1 строит текстовый декодер из ПЛОТНЫХ nn.Linear и грузит веса
+# без вызова nn.quantize (model.py:from_pretrained → decoder.py:load_decoder_weights).
+# Для 8bit/4bit репозиториев mlx-community веса model.layers.* лежат как
+# QuantizedLinear (.weight+.scales+.biases) → load_weights падает:
+#   "Received N parameters not in model: ...scales, ...biases" (decoder.py:290).
+# Здесь оборачиваем штатный загрузчик декодера: ДО load_weights квантуем ровно те
+# подмодули, у которых в файле есть .scales, параметрами из config["quantization"]
+# (group_size/bits/mode). Энкодер (audio_tower) в этих репо НЕ квантован (bf16),
+# поэтому штатный load_encoder_weights не трогаем.
+#
+# Тонкость: декодер делает tied lm_head ПЛОТНЫМ матмулом `h @ embed_tokens.weight.T`
+# (decoder.py), что несовместимо с QuantizedEmbedding. Поэтому embed_tokens НЕ
+# квантуем, а ДЕквантуем в плотный bf16-вес (совпадает с dtype остальных тензоров).
+#
+# Безопасность для не-квантованных (bf16) репо: если в config нет "quantization"
+# или в весах нет ни одного .scales — ветка квантизации пропускается и поведение
+# идентично оригиналу (strip префикса "model." + load_weights).
+import json as _json
+from pathlib import Path as _Path
+import mlx.core as _mx
+import mlx.nn as _nn
+import qwen3_asr_mlx.model as _qmodel  # модуль, в котором from_pretrained ищет имя
+
+
+def _load_decoder_weights_quant_aware(decoder, model_path):
+    path = _Path(model_path)
+    if not path.is_dir():
+        from huggingface_hub import snapshot_download
+        path = _Path(snapshot_download(repo_id=str(model_path)))
+
+    raw = _mx.load(str(path / "model.safetensors"))
+    prefix = "model."
+    weights = {k[len(prefix):]: v for k, v in raw.items() if k.startswith(prefix)}
+
+    quant = None
+    cfg_file = path / "config.json"
+    if cfg_file.is_file():
+        cfg = _json.loads(cfg_file.read_text(encoding="utf-8"))
+        quant = cfg.get("quantization") or cfg.get("quantization_config")
+
+    if quant and any(k.endswith(".scales") for k in weights):
+        group_size = int(quant["group_size"])
+        bits = int(quant["bits"])
+        mode = quant.get("mode", "affine")
+
+        # tied lm_head → эмбеддинг оставляем плотным: дексантуем в bf16.
+        if "embed_tokens.scales" in weights:
+            weights["embed_tokens.weight"] = _mx.dequantize(
+                weights["embed_tokens.weight"],
+                scales=weights.pop("embed_tokens.scales"),
+                biases=weights.pop("embed_tokens.biases"),
+                group_size=group_size, bits=bits, mode=mode,
+            )
+
+        # Квантуем РОВНО те подмодули, для которых в файле есть .scales.
+        def _is_quantized(submodule_path, module):
+            return hasattr(module, "to_quantized") and f"{submodule_path}.scales" in weights
+
+        _nn.quantize(decoder, group_size=group_size, bits=bits, mode=mode,
+                     class_predicate=_is_quantized)
+
+    decoder.load_weights(list(weights.items()))
+    # Принудительная материализация весов (это graph-вычисление MLX, не Python-
+    # builtin); паритет с upstream-загрузчиком и ранняя диагностика ошибок.
+    getattr(_mx, "eval")(decoder.parameters())
+
+
+_qmodel.load_decoder_weights = _load_decoder_weights_quant_aware
+# ------------------------------------------------------------------------------
+
 model = Qwen3ASR.from_pretrained(model_src)
 
 app = FastAPI()

@@ -88,6 +88,8 @@ pub struct Daemon {
     pub picks: std::sync::Arc<crate::route::pick::PendingPicks>,
     /// Голосовая маршрутизация: буфер отложенной отправки (stage-then-send).
     pub stage: std::sync::Arc<crate::route::stage::StageBuffer>,
+    /// История диктовки/реплик («что я говорил») + копирование. In-memory.
+    pub transcripts: std::sync::Arc<crate::stt::transcripts::Transcripts>,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -136,7 +138,7 @@ impl Daemon {
         if root.get("stt").and_then(|s| s.get("mute")).and_then(|v| v.as_bool()).unwrap_or(false) {
             audio.set_muted(true);
         }
-        let dictation = crate::stt::dictation::Dictation::new(stt.clone(), audio.clone());
+        let dictation = crate::stt::dictation::Dictation::new(stt.clone(), audio.clone(), app.clone());
         // Wake-word: действие = STT-захват(преролл)→агент; verifier — NullVerifier (v1).
         let wake_cfg = crate::wakeword::config::WakeConfig::from_settings(&root);
         let verify_cfg = crate::wakeword::config::VerifyConfig::from_settings(&root);
@@ -177,6 +179,7 @@ impl Daemon {
             wake,
             picks: std::sync::Arc::new(crate::route::pick::PendingPicks::new()),
             stage: std::sync::Arc::new(crate::route::stage::StageBuffer::new()),
+            transcripts: std::sync::Arc::new(crate::stt::transcripts::Transcripts::new()),
         }
     }
 

@@ -13,6 +13,8 @@ pub const HUD_ID: &str = "voice-hud";
 pub enum Phase {
     /// Идёт запись реплики; `secs` — длина окна (для кольца отсчёта).
     Listening { secs: u32 },
+    /// Идёт распознавание (анализ) реплики.
+    Analyzing,
     /// Распознали реплику.
     Heard { text: String },
     /// Стейдж: отправлю в `label` через `secs` с, текст — `text`, отмена по `nonce`.
@@ -42,6 +44,7 @@ pub fn hud_payload(p: Phase) -> Value {
             v["secs"] = json!(secs);
             v
         }
+        Phase::Analyzing => base("analyzing", "Анализирую…", ""),
         Phase::Heard { text } => base("heard", "Услышал", &text),
         Phase::Staged { nonce, label, text, secs } => {
             let mut v = base("staged", "Отправлю", &text);

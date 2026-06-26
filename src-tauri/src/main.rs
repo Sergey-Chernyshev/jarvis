@@ -159,6 +159,8 @@ fn main() {
             ipc::agent_send,
             ipc::stt_get,
             ipc::models_get,
+            ipc::transcripts_get,
+            ipc::transcripts_clear,
             ipc::stt_set_engine,
             ipc::stt_test,
             onboarding::stt_install_whisper,

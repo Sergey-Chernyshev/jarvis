@@ -20,11 +20,25 @@ pub struct Dictation {
     hub: Arc<AudioHub>,
     /// Активная сессия захвата аудио (None = не пишем).
     capturing: Mutex<Option<CaptureSession>>,
+    /// AppHandle для HUD-фаз («Слушаю…/Анализирую…/Услышал») и истории реплик.
+    /// None в юнит-тестах — тогда HUD/история становятся no-op.
+    app: Option<tauri::AppHandle>,
 }
 
 impl Dictation {
-    pub fn new(service: Arc<SttService>, hub: Arc<AudioHub>) -> Arc<Self> {
-        Arc::new(Dictation { service, hub, capturing: Mutex::new(None) })
+    pub fn new(service: Arc<SttService>, hub: Arc<AudioHub>, app: tauri::AppHandle) -> Arc<Self> {
+        Arc::new(Dictation { service, hub, capturing: Mutex::new(None), app: Some(app) })
+    }
+
+    /// Конструктор для тестов: без AppHandle (HUD/история — no-op).
+    #[cfg(test)]
+    fn new_headless(service: Arc<SttService>, hub: Arc<AudioHub>) -> Arc<Self> {
+        Arc::new(Dictation { service, hub, capturing: Mutex::new(None), app: None })
+    }
+
+    /// Daemon для HUD/истории (None, если нет AppHandle — например в тестах).
+    fn daemon(&self) -> Option<std::sync::Arc<crate::daemon::Daemon>> {
+        self.app.as_ref().map(crate::daemon::Daemon::get)
     }
 
     /// Начать захват аудио при нажатии хоткея. Идемпотентно: если захват уже
@@ -48,6 +62,10 @@ impl Dictation {
         // Греем STT-модель ПОКА человек говорит: к отпусканию клавиши она уже
         // загружена (прячет cold-start после idle-stop). Неблокирующий вызов.
         self.service.warm();
+        // видимая фаза «Слушаю…» в тосте (PTT — без кольца отсчёта, secs=0)
+        if let Some(d) = self.daemon() {
+            crate::route::hud::emit(&d, crate::route::hud::Phase::Listening { secs: 0 });
+        }
         crate::log::line("[dictation] запись начата");
     }
 
@@ -71,17 +89,28 @@ impl Dictation {
         };
 
         let service = self.service.clone();
+        let daemon = self.daemon();
         std::thread::spawn(move || {
+            // видимая фаза «Анализирую…» — пока идёт finish + транскрипция
+            if let Some(d) = &daemon {
+                crate::route::hud::emit(d, crate::route::hud::Phase::Analyzing);
+            }
             // ── finish() → PCM ───────────────────────────────────────────────
             let pcm = match session.finish() {
                 Ok(p) => p,
                 Err(e) => {
                     crate::log::line(&format!("[dictation] finish: {e}"));
+                    if let Some(d) = &daemon {
+                        crate::route::hud::emit(d, crate::route::hud::Phase::Error { msg: "захват не удался".into() });
+                    }
                     return;
                 }
             };
             if pcm.is_empty() {
                 crate::log::line("[dictation] пустой PCM-буфер, пропуск");
+                if let Some(d) = &daemon {
+                    crate::route::hud::emit(d, crate::route::hud::Phase::Empty);
+                }
                 return;
             }
 
@@ -91,18 +120,31 @@ impl Dictation {
                 Ok(r) => r.text,
                 Err(e) => {
                     crate::log::line(&format!("[dictation] transcribe: {e}"));
+                    if let Some(d) = &daemon {
+                        crate::route::hud::emit(d, crate::route::hud::Phase::Error { msg: "распознавание не удалось".into() });
+                    }
                     return;
                 }
             };
             let text = text.trim().to_string();
             if text.is_empty() {
                 crate::log::line("[dictation] пустой результат транскрипции, пропуск");
+                if let Some(d) = &daemon {
+                    crate::route::hud::emit(d, crate::route::hud::Phase::Empty);
+                }
                 return;
             }
             crate::log::line(&format!(
                 "[dictation] транскрипция: «{}»",
                 crate::util::ellipsize(&text, 80)
             ));
+            // история «что я говорил» + видимая фаза «Услышал …»
+            if let Some(d) = &daemon {
+                d.transcripts.push(&text, "dictation");
+                crate::route::hud::emit(d, crate::route::hud::Phase::Heard {
+                    text: crate::util::ellipsize(&text, 80),
+                });
+            }
 
             // ── insert_text() → ⌘V ──────────────────────────────────────────
             if let Err(e) = super::insert::insert_text(&text) {
@@ -128,7 +170,7 @@ mod tests {
         let svc = SttService::new(SttConfig::default());
         // Хаб без AppHandle; в тестах ensure_running() — no-op (живой микрофон не трогаем).
         let hub = super::super::hub::AudioHub::new(None, None);
-        Dictation::new(svc, hub)
+        Dictation::new_headless(svc, hub)
     }
 
     // on_release без предшествующего on_press — no-op (не паникует)

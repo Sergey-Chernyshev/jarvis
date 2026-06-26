@@ -2635,9 +2635,77 @@ async function loadSettings() {
   } catch {}
   renderModelManager();
   renderSttCard();
+  renderTranscriptsCard();
   renderWakeCard();
   renderVoiceCard();
   renderIntegrationCard();
+}
+
+/* ── карточка «История диктовки»: что я говорил + копирование/очистка ── */
+async function renderTranscriptsCard() {
+  const box = document.getElementById('transcriptsCard');
+  if (!box) return;
+  box.textContent = '';
+  let items = [];
+  try { const r = await window.jarvis.transcriptsGet(); items = (r && r.items) || []; } catch {}
+
+  const head = document.createElement('div');
+  head.className = 'awakehead';
+  head.appendChild(Object.assign(document.createElement('span'), { className: 'atitle', textContent: 'История диктовки' }));
+  head.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+  if (items.length) {
+    const copyAll = document.createElement('button');
+    copyAll.className = 'abtn small';
+    copyAll.textContent = 'Копировать всё';
+    copyAll.addEventListener('click', () => {
+      try { navigator.clipboard.writeText(items.map((i) => i.text).join('\n')); } catch {}
+      copyAll.textContent = 'Скопировано'; setTimeout(() => { copyAll.textContent = 'Копировать всё'; }, 1500);
+    });
+    head.appendChild(copyAll);
+    const clr = document.createElement('button');
+    clr.className = 'abtn danger small'; clr.style.marginLeft = '8px'; clr.textContent = 'Очистить';
+    let armed = false;
+    clr.addEventListener('click', async () => {
+      if (!armed) { armed = true; clr.textContent = 'Точно?'; setTimeout(() => { armed = false; clr.textContent = 'Очистить'; }, 3000); return; }
+      try { await window.jarvis.transcriptsClear(); } catch {}
+      renderTranscriptsCard();
+    });
+    head.appendChild(clr);
+  }
+  box.appendChild(head);
+
+  if (!items.length) {
+    const hint = document.createElement('div');
+    hint.className = 'ahint';
+    hint.textContent = 'Пока пусто. Скажи что-нибудь через диктовку (F8) или «Hey Jarvis».';
+    box.appendChild(hint);
+    return;
+  }
+
+  for (const it of items) {
+    const r = document.createElement('div');
+    r.className = 'istat hairtop on';
+    r.appendChild(Object.assign(document.createElement('span'), { className: 'dot' }));
+    const txt = document.createElement('span');
+    txt.textContent = it.text;
+    txt.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    r.appendChild(txt);
+    r.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+    const meta = document.createElement('span');
+    meta.className = 'sz';
+    const d = new Date((it.ts || 0) * 1000);
+    const hh = String(d.getHours()).padStart(2, '0'), mm = String(d.getMinutes()).padStart(2, '0');
+    meta.textContent = `${it.source === 'wake' ? '🎙' : '⌨'} ${hh}:${mm}`;
+    r.appendChild(meta);
+    const cp = document.createElement('button');
+    cp.className = 'abtn small'; cp.style.marginLeft = '10px'; cp.textContent = 'Копировать';
+    cp.addEventListener('click', () => {
+      try { navigator.clipboard.writeText(it.text); } catch {}
+      cp.textContent = 'OK'; setTimeout(() => { cp.textContent = 'Копировать'; }, 1200);
+    });
+    r.appendChild(cp);
+    box.appendChild(r);
+  }
 }
 
 /* ── формат размера на диске ── */

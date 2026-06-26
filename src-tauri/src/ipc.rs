@@ -933,6 +933,19 @@ pub fn models_get() -> Value {
     json!({ "models": crate::install::model_inventory() })
 }
 
+/// История диктовки/реплик («что я говорил») — новые первыми. Для UI + копирования.
+#[tauri::command]
+pub fn transcripts_get(app: AppHandle) -> Value {
+    json!({ "items": Daemon::get(&app).transcripts.list() })
+}
+
+/// Очистить историю реплик.
+#[tauri::command]
+pub fn transcripts_clear(app: AppHandle) -> Value {
+    Daemon::get(&app).transcripts.clear();
+    json!({ "ok": true })
+}
+
 /// Сменить движок STT + сохранить в settings.json. Требует перезапуска демона.
 #[tauri::command]
 pub fn stt_set_engine(app: AppHandle, engine: String) -> Value {

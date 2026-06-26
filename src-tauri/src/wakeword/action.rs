@@ -106,6 +106,8 @@ impl WakeAction for AgentWakeAction {
                 }
             };
             crate::log::line(&format!("[wake] реплика: «{}»", crate::util::ellipsize(&text, 80)));
+            // история «что я говорил» (общая с диктовкой)
+            d.transcripts.push(&text, "wake");
 
             // Маршрутизация в Rust. Источник недоверенный (открытый микрофон):
             // побочный эффект (reply_core) — только через stage-окно/пикер,

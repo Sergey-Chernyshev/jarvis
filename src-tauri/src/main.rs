@@ -22,6 +22,7 @@ mod metrics;
 mod model;
 mod onboarding;
 mod power;
+mod route; // голосовая маршрутизация: скоринг → tie-break → пикер → stage-then-send
 mod ru;
 mod screen_prompt;
 mod server;

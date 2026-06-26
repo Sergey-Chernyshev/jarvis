@@ -106,6 +106,81 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action, guard: SfGuard) -> Skill
             }
             None => SkillOutcome::Rejected("нет prompt".into()),
         },
+
+        // ── CONTROL: сайд-эффект → ПОЗИТИВНЫЙ confirm (не пассивное окно) + валидация ──
+        "set_model" => {
+            let (Some(id), Some(model)) = (
+                action.args.get("id").and_then(Value::as_str),
+                action.args.get("model").and_then(Value::as_str),
+            ) else {
+                return SkillOutcome::Rejected("нужны id и model".into());
+            };
+            if d.session(id).is_none() {
+                return SkillOutcome::Rejected("сессия не найдена".into());
+            }
+            if let Err(e) = validate_model(model) {
+                return SkillOutcome::Rejected(e);
+            }
+            if crate::convo::confirm(d, &format!("Переключить {id} на {model}?")).await {
+                crate::ipc::set_model_core(d, id, model).await;
+                SkillOutcome::Staged
+            } else {
+                SkillOutcome::Rejected("отменено".into())
+            }
+        }
+        "set_effort" => {
+            let (Some(id), Some(level)) = (
+                action.args.get("id").and_then(Value::as_str),
+                action.args.get("level").and_then(Value::as_str),
+            ) else {
+                return SkillOutcome::Rejected("нужны id и level".into());
+            };
+            if d.session(id).is_none() {
+                return SkillOutcome::Rejected("сессия не найдена".into());
+            }
+            if let Err(e) = validate_effort(level) {
+                return SkillOutcome::Rejected(e);
+            }
+            if crate::convo::confirm(d, &format!("Поставить {id} effort {level}?")).await {
+                crate::ipc::set_effort_core(d, id, level).await;
+                SkillOutcome::Staged
+            } else {
+                SkillOutcome::Rejected("отменено".into())
+            }
+        }
+        "keep_awake" => {
+            if action.args.get("off").and_then(Value::as_bool).unwrap_or(false) {
+                if crate::convo::confirm(d, "Выключить режим «не спать»?").await {
+                    crate::power::Power::cmd(d, "keep-awake", "stop", &json!({})).await;
+                    SkillOutcome::Staged
+                } else {
+                    SkillOutcome::Rejected("отменено".into())
+                }
+            } else {
+                let m = action.args.get("minutes").and_then(Value::as_i64).unwrap_or(0);
+                if let Err(e) = validate_minutes(m) {
+                    return SkillOutcome::Rejected(e);
+                }
+                if crate::convo::confirm(d, &format!("Не давать маку уснуть {m} минут?")).await {
+                    crate::power::Power::cmd(d, "keep-awake", "start-timer", &json!({ "minutes": m })).await;
+                    SkillOutcome::Staged
+                } else {
+                    SkillOutcome::Rejected("отменено".into())
+                }
+            }
+        }
+        "mute" => {
+            // mute{on} глушит звуковой аудит-след → ТОЛЬКО через confirm (как и off)
+            let on = action.args.get("on").and_then(Value::as_bool).unwrap_or(false);
+            let q = if on { "Выключить звук Джарвиса?" } else { "Включить звук Джарвиса?" };
+            if crate::convo::confirm(d, q).await {
+                d.voice.set_mute(on);
+                SkillOutcome::Staged
+            } else {
+                SkillOutcome::Rejected("отменено".into())
+            }
+        }
+
         other => SkillOutcome::Rejected(format!("неизвестный скил: {other}")),
     }
 }

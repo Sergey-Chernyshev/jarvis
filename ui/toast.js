@@ -284,6 +284,7 @@ function voiceClose(p) {
     e.stopPropagation();
     if (p.phase === 'staged') window.toast.voiceCancel(p.nonce);
     else if (p.phase === 'picker') window.toast.voicePick(p.nonce, null);
+    else if (p.phase === 'confirm') window.toast.voiceConfirm(p.nonce, false);
     removeCard(p.id);
   });
   return close;
@@ -371,6 +372,22 @@ function renderVoiceHud(p) {
       window.toast.voicePick(p.nonce, null);
     });
     card.appendChild(cancel);
+  } else if (p.phase === 'confirm') {
+    const yes = document.createElement('button');
+    yes.className = 'cont';
+    yes.textContent = 'Да';
+    yes.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.toast.voiceConfirm(p.nonce, true);
+    });
+    const no = document.createElement('button');
+    no.className = 'cont';
+    no.textContent = 'Отмена';
+    no.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.toast.voiceConfirm(p.nonce, false);
+    });
+    card.append(yes, no);
   }
 
   if (firstTime) {

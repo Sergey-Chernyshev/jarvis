@@ -793,6 +793,15 @@ pub fn voice_audio_state(app: AppHandle) -> Value {
     Daemon::get(&app).audio.audio_state_payload()
 }
 
+/// Голосовой разговор: «Да/Отмена» на confirm-карточке управления (п/п-2).
+/// In-process (НЕ в MCP-реестре): голос-агент не может сам себя подтвердить.
+#[tauri::command]
+pub fn voice_confirm_resolve(app: AppHandle, nonce: String, approved: bool) -> Value {
+    let d = Daemon::get(&app);
+    let known = d.vconfirm.resolve(&nonce, approved);
+    json!({ "ok": known })
+}
+
 /* ================= служебное ================= */
 
 /// Снять ложный лимит-баннер по официальному usage (таймер из main).

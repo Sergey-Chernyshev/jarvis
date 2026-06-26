@@ -84,6 +84,24 @@ fn reply(d: &Arc<Daemon>, text: &str) {
     hud::emit(d, hud::Phase::Reply { text: text.to_string() });
 }
 
+/// Показать confirm-карточку управляющего действия и дождаться решения юзера.
+/// true — подтвердил (тап «Да»); false — отмена/таймаут. Позитивное согласие —
+/// граница для CONTROL (не пассивное окно). На подтверждении эффект озвучивается
+/// вызывающим. Резолв — только из тоста (`voice_confirm_resolve`), не из MCP.
+pub async fn confirm(d: &Arc<Daemon>, text: &str) -> bool {
+    let nonce = crate::capability::confirm_panel::gen_nonce();
+    let rx = d.vconfirm.register(nonce.clone());
+    hud::emit(d, hud::Phase::Confirm { nonce: nonce.clone(), text: text.to_string() });
+    match tokio::time::timeout(Duration::from_secs(30), rx).await {
+        Ok(Ok(true)) => true,
+        _ => {
+            d.vconfirm.cancel(&nonce);
+            hud::emit(d, hud::Phase::Cancelled);
+            false
+        }
+    }
+}
+
 /// 2-й узкий вызов: данные read-скила + реплика → короткая устная фраза.
 async fn followup_phrase(transcript: &str, data: &serde_json::Value) -> String {
     let prompt = format!(

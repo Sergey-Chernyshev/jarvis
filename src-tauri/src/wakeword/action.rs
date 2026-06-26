@@ -107,11 +107,12 @@ impl WakeAction for AgentWakeAction {
             };
             crate::log::line(&format!("[wake] реплика: «{}»", crate::util::ellipsize(&text, 80)));
 
-            // Маршрутизация в Rust. Источник недоверенный (открытый микрофон):
-            // побочный эффект (reply_core) — только через stage-окно/пикер,
-            // см. модель доверия в спеке. Блокируемся в этом потоке (не tokio).
-            // guard едет внутрь — держит single-flight до пасты/отмены.
-            tauri::async_runtime::block_on(crate::route::route_transcript(d.clone(), text, guard));
+            // Разговорный мозг (п/п-2): транскрипт → снапшот+Haiku-план → скил
+            // (ответ/маршрутизация/управление) → голосовой ответ. Источник
+            // недоверенный (открытый микрофон): побочный эффект — только через
+            // consent (route → окно отмены; control → confirm). guard едет внутрь
+            // (держит single-flight). Блокируемся в этом потоке (не tokio).
+            tauri::async_runtime::block_on(crate::convo::converse_once(d.clone(), text, guard));
         });
     }
 }

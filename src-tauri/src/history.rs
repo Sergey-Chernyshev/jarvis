@@ -56,6 +56,68 @@ fn projects_dir() -> PathBuf {
     claude_dir().join("projects")
 }
 
+fn codex_sessions_dir() -> PathBuf {
+    crate::util::codex_dir().join("sessions")
+}
+
+/// Rollout Codex → Meta (для истории). session_meta даёт id/cwd, turn_context —
+/// модель, первая user-реплика — заголовок. service=false (codex-сессии не наши;
+/// служебные codex exec идут с --ephemeral и rollout не пишут).
+fn parse_codex_meta(file: &Path, mtime: i64) -> Option<Meta> {
+    let raw = fs::read_to_string(file).ok()?;
+    let mut session_id = String::new();
+    let mut cwd: Option<String> = None;
+    let mut model = String::new();
+    let mut title = String::new();
+    let mut first_at = 0i64;
+    let mut last_at = 0i64;
+    for line in raw.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if let Some(t) = v.get("timestamp").and_then(Value::as_str).and_then(crate::transcript::parse_ts) {
+            if first_at == 0 {
+                first_at = t;
+            }
+            last_at = t;
+        }
+        match v.get("type").and_then(Value::as_str) {
+            Some("session_meta") => {
+                if let Some(p) = v.get("payload") {
+                    session_id = p.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                    cwd = p.get("cwd").and_then(Value::as_str).map(String::from);
+                }
+            }
+            Some("turn_context") => {
+                if let Some(m) = v.get("payload").and_then(|p| p.get("model")).and_then(Value::as_str) {
+                    model = m.to_string();
+                }
+            }
+            Some("response_item") if title.is_empty() => {
+                for item in crate::backend::codex_transcript::to_chat_items(&v) {
+                    if item.role == "user" && item.kind == "text" {
+                        title = crate::util::ellipsize(&crate::util::one_line(&item.text), 80);
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if session_id.is_empty() {
+        return None;
+    }
+    Some(Meta {
+        mtime,
+        session_id,
+        cwd: cwd.clone(),
+        project: cwd.as_deref().map(crate::util::basename),
+        title: if title.is_empty() { "Codex-сессия".into() } else { title },
+        model: crate::backend::backend(crate::backend::Agent::Codex).friendly_model(&model),
+        first_at,
+        last_at,
+        service: false,
+    })
+}
+
 fn first_user_text(msg: &Value) -> String {
     match msg.get("content") {
         Some(Value::String(s)) => s.clone(),
@@ -221,6 +283,23 @@ impl History {
         out
     }
 
+    fn list_codex_files() -> Vec<PathBuf> {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(rd) = fs::read_dir(dir) else { return };
+            for e in rd.filter_map(|e| e.ok()) {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "jsonl") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&codex_sessions_dir(), &mut out);
+        out
+    }
+
     pub fn scan(self: &Arc<Self>) {
         if self.scanning.swap(true, Ordering::SeqCst) {
             return;
@@ -249,6 +328,28 @@ impl History {
                 continue; // не менялся
             }
             if let Some(meta) = parse_meta(&file, mtime) {
+                self.cache.lock().unwrap().insert(key, meta);
+            }
+        }
+        // Codex rollouts (~/.codex/sessions/**/*.jsonl)
+        for file in Self::list_codex_files() {
+            let key = file.to_string_lossy().into_owned();
+            seen.insert(key.clone());
+            let Ok(st) = fs::metadata(&file) else { continue };
+            if st.len() < 200 {
+                continue;
+            }
+            let mtime = st
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let fresh = self.cache.lock().unwrap().get(&key).is_some_and(|hit| hit.mtime == mtime);
+            if fresh {
+                continue;
+            }
+            if let Some(meta) = parse_codex_meta(&file, mtime) {
                 self.cache.lock().unwrap().insert(key, meta);
             }
         }

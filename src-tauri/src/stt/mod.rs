@@ -13,7 +13,7 @@ pub mod insert;
 pub mod mic_permission; // инкр.10: безопасная проверка разрешения микрофона (TCC)
 pub mod sidecar;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use config::SttConfig;
@@ -47,30 +47,68 @@ fn wait_ready(engine: &dyn SttEngine, timeout: Duration) {
 /// движок — лишь HTTP-клиент, кто-то должен поднять процесс на 127.0.0.1:8732.
 /// Создаётся один раз через `SttService::new`, живёт в Arc.
 pub struct SttService {
-    engine: Box<dyn SttEngine>,
-    config: SttConfig,
-    /// Сайдкар: Some только для qwen3-* (None для whisper — там движок из файла модели).
-    sidecar: Option<Arc<SttSidecar>>,
+    /// Активный движок за `Mutex<Arc<dyn>>`: `transcribe` берёт `Arc` по короткому
+    /// локу и работает на клоне (лок не держится во время распознавания), а
+    /// `set_engine` подменяет `Arc` под локом. In-flight транскрипции доживают на
+    /// старом движке. Так горячая смена не блокирует и не рвёт текущие запросы.
+    engine: Mutex<Arc<dyn SttEngine>>,
+    config: Mutex<SttConfig>,
+    /// Сайдкар: Some только для qwen3-* (None для whisper). Меняется при set_engine.
+    sidecar: Mutex<Option<Arc<SttSidecar>>>,
+    /// Сериализует переходы жизненного цикла (set_engine ↔ tick супервизора), чтобы
+    /// супервизор не воскресил только что остановленный сайдкар. Калька wakeword.
+    transition: Mutex<()>,
 }
 
 impl SttService {
     /// Создать сервис с заданной конфигурацией (движок инициализируется немедленно).
     /// Для qwen3-движка поднимает MLX-сайдкар и подключает движок к его base().
     pub fn new(cfg: SttConfig) -> Arc<Self> {
+        let (engine, sidecar) = Self::build_from_cfg(&cfg);
+        if let Some(s) = &sidecar {
+            // Запуск fail-safe: не установлен/не стартовал → движок просто вернёт Err.
+            let _ = s.ensure_started();
+        }
+        Arc::new(SttService {
+            engine: Mutex::new(engine),
+            config: Mutex::new(cfg),
+            sidecar: Mutex::new(sidecar),
+            transition: Mutex::new(()),
+        })
+    }
+
+    /// Построить пару (движок, сайдкар) из конфига. Общий код для `new` и
+    /// `set_engine` — чтобы пути сборки (qwen-сайдкар на STT_PORT / whisper из
+    /// файла модели) не разъехались.
+    fn build_from_cfg(cfg: &SttConfig) -> (Arc<dyn SttEngine>, Option<Arc<SttSidecar>>) {
         if cfg.engine.starts_with("qwen3") {
             let dir = crate::util::jarvis_dir().join("stt-mlx");
-            let sidecar = Arc::new(SttSidecar::new(
-                &dir.to_string_lossy(),
-                &cfg.engine,
-                STT_PORT,
-            ));
-            // Запуск fail-safe: не установлен/не стартовал → движок просто вернёт Err.
-            let _ = sidecar.ensure_started();
+            let sidecar = Arc::new(SttSidecar::new(&dir.to_string_lossy(), &cfg.engine, STT_PORT));
             let engine = engine::build_qwen3_engine(sidecar.base(), &cfg.engine);
-            return Arc::new(SttService { engine, config: cfg, sidecar: Some(sidecar) });
+            (engine, Some(sidecar))
+        } else {
+            (engine::build_engine(cfg), None)
         }
-        let engine = engine::build_engine(&cfg);
-        Arc::new(SttService { engine, config: cfg, sidecar: None })
+    }
+
+    /// Горячо сменить движок/модель без перезапуска демона. Под `transition`-локом:
+    /// останавливаем старый сайдкар (освобождаем порт 8732 и память модели),
+    /// собираем новый движок+сайдкар, атомарно подменяем. In-flight транскрипции
+    /// доживают на старом `Arc` движка. Готовность модели — лениво в `transcribe`
+    /// (без блокирующего ожидания здесь, чтобы не морозить IPC-команду).
+    pub fn set_engine(&self, cfg: SttConfig) {
+        let _t = self.transition.lock().unwrap();
+        // снять старый сайдкар ДО подмены (active=false внутри stop → tick не воскресит)
+        if let Some(old) = self.sidecar.lock().unwrap().take() {
+            old.stop();
+        }
+        let (engine, sidecar) = Self::build_from_cfg(&cfg);
+        if let Some(s) = &sidecar {
+            let _ = s.ensure_started();
+        }
+        *self.engine.lock().unwrap() = engine;
+        *self.sidecar.lock().unwrap() = sidecar;
+        *self.config.lock().unwrap() = cfg;
     }
 
     /// Прогреть сайдкар заранее (на нажатии клавиши диктовки), чтобы модель
@@ -78,15 +116,19 @@ impl SttService {
     /// после idle-stop незаметен. Неблокирующий: `ensure_started` спавнит питон,
     /// модель грузится в нём асинхронно; повторный/тёплый вызов — no-op.
     pub fn warm(&self) {
-        if let Some(s) = &self.sidecar {
+        let sidecar = self.sidecar.lock().unwrap().clone();
+        if let Some(s) = &sidecar {
             let _ = s.ensure_started();
         }
     }
 
     /// Тик супервизора (qwen3-only): сначала пробуем заглушить по простою
     /// (вернуть ~1.3 ГБ резидентной модели), иначе — перезапуск, если умер.
+    /// Под `transition` — атомарно к `set_engine` (не воскрешаем снятый сайдкар).
     pub fn tick(&self) {
-        if let Some(s) = &self.sidecar {
+        let _t = self.transition.lock().unwrap();
+        let sidecar = self.sidecar.lock().unwrap().clone();
+        if let Some(s) = &sidecar {
             if !s.idle_stop_if_due(IDLE_LIMIT) {
                 s.restart_if_dead();
             }
@@ -95,14 +137,15 @@ impl SttService {
 
     /// Погасить MLX-сайдкар на выходе демона (qwen3-only; no-op для whisper).
     pub fn dispose(&self) {
-        if let Some(s) = &self.sidecar {
+        let sidecar = self.sidecar.lock().unwrap().clone();
+        if let Some(s) = &sidecar {
             s.stop();
         }
     }
 
     /// PID MLX-сайдкара (для метрик диагностики); None, если не qwen3 или не запущен.
     pub fn sidecar_pid(&self) -> Option<u32> {
-        self.sidecar.as_ref().and_then(|s| s.pid())
+        self.sidecar.lock().unwrap().as_ref().and_then(|s| s.pid())
     }
 
     /// Транскрибировать буфер PCM (16кГц моно f32). Опции — из `options()` или явные.
@@ -110,47 +153,56 @@ impl SttService {
     /// Лениво поднимает сайдкар, если он был заглушён по простою (idle-stop), и
     /// ждёт загрузки модели (cold-start). Когда сайдкар уже тёплый — задержки нет.
     pub fn transcribe(&self, pcm: &[f32], opts: &SttOptions) -> Result<SttResult, String> {
+        // Снимок движка и сайдкара под короткими локами — дальше работаем на клонах
+        // (Arc), не держа лок во время распознавания. set_engine может подменить их
+        // параллельно; текущий запрос доживёт на снятых здесь Arc (старый движок).
+        let engine = self.engine.lock().unwrap().clone();
+        let sidecar = self.sidecar.lock().unwrap().clone();
         // Страж «в полёте» на весь transcribe (включая cold-start ожидание):
         // пока он жив, idle-stop из tick не убьёт сайдкар под нами (анти-гонка).
-        let _guard = self.sidecar.as_ref().map(|s| s.use_guard());
-        if let Some(s) = &self.sidecar {
+        let _guard = sidecar.as_ref().map(|s| s.use_guard());
+        if let Some(s) = &sidecar {
             // поднять после idle-stop (no-op, если уже работает) + отметить использование
             s.ensure_started()?;
             // дождаться готовности модели: питон грузит её синхронно при старте,
             // до этого HTTP не отвечает. Тёплый сайдкар проходит проверку сразу.
-            wait_ready(self.engine.as_ref(), READY_TIMEOUT);
+            wait_ready(engine.as_ref(), READY_TIMEOUT);
             s.touch();
         }
-        let r = self.engine.transcribe(pcm, opts);
+        let r = engine.transcribe(pcm, opts);
         // длинная транскрипция тоже считается использованием — продлеваем активность
-        if let Some(s) = &self.sidecar {
+        if let Some(s) = &sidecar {
             s.touch();
         }
         r
     }
 
-    /// Имя активного движка (для UI/логов).
+    /// Имя активного движка (для UI/логов). `name()` — статический литерал; лок
+    /// держится лишь на момент вызова, после set_engine сразу видно новое имя.
     pub fn engine_name(&self) -> &'static str {
-        self.engine.name()
+        self.engine.lock().unwrap().name()
     }
 
-    /// Движок доступен (модель/сайдкар на месте).
+    /// Движок доступен (модель/сайдкар на месте). Клонируем Arc и проверяем без
+    /// лока (qwen available() ходит по HTTP до 3с — не держим лок под этим).
     pub fn available(&self) -> bool {
-        self.engine.available()
+        let engine = self.engine.lock().unwrap().clone();
+        engine.available()
     }
 
     /// Опции из конфига (dominant_lang + task; hints пусты).
     pub fn options(&self) -> SttOptions {
+        let cfg = self.config.lock().unwrap();
         SttOptions {
-            dominant_lang: self.config.dominant_lang.clone(),
-            task: self.config.task.clone(),
+            dominant_lang: cfg.dominant_lang.clone(),
+            task: cfg.task.clone(),
             hints: vec![],
         }
     }
 
-    /// Активный конфиг (для диагностики).
-    pub fn config(&self) -> &SttConfig {
-        &self.config
+    /// Активный конфиг (клон — вернуть ссылку из-под лока нельзя).
+    pub fn config(&self) -> SttConfig {
+        self.config.lock().unwrap().clone()
     }
 }
 
@@ -181,14 +233,14 @@ mod tests {
 
     /// SttService с мок-движком через Box<dyn SttEngine> напрямую.
     fn service_with_mock(text: &str) -> Arc<SttService> {
-        // Строим сервис с дефолтным конфигом, потом подменяем движок.
-        // Так как конструктор Arc::new(SttService{engine, config}), используем
-        // специальный приватный конструктор-путь: создаём SttService вручную.
+        // Строим сервис с мок-движком напрямую (минуя build_from_cfg/сайдкар).
         let cfg = SttConfig::default();
+        let engine: Arc<dyn SttEngine> = Arc::new(MockEngine { result_text: text.to_string() });
         Arc::new(SttService {
-            engine: Box::new(MockEngine { result_text: text.to_string() }),
-            config: cfg,
-            sidecar: None,
+            engine: Mutex::new(engine),
+            config: Mutex::new(cfg),
+            sidecar: Mutex::new(None),
+            transition: Mutex::new(()),
         })
     }
 
@@ -271,5 +323,28 @@ mod tests {
     fn new_service_engine_name_is_qwen3_for_default_config() {
         let svc = SttService::new(SttConfig::default());
         assert_eq!(svc.engine_name(), "qwen3-0.6b");
+    }
+
+    // Инкр.6: set_engine горячо подменяет движок без пересоздания SttService.
+    // На whisper-turbo сайдкар не поднимается (None) — смена мгновенна, без процессов.
+    #[test]
+    fn set_engine_hot_swaps_to_whisper() {
+        let svc = service_with_mock("x");
+        assert_eq!(svc.engine_name(), "mock");
+        svc.set_engine(SttConfig { engine: "whisper-turbo".into(), ..SttConfig::default() });
+        assert_eq!(svc.engine_name(), "whisper-turbo", "имя движка обновилось");
+        assert!(svc.sidecar_pid().is_none(), "whisper не держит сайдкар");
+        // конфиг тоже обновился (клон отражает новый движок)
+        assert_eq!(svc.config().engine, "whisper-turbo");
+    }
+
+    // set_engine не отравляет локи: транскрипция после смены работает (мок→мок-симметрия
+    // через whisper-заглушку без модели → Err fail-safe, но не паника).
+    #[test]
+    fn transcribe_after_set_engine_does_not_panic() {
+        let svc = service_with_mock("привет");
+        svc.set_engine(SttConfig { engine: "whisper-turbo".into(), ..SttConfig::default() });
+        let _ = svc.transcribe(&[0.0f32; 16], &SttOptions::default()); // не паникует
+        assert!(svc.available() || !svc.available()); // лок не отравлен — вызов проходит
     }
 }

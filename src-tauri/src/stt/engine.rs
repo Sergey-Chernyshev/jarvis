@@ -2,6 +2,8 @@
 //! Phase 1: NullEngine для всех arms — реальные движки добавляются в следующих фазах.
 //! Любая ошибка движка — fail-safe: вернуть Err(String), демон не падает.
 
+use std::sync::Arc;
+
 /// Задача распознавания: транскрипция (оригинальный язык) или перевод (в английский).
 /// Дефолт — Transcribe (никогда не переводить; требование code-switching).
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -76,23 +78,24 @@ impl SttEngine for NullEngine {
 /// Собрать движок по конфигу.
 /// - "whisper-turbo" → WhisperEngine (Phase 2; Metal; требует cmake для компиляции).
 /// - "qwen3-0.6b" / "qwen3-1.7b" → Qwen3Engine (Phase 3; MLX Python sidecar).
-pub fn build_engine(cfg: &crate::stt::config::SttConfig) -> Box<dyn SttEngine> {
+pub fn build_engine(cfg: &crate::stt::config::SttConfig) -> Arc<dyn SttEngine> {
     match cfg.engine.as_str() {
-        "whisper-turbo" => Box::new(crate::stt::engine_whisper::WhisperEngine::new()),
+        "whisper-turbo" => Arc::new(crate::stt::engine_whisper::WhisperEngine::new()),
         "qwen3-0.6b" | "qwen3-1.7b" => {
             // Дефолтный base; в проде SttService::new пробрасывает base сайдкара
             // через build_qwen3_engine. Здесь — для тестов/whisper-симметрии.
             build_qwen3_engine("http://127.0.0.1:8732".to_string(), &cfg.engine)
         }
-        _ => Box::new(NullEngine),
+        _ => Arc::new(NullEngine),
     }
 }
 
 /// Собрать Qwen3-движок с явным base (URL сайдкара). `name` — "qwen3-0.6b"|"qwen3-1.7b";
 /// прочее тоже маппится на qwen3 (движок сам нормализует через `name()`).
-pub fn build_qwen3_engine(base: String, name: &str) -> Box<dyn SttEngine> {
+/// Возвращает `Arc<dyn>` — движок горячо заменяется в `SttService` под локом.
+pub fn build_qwen3_engine(base: String, name: &str) -> Arc<dyn SttEngine> {
     use crate::stt::engine_qwen3::Qwen3Engine;
-    Box::new(Qwen3Engine::new(base, name.to_string()))
+    Arc::new(Qwen3Engine::new(base, name.to_string()))
 }
 
 #[cfg(test)]

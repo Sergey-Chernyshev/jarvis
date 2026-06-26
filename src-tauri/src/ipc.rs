@@ -877,7 +877,11 @@ pub fn stt_set_engine(app: AppHandle, engine: String) -> Value {
     let mut patch = serde_json::Map::new();
     patch.insert("engine".into(), Value::String(engine));
     d.settings.set_stt(patch);
-    json!({ "ok": true, "restart": true })
+    // Горячая смена без перезапуска демона: пересобрать движок/сайдкар на месте.
+    // Диктовка и wake-action держат тот же Arc<SttService> — мутация им видна.
+    let cfg = crate::stt::config::SttConfig::from_settings(&d.settings.load());
+    d.stt.set_engine(cfg);
+    json!({ "ok": true, "restart": false })
 }
 
 /// Тест диктовки: ~4 с захвата с микрофона → транскрипция активным движком.

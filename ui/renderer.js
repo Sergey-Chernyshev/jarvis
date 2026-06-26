@@ -2877,7 +2877,7 @@ function modelRow(m) {
           act.disabled = false; act.textContent = 'Сделать активной';
           return;
         }
-        if (res && res.restart) showToast('Активна после перезапуска Jarvis');
+        showToast(res && res.restart ? 'Активна после перезапуска Jarvis' : 'Активна: ' + m.label);
         renderModelManager();
         try { renderSttCard(); } catch {}
       } catch (e) {

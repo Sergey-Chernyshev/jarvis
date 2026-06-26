@@ -234,9 +234,20 @@ function render() {
       branch.textContent = `⎇ ${s.branch}`;
     }
 
+    // бейдж агента: показываем только для не-claude (codex), чтобы отличать
+    // сессии разных бэкендов в общем списке; для claude — как раньше (без пилла).
+    let agentBadge = null;
+    if (s.agent && s.agent !== 'claude') {
+      agentBadge = document.createElement('span');
+      agentBadge.className = 'badge agent';
+      agentBadge.textContent = s.agent;
+    }
+
     const badge = document.createElement('span');
     badge.className = 'badge';
-    badge.textContent = s.model || s.agent || 'claude'; // модель — из транскрипта, бесплатно
+    // claude: s.model||'claude' (как было). codex: модель из payload, иначе «…»
+    // (не дублируем «codex» — его показывает agentBadge).
+    badge.textContent = s.model || (!s.agent || s.agent === 'claude' ? 'claude' : '…');
 
     const host = hostLabel(s);
     let hostBadge = null;
@@ -266,6 +277,7 @@ function render() {
 
     row.append(dot, name);
     if (branch) row.appendChild(branch);
+    if (agentBadge) row.appendChild(agentBadge);
     row.appendChild(badge);
     if (hostBadge) row.appendChild(hostBadge);
     row.append(summary);

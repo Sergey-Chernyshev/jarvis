@@ -28,5 +28,12 @@
     // ответ на вопрос кликом по варианту (выбор клавишами идёт мимо — глобальный хоткей)
     answerQuestion: (sessionId, indices, multiSelect) =>
       invoke('question_answer', { sessionId, choice: { indices, multiSelect } }),
+    // голосовая маршрутизация: фазы HUD + индикатор «слышу» (audio_state).
+    // НЕ через armed(): на буфер ранних тостов влияют только onAdd/onUpdate.
+    onVoiceHud: (cb) => { listen('voice-hud', (e) => cb(e.payload)); },
+    onAudioState: (cb) => { listen('audio_state', (e) => cb(e.payload)); },
+    // тап по варианту пикера (sessionId=null → отмена выбора) и «Отменить» стейджа
+    voicePick: (nonce, sessionId) => invoke('voice_pick_resolve', { nonce, sessionId }),
+    voiceCancel: (nonce) => invoke('voice_stage_cancel', { nonce }),
   };
 })();

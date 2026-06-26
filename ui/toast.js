@@ -256,3 +256,149 @@ window.toast.onUpdate((d) => {
   armTimer(d.id);
   reportHeight();
 });
+
+/* ===================== голосовая маршрутизация (HUD) ===================== */
+
+// Терминальные фазы исчезают по TTL; промежуточные/интерактивные — «липкие».
+const VOICE_TERMINAL = new Set(['sent', 'cancelled', 'empty', 'nosessions', 'error']);
+
+// Кнопка ✕ для HUD: на staged → отменить отправку, на picker → отменить выбор,
+// иначе просто снять карточку.
+function voiceClose(p) {
+  const close = document.createElement('button');
+  close.className = 'close';
+  close.title = 'Скрыть';
+  const x = document.createElement('span');
+  x.textContent = '✕';
+  close.appendChild(x);
+  close.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (p.phase === 'staged') window.toast.voiceCancel(p.nonce);
+    else if (p.phase === 'picker') window.toast.voicePick(p.nonce, null);
+    removeCard(p.id);
+  });
+  return close;
+}
+
+// Единственная HUD-карточка (стабильный id «voice-hud»), перерисовывается
+// целиком на каждую фазу — без устаревших кнопок/обработчиков.
+function renderVoiceHud(p) {
+  if (!p || !p.id) return;
+  const id = p.id;
+  removeCard(id, true); // снять предыдущую фазу мгновенно, рисуем заново
+
+  const terminal = VOICE_TERMINAL.has(p.phase);
+  const ttl = 4200;
+  const card = document.createElement('div');
+  card.className = 'card voice';
+  card.style.setProperty('--ttl', `${ttl}ms`);
+
+  const crow = document.createElement('div');
+  crow.className = 'crow';
+  const dot = document.createElement('span');
+  dot.className = 'dot' + (p.phase === 'staged' || p.phase === 'picker' ? ' waiting' : '');
+  const title = document.createElement('div');
+  title.className = 'title';
+  title.textContent = p.title || '';
+  crow.append(dot, title, voiceClose(p));
+  card.appendChild(crow);
+
+  if (p.body) {
+    const body = document.createElement('div');
+    body.className = 'body';
+    body.textContent = p.body;
+    card.appendChild(body);
+  }
+
+  if (p.phase === 'staged') {
+    const cancel = document.createElement('button');
+    cancel.className = 'cont';
+    cancel.textContent = p.secs ? `Отменить (${p.secs}с)` : 'Отменить';
+    cancel.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.toast.voiceCancel(p.nonce);
+    });
+    card.appendChild(cancel);
+  } else if (p.phase === 'picker') {
+    const opts = Array.isArray(p.options) ? p.options : [];
+    const list = document.createElement('div');
+    list.className = 'opts';
+    opts.slice(0, 9).forEach((o, i) => {
+      const opt = document.createElement('div');
+      opt.className = 'opt';
+      const num = document.createElement('span');
+      num.className = 'num';
+      num.textContent = String(i + 1);
+      const otext = document.createElement('div');
+      otext.className = 'otext';
+      const ol = document.createElement('div');
+      ol.className = 'olabel';
+      ol.textContent = o.label || o.sessionId || '';
+      otext.appendChild(ol);
+      opt.append(num, otext);
+      opt.addEventListener('click', (e) => {
+        e.stopPropagation();
+        window.toast.voicePick(p.nonce, o.sessionId);
+      });
+      list.appendChild(opt);
+    });
+    card.appendChild(list);
+    const cancel = document.createElement('button');
+    cancel.className = 'cont';
+    cancel.textContent = 'Отмена';
+    cancel.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.toast.voicePick(p.nonce, null);
+    });
+    card.appendChild(cancel);
+  }
+
+  stackEl.appendChild(card);
+  cards.set(id, { el: card, timer: null, ttl, sticky: !terminal });
+  armTimer(id); // терминальные — тикают к TTL; липкие — ждут следующую фазу
+  reportHeight();
+  requestAnimationFrame(() => requestAnimationFrame(() => card.classList.add('in')));
+}
+
+window.toast.onVoiceHud(renderVoiceHud);
+
+/* ============ индикатор «слышу тебя» / «тихо» (фикс «ничего не вижу») ============ */
+
+// Стабильная карточка состояния микрофона. Появляется ТОЛЬКО когда есть что
+// сказать (мик молчит / нет доступа) — иначе снимается. Дешёвый фикс UX-1:
+// детект mic_silent уже есть в hub.rs, его просто не показывали.
+const MIC_ID = 'voice-mic';
+function renderMicState(s) {
+  if (!s) return;
+  const denied = s.state === 'denied';
+  const silent = !!s.mic_silent;
+  if (!denied && !silent) {
+    removeCard(MIC_ID, true);
+    return;
+  }
+  removeCard(MIC_ID, true);
+  const card = document.createElement('div');
+  card.className = 'card voice mic';
+  const crow = document.createElement('div');
+  crow.className = 'crow';
+  const dot = document.createElement('span');
+  dot.className = 'dot waiting';
+  const title = document.createElement('div');
+  title.className = 'title';
+  title.textContent = denied ? 'Нет доступа к микрофону' : 'Микрофон молчит — говори громче';
+  const close = document.createElement('button');
+  close.className = 'close';
+  close.title = 'Скрыть';
+  const x = document.createElement('span');
+  x.textContent = '✕';
+  close.appendChild(x);
+  close.addEventListener('click', (e) => { e.stopPropagation(); removeCard(MIC_ID); });
+  crow.append(dot, title, close);
+  card.appendChild(crow);
+  stackEl.appendChild(card);
+  cards.set(MIC_ID, { el: card, timer: null, ttl: TTL, sticky: true });
+  reportHeight();
+  requestAnimationFrame(() => requestAnimationFrame(() => card.classList.add('in')));
+}
+
+window.toast.onAudioState(renderMicState);

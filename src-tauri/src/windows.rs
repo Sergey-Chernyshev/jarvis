@@ -141,6 +141,12 @@ pub fn emit_to_panel<P: Serialize + Clone>(app: &AppHandle, event: &str, payload
     let _ = app.emit_to("main", event, payload.clone());
 }
 
+/// Эмит события напрямую в окно `toast` (для прямых эмиттеров вне `Daemon`,
+/// напр. AudioHub — он держит только `AppHandle`, не буфер тостов).
+pub fn emit_to_toast_window<P: Serialize + Clone>(app: &AppHandle, event: &str, payload: &P) {
+    let _ = app.emit_to("toast", event, payload.clone());
+}
+
 /// Голос начал говорить эту карточку — держим открытой (не закрываем по TTL).
 pub fn toast_hold(app: &AppHandle, id: &str) {
     let _ = app.emit_to("toast", "toast-hold", json!({ "id": id }));

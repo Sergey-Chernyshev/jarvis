@@ -269,17 +269,17 @@ impl AudioHub {
     }
 
     /// Отправить панели текущее аудио-состояние (+ mute, + флаг «микрофон молчит»).
+    /// Дублируем в окно `toast`: оверлей виден, когда панель скрыта (норм. режим),
+    /// и показывает «слышу / тихо / нет доступа» — фикс «говорю Hey Jarvis, ничего».
     fn notify_panel(&self) {
         if let Some(app) = self.app.as_ref() {
-            crate::windows::emit_to_panel(
-                app,
-                "audio_state",
-                &serde_json::json!({
-                    "state": self.state().as_str(),
-                    "muted": self.is_muted(),
-                    "mic_silent": self.is_mic_silent(),
-                }),
-            );
+            let payload = serde_json::json!({
+                "state": self.state().as_str(),
+                "muted": self.is_muted(),
+                "mic_silent": self.is_mic_silent(),
+            });
+            crate::windows::emit_to_panel(app, "audio_state", &payload);
+            crate::windows::emit_to_toast_window(app, "audio_state", &payload);
         }
     }
 

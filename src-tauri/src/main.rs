@@ -152,6 +152,7 @@ fn main() {
             onboarding::quiet_set,
             ipc::agent_send,
             ipc::stt_get,
+            ipc::models_get,
             ipc::stt_set_engine,
             ipc::stt_test,
             onboarding::stt_install_whisper,

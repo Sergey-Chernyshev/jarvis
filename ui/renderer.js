@@ -2620,6 +2620,7 @@ async function loadSettings() {
     plugins = await window.jarvis.getPlugins();
     renderPluginRows();
   } catch {}
+  renderModelManager();
   renderSttCard();
   renderWakeCard();
   renderVoiceCard();
@@ -2764,6 +2765,65 @@ function renderModelsCard(box, models) {
   hint.className = 'ahint';
   hint.textContent = 'После удаления голос недоступен, пока не переустановишь интеграцию.';
   box.appendChild(hint);
+}
+
+/* ── карточка «Модели»: единый инвентарь всех моделей (STT/голос/wake) ──
+ *    Инкремент 1 — только статус и размер. Скачать/удалить/активировать — далее. */
+const MODEL_GROUPS = [
+  ['stt', 'Распознавание речи'],
+  ['voice', 'Голос'],
+  ['wake', 'Wake-word'],
+  ['runtime', 'Окружение'],
+];
+
+async function renderModelManager() {
+  const box = document.getElementById('modelManagerCard');
+  if (!box) return;
+  box.textContent = '';
+  let models = [];
+  try { const r = await window.jarvis.modelsGet(); models = (r && r.models) || []; } catch {}
+  if (!models.length) { box.hidden = true; return; }
+  box.hidden = false;
+
+  // шапка: суммарный размер на диске
+  const head = document.createElement('div');
+  head.className = 'awakehead';
+  head.appendChild(Object.assign(document.createElement('span'), { className: 'atitle', textContent: 'Все модели' }));
+  head.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+  const total = models.reduce((a, m) => a + (m.bytes || 0), 0);
+  head.appendChild(Object.assign(document.createElement('span'), { className: 'astatus on', textContent: fmtBytes(total) }));
+  box.appendChild(head);
+
+  // строки, сгруппированные по виду модели
+  for (const [kind, groupLabel] of MODEL_GROUPS) {
+    const items = models.filter((m) => m.kind === kind);
+    if (!items.length) continue;
+    const sub = document.createElement('div');
+    sub.className = 'ahint';
+    sub.style.marginTop = '8px';
+    sub.textContent = groupLabel;
+    box.appendChild(sub);
+    for (const m of items) box.appendChild(modelRow(m));
+  }
+}
+
+// одна строка модели: статус-точка + имя + (активна) + размер/«не скачана»
+function modelRow(m) {
+  const r = document.createElement('div');
+  r.className = 'istat hairtop' + (m.present ? ' on' : '');
+  r.appendChild(Object.assign(document.createElement('span'), { className: 'dot' }));
+  r.appendChild(Object.assign(document.createElement('span'), { textContent: m.label }));
+  if (m.active && m.present) {
+    const badge = Object.assign(document.createElement('span'), { className: 'astatus on', textContent: 'активна' });
+    badge.style.marginLeft = '8px';
+    r.appendChild(badge);
+  }
+  r.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+  r.appendChild(Object.assign(document.createElement('span'), {
+    className: 'sz',
+    textContent: m.present ? fmtBytes(m.bytes) : 'не скачана',
+  }));
+  return r;
 }
 
 // карточка «Голос»: движок, выбор спикера (Silero, живой), Тест, Без звука

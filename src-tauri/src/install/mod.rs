@@ -1023,6 +1023,113 @@ pub fn model_artifacts() -> Vec<Artifact> {
     v
 }
 
+/* ================= единый инвентарь моделей (раздел «Модели») ================= */
+
+/// Одна модель для раздела «Модели» в настройках. Только filesystem-срез.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelInfo {
+    /// Стабильный id (он же ключ движка для STT): "whisper-turbo", "qwen3-0.6b", …
+    pub id: String,
+    /// Категория: "stt" | "voice" | "wake" | "runtime".
+    pub kind: String,
+    /// Человекочитаемое имя.
+    pub label: String,
+    /// Занятое место на диске (0, если не скачана).
+    pub bytes: u64,
+    /// Скачана/установлена и готова к использованию (по наличию файлов, без health).
+    pub present: bool,
+    /// Активна сейчас (для STT — текущий движок; для wake — единственная модель).
+    pub active: bool,
+}
+
+/// Каталог локальных весов Qwen для ключа движка (qwen3-0.6b → …/stt-mlx/models/qwen3-0.6b).
+/// Совпадает с тем, что ищет `stt-server.py` (`models/<--model>/config.json`).
+pub fn qwen_weights_dir(key: &str) -> PathBuf {
+    stt_mlx_dir().join("models").join(key)
+}
+
+/// Веса Qwen на месте, если есть `config.json` (тот же признак, что у сайдкара).
+pub fn qwen_weights_present(key: &str) -> bool {
+    qwen_weights_dir(key).join("config.json").exists()
+}
+
+/// Полный инвентарь моделей (STT + голос + wake + runtime) для UI.
+/// Только filesystem — без сетевых/HTTP-проверок, мгновенный срез.
+pub fn model_inventory() -> Vec<ModelInfo> {
+    let active_stt = stt_engine();
+    let mut v = Vec::new();
+
+    // STT: Whisper (один файл).
+    let wmp = whisper_model_path();
+    v.push(ModelInfo {
+        id: "whisper-turbo".into(),
+        kind: "stt".into(),
+        label: "Whisper large-v3-turbo (q5)".into(),
+        bytes: fs::metadata(&wmp).map(|m| m.len()).unwrap_or(0),
+        present: wmp.exists(),
+        active: active_stt == "whisper-turbo",
+    });
+
+    // STT: Qwen3 веса (локальная папка сайдкара).
+    for (key, label) in [
+        ("qwen3-0.6b", "Qwen3-ASR 0.6B (8bit)"),
+        ("qwen3-1.7b", "Qwen3-ASR 1.7B (4bit)"),
+    ] {
+        let dir = qwen_weights_dir(key);
+        v.push(ModelInfo {
+            id: key.into(),
+            kind: "stt".into(),
+            label: label.into(),
+            bytes: if dir.exists() { dir_size(&dir) } else { 0 },
+            present: qwen_weights_present(key),
+            active: active_stt == key,
+        });
+    }
+
+    // STT runtime: Qwen MLX-окружение (venv) — показываем, только если установлено.
+    let venv = stt_venv();
+    if venv.exists() {
+        v.push(ModelInfo {
+            id: "qwen3-runtime".into(),
+            kind: "runtime".into(),
+            label: "Qwen3 MLX-окружение (venv)".into(),
+            bytes: dir_size(&venv),
+            present: stt_python().exists(),
+            active: false,
+        });
+    }
+
+    // Голос: Silero (venv/модель + torch-hub кэш).
+    let sd = silero_dir();
+    let tor = torch_hub_dir();
+    let silero_bytes = (if sd.exists() { dir_size(&sd) } else { 0 })
+        + (if tor.exists() { dir_size(&tor) } else { 0 });
+    v.push(ModelInfo {
+        id: "silero".into(),
+        kind: "voice".into(),
+        label: "Silero TTS (v4_ru)".into(),
+        bytes: silero_bytes,
+        present: silero_python().exists() && silero_server_py().exists(),
+        active: voice_engine() == "silero",
+    });
+
+    // Wake-word: openWakeWord «Hey Jarvis» (3 ONNX).
+    let wbytes: u64 = WAKEWORD_MODELS
+        .iter()
+        .filter_map(|(f, _)| fs::metadata(wakeword_dir().join(f)).ok().map(|m| m.len()))
+        .sum();
+    v.push(ModelInfo {
+        id: "hey_jarvis".into(),
+        kind: "wake".into(),
+        label: "openWakeWord «Hey Jarvis»".into(),
+        bytes: wbytes,
+        present: wakeword_models_present(),
+        active: true,
+    });
+
+    v
+}
+
 /// Удалить голосовой артефакт по id. После удаления голос недоступен до переустановки.
 pub fn delete_model(id: &str) -> Result<(), String> {
     let path = match id {
@@ -1184,5 +1291,42 @@ mod tests {
         let content = fs::read_to_string(&tmp).unwrap();
         assert_eq!(content, STT_SERVER_SRC, "атомарная запись не изменяет содержимое");
         let _ = fs::remove_file(&tmp);
+    }
+
+    // --- Инкр. «Модели»: единый инвентарь ---
+
+    #[test]
+    fn model_inventory_has_core_models() {
+        let inv = model_inventory();
+        let ids: Vec<&str> = inv.iter().map(|m| m.id.as_str()).collect();
+        for id in ["whisper-turbo", "qwen3-0.6b", "qwen3-1.7b", "silero", "hey_jarvis"] {
+            assert!(ids.contains(&id), "инвентарь должен содержать {id}");
+        }
+    }
+
+    #[test]
+    fn model_inventory_kinds_correct() {
+        let inv = model_inventory();
+        let kind_of = |id: &str| inv.iter().find(|m| m.id == id).map(|m| m.kind.clone());
+        assert_eq!(kind_of("whisper-turbo").as_deref(), Some("stt"));
+        assert_eq!(kind_of("qwen3-0.6b").as_deref(), Some("stt"));
+        assert_eq!(kind_of("qwen3-1.7b").as_deref(), Some("stt"));
+        assert_eq!(kind_of("silero").as_deref(), Some("voice"));
+        assert_eq!(kind_of("hey_jarvis").as_deref(), Some("wake"));
+    }
+
+    #[test]
+    fn model_inventory_at_most_one_active_stt() {
+        let inv = model_inventory();
+        let active = inv.iter().filter(|m| m.kind == "stt" && m.active).count();
+        assert!(active <= 1, "активным может быть не более одного STT-движка, найдено {active}");
+    }
+
+    #[test]
+    fn qwen_weights_dir_layout() {
+        let d = qwen_weights_dir("qwen3-0.6b");
+        assert!(d.ends_with("qwen3-0.6b"), "каталог заканчивается на ключ модели");
+        let s = d.to_string_lossy();
+        assert!(s.contains("stt-mlx") && s.contains("models"), "путь внутри stt-mlx/models: {s}");
     }
 }

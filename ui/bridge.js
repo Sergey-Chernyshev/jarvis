@@ -53,6 +53,7 @@
     integrationRemove: () => invoke('integration_remove'),
     onboardingOpen: () => invoke('onboarding_open'),
     modelDelete: (id) => invoke('model_delete', { id }),
+    modelsGet: () => invoke('models_get'),
     quietSet: (on) => invoke('quiet_set', { on }),
     onGotoSettings: (cb) => on('goto-settings', cb),
     // STT — диктовка (инкремент 9): состояние, выбор движка, тест

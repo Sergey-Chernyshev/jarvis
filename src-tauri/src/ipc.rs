@@ -843,6 +843,13 @@ pub fn stt_get(app: AppHandle) -> Value {
     })
 }
 
+/// Единый инвентарь всех моделей (STT/голос/wake/runtime) для раздела «Модели».
+/// Только filesystem-срез — без health/HTTP-проверок (мгновенно, без блокировок).
+#[tauri::command]
+pub fn models_get() -> Value {
+    json!({ "models": crate::install::model_inventory() })
+}
+
 /// Сменить движок STT + сохранить в settings.json. Требует перезапуска демона.
 #[tauri::command]
 pub fn stt_set_engine(app: AppHandle, engine: String) -> Value {

@@ -95,7 +95,7 @@ window.toast.onAdd((d) => {
   }
 
   if (cards.size >= MAX_CARDS) {
-    removeCard(cards.keys().next().value, true); // самая старая — мгновенно
+    evictForRoom(); // самая старая НЕ-липкая — мгновенно (не сносим пикер/стейдж/мик)
   }
 
   // карточка смены режима: компактная, по центру, с «поп»-анимацией, живёт недолго
@@ -262,6 +262,15 @@ window.toast.onUpdate((d) => {
 // Терминальные фазы исчезают по TTL; промежуточные/интерактивные — «липкие».
 const VOICE_TERMINAL = new Set(['sent', 'cancelled', 'empty', 'nosessions', 'error']);
 
+// Освободить место под новую карточку, НЕ трогая «липкие» (пикер/стейдж/мик/
+// вопрос — интерактивные, должны выжить). Если все липкие — не вытесняем: стек
+// кратко превысит MAX_CARDS, высота всё равно ограничена reportHeight (F3).
+function evictForRoom() {
+  for (const [cid, c] of cards) { // порядок Map = старые первыми
+    if (!c.sticky) { removeCard(cid, true); return; }
+  }
+}
+
 // Кнопка ✕ для HUD: на staged → отменить отправку, на picker → отменить выбор,
 // иначе просто снять карточку.
 function voiceClose(p) {
@@ -280,17 +289,26 @@ function voiceClose(p) {
   return close;
 }
 
-// Единственная HUD-карточка (стабильный id «voice-hud»), перерисовывается
-// целиком на каждую фазу — без устаревших кнопок/обработчиков.
+// Единственная HUD-карточка (стабильный id «voice-hud»). Контент перестраивается
+// на каждую фазу (свежие обработчики), но УЗЕЛ переиспользуется — без мигания и
+// повторной slide-in анимации между фазами (F2).
 function renderVoiceHud(p) {
   if (!p || !p.id) return;
   const id = p.id;
-  removeCard(id, true); // снять предыдущую фазу мгновенно, рисуем заново
-
   const terminal = VOICE_TERMINAL.has(p.phase);
   const ttl = 4200;
-  const card = document.createElement('div');
-  card.className = 'card voice';
+
+  const existing = cards.get(id);
+  const firstTime = !existing;
+  let card;
+  if (existing) {
+    card = existing.el;
+    clearTimeout(existing.timer);
+    while (card.firstChild) card.removeChild(card.firstChild); // сброс контента/обработчиков
+  } else {
+    card = document.createElement('div');
+    card.className = 'card voice';
+  }
   card.style.setProperty('--ttl', `${ttl}ms`);
 
   const crow = document.createElement('div');
@@ -299,7 +317,9 @@ function renderVoiceHud(p) {
   dot.className = 'dot' + (p.phase === 'staged' || p.phase === 'picker' ? ' waiting' : '');
   const title = document.createElement('div');
   title.className = 'title';
-  title.textContent = p.title || '';
+  // staged: показываем КУДА уйдёт промпт — это и есть смысл окна отмены (VR-2)
+  if (p.phase === 'staged' && p.label) title.textContent = `Отправлю → ${p.label}`;
+  else title.textContent = p.title || '';
   crow.append(dot, title, voiceClose(p));
   card.appendChild(crow);
 
@@ -353,11 +373,14 @@ function renderVoiceHud(p) {
     card.appendChild(cancel);
   }
 
-  stackEl.appendChild(card);
+  if (firstTime) {
+    if (cards.size >= MAX_CARDS) evictForRoom();
+    stackEl.appendChild(card);
+    requestAnimationFrame(() => requestAnimationFrame(() => card.classList.add('in')));
+  }
   cards.set(id, { el: card, timer: null, ttl, sticky: !terminal });
   armTimer(id); // терминальные — тикают к TTL; липкие — ждут следующую фазу
   reportHeight();
-  requestAnimationFrame(() => requestAnimationFrame(() => card.classList.add('in')));
 }
 
 window.toast.onVoiceHud(renderVoiceHud);
@@ -365,27 +388,39 @@ window.toast.onVoiceHud(renderVoiceHud);
 /* ============ индикатор «слышу тебя» / «тихо» (фикс «ничего не вижу») ============ */
 
 // Стабильная карточка состояния микрофона. Появляется ТОЛЬКО когда есть что
-// сказать (мик молчит / нет доступа) — иначе снимается. Дешёвый фикс UX-1:
-// детект mic_silent уже есть в hub.rs, его просто не показывали.
+// сказать (мик молчит / нет доступа / нет устройства) — иначе снимается. Дешёвый
+// фикс UX-1: детект уже есть в hub.rs, его просто не показывали.
 const MIC_ID = 'voice-mic';
 function renderMicState(s) {
   if (!s) return;
   const denied = s.state === 'denied';
+  const noDevice = s.state === 'no-device';
   const silent = !!s.mic_silent;
-  if (!denied && !silent) {
+  if (!denied && !noDevice && !silent) {
     removeCard(MIC_ID, true);
     return;
   }
-  removeCard(MIC_ID, true);
-  const card = document.createElement('div');
-  card.className = 'card voice mic';
+  const existing = cards.get(MIC_ID);
+  const firstTime = !existing;
+  let card;
+  if (existing) {
+    card = existing.el;
+    while (card.firstChild) card.removeChild(card.firstChild);
+  } else {
+    card = document.createElement('div');
+    card.className = 'card voice mic';
+  }
   const crow = document.createElement('div');
   crow.className = 'crow';
   const dot = document.createElement('span');
   dot.className = 'dot waiting';
   const title = document.createElement('div');
   title.className = 'title';
-  title.textContent = denied ? 'Нет доступа к микрофону' : 'Микрофон молчит — говори громче';
+  title.textContent = denied
+    ? 'Нет доступа к микрофону'
+    : noDevice
+      ? 'Микрофон не найден'
+      : 'Микрофон молчит — говори громче';
   const close = document.createElement('button');
   close.className = 'close';
   close.title = 'Скрыть';
@@ -395,10 +430,16 @@ function renderMicState(s) {
   close.addEventListener('click', (e) => { e.stopPropagation(); removeCard(MIC_ID); });
   crow.append(dot, title, close);
   card.appendChild(crow);
-  stackEl.appendChild(card);
+  if (firstTime) {
+    if (cards.size >= MAX_CARDS) evictForRoom();
+    stackEl.appendChild(card);
+    requestAnimationFrame(() => requestAnimationFrame(() => card.classList.add('in')));
+  }
   cards.set(MIC_ID, { el: card, timer: null, ttl: TTL, sticky: true });
   reportHeight();
-  requestAnimationFrame(() => requestAnimationFrame(() => card.classList.add('in')));
 }
 
 window.toast.onAudioState(renderMicState);
+// дотянуть текущее состояние на загрузке: audio_state эмитится лишь на изменении,
+// ранний denied/«нет устройства» мог уйти до регистрации слушателя (VR-3)
+if (window.toast.audioState) window.toast.audioState().then(renderMicState).catch(() => {});

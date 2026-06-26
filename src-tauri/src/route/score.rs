@@ -11,6 +11,10 @@ pub struct Scored {
     pub session_id: String,
     pub score: f32,
     pub label: String, // «project · task»
+    /// Есть ли СИЛЬНЫЙ сигнал (совпадение по project/task), а не только слабые
+    /// поля (cwd/branch/last_prompt). Уверенный роут требует сильного сигнала —
+    /// иначе эхо прошлого промпта могло бы авто-роутить (VR-LOGIC-3).
+    pub strong: bool,
 }
 
 /// Решение скорера.
@@ -83,18 +87,24 @@ pub fn rank(transcript: &str, sessions: &[Session]) -> Vec<Scored> {
     let words = tokens(transcript);
     let mut out: Vec<(Scored, i64)> = sessions
         .iter()
-        // Пропускаем переименованные/вытесненные сессии (renamed_to задан) —
-        // в карте они остаются как «хвост», но цель для роутинга стала другой.
-        .filter(|s| s.renamed_to.is_none())
+        // Пропускаем переименованные/вытесненные сессии (renamed_to задан) и те,
+        // что НЕ в tmux (tmux_pane = None): вставить промпт туда нельзя, роут в
+        // них — тупик (VR-LOGIC-2). Нет таких → decide вернёт Unknown → «нет сессий».
+        .filter(|s| s.renamed_to.is_none() && s.tmux_pane.is_some())
         .map(|s| {
-            let mut score = 0.0;
-            score += field_score(&words, &s.project, 1.5);
-            score += field_score(&words, &s.task, 1.2);
+            // сильные поля (project/task) отдельно — по ним решаем «уверенность»
+            let strong_score = field_score(&words, &s.project, 1.5) + field_score(&words, &s.task, 1.2);
+            let mut score = strong_score;
             score += field_score(&words, &s.branch, 1.0);
             score += field_score(&words, &cwd_leaf(&s.cwd), 1.0);
             score += field_score(&words, &s.last_prompt, 0.6);
             (
-                Scored { session_id: s.id.clone(), score, label: label_for(s) },
+                Scored {
+                    session_id: s.id.clone(),
+                    score,
+                    label: label_for(s),
+                    strong: strong_score > 0.0,
+                },
                 s.updated_at,
             )
         })
@@ -119,7 +129,10 @@ pub fn decide(scored: &[Scored]) -> Decision {
         return if cands.is_empty() { Decision::Unknown } else { Decision::Ambiguous(cands) };
     }
     let second = scored.get(1).map(|s| s.score).unwrap_or(0.0);
-    if second <= 0.0 || first.score >= second * GAP_RATIO {
+    let decisive = second <= 0.0 || first.score >= second * GAP_RATIO;
+    // Уверенно ТОЛЬКО при сильном сигнале (project/task), иначе слабый лидер
+    // (cwd/branch/last_prompt-эхо) идёт в пикер/tie-break (VR-LOGIC-3).
+    if decisive && first.strong {
         Decision::Route(first.session_id.clone())
     } else {
         Decision::Ambiguous(topk())
@@ -137,6 +150,7 @@ mod tests {
         s.task = Some(task.into());
         s.updated_at = updated;
         s.status = Status::Idle;
+        s.tmux_pane = Some("%1".into()); // маршрутизируемая (в tmux) сессия
         s
     }
 
@@ -190,7 +204,30 @@ mod tests {
         let mut s = Session::new("abcdefgh1234".into(), 1);
         s.project = None;
         s.task = None;
+        s.tmux_pane = Some("%1".into());
         let scored = rank("x", &[s]);
         assert_eq!(scored[0].label, "abcdefgh");
+    }
+
+    #[test]
+    fn sessions_without_tmux_pane_excluded() {
+        // нет tmux_pane → вставить нельзя → не кандидат (VR-LOGIC-2)
+        let mut s = sess("a", "frontend", "fix build", 100);
+        s.tmux_pane = None;
+        let scored = rank("frontend build", &[s]);
+        assert!(scored.is_empty());
+        assert!(matches!(decide(&scored), Decision::Unknown));
+    }
+
+    #[test]
+    fn last_prompt_only_match_is_ambiguous_not_route() {
+        // совпадение ТОЛЬКО по last_prompt (эхо прошлого промпта) набирает балл,
+        // но без сильного сигнала (project/task) — не уверенный роут (VR-LOGIC-3)
+        let mut s = sess("a", "zzz", "yyy", 100);
+        s.last_prompt = Some("деплой стейджинг прод релиз".into());
+        let scored = rank("деплой стейджинг прод релиз", &[s]);
+        assert!(scored[0].score >= 1.5, "балл выше порога, но сигнал слабый");
+        assert!(!scored[0].strong, "нет совпадения по project/task");
+        assert!(matches!(decide(&scored), Decision::Ambiguous(_)));
     }
 }

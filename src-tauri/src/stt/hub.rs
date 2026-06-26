@@ -268,16 +268,24 @@ impl AudioHub {
         }
     }
 
+    /// Текущее аудио-состояние одним payload (для эмита И для pull-on-load из тоста).
+    pub fn audio_state_payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "state": self.state().as_str(),
+            "muted": self.is_muted(),
+            "mic_silent": self.is_mic_silent(),
+        })
+    }
+
     /// Отправить панели текущее аудио-состояние (+ mute, + флаг «микрофон молчит»).
     /// Дублируем в окно `toast`: оверлей виден, когда панель скрыта (норм. режим),
     /// и показывает «слышу / тихо / нет доступа» — фикс «говорю Hey Jarvis, ничего».
+    /// audio_state эмитится лишь НА ИЗМЕНЕНИИ; ранний terminal-state (denied при
+    /// старте) мог уйти до загрузки webview тоста — тост дотягивает его сам через
+    /// `voice_audio_state` (VR-3).
     fn notify_panel(&self) {
         if let Some(app) = self.app.as_ref() {
-            let payload = serde_json::json!({
-                "state": self.state().as_str(),
-                "muted": self.is_muted(),
-                "mic_silent": self.is_mic_silent(),
-            });
+            let payload = self.audio_state_payload();
             crate::windows::emit_to_panel(app, "audio_state", &payload);
             crate::windows::emit_to_toast_window(app, "audio_state", &payload);
         }

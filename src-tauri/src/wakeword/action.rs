@@ -65,7 +65,10 @@ impl WakeAction for AgentWakeAction {
         // Тяжёлая часть (захват+STT+маршрутизация) — в отдельном потоке. Гард
         // живёт до конца цикла (Drop снимает single-flight на ЛЮБОМ выходе).
         std::thread::spawn(move || {
-            let _guard = guard;
+            // `guard` держим в области потока: ранние return (ошибка захвата/STT)
+            // дропают его → single-flight снимается и цикл закрыт. На успешном
+            // пути он УЕЗЖАЕТ в route_transcript → StageBuffer и держится всё окно
+            // отмены (RC1), а не снимается тут же по выходу из потока.
 
             // STT-захват реплики (преролл уже снят сервисом — добавляем сами)
             let cap = hub.open_capture(false);
@@ -107,7 +110,8 @@ impl WakeAction for AgentWakeAction {
             // Маршрутизация в Rust. Источник недоверенный (открытый микрофон):
             // побочный эффект (reply_core) — только через stage-окно/пикер,
             // см. модель доверия в спеке. Блокируемся в этом потоке (не tokio).
-            tauri::async_runtime::block_on(crate::route::route_transcript(d.clone(), text));
+            // guard едет внутрь — держит single-flight до пасты/отмены.
+            tauri::async_runtime::block_on(crate::route::route_transcript(d.clone(), text, guard));
         });
     }
 }

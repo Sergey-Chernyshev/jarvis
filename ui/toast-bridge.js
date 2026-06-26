@@ -35,5 +35,7 @@
     // тап по варианту пикера (sessionId=null → отмена выбора) и «Отменить» стейджа
     voicePick: (nonce, sessionId) => invoke('voice_pick_resolve', { nonce, sessionId }),
     voiceCancel: (nonce) => invoke('voice_stage_cancel', { nonce }),
+    // дотянуть текущее аудио-состояние на загрузке (VR-3)
+    audioState: () => invoke('voice_audio_state'),
   };
 })();

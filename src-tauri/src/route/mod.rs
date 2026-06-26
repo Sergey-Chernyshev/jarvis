@@ -86,7 +86,12 @@ pub fn decide_action(decision: Decision, tie: Option<(String, f32)>) -> Action {
 /// Полный голосовой цикл после успешного STT. Зовётся из `on_wake` (в async).
 /// Побочный эффект (`reply_core`) — только через `stage_and_send` (окно отмены)
 /// или после тапа пикера; см. модель доверия в спеке.
-pub async fn route_transcript(d: Arc<Daemon>, transcript: String) {
+///
+/// `guard` — single-flight цикла. На терминальных ветках (нет/пусто/ошибка/
+/// отмена) он дропается при выходе из функции. На отправке — переходит в
+/// `stage_and_send` → в `StageBuffer`, чтобы держаться всё окно отмены (RC1):
+/// иначе re-wake в эти 5с сносил бы staged-карточку, а паста всё равно шла.
+pub async fn route_transcript(d: Arc<Daemon>, transcript: String, guard: SfGuard) {
     let text = transcript.trim().to_string();
     if text.is_empty() {
         hud::emit(&d, hud::Phase::Empty);
@@ -116,10 +121,10 @@ pub async fn route_transcript(d: Arc<Daemon>, transcript: String) {
     };
 
     match decide_action(decision, tie) {
-        Action::Nothing => hud::emit(&d, hud::Phase::NoSessions),
+        Action::Nothing => hud::emit(&d, hud::Phase::NoSessions), // guard дропнется на выходе
         Action::Send(sid) => {
             let label = label_of(&sid);
-            stage_and_send(d.clone(), sid, label, text);
+            stage_and_send(d.clone(), sid, label, text, guard);
         }
         Action::Pick(cands) => {
             let options: Vec<(String, String)> =
@@ -131,6 +136,7 @@ pub async fn route_transcript(d: Arc<Daemon>, transcript: String) {
             let nonce = pick::gen_nonce();
             let rx = d.picks.register(nonce.clone());
             hud::emit(&d, hud::Phase::Picker { nonce: nonce.clone(), options });
+            // guard держится всё ожидание пикера (мы внутри block_on) — re-wake игнор
             let chosen = match tokio::time::timeout(Duration::from_secs(PICK_TIMEOUT_SECS), rx).await {
                 Ok(Ok(Some(sid))) => Some(sid),
                 _ => {
@@ -141,17 +147,18 @@ pub async fn route_transcript(d: Arc<Daemon>, transcript: String) {
             match chosen {
                 Some(sid) => {
                     let label = label_of(&sid);
-                    stage_and_send(d.clone(), sid, label, text);
+                    stage_and_send(d.clone(), sid, label, text, guard);
                 }
-                None => hud::emit(&d, hud::Phase::Cancelled),
+                None => hud::emit(&d, hud::Phase::Cancelled), // guard дропнется на выходе
             }
         }
     }
 }
 
 /// Стейдж текста в сессию с окном отмены; по истечении без отмены → `reply_core`
-/// и эмит итога (доставлено / в очередь / ошибка) в HUD.
-pub fn stage_and_send(d: Arc<Daemon>, session_id: String, label: String, text: String) {
+/// и эмит итога (доставлено / в очередь / нужен tmux / ошибка) в HUD. `guard`
+/// едет в `StageBuffer` и держит single-flight всё окно (дропается на пасте/отмене).
+pub fn stage_and_send(d: Arc<Daemon>, session_id: String, label: String, text: String, guard: SfGuard) {
     let nonce = pick::gen_nonce();
     hud::emit(
         &d,
@@ -168,6 +175,7 @@ pub fn stage_and_send(d: Arc<Daemon>, session_id: String, label: String, text: S
         session_id,
         text,
         Duration::from_secs(STAGE_SECS as u64),
+        Box::new(guard), // непрозрачный держатель single-flight на время окна
         move |sid, txt| {
             // колбэк вне async — поднимаем таску для собственно отправки
             tauri::async_runtime::spawn(async move {
@@ -176,6 +184,11 @@ pub fn stage_and_send(d: Arc<Daemon>, session_id: String, label: String, text: S
                 if ok {
                     let queued = res.get("queued").and_then(|v| v.as_bool()).unwrap_or(false);
                     hud::emit(&d2, hud::Phase::Sent { label, queued });
+                } else if res.get("needsTmux").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    // ЧЕТВЁРТАЯ форма reply_core: без "error", но с resumeCmd (VR-LOGIC-1)
+                    let cmd = res.get("resumeCmd").and_then(|v| v.as_str()).unwrap_or("");
+                    let msg = format!("Сессия не в tmux — вставить нельзя. {cmd}").trim().to_string();
+                    hud::emit(&d2, hud::Phase::Error { msg });
                 } else {
                     let msg = res
                         .get("error")

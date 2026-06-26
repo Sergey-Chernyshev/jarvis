@@ -2555,7 +2555,7 @@ window.jarvis.onWake((p) => {
   const pill = document.getElementById('wake-status-pill');
   if (pill) { pill.textContent = 'сработало!'; pill.className = 'astatus on'; }
 });
-window.jarvis.onWakeInstallDone(() => { try { renderWakeCard(); } catch {} });
+window.jarvis.onWakeInstallDone(() => { try { renderWakeCard(); renderModelManager(); } catch {} });
 // STT-модели качаются по запросу (кнопка в карточке) — прогресс в строку,
 // финал перерисовывает карточку, ошибку показываем тостом.
 window.jarvis.onSttInstallProgress((step) => {
@@ -2566,6 +2566,7 @@ window.jarvis.onSttInstallDone((p) => {
   try {
     if (p && !p.ok && p.error) showToast('STT: не удалось — ' + p.error);
     renderSttCard();
+    renderModelManager();
   } catch {}
 });
 
@@ -2807,7 +2808,20 @@ async function renderModelManager() {
   }
 }
 
-// одна строка модели: статус-точка + имя + (активна) + размер/«не скачана»
+// действие скачивания для не-скачанной модели (или null, если ставится иначе)
+function downloadActionFor(m) {
+  if (m.present) return null;
+  switch (m.id) {
+    case 'whisper-turbo': return { label: 'Скачать (~574 МБ)', run: () => window.jarvis.sttInstallWhisper() };
+    case 'qwen3-0.6b': return { label: 'Скачать (~1 ГБ)', run: () => window.jarvis.sttInstallQwen('qwen3-0.6b') };
+    case 'qwen3-1.7b': return { label: 'Скачать (~1 ГБ)', run: () => window.jarvis.sttInstallQwen('qwen3-1.7b') };
+    case 'qwen3-runtime': return { label: 'Установить (~2.6 ГБ)', run: () => window.jarvis.sttInstallSidecar() };
+    case 'hey_jarvis': return { label: 'Скачать', run: () => window.jarvis.wakeInstallModels() };
+    default: return null; // silero ставится через настройку интеграции
+  }
+}
+
+// одна строка модели: статус-точка + имя + (активна) + размер + [Скачать]
 function modelRow(m) {
   const r = document.createElement('div');
   r.className = 'istat hairtop' + (m.present ? ' on' : '');
@@ -2823,6 +2837,20 @@ function modelRow(m) {
     className: 'sz',
     textContent: m.present ? fmtBytes(m.bytes) : 'не скачана',
   }));
+  const action = downloadActionFor(m);
+  if (action) {
+    const btn = document.createElement('button');
+    btn.className = 'abtn small';
+    btn.style.marginLeft = '10px';
+    btn.textContent = action.label;
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Качаю…';
+      try { await action.run(); } catch {}
+      // финал прилетит событием stt_install_done / wake_install_done → перерисует карточку
+    });
+    r.appendChild(btn);
+  }
   return r;
 }
 

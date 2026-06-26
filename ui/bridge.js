@@ -62,6 +62,7 @@
     sttTest: () => invoke('stt_test'),
     sttInstallWhisper: () => invoke('stt_install_whisper'),
     sttInstallSidecar: () => invoke('stt_install_sidecar'),
+    sttInstallQwen: (key) => invoke('stt_install_qwen', { key }),
     onSttInstallProgress: (cb) => on('stt_install_progress', cb),
     onSttInstallDone: (cb) => on('stt_install_done', cb),
 

@@ -157,6 +157,7 @@ fn main() {
             ipc::stt_test,
             onboarding::stt_install_whisper,
             onboarding::stt_install_sidecar,
+            onboarding::stt_install_qwen,
             ipc::wake_get,
             ipc::wake_set_enabled,
             ipc::wake_set_threshold,

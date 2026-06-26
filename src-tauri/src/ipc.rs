@@ -844,14 +844,38 @@ pub async fn agent_send(app: AppHandle, message: String, session_id: Option<Stri
         .map(|m| format!("mcp__jarvis__{}", m.id.replace('.', "_")))
         .collect();
 
-    let host = ClaudeCliHost { app: app.clone(), mcp_config };
     let resume = session_id.clone();
 
-    tauri::async_runtime::spawn(async move {
-        host.run(&message, &tools, resume.as_deref()).await;
-    });
+    // Выбор хоста по доступности («auto»): Claude (жёсткий INV-TOOLS на init) если
+    // есть, иначе Codex (чистый CODEX_HOME + обязательный per-item kill).
+    if crate::claude_bin::resolve_claude_bin().is_some() {
+        let host = ClaudeCliHost { app: app.clone(), mcp_config };
+        tauri::async_runtime::spawn(async move {
+            host.run(&message, &tools, resume.as_deref()).await;
+        });
+    } else if crate::backend::codex::resolve_codex_bin().is_some() {
+        let Some((mcp_bin, token)) = read_mcp_bin_token(&mcp_config) else {
+            return err("jarvis-mcp.json не прочитан — Codex-агент недоступен");
+        };
+        let host = crate::backend::codex_agent::CodexCliHost { app: app.clone(), mcp_bin, token };
+        tauri::async_runtime::spawn(async move {
+            host.run(&message, &tools, resume.as_deref()).await;
+        });
+    } else {
+        return err("Нет ни claude, ни codex — агент недоступен");
+    }
 
     json!({ "ok": true })
+}
+
+/// Достать (путь к jarvis-mcp, токен агента) из jarvis-mcp.json — для Codex-хоста,
+/// который инжектит MCP-сервер через `-c`, а не файлом.
+pub(crate) fn read_mcp_bin_token(mcp_config: &str) -> Option<(String, String)> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(mcp_config).ok()?).ok()?;
+    let j = v.get("mcpServers")?.get("jarvis")?;
+    let bin = j.get("command")?.as_str()?.to_string();
+    let token = j.get("env")?.get("JARVIS_TOKEN")?.as_str()?.to_string();
+    Some((bin, token))
 }
 
 /// Открыть (или сфокусировать) окно чата с агентом (фаза 7).

@@ -857,6 +857,22 @@ pub fn stt_set_engine(app: AppHandle, engine: String) -> Value {
     if !allowed.contains(&engine.as_str()) {
         return err(format!("Неизвестный STT-движок: {engine}"));
     }
+    // Гейт: не переключаемся на движок без локальных весов/окружения — иначе
+    // qwen-сайдкар уйдёт в бесконечную загрузку с HF (:8732 висит), а whisper
+    // вернёт «модель не установлена». Сначала пользователь скачивает модель.
+    let st = crate::install::status();
+    let ready = match engine.as_str() {
+        "whisper-turbo" => st.whisper_model,
+        "qwen3-0.6b" | "qwen3-1.7b" => {
+            crate::install::qwen_weights_present(&engine) && st.qwen3_sidecar
+        }
+        _ => false,
+    };
+    if !ready {
+        return err(format!(
+            "{engine}: модель не скачана — сначала скачайте её в разделе «Модели»"
+        ));
+    }
     let d = Daemon::get(&app);
     let mut patch = serde_json::Map::new();
     patch.insert("engine".into(), Value::String(engine));

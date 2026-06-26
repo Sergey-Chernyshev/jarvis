@@ -2858,7 +2858,36 @@ function modelRow(m) {
       // финал прилетит событием stt_install_done / wake_install_done → перерисует карточку
     });
     r.appendChild(btn);
-  } else if (canDeleteModel(m)) {
+    return r;
+  }
+
+  // скачана: «Сделать активной» (только не-активный STT-движок) + «Удалить»
+  if (m.kind === 'stt' && !m.active) {
+    const act = document.createElement('button');
+    act.className = 'abtn small';
+    act.style.marginLeft = '10px';
+    act.textContent = 'Сделать активной';
+    act.addEventListener('click', async () => {
+      act.disabled = true;
+      act.textContent = 'Включаю…';
+      try {
+        const res = await window.jarvis.sttSetEngine(m.id);
+        if (res && res.ok === false) {
+          showToast('Не удалось: ' + (res.error || ''));
+          act.disabled = false; act.textContent = 'Сделать активной';
+          return;
+        }
+        if (res && res.restart) showToast('Активна после перезапуска Jarvis');
+        renderModelManager();
+        try { renderSttCard(); } catch {}
+      } catch (e) {
+        showToast('Ошибка: ' + e);
+        act.disabled = false; act.textContent = 'Сделать активной';
+      }
+    });
+    r.appendChild(act);
+  }
+  if (canDeleteModel(m)) {
     const del = document.createElement('button');
     del.className = 'abtn danger small';
     del.style.marginLeft = '10px';

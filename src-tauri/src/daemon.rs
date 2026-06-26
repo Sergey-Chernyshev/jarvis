@@ -282,7 +282,7 @@ impl Daemon {
         loop {
             let Some(batch) = self.translator.take_batch() else { return };
             let prompt = ru::Translator::prompt_for(&batch);
-            let out = claude_bin::run_haiku(&prompt, Duration::from_secs(60)).await;
+            let out = claude_bin::run_service_llm(&prompt, Duration::from_secs(60)).await;
             let changed = self.translator.finish_batch(&batch, out.as_deref());
             if changed {
                 self.apply_translations();
@@ -954,19 +954,29 @@ impl Daemon {
     /// словами). Так голос не глотает английский — лечим на уровне модели-суммаризатора,
     /// а не словарём. None — нет claude/квоты/короткий ответ/англоязычный мета-ответ.
     async fn ai_toast_summary(self: &std::sync::Arc<Self>, sid: &str) -> Option<(String, String)> {
-        if claude_bin::resolve_claude_bin().is_none() || !self.busy_take("aisum", sid) {
+        if !claude_bin::any_service_bin() || !self.busy_take("aisum", sid) {
             return None;
         }
         let result = async {
             let s = self.session(sid)?;
-            let reply = transcript::full_final_reply(s.transcript.as_deref()?)?;
+            let tr = s.transcript.as_deref()?;
+            // финальный ответ — по бэкенду: Claude из JSONL-цепочки, Codex из rollout
+            let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
+            let reply = match agent {
+                crate::backend::Agent::Claude => transcript::full_final_reply(tr)?,
+                crate::backend::Agent::Codex => {
+                    let entries = crate::backend::backend(agent)
+                        .read_entries(std::path::Path::new(tr), 512 * 1024);
+                    crate::backend::codex_transcript::full_final_reply(&entries)?
+                }
+            };
             // длинный ответ режем — haiku отвечает быстрее, а сути хватает
             let reply = ellipsize(&reply, 3000);
             let prompt = format!(
                 "Вот ответ агента:\n{reply}\n\nОпиши простыми словами по-русски, ЧТО по сути изменилось и какой результат для пользователя. Только суть и итог, без технических деталей: не упоминай конкретные имена переменных, файлов, функций, команд. Одно короткое предложение, до 160 символов, без markdown.\n\nВерни СТРОГО JSON без пояснений и без ```:\n{{\"display\": \"<текст для показа на экране; английские техтермины можно оставить латиницей>\", \"speak\": \"<тот же смысл, но как ПРОИЗНОСИТЬ вслух по-русски: каждое английское слово транслитерируй кириллицей (GitLab→гитлаб, Docker→докер, commit→коммит), числа пиши словами (3→три)>\"}}"
             );
             let t_haiku = crate::metrics::now();
-            let out = claude_bin::run_haiku(&prompt, Duration::from_secs(30)).await?;
+            let out = claude_bin::run_service_llm(&prompt, Duration::from_secs(30)).await?;
             crate::metrics::record("haiku", t_haiku, serde_json::json!({ "sid": sid, "in_chars": reply.chars().count() }));
             // вытащить {...} (haiku иногда оборачивает в прозу/```)
             let parsed = (|| {
@@ -1197,17 +1207,19 @@ impl Daemon {
             tokio::time::sleep(Duration::from_millis(1200)).await;
             let Some(s) = d.session(&sid) else { return };
             let Some(tr) = s.transcript.clone() else { return };
-            if claude_bin::resolve_claude_bin().is_none() || !d.busy_take("summary", &sid) {
+            if !claude_bin::any_service_bin() || !d.busy_take("summary", &sid) {
                 return;
             }
 
-            let turns: Vec<transcript::ChatItem> = transcript::chain_from_entries(
-                transcript::read_recent_entries(std::path::Path::new(&tr), 512 * 1024),
-            )
-            .iter()
-            .flat_map(transcript::to_chat_items)
-            .filter(|i| i.kind == "text")
-            .collect();
+            // лента диалога — по бэкенду сессии (Claude цепочка vs Codex rollout)
+            let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
+            let be = crate::backend::backend(agent);
+            let turns: Vec<transcript::ChatItem> = be
+                .read_entries(std::path::Path::new(&tr), 512 * 1024)
+                .iter()
+                .flat_map(|e| be.to_chat_items(e))
+                .filter(|i| i.kind == "text")
+                .collect();
             let turns: Vec<_> = turns.into_iter().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect();
             if turns.len() < 2 {
                 d.busy_release("summary", &sid);
@@ -1227,7 +1239,7 @@ impl Daemon {
             let prompt = format!(
                 "Вот хвост рабочего диалога:\n{convo}\n\nНапиши простыми словами по-русски одной короткой строкой, над чем сейчас идёт работа. Только обычный текст: без кавычек, без markdown, без форматирования. Не длиннее 90 символов. Названия кода, файлов и команд оставляй как есть."
             );
-            let out = claude_bin::run_haiku(&prompt, Duration::from_secs(90)).await;
+            let out = claude_bin::run_service_llm(&prompt, Duration::from_secs(90)).await;
             d.busy_release("summary", &sid);
             let Some(out) = out else { return }; // без квоты/сети живём на lastPrompt/title
             // squeeze_reply страхует от форматирования, если модель его всё же выдала

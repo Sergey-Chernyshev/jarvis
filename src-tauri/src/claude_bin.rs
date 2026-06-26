@@ -123,3 +123,69 @@ pub async fn run_haiku(prompt: &str, timeout: Duration) -> Option<String> {
     ));
     out
 }
+
+/// Доступен ли ХОТЬ КАКОЙ-ТО служебный бэкенд (claude или codex) — для гейтов
+/// саммари/переводов: на codex-only машине они тоже должны работать.
+pub fn any_service_bin() -> bool {
+    resolve_claude_bin().is_some() || crate::backend::codex::resolve_codex_bin().is_some()
+}
+
+/// Codex как «функция текста»: `codex exec --json --ignore-user-config` (без
+/// чужих MCP), read-only, дешёвый reasoning; system-промпт вшит в начало (у Codex
+/// нет --append-system-prompt). Возвращает последний agent_message из потока.
+pub async fn run_codex_summary(prompt: &str, timeout: Duration) -> Option<String> {
+    let bin = crate::backend::codex::resolve_codex_bin()?;
+    let full = format!("{HAIKU_SYSTEM}\n\n{prompt}");
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args([
+        "exec",
+        "--json",
+        "--ignore-user-config", // ноль чужих MCP/скиллов
+        "-s",
+        "read-only",
+        "-c",
+        "model_reasoning_effort=\"low\"", // не minimal: 400 при image_gen/web_search
+        &full,
+    ])
+    .current_dir(std::env::temp_dir())
+    .env("JARVIS_IGNORE", "1") // egress-прокси наследуется из env (как у claude)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .kill_on_drop(true);
+    let out = tokio::time::timeout(timeout, cmd.output()).await.ok()?.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut last: Option<String> = None;
+    for line in text.lines() {
+        if let crate::backend::codex_agent::CodexLine::Events(evs) =
+            crate::backend::codex_agent::classify_codex_line(line)
+        {
+            for ev in evs {
+                if let crate::agent::AgentEvent::Delta { text } = ev {
+                    if !text.trim().is_empty() {
+                        last = Some(text);
+                    }
+                }
+            }
+        }
+    }
+    last
+}
+
+/// Служебный LLM-вызов (саммари/перевод), бэкенд-агностично: предпочитаем Claude
+/// (дешёвый haiku), иначе — Codex (`codex exec`). На машине без claude саммари
+/// больше не пропадают.
+pub async fn run_service_llm(prompt: &str, timeout: Duration) -> Option<String> {
+    if resolve_claude_bin().is_some() {
+        if let Some(s) = run_haiku(prompt, timeout).await {
+            return Some(s);
+        }
+    }
+    if crate::backend::codex::resolve_codex_bin().is_some() {
+        return run_codex_summary(prompt, timeout).await;
+    }
+    None
+}

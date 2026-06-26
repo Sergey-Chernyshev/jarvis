@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use super::{Agent, Backend, CODEX_EVENTS};
+use super::{Agent, Backend};
 use crate::transcript::ChatItem;
 
 pub struct CodexBackend;
@@ -49,12 +49,6 @@ pub fn resolve_codex_bin() -> Option<PathBuf> {
 impl Backend for CodexBackend {
     fn agent(&self) -> Agent {
         Agent::Codex
-    }
-    fn hook_events(&self) -> &'static [(&'static str, &'static str)] {
-        CODEX_EVENTS
-    }
-    fn hooks_path(&self) -> PathBuf {
-        crate::util::codex_dir().join("hooks.json")
     }
     fn cli_found(&self) -> bool {
         resolve_codex_bin().is_some()

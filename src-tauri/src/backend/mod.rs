@@ -48,41 +48,17 @@ impl Agent {
     }
 }
 
-/// Событие хука Claude Code → внутренний аргумент шима. Единый источник правды
-/// (install/mod.rs ссылается сюда).
-pub static CLAUDE_EVENTS: &[(&str, &str)] = &[
-    ("SessionStart", "session-start"),
-    ("UserPromptSubmit", "prompt"),
-    ("PreToolUse", "pre-tool"),
-    ("PostToolUse", "post-tool"),
-    ("Notification", "notification"),
-    ("Stop", "stop"),
-    ("StopFailure", "stop-failure"),
-    ("SessionEnd", "session-end"),
-];
+// Примечание: таблицы событий хуков (CLAUDE/CODEX) живут в install/mod.rs —
+// он компилируется отдельным бинарём jarvis-setup (`#[path] mod install`) БЕЗ
+// остального крейта, поэтому provisioning самодостаточен и не зависит от backend.
 
-/// Событие хука Codex → внутренний аргумент. PermissionRequest→waiting,
-/// SubagentStart/Stop→доска (см. spec §4.1). У Codex нет Notification/
-/// StopFailure/SessionEnd.
-pub static CODEX_EVENTS: &[(&str, &str)] = &[
-    ("SessionStart", "session-start"),
-    ("UserPromptSubmit", "prompt"),
-    ("PreToolUse", "pre-tool"),
-    ("PostToolUse", "post-tool"),
-    ("Stop", "stop"),
-    ("PermissionRequest", "permission"),
-    ("SubagentStart", "subagent-start"),
-    ("SubagentStop", "subagent-stop"),
-];
-
-/// Sync, dyn-safe часть шва: чистые данные/форматирование. Всё async/stateful —
-/// свободными функциями в своих модулях.
+/// Sync, dyn-safe часть шва: чистые данные/форматирование для рантайма демона.
+/// Всё async/stateful (контроль, usage-скан, service-LLM, agent-host) — свободными
+/// функциями `match agent` в своих модулях. Provisioning — в install/mod.rs.
 pub trait Backend: Send + Sync {
     fn agent(&self) -> Agent;
 
-    // — provisioning —
-    fn hook_events(&self) -> &'static [(&'static str, &'static str)];
-    fn hooks_path(&self) -> PathBuf;
+    /// Установлен ли настоящий бинарь агента (минуя наш шим).
     fn cli_found(&self) -> bool;
 
     // — transcript → ChatItem —
@@ -115,12 +91,6 @@ pub struct ClaudeBackend;
 impl Backend for ClaudeBackend {
     fn agent(&self) -> Agent {
         Agent::Claude
-    }
-    fn hook_events(&self) -> &'static [(&'static str, &'static str)] {
-        CLAUDE_EVENTS
-    }
-    fn hooks_path(&self) -> PathBuf {
-        crate::util::home_dir().join(".claude/settings.json")
     }
     fn cli_found(&self) -> bool {
         crate::claude_bin::resolve_claude_bin().is_some()
@@ -207,17 +177,14 @@ mod tests {
         assert_eq!(b.friendly_model("claude-opus-4-8"), "Opus");
         assert_eq!(b.resume_cmd("abc"), "claude --resume abc");
         assert!(b.has_separate_effort());
-        assert_eq!(b.hook_events().len(), 8);
-        assert!(b.hooks_path().ends_with(".claude/settings.json"));
+        assert_eq!(b.models().len(), 4);
     }
 
     #[test]
-    fn codex_event_table_shape() {
+    fn codex_backend_basics() {
         let b = backend(Agent::Codex);
-        assert_eq!(b.hook_events().len(), 8);
-        assert!(b.hook_events().iter().any(|(e, a)| *e == "Stop" && *a == "stop"));
-        assert!(b.hook_events().iter().any(|(e, _)| *e == "PermissionRequest"));
         assert!(!b.has_separate_effort());
-        assert!(b.hooks_path().ends_with(".codex/hooks.json"));
+        assert_eq!(b.resume_cmd("xyz"), "codex resume xyz");
+        assert!(b.effort_levels().contains(&"minimal"));
     }
 }

@@ -140,6 +140,7 @@ pub async fn run_codex_summary(prompt: &str, timeout: Duration) -> Option<String
     cmd.args([
         "exec",
         "--json",
+        "--ephemeral", // НЕ писать rollout — служебные вызовы не засоряют history/usage
         "--ignore-user-config", // ноль чужих MCP/скиллов
         "-s",
         "read-only",

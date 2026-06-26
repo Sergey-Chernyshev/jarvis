@@ -1301,15 +1301,42 @@ pub fn model_inventory() -> Vec<ModelInfo> {
     v
 }
 
-/// Удалить голосовой артефакт по id. После удаления голос недоступен до переустановки.
+/// Является ли id ключом STT-движка (whisper/qwen).
+fn is_stt_engine_id(id: &str) -> bool {
+    matches!(id, "whisper-turbo" | "qwen3-0.6b" | "qwen3-1.7b")
+}
+
+/// Удалить модель/артефакт по id и освободить место. Запрещает удаление активного
+/// STT-движка (иначе диктовка останется без модели). После удаления соответствующая
+/// функция недоступна до повторной загрузки. Идемпотентно (нет файлов — не ошибка).
 pub fn delete_model(id: &str) -> Result<(), String> {
-    let path = match id {
-        "silero" => silero_dir(),
-        "torch-hub" => torch_hub_dir(),
-        other => return Err(format!("неизвестная модель: {other}")),
+    // не сносим активный STT-движок — сначала пользователь должен выбрать другой
+    if is_stt_engine_id(id) && id == stt_engine() {
+        return Err(format!("{id} — активный движок; сначала выберите другой"));
+    }
+    let rm_dir = |p: PathBuf| -> Result<(), String> {
+        if p.exists() {
+            fs::remove_dir_all(&p).map_err(|e| format!("удаление {}: {e}", p.display()))?;
+        }
+        Ok(())
     };
-    if path.exists() {
-        fs::remove_dir_all(&path).map_err(|e| format!("удаление {}: {e}", path.display()))?;
+    match id {
+        "whisper-turbo" => {
+            let f = whisper_model_path();
+            if f.exists() {
+                fs::remove_file(&f).map_err(|e| format!("удаление whisper: {e}"))?;
+            }
+        }
+        "qwen3-0.6b" | "qwen3-1.7b" => rm_dir(qwen_weights_dir(id))?,
+        "qwen3-runtime" => rm_dir(stt_venv())?,
+        "hey_jarvis" => {
+            for (name, _) in WAKEWORD_MODELS {
+                let _ = fs::remove_file(wakeword_dir().join(name));
+            }
+        }
+        "silero" => rm_dir(silero_dir())?,
+        "torch-hub" => rm_dir(torch_hub_dir())?,
+        other => return Err(format!("неизвестная модель: {other}")),
     }
     Ok(())
 }
@@ -1548,5 +1575,33 @@ mod tests {
         .expect("fetch config.json через прокси");
         assert!(fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0) > 1000, "config.json скачан");
         let _ = fs::remove_file(&tmp);
+    }
+
+    // --- Инкр.3: удаление ---
+
+    #[test]
+    fn delete_unknown_model_errs() {
+        assert!(delete_model("nonsense").is_err(), "неизвестный id → Err");
+    }
+
+    #[test]
+    fn delete_active_stt_engine_is_blocked() {
+        // активный движок (из settings, дефолт qwen3-0.6b) удалять нельзя
+        let active = stt_engine();
+        if is_stt_engine_id(&active) {
+            let r = delete_model(&active);
+            assert!(r.is_err(), "активный движок {active} нельзя удалить");
+            assert!(r.unwrap_err().contains("активный"), "ошибка про активность");
+        }
+    }
+
+    #[test]
+    fn is_stt_engine_id_classifies() {
+        assert!(is_stt_engine_id("whisper-turbo"));
+        assert!(is_stt_engine_id("qwen3-0.6b"));
+        assert!(is_stt_engine_id("qwen3-1.7b"));
+        assert!(!is_stt_engine_id("silero"));
+        assert!(!is_stt_engine_id("hey_jarvis"));
+        assert!(!is_stt_engine_id("qwen3-runtime"));
     }
 }

@@ -2821,13 +2821,20 @@ function downloadActionFor(m) {
   }
 }
 
-// одна строка модели: статус-точка + имя + (активна) + размер + [Скачать]
+// можно ли удалить модель: скачана и не активный STT-движок
+function canDeleteModel(m) {
+  if (!m.present) return false;
+  if (m.kind === 'stt' && m.active) return false; // активный движок не сносим
+  return true;
+}
+
+// одна строка модели: статус-точка + имя + (активна) + размер + [Скачать|Удалить]
 function modelRow(m) {
   const r = document.createElement('div');
   r.className = 'istat hairtop' + (m.present ? ' on' : '');
   r.appendChild(Object.assign(document.createElement('span'), { className: 'dot' }));
   r.appendChild(Object.assign(document.createElement('span'), { textContent: m.label }));
-  if (m.active && m.present) {
+  if (m.kind === 'stt' && m.active && m.present) {
     const badge = Object.assign(document.createElement('span'), { className: 'astatus on', textContent: 'активна' });
     badge.style.marginLeft = '8px';
     r.appendChild(badge);
@@ -2837,6 +2844,7 @@ function modelRow(m) {
     className: 'sz',
     textContent: m.present ? fmtBytes(m.bytes) : 'не скачана',
   }));
+
   const action = downloadActionFor(m);
   if (action) {
     const btn = document.createElement('button');
@@ -2850,6 +2858,20 @@ function modelRow(m) {
       // финал прилетит событием stt_install_done / wake_install_done → перерисует карточку
     });
     r.appendChild(btn);
+  } else if (canDeleteModel(m)) {
+    const del = document.createElement('button');
+    del.className = 'abtn danger small';
+    del.style.marginLeft = '10px';
+    del.textContent = 'Удалить';
+    let armed = false;
+    del.addEventListener('click', async () => {
+      if (!armed) { armed = true; del.textContent = 'Точно?'; setTimeout(() => { armed = false; del.textContent = 'Удалить'; }, 3000); return; }
+      del.disabled = true; del.textContent = '…';
+      try { await window.jarvis.modelDelete(m.id); } catch (e) { showToast('Не удалось удалить: ' + e); }
+      renderModelManager();
+      try { renderSttCard(); renderVoiceCard(); renderWakeCard(); } catch {}
+    });
+    r.appendChild(del);
   }
   return r;
 }

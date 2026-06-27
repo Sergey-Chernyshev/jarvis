@@ -1272,6 +1272,30 @@ fn dir_size(p: &Path) -> u64 {
     total
 }
 
+/// Кэш размеров тяжёлых каталогов (venv ~21k файлов, silero/torch-hub) — чтобы НЕ
+/// обходить десятки тысяч файлов на КАЖДОМ открытии настроек (был ~1с лаг).
+/// TTL 30с: первый расчёт честный, повторные — мгновенно из кэша.
+fn dir_size_cached(p: &Path) -> u64 {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<HashMap<PathBuf, (u64, Instant)>>> = Mutex::new(None);
+    const TTL: Duration = Duration::from_secs(30);
+    let mut g = match CACHE.lock() {
+        Ok(g) => g,
+        Err(_) => return dir_size(p),
+    };
+    let map = g.get_or_insert_with(HashMap::new);
+    if let Some((sz, at)) = map.get(p) {
+        if at.elapsed() < TTL {
+            return *sz;
+        }
+    }
+    let sz = dir_size(p);
+    map.insert(p.to_path_buf(), (sz, Instant::now()));
+    sz
+}
+
 /// Голосовые артефакты на диске (что есть — то и показываем).
 pub fn model_artifacts() -> Vec<Artifact> {
     let mut v = Vec::new();
@@ -1366,7 +1390,7 @@ pub fn model_inventory() -> Vec<ModelInfo> {
             id: "qwen3-runtime".into(),
             kind: "runtime".into(),
             label: "Qwen3 MLX-окружение (venv)".into(),
-            bytes: dir_size(&venv),
+            bytes: dir_size_cached(&venv),
             present: stt_python().exists(),
             active: false,
         });
@@ -1375,8 +1399,8 @@ pub fn model_inventory() -> Vec<ModelInfo> {
     // Голос: Silero (venv/модель + torch-hub кэш).
     let sd = silero_dir();
     let tor = torch_hub_dir();
-    let silero_bytes = (if sd.exists() { dir_size(&sd) } else { 0 })
-        + (if tor.exists() { dir_size(&tor) } else { 0 });
+    let silero_bytes = (if sd.exists() { dir_size_cached(&sd) } else { 0 })
+        + (if tor.exists() { dir_size_cached(&tor) } else { 0 });
     v.push(ModelInfo {
         id: "silero".into(),
         kind: "voice".into(),

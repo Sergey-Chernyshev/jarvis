@@ -978,6 +978,21 @@ pub fn transcripts_clear(app: AppHandle) -> Value {
     json!({ "ok": true })
 }
 
+/// Преобразовать надиктованный текст через LLM (Haiku). `style`: "prompt" | "clean".
+/// Возвращает { ok, result } или { ok:false, error }. Блокирующее — async-команда.
+#[tauri::command]
+pub async fn transcript_enhance(text: String, style: String) -> Value {
+    let t = text.trim();
+    if t.is_empty() {
+        return err("пустой текст");
+    }
+    let prompt = crate::stt::enhance::enhance_prompt(&style, t);
+    match crate::claude_bin::run_haiku(&prompt, std::time::Duration::from_secs(45)).await {
+        Some(s) => json!({ "ok": true, "result": s.trim() }),
+        None => err("ишка не ответила (таймаут или claude недоступен)"),
+    }
+}
+
 /// Сменить движок STT + сохранить в settings.json. Требует перезапуска демона.
 #[tauri::command]
 pub fn stt_set_engine(app: AppHandle, engine: String) -> Value {

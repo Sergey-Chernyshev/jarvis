@@ -5,9 +5,11 @@
 //! Дизайн: docs/superpowers/specs/2026-06-27-conversational-voice-design.md (рев.2).
 //! Многоход/VAD/барж-ин — вехи 2b/2c.
 
+pub mod memory;
 pub mod plan;
 pub mod skills;
 pub mod snapshot;
+pub mod vad;
 
 use std::sync::Arc;
 use std::time::Duration;

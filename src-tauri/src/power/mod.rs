@@ -193,6 +193,11 @@ impl Power {
 
     /* ================= статусы для панели и трея ================= */
 
+    /// Удерживается ли ассерт «не спать» прямо сейчас (для снапшота планировщика).
+    pub fn keep_awake_active(&self) -> bool {
+        self.engine.lock().unwrap().as_ref().is_some_and(|e| e.active())
+    }
+
     pub fn badges(&self) -> String {
         let mut s = String::new();
         if self.engine.lock().unwrap().as_ref().is_some_and(|e| e.active()) {

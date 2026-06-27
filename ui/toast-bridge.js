@@ -37,5 +37,7 @@
     voiceCancel: (nonce) => invoke('voice_stage_cancel', { nonce }),
     // дотянуть текущее аудио-состояние на загрузке (VR-3)
     audioState: () => invoke('voice_audio_state'),
+    // «Да/Отмена» на confirm-карточке управления (п/п-2)
+    voiceConfirm: (nonce, approved) => invoke('voice_confirm_resolve', { nonce, approved }),
   };
 })();

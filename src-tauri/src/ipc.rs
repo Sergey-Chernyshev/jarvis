@@ -431,6 +431,14 @@ pub(crate) async fn set_model_core(d: &Arc<Daemon>, session_id: &str, model: &st
         .session(session_id)
         .map(|s| crate::backend::Agent::from_opt(s.agent.as_deref()))
         .unwrap_or_default();
+    // Аллоулист модели для Claude-сессий (SEC-3: недоверенный голос не должен
+    // пастить свободный текст в `/model …`). У Codex набор моделей иной — там не
+    // ограничиваем (валидация — Claude-специфична).
+    if agent != crate::backend::Agent::Codex {
+        if let Err(e) = crate::convo::skills::validate_model(model) {
+            return err(e);
+        }
+    }
     let friendly = crate::backend::backend(agent).friendly_model(model);
     set_via_slash(d, session_id, format!("/model {model}"), move |s| {
         s.model = Some(friendly); // оптимистично; транскрипт подтвердит
@@ -456,6 +464,9 @@ pub(crate) async fn set_effort_core(d: &Arc<Daemon>, session_id: &str, level: &s
         .unwrap_or_default();
     if agent == crate::backend::Agent::Codex {
         return err("Codex: reasoning effort меняется через /model-пикер (отдельной команды нет)");
+    }
+    if let Err(e) = crate::convo::skills::validate_effort(level) {
+        return err(e);
     }
     let lv = level.to_string();
     set_via_slash(d, session_id, format!("/effort {level}"), move |s| {
@@ -821,6 +832,15 @@ pub fn voice_stage_cancel(app: AppHandle, nonce: String) -> Value {
 #[tauri::command]
 pub fn voice_audio_state(app: AppHandle) -> Value {
     Daemon::get(&app).audio.audio_state_payload()
+}
+
+/// Голосовой разговор: «Да/Отмена» на confirm-карточке управления (п/п-2).
+/// In-process (НЕ в MCP-реестре): голос-агент не может сам себя подтвердить.
+#[tauri::command]
+pub fn voice_confirm_resolve(app: AppHandle, nonce: String, approved: bool) -> Value {
+    let d = Daemon::get(&app);
+    let known = d.vconfirm.resolve(&nonce, approved);
+    json!({ "ok": known })
 }
 
 /* ================= служебное ================= */

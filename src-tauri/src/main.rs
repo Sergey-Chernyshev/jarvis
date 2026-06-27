@@ -13,6 +13,7 @@ mod agent;
 mod backend;
 mod claude_bin;
 mod commands_catalog;
+mod convo; // голосовой разговор: снапшот → Haiku-план → скилы → голосовой ответ (п/п-2)
 mod daemon;
 mod history;
 mod install;
@@ -142,6 +143,7 @@ fn main() {
             ipc::voice_pick_resolve,
             ipc::voice_stage_cancel,
             ipc::voice_audio_state,
+            ipc::voice_confirm_resolve,
             ipc::agent_chat_open,
             ipc::terminal_focus,
             ipc::toast_resize,

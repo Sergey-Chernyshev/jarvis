@@ -19,6 +19,9 @@ pub enum Priority {
 }
 
 /// Готовое высказывание для TTS-движка.
+/// Канал «речь завершена»: воркер ставит true + notify_all по окончании реплики.
+pub type DoneSignal = std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
+
 #[derive(Debug, Clone)]
 pub struct Utterance {
     pub text: String,
@@ -28,6 +31,9 @@ pub struct Utterance {
     pub coalesce_group: Option<String>,
     /// id тоста, который держим открытым на время речи (None — без тоста).
     pub toast_id: Option<String>,
+    /// Some → воркер сигналит сюда, когда реплика отыграна/прервана/смьючена
+    /// (для `Voice::speak_blocking` — полудуплекс речь→слух).
+    pub done: Option<DoneSignal>,
 }
 
 /// Событие, вызвавшее речь.
@@ -96,6 +102,7 @@ impl Composer for TemplateComposer {
                     dedup_key: format!("notif:{}:{gist}", s.sid),
                     coalesce_group: None,
                     toast_id: None,
+                    done: None,
                 })
             }
 
@@ -111,6 +118,7 @@ impl Composer for TemplateComposer {
                     dedup_key: format!("limit:{}", s.sid),
                     coalesce_group: None,
                     toast_id: None,
+                    done: None,
                 })
             }
 
@@ -143,6 +151,7 @@ impl Composer for TemplateComposer {
                     dedup_key: format!("stop:{}", s.sid),
                     coalesce_group: Some("stop-done".into()),
                     toast_id: None,
+                    done: None,
                 })
             }
         }

@@ -207,6 +207,12 @@ pub async fn converse_turn(d: &Arc<Daemon>, transcript: &str, mem: &mut memory::
             speak_reply(d, &say);
             mem.push(&text, &say, Some(&format!("{}: ok", action.skill)));
         }
+        skills::SkillOutcome::Answer(ans) => {
+            // готовый voice-friendly ответ внешнего ассистента — озвучиваем
+            // verbatim (НЕ через followup, иначе потеряем веб-результат).
+            speak_reply(d, &ans);
+            mem.push(&text, &ans, Some(&format!("{}: answer", action.skill)));
+        }
         skills::SkillOutcome::Data(data) => {
             let say = if p.speak.is_empty() { followup_phrase(&text, &data).await } else { p.speak.clone() };
             speak_reply(d, &say);

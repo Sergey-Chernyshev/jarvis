@@ -10,6 +10,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod assistant;
+
 // ── Структуры событий ──────────────────────────────────────────────────────
 
 /// Событие потока `--output-format stream-json` от `claude`.

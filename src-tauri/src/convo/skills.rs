@@ -16,6 +16,8 @@ use crate::daemon::Daemon;
 pub enum SkillOutcome {
     /// read → данные (для опц. 2-го вызова, чтобы сфразить устно).
     Data(Value),
+    /// готовый ответ для озвучки verbatim (внешний ассистент: веб-поиск/Q&A).
+    Answer(String),
     /// control: подтверждён и применён → озвучить короткое подтверждение.
     Controlled,
     /// пользователь сам отменил confirm / таймаут — HUD уже показал «Отменено».
@@ -74,7 +76,10 @@ pub fn skills_menu() -> String {
 - session_detail{id} — детали сессии (ветка/модель/effort/последний промпт). args: {\"id\":\"<id>\"}\n\
 - search_chats{query} — найти текст по чатам всех сессий. args: {\"query\":\"<текст>\"}\n\
 - metrics — расход токенов/денег за сегодня. args: {}\n\
-- limits — статус лимита провайдера. args: {}"
+- limits — статус лимита провайдера. args: {}\n\
+- assistant{query} — ответить на ЛЮБОЙ вопрос о внешнем мире, поиск в интернете, \
+расчёты, переводы, «что такое…», «как…». Всё, что НЕ про сессии/агентов/OS. \
+args: {\"query\":\"<суть вопроса своими словами>\"}"
         .to_string()
 }
 
@@ -244,6 +249,26 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
         "metrics" => SkillOutcome::Data(d.usage.stats("today")),
         "limits" => SkillOutcome::Data(serde_json::to_value(d.limits.state()).unwrap_or(Value::Null)),
 
+        // ── ВНЕШНИЙ АССИСТЕНТ: веб-поиск / общие вопросы / «думать» (read-only) ──
+        "assistant" => match action.args.get("query").and_then(Value::as_str) {
+            Some(q) if !q.trim().is_empty() => {
+                crate::route::hud::emit(
+                    d,
+                    crate::route::hud::Phase::Thinking { text: "ищу ответ…".into() },
+                );
+                match crate::agent::assistant::AssistantHost::run(
+                    q.trim(),
+                    crate::agent::assistant::ASSISTANT_TIMEOUT,
+                )
+                .await
+                {
+                    Some(ans) => SkillOutcome::Answer(ans),
+                    None => SkillOutcome::Rejected("не смогла найти ответ".into()),
+                }
+            }
+            _ => SkillOutcome::Rejected("нет запроса".into()),
+        },
+
         // ── CONTROL: сайд-эффект → ПОЗИТИВНЫЙ confirm + валидация + проверка ядра ──
         "set_model" => {
             let (Some(id), Some(model)) = (
@@ -354,7 +379,7 @@ mod tests {
         for s in [
             "route", "set_model", "set_effort", "keep_awake", "mute", "session_chat", "time",
             "media", "system_volume", "open_app", "session_detail", "search_chats", "metrics",
-            "limits",
+            "limits", "assistant",
         ] {
             assert!(m.contains(s), "меню без {s}");
         }

@@ -30,8 +30,11 @@ pub enum Phase {
     Picker { nonce: String, options: Vec<(String, String)> },
     /// Подтверждение управляющего действия (п/п-2): Да/Отмена по `nonce`.
     Confirm { nonce: String, text: String },
-    /// Отменено пользователем / по таймауту.
+    /// Отменено пользователем (× по активной фазе) — показываем «Отменено».
     Cancelled,
+    /// Тихо убрать HUD-карточку (естественный конец разговора: тишина/стоп-фраза/
+    /// end) — БЕЗ «Отменено» (отменять нечего). UI просто удаляет карточку.
+    Dismiss,
     /// Ошибка доставки/захвата/распознавания.
     Error { msg: String },
     /// Не расслышали (пустой STT).
@@ -84,6 +87,7 @@ pub fn hud_payload(p: Phase) -> Value {
             v
         }
         Phase::Cancelled => base("cancelled", "Отменено", ""),
+        Phase::Dismiss => base("dismiss", "", ""),
         Phase::Error { msg } => base("error", "Ошибка", &msg),
         Phase::Empty => base("empty", "Не расслышал", "Скажи ещё раз"),
         Phase::NoSessions => base("nosessions", "Нет активных сессий", ""),
@@ -147,6 +151,13 @@ mod tests {
         let r = hud_payload(Phase::Reply { text: "сейчас 14:05".into() });
         assert_eq!(r["phase"], "reply");
         assert_eq!(r["body"], "сейчас 14:05");
+    }
+
+    #[test]
+    fn dismiss_is_silent_phase() {
+        let v = hud_payload(Phase::Dismiss);
+        assert_eq!(v["phase"], "dismiss");
+        assert_eq!(v["title"], ""); // без «Отменено» — тихо убрать карточку
     }
 
     #[test]

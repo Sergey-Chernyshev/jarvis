@@ -13,6 +13,7 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::agent::{parse_stream_line, AgentEvent};
@@ -115,8 +116,13 @@ pub struct AssistantHost;
 
 impl AssistantHost {
     /// Ответить на запрос (веб-поиск + рассуждение). None — нет claude / таймаут /
-    /// пустой ответ. Прокси наследуется (egress); JARVIS_IGNORE — не засорять реестр.
-    pub async fn run(query: &str, timeout: Duration) -> Option<String> {
+    /// abort (× в HUD) / пустой ответ. `abort` опрашивается каждые ~200мс: при
+    /// взводе процесс убивается (kill_on_drop) и возвращаем None — чтобы крестик
+    /// мгновенно обрывал даже долгий веб-поиск. Прокси наследуется (egress).
+    pub async fn run(query: &str, timeout: Duration, abort: &AtomicBool) -> Option<String> {
+        if abort.load(Ordering::SeqCst) {
+            return None; // уже отменили до старта — не спавним процесс
+        }
         let bin = crate::claude_bin::resolve_claude_bin()?;
         let cwd = ensure_assistant_cwd();
         let args = build_assistant_args(query, ASSISTANT_MODEL);
@@ -136,7 +142,28 @@ impl AssistantHost {
             .stderr(Stdio::null())
             .kill_on_drop(true);
 
-        let out = tokio::time::timeout(timeout, cmd.output()).await.ok()?.ok()?;
+        // Гонка: вывод процесса vs таймаут vs опрос abort (× в HUD). При abort/
+        // таймауте дропаем future → kill_on_drop убивает claude (мгновенный стоп).
+        let out = {
+            let fut = cmd.output();
+            tokio::pin!(fut);
+            let start = tokio::time::Instant::now();
+            loop {
+                tokio::select! {
+                    r = &mut fut => break r.ok()?,
+                    _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                        if abort.load(Ordering::SeqCst) {
+                            crate::log::line("[assistant] ← <abort: × в HUD>");
+                            return None;
+                        }
+                        if start.elapsed() >= timeout {
+                            crate::log::line("[assistant] ← <таймаут>");
+                            return None;
+                        }
+                    }
+                }
+            }
+        };
         if !out.status.success() {
             crate::log::line("[assistant] ← <ненулевой код выхода>");
             return None;
@@ -220,6 +247,14 @@ mod tests {
     #[test]
     fn query_with_context_passthrough_when_empty() {
         assert_eq!(query_with_context("   ", "просто вопрос"), "просто вопрос");
+    }
+
+    #[tokio::test]
+    async fn run_short_circuits_when_aborted_before_start() {
+        // × нажали ДО запроса → None мгновенно, процесс не спавнится.
+        let abort = AtomicBool::new(true);
+        let r = AssistantHost::run("какая погода", Duration::from_secs(30), &abort).await;
+        assert!(r.is_none(), "abort до старта → None без спавна");
     }
 
     #[test]

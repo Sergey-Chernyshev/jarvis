@@ -55,6 +55,10 @@ pub struct Voice {
     ducked: AtomicBool,      // сейчас держим чужое медиа на паузе (мы поставили)
     sidecar: Arc<sidecar::Sidecar>,
     app: tauri::AppHandle, // для удержания/продления тоста на время речи
+    /// Воркер прямо сейчас проигрывает реплику (для полудуплекса разговора:
+    /// цикл не открывает мик, пока true; speak_blocking не выходит по таймауту
+    /// посреди звука).
+    speaking: Arc<AtomicBool>,
 }
 
 impl Voice {
@@ -81,6 +85,7 @@ impl Voice {
             ducked: AtomicBool::new(false),
             sidecar,
             app,
+            speaking: Arc::new(AtomicBool::new(false)),
         });
         v.clone().spawn_worker();
         v
@@ -174,6 +179,9 @@ impl Voice {
         }
     }
     pub fn is_muted(&self) -> bool { self.mute.load(Ordering::SeqCst) }
+
+    /// Идёт ли сейчас проигрывание реплики (полудуплекс: цикл ждёт окончания).
+    pub fn is_speaking(&self) -> bool { self.speaking.load(Ordering::SeqCst) }
 
     /// Композирует сигналы в реплику и кладёт в очередь (fail-safe).
     pub fn speak(&self, signals: SpeechSignals) {
@@ -286,7 +294,10 @@ impl Voice {
         while !*g {
             let (ng, _to) = c.wait_timeout(g, std::time::Duration::from_millis(500)).unwrap();
             g = ng;
-            if *g || start.elapsed() > std::time::Duration::from_secs(30) {
+            // Аварийный таймаут — только если воркер НЕ играет прямо сейчас (иначе
+            // длинная реплика вышла бы из speak_blocking посреди звука → следующий
+            // listen услышал бы хвост TTS; CONV-3). Пока играет — ждём дальше.
+            if *g || (start.elapsed() > std::time::Duration::from_secs(30) && !self.is_speaking()) {
                 break;
             }
         }
@@ -309,40 +320,51 @@ impl Voice {
                 g.next()
             };
             let Some(u) = next else { continue; };
-            if self.is_muted() {
-                Self::signal_done(&u); // не подвешиваем speak_blocking при mute
-                continue;
-            }
-            let vs = self.voice_sel();
-            // Лениво поднять сайдкар (после idle-stop) + дождаться готовности
-            // модели; страж держит активность на время синтеза (анти-гонка с tick).
-            self.sidecar.ensure_started();
-            self.sidecar.touch();
-            wait_ready(self.engine.as_ref(), VOICE_READY_TIMEOUT);
-            let _use = self.sidecar.use_guard();
-            let t_synth = crate::metrics::now();
-            match self.engine.synthesize(&u.text, &vs) {
-                Ok(wav) => {
-                    crate::metrics::record("tts_synth", t_synth, serde_json::json!({
-                        "engine": self.engine.name(), "chars": u.text.chars().count(), "bytes": wav.len(),
-                    }));
-                    // держим тост открытым на время речи
-                    if let Some(tid) = &u.toast_id {
-                        crate::windows::toast_hold(&self.app, tid);
-                    }
-                    self.ensure_ducked(); // зашторить чужое медиа на время речи
-                    let t_play = crate::metrics::now();
-                    self.player.play_blocking(wav);
-                    crate::metrics::record("tts_play", t_play, serde_json::json!({ "chars": u.text.chars().count() }));
-                    self.maybe_unduck(); // очередь пуста → вернуть медиа (с дебаунсом)
-                    // речь закончилась → закрыть карточку через 3.5с
-                    if let Some(tid) = &u.toast_id {
-                        crate::windows::toast_extend(&self.app, tid, 3500);
-                    }
+            // Тело утты в catch_unwind: паника синтеза/плеера не убивает воркер и
+            // НЕ оставляет speak_blocking-ждущего висеть 30с (HD-2). signal_done —
+            // ВСЕГДА после, на любом исходе (сыграна/ошибка/мьют/паника).
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if self.is_muted() {
+                    return;
                 }
-                Err(e) => crate::log::line(&format!("[voice] {} молчит: {e}", self.engine.name())),
+                let vs = self.voice_sel();
+                // Лениво поднять сайдкар + дождаться готовности; страж держит активность.
+                self.sidecar.ensure_started();
+                self.sidecar.touch();
+                wait_ready(self.engine.as_ref(), VOICE_READY_TIMEOUT);
+                let _use = self.sidecar.use_guard();
+                let t_synth = crate::metrics::now();
+                match self.engine.synthesize(&u.text, &vs) {
+                    Ok(wav) => {
+                        crate::metrics::record("tts_synth", t_synth, serde_json::json!({
+                            "engine": self.engine.name(), "chars": u.text.chars().count(), "bytes": wav.len(),
+                        }));
+                        // мьют мог прийти во время долгого синтеза → не озвучиваем (HD-3)
+                        if self.is_muted() {
+                            return;
+                        }
+                        if let Some(tid) = &u.toast_id {
+                            crate::windows::toast_hold(&self.app, tid);
+                        }
+                        self.ensure_ducked(); // зашторить чужое медиа на время речи
+                        let t_play = crate::metrics::now();
+                        self.speaking.store(true, Ordering::SeqCst); // полудуплекс: идёт звук
+                        self.player.play_blocking(wav);
+                        self.speaking.store(false, Ordering::SeqCst);
+                        crate::metrics::record("tts_play", t_play, serde_json::json!({ "chars": u.text.chars().count() }));
+                        self.maybe_unduck(); // очередь пуста → вернуть медиа (с дебаунсом)
+                        if let Some(tid) = &u.toast_id {
+                            crate::windows::toast_extend(&self.app, tid, 3500);
+                        }
+                    }
+                    Err(e) => crate::log::line(&format!("[voice] {} молчит: {e}", self.engine.name())),
+                }
+            }));
+            self.speaking.store(false, Ordering::SeqCst); // на случай паники во время play
+            if res.is_err() {
+                crate::log::line("[voice] паника в воркере озвучки — реплика пропущена (воркер жив)");
             }
-            Self::signal_done(&u); // реплика отыграна/прервана → разбудить speak_blocking
+            Self::signal_done(&u); // ВСЕГДА: реплика отыграна/прервана/паника → будим speak_blocking
         });
     }
 }

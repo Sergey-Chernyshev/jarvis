@@ -90,6 +90,9 @@ pub struct Daemon {
     pub stage: std::sync::Arc<crate::route::stage::StageBuffer>,
     /// История диктовки/реплик («что я говорил») + копирование. In-memory.
     pub transcripts: std::sync::Arc<crate::stt::transcripts::Transcripts>,
+    /// Голосовой разговор (п/п-2): ожидающие confirm управления (yes/no из тоста).
+    /// Отдельный инстанс от `pending` (агент-гейт) — резолвится своим IPC.
+    pub vconfirm: std::sync::Arc<crate::capability::confirm_panel::PendingConfirms>,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -180,6 +183,7 @@ impl Daemon {
             picks: std::sync::Arc::new(crate::route::pick::PendingPicks::new()),
             stage: std::sync::Arc::new(crate::route::stage::StageBuffer::new()),
             transcripts: std::sync::Arc::new(crate::stt::transcripts::Transcripts::new()),
+            vconfirm: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
         }
     }
 

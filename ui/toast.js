@@ -260,7 +260,7 @@ window.toast.onUpdate((d) => {
 /* ===================== голосовая маршрутизация (HUD) ===================== */
 
 // Терминальные фазы исчезают по TTL; промежуточные/интерактивные — «липкие».
-const VOICE_TERMINAL = new Set(['sent', 'cancelled', 'empty', 'nosessions', 'error']);
+const VOICE_TERMINAL = new Set(['sent', 'cancelled', 'empty', 'nosessions', 'error', 'reply']);
 
 // Освободить место под новую карточку, НЕ трогая «липкие» (пикер/стейдж/мик/
 // вопрос — интерактивные, должны выжить). Если все липкие — не вытесняем: стек
@@ -284,6 +284,7 @@ function voiceClose(p) {
     e.stopPropagation();
     if (p.phase === 'staged') window.toast.voiceCancel(p.nonce);
     else if (p.phase === 'picker') window.toast.voicePick(p.nonce, null);
+    else if (p.phase === 'confirm') window.toast.voiceConfirm(p.nonce, false);
     removeCard(p.id);
   });
   return close;
@@ -314,7 +315,7 @@ function renderVoiceHud(p) {
   const crow = document.createElement('div');
   crow.className = 'crow';
   const dot = document.createElement('span');
-  dot.className = 'dot' + (p.phase === 'staged' || p.phase === 'picker' ? ' waiting' : '');
+  dot.className = 'dot' + (['staged', 'picker', 'confirm'].includes(p.phase) ? ' waiting' : '');
   const title = document.createElement('div');
   title.className = 'title';
   // staged: показываем КУДА уйдёт промпт — это и есть смысл окна отмены (VR-2)
@@ -371,6 +372,22 @@ function renderVoiceHud(p) {
       window.toast.voicePick(p.nonce, null);
     });
     card.appendChild(cancel);
+  } else if (p.phase === 'confirm') {
+    const yes = document.createElement('button');
+    yes.className = 'cont';
+    yes.textContent = 'Да';
+    yes.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.toast.voiceConfirm(p.nonce, true);
+    });
+    const no = document.createElement('button');
+    no.className = 'cont';
+    no.textContent = 'Отмена';
+    no.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.toast.voiceConfirm(p.nonce, false);
+    });
+    card.append(yes, no);
   }
 
   if (firstTime) {

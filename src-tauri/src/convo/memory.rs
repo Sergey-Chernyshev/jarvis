@@ -21,12 +21,14 @@ impl Memory {
         Self { turns: VecDeque::new(), max: max_turns.max(1) }
     }
 
-    /// Добавить ход. `action_result` — КОРОТКАЯ сводка (не сырой контент).
+    /// Добавить ход. `action_result` — КОРОТКАЯ сводка (не сырой контент). Поля
+    /// клампим (ответ из Data-пути ограничен лишь краткостью модели — не даём
+    /// раздуть последующие промпты / усилить инъекцию; SEC-2/SEC-3).
     pub fn push(&mut self, user: &str, assistant: &str, action_result: Option<&str>) {
         self.turns.push_back(Turn {
-            user: user.to_string(),
-            assistant: assistant.to_string(),
-            action_result: action_result.map(str::to_string),
+            user: crate::util::ellipsize(user, 200),
+            assistant: crate::util::ellipsize(assistant, 200),
+            action_result: action_result.map(|a| crate::util::ellipsize(a, 120)),
         });
         while self.turns.len() > self.max {
             self.turns.pop_front();

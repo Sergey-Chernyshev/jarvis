@@ -20,9 +20,16 @@ pub enum Step {
     Timeout,     // речь так и не началась за max_wait
 }
 
+/// Энергия выше этого уровня НЕ считается шумом при калибровке (речь/щелчок,
+/// попавшие в окно калибровки, иначе задрали бы порог выше реальной речи).
+const NOISE_CAP: f32 = 0.02;
+/// Потолок порога старта — гарантирует, что обычная речь его пробьёт.
+const THR_MAX: f32 = 0.08;
+
 /// Автомат эндпойнтинга. Кадры (их RMS) подаются по одному через `push`.
 pub struct Endpointer {
     calib_left: u32,
+    calib_seen: u32,
     noise: f32,
     trailing_need: u32,
     trailing: u32,
@@ -35,6 +42,7 @@ impl Endpointer {
     pub fn new(calib_frames: u32, trailing_silence_frames: u32, max_wait_frames: u32) -> Self {
         Self {
             calib_left: calib_frames.max(1),
+            calib_seen: 0,
             noise: 0.0,
             trailing_need: trailing_silence_frames.max(1),
             trailing: 0,
@@ -44,14 +52,20 @@ impl Endpointer {
         }
     }
 
-    /// Порог старта речи над шумовым полом (3× пол, но не ниже 0.01).
+    /// Порог старта речи: 3× шумового пола, но в пределах [0.01, THR_MAX] —
+    /// потолок не даёт «убежать» порогу, если калибровка всё же подхватила шум.
     fn threshold(&self) -> f32 {
-        (self.noise * 3.0).max(0.01)
+        (self.noise * 3.0).clamp(0.01, THR_MAX)
     }
 
     pub fn push(&mut self, energy: f32) -> Step {
         if self.calib_left > 0 {
-            self.noise = (self.noise + energy) / 2.0;
+            // running MIN клампнутой энергии: речь в окне калибровки громкая и НЕ
+            // понижает пол, поэтому онсет-во-время-калибровки больше не отравляет
+            // порог старта (раньше EMA усредняла речь → вечный Timeout → Silence).
+            let e = energy.min(NOISE_CAP);
+            self.noise = if self.calib_seen == 0 { e } else { self.noise.min(e) };
+            self.calib_seen += 1;
             self.calib_left -= 1;
             return Step::Calibrating;
         }
@@ -113,6 +127,18 @@ mod tests {
             assert_eq!(ep.push(0.001), Step::Waiting);
         }
         assert_eq!(ep.push(0.001), Step::Timeout);
+    }
+
+    #[test]
+    fn calib_contaminated_by_prompt_speech_still_starts() {
+        // Все 5 калибровочных кадров уже несут речь (RMS 0.12). Раньше EMA задирала
+        // порог до ~0.3 → продолжение речи (0.12) его не пробивало → вечный Timeout.
+        // Теперь noise клампится до NOISE_CAP(0.02), порог = 0.06 → речь 0.12 стартует.
+        let mut ep = Endpointer::new(5, 10, 50);
+        for _ in 0..5 {
+            assert_eq!(ep.push(rms(&frame(0.12, 1280))), Step::Calibrating);
+        }
+        assert_eq!(ep.push(rms(&frame(0.12, 1280))), Step::Speaking);
     }
 
     #[test]

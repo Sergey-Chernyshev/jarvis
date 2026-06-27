@@ -39,25 +39,45 @@ pub fn start_conversation(
 ) {
     std::thread::spawn(move || {
         let _conv = guard; // single-flight на весь диалог
+
+        // RAII: чистим HUD-карточку на ЛЮБОМ выходе из потока (break И panic-unwind),
+        // иначе при панике остался бы залипший «Слушаю/Думаю» (CONV-4).
+        struct HudClear(Arc<Daemon>);
+        impl Drop for HudClear {
+            fn drop(&mut self) {
+                hud::emit(&self.0, hud::Phase::Cancelled);
+            }
+        }
+        let _hud_clear = HudClear(d.clone());
+
         let mut mem = memory::Memory::new(6);
         loop {
+            // полудуплекс: не открываем мик, пока Джарвис ещё что-то озвучивает
+            // (напр. фоновая NeedHuman-нотификация, перебившая ответ; HD-1).
+            while d.voice.is_speaking() {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
             hud::emit(&d, hud::Phase::Listening { secs: 9 });
             let pcm = match listen::listen(&hub, 112 /*~9с ожидания старта*/) {
                 listen::ListenResult::Utterance(p) => p,
                 listen::ListenResult::Silence => break, // пауза без речи → конец
             };
-            if pcm.is_empty() {
-                continue;
-            }
-            let opts = stt.options();
-            let text = match stt.transcribe(&pcm, &opts) {
-                Ok(r) => r.text.trim().to_string(),
-                Err(e) => {
-                    crate::log::line(&format!("[convo] stt: {e}"));
-                    continue;
+            // пустой захват / ошибка STT — дать видимый+голосовой сигнал и переслушать
+            let text = if pcm.is_empty() {
+                String::new()
+            } else {
+                let opts = stt.options();
+                match stt.transcribe(&pcm, &opts) {
+                    Ok(r) => r.text.trim().to_string(),
+                    Err(e) => {
+                        crate::log::line(&format!("[convo] stt: {e}"));
+                        String::new()
+                    }
                 }
             };
             if text.is_empty() {
+                hud::emit(&d, hud::Phase::Empty);
+                d.voice.speak_blocking("Не расслышал, повтори");
                 continue;
             }
             if is_stop_phrase(&text) {
@@ -70,14 +90,21 @@ pub fn start_conversation(
                 break;
             }
         }
-        hud::emit(&d, hud::Phase::Cancelled); // «разговор закрыт»
+        // HUD «разговор закрыт» эмитит HudClear::drop
     });
 }
 
-/// Локальный детект стоп-фразы (страховка к `plan.end`).
+/// Локальный детект стоп-фразы (страховка к `plan.end`). Слово-точный матч по
+/// ПОСЛЕДНЕМУ токену реплики — иначе `"покажи".contains("пока")` убивал бы диалог
+/// на обычных командах «покажи…/показать…/стоп-кран» (STOP-SUBSTR-1).
 fn is_stop_phrase(t: &str) -> bool {
-    let t = t.to_lowercase();
-    ["спасибо", "хватит", "отбой", "пока", "стоп"].iter().any(|s| t.contains(s))
+    const STOPS: &[&str] = &["спасибо", "хватит", "отбой", "пока", "стоп", "всё", "все"];
+    t.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .last()
+        .map(|w| STOPS.contains(&w))
+        .unwrap_or(false)
 }
 
 /// Один ход разговора: транскрипт → снапшот+память+план → исполнение → голосовой
@@ -132,7 +159,11 @@ pub async fn converse_turn(d: &Arc<Daemon>, transcript: &str, mem: &mut memory::
                     crate::route::route_transcript(d.clone(), rp.to_string(), g).await;
                 }
                 let say = if p.speak.is_empty() { "Отправляю".to_string() } else { p.speak.clone() };
-                d.voice.speak_blocking(&say); // без hud::emit (route держит свою карточку)
+                d.voice.speak_blocking(&say); // без hud::emit (route держит свою staged-карточку)
+                // Дать staged-карточке «Отменить (5с)» прожить окно, прежде чем
+                // следующий listen эмитнет Listening поверх неё (ROUTE-HUD-CANCEL-1).
+                // Заодно мик не открыт — у юзера есть время тапнуть отмену.
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 mem.push(&text, &say, Some(&format!("route: {}", crate::util::ellipsize(rp, 40))));
             }
             None => {
@@ -150,7 +181,10 @@ pub async fn converse_turn(d: &Arc<Daemon>, transcript: &str, mem: &mut memory::
             mem.push(&text, &say, Some(&format!("{}: rejected", action.skill)));
         }
         skills::SkillOutcome::Cancelled => {
-            d.voice.speak_blocking("Отменила"); // hud уже «Отменено» (R3)
+            // confirm() показал «Отменено» (терминально-выглядящая карточка) —
+            // перекрываем её Reply «Отменила», чтобы не путать с концом разговора
+            // перед тем как цикл снова откроет listen (CONFIRM-CANCELLED-COLLIDE-2).
+            speak_reply(d, "Отменила");
             mem.push(&text, "отменено", Some(&format!("{}: cancelled", action.skill)));
         }
         skills::SkillOutcome::Controlled => {
@@ -201,4 +235,23 @@ async fn followup_phrase(transcript: &str, data: &serde_json::Value) -> String {
         .await
         .map(|s| crate::util::one_line(&s))
         .unwrap_or_else(|| "Готово".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_stop_phrase;
+
+    #[test]
+    fn stop_phrase_matches_whole_last_word_only() {
+        // настоящие стоп-фразы
+        assert!(is_stop_phrase("пока"));
+        assert!(is_stop_phrase("спасибо"));
+        assert!(is_stop_phrase("ладно, стоп"));
+        assert!(is_stop_phrase("ну всё"));
+        // обычные команды НЕ должны останавливать (баг substring «пока» в «покажи»)
+        assert!(!is_stop_phrase("покажи последние сообщения"));
+        assert!(!is_stop_phrase("показать борд"));
+        assert!(!is_stop_phrase("стоп-кран не трогай")); // последний токен «трогай»
+        assert!(!is_stop_phrase("спасибо что помог раньше, переключи фронт на опус"));
+    }
 }

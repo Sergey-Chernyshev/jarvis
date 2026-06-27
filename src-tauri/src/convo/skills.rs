@@ -67,7 +67,10 @@ pub fn skills_menu() -> String {
 - set_model{id,model} — сменить модель сессии. args: {\"id\":\"<id>\",\"model\":\"opus|sonnet|haiku|fable\"}\n\
 - set_effort{id,level} — сменить effort сессии. args: {\"id\":\"<id>\",\"level\":\"low|medium|high|xhigh|max\"}\n\
 - keep_awake{minutes|off} — не давать маку уснуть. args: {\"minutes\":<1..600>} или {\"off\":true}\n\
-- mute{on|off} — звук Джарвиса. args: {\"on\":<true|false>}"
+- mute{on|off} — звук Джарвиса. args: {\"on\":<true|false>}\n\
+- media{action} — управление воспроизведением (любой плеер). args: {\"action\":\"play|pause|toggle|next|prev\"}\n\
+- system_volume{...} — системная громкость. args: {\"set\":0..100} | {\"delta\":±N} | {\"mute\":true|false} | {\"action\":\"up|down|mute|unmute\"}\n\
+- open_app{name} — открыть приложение macOS. args: {\"name\":\"Safari\"}"
         .to_string()
 }
 
@@ -218,6 +221,26 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
             }
         }
 
+        // ── OS-CONTROL: benign-reversible → AUTO (без confirm), строгая валидация ──
+        "media" => match action.args.get("action").and_then(Value::as_str) {
+            Some(a) => match crate::convo::os::run_media(a) {
+                Ok(()) => SkillOutcome::Controlled,
+                Err(e) => SkillOutcome::Rejected(e),
+            },
+            None => SkillOutcome::Rejected("нет action".into()),
+        },
+        "system_volume" => match crate::convo::os::run_volume(&action.args) {
+            Ok(()) => SkillOutcome::Controlled,
+            Err(e) => SkillOutcome::Rejected(e),
+        },
+        "open_app" => match action.args.get("name").and_then(Value::as_str) {
+            Some(n) => match crate::convo::os::run_open_app(n) {
+                Ok(()) => SkillOutcome::Controlled,
+                Err(e) => SkillOutcome::Rejected(e),
+            },
+            None => SkillOutcome::Rejected("нет name".into()),
+        },
+
         other => SkillOutcome::Rejected(format!("неизвестный скил: {other}")),
     }
 }
@@ -229,7 +252,10 @@ mod tests {
     #[test]
     fn menu_lists_core_skills() {
         let m = skills_menu();
-        for s in ["route", "set_model", "set_effort", "keep_awake", "mute", "session_chat", "time"] {
+        for s in [
+            "route", "set_model", "set_effort", "keep_awake", "mute", "session_chat", "time",
+            "media", "system_volume", "open_app",
+        ] {
             assert!(m.contains(s), "меню без {s}");
         }
     }

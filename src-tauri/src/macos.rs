@@ -224,3 +224,15 @@ pub fn media_pause() {
 pub fn media_play() {
     let _ = mra_run(&["send", "0"]);
 }
+/// Переключить play/pause (MediaRemote команда 2).
+pub fn media_toggle() {
+    let _ = mra_run(&["send", "2"]);
+}
+/// Следующий трек (MediaRemote команда 4).
+pub fn media_next() {
+    let _ = mra_run(&["send", "4"]);
+}
+/// Предыдущий трек (MediaRemote команда 5).
+pub fn media_prev() {
+    let _ = mra_run(&["send", "5"]);
+}

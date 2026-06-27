@@ -8,6 +8,7 @@
 pub mod bargein;
 pub mod listen;
 pub mod memory;
+pub mod os;
 pub mod plan;
 pub mod skills;
 pub mod snapshot;

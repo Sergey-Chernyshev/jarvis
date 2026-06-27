@@ -70,8 +70,92 @@ pub fn skills_menu() -> String {
 - mute{on|off} — звук Джарвиса. args: {\"on\":<true|false>}\n\
 - media{action} — управление воспроизведением (любой плеер). args: {\"action\":\"play|pause|toggle|next|prev\"}\n\
 - system_volume{...} — системная громкость. args: {\"set\":0..100} | {\"delta\":±N} | {\"mute\":true|false} | {\"action\":\"up|down|mute|unmute\"}\n\
-- open_app{name} — открыть приложение macOS. args: {\"name\":\"Safari\"}"
+- open_app{name} — открыть приложение macOS. args: {\"name\":\"Safari\"}\n\
+- session_detail{id} — детали сессии (ветка/модель/effort/последний промпт). args: {\"id\":\"<id>\"}\n\
+- search_chats{query} — найти текст по чатам всех сессий. args: {\"query\":\"<текст>\"}\n\
+- metrics — расход токенов/денег за сегодня. args: {}\n\
+- limits — статус лимита провайдера. args: {}"
         .to_string()
+}
+
+/// Найти совпадения `query` в тексте элементов чата (без учёта регистра). Берём
+/// только текстовые реплики; возвращаем до `limit` НАИБОЛЕЕ СВЕЖИХ сниппетов
+/// (роль + усечённый текст). Чистая — тестируема без I/O.
+fn search_items(items: &[crate::transcript::ChatItem], query: &str, limit: usize) -> Vec<String> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return vec![];
+    }
+    let mut hits: Vec<String> = items
+        .iter()
+        .filter(|it| it.kind == "text" && it.text.to_lowercase().contains(&q))
+        .map(|it| format!("{}: {}", it.role, crate::util::ellipsize(it.text.trim(), 120)))
+        .collect();
+    if hits.len() > limit {
+        hits = hits.split_off(hits.len() - limit); // последние limit = самые свежие
+    }
+    hits
+}
+
+/// Прочитать элементы чата сессии из её транскрипта (хвост 512K).
+fn session_chat_items(transcript: &str) -> Vec<crate::transcript::ChatItem> {
+    crate::transcript::chain_from_entries(crate::transcript::read_recent_entries(
+        Path::new(transcript),
+        512 * 1024,
+    ))
+    .iter()
+    .flat_map(crate::transcript::to_chat_items)
+    .collect()
+}
+
+/// Поиск по чатам ВСЕХ живых сессий → агрегированные совпадения (Data).
+fn search_chats(d: &Arc<Daemon>, query: &str) -> SkillOutcome {
+    let q = query.trim();
+    if q.is_empty() {
+        return SkillOutcome::Rejected("пустой запрос".into());
+    }
+    let mut results = Vec::new();
+    for s in d.snapshot().into_iter().filter(|s| s.renamed_to.is_none()) {
+        let Some(tr) = s.transcript.as_deref() else { continue };
+        let hits = search_items(&session_chat_items(tr), q, 3);
+        if !hits.is_empty() {
+            results.push(json!({
+                "session_id": s.id.chars().take(8).collect::<String>(),
+                "project": s.project,
+                "matches": hits,
+            }));
+        }
+    }
+    SkillOutcome::Data(json!({ "query": q, "results": results }))
+}
+
+/// Краткий RU-статус сессии (как в снапшоте).
+fn status_ru(st: crate::model::Status) -> &'static str {
+    use crate::model::Status::*;
+    match st {
+        Waiting => "ждёт",
+        Working => "работает",
+        Done => "готово",
+        Limit => "лимит",
+        Idle => "простаивает",
+    }
+}
+
+/// Детали одной сессии (Data) — ветка/модель/effort/последний промпт.
+fn session_detail(d: &Arc<Daemon>, id: &str) -> SkillOutcome {
+    let Some(s) = d.session(id) else {
+        return SkillOutcome::Rejected("сессия не найдена".into());
+    };
+    SkillOutcome::Data(json!({
+        "id": s.id.chars().take(8).collect::<String>(),
+        "project": s.project,
+        "task": s.task,
+        "status": status_ru(s.status),
+        "branch": s.branch,
+        "model": s.model,
+        "effort": s.effort,
+        "last_prompt": s.last_prompt.as_deref().map(|p| crate::util::ellipsize(p, 120)),
+    }))
 }
 
 /// Резолв id-подсказки от планировщика в ПОЛНЫЙ id живой сессии: точное
@@ -144,6 +228,21 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
             },
             None => SkillOutcome::Rejected("нет id".into()),
         },
+
+        // ── READS (free, без confirm) ──
+        "session_detail" => match action.args.get("id").and_then(Value::as_str) {
+            Some(id) => match resolve_sid(d, id) {
+                Ok(full) => session_detail(d, &full),
+                Err(e) => SkillOutcome::Rejected(e),
+            },
+            None => SkillOutcome::Rejected("нет id".into()),
+        },
+        "search_chats" => match action.args.get("query").and_then(Value::as_str) {
+            Some(q) => search_chats(d, q),
+            None => SkillOutcome::Rejected("нет query".into()),
+        },
+        "metrics" => SkillOutcome::Data(d.usage.stats("today")),
+        "limits" => SkillOutcome::Data(serde_json::to_value(d.limits.state()).unwrap_or(Value::Null)),
 
         // ── CONTROL: сайд-эффект → ПОЗИТИВНЫЙ confirm + валидация + проверка ядра ──
         "set_model" => {
@@ -254,10 +353,46 @@ mod tests {
         let m = skills_menu();
         for s in [
             "route", "set_model", "set_effort", "keep_awake", "mute", "session_chat", "time",
-            "media", "system_volume", "open_app",
+            "media", "system_volume", "open_app", "session_detail", "search_chats", "metrics",
+            "limits",
         ] {
             assert!(m.contains(s), "меню без {s}");
         }
+    }
+
+    fn item(role: &'static str, kind: &'static str, text: &str) -> crate::transcript::ChatItem {
+        crate::transcript::ChatItem { role, kind, text: text.into(), ts: 0 }
+    }
+
+    #[test]
+    fn search_items_case_insensitive_text_only() {
+        let items = vec![
+            item("user", "text", "Почини сборку фронта"),
+            item("assistant", "tool", "сборка через cargo build"), // kind=tool → пропускаем
+            item("assistant", "text", "Сборка готова"),
+        ];
+        let hits = search_items(&items, "сборк", 5);
+        assert_eq!(hits.len(), 2, "оба текстовых совпадения (без учёта регистра)");
+        assert!(hits.iter().all(|h| !h.contains("cargo")), "tool-реплики не ищем");
+    }
+
+    #[test]
+    fn search_items_keeps_most_recent_within_limit() {
+        let items = vec![
+            item("user", "text", "тест 1"),
+            item("user", "text", "тест 2"),
+            item("user", "text", "тест 3"),
+        ];
+        let hits = search_items(&items, "тест", 2);
+        assert_eq!(hits.len(), 2);
+        assert!(hits[1].contains("тест 3"), "последний = самый свежий");
+        assert!(!hits.iter().any(|h| h.contains("тест 1")), "старейший вытеснен");
+    }
+
+    #[test]
+    fn search_items_empty_query_no_hits() {
+        let items = vec![item("user", "text", "что-то")];
+        assert!(search_items(&items, "   ", 5).is_empty());
     }
 
     #[test]

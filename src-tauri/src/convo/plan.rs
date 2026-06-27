@@ -16,7 +16,6 @@ pub struct Plan {
     pub speak: String,
     pub action: Option<Action>,
     pub end: bool,
-    pub need_followup: bool,
 }
 
 /// Собрать промпт планировщика. Транскрипт и данные снапшота — это ДАННЫЕ, не
@@ -65,7 +64,6 @@ fn extract_plan(text: &str) -> Option<Plan> {
     let v: Value = serde_json::from_str(&text[start..=end]).ok()?;
     let speak = v.get("speak").and_then(Value::as_str).unwrap_or("").to_string();
     let endf = v.get("end").and_then(Value::as_bool).unwrap_or(false);
-    let need_followup = v.get("need_followup").and_then(Value::as_bool).unwrap_or(false);
     let action = match v.get("action") {
         Some(Value::Object(o)) => {
             let skill = o.get("skill").and_then(Value::as_str)?.to_string();
@@ -82,7 +80,7 @@ fn extract_plan(text: &str) -> Option<Plan> {
     if speak.is_empty() && action.is_none() && !endf {
         return None;
     }
-    Some(Plan { speak, action, end: endf, need_followup })
+    Some(Plan { speak, action, end: endf })
 }
 
 #[cfg(test)]

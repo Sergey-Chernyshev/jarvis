@@ -415,6 +415,11 @@ pub async fn session_set_model(app: AppHandle, session_id: String, model: String
 
 /// Ядро смены модели — общее для IPC и капабилити `sessions.control` (инкр. 8).
 pub(crate) async fn set_model_core(d: &Arc<Daemon>, session_id: &str, model: &str) -> Value {
+    // Аллоулист в ядре → защищены ВСЕ вызыватели (панель, голос, агент-капабилити):
+    // никакой свободный текст не уходит в `/model …` пасту в пану (SEC-3).
+    if let Err(e) = crate::convo::skills::validate_model(model) {
+        return err(e);
+    }
     let friendly = friendly_model(model);
     set_via_slash(d, session_id, format!("/model {model}"), move |s| {
         s.model = Some(friendly); // оптимистично; транскрипт подтвердит
@@ -431,6 +436,9 @@ pub async fn session_set_effort(app: AppHandle, session_id: String, level: Strin
 
 /// Ядро смены effort — общее для IPC и капабилити `sessions.control` (инкр. 8).
 pub(crate) async fn set_effort_core(d: &Arc<Daemon>, session_id: &str, level: &str) -> Value {
+    if let Err(e) = crate::convo::skills::validate_effort(level) {
+        return err(e);
+    }
     let lv = level.to_string();
     set_via_slash(d, session_id, format!("/effort {level}"), move |s| {
         s.effort = Some(lv); // effort снаружи не читается — ведём оптимистично

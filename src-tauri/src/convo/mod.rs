@@ -31,12 +31,18 @@ pub async fn converse_once(d: Arc<Daemon>, transcript: String, guard: SfGuard) {
     let text = transcript.trim().to_string();
     if text.is_empty() {
         hud::emit(&d, hud::Phase::Empty);
+        d.voice.say("Не расслышал, повтори"); // не молчим на открытый мик (VR-7)
         return;
     }
-    hud::emit(&d, hud::Phase::Heard { text: text.clone() });
-    hud::emit(&d, hud::Phase::Thinking);
+    // распознанная реплика видна всё время вызова Haiku (а не мелькает; VR-6)
+    hud::emit(&d, hud::Phase::Thinking { text: text.clone() });
 
-    let snap = snapshot::build_snapshot(&d.snapshot(), &now_string(), d.voice.is_muted(), false);
+    let snap = snapshot::build_snapshot(
+        &d.snapshot(),
+        &now_string(),
+        d.voice.is_muted(),
+        d.power.keep_awake_active(), // реальное состояние «не спать» (R5/L3)
+    );
     let prompt = plan::build_plan_prompt(&snap, &skills::skills_menu(), &text);
 
     let raw = match crate::claude_bin::run_haiku(&prompt, HAIKU_TIMEOUT).await {
@@ -51,31 +57,52 @@ pub async fn converse_once(d: Arc<Daemon>, transcript: String, guard: SfGuard) {
         return;
     };
 
-    if let Some(action) = p.action.clone() {
-        match skills::dispatch(&d, &action, guard).await {
-            skills::SkillOutcome::Rejected(why) => {
-                crate::log::line(&format!("[convo] скил отклонён: {why}"));
-                reply(&d, "Так не могу — уточни");
+    let Some(action) = p.action.clone() else {
+        reply(&d, if p.speak.is_empty() { "Готово" } else { &p.speak });
+        return;
+    };
+
+    // route — особый: ему нужен single-flight guard (держит stage-окно отмены) и
+    // он САМ владеет HUD (staged→sent). Поэтому НЕ эмитим Reply — иначе затёрли бы
+    // карточку «Отменить (5с)» и сказали «Готово» до доставки (R1/VR-1).
+    if action.skill == "route" {
+        match action.args.get("prompt").and_then(|v| v.as_str()) {
+            Some(prompt) => {
+                crate::route::route_transcript(d.clone(), prompt.to_string(), guard).await;
+                // голосовое подтверждение БЕЗ hud::emit (не трогаем staged-карточку)
+                d.voice.say(if p.speak.is_empty() { "Отправляю" } else { &p.speak });
             }
-            skills::SkillOutcome::Staged => {
-                // route/control уже показали своё окно/подтверждение; короткий голос
-                reply(&d, if p.speak.is_empty() { "Готово" } else { &p.speak });
-            }
-            skills::SkillOutcome::Data(data) => {
-                // read: если Haiku уже дал speak — озвучиваем его; иначе фразируем 2-м вызовом
-                let say = if p.speak.is_empty() {
-                    followup_phrase(&text, &data).await
-                } else {
-                    p.speak.clone()
-                };
-                reply(&d, &say);
-            }
+            None => reply(&d, "Не поняла, что отправить"),
         }
         return;
     }
 
-    // нет действия — просто ответ из снапшота
-    reply(&d, if p.speak.is_empty() { "Готово" } else { &p.speak });
+    // НЕ-route: держим single-flight весь ход (включая confirm в dispatch и
+    // followup-вызов Haiku) — иначе re-wake стартовал бы параллельный захват (R2).
+    let _guard = guard;
+    match skills::dispatch(&d, &action).await {
+        skills::SkillOutcome::Rejected(why) => {
+            crate::log::line(&format!("[convo] скил отклонён: {why}"));
+            reply(&d, &format!("Не вышло: {why}"));
+        }
+        skills::SkillOutcome::Cancelled => {
+            // confirm() уже эмитнул «Отменено» — не затираем карточку Reply'ем,
+            // только короткий голос (R3/VR-3).
+            d.voice.say("Отменила");
+        }
+        skills::SkillOutcome::Controlled => {
+            reply(&d, if p.speak.is_empty() { "Готово" } else { &p.speak });
+        }
+        skills::SkillOutcome::Data(data) => {
+            let say = if p.speak.is_empty() {
+                followup_phrase(&text, &data).await
+            } else {
+                p.speak.clone()
+            };
+            reply(&d, &say);
+        }
+    }
+    // _guard дропается здесь → single-flight снят после ВСЕГО хода
 }
 
 /// Озвучить ответ + отразить в HUD.

@@ -9,16 +9,18 @@ use serde_json::{json, Value};
 
 use crate::convo::plan::Action;
 use crate::daemon::Daemon;
-use crate::route::SfGuard;
 
-/// Исход исполнения скила.
+/// Исход исполнения скила (для НЕ-route скилов; route оркестрируется в convo,
+/// т.к. ему нужен single-flight guard и он сам владеет HUD staged→sent).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SkillOutcome {
     /// read → данные (для опц. 2-го вызова, чтобы сфразить устно).
     Data(Value),
-    /// route/control → ушло в окно отмены / подтверждение.
-    Staged,
-    /// нелистовой скил / провал валидации → переспрос.
+    /// control: подтверждён и применён → озвучить короткое подтверждение.
+    Controlled,
+    /// пользователь сам отменил confirm / таймаут — HUD уже показал «Отменено».
+    Cancelled,
+    /// нелистовой скил / провал валидации / провал ядра → переспрос/сообщить.
     Rejected(String),
 }
 
@@ -69,7 +71,34 @@ pub fn skills_menu() -> String {
         .to_string()
 }
 
-/// Прочитать хвост транскрипта сессии (как `chats.read`, in-process).
+/// Резолв id-подсказки от планировщика в ПОЛНЫЙ id живой сессии: точное
+/// совпадение, иначе уникальный префикс (снапшот показывает 8 симв.), иначе
+/// ошибка. Неоднозначность НЕ угадываем — сайд-эффект в чужую сессию недопустим.
+pub fn resolve_sid(d: &Arc<Daemon>, hint: &str) -> Result<String, String> {
+    if d.session(hint).is_some() {
+        return Ok(hint.to_string());
+    }
+    let ids: Vec<String> = d
+        .snapshot()
+        .into_iter()
+        .filter(|s| s.renamed_to.is_none())
+        .map(|s| s.id)
+        .collect();
+    match_prefix(&ids, hint)
+}
+
+/// Уникальный префиксный матч (чистый, тестируемый). Ноль → не найдено;
+/// больше одного → неоднозначно (не угадываем — чужой сайд-эффект недопустим).
+fn match_prefix(ids: &[String], hint: &str) -> Result<String, String> {
+    let m: Vec<&String> = ids.iter().filter(|id| id.starts_with(hint)).collect();
+    match m.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err("сессия не найдена".into()),
+        _ => Err("несколько сессий с таким id — уточни".into()),
+    }
+}
+
+/// Прочитать хвост транскрипта сессии (как `chats.read`, in-process). `id` — полный.
 fn read_chat(d: &Arc<Daemon>, id: &str) -> SkillOutcome {
     let Some(s) = d.session(id) else {
         return SkillOutcome::Rejected("сессия не найдена".into());
@@ -87,27 +116,33 @@ fn read_chat(d: &Arc<Daemon>, id: &str) -> SkillOutcome {
     SkillOutcome::Data(json!({ "session_id": id, "project": s.project, "items": &items[start..] }))
 }
 
-/// Исполнить действие плана. reads → Data; route → Staged (через route::*).
-/// control (set_model/set_effort/keep_awake/mute) — добавляется в Task 6.
-/// `guard` уезжает в route (держит single-flight весь stage-window); для прочих
-/// веток дропается по выходу.
-pub async fn dispatch(d: &Arc<Daemon>, action: &Action, guard: SfGuard) -> SkillOutcome {
+/// Проверить результат ядра управления: ok:true → Controlled, иначе Rejected с
+/// внятной причиной (не «Готово» при провале — VR-2).
+fn outcome_from_core(res: &Value) -> SkillOutcome {
+    if res.get("ok").and_then(Value::as_bool) == Some(true) {
+        SkillOutcome::Controlled
+    } else if res.get("needsTmux").and_then(Value::as_bool) == Some(true) {
+        SkillOutcome::Rejected("сессия не в tmux".into())
+    } else {
+        let why = res.get("error").and_then(Value::as_str).unwrap_or("не вышло").to_string();
+        SkillOutcome::Rejected(why)
+    }
+}
+
+/// Исполнить НЕ-route действие плана. reads → Data; control → confirm → ядро.
+/// route обрабатывается в `convo::converse_once` (нужен single-flight guard).
+pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
     match action.skill.as_str() {
         "time" => SkillOutcome::Data(json!({ "now": crate::convo::now_string() })),
         "session_chat" => match action.args.get("id").and_then(Value::as_str) {
-            Some(id) => read_chat(d, id),
+            Some(id) => match resolve_sid(d, id) {
+                Ok(full) => read_chat(d, &full),
+                Err(e) => SkillOutcome::Rejected(e),
+            },
             None => SkillOutcome::Rejected("нет id".into()),
         },
-        "route" => match action.args.get("prompt").and_then(Value::as_str) {
-            Some(prompt) => {
-                // полный путь п/п-1: скоринг → stage-then-send / пикер; guard внутрь
-                crate::route::route_transcript(d.clone(), prompt.to_string(), guard).await;
-                SkillOutcome::Staged
-            }
-            None => SkillOutcome::Rejected("нет prompt".into()),
-        },
 
-        // ── CONTROL: сайд-эффект → ПОЗИТИВНЫЙ confirm (не пассивное окно) + валидация ──
+        // ── CONTROL: сайд-эффект → ПОЗИТИВНЫЙ confirm + валидация + проверка ядра ──
         "set_model" => {
             let (Some(id), Some(model)) = (
                 action.args.get("id").and_then(Value::as_str),
@@ -115,17 +150,17 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action, guard: SfGuard) -> Skill
             ) else {
                 return SkillOutcome::Rejected("нужны id и model".into());
             };
-            if d.session(id).is_none() {
-                return SkillOutcome::Rejected("сессия не найдена".into());
-            }
+            let sid = match resolve_sid(d, id) {
+                Ok(s) => s,
+                Err(e) => return SkillOutcome::Rejected(e),
+            };
             if let Err(e) = validate_model(model) {
                 return SkillOutcome::Rejected(e);
             }
-            if crate::convo::confirm(d, &format!("Переключить {id} на {model}?")).await {
-                crate::ipc::set_model_core(d, id, model).await;
-                SkillOutcome::Staged
+            if crate::convo::confirm(d, &format!("Переключить {} на {model}?", d.session_label(&sid))).await {
+                outcome_from_core(&crate::ipc::set_model_core(d, &sid, model).await)
             } else {
-                SkillOutcome::Rejected("отменено".into())
+                SkillOutcome::Cancelled
             }
         }
         "set_effort" => {
@@ -135,26 +170,27 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action, guard: SfGuard) -> Skill
             ) else {
                 return SkillOutcome::Rejected("нужны id и level".into());
             };
-            if d.session(id).is_none() {
-                return SkillOutcome::Rejected("сессия не найдена".into());
-            }
+            let sid = match resolve_sid(d, id) {
+                Ok(s) => s,
+                Err(e) => return SkillOutcome::Rejected(e),
+            };
             if let Err(e) = validate_effort(level) {
                 return SkillOutcome::Rejected(e);
             }
-            if crate::convo::confirm(d, &format!("Поставить {id} effort {level}?")).await {
-                crate::ipc::set_effort_core(d, id, level).await;
-                SkillOutcome::Staged
+            if crate::convo::confirm(d, &format!("Поставить {} effort {level}?", d.session_label(&sid))).await {
+                outcome_from_core(&crate::ipc::set_effort_core(d, &sid, level).await)
             } else {
-                SkillOutcome::Rejected("отменено".into())
+                SkillOutcome::Cancelled
             }
         }
         "keep_awake" => {
             if action.args.get("off").and_then(Value::as_bool).unwrap_or(false) {
                 if crate::convo::confirm(d, "Выключить режим «не спать»?").await {
-                    crate::power::Power::cmd(d, "keep-awake", "stop", &json!({})).await;
-                    SkillOutcome::Staged
+                    // "off" = мастер-выкл (set_auto(false)+stop_manual+persist), а не
+                    // "stop" (чистит лишь ручной слот, авто-грант остаётся) — L1/VR-4.
+                    outcome_from_core(&crate::power::Power::cmd(d, "keep-awake", "off", &json!({})).await)
                 } else {
-                    SkillOutcome::Rejected("отменено".into())
+                    SkillOutcome::Cancelled
                 }
             } else {
                 let m = action.args.get("minutes").and_then(Value::as_i64).unwrap_or(0);
@@ -162,10 +198,11 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action, guard: SfGuard) -> Skill
                     return SkillOutcome::Rejected(e);
                 }
                 if crate::convo::confirm(d, &format!("Не давать маку уснуть {m} минут?")).await {
-                    crate::power::Power::cmd(d, "keep-awake", "start-timer", &json!({ "minutes": m })).await;
-                    SkillOutcome::Staged
+                    outcome_from_core(
+                        &crate::power::Power::cmd(d, "keep-awake", "start-timer", &json!({ "minutes": m })).await,
+                    )
                 } else {
-                    SkillOutcome::Rejected("отменено".into())
+                    SkillOutcome::Cancelled
                 }
             }
         }
@@ -174,10 +211,10 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action, guard: SfGuard) -> Skill
             let on = action.args.get("on").and_then(Value::as_bool).unwrap_or(false);
             let q = if on { "Выключить звук Джарвиса?" } else { "Включить звук Джарвиса?" };
             if crate::convo::confirm(d, q).await {
-                d.voice.set_mute(on);
-                SkillOutcome::Staged
+                d.voice.set_mute(on); // инфолибельно (void)
+                SkillOutcome::Controlled
             } else {
-                SkillOutcome::Rejected("отменено".into())
+                SkillOutcome::Cancelled
             }
         }
 
@@ -223,5 +260,14 @@ mod tests {
         assert!(validate_model("op us").is_err());
         assert!(validate_model("opus\n").is_err());
         assert!(validate_effort("hi gh").is_err());
+    }
+
+    #[test]
+    fn match_prefix_unique_none_ambiguous() {
+        let ids = vec!["aaaa1111".to_string(), "aaaa2222".to_string(), "bbbb3333".to_string()];
+        assert_eq!(match_prefix(&ids, "bbbb").unwrap(), "bbbb3333"); // уникальный префикс
+        assert_eq!(match_prefix(&ids, "aaaa1111").unwrap(), "aaaa1111"); // полный
+        assert!(match_prefix(&ids, "zzzz").is_err()); // нет
+        assert!(match_prefix(&ids, "aaaa").is_err()); // неоднозначно → не угадываем
     }
 }

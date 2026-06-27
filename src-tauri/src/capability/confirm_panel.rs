@@ -51,10 +51,11 @@ impl PendingConfirms {
 
 /// Нонс подтверждения: 16 байт /dev/urandom → hex. НЕ auth-токен.
 pub fn gen_nonce() -> String {
+    // Fail-closed: пустой/нечитаемый /dev/urandom оставил бы буфер нулями →
+    // константный nonce (ломает одноразовость). Паникуем, а не используем нули.
     let mut buf = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut buf);
-    }
+    let mut f = std::fs::File::open("/dev/urandom").expect("/dev/urandom недоступен");
+    f.read_exact(&mut buf).expect("/dev/urandom не читается");
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 

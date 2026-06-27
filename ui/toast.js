@@ -315,7 +315,7 @@ function renderVoiceHud(p) {
   const crow = document.createElement('div');
   crow.className = 'crow';
   const dot = document.createElement('span');
-  dot.className = 'dot' + (p.phase === 'staged' || p.phase === 'picker' ? ' waiting' : '');
+  dot.className = 'dot' + (['staged', 'picker', 'confirm'].includes(p.phase) ? ' waiting' : '');
   const title = document.createElement('div');
   title.className = 'title';
   // staged: показываем КУДА уйдёт промпт — это и есть смысл окна отмены (VR-2)

@@ -208,6 +208,7 @@ impl Voice {
             dedup_key: format!("{kind}:{title}:{body}"),
             coalesce_group: None,
             toast_id: toast_id.map(String::from),
+            done: None,
         };
         let (m, cv) = &*self.queue;
         if m.lock().unwrap().enqueue(u) {
@@ -222,7 +223,7 @@ impl Voice {
         let (m, cv) = &*self.queue;
         m.lock().unwrap().enqueue(Utterance {
             text: text.to_string(), priority: Priority::Done,
-            dedup_key: format!("test:{text}"), coalesce_group: None, toast_id: None,
+            dedup_key: format!("test:{text}"), coalesce_group: None, toast_id: None, done: None,
         });
         cv.notify_one();
     }
@@ -241,9 +242,53 @@ impl Voice {
             dedup_key: format!("say:{n}"),
             coalesce_group: None,
             toast_id: None,
+            done: None,
         });
         if added {
             cv.notify_one();
+        }
+    }
+
+    /// Сигнал «реплика отыграна» в канал `done` утты (если есть). Вызывается
+    /// воркером на ЛЮБОМ исходе утты (сыграна/ошибка/мьют) — чтобы speak_blocking
+    /// не завис.
+    fn signal_done(u: &Utterance) {
+        if let Some(done) = &u.done {
+            let (m, cv) = &**done;
+            *m.lock().unwrap() = true;
+            cv.notify_all();
+        }
+    }
+
+    /// Озвучить и ДОЖДАТЬСЯ конца (полудуплексный разговорный цикл): возвращает,
+    /// когда речь отыграна/прервана/смьючена. Без контент-дедупа. Страховочный
+    /// таймаут ~30с, чтобы цикл не завис, если воркер не сигналит.
+    pub fn speak_blocking(&self, text: &str) {
+        let done: composer::DoneSignal = Arc::new((Mutex::new(false), Condvar::new()));
+        {
+            let (m, cv) = &*self.queue;
+            let added = m.lock().unwrap().enqueue(Utterance {
+                text: text.to_string(),
+                priority: Priority::Done,
+                dedup_key: format!("blk:{}", crate::util::now_ms()),
+                coalesce_group: None,
+                toast_id: None,
+                done: Some(done.clone()),
+            });
+            if !added {
+                return; // дедуп отбил (крайне маловероятно с now_ms) → не ждём
+            }
+            cv.notify_one();
+        }
+        let (lock, c) = &*done;
+        let mut g = lock.lock().unwrap();
+        let start = std::time::Instant::now();
+        while !*g {
+            let (ng, _to) = c.wait_timeout(g, std::time::Duration::from_millis(500)).unwrap();
+            g = ng;
+            if *g || start.elapsed() > std::time::Duration::from_secs(30) {
+                break;
+            }
         }
     }
 
@@ -264,7 +309,10 @@ impl Voice {
                 g.next()
             };
             let Some(u) = next else { continue; };
-            if self.is_muted() { continue; }
+            if self.is_muted() {
+                Self::signal_done(&u); // не подвешиваем speak_blocking при mute
+                continue;
+            }
             let vs = self.voice_sel();
             // Лениво поднять сайдкар (после idle-stop) + дождаться готовности
             // модели; страж держит активность на время синтеза (анти-гонка с tick).
@@ -294,6 +342,7 @@ impl Voice {
                 }
                 Err(e) => crate::log::line(&format!("[voice] {} молчит: {e}", self.engine.name())),
             }
+            Self::signal_done(&u); // реплика отыграна/прервана → разбудить speak_blocking
         });
     }
 }

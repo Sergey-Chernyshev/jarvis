@@ -56,7 +56,9 @@ pub fn start_conversation(
         use std::sync::atomic::Ordering;
         d.convo_abort.store(false, Ordering::SeqCst);
 
-        let mut mem = memory::Memory::new(6);
+        // сквозной контекст: подхватываем недавний разговор (если свеж), чтобы
+        // продолжить «обсуждение проблемы» с того же места между разговорами.
+        let mut mem = memory::Memory::load(8);
         loop {
             if d.convo_abort.load(Ordering::SeqCst) {
                 break; // крестик в HUD → конец разговора
@@ -97,10 +99,12 @@ pub fn start_conversation(
             d.transcripts.push(&text, "wake");
             if is_stop_phrase(&text) {
                 d.voice.speak_blocking("Поняла, отключаюсь");
+                mem.save(); // сохранить сквозной контекст перед выходом
                 break;
             }
             // ход целиком (включая confirm/followup) — блокирующе в этом потоке
             let end = tauri::async_runtime::block_on(converse_turn(&d, &text, &mut mem));
+            mem.save(); // персист после каждого хода → контекст переживёт разговор
             if end || d.convo_abort.load(Ordering::SeqCst) {
                 break; // Haiku решил закончить ИЛИ крестик во время хода
             }

@@ -261,6 +261,10 @@ window.toast.onUpdate((d) => {
 
 // Терминальные фазы исчезают по TTL; промежуточные/интерактивные — «липкие».
 const VOICE_TERMINAL = new Set(['sent', 'cancelled', 'empty', 'nosessions', 'error', 'reply']);
+// Фазы, где разговор УЖЕ завершён — × просто закрывает карточку, без abort и без
+// «Отмена». ВАЖНО: 'reply' тут НЕТ — пока Джарвис ОЗВУЧИВАЕТ ответ, крестик должен
+// оборвать речь и завершить разговор (RC1), а не молча спрятать карточку.
+const VOICE_FINISHED = new Set(['sent', 'cancelled', 'empty', 'nosessions', 'error', 'dismiss']);
 
 // Освободить место под новую карточку, НЕ трогая «липкие» (пикер/стейдж/мик/
 // вопрос — интерактивные, должны выжить). Если все липкие — не вытесняем: стек
@@ -285,10 +289,12 @@ function voiceClose(p) {
     if (p.phase === 'staged') window.toast.voiceCancel(p.nonce);
     else if (p.phase === 'picker') window.toast.voicePick(p.nonce, null);
     else if (p.phase === 'confirm') window.toast.voiceConfirm(p.nonce, false);
-    // На терминальных фазах (Отменено/Отправлено/Ошибка/…) абортить НЕЧЕГО —
-    // разговор уже завершён. voiceAbort там СНОВА эмитит Cancelled → новый тост →
-    // бесконечный «Отменено» при повторном крестике. Закрываем карточку локально.
-    if (!VOICE_TERMINAL.has(p.phase)) {
+    // На ЗАВЕРШЁННЫХ фазах (Отменено/Отправлено/Ошибка/…) абортить НЕЧЕГО —
+    // разговор уже окончен. voiceAbort там СНОВА эмитит Cancelled → новый тост →
+    // бесконечный «Отменено». Закрываем карточку локально. НО на активных фазах
+    // (Слушаю/Думаю/Reply/staged/picker/confirm) × = «стоп всё»: рвём речь и
+    // завершаем разговор — в т.ч. пока Джарвис ГОВОРИТ ответ (RC1).
+    if (!VOICE_FINISHED.has(p.phase)) {
       window.toast.voiceAbort(); // оборвать речь + закончить разговор/слушание
     }
     removeCard(p.id);
@@ -301,6 +307,8 @@ function voiceClose(p) {
 // повторной slide-in анимации между фазами (F2).
 function renderVoiceHud(p) {
   if (!p || !p.id) return;
+  // «dismiss» — естественный конец разговора: тихо убрать карточку, без «Отмена» (RC3).
+  if (p.phase === 'dismiss') { removeCard(p.id, true); return; }
   const id = p.id;
   const terminal = VOICE_TERMINAL.has(p.phase);
   const ttl = 4200;

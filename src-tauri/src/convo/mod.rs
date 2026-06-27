@@ -28,6 +28,12 @@ pub fn now_string() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
 }
 
+/// Нажат ли крестик (× в HUD) — разговор обрывается: ничего не озвучиваем, не
+/// действуем, не переслушиваем. Единая точка опроса флага по всему циклу.
+fn aborted(d: &Arc<Daemon>) -> bool {
+    d.convo_abort.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Запустить многоходовый разговор (веха 2b). Держит single-flight на ВЕСЬ
 /// диалог (пока он жив, повторный «Hey Jarvis» подавлен). Полудуплекс: слушаем
 /// (`listen`) только когда Джарвис молчит; пока говорит — `speak_blocking`
@@ -47,7 +53,15 @@ pub fn start_conversation(
         struct HudClear(Arc<Daemon>);
         impl Drop for HudClear {
             fn drop(&mut self) {
-                hud::emit(&self.0, hud::Phase::Cancelled);
+                use std::sync::atomic::Ordering;
+                if self.0.convo_abort.load(Ordering::SeqCst) {
+                    // × (крестик): voice_abort УЖЕ показал «Отменено» — не трогаем,
+                    // пусть карточка отстоит и сама уйдёт. Иначе мигнёт и исчезнет.
+                } else {
+                    // естественный конец (тишина/стоп-фраза/Haiku end) — отменять
+                    // НЕЧЕГО: тихо убираем карточку, без «Отменено» (RC3).
+                    hud::emit(&self.0, hud::Phase::Dismiss);
+                }
             }
         }
         let _hud_clear = HudClear(d.clone());
@@ -77,6 +91,11 @@ pub fn start_conversation(
                 listen::ListenResult::Utterance(p) => p,
                 listen::ListenResult::Silence => break, // пауза без речи / abort → конец
             };
+            // × мог взвестись РОВНО когда реплика заэндпойнтилась (гонка listen:
+            // Step::Done вернул Utterance до проверки abort) → не обрабатываем (RC2).
+            if aborted(&d) {
+                break;
+            }
             // пустой захват / ошибка STT — дать видимый+голосовой сигнал и переслушать
             let text = if pcm.is_empty() {
                 String::new()
@@ -90,6 +109,10 @@ pub fn start_conversation(
                     }
                 }
             };
+            // × мог взвестись пока шёл STT (несколько секунд) → не отвечаем (RC2).
+            if aborted(&d) {
+                break;
+            }
             if text.is_empty() {
                 hud::emit(&d, hud::Phase::Empty);
                 d.voice.speak_blocking("Не расслышал, повтори");
@@ -160,6 +183,11 @@ pub async fn converse_turn(d: &Arc<Daemon>, transcript: &str, mem: &mut memory::
         return false;
     };
 
+    // × нажали, пока думали (run_haiku ~1-3с) → не исполняем действие и молчим (RC2).
+    if aborted(d) {
+        return true;
+    }
+
     let Some(action) = p.action.clone() else {
         let say = if p.speak.is_empty() { "Готово".to_string() } else { p.speak.clone() };
         speak_reply(d, &say);
@@ -178,7 +206,9 @@ pub async fn converse_turn(d: &Arc<Daemon>, transcript: &str, mem: &mut memory::
                     crate::route::route_transcript(d.clone(), rp.to_string(), g).await;
                 }
                 let say = if p.speak.is_empty() { "Отправляю".to_string() } else { p.speak.clone() };
-                d.voice.speak_blocking(&say); // без hud::emit (route держит свою staged-карточку)
+                if !aborted(d) {
+                    d.voice.speak_blocking(&say); // без hud::emit (route держит свою staged-карточку)
+                }
                 // Дать staged-карточке «Отменить (5с)» прожить окно, прежде чем
                 // следующий listen эмитнет Listening поверх неё (ROUTE-HUD-CANCEL-1).
                 // Заодно мик не открыт — у юзера есть время тапнуть отмену.
@@ -213,6 +243,7 @@ pub async fn converse_turn(d: &Arc<Daemon>, transcript: &str, mem: &mut memory::
         match crate::agent::assistant::AssistantHost::run(
             &full_q,
             crate::agent::assistant::ASSISTANT_TIMEOUT,
+            &d.convo_abort,
         )
         .await
         {
@@ -255,8 +286,13 @@ pub async fn converse_turn(d: &Arc<Daemon>, transcript: &str, mem: &mut memory::
     p.end
 }
 
-/// Озвучить ответ (блокирующе — полудуплекс) + отразить в HUD.
+/// Озвучить ответ (блокирующе — полудуплекс) + отразить в HUD. ГЛАВНЫЙ чокпойнт
+/// отмены: если × уже нажат — молчим и не рисуем Reply (иначе «отвечать внезапно»
+/// после крестика и перекрытие карточки «Отменено»; RC2).
 fn speak_reply(d: &Arc<Daemon>, text: &str) {
+    if aborted(d) {
+        return;
+    }
     hud::emit(d, hud::Phase::Reply { text: text.to_string() });
     d.voice.speak_blocking(text);
 }

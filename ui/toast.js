@@ -285,7 +285,12 @@ function voiceClose(p) {
     if (p.phase === 'staged') window.toast.voiceCancel(p.nonce);
     else if (p.phase === 'picker') window.toast.voicePick(p.nonce, null);
     else if (p.phase === 'confirm') window.toast.voiceConfirm(p.nonce, false);
-    window.toast.voiceAbort(); // оборвать речь + закончить разговор/слушание
+    // На терминальных фазах (Отменено/Отправлено/Ошибка/…) абортить НЕЧЕГО —
+    // разговор уже завершён. voiceAbort там СНОВА эмитит Cancelled → новый тост →
+    // бесконечный «Отменено» при повторном крестике. Закрываем карточку локально.
+    if (!VOICE_TERMINAL.has(p.phase)) {
+      window.toast.voiceAbort(); // оборвать речь + закончить разговор/слушание
+    }
     removeCard(p.id);
   });
   return close;

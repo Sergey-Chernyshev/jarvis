@@ -2683,6 +2683,7 @@ async function renderTranscriptsCard() {
   }
 
   for (const it of items) {
+    const wrap = document.createElement('div');
     const r = document.createElement('div');
     r.className = 'istat hairtop on';
     r.appendChild(Object.assign(document.createElement('span'), { className: 'dot' }));
@@ -2697,15 +2698,49 @@ async function renderTranscriptsCard() {
     const hh = String(d.getHours()).padStart(2, '0'), mm = String(d.getMinutes()).padStart(2, '0');
     meta.textContent = `${it.source === 'wake' ? '🎙' : '⌨'} ${hh}:${mm}`;
     r.appendChild(meta);
+    // → Промпт: преобразовать надиктованное через LLM (ишку)
+    const enh = document.createElement('button');
+    enh.className = 'abtn small primary'; enh.style.marginLeft = '10px'; enh.textContent = '→ Промпт';
+    enh.addEventListener('click', async () => {
+      enh.disabled = true; enh.textContent = 'Думаю…';
+      let res = null;
+      try { res = await window.jarvis.transcriptEnhance(it.text, 'prompt'); } catch (e) {}
+      enh.disabled = false; enh.textContent = '→ Промпт';
+      if (res && res.ok && res.result) showEnhanceResult(wrap, res.result);
+      else showToast('Не удалось: ' + ((res && res.error) || 'ишка недоступна'));
+    });
+    r.appendChild(enh);
     const cp = document.createElement('button');
-    cp.className = 'abtn small'; cp.style.marginLeft = '10px'; cp.textContent = 'Копировать';
+    cp.className = 'abtn small'; cp.style.marginLeft = '8px'; cp.textContent = 'Копировать';
     cp.addEventListener('click', () => {
       try { navigator.clipboard.writeText(it.text); } catch {}
       cp.textContent = 'OK'; setTimeout(() => { cp.textContent = 'Копировать'; }, 1200);
     });
     r.appendChild(cp);
-    box.appendChild(r);
+    wrap.appendChild(r);
+    box.appendChild(wrap);
   }
+}
+
+// показать результат преобразования (промпт) под репликой + кнопка копирования
+function showEnhanceResult(wrap, text) {
+  const old = wrap.querySelector('.enh-result');
+  if (old) old.remove();
+  const res = document.createElement('div');
+  res.className = 'enh-result';
+  res.style.cssText = 'margin:6px 0 10px 22px;padding:10px;border-radius:8px;background:rgba(108,160,255,.10);';
+  const t = document.createElement('div');
+  t.textContent = text;
+  t.style.cssText = 'white-space:pre-wrap;font-size:13px;line-height:1.45;';
+  res.appendChild(t);
+  const cp = document.createElement('button');
+  cp.className = 'abtn small primary'; cp.style.marginTop = '8px'; cp.textContent = 'Копировать промпт';
+  cp.addEventListener('click', () => {
+    try { navigator.clipboard.writeText(text); } catch {}
+    cp.textContent = 'Скопировано'; setTimeout(() => { cp.textContent = 'Копировать промпт'; }, 1500);
+  });
+  res.appendChild(cp);
+  wrap.appendChild(res);
 }
 
 /* ── формат размера на диске ── */

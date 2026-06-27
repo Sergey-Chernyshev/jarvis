@@ -164,6 +164,7 @@ fn main() {
             ipc::models_get,
             ipc::transcripts_get,
             ipc::transcripts_clear,
+            ipc::transcript_enhance,
             ipc::stt_set_engine,
             ipc::stt_test,
             onboarding::stt_install_whisper,
@@ -201,6 +202,12 @@ fn main() {
             // плагины питания (Не спать, Крышка) — после трея:
             // их changed() обновляет title
             power::Power::init(&d);
+
+            // Прогрев кэша размеров моделей в фоне: первое открытие настроек не
+            // ждёт обхода venv (~21k файлов) — см. install::dir_size_cached.
+            std::thread::spawn(|| {
+                let _ = crate::install::model_inventory();
+            });
 
             if let Err(e) = ipc::register_hotkey(&d, &d.settings.string("hotkey")) {
                 eprintln!("[jarvis] хоткей не зарегистрировался: {e}");

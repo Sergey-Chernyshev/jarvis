@@ -13,6 +13,7 @@ pub mod insert;
 pub mod mic_permission; // инкр.10: безопасная проверка разрешения микрофона (TCC)
 pub mod sidecar;
 pub mod transcripts; // история «что я говорил» (диктовка/wake) + копирование
+pub mod enhance; // преобразование надиктованного через LLM (в промпт / почистить)
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

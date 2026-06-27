@@ -22,98 +22,40 @@ pub trait WakeAction: Send + Sync {
     fn on_wake(&self, preroll: Vec<f32>);
 }
 
-/// Прод-действие: видимая реакция + STT-захват(преролл+окно) + маршрутизация.
+/// Прод-действие: видимая реакция + запуск разговорного цикла (VAD/STT внутри).
 pub struct AgentWakeAction {
     hub: Arc<AudioHub>,
     stt: Arc<SttService>,
     app: tauri::AppHandle,
-    /// Длина фикс-окна записи после wake, мс (полный VAD — под-проект 2).
-    window_ms: u64,
-    /// Один голосовой цикл за раз: повторный wake во время цикла игнорируется.
+    /// Один разговор за раз: повторный wake во время диалога игнорируется.
     sf: SingleFlight,
 }
 
 impl AgentWakeAction {
     pub fn new(hub: Arc<AudioHub>, stt: Arc<SttService>, app: tauri::AppHandle) -> Arc<Self> {
-        // 6с (а не 4с) — стоп-гэп до VAD: фикс-окно реже режет нормальную команду.
-        Arc::new(AgentWakeAction { hub, stt, app, window_ms: 6000, sf: SingleFlight::default() })
+        Arc::new(AgentWakeAction { hub, stt, app, sf: SingleFlight::default() })
     }
 }
 
 impl WakeAction for AgentWakeAction {
     fn on_wake(&self, preroll: Vec<f32>) {
-        // single-flight: если цикл уже идёт — не плодим второй захват/агента
+        // single-flight: цикл/разговор уже идёт — повторный wake игнорируем (он же
+        // подавляет срабатывание детектора на собственный TTS Джарвиса).
         let Some(guard) = self.sf.try_enter() else {
             crate::log::line("[wake] уже слушаю — повторный wake проигнорирован");
             return;
         };
 
         let app = self.app.clone();
-        let hub = self.hub.clone();
-        let stt = self.stt.clone();
-        let window_ms = self.window_ms;
         let d = crate::daemon::Daemon::get(&app);
 
         // совместимость: панель по-прежнему получает «detected» (пилюля в настройках)
         crate::windows::emit_to_panel(&app, "wake", &json!({ "phase": "detected" }));
-        // видимая реакция в оверлее: «Слушаю…» + длина окна для кольца отсчёта
-        crate::route::hud::emit(
-            &d,
-            crate::route::hud::Phase::Listening { secs: (window_ms / 1000) as u32 },
-        );
 
-        // Тяжёлая часть (захват+STT+маршрутизация) — в отдельном потоке. Гард
-        // живёт до конца цикла (Drop снимает single-flight на ЛЮБОМ выходе).
-        std::thread::spawn(move || {
-            // `guard` держим в области потока: ранние return (ошибка захвата/STT)
-            // дропают его → single-flight снимается и цикл закрыт. На успешном
-            // пути он УЕЗЖАЕТ в route_transcript → StageBuffer и держится всё окно
-            // отмены (RC1), а не снимается тут же по выходу из потока.
-
-            // STT-захват реплики (преролл уже снят сервисом — добавляем сами)
-            let cap = hub.open_capture(false);
-            std::thread::sleep(std::time::Duration::from_millis(window_ms));
-            let live = match cap.finish() {
-                Ok(p) => p,
-                Err(e) => {
-                    crate::log::line(&format!("[wake] capture finish: {e}"));
-                    crate::route::hud::emit(
-                        &d,
-                        crate::route::hud::Phase::Error { msg: "захват не удался".into() },
-                    );
-                    return;
-                }
-            };
-            let mut pcm = preroll;
-            pcm.extend_from_slice(&live);
-            if pcm.is_empty() {
-                crate::log::line("[wake] пустой PCM после wake, пропуск");
-                crate::route::hud::emit(&d, crate::route::hud::Phase::Empty);
-                return;
-            }
-
-            // транскрипция активным STT-движком
-            let opts = stt.options();
-            let text = match stt.transcribe(&pcm, &opts) {
-                Ok(r) => r.text.trim().to_string(),
-                Err(e) => {
-                    crate::log::line(&format!("[wake] transcribe: {e}"));
-                    crate::route::hud::emit(
-                        &d,
-                        crate::route::hud::Phase::Error { msg: "распознавание не удалось".into() },
-                    );
-                    return;
-                }
-            };
-            crate::log::line(&format!("[wake] реплика: «{}»", crate::util::ellipsize(&text, 80)));
-
-            // Разговорный мозг (п/п-2): транскрипт → снапшот+Haiku-план → скил
-            // (ответ/маршрутизация/управление) → голосовой ответ. Источник
-            // недоверенный (открытый микрофон): побочный эффект — только через
-            // consent (route → окно отмены; control → confirm). guard едет внутрь
-            // (держит single-flight). Блокируемся в этом потоке (не tokio).
-            tauri::async_runtime::block_on(crate::convo::converse_once(d.clone(), text, guard));
-        });
+        // Разговорный мозг (п/п-2, веха 2b): start_conversation спавнит поток, держит
+        // single-flight на весь диалог и крутит VAD-цикл (listen → STT → ход →
+        // голосовой ответ), полудуплекс. guard уезжает внутрь.
+        crate::convo::start_conversation(d, self.hub.clone(), self.stt.clone(), preroll, guard);
     }
 }
 

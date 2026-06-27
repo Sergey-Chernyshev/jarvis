@@ -5,6 +5,7 @@
 //! Дизайн: docs/superpowers/specs/2026-06-27-conversational-voice-design.md (рев.2).
 //! Многоход/VAD/барж-ин — вехи 2b/2c.
 
+pub mod listen;
 pub mod memory;
 pub mod plan;
 pub mod skills;
@@ -25,92 +26,151 @@ pub fn now_string() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
 }
 
-/// Один ход разговора (веха 2a): транскрипт → снапшот+план → исполнение →
-/// голосовой ответ. `guard` держит single-flight; на route уезжает в stage-окно,
-/// иначе дропается по выходу. Побочные эффекты — только через consent (route →
-/// окно отмены; control → confirm в Task 6).
-pub async fn converse_once(d: Arc<Daemon>, transcript: String, guard: SfGuard) {
+/// Запустить многоходовый разговор (веха 2b). Держит single-flight на ВЕСЬ
+/// диалог (пока он жив, повторный «Hey Jarvis» подавлен). Полудуплекс: слушаем
+/// (`listen`) только когда Джарвис молчит; пока говорит — `speak_blocking`
+/// блокирует цикл, мик не открыт. Конец — тишина (listen→Silence) или стоп-фраза.
+pub fn start_conversation(
+    d: Arc<Daemon>,
+    hub: Arc<crate::stt::hub::AudioHub>,
+    stt: Arc<crate::stt::SttService>,
+    _preroll: Vec<f32>,
+    guard: SfGuard,
+) {
+    std::thread::spawn(move || {
+        let _conv = guard; // single-flight на весь диалог
+        let mut mem = memory::Memory::new(6);
+        loop {
+            hud::emit(&d, hud::Phase::Listening { secs: 9 });
+            let pcm = match listen::listen(&hub, 112 /*~9с ожидания старта*/) {
+                listen::ListenResult::Utterance(p) => p,
+                listen::ListenResult::Silence => break, // пауза без речи → конец
+            };
+            if pcm.is_empty() {
+                continue;
+            }
+            let opts = stt.options();
+            let text = match stt.transcribe(&pcm, &opts) {
+                Ok(r) => r.text.trim().to_string(),
+                Err(e) => {
+                    crate::log::line(&format!("[convo] stt: {e}"));
+                    continue;
+                }
+            };
+            if text.is_empty() {
+                continue;
+            }
+            if is_stop_phrase(&text) {
+                d.voice.speak_blocking("Поняла, отключаюсь");
+                break;
+            }
+            // ход целиком (включая confirm/followup) — блокирующе в этом потоке
+            let end = tauri::async_runtime::block_on(converse_turn(&d, &text, &mut mem));
+            if end {
+                break;
+            }
+        }
+        hud::emit(&d, hud::Phase::Cancelled); // «разговор закрыт»
+    });
+}
+
+/// Локальный детект стоп-фразы (страховка к `plan.end`).
+fn is_stop_phrase(t: &str) -> bool {
+    let t = t.to_lowercase();
+    ["спасибо", "хватит", "отбой", "пока", "стоп"].iter().any(|s| t.contains(s))
+}
+
+/// Один ход разговора: транскрипт → снапшот+память+план → исполнение → голосовой
+/// ответ (`speak_blocking`, полудуплекс). Возвращает `end` (Haiku решил закончить).
+/// НЕ потребляет conversation-lock; route внутри хода берёт СВОЙ stage-токен.
+pub async fn converse_turn(d: &Arc<Daemon>, transcript: &str, mem: &mut memory::Memory) -> bool {
     let text = transcript.trim().to_string();
     if text.is_empty() {
-        hud::emit(&d, hud::Phase::Empty);
-        d.voice.say("Не расслышал, повтори"); // не молчим на открытый мик (VR-7)
-        return;
+        hud::emit(d, hud::Phase::Empty);
+        d.voice.speak_blocking("Не расслышал, повтори");
+        return false;
     }
-    // распознанная реплика видна всё время вызова Haiku (а не мелькает; VR-6)
-    hud::emit(&d, hud::Phase::Thinking { text: text.clone() });
+    hud::emit(d, hud::Phase::Thinking { text: text.clone() });
 
     let snap = snapshot::build_snapshot(
         &d.snapshot(),
         &now_string(),
         d.voice.is_muted(),
-        d.power.keep_awake_active(), // реальное состояние «не спать» (R5/L3)
+        d.power.keep_awake_active(),
     );
-    let prompt = plan::build_plan_prompt(&snap, &skills::skills_menu(), &text);
+    let prompt = plan::build_plan_prompt(&snap, &skills::skills_menu(), &mem.render(), &text);
 
     let raw = match crate::claude_bin::run_haiku(&prompt, HAIKU_TIMEOUT).await {
         Some(s) => s,
         None => {
-            reply(&d, "Не смогла подумать, повтори");
-            return;
+            speak_reply(d, "Не смогла подумать, повтори");
+            mem.push(&text, "Не смогла подумать", None);
+            return false;
         }
     };
     let Some(p) = plan::parse_plan(&raw) else {
-        reply(&d, "Не поняла, повтори пожалуйста");
-        return;
+        speak_reply(d, "Не поняла, повтори пожалуйста");
+        mem.push(&text, "Не поняла", None);
+        return false;
     };
 
     let Some(action) = p.action.clone() else {
-        reply(&d, if p.speak.is_empty() { "Готово" } else { &p.speak });
-        return;
+        let say = if p.speak.is_empty() { "Готово".to_string() } else { p.speak.clone() };
+        speak_reply(d, &say);
+        mem.push(&text, &say, None);
+        return p.end;
     };
 
-    // route — особый: ему нужен single-flight guard (держит stage-окно отмены) и
-    // он САМ владеет HUD (staged→sent). Поэтому НЕ эмитим Reply — иначе затёрли бы
-    // карточку «Отменить (5с)» и сказали «Готово» до доставки (R1/VR-1).
+    // route — свой stage-токен, ОТДЕЛЬНЫЙ от conversation-lock (AUD-3): иначе
+    // его дроп после 5с-окна снял бы блокировку всего диалога. route сам владеет
+    // HUD (staged→sent) — НЕ эмитим Reply (не затираем карточку отмены, R1).
     if action.skill == "route" {
         match action.args.get("prompt").and_then(|v| v.as_str()) {
-            Some(prompt) => {
-                crate::route::route_transcript(d.clone(), prompt.to_string(), guard).await;
-                // голосовое подтверждение БЕЗ hud::emit (не трогаем staged-карточку)
-                d.voice.say(if p.speak.is_empty() { "Отправляю" } else { &p.speak });
+            Some(rp) => {
+                let sf = crate::route::SingleFlight::default();
+                if let Some(g) = sf.try_enter() {
+                    crate::route::route_transcript(d.clone(), rp.to_string(), g).await;
+                }
+                let say = if p.speak.is_empty() { "Отправляю".to_string() } else { p.speak.clone() };
+                d.voice.speak_blocking(&say); // без hud::emit (route держит свою карточку)
+                mem.push(&text, &say, Some(&format!("route: {}", crate::util::ellipsize(rp, 40))));
             }
-            None => reply(&d, "Не поняла, что отправить"),
+            None => {
+                speak_reply(d, "Не поняла, что отправить");
+                mem.push(&text, "не поняла что отправить", None);
+            }
         }
-        return;
+        return p.end;
     }
 
-    // НЕ-route: держим single-flight весь ход (включая confirm в dispatch и
-    // followup-вызов Haiku) — иначе re-wake стартовал бы параллельный захват (R2).
-    let _guard = guard;
-    match skills::dispatch(&d, &action).await {
+    match skills::dispatch(d, &action).await {
         skills::SkillOutcome::Rejected(why) => {
-            crate::log::line(&format!("[convo] скил отклонён: {why}"));
-            reply(&d, &format!("Не вышло: {why}"));
+            let say = format!("Не вышло: {why}");
+            speak_reply(d, &say);
+            mem.push(&text, &say, Some(&format!("{}: rejected", action.skill)));
         }
         skills::SkillOutcome::Cancelled => {
-            // confirm() уже эмитнул «Отменено» — не затираем карточку Reply'ем,
-            // только короткий голос (R3/VR-3).
-            d.voice.say("Отменила");
+            d.voice.speak_blocking("Отменила"); // hud уже «Отменено» (R3)
+            mem.push(&text, "отменено", Some(&format!("{}: cancelled", action.skill)));
         }
         skills::SkillOutcome::Controlled => {
-            reply(&d, if p.speak.is_empty() { "Готово" } else { &p.speak });
+            let say = if p.speak.is_empty() { "Готово".to_string() } else { p.speak.clone() };
+            speak_reply(d, &say);
+            mem.push(&text, &say, Some(&format!("{}: ok", action.skill)));
         }
         skills::SkillOutcome::Data(data) => {
-            let say = if p.speak.is_empty() {
-                followup_phrase(&text, &data).await
-            } else {
-                p.speak.clone()
-            };
-            reply(&d, &say);
+            let say = if p.speak.is_empty() { followup_phrase(&text, &data).await } else { p.speak.clone() };
+            speak_reply(d, &say);
+            mem.push(&text, &say, Some(&format!("{}: data", action.skill)));
         }
     }
-    // _guard дропается здесь → single-flight снят после ВСЕГО хода
+    p.end
 }
 
-/// Озвучить ответ + отразить в HUD.
-fn reply(d: &Arc<Daemon>, text: &str) {
-    d.voice.say(text);
+/// Озвучить ответ (блокирующе — полудуплекс) + отразить в HUD.
+fn speak_reply(d: &Arc<Daemon>, text: &str) {
     hud::emit(d, hud::Phase::Reply { text: text.to_string() });
+    d.voice.speak_blocking(text);
 }
 
 /// Показать confirm-карточку управляющего действия и дождаться решения юзера.

@@ -193,6 +193,41 @@ pub async fn converse_turn(d: &Arc<Daemon>, transcript: &str, mem: &mut memory::
         return p.end;
     }
 
+    // assistant — особый путь (как route): нужен КОНТЕКСТ разговора, чтобы
+    // внешний мозг следил за нитью «обсуждения проблемы». Память (санированная)
+    // вшивается в запрос; ответ озвучивается verbatim (он уже voice-friendly).
+    if action.skill == "assistant" {
+        let q = action
+            .args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("");
+        if q.is_empty() {
+            speak_reply(d, "Не поняла вопрос, повтори");
+            mem.push(&text, "не поняла вопрос", None);
+            return p.end;
+        }
+        hud::emit(d, hud::Phase::Thinking { text: "ищу ответ…".into() });
+        let full_q = crate::agent::assistant::query_with_context(&mem.render(), q);
+        match crate::agent::assistant::AssistantHost::run(
+            &full_q,
+            crate::agent::assistant::ASSISTANT_TIMEOUT,
+        )
+        .await
+        {
+            Some(ans) => {
+                speak_reply(d, &ans);
+                mem.push(&text, &ans, Some("assistant: answer"));
+            }
+            None => {
+                speak_reply(d, "Не смогла найти ответ, попробуй переформулировать");
+                mem.push(&text, "ассистент не ответил", Some("assistant: fail"));
+            }
+        }
+        return p.end;
+    }
+
     match skills::dispatch(d, &action).await {
         skills::SkillOutcome::Rejected(why) => {
             let say = format!("Не вышло: {why}");
@@ -210,12 +245,6 @@ pub async fn converse_turn(d: &Arc<Daemon>, transcript: &str, mem: &mut memory::
             let say = if p.speak.is_empty() { "Готово".to_string() } else { p.speak.clone() };
             speak_reply(d, &say);
             mem.push(&text, &say, Some(&format!("{}: ok", action.skill)));
-        }
-        skills::SkillOutcome::Answer(ans) => {
-            // готовый voice-friendly ответ внешнего ассистента — озвучиваем
-            // verbatim (НЕ через followup, иначе потеряем веб-результат).
-            speak_reply(d, &ans);
-            mem.push(&text, &ans, Some(&format!("{}: answer", action.skill)));
         }
         skills::SkillOutcome::Data(data) => {
             let say = if p.speak.is_empty() { followup_phrase(&text, &data).await } else { p.speak.clone() };

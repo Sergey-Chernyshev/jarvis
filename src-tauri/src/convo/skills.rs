@@ -16,8 +16,6 @@ use crate::daemon::Daemon;
 pub enum SkillOutcome {
     /// read → данные (для опц. 2-го вызова, чтобы сфразить устно).
     Data(Value),
-    /// готовый ответ для озвучки verbatim (внешний ассистент: веб-поиск/Q&A).
-    Answer(String),
     /// control: подтверждён и применён → озвучить короткое подтверждение.
     Controlled,
     /// пользователь сам отменил confirm / таймаут — HUD уже показал «Отменено».
@@ -249,25 +247,7 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
         "metrics" => SkillOutcome::Data(d.usage.stats("today")),
         "limits" => SkillOutcome::Data(serde_json::to_value(d.limits.state()).unwrap_or(Value::Null)),
 
-        // ── ВНЕШНИЙ АССИСТЕНТ: веб-поиск / общие вопросы / «думать» (read-only) ──
-        "assistant" => match action.args.get("query").and_then(Value::as_str) {
-            Some(q) if !q.trim().is_empty() => {
-                crate::route::hud::emit(
-                    d,
-                    crate::route::hud::Phase::Thinking { text: "ищу ответ…".into() },
-                );
-                match crate::agent::assistant::AssistantHost::run(
-                    q.trim(),
-                    crate::agent::assistant::ASSISTANT_TIMEOUT,
-                )
-                .await
-                {
-                    Some(ans) => SkillOutcome::Answer(ans),
-                    None => SkillOutcome::Rejected("не смогла найти ответ".into()),
-                }
-            }
-            _ => SkillOutcome::Rejected("нет запроса".into()),
-        },
+        // assistant — особый путь в convo::converse_turn (нужен контекст разговора).
 
         // ── CONTROL: сайд-эффект → ПОЗИТИВНЫЙ confirm + валидация + проверка ядра ──
         "set_model" => {

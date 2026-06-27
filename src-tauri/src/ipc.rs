@@ -843,6 +843,18 @@ pub fn voice_confirm_resolve(app: AppHandle, nonce: String, approved: bool) -> V
     json!({ "ok": known })
 }
 
+/// Голосовой разговор: крестик в HUD = «стоп всё» — оборвать текущую озвучку И
+/// завершить разговор (цикл выйдет, listen прервётся, мик закроется). Плюс
+/// снимаем висящие confirm/stage, чтобы ничего не сработало после.
+#[tauri::command]
+pub fn voice_abort(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    d.convo_abort.store(true, std::sync::atomic::Ordering::SeqCst);
+    d.voice.stop(); // оборвать речь + очистить очередь TTS
+    crate::route::hud::emit(&d, crate::route::hud::Phase::Cancelled);
+    json!({ "ok": true })
+}
+
 /* ================= служебное ================= */
 
 /// Снять ложный лимит-баннер по официальному usage (таймер из main).

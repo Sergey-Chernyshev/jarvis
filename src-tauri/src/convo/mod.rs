@@ -51,17 +51,28 @@ pub fn start_conversation(
         }
         let _hud_clear = HudClear(d.clone());
 
+        // сброс флага «оборвать» в начале нового разговора (крестик прошлого не висит)
+        use std::sync::atomic::Ordering;
+        d.convo_abort.store(false, Ordering::SeqCst);
+
         let mut mem = memory::Memory::new(6);
         loop {
+            if d.convo_abort.load(Ordering::SeqCst) {
+                break; // крестик в HUD → конец разговора
+            }
             // полудуплекс: не открываем мик, пока Джарвис ещё что-то озвучивает
             // (напр. фоновая NeedHuman-нотификация, перебившая ответ; HD-1).
-            while d.voice.is_speaking() {
+            // Крестик во время речи рвёт озвучку (voice.stop) → is_speaking спадёт.
+            while d.voice.is_speaking() && !d.convo_abort.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(80));
             }
+            if d.convo_abort.load(Ordering::SeqCst) {
+                break;
+            }
             hud::emit(&d, hud::Phase::Listening { secs: 9 });
-            let pcm = match listen::listen(&hub, 112 /*~9с ожидания старта*/) {
+            let pcm = match listen::listen(&hub, 112 /*~9с ожидания старта*/, &d.convo_abort) {
                 listen::ListenResult::Utterance(p) => p,
-                listen::ListenResult::Silence => break, // пауза без речи → конец
+                listen::ListenResult::Silence => break, // пауза без речи / abort → конец
             };
             // пустой захват / ошибка STT — дать видимый+голосовой сигнал и переслушать
             let text = if pcm.is_empty() {
@@ -89,8 +100,8 @@ pub fn start_conversation(
             }
             // ход целиком (включая confirm/followup) — блокирующе в этом потоке
             let end = tauri::async_runtime::block_on(converse_turn(&d, &text, &mut mem));
-            if end {
-                break;
+            if end || d.convo_abort.load(Ordering::SeqCst) {
+                break; // Haiku решил закончить ИЛИ крестик во время хода
             }
         }
         // HUD «разговор закрыт» эмитит HudClear::drop

@@ -271,12 +271,12 @@ function evictForRoom() {
   }
 }
 
-// Кнопка ✕ для HUD: на staged → отменить отправку, на picker → отменить выбор,
-// иначе просто снять карточку.
+// Кнопка ✕ для HUD = «стоп всё»: снять конкретное действие (staged/picker/
+// confirm), оборвать озвучку и ЗАВЕРШИТЬ разговор (перестать слушать).
 function voiceClose(p) {
   const close = document.createElement('button');
   close.className = 'close';
-  close.title = 'Скрыть';
+  close.title = 'Стоп';
   const x = document.createElement('span');
   x.textContent = '✕';
   close.appendChild(x);
@@ -285,6 +285,7 @@ function voiceClose(p) {
     if (p.phase === 'staged') window.toast.voiceCancel(p.nonce);
     else if (p.phase === 'picker') window.toast.voicePick(p.nonce, null);
     else if (p.phase === 'confirm') window.toast.voiceConfirm(p.nonce, false);
+    window.toast.voiceAbort(); // оборвать речь + закончить разговор/слушание
     removeCard(p.id);
   });
   return close;

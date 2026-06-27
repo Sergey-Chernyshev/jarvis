@@ -144,6 +144,7 @@ fn main() {
             ipc::voice_stage_cancel,
             ipc::voice_audio_state,
             ipc::voice_confirm_resolve,
+            ipc::voice_abort,
             ipc::agent_chat_open,
             ipc::terminal_focus,
             ipc::toast_resize,

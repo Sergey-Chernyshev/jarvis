@@ -93,6 +93,9 @@ pub struct Daemon {
     /// Голосовой разговор (п/п-2): ожидающие confirm управления (yes/no из тоста).
     /// Отдельный инстанс от `pending` (агент-гейт) — резолвится своим IPC.
     pub vconfirm: std::sync::Arc<crate::capability::confirm_panel::PendingConfirms>,
+    /// Голосовой разговор: запрос «оборвать» (крестик в HUD) — цикл выходит,
+    /// listen прерывается. Сбрасывается в начале каждого разговора.
+    pub convo_abort: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -184,6 +187,7 @@ impl Daemon {
             stage: std::sync::Arc::new(crate::route::stage::StageBuffer::new()),
             transcripts: std::sync::Arc::new(crate::stt::transcripts::Transcripts::new()),
             vconfirm: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
+            convo_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 

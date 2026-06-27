@@ -39,5 +39,7 @@
     audioState: () => invoke('voice_audio_state'),
     // «Да/Отмена» на confirm-карточке управления (п/п-2)
     voiceConfirm: (nonce, approved) => invoke('voice_confirm_resolve', { nonce, approved }),
+    // крестик в HUD = «стоп всё»: оборвать озвучку и завершить разговор
+    voiceAbort: () => invoke('voice_abort'),
   };
 })();

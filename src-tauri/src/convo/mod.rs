@@ -5,6 +5,7 @@
 //! Дизайн: docs/superpowers/specs/2026-06-27-conversational-voice-design.md (рев.2).
 //! Многоход/VAD/барж-ин — вехи 2b/2c.
 
+pub mod bargein;
 pub mod listen;
 pub mod memory;
 pub mod plan;

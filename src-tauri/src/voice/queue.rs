@@ -46,6 +46,15 @@ impl SpeechQueue {
 
     pub fn is_empty(&self) -> bool { self.items.is_empty() }
     pub fn len(&self) -> usize { self.items.len() }
+
+    /// Очистить очередь (для барж-ина: оборвать речь — недостаточно, иначе воркер
+    /// заговорит следующую утту). Дедуп-историю НЕ трогаем (повторы по-прежнему
+    /// схлопываются). Возвращает число выброшенных утт.
+    pub fn clear(&mut self) -> usize {
+        let n = self.items.len();
+        self.items.clear();
+        n
+    }
 }
 
 /// «Пиксела: …»/«Пиксела закончил» → «Пиксела» (для коалесцирования).
@@ -92,6 +101,16 @@ mod tests {
         let mut q = SpeechQueue::new();
         assert!(q.enqueue(wait("Пиксела")));
         assert!(!q.enqueue(wait("Пиксела")), "повтор того же dedup_key не добавляется");
+    }
+
+    #[test]
+    fn clear_drains_items() {
+        let mut q = SpeechQueue::new();
+        q.enqueue(done("Пиксела"));
+        q.enqueue(done("Рекрю"));
+        assert_eq!(q.clear(), 2);
+        assert!(q.is_empty());
+        assert!(q.next().is_none());
     }
 
     #[test]

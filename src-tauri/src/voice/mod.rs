@@ -183,6 +183,14 @@ impl Voice {
     /// Идёт ли сейчас проигрывание реплики (полудуплекс: цикл ждёт окончания).
     pub fn is_speaking(&self) -> bool { self.speaking.load(Ordering::SeqCst) }
 
+    /// Барж-ин/прерывание (веха 2c): оборвать текущую озвучку И очистить очередь,
+    /// БЕЗ mute и force_unduck (в отличие от set_mute). Иначе воркер после
+    /// прерванного play_blocking заговорил бы следующую утту из очереди.
+    pub fn stop(&self) {
+        self.player.stop();
+        self.queue.0.lock().unwrap().clear();
+    }
+
     /// Композирует сигналы в реплику и кладёт в очередь (fail-safe).
     pub fn speak(&self, signals: SpeechSignals) {
         if self.is_muted() { return; }

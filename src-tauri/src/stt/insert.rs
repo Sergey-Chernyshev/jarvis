@@ -14,6 +14,22 @@ pub fn paste_keycode() -> u16 {
     9
 }
 
+/// Скопировать `text` в буфер обмена и ОСТАВИТЬ его там (в отличие от
+/// `insert_text`, который восстанавливает прежний буфер). Нужно, чтобы результат
+/// диктовки можно было вставить ещё раз вручную. Пустая строка → no-op.
+pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    #[cfg(not(test))]
+    {
+        let mut cb =
+            arboard::Clipboard::new().map_err(|e| format!("[copy] clipboard new: {e}"))?;
+        cb.set_text(text).map_err(|e| format!("[copy] clipboard set: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Вставить `text` в активное приложение через ⌘V.
 ///
 /// Пустая строка → Ok(()) без операций.
@@ -120,5 +136,15 @@ mod tests {
     #[test]
     fn nonempty_text_returns_ok_in_test_mode() {
         assert!(insert_text("привет мир").is_ok());
+    }
+
+    #[test]
+    fn copy_to_clipboard_empty_is_noop() {
+        assert!(copy_to_clipboard("").is_ok());
+    }
+
+    #[test]
+    fn copy_to_clipboard_nonempty_ok_in_test_mode() {
+        assert!(copy_to_clipboard("надиктованный текст").is_ok());
     }
 }

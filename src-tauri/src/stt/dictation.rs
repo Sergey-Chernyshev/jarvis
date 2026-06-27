@@ -150,6 +150,12 @@ impl Dictation {
             if let Err(e) = super::insert::insert_text(&text) {
                 crate::log::line(&format!("[dictation] insert_text: {e}"));
             }
+            // Авто-копия надиктованного в буфер обмена (остаётся там, поверх
+            // restore из insert_text) — чтобы результат можно было вставить ещё
+            // раз вручную (по просьбе пользователя).
+            if let Err(e) = super::insert::copy_to_clipboard(&text) {
+                crate::log::line(&format!("[dictation] copy_to_clipboard: {e}"));
+            }
         });
     }
 

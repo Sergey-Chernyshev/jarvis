@@ -32,7 +32,7 @@ flate2 = "1" # gzip для сжатого хранения аудио дикто
 # клиент к Silero-сайдкару (localhost HTTP), blocking — зовём из voice-воркера
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 core-foundation = "0.10"
-core-graphics = "0.24"
+core-graphics = "0.25"
 objc2 = "0.6"
 # блоки Objective-C для AVCaptureDevice.requestAccessForMediaType:completionHandler:
 block2 = "0.6"

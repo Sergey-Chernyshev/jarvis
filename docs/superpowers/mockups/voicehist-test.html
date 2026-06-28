@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Jarvis · История голосового ввода — превью</title>
+<style>
+  :root{
+    --bg: rgba(10,10,12,0.85); --border: rgba(255,255,255,0.08); --hairline: rgba(255,255,255,0.06);
+    --row-hover: rgba(255,255,255,0.05); --text:#e7e7ea; --text-body:#d6d6db; --muted:#76767e; --faint:#55555c;
+    --keycap-text:#b9b9bf; --keycap-bg:rgba(255,255,255,0.07);
+    --mono: ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace; --working:#6ca0ff; --waiting:#f2a33c; --done:#41c98e; --idle:#55555c;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;font-size:13px;color:var(--text);
+    min-height:100vh;display:grid;place-items:center;padding:40px;background:radial-gradient(80% 60% at 50% 0%,#232733,#0d0e12 70%),#0a0a0c}
+  .panel{width:820px;height:620px;border-radius:14px;overflow:hidden;background:var(--bg);border:1px solid var(--border);
+    box-shadow:0 30px 80px rgba(0,0,0,.6);display:flex;flex-direction:column}
+  .tabs{display:flex;gap:2px;padding:7px 10px;border-bottom:1px solid var(--hairline);align-items:center;flex:none}
+  .tab{padding:5px 11px;border-radius:6px;font-size:12px;color:var(--muted)} .tab.active{background:rgba(255,255,255,.08);color:var(--text)}
+  .content{flex:1;min-height:0;display:flex} #voicehist-host{flex:1;min-height:0}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1c1d22;border:1px solid var(--border);border-radius:10px;padding:9px 14px;font-size:12px;color:var(--text)}
+</style>
+</head>
+<body>
+<div class="panel">
+  <div class="tabs"><span class="tab">Чаты</span><span class="tab">Проекты</span><span class="tab">Статистика</span><span class="tab active">Голос</span><span style="flex:1"></span></div>
+  <div class="content"><div id="voicehist-host"></div></div>
+</div>
+<script>
+  const now = Math.floor(Date.now()/1000);
+  const items = [
+    { id:9, source:'wake', ts:now-600,   text:'Найди в интернете, как откатить последний коммит в git, но сохранить изменения в рабочей директории' },
+    { id:8, source:'dictation', ts:now-1800, text:'Добавь обработку ошибок в функцию загрузки весов модели — таймаут, ретраи и понятное сообщение если сеть недоступна' },
+    { id:7, source:'dictation', ts:now-5400, text:'Напиши коммит: рефакторинг слоя авторизации, вынес проверку токена в отдельный middleware, добавил тесты на истёкший и невалидный токен' },
+    { id:6, source:'wake', ts:now-7200,  text:'Переключи фронтенд на опус' },
+    { id:5, source:'dictation', ts:now-9000, text:'Спасибо, это сработало' },
+    { id:4, source:'wake', ts:now-90000, text:'Сколько сейчас сессий ждут и что у бэкенда?' },
+    { id:3, source:'dictation', ts:now-93000, text:'Заметка: вынести историю разговоров в отдельную вкладку, а Jisper оставить под диктовку' },
+  ];
+  const ok = () => Promise.resolve({ ok:true });
+  window.jarvis = {
+    transcriptsGet: () => Promise.resolve({ items }),
+    transcriptsClear: () => { items.length = 0; return ok(); },
+    transcriptDelete: (id) => { const i = items.findIndex(x=>x.id===id); if(i>=0) items.splice(i,1); return ok(); },
+    transcriptEnhance: (text, style) => Promise.resolve({ ok:true, result:'['+style+'] '+text.slice(0,60)+'… (преобразованный текст-пример)' }),
+  };
+</script>
+<script src="../../../ui/voice-history.js"></script>
+<script>
+  try { window.initVoiceHistory(document.getElementById('voicehist-host')); }
+  catch(e){ document.getElementById('voicehist-host').textContent = 'initVoiceHistory error: '+e.message; console.error(e); }
+</script>
+</body>
+</html>

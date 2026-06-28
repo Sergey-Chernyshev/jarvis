@@ -851,7 +851,9 @@ pub fn voice_abort(app: AppHandle) -> Value {
     let d = Daemon::get(&app);
     d.convo_abort.store(true, std::sync::atomic::Ordering::SeqCst);
     d.voice.stop(); // оборвать речь + очистить очередь TTS
-    crate::route::hud::emit(&d, crate::route::hud::Phase::Cancelled);
+    // HUD убираем ТИХО (Phase::Dismiss), БЕЗ тоста «Отменено»: × — это «закрой/
+    // останови», а не «отмена действия»; «Отменено» на каждый крестик раздражает.
+    crate::route::hud::emit(&d, crate::route::hud::Phase::Dismiss);
     json!({ "ok": true })
 }
 
@@ -976,6 +978,13 @@ pub fn transcripts_get(app: AppHandle) -> Value {
 pub fn transcripts_clear(app: AppHandle) -> Value {
     Daemon::get(&app).transcripts.clear();
     json!({ "ok": true })
+}
+
+/// Удалить одну реплику по id (для страницы истории).
+#[tauri::command]
+pub fn transcript_delete(app: AppHandle, id: u64) -> Value {
+    let ok = Daemon::get(&app).transcripts.remove(id);
+    json!({ "ok": ok })
 }
 
 /// Преобразовать надиктованный текст через LLM (Haiku). `style`: "prompt" | "clean".

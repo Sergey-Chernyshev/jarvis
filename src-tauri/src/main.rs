@@ -164,6 +164,7 @@ fn main() {
             ipc::models_get,
             ipc::transcripts_get,
             ipc::transcripts_clear,
+            ipc::transcript_delete,
             ipc::transcript_enhance,
             ipc::stt_set_engine,
             ipc::stt_test,

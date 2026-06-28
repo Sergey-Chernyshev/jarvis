@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Jarvis · Настройки — превью (settings2.js)</title>
+<style>
+  :root{
+    --bg: rgba(10,10,12,0.85); --border: rgba(255,255,255,0.08); --hairline: rgba(255,255,255,0.06);
+    --row-hover: rgba(255,255,255,0.07); --text:#e7e7ea; --text-body:#d6d6db; --muted:#76767e; --faint:#55555c;
+    --keycap-text:#b9b9bf; --keycap-bg:rgba(255,255,255,0.07);
+    --mono: ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace;
+    --working:#6ca0ff; --waiting:#f2a33c; --done:#41c98e; --idle:#55555c;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;font-size:13px;color:var(--text);
+    min-height:100vh;display:grid;place-items:center;padding:40px;
+    background:radial-gradient(80% 60% at 50% 0%,#232733,#0d0e12 70%),#0a0a0c}
+  /* окно-панель реального размера приложения */
+  .panel{width:820px;height:620px;border-radius:14px;overflow:hidden;background:var(--bg);
+    border:1px solid var(--border);box-shadow:0 30px 80px rgba(0,0,0,.6);display:flex;flex-direction:column}
+  .tabs{display:flex;gap:2px;padding:7px 10px;border-bottom:1px solid var(--hairline);align-items:center;flex:none}
+  .tab{padding:5px 11px;border-radius:6px;font-size:12px;color:var(--muted)}
+  .tab.active{background:rgba(255,255,255,.08);color:var(--text)}
+  .content{flex:1;min-height:0;display:flex}
+  #settings{flex:1;min-height:0}
+</style>
+</head>
+<body>
+<div class="panel">
+  <div class="tabs"><span class="tab">Чаты</span><span class="tab">Проекты</span><span class="tab">Статистика</span><span style="flex:1"></span><span class="tab active">Настройки</span></div>
+  <div class="content"><div id="settings"></div></div>
+</div>
+
+<script>
+  // мок window.jarvis с примерными данными (формы из отчёта агента)
+  const ok = () => Promise.resolve({ ok: true });
+  window.jarvis = {
+    getSettings: () => Promise.resolve({ hotkey:'Cmd+J', continueHotkey:'Cmd+Alt+C', repeatHotkey:'Cmd+Alt+R', muteHotkey:'Cmd+Alt+M', quietHotkey:'Cmd+Alt+J', notifyDone:true, notifyWaiting:true, autoResume:false, openAtLogin:true, diagnostics:false, position:'center' }),
+    setSettings: ok,
+    sttGet: () => Promise.resolve({ engine:'qwen3-0.6b', engines:['whisper-turbo','qwen3-0.6b','qwen3-1.7b'], whisperReady:false, qwen3Ready:true, qwen3Installed:true, available:true, hotkey:'F8' }),
+    sttSetEngine: ok, sttTest: ok, sttInstallWhisper: ok, sttInstallSidecar: ok, sttInstallQwen: ok,
+    voiceGet: () => Promise.resolve({ engine:'silero', speaker:'baya', rate:'medium', mute:false, duck:true, speakers:['aidar','baya','kseniya','xenia','eugene'], rates:['slow','medium','fast','x-fast'] }),
+    voiceSetSpeaker: ok, voiceSetRate: ok, voiceTest: ok, voiceSetMute: ok, voiceSetDuck: ok,
+    wakeGet: () => Promise.resolve({ enabled:false, running:false, listening:false, muted:false, engine:'openwakeword', threshold:0.25, model_present:true, verification_enabled:false, audio_state:'idle', mic:'MacBook', mic_silent:false }),
+    wakeSetEnabled: ok, wakeSetThreshold: ok, wakeInstallModels: ok, audioSetMute: ok,
+    modelsGet: () => Promise.resolve({ models:[
+      { id:'qwen3-0.6b', kind:'stt', label:'Qwen3-ASR 0.6B', bytes:964000000, present:true, active:true },
+      { id:'qwen3-1.7b', kind:'stt', label:'Qwen3-ASR 1.7B', bytes:1500000000, present:false, active:false },
+      { id:'whisper-turbo', kind:'stt', label:'Whisper-turbo', bytes:1500000000, present:false, active:false },
+      { id:'silero', kind:'voice', label:'Silero v4 RU', bytes:612000000, present:true, active:true },
+      { id:'hey_jarvis', kind:'wake', label:'openWakeWord · hey_jarvis', bytes:8000000, present:true, active:true },
+    ] }),
+    modelDelete: ok,
+    integrationGet: () => Promise.resolve({ status:{ hooks:true, shim:true, tmux_conf:true, path_block:true, whisper_model:false, qwen3_sidecar:true }, foreign_hooks:0, models:[{id:'silero',label:'Модели голоса (Silero)',hint:'612 МБ',bytes:612000000},{id:'qwen3-0.6b',label:'Модели диктовки (Qwen3)',hint:'964 МБ',bytes:964000000}], quiet:false, proxy:'' }),
+    integrationRemove: ok, onboardingOpen: ok, quietSet: ok,
+    getMeta: () => Promise.resolve({ effortLevels:['low','medium','high','xhigh','max'] }),
+    getPlugins: () => Promise.resolve([{ id:'keep-awake', on:false, label:'Не давать спать' }, { id:'clamshell', on:false, label:'Закрытая крышка' }]),
+    pluginCmd: ok,
+    onSttInstallProgress: () => {}, onSttInstallDone: () => {}, onWakeInstallDone: () => {}, onAudioState: () => {},
+  };
+</script>
+<script src="../../../ui/settings2.js"></script>
+<script>
+  try { window.initSettings2(document.getElementById('settings')); }
+  catch (e) { document.getElementById('settings').textContent = 'initSettings2 error: ' + e.message; console.error(e); }
+</script>
+</body>
+</html>

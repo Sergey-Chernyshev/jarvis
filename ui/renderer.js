@@ -14,6 +14,8 @@ const replyEl = document.getElementById('reply');
 const footerLeftEl = document.getElementById('footerLeft');
 const tabSessionsEl = document.getElementById('tabSessions');
 const tabSettingsEl = document.getElementById('tabSettings');
+const voicehistEl = document.getElementById('voicehist');
+const tabVoiceEl = document.getElementById('tabVoice');
 
 const STATUS_LABEL = {
   working: 'работает',
@@ -112,6 +114,7 @@ function setView(next) {
   qviewEl.hidden = next !== 'question';
   settingsEl.hidden = next !== 'settings';
   statsEl.hidden = next !== 'stats';
+  voicehistEl.hidden = next !== 'voicehist';
   historyEl.hidden = next !== 'history';
   // чат и вопрос несут собственные нижние бары — парящий футер только тут
   footerEl.hidden = next === 'chat' || next === 'question';
@@ -121,9 +124,14 @@ function setView(next) {
   tabSettingsEl.classList.toggle('active', next === 'settings');
   tabStatsEl.classList.toggle('active', next === 'stats');
   tabHistoryEl.classList.toggle('active', next === 'history');
+  tabVoiceEl.classList.toggle('active', next === 'voicehist');
   tabSessionsEl.classList.toggle('active', next === 'list' || next === 'chat');
   if (next === 'settings') loadSettings();
   if (next === 'stats') renderStats();
+  if (next === 'voicehist') {
+    voicehistEl.style.cssText = 'padding:0;height:100%;overflow:hidden';
+    try { window.initVoiceHistory(voicehistEl); } catch (e) { console.error('[voicehist] init:', e); }
+  }
   if (next === 'history') renderHistory();
   else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
   if (next === 'list') queryEl.focus();
@@ -2183,6 +2191,7 @@ function actionItems() {
   if (view !== 'chat') items.push({ label: 'Очистить завершённые', key: '⌘⌫', run: () => window.jarvis.clearFinished() });
   items.push({ label: 'Проекты и история', key: '⌘2', run: () => setView('history') });
   items.push({ label: 'Статистика usage', key: '⌘3', run: () => setView('stats') });
+  items.push({ label: 'История голоса', key: '⌘4', run: () => setView('voicehist') });
   items.push({ label: 'Настройки', key: '⌘,', run: () => setView('settings') });
   return items;
 }
@@ -2378,6 +2387,7 @@ function paintHistSel() {
 const statsEl = document.getElementById('stats');
 const tabStatsEl = document.getElementById('tabStats');
 tabStatsEl.addEventListener('click', () => setView('stats'));
+tabVoiceEl.addEventListener('click', () => setView('voicehist'));
 
 const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(n || 0));
 
@@ -2615,30 +2625,17 @@ function displayHotkey(acc) {
 }
 
 async function loadSettings() {
-  const s = await window.jarvis.getSettings();
-  hotkeyBtn.textContent = displayHotkey(s.hotkey);
-  for (const btn of document.querySelectorAll('.keycap[data-hk]')) {
-    const key = btn.dataset.hk;
-    btn.textContent = displayHotkey(s[key] || HK_DEFAULTS[key] || '');
-  }
-  document.getElementById('notifyDone').checked = s.notifyDone;
-  document.getElementById('notifyWaiting').checked = s.notifyWaiting;
-  document.getElementById('autoResume').checked = s.autoResume !== false;
-  document.getElementById('openAtLogin').checked = s.openAtLogin;
-  document.getElementById('diagnostics').checked = !!s.diagnostics;
-  for (const b of document.querySelectorAll('.segbtn')) {
-    b.classList.toggle('active', b.dataset.v === s.position);
-  }
+  // Новая страница настроек (settings2.js): сайдбар + детальные панели в дизайне
+  // редизайна, проводка к тем же IPC. initSettings2 сам чистит и строит host.
+  // Старая разметка #settings затирается; её top-level обработчики остаются
+  // привязанными к detached-узлам (безопасно), карточки no-op (нет их DOM).
+  try { plugins = await window.jarvis.getPlugins(); } catch {}
+  settingsEl.style.cssText = 'padding:0;height:100%;overflow:hidden';
   try {
-    plugins = await window.jarvis.getPlugins();
-    renderPluginRows();
-  } catch {}
-  renderModelManager();
-  renderSttCard();
-  renderTranscriptsCard();
-  renderWakeCard();
-  renderVoiceCard();
-  renderIntegrationCard();
+    window.initSettings2(settingsEl);
+  } catch (e) {
+    console.error('[settings2] init:', e);
+  }
 }
 
 /* ── карточка «История диктовки»: что я говорил + копирование/очистка ── */
@@ -3498,6 +3495,11 @@ window.addEventListener('keydown', async (e) => {
   if (e.metaKey && e.key === '3') { // ⌘3 — Статистика
     e.preventDefault();
     setView('stats');
+    return;
+  }
+  if (e.metaKey && e.key === '4') { // ⌘4 — История голоса
+    e.preventDefault();
+    setView('voicehist');
     return;
   }
 

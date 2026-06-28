@@ -1242,6 +1242,7 @@
       <div class="tab active" id="tabSessions">Чаты <span class="tabkey">⌘1</span></div>
       <div class="tab" id="tabHistory">Проекты <span class="tabkey">⌘2</span></div>
       <div class="tab" id="tabStats">Статистика <span class="tabkey">⌘3</span></div>
+      <div class="tab" id="tabVoice">Голос <span class="tabkey">⌘4</span></div>
       <span class="spacer"></span>
       <div class="tab icon" id="tabSettings" title="Настройки · ⌘,">
         <!-- lucide: sliders-horizontal -->
@@ -1252,6 +1253,7 @@
     <div class="limitbanner" id="limitBanner" hidden></div>
     <div class="content">
       <div class="list" id="list"></div>
+      <div class="voicehist" id="voicehist" hidden></div>
       <div class="chat" id="chat" hidden>
         <div class="chathead">
           <button class="back" id="chatBack" title="Назад · Esc">
@@ -1458,6 +1460,8 @@
     <div class="actions-pop" id="actionsPop" hidden></div>
   </div>
   <script src="./bridge.js"></script>
+  <script src="./settings2.js"></script>
+  <script src="./voice-history.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

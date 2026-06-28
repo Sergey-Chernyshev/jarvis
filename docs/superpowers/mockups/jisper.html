@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Jisper · История диктовки — макет</title>
+<style>
+/* ── токены дизайн-системы Jarvis (из prototypes/app.css) ── */
+:root{
+  --bg: rgba(18,18,21,0.94);
+  --border: rgba(255,255,255,0.08);
+  --hairline: rgba(255,255,255,0.06);
+  --row-hover: rgba(255,255,255,0.05);
+  --text:#e7e7ea; --text-body:#d6d6db; --muted:#76767e; --faint:#55555c;
+  --keycap-text:#b9b9bf; --keycap-bg:rgba(255,255,255,0.07);
+  --mono: ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace;
+  --font: -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;
+  --working:#6ca0ff; --waiting:#f2a33c; --done:#41c98e; --idle:#55555c; --limit:#8b7ec8;
+  --accent:#6ca0ff; --accent-soft:rgba(108,160,255,0.13); --accent-line:rgba(108,160,255,0.30);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;font-family:var(--font);color:var(--text);-webkit-font-smoothing:antialiased}
+body{min-height:100vh;display:grid;place-items:center;padding:40px;
+  background:radial-gradient(80% 60% at 50% 0%,#232733,#0d0e12 70%),#0a0a0c}
+
+/* ── Panel ── */
+.panel{width:820px;height:620px;border-radius:14px;overflow:hidden;background:var(--bg);
+  border:1px solid var(--border);box-shadow:0 30px 80px rgba(0,0,0,.6),0 0 0 .5px rgba(255,255,255,.04) inset;
+  backdrop-filter:blur(50px) saturate(160%);display:flex;flex-direction:column}
+
+/* ── Tabs (как в app-panel) ── */
+.tabs{display:flex;gap:2px;padding:7px 10px;border-bottom:1px solid var(--hairline);flex:none;align-items:center}
+.tab{display:flex;align-items:center;gap:5px;padding:5px 11px;border-radius:6px;font-size:12px;font-weight:500;color:var(--muted);user-select:none}
+.tab:hover{color:var(--text)}
+.tab.active{background:rgba(255,255,255,.08);color:var(--text)}
+.tab .tabkey{font-family:var(--mono);font-size:9px;color:var(--faint)}
+.tab.active .tabkey{color:var(--muted)}
+.tabs .sp{flex:1}
+.tabs .gear{color:var(--faint);font-size:14px;padding:5px 8px;border-radius:6px}
+.tabs .gear:hover{color:var(--text);background:rgba(255,255,255,.06)}
+
+/* ── Searchbar + фильтр источника ── */
+.head{display:flex;align-items:center;gap:11px;padding:12px 16px;border-bottom:1px solid var(--hairline);flex:none}
+.head .si{color:var(--faint)}
+.head input{flex:1;background:transparent;border:0;outline:0;color:var(--text);font:400 15px/1 var(--font)}
+.head input::placeholder{color:var(--faint)}
+.seg{display:flex;gap:2px;background:rgba(255,255,255,.05);border:1px solid var(--hairline);border-radius:8px;padding:2px}
+.seg button{appearance:none;border:0;background:transparent;color:var(--muted);font:500 11.5px/1 var(--font);
+  padding:5px 10px;border-radius:6px;cursor:default;display:flex;align-items:center;gap:5px}
+.seg button.on{background:rgba(255,255,255,.09);color:var(--text)}
+.seg button .mi{font-size:12px}
+
+/* ── Stats strip ── */
+.stats{display:flex;align-items:center;gap:22px;padding:11px 18px;border-bottom:1px solid var(--hairline);flex:none}
+.stat{display:flex;flex-direction:column;gap:2px}
+.stat .n{font-family:var(--mono);font-size:16px;font-weight:600;color:var(--text);font-variant-numeric:tabular-nums;line-height:1}
+.stat .n.accent{color:var(--accent)}
+.stat .l{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em}
+.stats .sp{flex:1}
+.stats .live{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--muted)}
+.stats .live .pulse{width:7px;height:7px;border-radius:50%;background:var(--done);box-shadow:0 0 0 0 rgba(65,201,142,.5);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(65,201,142,.4)}50%{box-shadow:0 0 0 5px rgba(65,201,142,0)}}
+
+/* ── Content / groups ── */
+.content{flex:1;overflow-y:auto;min-height:0;padding:0 12px 12px}
+.content::-webkit-scrollbar{width:0}
+.daygroup{margin-top:6px}
+.daygroup:first-child{margin-top:0}
+.dayhead{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;padding:9px 8px 7px;
+  font:600 10.5px/1 var(--font);letter-spacing:.06em;text-transform:uppercase;color:var(--faint);
+  background:rgba(20,20,24,0.97)}
+.dayhead .cnt{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--faint);text-transform:none}
+
+/* ── Entry (Wispr-стиль: полный текст + источник + ховер-действия) ── */
+.entry{display:flex;gap:12px;padding:11px 10px 11px 12px;border-radius:10px;position:relative}
+.entry:hover{background:var(--row-hover)}
+.entry .src{width:26px;height:26px;border-radius:7px;flex:none;display:grid;place-items:center;font-size:13px;margin-top:1px}
+.entry .src.wake{background:var(--accent-soft);color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent-line)}
+.entry .src.dict{background:rgba(255,255,255,.05);color:var(--muted);box-shadow:inset 0 0 0 1px var(--hairline)}
+.entry .body{flex:1;min-width:0}
+.entry .text{font-size:13.5px;line-height:1.45;color:var(--text-body);word-wrap:break-word}
+.entry .meta{display:flex;align-items:center;gap:8px;margin-top:5px;font-size:11px;color:var(--faint)}
+.entry .meta .t{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.entry .meta .lbl{color:var(--muted)}
+.entry .meta .sep{opacity:.4}
+.entry .meta .words{font-family:var(--mono)}
+.entry .meta .copied{color:var(--done);display:inline-flex;align-items:center;gap:3px}
+
+/* действия — появляются на ховер */
+.acts{display:flex;align-items:center;gap:4px;flex:none;opacity:0;transition:opacity .12s;align-self:flex-start;margin-top:1px}
+.entry:hover .acts{opacity:1}
+.acts button{appearance:none;border:1px solid var(--hairline);background:rgba(255,255,255,.04);color:var(--keycap-text);
+  font:500 11px/1 var(--font);padding:5px 9px;border-radius:6px;cursor:default;display:flex;align-items:center;gap:5px;white-space:nowrap}
+.acts button:hover{background:rgba(255,255,255,.09);color:var(--text)}
+.acts button.primary{border-color:var(--accent-line);background:var(--accent-soft);color:var(--accent)}
+.acts button.icon{padding:5px 7px}
+.acts button.danger:hover{border-color:rgba(242,99,99,.4);color:#f26363}
+
+/* инлайн-результат преобразования — лёгкий, не тяжёлый синий блок */
+.enh{margin:9px 0 2px 0;border:1px solid var(--hairline);background:rgba(255,255,255,.025);border-radius:10px;overflow:hidden}
+.enh .eh{display:flex;align-items:center;gap:9px;padding:8px 10px 8px 11px;border-bottom:1px solid var(--hairline)}
+.enh .eh .chip{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;color:var(--accent);background:var(--accent-soft);border:1px solid var(--accent-line);border-radius:6px;padding:3px 8px}
+.enh .eh .sp{flex:1}
+.enh .eh button{appearance:none;border:1px solid var(--hairline);background:rgba(255,255,255,.04);color:var(--keycap-text);font:500 11px/1 var(--font);padding:5px 9px;border-radius:6px;cursor:default}
+.enh .eh button:hover{color:var(--text);background:rgba(255,255,255,.09)}
+.enh .eh button.acc{border-color:var(--accent-line);background:var(--accent-soft);color:var(--accent)}
+.enh .eh button.icon{padding:4px 9px;font-size:16px;line-height:.5;letter-spacing:1px}
+.enh .etext{padding:11px 12px;font-size:13px;line-height:1.5;color:var(--text)}
+
+/* меню преобразований (библиотека кастомных промптов) */
+.tmenu{position:absolute;right:10px;top:40px;z-index:5;width:288px;background:rgba(28,28,32,0.98);
+  border:1px solid var(--border);border-radius:11px;box-shadow:0 18px 50px rgba(0,0,0,.6);overflow:hidden;backdrop-filter:blur(30px) saturate(160%)}
+.tmenu .tmh{padding:10px 12px 7px;font:600 10px/1 var(--font);letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+.tmenu .ti{display:flex;align-items:center;gap:10px;padding:9px 12px;cursor:default}
+.tmenu .ti:hover{background:var(--row-hover)}
+.tmenu .ti .tic{width:23px;height:23px;border-radius:6px;display:grid;place-items:center;font-size:12px;background:rgba(255,255,255,.05);flex:none}
+.tmenu .ti .tn{font-size:13px;color:var(--text)}
+.tmenu .ti .th{font-family:var(--mono);font-size:10px;color:var(--faint);margin-left:auto}
+.tmenu .tdiv{height:1px;background:var(--hairline);margin:4px 0}
+.tmenu .ti.add .tic{color:var(--accent);background:var(--accent-soft)}
+.tmenu .ti.add .tn{color:var(--accent)}
+
+/* ── ActionBar ── */
+.actionbar{display:flex;align-items:center;gap:10px;padding:9px 14px;border-top:1px solid var(--hairline);background:rgba(0,0,0,.22);flex:none}
+.actionbar .brand{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--muted)}
+.actionbar .brand .mk{width:16px;height:16px;border-radius:5px;background:var(--accent);display:grid;place-items:center;color:#0a0a0c;font:700 9px/1 var(--font)}
+.actionbar .lock{font-size:10.5px;color:var(--faint);display:flex;align-items:center;gap:4px}
+.actionbar .sp{flex:1}
+.actionbar .act{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-body)}
+.actionbar .keycap{font-family:var(--mono);font-size:10.5px;color:var(--keycap-text);background:var(--keycap-bg);border:1px solid rgba(255,255,255,.07);border-radius:4px;padding:2px 6px}
+.actionbar .danger{color:#c97c7c}
+.actionbar .sep{width:1px;height:14px;background:var(--border)}
+</style>
+</head>
+<body>
+<div class="panel">
+  <!-- вкладки: Jisper — новая вкладка рядом с сессиями -->
+  <div class="tabs">
+    <div class="tab"><span>Сессии</span><span class="tabkey">⌘1</span></div>
+    <div class="tab"><span>Проекты</span><span class="tabkey">⌘2</span></div>
+    <div class="tab active"><span>Jisper</span><span class="tabkey">⌘3</span></div>
+    <div class="tab"><span>Статистика</span><span class="tabkey">⌘4</span></div>
+    <div class="sp"></div>
+    <div class="gear">⚙</div>
+  </div>
+
+  <!-- поиск (источник один — диктовка, фильтр не нужен) -->
+  <div class="head">
+    <span class="si">⌕</span>
+    <input placeholder="Поиск по надиктованному…" />
+    <span class="cmdhintpill" style="font-size:11px;color:var(--muted);display:inline-flex;gap:6px;align-items:center"><span class="keycap" style="font-family:var(--mono);font-size:10px;color:var(--keycap-text);background:var(--keycap-bg);border:1px solid rgba(255,255,255,.07);border-radius:4px;padding:2px 6px">F8</span>надиктовать</span>
+  </div>
+
+  <!-- статистика -->
+  <div class="stats">
+    <div class="stat"><span class="n accent">12</span><span class="l">сегодня</span></div>
+    <div class="stat"><span class="n">248</span><span class="l">всего</span></div>
+    <div class="stat"><span class="n">1 240</span><span class="l">слов</span></div>
+    <div class="sp"></div>
+    <div class="live"><span class="pulse"></span>⌨ диктовка F8 · история разговоров — отдельно</div>
+  </div>
+
+  <!-- лента, сгруппирована по дням -->
+  <div class="content">
+    <div class="daygroup">
+      <div class="dayhead">Сегодня<span class="cnt">12 реплик</span></div>
+
+      <div class="entry">
+        <div class="body">
+          <div class="text">Найди в интернете, как откатить последний коммит в git, но сохранить изменения в рабочей директории</div>
+          <div class="meta"><span class="t">16:42</span><span class="sep">·</span><span class="lbl">диктовка F8</span><span class="sep">·</span><span class="words">14 слов</span></div>
+        </div>
+        <div class="acts">
+          <button class="primary">Преобразовать ▾</button>
+          <button>Копировать</button>
+          <button class="icon danger">✕</button>
+        </div>
+        <div class="tmenu">
+          <div class="tmh">Преобразовать диктовку</div>
+          <div class="ti"><span class="tn">Промпт для агента</span><span class="th">⌘1</span></div>
+          <div class="ti"><span class="tn">Коммит-сообщение</span><span class="th">⌘2</span></div>
+          <div class="ti"><span class="tn">Чистовик · грамматика</span><span class="th">⌘3</span></div>
+          <div class="ti"><span class="tn">Перевод на English</span><span class="th">⌘4</span></div>
+          <div class="tdiv"></div>
+          <div class="ti add"><span class="tn">＋ Настроить промпты…</span></div>
+        </div>
+      </div>
+
+      <div class="entry">
+        <div class="body">
+          <div class="text">Добавь обработку ошибок в функцию загрузки весов модели — таймаут, ретраи и понятное сообщение если сеть недоступна</div>
+          <div class="meta"><span class="t">16:31</span><span class="sep">·</span><span class="lbl">диктовка F8</span><span class="sep">·</span><span class="copied">✓ в буфере</span></div>
+          <!-- инлайн результат → Промпт -->
+          <div class="enh">
+            <div class="eh"><span class="chip">Модифицированный текст</span><span class="sp"></span><button class="acc">Копировать</button><button class="icon" title="Заменить · Скрыть">⋯</button></div>
+            <div class="etext">Реализуй надёжную загрузку весов модели: добавь таймаут на сетевой запрос, экспоненциальные ретраи (до 3 попыток) и fail-closed обработку — при недоступности сети возвращай понятную ошибку «сеть недоступна, проверьте соединение» вместо паники.</div>
+          </div>
+        </div>
+        <div class="acts">
+          <button class="primary">Преобразовать ▾</button>
+          <button>Копировать</button>
+          <button class="icon danger">✕</button>
+        </div>
+      </div>
+
+      <div class="entry">
+        <div class="body">
+          <div class="text">Напиши коммит: рефакторинг слоя авторизации, вынес проверку токена в отдельный middleware, добавил тесты на истёкший и невалидный токен</div>
+          <div class="meta"><span class="t">15:08</span><span class="sep">·</span><span class="lbl">диктовка F8</span><span class="sep">·</span><span class="words">18 слов</span></div>
+        </div>
+        <div class="acts">
+          <button class="primary">Преобразовать ▾</button>
+          <button>Копировать</button>
+          <button class="icon danger">✕</button>
+        </div>
+      </div>
+
+      <div class="entry">
+        <div class="body">
+          <div class="text">Спасибо, это сработало</div>
+          <div class="meta"><span class="t">14:55</span><span class="sep">·</span><span class="lbl">диктовка F8</span><span class="sep">·</span><span class="words">3 слова</span></div>
+        </div>
+        <div class="acts">
+          <button class="primary">Преобразовать ▾</button>
+          <button>Копировать</button>
+          <button class="icon danger">✕</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="daygroup">
+      <div class="dayhead">Вчера<span class="cnt">31 реплика</span></div>
+      <div class="entry">
+        <div class="body">
+          <div class="text">Идея на завтра: вынести историю разговоров в отдельную вкладку, а Jisper оставить чисто под диктовку — у них разные действия и жизненный цикл</div>
+          <div class="meta"><span class="t">23:10</span><span class="sep">·</span><span class="lbl">диктовка F8</span><span class="sep">·</span><span class="words">23 слова</span></div>
+        </div>
+        <div class="acts">
+          <button class="primary">Преобразовать ▾</button>
+          <button>Копировать</button>
+          <button class="icon danger">✕</button>
+        </div>
+      </div>
+      <div class="entry">
+        <div class="body">
+          <div class="text">Заметка по ревью: проверить, что в обработке отмены нет гонки между крестиком и циклом разговора, добавить тест на abort во время STT</div>
+          <div class="meta"><span class="t">22:47</span><span class="sep">·</span><span class="lbl">диктовка F8</span><span class="sep">·</span><span class="words">22 слова</span></div>
+        </div>
+        <div class="acts">
+          <button class="primary">Преобразовать ▾</button>
+          <button>Копировать</button>
+          <button class="icon danger">✕</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- нижняя action-bar -->
+  <div class="actionbar">
+    <span class="brand"><span class="mk">J</span>Jisper</span>
+    <span class="lock">🔒 хранится локально</span>
+    <span class="sp"></span>
+    <span class="act">Копировать всё <span class="keycap">⌘⇧C</span></span>
+    <span class="sep"></span>
+    <span class="act danger">Очистить <span class="keycap">⌫</span></span>
+  </div>
+</div>
+</body>
+</html>

@@ -56,6 +56,7 @@
     modelsGet: () => invoke('models_get'),
     transcriptsGet: () => invoke('transcripts_get'),
     transcriptsClear: () => invoke('transcripts_clear'),
+    transcriptDelete: (id) => invoke('transcript_delete', { id }),
     transcriptEnhance: (text, style) => invoke('transcript_enhance', { text, style }),
     quietSet: (on) => invoke('quiet_set', { on }),
     onGotoSettings: (cb) => on('goto-settings', cb),

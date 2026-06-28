@@ -185,7 +185,7 @@ impl Daemon {
             wake,
             picks: std::sync::Arc::new(crate::route::pick::PendingPicks::new()),
             stage: std::sync::Arc::new(crate::route::stage::StageBuffer::new()),
-            transcripts: std::sync::Arc::new(crate::stt::transcripts::Transcripts::new()),
+            transcripts: std::sync::Arc::new(crate::stt::transcripts::Transcripts::load()),
             vconfirm: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
             convo_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }

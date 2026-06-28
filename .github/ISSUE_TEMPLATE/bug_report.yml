@@ -1,0 +1,50 @@
+name: "🐞 Баг / Bug report"
+description: "Сообщить о проблеме в работе Jarvis / Report a problem"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо за репорт! Заполни поля ниже — так баг будет проще воспроизвести и починить.
+        Перед отправкой загляни в [открытые issue](https://github.com/Sergey-Chernyshev/jarvis/issues) — вдруг такой уже есть.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Что происходит / What happens
+      description: Опиши проблему и что ты ожидал увидеть вместо этого.
+      placeholder: При нажатии F8 диктовка не запускается, в логе…
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Шаги воспроизведения / Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: Версия macOS / macOS version
+      placeholder: "14.5 (Apple Silicon)"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Версия Jarvis / Jarvis version
+      description: Из релиза или git-хеш сборки.
+      placeholder: "v0.x.x / commit 83283e2"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Логи / Logs
+      description: "Релевантные строки лога или вывод консоли (секреты убери)."
+      render: shell
+    validations:
+      required: false

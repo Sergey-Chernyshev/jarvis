@@ -1,0 +1,36 @@
+name: "✨ Предложение / Feature request"
+description: "Идея или улучшение / Suggest an idea or improvement"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо за идею! Для крупных изменений лучше сначала обсудить подход здесь, прежде чем писать код.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую проблему решает / Problem it solves
+      description: Что мешает сейчас? Какой сценарий не закрыт?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Предлагаемое решение / Proposed solution
+      description: Как ты это видишь?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Альтернативы / Alternatives considered
+    validations:
+      required: false
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Соответствие проекту / Fits the project
+      description: "Напоминание: Jarvis — монитор и пульт сессий Claude Code, не оркестратор."
+      options:
+        - label: Идея вписывается в границы проекта (монитор/пульт, не оркестрация агентов)
+          required: false

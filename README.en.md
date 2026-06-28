@@ -223,7 +223,9 @@ Pre-1.0 (**SemVer 0.x**): the hook contract and the on-disk formats (`~/.jarvis/
 
 ## Contributing
 
-Issues and PRs are welcome. Specs and per-increment plans live in [`docs/superpowers/`](docs/superpowers/).
+Issues and PRs are welcome! See [CONTRIBUTING.en.md](CONTRIBUTING.en.md) for how to build, test, and open a PR. By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). Report vulnerabilities privately via [SECURITY.md](SECURITY.md). Specs and per-increment plans live in [`docs/superpowers/`](docs/superpowers/).
+
+Direct pushes to `master` are disabled — changes land only via Pull Request with green CI.
 
 ## License
 

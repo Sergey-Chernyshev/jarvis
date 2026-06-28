@@ -41,5 +41,10 @@
     voiceConfirm: (nonce, approved) => invoke('voice_confirm_resolve', { nonce, approved }),
     // крестик в HUD = «стоп всё»: оборвать озвучку и завершить разговор
     voiceAbort: () => invoke('voice_abort'),
+    // клик по карточке «Услышал» → открыть панель на вкладке «История голоса»
+    openVoiceHistory: () => invoke('voice_history_open'),
+    // копировать текст в буфер (надёжный путь через плагин Tauri — навигаторный
+    // clipboard в неактивном окне тостов WKWebView капризен)
+    copy: (text) => invoke('plugin:clipboard-manager|write_text', { text: String(text) }),
   };
 })();

@@ -260,7 +260,9 @@ window.toast.onUpdate((d) => {
 /* ===================== голосовая маршрутизация (HUD) ===================== */
 
 // Терминальные фазы исчезают по TTL; промежуточные/интерактивные — «липкие».
-const VOICE_TERMINAL = new Set(['sent', 'cancelled', 'empty', 'nosessions', 'error', 'reply']);
+// 'heard' (итог диктовки) — терминальная: уходит сама по TTL (как остальные
+// уведомления), а не висит вечно до крестика. Под курсором пауза — успеть прочесть/кликнуть.
+const VOICE_TERMINAL = new Set(['sent', 'cancelled', 'empty', 'nosessions', 'error', 'reply', 'heard']);
 // Фазы, где разговор УЖЕ завершён — × просто закрывает карточку, без abort и без
 // «Отмена». ВАЖНО: 'reply' тут НЕТ — пока Джарвис ОЗВУЧИВАЕТ ответ, крестик должен
 // оборвать речь и завершить разговор (RC1), а не молча спрятать карточку.
@@ -311,7 +313,8 @@ function renderVoiceHud(p) {
   if (p.phase === 'dismiss') { removeCard(p.id, true); return; }
   const id = p.id;
   const terminal = VOICE_TERMINAL.has(p.phase);
-  const ttl = 4200;
+  // «Услышал» — даём дольше прочитать/скопировать/кликнуть в историю.
+  const ttl = p.phase === 'heard' ? 7000 : 4200;
 
   const existing = cards.get(id);
   const firstTime = !existing;
@@ -325,6 +328,10 @@ function renderVoiceHud(p) {
     card.className = 'card voice';
   }
   card.style.setProperty('--ttl', `${ttl}ms`);
+  // узел переиспользуется между фазами — сбрасываем клик/курсор/подсказку прошлой фазы
+  card.onclick = null;
+  card.style.cursor = '';
+  card.title = '';
 
   const crow = document.createElement('div');
   crow.className = 'crow';
@@ -402,6 +409,24 @@ function renderVoiceHud(p) {
       window.toast.voiceConfirm(p.nonce, false);
     });
     card.append(yes, no);
+  } else if (p.phase === 'heard') {
+    // Надиктовка завершена. Кнопка ручного копирования — на случай, если
+    // автоматическая вставка/копия не сработала (полный текст из p.full).
+    const copy = document.createElement('button');
+    copy.className = 'cont';
+    copy.textContent = 'Копировать';
+    copy.addEventListener('click', (e) => {
+      e.stopPropagation();
+      try { window.toast.copy(p.full || p.body || ''); } catch {}
+      copy.textContent = 'Скопировано';
+      setTimeout(() => { copy.textContent = 'Копировать'; }, 1200);
+    });
+    card.appendChild(copy);
+    // Клик по карточке → открыть «Историю голоса» (× и кнопка копирования
+    // гасят всплытие, так что не конфликтуют).
+    card.style.cursor = 'pointer';
+    card.title = 'Открыть историю голоса';
+    card.onclick = () => { try { window.toast.openVoiceHistory(); } catch {} };
   }
 
   if (firstTime) {

@@ -28,6 +28,7 @@ libc = "0.2"
 # голос (инкремент 7): проигрывание WAV на системный output
 rodio = "0.19"
 hound = "3"
+flate2 = "1" # gzip для сжатого хранения аудио диктовок (перегенерация распознавания)
 # клиент к Silero-сайдкару (localhost HTTP), blocking — зовём из voice-воркера
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 core-foundation = "0.10"
@@ -60,12 +61,21 @@ path = "src/bin/jarvis-mcp.rs"
 # Требует: cmake ≥ 3.x (brew install cmake) + Xcode CLT.
 # Без этих инструментов — cargo build --features whisper-native не запустится.
 [features]
+# whisper-native — В ДЕФОЛТЕ: иначе обычный `cargo build` собирает Whisper как стаб
+# («whisper-native feature не включён»), и движок whisper-turbo молча ломается при
+# ad-hoc сборках. cmake требуется всегда (есть локально + шаг в release.yml).
+# Отключить можно явно: `cargo build --no-default-features`.
+default = ["whisper-native"]
 whisper-native = ["dep:whisper-rs"]
 # wake-word через openWakeWord/ort (инкр. 10). ВЫКЛ по умолчанию: дефолтная сборка
 # НЕ тянет onnxruntime и компилируется офлайн. Для работы нужны 3 ONNX-модели
 # (ставит установщик) и нативный onnxruntime (download-binaries при сети либо
 # bundled signed dylib + ORT_DYLIB_PATH для hardened runtime).
 wakeword-ort = ["dep:ort"]
+# STT-VAD: Silero-VAD (через voice_activity_detector) гейтит не-речь ДО Whisper/Qwen,
+# чтобы фон/музыка/тишина не превращались в «слова». Тянет тот же ort (=2.0.0-rc.10),
+# что и wakeword — одна onnxruntime на бинарь. ВКЛ в сборке (package.json/release.yml).
+stt-vad = ["dep:voice_activity_detector"]
 
 [dependencies.whisper-rs]
 version = "0.16"
@@ -73,9 +83,14 @@ features = ["metal"]
 optional = true
 
 # ort запинен =2.0.0-rc.10: links=onnxruntime ⇒ одна версия ort на бинарь
-# (совместимость с будущим voice_activity_detector). Только под фичей wakeword-ort.
+# (совместимость с voice_activity_detector). Под фичами wakeword-ort / stt-vad.
 [dependencies.ort]
 version = "=2.0.0-rc.10"
+optional = true
+
+# Silero-VAD: бандлит ONNX-модель внутри крейта, использует тот же ort=2.0.0-rc.10.
+[dependencies.voice_activity_detector]
+version = "=0.2.1"
 optional = true
 
 [profile.release]

@@ -117,21 +117,27 @@ unsafe fn work_area_under_cursor() -> Option<CGRect> {
 pub fn place_panel(win: &WebviewWindow, w: f64, h: f64, corner: bool) {
     on_main(win, move |window| unsafe {
         let Some(vf) = work_area_under_cursor() else { return };
+        // Адаптивный размер: на большом экране панель крупнее (сохраняя пропорции).
+        // База w×h — для ноутбука; масштаб по высоте рабочей области, кламп 1.0..1.7,
+        // плюс не вылезать за ~90% экрана. На MacBook фактор ≈1.0 (820×620).
+        let factor = (vf.size.height / 900.0).clamp(1.0, 1.7);
+        let pw = (w * factor).min(vf.size.width * 0.90).round();
+        let ph = (h * factor).min(vf.size.height * 0.92).round();
         let (x, y_bottom) = if corner {
             (
-                vf.origin.x + vf.size.width - w - 12.0,
-                vf.origin.y + vf.size.height - 12.0 - h,
+                vf.origin.x + vf.size.width - pw - 12.0,
+                vf.origin.y + vf.size.height - 12.0 - ph,
             )
         } else {
             (
-                vf.origin.x + ((vf.size.width - w) / 2.0).round(),
-                // отступ сверху (vf.h − h)/3 → в AppKit-координатах снизу:
-                vf.origin.y + vf.size.height - ((vf.size.height - h) / 3.0).round() - h,
+                vf.origin.x + ((vf.size.width - pw) / 2.0).round(),
+                // отступ сверху (vf.h − ph)/3 → в AppKit-координатах снизу:
+                vf.origin.y + vf.size.height - ((vf.size.height - ph) / 3.0).round() - ph,
             )
         };
         let frame = CGRect {
             origin: CGPoint { x, y: y_bottom },
-            size: CGSize { width: w, height: h },
+            size: CGSize { width: pw, height: ph },
         };
         let _: () = msg_send![window, setFrame: frame, display: false];
     });

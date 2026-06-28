@@ -3,7 +3,9 @@
 //! движка — не паника, а Err-результат.
 
 pub mod audio;
+pub mod audio_store; // сжатое хранение аудио диктовок → перегенерация при ошибке анализа
 pub mod config;
+pub mod dehallucinate; // anti-hallucination фильтр (блоклист фраз тишины/шума)
 pub mod dictation;
 pub mod engine;
 pub mod engine_qwen3;
@@ -13,7 +15,9 @@ pub mod insert;
 pub mod mic_permission; // инкр.10: безопасная проверка разрешения микрофона (TCC)
 pub mod sidecar;
 pub mod transcripts; // история «что я говорил» (диктовка/wake) + копирование
+pub mod vad_silero; // Silero-VAD гейт перед STT (feature stt-vad): не пускать не-речь
 pub mod enhance; // преобразование надиктованного через LLM (в промпт / почистить)
+pub mod prompts; // умные промпты: классификация + авто-преобразование надиктовки
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

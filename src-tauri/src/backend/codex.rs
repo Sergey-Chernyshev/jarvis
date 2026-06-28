@@ -46,6 +46,45 @@ pub fn resolve_codex_bin() -> Option<PathBuf> {
     None
 }
 
+/// Найти rollout-файл codex по `session_id` (хвост имени файла = uuid сессии):
+/// `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<sid>.jsonl`. Safety-net на случай,
+/// когда hook-payload codex НЕ принёс `transcript_path` (хуки пропущены по hook-trust):
+/// демон всё равно находит транскрипт по sid и достаёт модель + переписку. Возвращает
+/// самый свежий матч; обход ограничен глубиной (YYYY/MM/DD — 3-4 уровня).
+pub fn find_rollout_by_sid(sid: &str) -> Option<PathBuf> {
+    find_rollout_in(&crate::util::codex_dir().join("sessions"), sid)
+}
+
+/// Чистое ядро поиска (тестируется на temp-каталоге без env): рекурсивный обход
+/// `root` в поисках файла с хвостом `-<sid>.jsonl`, самый свежий по mtime.
+fn find_rollout_in(root: &Path, sid: &str) -> Option<PathBuf> {
+    if sid.is_empty() {
+        return None;
+    }
+    let needle = format!("-{sid}.jsonl");
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    fn walk(dir: &Path, needle: &str, best: &mut Option<(std::time::SystemTime, PathBuf)>, depth: u8) {
+        if depth > 4 {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, needle, best, depth + 1);
+            } else if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(needle)) {
+                if let Ok(mt) = e.metadata().and_then(|m| m.modified()) {
+                    if best.as_ref().is_none_or(|(bt, _)| mt > *bt) {
+                        *best = Some((mt, p));
+                    }
+                }
+            }
+        }
+    }
+    walk(root, &needle, &mut best, 0);
+    best.map(|(_, p)| p)
+}
+
 impl Backend for CodexBackend {
     fn agent(&self) -> Agent {
         Agent::Codex
@@ -114,5 +153,23 @@ mod tests {
         assert_eq!(CODEX.friendly_model("gpt-5.5"), "GPT-5");
         assert_eq!(CODEX.resume_cmd("xyz"), "codex resume xyz");
         assert!(!CODEX.has_separate_effort());
+    }
+
+    #[test]
+    fn find_rollout_locates_by_sid_recursively() {
+        // ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<sid>.jsonl — обход вглубь.
+        let root = std::env::temp_dir().join("jarvis-find-rollout-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let day = root.join("2026/06/29");
+        std::fs::create_dir_all(&day).unwrap();
+        let want = day.join("rollout-200-AAA-BBB.jsonl");
+        std::fs::write(&want, b"{}\n").unwrap();
+        std::fs::write(day.join("rollout-100-CCC-DDD.jsonl"), b"{}\n").unwrap();
+
+        assert_eq!(find_rollout_in(&root, "AAA-BBB").as_deref(), Some(want.as_path()));
+        assert_eq!(find_rollout_in(&root, "ZZZ"), None, "нет матча → None");
+        assert_eq!(find_rollout_in(&root, ""), None, "пустой sid → None");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

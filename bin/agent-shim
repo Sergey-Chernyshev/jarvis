@@ -75,7 +75,15 @@ command -v tmux >/dev/null 2>&1 || wrap=0  # tmux не установлен — 
 if [ "$wrap" = 0 ]; then
   # Сквозной exec наследует окружение шима (= твоего терминала) как есть.
   JARVIS_SHIM=1 export JARVIS_SHIM
-  exec "$REAL" "$@"
+  # Codex: даже БЕЗ tmux-обёртки (запуск ВНУТРИ tmux / JARVIS_TMUX=off / без tty) —
+  # снимаем требование trust хуков. Иначе SessionStart/UserPromptSubmit codex молча
+  # пропускаются (trusted_hash в config.toml не покрывает свежие события), демон не
+  # видит сессию как codex → модель показывается как «Opus», нет текста/промта.
+  # Флаг глобальный (идёт перед сабкомандой), запекается установщиком; не-codex — пусто.
+  PASS_EXTRA=''
+  [ "$BIN_NAME" = codex ] && PASS_EXTRA="$CODEX_BYPASS"
+  # shellcheck disable=SC2086  # $PASS_EXTRA: пустой или один флаг
+  exec "$REAL" $PASS_EXTRA "$@"
 fi
 
 # --- обёртка в tmux ---

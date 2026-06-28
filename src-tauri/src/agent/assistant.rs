@@ -111,6 +111,46 @@ pub fn extract_answer(events: &[AgentEvent]) -> Option<String> {
     (!t.is_empty()).then(|| t.to_string())
 }
 
+/// Разбить накопленный буфер на ЗАВЕРШЁННЫЕ предложения + остаток. Предложение
+/// завершено, если после `.!?…` (и закрывающих кавычек/скобок) идёт пробел или
+/// перевод строки — значит знак не «в середине числа/сокращения», за ним точно
+/// есть продолжение. Хвост без финальной пунктуации возвращается как остаток
+/// (озвучивается в конце потока). Чистая — для стриминга речи по предложениям.
+pub fn drain_sentences(buf: &str) -> (Vec<String>, String) {
+    let chars: Vec<char> = buf.chars().collect();
+    let is_end = |c: char| matches!(c, '.' | '!' | '?' | '…');
+    let is_close = |c: char| matches!(c, '"' | '»' | ')' | '\'' | '”');
+    let mut sentences = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < chars.len() {
+        if is_end(chars[i]) {
+            let mut j = i + 1;
+            while j < chars.len() && (is_end(chars[j]) || is_close(chars[j])) {
+                j += 1;
+            }
+            // завершено только если дальше пробел/конец-строки (а не конец буфера)
+            if j < chars.len() && chars[j].is_whitespace() {
+                let s: String = chars[start..j].iter().collect();
+                let s = s.trim().to_string();
+                if !s.is_empty() {
+                    sentences.push(s);
+                }
+                let mut k = j;
+                while k < chars.len() && chars[k].is_whitespace() {
+                    k += 1;
+                }
+                start = k;
+                i = k;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    let rest: String = chars[start..].iter().collect();
+    (sentences, rest)
+}
+
 /// Внешний ассистент. Запускает `claude`, ждёт финальный текст для озвучки.
 pub struct AssistantHost;
 
@@ -141,6 +181,7 @@ impl AssistantHost {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        crate::claude_bin::apply_claude_auth(&mut cmd); // подключённый аккаунт Claude
 
         // Гонка: вывод процесса vs таймаут vs опрос abort (× в HUD). При abort/
         // таймауте дропаем future → kill_on_drop убивает claude (мгновенный стоп).
@@ -179,6 +220,130 @@ impl AssistantHost {
             }
         ));
         ans
+    }
+
+    /// Стриминговый вариант: озвучивает ответ ПО ПРЕДЛОЖЕНИЯМ по мере генерации —
+    /// речь стартует через секунды (первое предложение), а не после всего ответа
+    /// (+веб-поиск, до 90с). `on_sentence` зовётся на каждое готовое предложение
+    /// (обычно — speak_blocking). По итогу эквивалентен `run`: возвращает полный
+    /// ответ (для памяти) или None (нет claude / таймаут / abort / пусто).
+    pub async fn run_streamed<F: FnMut(&str)>(
+        query: &str,
+        timeout: Duration,
+        abort: &AtomicBool,
+        mut on_sentence: F,
+    ) -> Option<String> {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        if abort.load(Ordering::SeqCst) {
+            return None;
+        }
+        let bin = crate::claude_bin::resolve_claude_bin()?;
+        let cwd = ensure_assistant_cwd();
+        let args = build_assistant_args(query, ASSISTANT_MODEL);
+        crate::log::line(&format!(
+            "[assistant] → (stream) {}",
+            crate::util::ellipsize(&crate::util::one_line(query), 200)
+        ));
+
+        let mut cmd = tokio::process::Command::new(bin);
+        cmd.args(&args)
+            .current_dir(&cwd)
+            .env("JARVIS_IGNORE", "1")
+            .env("DISABLE_NON_ESSENTIAL_MODEL_CALLS", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        crate::claude_bin::apply_claude_auth(&mut cmd); // подключённый аккаунт Claude
+        let mut child = cmd.spawn().ok()?;
+        let stdout = child.stdout.take()?;
+        let mut lines = BufReader::new(stdout).lines();
+
+        let mut buf = String::new(); // несказанный хвост дельт
+        let mut joined = String::new(); // все дельты (фолбэк-ответ)
+        let mut done_result: Option<String> = None;
+        let mut spoke = false;
+        let start = tokio::time::Instant::now();
+
+        loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    match line {
+                        Ok(Some(l)) => {
+                            for ev in parse_stream_line(&l) {
+                                match ev {
+                                    AgentEvent::Delta { text } => {
+                                        joined.push_str(&text);
+                                        buf.push_str(&text);
+                                        let (sents, rest) = drain_sentences(&buf);
+                                        buf = rest;
+                                        for s in sents {
+                                            if abort.load(Ordering::SeqCst) {
+                                                let _ = child.start_kill();
+                                                return None;
+                                            }
+                                            on_sentence(&s);
+                                            spoke = true;
+                                        }
+                                    }
+                                    AgentEvent::Done { result, .. } => {
+                                        if !result.trim().is_empty() {
+                                            done_result = Some(result.trim().to_string());
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Ok(None) => break, // EOF — процесс закончил вывод
+                        Err(_) => break,
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                    if abort.load(Ordering::SeqCst) {
+                        let _ = child.start_kill();
+                        crate::log::line("[assistant] ← <abort: × в HUD>");
+                        return None;
+                    }
+                    if start.elapsed() >= timeout {
+                        let _ = child.start_kill();
+                        crate::log::line("[assistant] ← <таймаут>");
+                        return None;
+                    }
+                }
+            }
+        }
+        let _ = child.wait().await; // пожать процесс
+
+        // хвост без финальной пунктуации — договорить
+        let tail = buf.trim().to_string();
+        if !tail.is_empty() && !abort.load(Ordering::SeqCst) {
+            on_sentence(&tail);
+            spoke = true;
+        }
+
+        let final_answer = done_result.or_else(|| {
+            let t = joined.trim();
+            (!t.is_empty()).then(|| t.to_string())
+        });
+
+        // дельт не было (ответ пришёл только финальным result) — озвучить целиком.
+        if !spoke {
+            if let Some(ans) = &final_answer {
+                if !abort.load(Ordering::SeqCst) {
+                    on_sentence(ans);
+                }
+            }
+        }
+
+        crate::log::line(&format!(
+            "[assistant] ← (stream) {}",
+            match &final_answer {
+                Some(s) => crate::util::ellipsize(&crate::util::one_line(s), 200),
+                None => "<пусто>".into(),
+            }
+        ));
+        final_answer
     }
 }
 
@@ -234,6 +399,35 @@ mod tests {
     fn extract_empty_is_none() {
         assert!(extract_answer(&[]).is_none());
         assert!(extract_answer(&[done(""), delta("   ")]).is_none());
+    }
+
+    #[test]
+    fn drain_yields_complete_sentences_keeps_tail() {
+        let (s, rest) = drain_sentences("Привет. Как дела? Сейчас отвечу");
+        assert_eq!(s, vec!["Привет.".to_string(), "Как дела?".to_string()]);
+        assert_eq!(rest, "Сейчас отвечу", "хвост без пунктуации — остаток");
+    }
+
+    #[test]
+    fn drain_no_complete_sentence_all_remainder() {
+        // точка в конце буфера без пробела — ещё не завершено (может быть «3.14»)
+        let (s, rest) = drain_sentences("Это 3.");
+        assert!(s.is_empty(), "нет завершённого предложения: {s:?}");
+        assert_eq!(rest, "Это 3.");
+    }
+
+    #[test]
+    fn drain_handles_closing_quote_and_ellipsis() {
+        let (s, rest) = drain_sentences("Он сказал «да». Ну… ладно потом");
+        assert_eq!(s, vec!["Он сказал «да».".to_string(), "Ну…".to_string()]);
+        assert_eq!(rest, "ладно потом");
+    }
+
+    #[test]
+    fn drain_empty_is_empty() {
+        let (s, rest) = drain_sentences("");
+        assert!(s.is_empty());
+        assert_eq!(rest, "");
     }
 
     #[test]

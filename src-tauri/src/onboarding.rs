@@ -167,6 +167,35 @@ pub fn stt_install_sidecar(app: AppHandle) {
     });
 }
 
+/// Установить Codex-SDK сайдкар (venv + `openai-codex`) — служебный LLM «под
+/// капотом» на Codex. Фоном, fail-safe; прогресс → `codex_install_progress`,
+/// финал → `codex_install_done`.
+#[tauri::command]
+pub fn codex_install_sidecar(app: AppHandle) {
+    let d = crate::daemon::Daemon::get(&app);
+    let proxy = {
+        let s = d.settings.string("proxy");
+        (!s.is_empty()).then_some(s)
+    };
+    std::thread::spawn(move || {
+        let r = install::install_codex_sdk_sidecar(
+            &|step: Step| {
+                let _ = app.emit_to("main", "codex_install_progress", step);
+            },
+            proxy.as_deref(),
+        );
+        let _ = app.emit_to(
+            "main",
+            "codex_install_done",
+            serde_json::json!({
+                "ok": r.is_ok(),
+                "error": r.err(),
+                "ready": install::status().codex_sdk_sidecar,
+            }),
+        );
+    });
+}
+
 /// Скачать 3 ONNX-модели wake-word (инкр. 10) с прогрессом в панель. Фоном,
 /// fail-safe; по завершении — событие `wake_install_done` со статусом.
 #[tauri::command]

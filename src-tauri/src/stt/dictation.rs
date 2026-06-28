@@ -64,6 +64,11 @@ impl Dictation {
         self.service.warm();
         // видимая фаза «Слушаю…» в тосте (PTT — без кольца отсчёта, secs=0)
         if let Some(d) = self.daemon() {
+            // взаимодействие началось: пока диктуем — уведомления откладываются, wake
+            // подавлён (не сработает на собственную речь). Парный leave — в on_release.
+            d.interaction.enter();
+            // пауза чужого медиа (музыки) на время диктовки — как при озвучке.
+            d.duck_media_for_capture();
             crate::route::hud::emit(&d, crate::route::hud::Phase::Listening { secs: 0 });
         }
         crate::log::line("[dictation] запись начата");
@@ -91,6 +96,20 @@ impl Dictation {
         let service = self.service.clone();
         let daemon = self.daemon();
         std::thread::spawn(move || {
+            // Взаимодействие завершится при выходе из потока (ЛЮБОЙ путь, включая
+            // ранние return) — RAII-гард снимает счётчик и сливает отложенные
+            // уведомления ровно один раз. Парный enter был в on_press.
+            struct LeaveGuard(Option<std::sync::Arc<crate::daemon::Daemon>>);
+            impl Drop for LeaveGuard {
+                fn drop(&mut self) {
+                    if let Some(d) = &self.0 {
+                        // возобновить медиа, поставленное на паузу на старте диктовки
+                        d.unduck_media_for_capture();
+                        d.interaction_leave_and_flush();
+                    }
+                }
+            }
+            let _leave = LeaveGuard(daemon.clone());
             // видимая фаза «Анализирую…» — пока идёт finish + транскрипция
             if let Some(d) = &daemon {
                 crate::route::hud::emit(d, crate::route::hud::Phase::Analyzing);
@@ -114,6 +133,16 @@ impl Dictation {
                 return;
             }
 
+            // ── VAD-гейт (Tier 3): не пускать не-речь в STT ───────────────────
+            // Фон/музыка/тишина → STT пропускаем, чтобы не «придумать» слова.
+            if !crate::stt::vad_silero::has_speech(&pcm) {
+                crate::log::line("[dictation] VAD: речи нет — пропуск (фон/шум/тишина)");
+                if let Some(d) = &daemon {
+                    crate::route::hud::emit(d, crate::route::hud::Phase::Empty);
+                }
+                return;
+            }
+
             // ── transcribe() → text ──────────────────────────────────────────
             let opts = service.options();
             let text = match service.transcribe(&pcm, &opts) {
@@ -126,7 +155,10 @@ impl Dictation {
                     return;
                 }
             };
-            let text = text.trim().to_string();
+            // Anti-hallucination (Tier 2): убрать известные фразы-галлюцинации из
+            // финального текста — общая сетка для whisper и qwen (qwen не отдаёт
+            // посегментный no_speech_prob, поэтому чистим здесь).
+            let text = crate::stt::dehallucinate::scrub(text.trim());
             if text.is_empty() {
                 crate::log::line("[dictation] пустой результат транскрипции, пропуск");
                 if let Some(d) = &daemon {
@@ -138,21 +170,47 @@ impl Dictation {
                 "[dictation] транскрипция: «{}»",
                 crate::util::ellipsize(&text, 80)
             ));
-            // история «что я говорил» + видимая фаза «Услышал …»
+            // ── умные промпты: если включён «умный режим» — один Haiku-проход САМ
+            // классифицирует и преобразует надиктованное (коммит/промпт/чистовик).
+            // Fail-safe: на сбой/таймаут остаётся исходный текст без применения.
+            let (text, applied) = match &daemon {
+                Some(d) if d.prompts.smart() => {
+                    let p = crate::stt::prompts::smart_transform_prompt(&text);
+                    match tauri::async_runtime::block_on(crate::claude_bin::run_service_llm(
+                        &p,
+                        std::time::Duration::from_secs(12),
+                    )) {
+                        Some(raw) => {
+                            let r = crate::stt::prompts::parse_smart_result(&raw, &text);
+                            if let Some(a) = &r.applied {
+                                crate::log::line(&format!("[dictation] умный промпт применён: {a}"));
+                            }
+                            (r.text, r.applied)
+                        }
+                        None => (text, None),
+                    }
+                }
+                _ => (text, None),
+            };
+
+            // история «что я говорил» (с пометкой стиля) + видимая фаза «Услышал …»
             if let Some(d) = &daemon {
-                d.transcripts.push(&text, "dictation");
-                crate::route::hud::emit(d, crate::route::hud::Phase::Heard {
-                    text: crate::util::ellipsize(&text, 80),
-                });
+                let id = d.transcripts.push_styled(&text, "dictation", applied.as_deref(), true);
+                // сохранить СЖАТОЕ аудио диктовки → можно перегенерировать
+                // распознавание, если анализ дал ошибку/мусор. Best-effort.
+                if id != 0 {
+                    if let Err(e) = crate::stt::audio_store::save(id, &pcm) {
+                        crate::log::line(&format!("[dictation] сохранение аудио: {e}"));
+                    }
+                }
+                crate::route::hud::emit(d, crate::route::hud::Phase::Heard { text: text.clone() });
             }
 
             // ── insert_text() → ⌘V ──────────────────────────────────────────
             if let Err(e) = super::insert::insert_text(&text) {
                 crate::log::line(&format!("[dictation] insert_text: {e}"));
             }
-            // Авто-копия надиктованного в буфер обмена (остаётся там, поверх
-            // restore из insert_text) — чтобы результат можно было вставить ещё
-            // раз вручную (по просьбе пользователя).
+            // Авто-копия в буфер (остаётся поверх restore) — вставить ещё раз вручную.
             if let Err(e) = super::insert::copy_to_clipboard(&text) {
                 crate::log::line(&format!("[dictation] copy_to_clipboard: {e}"));
             }

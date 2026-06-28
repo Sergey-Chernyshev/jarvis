@@ -55,7 +55,14 @@ pub fn hud_payload(p: Phase) -> Value {
             v
         }
         Phase::Analyzing => base("analyzing", "Анализирую…", ""),
-        Phase::Heard { text } => base("heard", "Услышал", &text),
+        Phase::Heard { text } => {
+            // body — текст для карточки; визуальное усечение (до 6 строк + «…») делает
+            // CSS-клэмп тоста, поэтому шлём щедро (не режем на 100 символов посреди
+            // слова без многоточия). full — полный текст для кнопки «Копировать».
+            let mut v = base("heard", "Услышал", &crate::util::ellipsize(&text, 400));
+            v["full"] = json!(text);
+            v
+        }
         Phase::Thinking { text } => base("thinking", "Думаю…", &text),
         Phase::Reply { text } => base("reply", "Jarvis", &text),
         Phase::Staged { nonce, label, text, secs } => {

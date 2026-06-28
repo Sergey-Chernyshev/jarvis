@@ -24,6 +24,9 @@ const TMUX_CONF_SRC: &str = include_str!("../../../bin/jarvis-tmux.conf");
 const SILERO_SERVER_SRC: &str = include_str!("../../../bin/silero-server.py");
 /// STT-сайдкар (Qwen3-ASR MLX): Python-сервер для диктовки (инкр. 9, Phase 8).
 const STT_SERVER_SRC: &str = include_str!("../../../bin/stt-server.py");
+/// Codex-SDK сайдкар: одношаговый служебный LLM через `openai-codex` (саммари/
+/// заголовки «под капотом»). Запускается из своего venv по запросу из настроек.
+const CODEX_SUMMARY_SRC: &str = include_str!("../../../bin/codex-summary.py");
 // MediaRemote-адаптер (BSD-3, ungive/mediaremote-adapter): пауза ЛЮБОГО медиа на
 // время озвучки. Системный perl энтайтлен на MediaRemote — он dlopen-ит фреймворк.
 const MRA_PL_SRC: &str = include_str!("../../../bin/mediaremote-adapter/mediaremote-adapter.pl");
@@ -79,16 +82,24 @@ pub struct Step {
     pub phase: String,
     pub state: StepState,
     pub msg: String,
+    /// Процент загрузки 0..=100 для прогрессбара в UI (settings2.js читает `step.pct`).
+    /// `None` у не-прогрессовых шагов → поле не сериализуется, полоса не рисуется.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pct: Option<u8>,
 }
 
 impl Step {
     fn new(phase: &str, state: StepState, msg: impl Into<String>) -> Step {
-        Step { phase: phase.into(), state, msg: msg.into() }
+        Step { phase: phase.into(), state, msg: msg.into(), pct: None }
     }
     fn start(phase: &str) -> Step { Step::new(phase, StepState::Start, "") }
     fn done(phase: &str, msg: impl Into<String>) -> Step { Step::new(phase, StepState::Done, msg) }
     fn warn(phase: &str, msg: impl Into<String>) -> Step { Step::new(phase, StepState::Warn, msg) }
     fn info(phase: &str, msg: impl Into<String>) -> Step { Step::new(phase, StepState::Info, msg) }
+    /// Шаг загрузки с процентом — UI рисует полосу прогресса по полю `pct`.
+    fn progress(phase: &str, msg: impl Into<String>, pct: u8) -> Step {
+        Step { phase: phase.into(), state: StepState::Info, msg: msg.into(), pct: Some(pct) }
+    }
 }
 
 /// Колбэк прогресса. CLI печатает шаги, приложение шлёт их событием в окно.
@@ -104,8 +115,14 @@ pub struct Status {
     pub silero: bool,
     /// Модель Whisper large-v3-turbo-q5_0.bin присутствует на диске.
     pub whisper_model: bool,
+    /// Whisper вкомпилирован нативно (feature `whisper-native`). Без неё whisper-turbo
+    /// — лишь стаб и падает при распознавании; источник правды для гейта/настроек.
+    pub whisper_native_built: bool,
     /// Qwen3-ASR MLX-сайдкар (venv + stt-server.py) установлен.
     pub qwen3_sidecar: bool,
+    /// Codex-SDK сайдкар (venv с openai-codex + codex-summary.py) установлен —
+    /// служебный LLM «под капотом» на Codex.
+    pub codex_sdk_sidecar: bool,
     /// Имя активного STT-движка из ~/.jarvis/settings.json (stt.engine).
     pub stt_engine_active: String,
     /// 3 ONNX-модели wake-word (инкр. 10) на месте (~3.5 МБ).
@@ -131,6 +148,47 @@ fn jarvis_dir() -> PathBuf {
         Ok(d) if !d.is_empty() => PathBuf::from(d),
         _ => home().join(".jarvis"),
     }
+}
+
+/// Чистый старт демона (зовётся ПЕРВЫМ в main::setup, ДО Daemon::new). Прибивает
+/// прежние демоны и осиротевшие сайдкары, чтобы повторный запуск — в т.ч.
+/// параллельным агентом — не плодил зомби-демонов и не уходил в цикл «порт занят».
+/// В dev single-instance ВЫКЛ (см. main.rs), поэтому чистим руками. Best-effort:
+/// ошибки молча игнорируются (системные pgrep/lsof/kill из /usr/bin).
+pub fn prepare_clean_start() {
+    let me = std::process::id().to_string();
+    let kill = |pid: &str| {
+        if !pid.is_empty() && pid != me {
+            let _ = std::process::Command::new("kill").args(["-9", pid]).status();
+        }
+    };
+    // 1) Прежние демоны: pgrep -x по имени процесса `jarvis` — матчит только бинарь
+    //    демона, НЕ задевая cargo/rustc сборки (их comm = cargo/rustc).
+    if let Ok(out) = std::process::Command::new("pgrep").args(["-x", "jarvis"]).output() {
+        for pid in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+            if pid != me {
+                kill(pid);
+                crate::log::line(&format!("[startup] прибит прежний демон pid {pid}"));
+            }
+        }
+    }
+    // 2) Освободить порты сайдкаров (осиротевшие/чужие сайдкары держат :8731/:8732).
+    for port in ["8731", "8732"] {
+        if let Ok(out) = std::process::Command::new("lsof")
+            .args(["-ti", &format!("tcp:{port}"), "-sTCP:LISTEN"])
+            .output()
+        {
+            let pids = String::from_utf8_lossy(&out.stdout);
+            for pid in pids.split_whitespace() {
+                kill(pid);
+            }
+            if !pids.trim().is_empty() {
+                crate::log::line(&format!("[startup] порт :{port} освобождён"));
+            }
+        }
+    }
+    // 3) Stale unix-сокет — чтобы следующий bind прошёл чисто.
+    let _ = std::fs::remove_file(jarvis_dir().join("run.sock"));
 }
 
 /// PATH с добавленными Homebrew + nvm путями. GUI-приложение из /Applications
@@ -345,7 +403,7 @@ fn fetch_to_file(
                     let pct = ((done as f64 / t as f64) * 100.0) as i64;
                     if pct - last_pct >= 4 || pct >= 100 {
                         last_pct = pct;
-                        progress(Step::info("Модель", format!("{label} — {pct}%")));
+                        progress(Step::progress("Модель", format!("{label} — {pct}%"), pct.clamp(0, 100) as u8));
                     }
                 }
             }
@@ -586,6 +644,79 @@ pub fn install_stt_sidecar(progress: &Progress, proxy: Option<&str>) -> Result<(
     Ok(())
 }
 
+/* ====== Codex-SDK сайдкар (openai-codex): служебный LLM «под капотом» ====== */
+
+fn codex_sdk_dir() -> PathBuf { jarvis_dir().join("codex-sdk") }
+fn codex_sdk_venv() -> PathBuf { codex_sdk_dir().join("venv") }
+fn codex_sdk_python() -> PathBuf { codex_sdk_venv().join("bin/python") }
+fn codex_sdk_pip() -> PathBuf { codex_sdk_venv().join("bin/pip") }
+fn codex_sdk_script() -> PathBuf { codex_sdk_dir().join("codex-summary.py") }
+
+/// Установлен ли Codex-SDK сайдкар: venv с `openai_codex` + скрипт на месте.
+/// Источник правды для гейта настроек «Под капотом» (кнопка «Установить»).
+pub fn codex_sdk_sidecar_present() -> bool {
+    codex_sdk_python().exists() && codex_sdk_script().exists()
+}
+
+/// Установить Codex-SDK сайдкар: codex-summary.py + venv + `openai-codex`.
+/// Идемпотентно; fail-safe (ошибка → Err, демон не падает). Зависимость одна —
+/// `openai-codex` (тащит pinned codex-бинарь). Авторизация переиспользует
+/// существующий `codex login` (~/.codex/auth.json) — ключ API не нужен.
+pub fn install_codex_sdk_sidecar(progress: &Progress, proxy: Option<&str>) -> Result<(), String> {
+    fs::create_dir_all(codex_sdk_dir()).map_err(|e| format!("mkdir codex-sdk: {e}"))?;
+    atomic_write(&codex_sdk_script(), CODEX_SUMMARY_SRC);
+    progress(Step::info("Codex-SDK", "codex-summary.py установлен"));
+
+    if !codex_sdk_python().exists() {
+        progress(Step::info("Codex-SDK", "создаю Python-venv…"));
+        run_inherit(
+            "python3 -m venv (codex-sdk)",
+            Command::new("python3")
+                .env("PATH", augmented_path())
+                .arg("-m")
+                .arg("venv")
+                .arg(codex_sdk_venv()),
+        )?;
+    }
+
+    let dep_ok = Command::new(codex_sdk_python())
+        .args(["-c", "import openai_codex"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !dep_ok {
+        progress(Step::info(
+            "Codex-SDK",
+            "ставлю openai-codex (Python Codex SDK + pinned codex-бинарь)…",
+        ));
+        let mut up = Command::new(codex_sdk_pip());
+        up.args(["install", "--upgrade", "pip"]);
+        set_proxy(&mut up, proxy);
+        run_inherit("pip install --upgrade pip (codex-sdk)", &mut up)?;
+        let proxy_arg = match proxy {
+            Some(p) if !p.is_empty() => format!("--proxy '{p}' "),
+            _ => String::new(),
+        };
+        let cmd = format!(
+            "'{}' install --progress-bar raw {}openai-codex",
+            codex_sdk_pip().display(),
+            proxy_arg,
+        );
+        run_streamed("pip install openai-codex", &cmd, proxy, progress, "Codex-SDK")?;
+    } else {
+        progress(Step::info("Codex-SDK", "openai-codex уже установлен"));
+    }
+
+    progress(Step::done(
+        "Codex-SDK",
+        "сайдкар установлен (авторизация — существующий codex login)",
+    ));
+    Ok(())
+}
+
 /* ================= Silero: Python-sidecar (venv + torch + модель) ================= */
 
 fn silero_dir() -> PathBuf { jarvis_dir().join("silero") }
@@ -821,16 +952,20 @@ fn read_settings() -> Result<(bool, Value), String> {
 }
 
 /// Смержить наши хуки (метка = claude|codex) в файл регистрации агента.
-/// Идемпотентно: уже-наши пропускаем; бэкап перед записью; чужие сохраняем.
+///
+/// Идемпотентно И самолечаще: для каждого события держим РОВНО один наш хук с
+/// актуальной командой (`<hook_dst> <label> <arg>`). Чужие хуки сохраняем.
+///
+/// Важно: `is_ours` матчит лишь по подстроке "bin/jarvis-hook" — без пути и
+/// метки. Поэтому устаревший наш хук (старый prod-путь ~/.jarvis вместо живого
+/// JARVIS_DIR, или метка `claude` у codex-файла) ВЫГЛЯДИТ «уже установленным».
+/// Старая версия его пропускала → codex дёргал несуществующий бинарь и хуки
+/// молчали. Теперь устаревшие наши записи снимаем и переписываем на верную —
+/// файл правится, только если что-то реально изменилось (без лишних бэкапов на
+/// каждом старте демона).
 fn install_hooks_into(path: &Path, label: &str, events: &[(&str, &str)], progress: &Progress) {
     match read_hooks_file(path) {
         Ok((exists, mut json)) => {
-            if exists {
-                backup(path);
-            }
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
             if !json.is_object() {
                 json = json!({});
             }
@@ -838,30 +973,62 @@ fn install_hooks_into(path: &Path, label: &str, events: &[(&str, &str)], progres
                 json["hooks"] = json!({});
             }
             let mut added = Vec::new();
+            let mut healed = Vec::new();
             for (event, arg) in events {
-                if event_installed(&json, event) {
-                    continue;
-                }
+                let want = format!("{} {label} {arg}", hook_dst().display());
                 let hooks = json["hooks"].as_object_mut().unwrap();
                 let arr = hooks.entry(*event).or_insert_with(|| json!([]));
                 if !arr.is_array() {
                     *arr = json!([]);
                 }
-                arr.as_array_mut().unwrap().push(json!({
-                    "hooks": [{
-                        "type": "command",
-                        "command": format!("{} {label} {arg}", hook_dst().display()),
-                        "timeout": 5,
-                    }],
+                let arr = arr.as_array_mut().unwrap();
+
+                let has_correct = arr.iter().any(|g| group_has_cmd(g, &want));
+                let stale_present = arr.iter().any(|g| group_has_stale_ours(g, &want));
+                if has_correct && !stale_present {
+                    continue; // уже верно — не трогаем (иначе бэкап+запись на каждом старте)
+                }
+
+                // Снимаем ВСЕ наши хуки (любой путь/метка), чужие — оставляем.
+                for group in arr.iter_mut() {
+                    if let Some(gh) = group.get_mut("hooks").and_then(Value::as_array_mut) {
+                        gh.retain(|h| !is_ours(h));
+                    }
+                }
+                arr.retain(|g| g.get("hooks").and_then(Value::as_array).is_some_and(|h| !h.is_empty()));
+
+                // Ставим единственный правильный.
+                arr.push(json!({
+                    "hooks": [{ "type": "command", "command": want, "timeout": 5 }],
                 }));
-                added.push(*event);
+                if stale_present {
+                    healed.push(*event);
+                } else {
+                    added.push(*event);
+                }
             }
-            if !added.is_empty() {
-                atomic_write(path, &(serde_json::to_string_pretty(&json).unwrap() + "\n"));
-                progress(Step::done("Хуки", format!("{label}: добавлены {}", added.join(", "))));
-            } else {
+            if added.is_empty() && healed.is_empty() {
                 progress(Step::done("Хуки", format!("{label}: уже установлены")));
+                return;
             }
+            if exists {
+                backup(path);
+            }
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            atomic_write(path, &(serde_json::to_string_pretty(&json).unwrap() + "\n"));
+            let mut msg = String::new();
+            if !added.is_empty() {
+                msg += &format!("добавлены {}", added.join(", "));
+            }
+            if !healed.is_empty() {
+                if !msg.is_empty() {
+                    msg += "; ";
+                }
+                msg += &format!("исправлены {}", healed.join(", "));
+            }
+            progress(Step::done("Хуки", format!("{label}: {msg}")));
         }
         Err(e) => progress(Step::warn("Хуки", format!("{e} — пропускаю хуки {label}"))),
     }
@@ -935,6 +1102,131 @@ fn group_has_ours(group: &Value) -> bool {
         .get("hooks")
         .and_then(Value::as_array)
         .is_some_and(|hooks| hooks.iter().any(is_ours))
+}
+
+/// Содержит ли группа хук ровно с этой командой (наш правильный, актуальный).
+fn group_has_cmd(group: &Value, cmd: &str) -> bool {
+    group
+        .get("hooks")
+        .and_then(Value::as_array)
+        .is_some_and(|hooks| {
+            hooks
+                .iter()
+                .any(|h| h.get("command").and_then(Value::as_str) == Some(cmd))
+        })
+}
+
+/// Содержит ли группа УСТАРЕВШИЙ наш хук — наш по MARKER, но команда не совпадает
+/// с актуальной (другой путь/метка). Именно его нужно вылечить.
+fn group_has_stale_ours(group: &Value, want: &str) -> bool {
+    group
+        .get("hooks")
+        .and_then(Value::as_array)
+        .is_some_and(|hooks| {
+            hooks
+                .iter()
+                .any(|h| is_ours(h) && h.get("command").and_then(Value::as_str) != Some(want))
+        })
+}
+
+/// Все ли наши хуки в файле стоят с АКТУАЛЬНОЙ командой (`<hook_dst> <label> <arg>`).
+/// Строже `event_installed` (тот матчит лишь подстроку "bin/jarvis-hook"): ловит
+/// дрейф пути/метки — старый prod-путь ~/.jarvis или метку `claude` в codex-файле,
+/// из-за чего «хуки молчат». Источник правды для health-самопроверки на старте.
+fn hooks_all_correct(path: &Path, label: &str, events: &[(&str, &str)]) -> bool {
+    let Ok((true, json)) = read_hooks_file(path) else {
+        return false;
+    };
+    events.iter().all(|(event, arg)| {
+        let want = format!("{} {label} {arg}", hook_dst().display());
+        json.pointer(&format!("/hooks/{event}"))
+            .and_then(Value::as_array)
+            .is_some_and(|arr| arr.iter().any(|g| group_has_cmd(g, &want)))
+    })
+}
+
+/// Health-снимок интеграции (read-only, без сети) — для самопроверки на старте
+/// демона и для раздела «Интеграция» в настройках.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IntegrationHealth {
+    /// Активный корень установки (~/.jarvis или ~/.jarvis-dev) — на него нацелены хуки.
+    pub jarvis_dir: String,
+    /// Бинарь `<jarvis_dir>/bin/jarvis-hook` на месте (иначе хуки = exit 127).
+    pub hook_bin: bool,
+    /// Сокет демона существует (события есть куда слать).
+    pub socket: bool,
+    /// Все хуки Claude в ~/.claude/settings.json — с актуальной командой.
+    pub claude_hooks_ok: bool,
+    /// `codex` найден в PATH (иначе codex-интеграция неприменима).
+    pub codex_present: bool,
+    /// Все хуки Codex в ~/.codex/hooks.json — с актуальной командой (n/a → true).
+    pub codex_hooks_ok: bool,
+    /// Шим `claude` установлен в shims-каталог.
+    pub claude_shim: bool,
+    /// Шим `codex` установлен (нужен для bypass-hook-trust при запуске codex).
+    pub codex_shim: bool,
+}
+
+impl IntegrationHealth {
+    /// Всё критичное на месте: бинарь хука + корректные регистрации обоих агентов
+    /// (codex учитывается, только если установлен).
+    pub fn ok(&self) -> bool {
+        self.hook_bin && self.claude_hooks_ok && (!self.codex_present || self.codex_hooks_ok)
+    }
+}
+
+/// Снять health-снимок интеграции. `codex_found()` дёргает `command -v` — несколько мс.
+pub fn integration_health() -> IntegrationHealth {
+    let codex_present = codex_found();
+    IntegrationHealth {
+        jarvis_dir: jarvis_dir().display().to_string(),
+        hook_bin: hook_dst().exists(),
+        socket: jarvis_dir().join("run.sock").exists(),
+        claude_hooks_ok: hooks_all_correct(&settings_path(), "claude", &EVENTS),
+        codex_present,
+        codex_hooks_ok: !codex_present
+            || hooks_all_correct(&codex_hooks_path(), "codex", &CODEX_EVENTS),
+        claude_shim: shim_dst().exists(),
+        codex_shim: codex_shim_dst().exists(),
+    }
+}
+
+/// Самолечение регистраций хуков на старте демона: приводит ~/.claude/settings.json
+/// и (если codex установлен) ~/.codex/hooks.json к актуальному JARVIS_DIR и метке.
+/// Дёшево (только файлы + `command -v`), ничего не качает; идемпотентно — если всё
+/// верно, файлы не переписываются. Лечит главный баг: stale prod-путь/метка после
+/// смены dev↔prod профиля, из-за которого codex дёргал несуществующий бинарь.
+pub fn reconcile_hooks(progress: &Progress) {
+    install_hooks_into(&settings_path(), "claude", &EVENTS, progress);
+    if codex_found() {
+        install_hooks_into(&codex_hooks_path(), "codex", &CODEX_EVENTS, progress);
+    }
+}
+
+/// Починить/обновить ТОЛЬКО интеграцию агентов: хуки (claude+codex) + транспорт-шим
+/// (claude+codex с bypass-hook-trust) + PATH-блок. БЕЗ тяжёлых шагов (Silero/STT/
+/// модели) — в отличие от `install`. Идемпотентно. Доустанавливает codex-шим, если
+/// codex появился после первичной установки, и лечит дрейф путей/меток в хуках.
+/// Для `jarvis-setup repair` и кнопки «Починить интеграцию» в настройках.
+pub fn repair(progress: &Progress) {
+    progress(Step::start("Хуки"));
+    reconcile_hooks(progress);
+    progress(Step::start("Транспорт"));
+    install_tmux_transport(progress);
+    let h = integration_health();
+    progress(Step::info(
+        "Интеграция",
+        format!(
+            "dir={} hook_bin={} claude_hooks={} codex={} codex_hooks={} codex_shim={} → {}",
+            h.jarvis_dir,
+            h.hook_bin,
+            h.claude_hooks_ok,
+            h.codex_present,
+            h.codex_hooks_ok,
+            h.codex_shim,
+            if h.ok() { "OK" } else { "НЕПОЛНО" },
+        ),
+    ));
 }
 
 fn event_installed(json: &Value, event: &str) -> bool {
@@ -1014,7 +1306,9 @@ pub fn status() -> Status {
             .any(|rc| rc.exists() && has_block(&fs::read_to_string(rc).unwrap_or_default())),
         silero: silero_python().exists() && silero_server_py().exists(),
         whisper_model: whisper_model_path().exists(),
+        whisper_native_built: cfg!(feature = "whisper-native"),
         qwen3_sidecar: stt_python().exists() && stt_server_py().exists(),
+        codex_sdk_sidecar: codex_sdk_sidecar_present(),
         stt_engine_active: stt_engine(),
         wakeword_models: wakeword_models_present(),
     }
@@ -1350,6 +1644,25 @@ pub fn qwen_weights_present(key: &str) -> bool {
     qwen_weights_dir(key).join("config.json").exists()
 }
 
+/// Готов ли STT-движок к активации — честный гейт для настроек (источник «правды
+/// по модели»). До этого whisper-turbo считался готовым по одному наличию файла,
+/// и переключение на него приводило к ошибке распознавания (стаб без нативной сборки).
+/// - whisper-turbo: нужна И модель на диске, И вкомпилированная фича `whisper-native`.
+/// - qwen3-*: нужны И локальные веса, И установленный MLX-сайдкар (venv + server.py).
+pub fn stt_engine_ready(
+    engine: &str,
+    whisper_model: bool,
+    whisper_native_built: bool,
+    qwen_weights: bool,
+    qwen_sidecar: bool,
+) -> bool {
+    match engine {
+        "whisper-turbo" => whisper_model && whisper_native_built,
+        "qwen3-0.6b" | "qwen3-1.7b" => qwen_weights && qwen_sidecar,
+        _ => false,
+    }
+}
+
 /// Полный инвентарь моделей (STT + голос + wake + runtime) для UI.
 /// Только filesystem — без сетевых/HTTP-проверок, мгновенный срез.
 pub fn model_inventory() -> Vec<ModelInfo> {
@@ -1582,6 +1895,134 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // Собрать все command-строки события в плоский список (для проверок ниже).
+    fn event_commands(v: &Value, event: &str) -> Vec<String> {
+        v["hooks"][event]
+            .as_array()
+            .map(|groups| {
+                groups
+                    .iter()
+                    .flat_map(|g| g["hooks"].as_array().cloned().unwrap_or_default())
+                    .filter_map(|h| h["command"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    // --- Регрессия бага «хуки ничего не отправляют» -------------------------
+    // ~/.codex/hooks.json остался написанным от руки со СТАРЫМ путём (prod
+    // ~/.jarvis вместо живого JARVIS_DIR=~/.jarvis-dev) и меткой `claude`.
+    // is_ours матчит по подстроке "bin/jarvis-hook" (без пути и метки), поэтому
+    // event_installed считал событие «уже установленным» и НЕ лечил его —
+    // codex дёргал несуществующий бинарь (exit 127) и хуки молчали навсегда.
+    #[test]
+    fn install_heals_stale_jarvis_hook_path_and_label() {
+        let dir = std::env::temp_dir().join(format!("jarvis-heal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hooks.json");
+        // Похоже на реальный сломанный файл: чужой prod-путь + метка claude.
+        let stale = json!({
+            "hooks": { "PreToolUse": [{ "hooks": [{
+                "type": "command",
+                "command": "/Users/somebody/.jarvis/bin/jarvis-hook claude pre-tool",
+                "timeout": 5
+            }]}]}
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&stale).unwrap()).unwrap();
+
+        let noop = |_s: Step| {};
+        install_hooks_into(&path, "codex", &CODEX_EVENTS, &noop);
+
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let want = format!("{} codex pre-tool", hook_dst().display());
+        let cmds = event_commands(&v, "PreToolUse");
+        assert!(cmds.contains(&want), "вылечено на верный путь+метку codex: {cmds:?}");
+        assert!(
+            !cmds.iter().any(|c| c.contains("claude pre-tool")),
+            "старый claude-хук убран: {cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| c.contains("/Users/somebody/.jarvis")),
+            "старый prod-путь убран: {cmds:?}"
+        );
+        assert_eq!(
+            cmds.iter().filter(|c| c.contains(MARKER)).count(),
+            1,
+            "ровно один наш хук, без дублей: {cmds:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Лечение НЕ должно сносить чужие хуки в том же событии.
+    #[test]
+    fn heal_preserves_foreign_hooks() {
+        let dir = std::env::temp_dir().join(format!("jarvis-heal-foreign-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hooks.json");
+        let mixed = json!({
+            "hooks": { "PreToolUse": [{ "hooks": [
+                { "type": "command", "command": "/opt/other/guard pre", "timeout": 5 },
+                { "type": "command", "command": "/Users/x/.jarvis/bin/jarvis-hook claude pre-tool" }
+            ]}]}
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&mixed).unwrap()).unwrap();
+
+        let noop = |_s: Step| {};
+        install_hooks_into(&path, "codex", &CODEX_EVENTS, &noop);
+
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let cmds = event_commands(&v, "PreToolUse");
+        assert!(cmds.iter().any(|c| c == "/opt/other/guard pre"), "чужой хук сохранён: {cmds:?}");
+        assert!(cmds.contains(&format!("{} codex pre-tool", hook_dst().display())), "наш вылечен: {cmds:?}");
+        assert!(!cmds.iter().any(|c| c.contains("claude pre-tool")), "старый снят: {cmds:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Строгий детектор дрейфа: стейл-файл (старый путь/метка) НЕ «ок»; после
+    // лечения — «ок». Это источник правды для health-самопроверки на старте.
+    #[test]
+    fn hooks_all_correct_detects_stale_then_healed() {
+        let dir = std::env::temp_dir().join(format!("jarvis-allok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hooks.json");
+        let stale = json!({
+            "hooks": { "PreToolUse": [{ "hooks": [{
+                "type": "command",
+                "command": "/Users/x/.jarvis/bin/jarvis-hook claude pre-tool"
+            }]}]}
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&stale).unwrap()).unwrap();
+        assert!(!hooks_all_correct(&path, "codex", &CODEX_EVENTS), "стейл-файл не «ок»");
+
+        let noop = |_s: Step| {};
+        install_hooks_into(&path, "codex", &CODEX_EVENTS, &noop);
+        assert!(hooks_all_correct(&path, "codex", &CODEX_EVENTS), "после лечения — все события ок");
+
+        // отсутствующий файл — тоже не «ок»
+        assert!(!hooks_all_correct(&dir.join("nope.json"), "codex", &CODEX_EVENTS));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Когда всё уже верно — повторный проход НЕ переписывает файл (иначе бэкап и
+    // запись на каждом старте демона). Проверяем по байтовой идентичности.
+    #[test]
+    fn install_no_rewrite_when_already_correct() {
+        let dir = std::env::temp_dir().join(format!("jarvis-idem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hooks.json");
+        let noop = |_s: Step| {};
+        install_hooks_into(&path, "codex", &CODEX_EVENTS, &noop); // первичная установка
+        let first = std::fs::read(&path).unwrap();
+        install_hooks_into(&path, "codex", &CODEX_EVENTS, &noop); // повтор — должен быть no-op
+        let second = std::fs::read(&path).unwrap();
+        assert_eq!(first, second, "повторный проход не меняет уже верный файл");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // Phase 8: STT-SERVER_SRC встроен и является валидным Python-скриптом (начало).
     #[test]
     fn stt_server_src_embedded() {
@@ -1766,5 +2207,46 @@ mod tests {
         assert!(!is_stt_engine_id("silero"));
         assert!(!is_stt_engine_id("hey_jarvis"));
         assert!(!is_stt_engine_id("qwen3-runtime"));
+    }
+
+    // --- Step::progress несёт pct: UI (settings2.js) читает step.pct и рисует полосу ---
+    #[test]
+    fn step_progress_carries_pct_as_number() {
+        let s = Step::progress("Модель", "qwen3-1.7b — 42%", 42);
+        assert_eq!(s.pct, Some(42));
+        let j = serde_json::to_value(&s).unwrap();
+        assert_eq!(j["pct"], 42, "pct сериализуется числом — иначе прогрессбар не появится");
+    }
+
+    #[test]
+    fn step_info_omits_pct_field() {
+        let s = Step::info("X", "msg");
+        assert_eq!(s.pct, None);
+        let j = serde_json::to_value(&s).unwrap();
+        assert!(j.get("pct").is_none(), "без прогресса поле pct не сериализуется");
+    }
+
+    // --- stt_engine_ready: честный гейт. Главный баг «правды по модели»: whisper
+    // показывался готовым по наличию файла, но без нативной сборки стаб падал. ---
+    #[test]
+    fn whisper_ready_requires_native_build_and_model() {
+        // модель есть, но фича не вкомпилирована → НЕ готов (иначе стаб = ошибка распознавания)
+        assert!(!stt_engine_ready("whisper-turbo", true, false, false, false));
+        // модель есть и фича вкомпилирована → готов
+        assert!(stt_engine_ready("whisper-turbo", true, true, false, false));
+        // фича есть, но модель не скачана → не готов
+        assert!(!stt_engine_ready("whisper-turbo", false, true, false, false));
+    }
+
+    #[test]
+    fn qwen_ready_requires_weights_and_sidecar() {
+        assert!(stt_engine_ready("qwen3-1.7b", false, false, true, true));
+        assert!(!stt_engine_ready("qwen3-1.7b", false, false, false, true), "нет весов → не готов");
+        assert!(!stt_engine_ready("qwen3-0.6b", false, false, true, false), "нет сайдкара → не готов");
+    }
+
+    #[test]
+    fn unknown_engine_never_ready() {
+        assert!(!stt_engine_ready("banana", true, true, true, true));
     }
 }

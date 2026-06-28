@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+# Отменяем устаревшие прогоны на той же ветке/PR.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: fmt · clippy · test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cargo cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install JS deps
+        run: npm ci
+
+      # whisper.cpp (фича whisper-native) собирается через CMake.
+      - name: Ensure cmake
+        run: cmake --version || brew install cmake
+
+      - name: Format check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
+
+      - name: Clippy
+        run: >
+          cargo clippy --manifest-path src-tauri/Cargo.toml
+          --features wakeword-ort,whisper-native,stt-vad --all-targets
+
+      - name: Tests
+        run: >
+          cargo test --manifest-path src-tauri/Cargo.toml
+          --features wakeword-ort,whisper-native,stt-vad

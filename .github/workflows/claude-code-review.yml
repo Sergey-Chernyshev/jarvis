@@ -1,0 +1,39 @@
+name: Claude Code Review
+
+# Автоматическое ревью входящих pull request'ов.
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Review with Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Один «липкий» комментарий, который обновляется на каждый пуш в PR.
+          use_sticky_comment: true
+          prompt: |
+            Сделай ревью этого pull request'а. Проект Jarvis — меню-бар macOS
+            (Rust + Tauri) для мониторинга сессий Claude Code.
+
+            Посмотри на diff и оцени:
+            - корректность и потенциальные баги;
+            - безопасность (работа с процессами, IPC, доступ к микрофону, секреты);
+            - соответствие стилю проекта (cargo fmt/clippy, паттерны соседнего кода);
+            - покрытие тестами для нетривиальной логики.
+
+            Дай конкретную, доброжелательную обратную связь по-русски. Если всё хорошо —
+            так и скажи. Не одобряй и не блокируй PR формально, просто оставь ревью-комментарий.
+          claude_args: '--allowed-tools "Bash(gh pr view:*),Bash(gh pr diff:*)"'

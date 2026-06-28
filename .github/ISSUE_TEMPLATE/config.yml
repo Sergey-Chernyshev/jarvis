@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Вопрос или обсуждение / Question or discussion
+    url: https://github.com/Sergey-Chernyshev/jarvis/discussions
+    about: Для вопросов и общих обсуждений используй Discussions, а не issue.
+  - name: 🔒 Уязвимость / Security vulnerability
+    url: https://github.com/Sergey-Chernyshev/jarvis/security/policy
+    about: Уязвимости сообщай приватно по SECURITY.md, не через публичный issue.

@@ -1,0 +1,39 @@
+name: Claude Issue Triage
+
+# Автоматически разбирает новые issue: навешивает метки, просит недостающее.
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Triage with Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Открыт новый issue в репозитории Jarvis (меню-бар macOS на Rust + Tauri
+            для мониторинга сессий Claude Code; это монитор и пульт, не оркестратор).
+
+            Сделай триаж текущего issue:
+            1. Прочитай заголовок и тело issue через доступные инструменты.
+            2. Получи список существующих меток репозитория (`gh label list`) и навесь
+               подходящие на этот issue через `gh issue edit` (например: bug, enhancement,
+               question, documentation, good first issue, help wanted).
+            3. Если для бага не хватает важных данных (версия macOS, версия Jarvis,
+               шаги воспроизведения) — поставь метку `needs-info` и оставь короткий
+               вежливый комментарий по-русски с просьбой дополнить.
+            4. Не закрывай issue и не делай ничего, кроме разметки и одного комментария
+               при необходимости. Комментарий — по-русски.
+          claude_args: '--allowed-tools "Bash(gh label list),Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh issue comment:*)"'

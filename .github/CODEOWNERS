@@ -1,0 +1,4 @@
+# Code owners — автоматически запрашиваются в ревьюеры на каждый PR.
+# https://docs.github.com/articles/about-code-owners
+
+* @Sergey-Chernyshev

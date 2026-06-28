@@ -90,12 +90,20 @@ pub struct Daemon {
     pub stage: std::sync::Arc<crate::route::stage::StageBuffer>,
     /// История диктовки/реплик («что я говорил») + копирование. In-memory.
     pub transcripts: std::sync::Arc<crate::stt::transcripts::Transcripts>,
+    /// Умные промпты: флаг «умный режим» + авто-преобразование надиктовки.
+    pub prompts: std::sync::Arc<crate::stt::prompts::Prompts>,
     /// Голосовой разговор (п/п-2): ожидающие confirm управления (yes/no из тоста).
     /// Отдельный инстанс от `pending` (агент-гейт) — резолвится своим IPC.
     pub vconfirm: std::sync::Arc<crate::capability::confirm_panel::PendingConfirms>,
     /// Голосовой разговор: запрос «оборвать» (крестик в HUD) — цикл выходит,
     /// listen прерывается. Сбрасывается в начале каждого разговора.
     pub convo_abort: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Координация голоса: пока юзер диктует/говорит — уведомления откладываются
+    /// (а не перебивают речь), wake-детектор подавлён. Счётчик + буфер отложенных.
+    pub interaction: std::sync::Arc<crate::coord::Interaction>,
+    /// Мы поставили чужое медиа на паузу на время диктовки (как при озвучке). Чтобы
+    /// возобновить ТОЛЬКО то, что паузили сами, и не трогать ручную паузу юзера.
+    media_ducked: AtomicBool,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -150,7 +158,15 @@ impl Daemon {
         let verify_cfg = crate::wakeword::config::VerifyConfig::from_settings(&root);
         let wake_action: std::sync::Arc<dyn crate::wakeword::action::WakeAction> =
             crate::wakeword::action::AgentWakeAction::new(audio.clone(), stt.clone(), app.clone());
-        let wake = crate::wakeword::WakeWord::new(audio.clone(), wake_cfg, verify_cfg, wake_action);
+        // Координация: счётчик взаимодействия (диктовка/разговор) + буфер отложенных
+        // уведомлений. Wake подавляется, пока юзер занят ИЛИ Jarvis сам говорит (эхо).
+        let interaction = std::sync::Arc::new(crate::coord::Interaction::default());
+        let wake_gate: crate::wakeword::WakeGate = {
+            let i = interaction.clone();
+            let v = voice.clone();
+            std::sync::Arc::new(move || i.is_active() || v.is_speaking())
+        };
+        let wake = crate::wakeword::WakeWord::new(audio.clone(), wake_cfg, verify_cfg, wake_action, wake_gate);
         Self {
             app,
             sessions: Mutex::new(HashMap::new()),
@@ -186,8 +202,11 @@ impl Daemon {
             picks: std::sync::Arc::new(crate::route::pick::PendingPicks::new()),
             stage: std::sync::Arc::new(crate::route::stage::StageBuffer::new()),
             transcripts: std::sync::Arc::new(crate::stt::transcripts::Transcripts::load()),
+            prompts: std::sync::Arc::new(crate::stt::prompts::Prompts::load()),
             vconfirm: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
             convo_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            interaction,
+            media_ducked: AtomicBool::new(false),
         }
     }
 
@@ -448,7 +467,71 @@ impl Daemon {
             _ => false,
         };
         if on {
-            self.voice.speak_text(title, &speak_text, kind, Some(id));
+            // Пока юзер ДИКТУЕТ или ведёт РАЗГОВОР — не перебиваем озвучкой. Проверка
+            // «идёт ли взаимодействие» и постановка в буфер атомарны (defer_if_active
+            // под тем же локом, что и leave+слив) → уведомление на границе завершения
+            // не теряется. Если взаимодействия нет — озвучиваем сразу.
+            let dv = crate::coord::DeferredVoiced {
+                id: id.to_string(),
+                title: title.to_string(),
+                speak: speak_text.clone(),
+                kind: kind.to_string(),
+            };
+            if self.interaction.defer_if_active(dv) {
+                crate::log::line(&format!(
+                    "[voice] уведомление «{kind}» отложено — идёт диктовка/разговор"
+                ));
+            } else {
+                self.voice.speak_text(title, &speak_text, kind, Some(id));
+            }
+        }
+    }
+
+    /// Завершить взаимодействие (диктовка/разговор) и озвучить накопленные отложенные
+    /// уведомления, если оно закрылось полностью. Слив происходит атомарно внутри
+    /// `leave` (под тем же локом, что и постановка) — ни одно уведомление не теряется
+    /// на границе. Озвучка идёт через общую очередь Voice (сериализуется с речью).
+    pub fn interaction_leave_and_flush(&self) {
+        let (_idle, drained) = self.interaction.leave();
+        for v in drained {
+            self.voice.speak_text(&v.title, &v.speak, &v.kind, Some(&v.id));
+        }
+    }
+
+    /// Поставить чужое медиа (музыку) на паузу на время диктовки — как при озвучке.
+    /// Уважает `duckOthers`. ВСЯ работа с медиа (perl-шелаут MediaRemote, сотни мс)
+    /// уходит в ФОН: `on_press` вызывается СИНХРОННО из глобального хоткея на ГЛАВНОМ
+    /// потоке — блокировать его нельзя, иначе UI зависает на каждое нажатие диктовки.
+    pub fn duck_media_for_capture(self: &std::sync::Arc<Self>) {
+        let duck = crate::voice::config::VoiceConfig::from_settings(&self.settings.load()).duck_others;
+        if !duck || self.media_ducked.load(Ordering::SeqCst) {
+            return;
+        }
+        let d = self.clone();
+        std::thread::spawn(move || {
+            // Диктовка могла кончиться, пока поток стартовал — не паузим зря.
+            if !d.interaction.is_active() {
+                return;
+            }
+            if crate::macos::media_is_playing() {
+                crate::macos::media_pause();
+                d.media_ducked.store(true, Ordering::SeqCst);
+                crate::log::line("[dictation] медиа на паузу (диктовка)");
+                // Короткий тап: если за время perl-шелаута диктовка уже кончилась —
+                // сразу возвращаем, чтобы музыка не осталась на паузе.
+                if !d.interaction.is_active() {
+                    d.unduck_media_for_capture();
+                }
+            }
+        });
+    }
+
+    /// Возобновить медиа после диктовки — ТОЛЬКО если паузу ставили мы (не трогаем
+    /// ручную паузу юзера). Шелаут media_play — тоже в фон (не блокируем поток вызова).
+    pub fn unduck_media_for_capture(self: &std::sync::Arc<Self>) {
+        if self.media_ducked.swap(false, Ordering::SeqCst) {
+            std::thread::spawn(|| crate::macos::media_play());
+            crate::log::line("[dictation] медиа возобновлено");
         }
     }
 
@@ -1031,12 +1114,32 @@ impl Daemon {
             tokio::time::sleep(Duration::from_millis(1500)).await;
             d.busy_release("meta", &sid);
             let Some(snap) = d.session(&sid) else { return };
-            let Some(tr) = snap.transcript.clone() else { return };
-
-            let entries = transcript::read_recent_entries(std::path::Path::new(&tr), 64 * 1024);
 
             let is_codex = crate::backend::Agent::from_opt(snap.agent.as_deref())
                 == crate::backend::Agent::Codex;
+
+            // Транскрипт: обычно из hook-payload (transcript_path). Codex на машине
+            // с невыданным hook-trust мог пропустить SessionStart → payload без пути.
+            // Safety-net: находим rollout по session_id и персистим, чтобы
+            // chat_open и мета (заголовок/модель) всё равно работали.
+            let tr = match snap.transcript.clone() {
+                Some(tr) => tr,
+                None if is_codex => {
+                    let Some(path) = crate::backend::codex::find_rollout_by_sid(&sid) else {
+                        return;
+                    };
+                    let p = path.to_string_lossy().into_owned();
+                    d.with_session(&sid, |s| {
+                        if s.transcript.is_none() {
+                            s.transcript = Some(p.clone());
+                        }
+                    });
+                    p
+                }
+                None => return,
+            };
+
+            let entries = transcript::read_recent_entries(std::path::Path::new(&tr), 64 * 1024);
 
             // ветка: Claude — gitBranch в каждой записи; в rollout Codex её нет.
             let branch = if is_codex {
@@ -1067,14 +1170,19 @@ impl Daemon {
             };
             let title = raw_title.map(|t| d.ru(&ellipsize(&one_line(&t), 60)));
 
-            // модель: Claude — из транскрипта; Codex УЖЕ имеет модель из payload —
-            // НЕ перетираем Claude-майнингом из ~/.claude/projects. Свежий ручной
-            // выбор (modelAt) тоже не трогаем.
+            // модель: свежий ручной выбор (/model) не трогаем. Codex — из последнего
+            // turn_context.model в rollout (раньше полагались только на hook-payload;
+            // при пропущенном по hook-trust SessionStart модель оставалась дефолтной
+            // «Opus»). Claude — из транскрипта, фолбэк на ~/.claude/projects.
             let model_fresh = snap
                 .model_at
                 .is_some_and(|at| now_ms() - at <= 30_000);
-            let model = if model_fresh || is_codex {
+            let model = if model_fresh {
                 None
+            } else if is_codex {
+                crate::backend::codex_transcript::extract_model(&entries).map(|m| {
+                    crate::backend::backend(crate::backend::Agent::Codex).friendly_model(&m)
+                })
             } else {
                 entries
                     .iter()

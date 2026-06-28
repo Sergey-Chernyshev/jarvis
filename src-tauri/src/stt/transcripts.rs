@@ -26,6 +26,13 @@ pub struct Transcript {
     pub ts: u64,
     /// Источник: "dictation" (F8) | "wake" (Hey Jarvis).
     pub source: String,
+    /// Применённое умное преобразование (стиль) — для зелёного тега в истории.
+    #[serde(rename = "appliedStyle", default, skip_serializing_if = "Option::is_none")]
+    pub applied_style: Option<String>,
+    /// Есть сохранённое сжатое аудио этой диктовки → можно перегенерировать
+    /// распознавание (см. `stt::audio_store`). Для wake/конвo — false.
+    #[serde(rename = "hasAudio", default)]
+    pub has_audio: bool,
 }
 
 /// Формат файла персиста.
@@ -91,10 +98,17 @@ impl Transcripts {
     }
 
     /// Добавить реплику (с текущим временем + новым id). Пустой текст игнорируется.
-    pub fn push(&self, text: &str, source: &str) {
+    pub fn push(&self, text: &str, source: &str) -> u64 {
+        self.push_styled(text, source, None, false)
+    }
+
+    /// Добавить реплику с пометкой применённого умного преобразования и наличия
+    /// сохранённого аудио. Возвращает id новой реплики (0 — если текст пуст и не
+    /// добавлена), чтобы вызывающий (диктовка) сохранил аудио под этим id.
+    pub fn push_styled(&self, text: &str, source: &str, applied: Option<&str>, has_audio: bool) -> u64 {
         let text = text.trim();
         if text.is_empty() {
-            return;
+            return 0;
         }
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -103,13 +117,45 @@ impl Transcripts {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut g = match self.items.lock() {
             Ok(g) => g,
-            Err(_) => return, // отравленный лок — fail-safe, не паникуем
+            Err(_) => return 0, // отравленный лок — fail-safe, не паникуем
         };
-        g.push_front(Transcript { id, text: text.to_string(), ts, source: source.to_string() });
+        g.push_front(Transcript {
+            id,
+            text: text.to_string(),
+            ts,
+            source: source.to_string(),
+            applied_style: applied.map(|s| s.to_string()),
+            has_audio,
+        });
         while g.len() > CAP {
-            g.pop_back();
+            // выселяя реплику — чистим её аудио, чтобы оно не оставалось сиротой
+            if let Some(old) = g.pop_back() {
+                if old.has_audio {
+                    crate::stt::audio_store::delete(old.id);
+                }
+            }
         }
         self.save(&g);
+        id
+    }
+
+    /// Заменить текст реплики по id (после ПЕРЕГЕНЕРАЦИИ распознавания из аудио).
+    /// Сбрасывает пометку умного стиля — это сырой распознанный текст. true — найдена.
+    pub fn update_text(&self, id: u64, text: &str) -> bool {
+        let Ok(mut g) = self.items.lock() else { return false };
+        let mut found = false;
+        for t in g.iter_mut() {
+            if t.id == id {
+                t.text = text.trim().to_string();
+                t.applied_style = None;
+                found = true;
+                break;
+            }
+        }
+        if found {
+            self.save(&g);
+        }
+        found
     }
 
     /// Все реплики (новые первыми) — для UI.
@@ -121,9 +167,13 @@ impl Transcripts {
     pub fn remove(&self, id: u64) -> bool {
         let Ok(mut g) = self.items.lock() else { return false };
         let before = g.len();
+        let had_audio = g.iter().find(|t| t.id == id).map(|t| t.has_audio).unwrap_or(false);
         g.retain(|t| t.id != id);
         let removed = g.len() != before;
         if removed {
+            if had_audio {
+                crate::stt::audio_store::delete(id);
+            }
             self.save(&g);
         }
         removed

@@ -34,7 +34,6 @@ pub fn build_snapshot(sessions: &[Session], now: &str, muted: bool, keep_awake: 
     for s in live {
         let id = s.id.chars().take(8).collect::<String>();
         let project = s.project.as_deref().unwrap_or("?");
-        let task = s.task.as_deref().unwrap_or("");
         let status = match s.status {
             Status::Waiting => "ждёт",
             Status::Working => "работает",
@@ -42,10 +41,20 @@ pub fn build_snapshot(sessions: &[Session], now: &str, muted: bool, keep_awake: 
             Status::Limit => "лимит",
             Status::Idle => "простаивает",
         };
-        let lp = s.last_prompt.as_deref().map(|p| ellip(p, 40)).unwrap_or_default();
-        out.push_str(&format!("- [{id}] {project} · {task} · {status}"));
-        if !lp.is_empty() {
-            out.push_str(&format!(" · послед.: «{lp}»"));
+        // ЧТО проект делает — берём БОГАТЫЕ поля: title (заголовок задачи) или task,
+        // + ветка + краткая сводка (summary). Раньше слали только task/last_prompt,
+        // которые на практике пусты → голос не знал, чем заняты проекты, и не мог
+        // ни описать их, ни сопоставить названный проект (DATA-баг).
+        let branch = s.branch.as_deref().map(|b| format!(" ({b})")).unwrap_or_default();
+        out.push_str(&format!("- [{id}] {project}{branch} · {status}"));
+        if let Some(desc) = s.title.as_deref().or(s.task.as_deref()).filter(|x| !x.is_empty()) {
+            out.push_str(&format!(" · {}", ellip(desc, 60)));
+        }
+        if let Some(sum) = s.summary.as_deref().filter(|x| !x.is_empty()) {
+            out.push_str(&format!(" — {}", ellip(sum, 70)));
+        }
+        if let Some(lp) = s.last_prompt.as_deref().filter(|x| !x.is_empty()) {
+            out.push_str(&format!(" · послед.: «{}»", ellip(lp, 40)));
         }
         out.push('\n');
     }

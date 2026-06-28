@@ -18,6 +18,8 @@
   let docClickBound = false;  // глобальный «клик мимо» для закрытия селектов
   let currentRoot = null;     // активный rootEl (для live-перерисовок)
   let activePane = 'general'; // выбранная вкладка сайдбара
+  const renderingPane = {};   // pane → идёт ли сейчас рендер (анти-гонка)
+  const renderPending = {};   // pane → запрошен ли повторный рендер во время текущего
 
   // ── Дефолты хоткеев (сверено с HK_DEFAULTS + settings_get в renderer.js) ──
   const HK_DEFAULTS = {
@@ -119,6 +121,18 @@
       ['circle', { cx: 12, cy: 12, r: 10 }],
       ['path', { d: 'M12 16v-4' }],
       ['path', { d: 'M12 8h.01' }],
+    ],
+    'cpu': [
+      ['rect', { width: 16, height: 16, x: 4, y: 4, rx: 2 }],
+      ['rect', { width: 6, height: 6, x: 9, y: 9, rx: 1 }],
+      ['path', { d: 'M15 2v2' }],
+      ['path', { d: 'M15 20v2' }],
+      ['path', { d: 'M2 15h2' }],
+      ['path', { d: 'M2 9h2' }],
+      ['path', { d: 'M20 15h2' }],
+      ['path', { d: 'M20 9h2' }],
+      ['path', { d: 'M9 2v2' }],
+      ['path', { d: 'M9 20v2' }],
     ],
     'chevron-down': [['path', { d: 'm6 9 6 6 6-6' }]],
     'chevron-left': [['path', { d: 'm15 18-6-6 6-6' }]],
@@ -240,6 +254,25 @@
     const b = el('button.btn' + (extra ? '.' + extra.split(' ').join('.') : ''), { text: label });
     b.addEventListener('click', () => { try { onClick(b); } catch (e) {} });
     return b;
+  }
+
+  /* ── Скелетоны: показываем мерцающие плейсхолдеры, пока рендерер ждёт IPC
+   * (sttGet/voiceGet/modelsGet и т.п.), и убираем по приходу данных — вкладка
+   * перестаёт быть пустой в момент переключения. ─────────────────────────*/
+  function skelRow() {
+    return el('div.skrow', null, [
+      el('div.skgrow', null, [
+        el('div.skel.skbar', { style: 'width:' + (38 + ((Math.random() * 22) | 0)) + '%' }),
+        el('div.skel.skbar', { style: 'width:' + (58 + ((Math.random() * 28) | 0)) + '%;height:11px;opacity:.6' }),
+      ]),
+      el('div.skel.skctl'),
+    ]);
+  }
+  // группа из n скелетон-строк (в обёртке .dgroup — как настоящие группы)
+  function skelGroup(n) {
+    const g = el('div.dgroup');
+    for (let i = 0; i < (n || 3); i++) g.appendChild(skelRow());
+    return g;
   }
 
   /* ── Кастомный селект (.cselect): триггер + всплывающее меню ─────────────
@@ -414,6 +447,23 @@
 #settings2 .ic.orange{background:rgba(255,138,76,.2);color:#ff8a4c}
 #settings2 .ic.violet{background:rgba(139,126,200,.25);color:var(--limit,#8b7ec8)}
 #settings2 .ic.teal{background:rgba(60,200,200,.2);color:#3cc8c8}
+#settings2 .ic.purple{background:rgba(180,120,255,.2);color:#b478ff}
+
+/* ── скелетоны: мерцающие плейсхолдеры, пока грузятся данные вкладки ──── */
+#settings2 .skel{position:relative;overflow:hidden;background:rgba(255,255,255,.05);border-radius:6px}
+#settings2 .skel::after{content:'';position:absolute;inset:0;transform:translateX(-100%);background:linear-gradient(90deg,transparent,rgba(255,255,255,.07),transparent);animation:s2shim 1.15s infinite}
+@keyframes s2shim{100%{transform:translateX(100%)}}
+#settings2 .skrow{display:flex;align-items:flex-start;gap:20px;padding:15px 16px}
+#settings2 .dgroup .skrow:not(:first-child){border-top:1px solid var(--hairline,rgba(255,255,255,0.06))}
+#settings2 .skgrow{flex:1;min-width:0;display:flex;flex-direction:column;gap:9px}
+#settings2 .skbar{height:13px}
+#settings2 .skctl{width:50px;height:22px;border-radius:11px;flex:none;margin-left:auto}
+
+/* ── поле-секрет (API-ключ / токен подписки) ─────────────────────────── */
+#settings2 .s2-secret{width:100%;max-width:340px;background:rgba(255,255,255,.04);border:1px solid var(--hairline,rgba(255,255,255,0.12));border-radius:8px;color:var(--text,#e7e7ea);font:12.5px/1.3 var(--s2-mono,ui-monospace,monospace);padding:9px 11px;outline:none;transition:border-color .12s ease}
+#settings2 .s2-secret:focus{border-color:var(--working,#6ca0ff)}
+#settings2 .s2-secret::placeholder{color:var(--faint,#55555c)}
+#settings2 .loadcap.err{color:var(--waiting,#f2a33c)}
 
 /* ── статус-точка ────────────────────────────────────────────────────── */
 #settings2 .dot { width:7px; height:7px; border-radius:50%; flex:none; background:var(--idle,#55555c); }
@@ -513,6 +563,7 @@
     { pane: 'awake', label: 'Бодрость', icon: 'coffee', ic: 'orange' },
     { pane: 'keys', label: 'Горячие клавиши', icon: 'keyboard', ic: 'violet' },
     { sep: true },
+    { pane: 'service', label: 'Под капотом', icon: 'cpu', ic: 'purple' },
     { pane: 'integration', label: 'Интеграция', icon: 'cable', ic: 'teal' },
     { pane: 'about', label: 'О программе', icon: 'info', ic: 'gray' },
   ];
@@ -525,7 +576,9 @@
   // 1. Основное (general) — settings_get
   async function renderGeneral(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Основное' }));
+    const _sk = skelGroup(4); pane.appendChild(_sk);
     const s = await safe(() => window.jarvis.getSettings(), {});
+    _sk.remove();
     const group = el('div.dgroup');
 
     // глобальный хоткей (read-only капсы) + сброс
@@ -557,7 +610,9 @@
   // 2. Голосовой ввод (stt) — sttGet + modelsGet
   async function renderStt(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Голосовой ввод' }));
+    const _sk = skelGroup(3); pane.appendChild(_sk);
     const v = await safe(() => window.jarvis.sttGet(), null);
+    _sk.remove();
     const group = el('div.dgroup');
 
     if (!v) {
@@ -594,6 +649,19 @@
     ]);
     group.appendChild(engRow);
 
+    // устройство ввода (микрофон) — селектор + горячее применение (без перезапуска)
+    const dev = await safe(() => window.jarvis.sttInputDevices(), { devices: [], current: null });
+    const devOpts = [{ value: '', label: 'Системный по умолчанию' }]
+      .concat((dev.devices || []).map((n) => ({ value: n, label: n })));
+    const devSel = customSelect(devOpts, dev.current || '', async (name) => {
+      if (devSel.setBusy) devSel.setBusy(true);
+      await safe(() => window.jarvis.sttSetInputDevice(name || null), null);
+      if (devSel.setBusy) devSel.setBusy(false);
+    });
+    group.appendChild(drow('Микрофон',
+      'С какого устройства писать речь. Выбери встроенный микрофон, если гарнитура шумит.',
+      devSel.node));
+
     // клавиша диктовки (read-only капс)
     group.appendChild(drow('Клавиша диктовки', 'Зажми и говори (push-to-talk).',
       hotkeyField(v.hotkey || 'F8', { rec: true }), { ctlClass: 'hk' }));
@@ -625,7 +693,10 @@
   // заполнить группу строк моделей (по группам kind), порт modelRow/downloadActionFor
   async function fillModelRows(group) {
     group.textContent = '';
+    // инвентарь моделей грузится дольше всего — пока показываем скелетоны
+    for (let i = 0; i < 4; i++) group.appendChild(skelRow());
     const r = await safe(() => window.jarvis.modelsGet(), { models: [] });
+    group.textContent = '';
     const models = (r && r.models) || [];
     if (!models.length) {
       group.appendChild(drow('Нет моделей', 'Инвентарь моделей пуст.', []));
@@ -710,7 +781,9 @@
   // 3. Голос (voice) — voiceGet
   async function renderVoice(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Голос' }));
+    const _sk = skelGroup(3); pane.appendChild(_sk);
     const v = await safe(() => window.jarvis.voiceGet(), null);
+    _sk.remove();
     const group = el('div.dgroup');
     if (!v) {
       group.appendChild(drow('Голос недоступен', 'Движок синтеза недоступен.', []));
@@ -752,7 +825,9 @@
   // 4. Пробуждение (wake) — wakeGet
   async function renderWake(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Пробуждение' }));
+    const _sk = skelGroup(4); pane.appendChild(_sk);
     const v = await safe(() => window.jarvis.wakeGet(), null);
+    _sk.remove();
     const group = el('div.dgroup');
     if (!v) {
       group.appendChild(drow('Wake-word недоступен', 'Данные активации по фразе недоступны.', []));
@@ -792,7 +867,9 @@
   // 5. Уведомления (notify) — settings_get
   async function renderNotify(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Уведомления' }));
+    const _sk = skelGroup(3); pane.appendChild(_sk);
     const s = await safe(() => window.jarvis.getSettings(), {});
+    _sk.remove();
     const group = el('div.dgroup');
     group.appendChild(drow('Когда агент закончил', 'Уведомлять о завершении ответа.',
       toggle(s.notifyDone, (on) => fire(() => window.jarvis.setSettings({ notifyDone: on })))));
@@ -806,7 +883,9 @@
   // 6. Бодрость (awake) — keep-awake через плагины (getPlugins / pluginCmd)
   async function renderAwake(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Бодрость' }));
+    const _sk = skelGroup(3); pane.appendChild(_sk);
     const plugins = await safe(() => window.jarvis.getPlugins(), []);
+    _sk.remove();
     const byId = (id) => (Array.isArray(plugins) ? plugins.find((p) => p && p.id === id) : null);
     const ka = byId('keep-awake');
     const st = (ka && ka.status) || {};
@@ -881,7 +960,9 @@
   // 7. Горячие клавиши (keys) — settings_get
   async function renderKeys(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Горячие клавиши' }));
+    const _sk = skelGroup(4); pane.appendChild(_sk);
     const s = await safe(() => window.jarvis.getSettings(), {});
+    _sk.remove();
     const group = el('div.dgroup');
     const HKS = [
       ['hotkey', 'Открыть панель', 'Показать или скрыть Jarvis.'],
@@ -903,7 +984,9 @@
   // 8. Интеграция (integration) — integrationGet
   async function renderIntegration(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Интеграция' }));
+    const _sk = skelGroup(3); pane.appendChild(_sk);
     const info = await safe(() => window.jarvis.integrationGet(), null);
+    _sk.remove();
     if (!info) {
       pane.appendChild(el('div.dgroup', null, [drow('Данные недоступны', 'Не удалось получить статус интеграции.', [])]));
       return;
@@ -963,7 +1046,9 @@
   // 9. О программе (about) — getMeta
   async function renderAbout(pane) {
     pane.appendChild(el('div.dtitle', { text: 'О программе' }));
+    const _sk = skelGroup(2); pane.appendChild(_sk);
     const meta = await safe(() => window.jarvis.getMeta(), {});
+    _sk.remove();
     const group = el('div.dgroup');
     // app_meta отдаёт только effortLevels; версии/обновлений в IPC нет (см. отчёт).
     group.appendChild(drow('Версия', 'Jarvis · локальный ассистент.',
@@ -979,6 +1064,231 @@
   }
 
   // карта pane → рендерер
+  /* Под капотом (service) — serviceGet: бэкенд служебного LLM + модель Codex.
+   * Служебный LLM = саммари чатов, заголовки, диктовка, голос-план (НЕ сами
+   * сессии агента). Бэкенд: Авто (claude→codex) / Claude / Codex. */
+  /* Аккаунт Claude — подключить ПОДПИСКУ (claude setup-token → CLAUDE_CODE_OAUTH_TOKEN)
+   * или API-ключ (sk-ant-api…). Подключённая учётка впрыскивается в служебные вызовы
+   * claude. Дизайн — в общей системе настроек: сегмент-переключатель режима,
+   * контекстная подсказка, поле-пароль с валидацией, статус подключения. */
+  async function renderClaudeAccount(pane) {
+    pane.appendChild(el('div.dsection', { text: 'Аккаунт Claude' }));
+    const wrap = el('div.dgroup');
+    wrap.appendChild(skelRow());
+    pane.appendChild(wrap);
+    const a = await safe(() => window.jarvis.claudeAuthGet(), null);
+    wrap.textContent = '';
+    if (!a) {
+      wrap.appendChild(drow('Недоступно', 'Не удалось получить статус аккаунта.', []));
+      return;
+    }
+
+    if (a.connected) {
+      const label = a.mode === 'subscription' ? 'Подписка Claude (Pro/Max)' : 'API-ключ Anthropic';
+      const sub = (a.hint ? a.hint + ' · ' : '') + 'служебные вызовы Claude идут через этот аккаунт';
+      wrap.appendChild(drow(label, sub, el('span.sval.on', { text: 'подключён' })));
+      wrap.appendChild(drow('Управление', 'Отключить и вернуться к собственному логину claude.',
+        button('Отключить', async (b) => {
+          b.disabled = true; b.textContent = 'Отключаю…';
+          await safe(() => window.jarvis.claudeAuthDisconnect(), null);
+          reRenderPane('service');
+        }, 'sm danger')));
+      return;
+    }
+
+    // не подключён → поток подключения
+    let mode = 'key';
+    wrap.appendChild(drow('Подключить аккаунт',
+      'Чтобы служебный LLM работал на твоём аккаунте Anthropic — даже без логина в claude CLI.',
+      segmented([
+        { value: 'key', label: 'API-ключ' },
+        { value: 'subscription', label: 'Подписка' },
+      ], mode, (m) => { mode = m; renderHint(); })));
+
+    const hintBox = el('div.dd', { style: 'padding:2px 16px 10px;line-height:1.5;max-width:none' });
+    function renderHint() {
+      hintBox.textContent = mode === 'key'
+        ? 'Создай ключ: platform.claude.com → Settings → API keys → Create key. Выглядит как sk-ant-api… Оплата — из предоплаченных кредитов (от $5).'
+        : 'Подписка Pro/Max: в терминале выполни  claude setup-token , авторизуйся в браузере и вставь напечатанный токен. Это твой ЛИЧНЫЙ аккаунт (не для общего/хостинга).';
+    }
+    renderHint();
+    wrap.appendChild(hintBox);
+
+    const input = el('input.s2-secret', {
+      type: 'password', placeholder: 'sk-ant-… или токен подписки',
+      autocomplete: 'off', spellcheck: 'false',
+    });
+    const cap = el('span.loadcap', { style: 'display:none' });
+    const connect = button('Подключить', async (b) => {
+      const val = (input.value || '').trim();
+      if (!val) { input.focus(); return; }
+      b.disabled = true; b.textContent = 'Проверяю…';
+      cap.classList.remove('err'); cap.style.display = '';
+      cap.textContent = 'проверяю крошечным запросом…';
+      const r = await safe(() => window.jarvis.claudeAuthConnect(mode, val), null);
+      if (r && r.ok) { reRenderPane('service'); return; }
+      b.disabled = false; b.textContent = 'Подключить';
+      cap.classList.add('err');
+      cap.textContent = (r && r.error) ? r.error : 'не сработало';
+    }, 'sm primary');
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') connect.click(); });
+    wrap.appendChild(el('div.drow', null, [
+      el('div.grow', null, [input, cap]),
+      el('div.dctl', null, [connect]),
+    ]));
+  }
+
+  async function renderService(pane) {
+    pane.appendChild(el('div.dtitle', { text: 'Под капотом' }));
+    const _sk = skelGroup(3); pane.appendChild(_sk);
+    const v = await safe(() => window.jarvis.serviceGet(), null);
+    _sk.remove();
+    const group = el('div.dgroup');
+    if (!v) {
+      group.appendChild(drow('Недоступно', 'Не удалось получить настройки служебного LLM.', []));
+      pane.appendChild(group);
+      return;
+    }
+
+    // 1. Бэкенд: Авто / Claude / Codex
+    const backends = [
+      { value: 'auto', label: 'Авто' },
+      { value: 'claude', label: 'Claude' },
+      { value: 'codex', label: 'Codex' },
+    ];
+    group.appendChild(drow(
+      'Бэкенд служебного LLM',
+      'Что Jarvis использует под капотом для саммари чатов, заголовков, диктовки и голос-плана. ' +
+        'Авто: Claude (haiku) → Codex. Фолбэк всегда включён, чтобы саммари не пропадали.',
+      segmented(backends, v.backend || 'auto', async (b) => {
+        await safe(() => window.jarvis.serviceSetBackend(b), null);
+        reRenderPane('service');
+      }),
+    ));
+
+    // 2. Что доступно сейчас
+    const av = [
+      v.claudeBin ? 'claude ✓' : 'claude ✗',
+      v.codexBin ? 'codex ✓' : 'codex ✗',
+      v.codexSidecar ? 'Codex-SDK ✓' : 'Codex-SDK ✗',
+    ].join('  ·  ');
+    group.appendChild(drow('Доступно', av, []));
+
+    // Кнопка «Протестировать» — короткий запрос через ВЫБРАННЫЙ бэкенд: покажет,
+    // какая модель ответила (прямой ответ, без преамбул) + за сколько.
+    const testOut = el('div');
+    testOut.style.cssText = 'font-size:12.5px;margin:0 16px 13px;font-variant-numeric:tabular-nums;color:var(--muted)';
+    const testBtn = el('button.btn.sm', { text: 'Протестировать' });
+    testBtn.addEventListener('click', async () => {
+      testBtn.disabled = true;
+      testBtn.textContent = 'Тестирую…';
+      testOut.style.color = 'var(--muted)';
+      testOut.textContent = 'жду ответ модели…';
+      const r = await safe(() => window.jarvis.serviceTest(), null);
+      testBtn.disabled = false;
+      testBtn.textContent = 'Протестировать';
+      if (r && r.ok) {
+        testOut.style.color = 'var(--done, #41c98e)';
+        testOut.textContent = '✓ ' + (r.result || '') + (r.ms ? `   ·   ${(r.ms / 1000).toFixed(1)} с` : '');
+      } else {
+        testOut.style.color = '#f26363';
+        testOut.textContent = '✗ ' + ((r && r.error) || 'не ответил');
+      }
+    });
+    group.appendChild(drow('Проверить ответ', 'Шлёт короткий запрос через выбранный бэкенд — покажет, какая модель ответила.', testBtn));
+    group.appendChild(testOut);
+
+    pane.appendChild(group);
+
+    // 2b. Сеть: egress-прокси служебных вызовов. Ключевая причина, по которой Codex
+    // молча уходил в таймаут — он ходит к OpenAI по HTTPS, а в окружении был только
+    // HTTP_PROXY. Здесь можно задать прокси отдельно (применяется к Claude и Codex).
+    pane.appendChild(el('div.dsection', { text: 'Сеть' }));
+    const ng = el('div.dgroup');
+    const proxyInput = el('input.s2-secret', {
+      type: 'text', placeholder: 'http://user:pass@host:port  (пусто — из окружения)',
+      autocomplete: 'off', spellcheck: 'false', value: v.proxy || '',
+    });
+    const proxyCap = el('span.loadcap', { style: 'display:none' });
+    const proxySave = button('Сохранить', async (b) => {
+      const val = (proxyInput.value || '').trim();
+      b.disabled = true; b.textContent = 'Сохраняю…';
+      proxyCap.classList.remove('err'); proxyCap.style.display = '';
+      proxyCap.textContent = 'сохраняю…';
+      const r = await safe(() => window.jarvis.serviceSetProxy(val), null);
+      b.disabled = false; b.textContent = 'Сохранить';
+      if (r && r.ok) {
+        proxyCap.classList.remove('err');
+        proxyCap.textContent = val ? 'прокси сохранён ✓' : 'очищен — снова из окружения';
+      } else {
+        proxyCap.classList.add('err');
+        proxyCap.textContent = (r && r.error) ? r.error : 'не сохранилось';
+      }
+    }, 'sm primary');
+    proxyInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') proxySave.click(); });
+    ng.appendChild(el('div.drow', null, [
+      el('div.grow', null, [
+        el('div.dt', { text: 'Egress-прокси' }),
+        el('div.dd', {
+          text: 'Codex общается с OpenAI по HTTPS — на прокси-сети без HTTPS_PROXY запрос висит до таймаута. '
+            + 'Задай прокси здесь, и он применится и к Claude, и к Codex. Пусто → берётся из окружения процесса.',
+        }),
+        proxyInput, proxyCap,
+      ]),
+      el('div.dctl', null, [proxySave]),
+    ]));
+    pane.appendChild(ng);
+
+    // 3. Аккаунт Claude — подписка (claude setup-token) или API-ключ
+    await renderClaudeAccount(pane);
+
+    // 4. Codex (Python SDK): модель + effort + установка сайдкара
+    pane.appendChild(el('div.dsection', { text: 'Codex (Python SDK)' }));
+    const cg = el('div.dgroup');
+
+    // codexModels приходит уже как [{value,label}] из реального кэша моделей codex
+    const models = (v.codexModels && v.codexModels.length)
+      ? v.codexModels
+      : [{ value: '', label: 'По умолчанию' }];
+    const msel = customSelect(models, v.codexModel || '', async (m) => {
+      await safe(() => window.jarvis.serviceSetModel(m), null);
+    });
+    cg.appendChild(drow('Модель Codex',
+      'Для служебных вызовов через Codex. Список — из codex (включая gpt-5.3-codex-spark). «По умолчанию» — модель из codex config.', msel.node));
+
+    const efforts = (v.efforts || ['low', 'medium', 'high']).map((e) => ({ value: e, label: e }));
+    const esel = customSelect(efforts, v.codexEffort || 'low', async (e) => {
+      await safe(() => window.jarvis.serviceSetEffort(e), null);
+    });
+    cg.appendChild(drow('Глубина рассуждений',
+      'Меньше = быстрее и дешевле. Для саммари хватает low/minimal.', esel.node));
+
+    if (v.codexSidecar) {
+      cg.appendChild(drow('Codex-SDK сайдкар',
+        'Установлен (openai-codex). Авторизация — существующий codex login, ключ API не нужен.',
+        el('span.sval.on', { text: 'на месте' })));
+    } else {
+      const wrap = el('div.dctl', { style: 'flex-direction:column;align-items:flex-end;gap:6px' });
+      const btn = el('button.btn.sm', null, [iconSpan('download'), document.createTextNode('Установить')]);
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.replaceChildren(document.createTextNode('Ставлю…'));
+        await safe(() => window.jarvis.codexInstallSidecar(), null);
+        // финал прилетит codex_install_done → перерисует панель
+      });
+      wrap.appendChild(btn);
+      wrap.appendChild(el('div', { id: 's2-codex-progress' })); // плейсхолдер прогресса
+      cg.appendChild(el('div.drow', null, [
+        el('div.grow', null, [
+          el('div.dt', { text: 'Codex-SDK сайдкар' }),
+          el('div.dd', { text: 'Нужен для бэкенда Codex: Python-venv + openai-codex (тянет codex-бинарь). Ставится один раз.' }),
+        ]),
+        wrap,
+      ]));
+    }
+    pane.appendChild(cg);
+  }
+
   const RENDERERS = {
     general: renderGeneral,
     stt: renderStt,
@@ -987,6 +1297,7 @@
     notify: renderNotify,
     awake: renderAwake,
     keys: renderKeys,
+    service: renderService,
     integration: renderIntegration,
     about: renderAbout,
   };
@@ -994,13 +1305,27 @@
   /* ========================================================================
    * Перерисовать конкретную панель на месте (для live-событий и after-action).
    * ====================================================================== */
+  // Перерисовать вкладку. Рендереры АСИНХРОННЫ (await *Get()): два наложившихся
+  // вызова успевали оба дописать контент в один узел → дубль («почему 2»). Поэтому
+  // сериализуем по вкладке: пока идёт рендер — повторный запрос лишь взводит флаг,
+  // и после текущего мы перерисовываем РОВНО раз (коалесцируем частые события вроде
+  // onAudioState). Узел чистим только в начале каждого витка.
   async function reRenderPane(pane) {
     if (!currentRoot) return;
-    const node = currentRoot.querySelector('#s2-pane-' + pane);
-    if (!node) return;
-    node.textContent = '';
-    const fn = RENDERERS[pane];
-    if (fn) { try { await fn(node); } catch (e) {} }
+    if (renderingPane[pane]) { renderPending[pane] = true; return; }
+    renderingPane[pane] = true;
+    try {
+      do {
+        renderPending[pane] = false;
+        const node = currentRoot.querySelector('#s2-pane-' + pane);
+        if (!node) break;
+        node.textContent = '';
+        const fn = RENDERERS[pane];
+        if (fn) { try { await fn(node); } catch (e) {} }
+      } while (renderPending[pane]);
+    } finally {
+      renderingPane[pane] = false;
+    }
   }
 
   /* ========================================================================
@@ -1024,6 +1349,20 @@
     } catch (e) {}
     // финал установки STT → перерисовать stt-панель
     try { window.jarvis.onSttInstallDone(() => { reRenderPane('stt'); }); } catch (e) {}
+    // прогресс установки Codex-SDK сайдкара → обновить плейсхолдер в панели service
+    try {
+      window.jarvis.onCodexInstallProgress((step) => {
+        if (!currentRoot) return;
+        const h = currentRoot.querySelector('#s2-codex-progress');
+        if (!h) return;
+        h.textContent = '';
+        if (step && step.msg) h.appendChild(el('span.loadcap', { text: step.msg }));
+        const pct = step && typeof step.pct === 'number' ? step.pct : null;
+        if (pct != null) h.appendChild(progressBar(pct));
+      });
+    } catch (e) {}
+    // финал установки Codex-SDK → перерисовать service-панель
+    try { window.jarvis.onCodexInstallDone(() => { reRenderPane('service'); }); } catch (e) {}
     // финал установки wake-моделей → перерисовать wake + stt
     try { window.jarvis.onWakeInstallDone(() => { reRenderPane('wake'); reRenderPane('stt'); }); } catch (e) {}
     // состояние аудио → обновить индикаторы wake-панели (если открыта)
@@ -1090,10 +1429,9 @@
       for (const k in paneNodes) paneNodes[k].classList.toggle('on', k === pane);
       closeAllSelects(null);
       const node = paneNodes[pane];
-      if (node && !node.childNodes.length) {
-        const fn = RENDERERS[pane];
-        if (fn) { try { fn(node); } catch (e) {} }
-      }
+      // через reRenderPane (сериализованный) — чтобы прямой рендер не гонялся с
+      // live-перерисовкой (onAudioState и т.п.) и не задваивал контент вкладки.
+      if (node && !node.childNodes.length) reRenderPane(pane);
     }
 
     // глобальный «клик мимо» закрывает открытые селекты (ставим один раз)
@@ -1104,9 +1442,8 @@
 
     subscribeOnce();
 
-    // отрисовать активную панель сразу
-    const startFn = RENDERERS[activePane];
-    if (startFn && paneNodes[activePane]) { try { startFn(paneNodes[activePane]); } catch (e) {} }
+    // отрисовать активную панель сразу (через сериализованный reRenderPane)
+    reRenderPane(activePane);
   }
 
   window.initSettings2 = initSettings2;

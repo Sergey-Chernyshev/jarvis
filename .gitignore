@@ -5,3 +5,10 @@ target/
 dist/
 src-tauri/gen/
 .worktrees/
+
+# Local session memory / scratch (not for public repo)
+.remember/
+
+# Python bytecode cache
+__pycache__/
+*.pyc

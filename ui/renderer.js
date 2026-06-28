@@ -713,10 +713,13 @@ function gateReply(s) {
   tmuxHintEl.appendChild(document.createTextNode('Сессия не в tmux — управлять из Jarvis нельзя. Запусти в терминале: '));
   const code = document.createElement('code');
   code.className = 'tmuxcmd';
-  code.textContent = `claude --resume ${s.id}`;
+  // команда возобновления зависит от агента: codex resume <id> vs claude --resume <id>.
+  // Раньше было захардкожено «claude --resume» — для codex-сессий это вело не туда.
+  const resumeCmd = s.agent === 'codex' ? `codex resume ${s.id}` : `claude --resume ${s.id}`;
+  code.textContent = resumeCmd;
   code.title = 'Скопировать';
   code.addEventListener('click', () => {
-    navigator.clipboard?.writeText(`claude --resume ${s.id}`);
+    navigator.clipboard?.writeText(resumeCmd);
     showToast('Скопировано');
   });
   tmuxHintEl.appendChild(code);
@@ -2559,6 +2562,7 @@ tabSettingsEl.addEventListener('click', () => {
 
 // кнопка «Открыть настройки» из окна онбординга
 window.jarvis.onGotoSettings(() => setView('settings'));
+window.jarvis.onGotoVoicehist(() => setView('voicehist'));
 
 // Wake-word (инкр. 10): живой индикатор «слушаю»/срабатывание + рефреш после установки
 window.jarvis.onAudioState((p) => {

@@ -32,8 +32,14 @@ fn main() {
         }
         Some("uninstall") => install::uninstall(&print_step),
         Some("status") => print!("{}", install::status_report()),
+        Some("repair") => {
+            // Только интеграция агентов (хуки + шим), без Silero/STT/моделей.
+            install::repair(&print_step);
+            println!("\nИнтеграция починена. Если codex-шим доустановлен — перезапусти");
+            println!("шелл (exec zsh) или открой новую вкладку, чтобы `codex` пошёл через Jarvis.");
+        }
         _ => {
-            eprintln!("Использование: jarvis-setup <install|uninstall|status>");
+            eprintln!("Использование: jarvis-setup <install|uninstall|status|repair>");
             std::process::exit(1);
         }
     }

@@ -14,6 +14,7 @@ mod backend;
 mod claude_bin;
 mod commands_catalog;
 mod convo; // голосовой разговор: снапшот → Haiku-план → скилы → голосовой ответ (п/п-2)
+mod coord; // координация голоса: пока юзер диктует/говорит — уведомления ждут, wake подавлен
 mod daemon;
 mod history;
 mod install;
@@ -165,9 +166,26 @@ fn main() {
             ipc::transcripts_get,
             ipc::transcripts_clear,
             ipc::transcript_delete,
+            ipc::transcript_retranscribe,
             ipc::transcript_enhance,
+            ipc::prompts_get_settings,
+            ipc::prompts_set_smart,
+            ipc::prompts_get,
             ipc::stt_set_engine,
             ipc::stt_test,
+            ipc::voice_history_open,
+            ipc::stt_input_devices,
+            ipc::stt_set_input_device,
+            ipc::service_get,
+            ipc::service_set_backend,
+            ipc::service_set_model,
+            ipc::service_set_effort,
+            ipc::service_set_proxy,
+            ipc::service_test,
+            ipc::claude_auth_get,
+            ipc::claude_auth_connect,
+            ipc::claude_auth_disconnect,
+            onboarding::codex_install_sidecar,
             onboarding::stt_install_whisper,
             onboarding::stt_install_sidecar,
             onboarding::stt_install_qwen,
@@ -178,11 +196,22 @@ fn main() {
             onboarding::wake_install_models,
         ])
         .setup(|app| {
+            // чистый старт: прибить прежние демоны + осиротевшие сайдкары на :8731/:8732
+            // ДО Daemon::new (он спавнит прогрев голоса → silero-сайдкар). В dev нет
+            // single-instance, поэтому без этого повторный запуск плодит зомби.
+            install::prepare_clean_start();
+
             // чистое меню-бар приложение: без иконки в доке
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let d = Arc::new(Daemon::new(app.handle().clone()));
             app.manage(d.clone());
+
+            // Конфиг служебного LLM («Под капотом»: Claude/Codex + модель) — из
+            // настроек в процесс-глобал, чтобы run_service_llm сразу его видел.
+            crate::claude_bin::set_service_config(
+                crate::claude_bin::ServiceConfig::from_settings(&d.settings.load()),
+            );
 
             d.restore_state(); // реестр переживает перезапуск
             windows::create_panel(app.handle())?;
@@ -208,6 +237,27 @@ fn main() {
             // ждёт обхода venv (~21k файлов) — см. install::dir_size_cached.
             std::thread::spawn(|| {
                 let _ = crate::install::model_inventory();
+            });
+
+            // Самопроверка интеграции на старте («тесты под капотом»): лечим дрейф
+            // регистраций хуков — главный баг, из-за которого codex молчит (stale
+            // prod-путь ~/.jarvis после смены на dev-профиль ~/.jarvis-dev) — и
+            // пишем health-снимок в лог. Дёшево и без сети, но в отдельном потоке,
+            // чтобы не тормозить создание окна.
+            std::thread::spawn(|| {
+                crate::install::reconcile_hooks(&|s| {
+                    if !s.msg.is_empty() {
+                        crate::log::line(&format!("[integration] {}: {}", s.phase, s.msg));
+                    }
+                });
+                let h = crate::install::integration_health();
+                crate::log::line(&format!(
+                    "[integration] dir={} hook_bin={} sock={} claude_hooks={} \
+                     codex_present={} codex_hooks={} codex_shim={} → {}",
+                    h.jarvis_dir, h.hook_bin, h.socket, h.claude_hooks_ok,
+                    h.codex_present, h.codex_hooks_ok, h.codex_shim,
+                    if h.ok() { "OK" } else { "ВНИМАНИЕ: интеграция неполная" },
+                ));
             });
 
             if let Err(e) = ipc::register_hotkey(&d, &d.settings.string("hotkey")) {

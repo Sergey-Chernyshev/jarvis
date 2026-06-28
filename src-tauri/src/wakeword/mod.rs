@@ -67,6 +67,15 @@ impl Detector {
         }
         false
     }
+
+    /// Сбросить автомат (на входе в подавление): забываем накопленные consec/cooldown
+    /// и заново прогреваемся, чтобы хвост подавлённой речи не «дозрел» в срабатывание
+    /// сразу после снятия подавления.
+    fn reset(&mut self) {
+        self.seen = 0;
+        self.consec = 0;
+        self.cooldown = 0;
+    }
 }
 
 // ─── Сессия детекции (движок + автомат + гейт + действие) ────────────────────
@@ -147,11 +156,18 @@ struct Inner {
     running: Option<Running>,
 }
 
+/// Гейт подавления wake-детектора: возвращает `true`, когда фразу-побудку слушать
+/// НЕ нужно — юзер диктует/ведёт разговор ИЛИ Jarvis сам озвучивает (иначе детектор
+/// сработал бы на собственную речь пользователя или на эхо TTS).
+pub type WakeGate = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// Сервис wake-word. Живёт в `Arc<WakeWord>` внутри `Daemon`.
 pub struct WakeWord {
     hub: Arc<AudioHub>,
     verifier: Arc<dyn SpeakerVerifier>,
     action: Arc<dyn WakeAction>,
+    /// Гейт подавления (см. `WakeGate`): consumer-поток пропускает кадры, пока true.
+    gate: WakeGate,
     inner: Mutex<Inner>,
     /// Сериализует переходы жизненного цикла (start/stop/tick/set_enabled/
     /// reconfigure), чтобы супервизорный tick не разъехался с IPC-вызовом и не
@@ -165,12 +181,14 @@ impl WakeWord {
         wake_cfg: WakeConfig,
         verify_cfg: VerifyConfig,
         action: Arc<dyn WakeAction>,
+        gate: WakeGate,
     ) -> Arc<WakeWord> {
         let verifier: Arc<dyn SpeakerVerifier> = Arc::from(build_verifier(&verify_cfg));
         let svc = Arc::new(WakeWord {
             hub,
             verifier,
             action,
+            gate,
             inner: Mutex::new(Inner {
                 wake_cfg: wake_cfg.clone(),
                 verify_cfg,
@@ -206,9 +224,10 @@ impl WakeWord {
         let hub = self.hub.clone();
         let verifier = self.verifier.clone();
         let action = self.action.clone();
+        let gate = self.gate.clone();
         let stop_t = stop.clone();
         let join = std::thread::spawn(move || {
-            run_loop(hub, wake_cfg, verify_cfg, verifier, action, stop_t);
+            run_loop(hub, wake_cfg, verify_cfg, verifier, action, gate, stop_t);
         });
         g.running = Some(Running { stop, join: Some(join) });
         crate::log::line("[wake] детектор запущен (always-on)");
@@ -319,6 +338,7 @@ fn run_loop(
     verify_cfg: VerifyConfig,
     verifier: Arc<dyn SpeakerVerifier>,
     action: Arc<dyn WakeAction>,
+    gate: WakeGate,
     stop: Arc<AtomicBool>,
 ) {
     let tap = hub.subscribe_wake();
@@ -336,8 +356,22 @@ fn run_loop(
         action,
         hub: hub.clone(),
     };
+    let mut suppressed = false;
     while !stop.load(Ordering::SeqCst) {
         if let Some(frame) = tap.recv_timeout(Duration::from_millis(200)) {
+            // Подавление: пока юзер диктует/говорит ИЛИ Jarvis озвучивает — НЕ кормим
+            // детектор (иначе он сработал бы на собственную речь юзера или эхо TTS).
+            if (gate)() {
+                if !suppressed {
+                    suppressed = true;
+                    // на входе в подавление сбрасываем накопленный буфер движка И
+                    // автомат, чтобы хвост речи не «дозрел» в срабатывание после снятия.
+                    session.engine.reset();
+                    session.detector.reset();
+                }
+                continue;
+            }
+            suppressed = false;
             session.on_frame(&frame);
         }
     }
@@ -500,7 +534,7 @@ mod tests {
     fn service_start_stop_idempotent() {
         let hub = AudioHub::new(None, None);
         let action: Arc<dyn WakeAction> = Arc::new(CountingAction::new());
-        let svc = WakeWord::new(hub, WakeConfig::default(), VerifyConfig::default(), action);
+        let svc = WakeWord::new(hub, WakeConfig::default(), VerifyConfig::default(), action, std::sync::Arc::new(|| false));
         svc.start();
         svc.start(); // идемпотентно
         svc.stop();
@@ -511,7 +545,7 @@ mod tests {
     fn service_disabled_by_default_not_running() {
         let hub = AudioHub::new(None, None);
         let action: Arc<dyn WakeAction> = Arc::new(CountingAction::new());
-        let svc = WakeWord::new(hub, WakeConfig::default(), VerifyConfig::default(), action);
+        let svc = WakeWord::new(hub, WakeConfig::default(), VerifyConfig::default(), action, std::sync::Arc::new(|| false));
         let st = svc.status();
         assert_eq!(st["enabled"], false);
         assert_eq!(st["running"], false);
@@ -521,7 +555,7 @@ mod tests {
     fn service_set_enabled_toggles_running() {
         let hub = AudioHub::new(None, None);
         let action: Arc<dyn WakeAction> = Arc::new(CountingAction::new());
-        let svc = WakeWord::new(hub, WakeConfig::default(), VerifyConfig::default(), action);
+        let svc = WakeWord::new(hub, WakeConfig::default(), VerifyConfig::default(), action, std::sync::Arc::new(|| false));
         svc.set_enabled(true);
         assert_eq!(svc.status()["running"], true);
         svc.set_enabled(false);

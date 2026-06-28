@@ -574,9 +574,12 @@ impl AudioHub {
         };
         if let Some(t) = threads {
             t.stop.store(true, Ordering::SeqCst);
-            let _ = t.capture.join();
-            // proc-поток завершится, когда native_tx уронится в capture-потоке
-            let _ = t.proc.join();
+            // НЕ джойним под локом: cpal/CoreAudio-teardown может зависнуть, а
+            // `unsubscribe`/`set_device` держат `lifecycle` — это морозило ВЕСЬ
+            // аудио-хаб («бесконечный анализ» на любом движке). Detach: потоки сами
+            // завершатся по stop-флагу (capture уронит native_tx → proc выйдет из recv).
+            // JoinHandle'ы дропаются без join — поток продолжает teardown в фоне.
+            drop(t);
         }
         self.refresh_state();
     }
@@ -660,6 +663,21 @@ impl Drop for WakeTap {
     }
 }
 
+/// Имена доступных устройств ввода (микрофонов) для селектора в настройках.
+/// Дедуп + сортировка; пустой список — если хост не отдал устройства. Совпадает по
+/// имени с тем, что ищет `capture_thread` (точный матч `device.name()`).
+pub fn input_device_names() -> Vec<String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    let mut names: Vec<String> = host
+        .input_devices()
+        .map(|it| it.filter_map(|d| d.name().ok()).collect())
+        .unwrap_or_default();
+    names.sort();
+    names.dedup();
+    names
+}
+
 // ─── cpal capture-поток (вызывается только на своём потоке; Stream !Send) ─────
 
 fn capture_thread(
@@ -675,15 +693,30 @@ fn capture_thread(
     let host = cpal::default_host();
     let dev = match device {
         None => host.default_input_device(),
-        Some(name) => host
-            .input_devices()
-            .ok()
-            .and_then(|mut it| it.find(|d| d.name().map(|n| n == name).unwrap_or(false))),
+        Some(name) => {
+            let found = host
+                .input_devices()
+                .ok()
+                .and_then(|mut it| it.find(|d| d.name().map(|n| n == name).unwrap_or(false)));
+            if found.is_none() {
+                // Выбранное устройство пропало (отключили / неверное имя) — НЕ роняем
+                // захват, а откатываемся на системное по умолчанию (запись продолжит идти).
+                crate::log::line(&format!(
+                    "[audio] устройство «{name}» не найдено (есть: {}) — откат на системное по умолчанию",
+                    input_device_names().join(", ")
+                ));
+            }
+            found.or_else(|| host.default_input_device())
+        }
     };
     let Some(dev) = dev else {
         let _ = ready_tx.send(Err("нет устройства ввода".into()));
         return;
     };
+    crate::log::line(&format!(
+        "[audio] захват с устройства: {}",
+        dev.name().unwrap_or_else(|_| "<неизвестно>".into())
+    ));
     let config = match dev.default_input_config() {
         Ok(c) => c,
         Err(e) => {

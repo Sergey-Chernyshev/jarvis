@@ -939,23 +939,30 @@ pub fn stt_get(app: AppHandle) -> Value {
     let d = Daemon::get(&app);
     let cfg = crate::stt::config::SttConfig::from_settings(&d.settings.load());
     let engine_name = d.stt.engine_name();
-    let whisper_model = crate::util::jarvis_dir()
-        .join("stt")
-        .join("ggml-large-v3-turbo-q5_0.bin")
-        .exists();
-    // Qwen3 сайдкар «готов», если движок отвечает на /health (быстро из кэша).
-    // Для UI — показываем наличие файла модели через быструю HTTP-проверку.
-    let qwen3_sidecar = d.stt.available(); // блокирует не более 3 с (connect timeout)
+    let st = crate::install::status();
+    let whisper_model = st.whisper_model;
+    // Whisper готов, ТОЛЬКО если И модель на диске, И вкомпилирована нативная фича.
+    // Иначе движок — стаб: переключение давало «whisper-native feature не включён».
+    let whisper_native = st.whisper_native_built;
+    let whisper_ready = whisper_model && whisper_native;
+    // Qwen3 «готов» = жив процесс сайдкара (мгновенно). РАНЬШЕ здесь был HTTP /health
+    // (`d.stt.available()`, до 3с connect-timeout) — он морозил панель настроек на
+    // время холодной загрузки модели (особенно сразу после смены движка). Реальную
+    // готовность модели подтверждает сам transcribe (wait_ready), так что для UI
+    // достаточно факта живого процесса — без блокирующего сетевого вызова.
+    let qwen3_sidecar = d.stt.sidecar_pid().is_some();
     // Установлен ли сайдкар на диске (venv + stt-server.py) — отдельно от health:
     // панель предлагает «Установить», если файлов нет, даже когда демон не отвечает.
-    let qwen3_installed = crate::install::status().qwen3_sidecar;
+    let qwen3_installed = st.qwen3_sidecar;
     json!({
         "engine": engine_name,
         "engines": ["whisper-turbo", "qwen3-0.6b", "qwen3-1.7b"],
-        "whisperReady": whisper_model,
+        "whisperReady": whisper_ready,
+        "whisperModel": whisper_model,
+        "whisperNativeBuilt": whisper_native,
         "qwen3Ready": qwen3_sidecar,
         "qwen3Installed": qwen3_installed,
-        "available": qwen3_sidecar || (cfg.engine == "whisper-turbo" && whisper_model),
+        "available": qwen3_sidecar || (cfg.engine == "whisper-turbo" && whisper_ready),
         "hotkey": if cfg.hotkey.is_empty() { "F8".to_string() } else { cfg.hotkey },
     })
 }
@@ -987,6 +994,50 @@ pub fn transcript_delete(app: AppHandle, id: u64) -> Value {
     json!({ "ok": ok })
 }
 
+/// ПЕРЕГЕНЕРИРОВАТЬ распознавание реплики из сохранённого аудио (если анализ дал
+/// ошибку/мусор). Грузит сжатое аудио по id, прогоняет текущим STT-движком, заменяет
+/// текст реплики. Тяжёлое — в blocking-пуле, не морозим IPC. { ok, text } | { ok:false }.
+#[tauri::command]
+pub async fn transcript_retranscribe(app: AppHandle, id: u64) -> Value {
+    let d = Daemon::get(&app);
+    let stt = d.stt.clone();
+    let opts = stt.options();
+    let res = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let pcm = crate::stt::audio_store::load(id)?;
+        let r = stt.transcribe(&pcm, &opts).map_err(|e| format!("распознавание: {e}"))?;
+        Ok(r.text.trim().to_string())
+    })
+    .await;
+    match res {
+        Ok(Ok(text)) if !text.is_empty() => {
+            d.transcripts.update_text(id, &text);
+            json!({ "ok": true, "text": text })
+        }
+        Ok(Ok(_)) => err("распознавание дало пустой результат"),
+        Ok(Err(e)) => err(e),
+        Err(e) => err(format!("задача упала: {e}")),
+    }
+}
+
+/// Умные промпты: настройки (флаг «умный режим») для UI.
+#[tauri::command]
+pub fn prompts_get_settings(app: AppHandle) -> Value {
+    Daemon::get(&app).prompts.settings_json()
+}
+
+/// Включить/выключить умный режим (авто-преобразование надиктовки).
+#[tauri::command]
+pub fn prompts_set_smart(app: AppHandle, on: bool) -> Value {
+    Daemon::get(&app).prompts.set_smart(on);
+    json!({ "ok": true })
+}
+
+/// Библиотека преобразований (встроенные) для UI.
+#[tauri::command]
+pub fn prompts_get() -> Value {
+    crate::stt::prompts::builtin_prompts_json()
+}
+
 /// Преобразовать надиктованный текст через LLM (Haiku). `style`: "prompt" | "clean".
 /// Возвращает { ok, result } или { ok:false, error }. Блокирующее — async-команда.
 #[tauri::command]
@@ -1013,17 +1064,22 @@ pub fn stt_set_engine(app: AppHandle, engine: String) -> Value {
     // qwen-сайдкар уйдёт в бесконечную загрузку с HF (:8732 висит), а whisper
     // вернёт «модель не установлена». Сначала пользователь скачивает модель.
     let st = crate::install::status();
-    let ready = match engine.as_str() {
-        "whisper-turbo" => st.whisper_model,
-        "qwen3-0.6b" | "qwen3-1.7b" => {
-            crate::install::qwen_weights_present(&engine) && st.qwen3_sidecar
-        }
-        _ => false,
-    };
+    let ready = crate::install::stt_engine_ready(
+        &engine,
+        st.whisper_model,
+        st.whisper_native_built,
+        crate::install::qwen_weights_present(&engine),
+        st.qwen3_sidecar,
+    );
     if !ready {
-        return err(format!(
-            "{engine}: модель не скачана — сначала скачайте её в разделе «Модели»"
-        ));
+        // Честная, конкретная ошибка под каждый режим отказа (правда по модели).
+        let msg = if engine == "whisper-turbo" && st.whisper_model && !st.whisper_native_built {
+            "whisper-turbo: модель скачана, но нужна нативная сборка \
+             (--features whisper-native) — пересоберите приложение".to_string()
+        } else {
+            format!("{engine}: модель не скачана — сначала скачайте её в разделе «Модели»")
+        };
+        return err(msg);
     }
     let d = Daemon::get(&app);
     let mut patch = serde_json::Map::new();
@@ -1034,6 +1090,263 @@ pub fn stt_set_engine(app: AppHandle, engine: String) -> Value {
     let cfg = crate::stt::config::SttConfig::from_settings(&d.settings.load());
     d.stt.set_engine(cfg);
     json!({ "ok": true, "restart": false })
+}
+
+/// Открыть панель и переключить на вкладку «История голоса» (клик по карточке
+/// «Услышал»). Зеркалит onboarding_open_settings: show_panel + событие в main.
+#[tauri::command]
+pub fn voice_history_open(app: AppHandle) {
+    use tauri::Emitter;
+    crate::windows::show_panel(&Daemon::get(&app));
+    let _ = app.emit_to("main", "goto-voicehist", ());
+}
+
+/// Список устройств ввода (микрофоны) + текущее выбранное — для селектора в
+/// настройках. `current` = null → системное устройство по умолчанию.
+#[tauri::command]
+pub fn stt_input_devices(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    let cfg = crate::stt::config::SttConfig::from_settings(&d.settings.load());
+    json!({
+        "devices": crate::stt::hub::input_device_names(),
+        "current": cfg.audio_device,
+    })
+}
+
+/// Выбрать устройство ввода. `name` пустой/null → системное по умолчанию.
+/// Пишем в `settings.stt.audioDevice` и ГОРЯЧО применяем к AudioHub. Применение —
+/// в блокирующем потоке: рестарт cpal-захвата (join старого потока + открытие нового
+/// устройства CoreAudio) занимает сотни мс, и синхронно он морозил UI при выборе.
+#[tauri::command]
+pub fn stt_set_input_device(app: AppHandle, name: Option<String>) -> Value {
+    let d = Daemon::get(&app);
+    let name = name.filter(|s| !s.trim().is_empty());
+    let mut patch = serde_json::Map::new();
+    patch.insert(
+        "audioDevice".into(),
+        name.clone().map(Value::String).unwrap_or(Value::Null),
+    );
+    d.settings.set_stt(patch);
+    // Команда возвращается МГНОВЕННО: тяжёлый рестарт захвата (cpal teardown + open
+    // нового CoreAudio-устройства, сотни мс) уходит в blocking-пул fire-and-forget.
+    // Раньше синхронный вызов морозил UI на время переключения.
+    let audio = d.audio.clone();
+    tauri::async_runtime::spawn_blocking(move || audio.set_device(name));
+    json!({ "ok": true })
+}
+
+/* ============== Раздел «Под капотом»: служебный LLM (Claude/Codex) ============== */
+
+/// Текущая конфигурация служебного LLM + доступность бэкендов — для рендера
+/// раздела «Под капотом» (бэкенд, модель Codex, effort, кнопка установки SDK).
+#[tauri::command]
+pub fn service_get(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    let cfg = crate::claude_bin::ServiceConfig::from_settings(&d.settings.load());
+    let st = crate::install::status();
+    let backend = match cfg.backend {
+        crate::claude_bin::ServiceBackend::Claude => "claude",
+        crate::claude_bin::ServiceBackend::Codex => "codex",
+        crate::claude_bin::ServiceBackend::Auto => "auto",
+    };
+    json!({
+        "backend": backend,
+        "codexModel": cfg.codex_model,
+        "codexEffort": cfg.codex_effort,
+        // Реальные модели из ~/.codex/models_cache.json (включая spark/mini).
+        "codexModels": codex_models_list(),
+        // minimal убран: часть моделей (spark) его не поддерживают (400).
+        "efforts": ["low", "medium", "high"],
+        "codexSidecar": st.codex_sdk_sidecar, // SDK-сайдкар установлен
+        "claudeBin": crate::claude_bin::resolve_claude_bin().is_some(),
+        "codexBin": crate::backend::codex::resolve_codex_bin().is_some(),
+        // egress-прокси служебных вызовов (пусто → наследуется из env процесса)
+        "proxy": cfg.proxy,
+    })
+}
+
+/// Реальные модели Codex из ~/.codex/models_cache.json для пикера: [{value,label}].
+/// Первый элемент — «По умолчанию» (пустой slug). review-only модели отфильтрованы.
+/// Ошибка/нет файла → только «По умолчанию» + пара известных slug'ов как фолбэк.
+fn codex_models_list() -> Vec<Value> {
+    let mut out = vec![json!({ "value": "", "label": "По умолчанию" })];
+    let path = crate::util::home_dir().join(".codex/models_cache.json");
+    if let Ok(txt) = std::fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+            if let Some(arr) = v.get("models").and_then(Value::as_array) {
+                for m in arr {
+                    let slug = m.get("slug").and_then(Value::as_str).unwrap_or("");
+                    if slug.is_empty() || slug.contains("review") {
+                        continue;
+                    }
+                    let label = m
+                        .get("display_name")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(slug);
+                    out.push(json!({ "value": slug, "label": format!("{label} ({slug})") }));
+                }
+            }
+        }
+    }
+    if out.len() == 1 {
+        for s in ["gpt-5.5", "gpt-5.4"] {
+            out.push(json!({ "value": s, "label": s }));
+        }
+    }
+    out
+}
+
+/// Применить блок `service` из настроек к процесс-глобальному конфигу служебного
+/// LLM (чтобы свободные run_service_llm сразу увидели смену без перезапуска).
+fn apply_service_config(d: &std::sync::Arc<Daemon>) {
+    crate::claude_bin::set_service_config(crate::claude_bin::ServiceConfig::from_settings(
+        &d.settings.load(),
+    ));
+}
+
+#[tauri::command]
+pub fn service_set_backend(app: AppHandle, backend: String) -> Value {
+    if !["auto", "claude", "codex"].contains(&backend.as_str()) {
+        return err(format!("неизвестный бэкенд: {backend}"));
+    }
+    let d = Daemon::get(&app);
+    let mut p = serde_json::Map::new();
+    p.insert("backend".into(), Value::String(backend));
+    d.settings.set_block("service", p);
+    apply_service_config(&d);
+    ok()
+}
+
+#[tauri::command]
+pub fn service_set_model(app: AppHandle, model: String) -> Value {
+    let d = Daemon::get(&app);
+    let mut p = serde_json::Map::new();
+    p.insert("codexModel".into(), Value::String(model));
+    d.settings.set_block("service", p);
+    apply_service_config(&d);
+    ok()
+}
+
+#[tauri::command]
+pub fn service_set_effort(app: AppHandle, effort: String) -> Value {
+    if !["minimal", "low", "medium", "high", "xhigh"].contains(&effort.as_str()) {
+        return err(format!("неизвестный effort: {effort}"));
+    }
+    let d = Daemon::get(&app);
+    let mut p = serde_json::Map::new();
+    p.insert("codexEffort".into(), Value::String(effort));
+    d.settings.set_block("service", p);
+    apply_service_config(&d);
+    ok()
+}
+
+/// Задать egress-прокси служебных вызовов (Codex по HTTPS требует HTTPS_PROXY —
+/// без него на прокси-сети запрос висит в таймаут). Пустая строка → стереть
+/// настройку, прокси снова наследуется из env. Тримминг + лёгкая валидация схемы.
+#[tauri::command]
+pub fn service_set_proxy(app: AppHandle, proxy: String) -> Value {
+    let proxy = proxy.trim().to_string();
+    if !proxy.is_empty()
+        && !proxy.starts_with("http://")
+        && !proxy.starts_with("https://")
+        && !proxy.starts_with("socks5://")
+    {
+        return err("прокси должен начинаться с http://, https:// или socks5://");
+    }
+    let d = Daemon::get(&app);
+    let mut p = serde_json::Map::new();
+    p.insert("proxy".into(), Value::String(proxy));
+    d.settings.set_block("service", p);
+    apply_service_config(&d);
+    ok()
+}
+
+/// Проверка служебного LLM: короткий запрос через ВЫБРАННЫЙ бэкенд (run_service_llm),
+/// прямой ответ — какая модель отвечает. Для кнопки «Протестировать» в «Под капотом».
+#[tauri::command]
+pub async fn service_test() -> Value {
+    let prompt = "Ответь ОДНОЙ строкой: какая ты модель — точное короткое название \
+                  (например «Claude Haiku 4.5» или «GPT-5.3 Codex»). Только название модели, \
+                  без преамбул, без пояснений, без слов вроде «сейчас скажу».";
+    let started = std::time::Instant::now();
+    match crate::claude_bin::run_service_llm(prompt, std::time::Duration::from_secs(25)).await {
+        Some(s) => json!({
+            "ok": true,
+            "result": crate::util::one_line(s.trim()),
+            "ms": started.elapsed().as_millis() as u64,
+        }),
+        None => err("нет ответа / таймаут"),
+    }
+}
+
+/* --- Аккаунт Claude: подключить подписку (OAuth-токен) или API-ключ --- */
+
+/// Состояние подключения аккаунта Claude для раздела «Под капотом».
+#[tauri::command]
+pub fn claude_auth_get(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    let cfg = crate::claude_bin::ServiceConfig::from_settings(&d.settings.load());
+    let connected = !cfg.claude_auth_mode.is_empty() && !cfg.claude_secret.is_empty();
+    // маска секрета: префикс…суффикс (ASCII — sk-ant-…/токены), без утечки
+    let s = &cfg.claude_secret;
+    let hint = if s.len() > 18 {
+        format!("{}…{}", &s[..10], &s[s.len() - 4..])
+    } else if connected {
+        "••••".to_string()
+    } else {
+        String::new()
+    };
+    json!({
+        "connected": connected,
+        "mode": cfg.claude_auth_mode, // "key" | "subscription" | ""
+        "hint": hint,
+        "claudeBin": crate::claude_bin::resolve_claude_bin().is_some(),
+    })
+}
+
+/// Подключить аккаунт Claude: валидируем крошечным `claude -p`, при успехе пишем
+/// в settings.json (0600) и обновляем процесс-конфиг. mode ∈ key|subscription.
+#[tauri::command]
+pub async fn claude_auth_connect(app: AppHandle, mode: String, value: String) -> Value {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return err("пустой ключ/токен");
+    }
+    if mode != "key" && mode != "subscription" {
+        return err(format!("неизвестный режим: {mode}"));
+    }
+    if crate::claude_bin::resolve_claude_bin().is_none() {
+        return err("claude не найден в PATH — установи Claude Code");
+    }
+    let valid = crate::claude_bin::validate_claude_auth(
+        &mode,
+        &value,
+        std::time::Duration::from_secs(40),
+    )
+    .await;
+    if !valid {
+        return err("не сработало: проверь ключ/токен (или claude недоступен)");
+    }
+    let d = Daemon::get(&app);
+    let mut p = serde_json::Map::new();
+    p.insert("claudeAuthMode".into(), Value::String(mode));
+    p.insert("claudeSecret".into(), Value::String(value));
+    d.settings.set_block("service", p);
+    apply_service_config(&d);
+    ok()
+}
+
+/// Отключить аккаунт Claude — снова используется собственный логин `claude` CLI.
+#[tauri::command]
+pub fn claude_auth_disconnect(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    let mut p = serde_json::Map::new();
+    p.insert("claudeAuthMode".into(), Value::String(String::new()));
+    p.insert("claudeSecret".into(), Value::String(String::new()));
+    d.settings.set_block("service", p);
+    apply_service_config(&d);
+    ok()
 }
 
 /// Тест диктовки: ~4 с захвата с микрофона → транскрипция активным движком.

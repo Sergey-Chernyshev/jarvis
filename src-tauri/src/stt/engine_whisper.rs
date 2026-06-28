@@ -134,6 +134,14 @@ impl SttEngine for WhisperEngine {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_language(Some(&lang));
         params.set_translate(translate);
+        // Anti-hallucination для коротких PTT-клипов (Tier 1, см. ресёрч): на тишине/
+        // шуме Whisper сваливается в языковую модель и печатает субтитры-фразы.
+        params.set_no_context(true); // клипы независимы — не «засевать» след. галлюцинацией
+        params.set_temperature(0.0); // без сэмплинга
+        params.set_temperature_inc(0.2); // fallback против повторов
+        params.set_logprob_thold(-1.0); // низкий avg logprob → провал декода
+        params.set_entropy_thold(2.6); // аналог compression_ratio: ловит повторы
+        params.set_suppress_blank(true);
         params.set_print_progress(false);
         params.set_print_special(false);
         params.set_print_realtime(false);
@@ -144,13 +152,20 @@ impl SttEngine for WhisperEngine {
         let mut text_parts: Vec<String> = Vec::new();
         let mut segments: Vec<SttSeg> = Vec::new();
 
+        // Tier 2: посегментный фильтр. no_speech_probability выше порога → модель
+        // «придумала» текст на не-речи; блок-фраза → известная галлюцинация.
+        const NO_SPEECH_MAX: f32 = 0.6;
         for seg in state.as_iter() {
+            if seg.no_speech_probability() > NO_SPEECH_MAX {
+                continue;
+            }
             let seg_text = seg.to_str_lossy().map_err(|e| format!("whisper: seg text: {e}"))?;
             let seg_text = seg_text.trim().to_string();
-            if !seg_text.is_empty() {
-                text_parts.push(seg_text.clone());
-                segments.push(SttSeg { text: seg_text, lang: None });
+            if seg_text.is_empty() || crate::stt::dehallucinate::is_hallucination(&seg_text) {
+                continue;
             }
+            text_parts.push(seg_text.clone());
+            segments.push(SttSeg { text: seg_text, lang: None });
         }
 
         let text = text_parts.join(" ");

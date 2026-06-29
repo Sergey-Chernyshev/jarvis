@@ -531,7 +531,7 @@
 #settings2 .snav .grp { font:600 9.5px/1 var(--s2-font); letter-spacing:.08em; text-transform:uppercase; color:var(--faint,#55555c); padding:10px 10px 5px; }
 
 /* ── Детальная панель ────────────────────────────────────────────────── */
-#settings2 .detail { flex:1; overflow-y:auto; padding:18px 24px 30px; min-height:0; min-width:0; }
+#settings2 .detail { flex:1; overflow-y:auto; padding:18px 24px 88px; min-height:0; min-width:0; }
 #settings2 .detail::-webkit-scrollbar { width:0; }
 #settings2 .dnav { display:inline-flex; gap:1px; padding:3px; border-radius:8px; background:rgba(255,255,255,0.05); border:1px solid var(--border, rgba(255,255,255,0.08)); margin-bottom:18px; }
 #settings2 .dnav button { appearance:none; border:0; background:transparent; color:var(--muted,#76767e); width:26px; height:22px; border-radius:6px; cursor:default; font-size:13px; display:grid; place-items:center; }
@@ -676,17 +676,13 @@
 #settings2 .npvdot { width:8px; height:8px; border-radius:50%; background:#41c98e; flex:none; }
 #settings2 .npvtitle { font-size:14px; font-weight:600; color:#f0f0f2; flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 #settings2 .npvx { width:26px; height:26px; border-radius:50%; flex:none; display:grid; place-items:center; color:#d9d9de; font-size:11px; border:2.5px solid rgba(255,255,255,0.16); }
-#settings2 .npvmeta { margin-top:6px; font-size:11.5px; color:#8a8a93; display:flex; gap:7px; flex-wrap:wrap; align-items:center; }
+#settings2 .npvmeta { margin:6px 16px 0 18px; font-size:11.5px; color:#8a8a93; display:flex; gap:7px; flex-wrap:wrap; align-items:center; }
 #settings2 .npvmeta:empty { display:none; }
 #settings2 .npvmeta .br { color:#7f8da3; font-family:"SF Mono", ui-monospace, Menlo, monospace; font-size:11px; }
 #settings2 .npvmeta .md { color:#a9966f; }
 #settings2 .npvmeta .ef { font:600 9.5px/1 "SF Mono", ui-monospace, Menlo, monospace; color:#9a9aa2; border:1px solid rgba(255,255,255,0.12); border-radius:5px; padding:3px 5px; }
 #settings2 .npvmeta .sp { color:#46464d; }
-#settings2 .npvbody { font-size:12.5px; line-height:1.45; color:#9a9aa2; margin-top:7px; }
-#settings2 .npvstate { display:flex; justify-content:center; gap:6px; margin:0 0 16px; }
-#settings2 .npvst { appearance:none; background:transparent; border:1px solid var(--border, rgba(255,255,255,0.08)); border-radius:999px; color:var(--muted,#76767e); font:500 11.5px/1 var(--s2-font); padding:6px 12px; cursor:default; display:flex; align-items:center; gap:6px; }
-#settings2 .npvst.on { border-color:var(--working,#6ca0ff); color:var(--text,#e7e7ea); }
-#settings2 .npvst .sd { width:7px; height:7px; border-radius:50%; }
+#settings2 .npvbody { font-size:12.5px; line-height:1.45; color:#9a9aa2; margin:7px 16px 0 18px; }
 `;
     const style = document.createElement('style');
     style.id = 'settings2-style';
@@ -1062,24 +1058,19 @@
     const nf = Object.assign({ content: {}, ttlSec: 8 }, s.notify || {});
     const content = Object.assign({ branch: true, model: false, effort: false, time: false }, nf.content || {});
 
-    // ── живое превью карточки ──
+    // ── живое превью карточки (та же вёрстка, что у реального тоста) ──
     const SAMPLE = { br: '⎇ feat/voice-settings', md: 'Opus 4.8', ef: 'low', time: '14:32' };
-    const STATES = {
-      done: { dot: '#41c98e', body: 'Готово · изменено 3 файла, тесты прошли.' },
-      wait: { dot: '#f2a33c', body: 'Нужно подтверждение: применить миграцию схемы?' },
-      limit: { dot: '#8b7ec8', body: 'Лимит достигнут · продолжит в 14:30.' },
-    };
-    let pvState = 'done';
-    const pvDot = el('span.npvdot');
     const pvMeta = el('div.npvmeta');
-    const pvBody = el('div.npvbody');
     const pvCard = el('div.npvcard', null, [
-      el('div.row', null, [pvDot, el('span.npvtitle', { text: 'checkout-flow' }), el('span.npvx', { text: '✕' })]),
-      pvMeta, pvBody,
+      el('div.row', null, [
+        el('span.npvdot'),
+        el('span.npvtitle', { text: 'checkout-flow' }),
+        el('span.npvx', { text: '✕' }),
+      ]),
+      pvMeta,
+      el('div.npvbody', { text: 'Готово · изменено 3 файла, тесты прошли.' }),
     ]);
     const renderPreview = () => {
-      pvDot.style.background = STATES[pvState].dot;
-      pvBody.textContent = STATES[pvState].body;
       pvMeta.textContent = '';
       const segs = [];
       if (content.branch) segs.push(['br', SAMPLE.br]);
@@ -1091,21 +1082,7 @@
         pvMeta.appendChild(el('span' + (cls ? '.' + cls : ''), { text: txt }));
       });
     };
-    const stBtn = (key, label, color) => {
-      const b = el('button.npvst' + (pvState === key ? '.on' : ''), null,
-        [el('span.sd', { style: 'background:' + color }), document.createTextNode(label)]);
-      b.addEventListener('click', () => {
-        pvState = key;
-        for (const x of pane.querySelectorAll('.npvst')) x.classList.remove('on');
-        b.classList.add('on');
-        renderPreview();
-      });
-      return b;
-    };
     pane.appendChild(el('div.npvbox', null, [el('span.tag', { text: 'превью' }), pvCard]));
-    pane.appendChild(el('div.npvstate', null, [
-      stBtn('done', 'Готово', '#41c98e'), stBtn('wait', 'Ждёт', '#f2a33c'), stBtn('limit', 'Лимит', '#8b7ec8'),
-    ]));
 
     const saveContent = (k, on) => {
       content[k] = on;

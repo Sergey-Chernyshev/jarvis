@@ -11,6 +11,14 @@ const chatDotEl = document.getElementById('chatDot');
 const settingsEl = document.getElementById('settings');
 const queryEl = document.getElementById('query');
 const replyEl = document.getElementById('reply');
+
+// Фокус в редактируемом поле? Тогда нативные текст-комбо (⌘⌫ = удалить до начала
+// строки) НЕ должны перехватываться глобальными хоткеями приложения — иначе ⌘⌫ при
+// печати в чате стирал завершённые сессии (clearFinished). См. обработчик ниже.
+function editingText(el = document.activeElement) {
+  if (!el) return false;
+  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable === true;
+}
 const footerLeftEl = document.getElementById('footerLeft');
 const tabSessionsEl = document.getElementById('tabSessions');
 const tabSettingsEl = document.getElementById('tabSettings');
@@ -3607,6 +3615,9 @@ window.addEventListener('keydown', async (e) => {
   }
 
   if (e.metaKey && e.key === 'Backspace') { // ⌘⌫ — очистить завершённые
+    // НЕ в поле ввода: иначе ⌘⌫ (удалить до начала строки) при печати в чате
+    // молча сносил все Done/Idle сессии. В поле — отдаём комбо нативному редактору.
+    if (editingText()) return;
     e.preventDefault();
     window.jarvis.clearFinished();
     return;

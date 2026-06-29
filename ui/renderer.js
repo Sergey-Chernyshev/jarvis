@@ -767,9 +767,12 @@ const qHeaderEl = document.getElementById('qHeader');
 const qTitleEl = document.getElementById('qTitle');
 const qFootEl = document.getElementById('qFoot');
 let qSessionId = null;
-let qData = null; // первый вопрос опроса
+let qData = null;        // текущий вопрос визарда
 let qSel = 0;
 let qChosen = new Set();
+let qItems = [];         // все вопросы опроса (s.question.questions)
+let qIdx = 0;            // индекс текущего вопроса
+let qAnswers = [];       // собранные выборы по каждому вопросу: number[][]
 
 function keycap(text) {
   const k = document.createElement('span');
@@ -779,14 +782,21 @@ function keycap(text) {
 }
 
 function openQuestion(s) {
-  const q = s.question.questions[0];
   qSessionId = s.id;
-  qData = q;
-  qSel = 0;
-  qChosen = new Set();
+  qItems = (s.question && s.question.questions) || [];
+  qIdx = 0;
+  qAnswers = qItems.map(() => []);
+  loadQ();
   setView('question');
   renderQuestion();
   qOptsEl.focus?.();
+}
+
+// Загрузить текущий вопрос визарда в общее состояние рендера.
+function loadQ() {
+  qData = qItems[qIdx] || null;
+  qSel = 0;
+  qChosen = new Set(qAnswers[qIdx] || []);
 }
 
 let activeQOpts = qOptsEl; // контейнер опций: полноэкранный qview или слайд-овер вариантов
@@ -856,6 +866,9 @@ function renderQuestion() {
   qHeaderEl.textContent = qData.header || '';
   qHeaderEl.hidden = !qData.header;
   qTitleEl.textContent = qData.question;
+  const prog = document.getElementById('qProgress');
+  if (qItems.length > 1) { prog.textContent = `${qIdx + 1}/${qItems.length}`; prog.hidden = false; }
+  else prog.hidden = true;
   activeQOpts = qOptsEl;
   renderQOpts(qOptsEl, qFootEl);
 }
@@ -872,17 +885,38 @@ function activateQ() {
   else submitQ();
 }
 
-async function submitQ() {
-  const indices = qData.multiSelect
+// Записать выбор текущего вопроса и пойти дальше (или отправить весь опрос).
+function commitCurrentQ() {
+  const sel = qData.multiSelect
     ? [...qChosen].sort((a, b) => a - b)
     : [qSel + 1];
-  if (!indices.length) { showToast('Отметь хотя бы один вариант'); return; }
+  if (!sel.length) { showToast('Отметь хотя бы один вариант'); return false; }
+  qAnswers[qIdx] = sel;
+  return true;
+}
+
+function advanceQ() {
+  if (qIdx + 1 < qItems.length) {
+    qIdx += 1;
+    loadQ();
+    if (varOpen) renderVarPanel(curSession()); else renderQuestion();
+  } else {
+    finalizeQ();
+  }
+}
+
+async function finalizeQ() {
   const sid = qSessionId;
-  const res = await window.jarvis.answerQuestion(sid, { indices, multiSelect: qData.multiSelect });
+  const res = await window.jarvis.answerQuestion(sid, { answers: qAnswers });
   if (res.ok) {
-    if (varOpen) closeVarPanel(); // отвечали из слайд-овера — закрываем, остаёмся в чате
+    if (varOpen) closeVarPanel();
     else { setView('list'); render(); }
   } else showToast(res.error || 'Не удалось ответить');
+}
+
+// Совместимость с существующими обработчиками (Enter / кнопка «Отправить»).
+function submitQ() {
+  if (commitCurrentQ()) advanceQ();
 }
 
 document.getElementById('qBack').addEventListener('click', () => { setView('list'); render(); });
@@ -1012,18 +1046,19 @@ function renderVarBtn(s) {
 }
 
 function renderVarPanel(s) {
-  const q = questionOf(s);
+  const q = qItems[qIdx];
   if (!q) { closeVarPanel(); return; }
   qData = q;
-  qpHeaderEl.textContent = q.header || '';
-  qpHeaderEl.hidden = !q.header;
+  const prog = qItems.length > 1 ? ` (${qIdx + 1}/${qItems.length})` : '';
+  qpHeaderEl.textContent = (q.header || '') + prog;
+  qpHeaderEl.hidden = !q.header && !prog;
   qpTitleEl.textContent = q.question;
   activeQOpts = qpOptsEl;
   renderQOpts(qpOptsEl, qpFootEl);
   if (q.multiSelect) { // мульти-выбор: клик-сабмит (на полноэкранном экране это Enter)
     const send = document.createElement('button');
     send.className = 'qp-send';
-    send.textContent = 'Отправить';
+    send.textContent = qIdx + 1 < qItems.length ? 'Далее' : 'Отправить';
     send.addEventListener('click', submitQ);
     qpFootEl.appendChild(send);
   }
@@ -1031,12 +1066,12 @@ function renderVarPanel(s) {
 
 function openVarPanel() {
   const s = curSession();
-  const q = questionOf(s);
-  if (!q) return;
+  if (!s || !s.question || !s.question.questions || !s.question.questions.length) return;
   qSessionId = s.id;
-  qData = q;
-  qSel = 0;
-  qChosen = new Set();
+  qItems = s.question.questions;
+  qIdx = 0;
+  qAnswers = qItems.map(() => []);
+  loadQ();
   varOpen = true;
   qWrap.hidden = false;
   varBtn.classList.add('open');

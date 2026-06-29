@@ -224,6 +224,36 @@ pub fn wake_install_models(app: AppHandle) {
     });
 }
 
+/// Установить голос Silero (venv + torch/deps + модель) по запросу из раздела
+/// «Модели». Переиспользует UI-события STT: прогресс → `stt_install_progress`,
+/// финал → `stt_install_done` (kind=silero) — строка модели «silero» в той же панели.
+#[tauri::command]
+pub fn voice_install_silero(app: AppHandle) {
+    let d = crate::daemon::Daemon::get(&app);
+    let proxy = {
+        let s = d.settings.string("proxy");
+        (!s.is_empty()).then_some(s)
+    };
+    std::thread::spawn(move || {
+        let r = install::install_silero(
+            &|step: Step| {
+                let _ = app.emit_to("main", "stt_install_progress", step);
+            },
+            proxy.as_deref(),
+        );
+        let _ = app.emit_to(
+            "main",
+            "stt_install_done",
+            serde_json::json!({
+                "kind": "silero",
+                "ok": r.is_ok(),
+                "error": r.err(),
+                "ready": install::status().silero,
+            }),
+        );
+    });
+}
+
 /// Скачать веса Qwen3 (`qwen3-0.6b`/`qwen3-1.7b`) в локальную папку сайдкара —
 /// гибридной загрузкой (HF через прокси, CDN напрямую). Сайдкар затем берёт их
 /// локально, без похода в HF. Фоном, fail-safe; прогресс → `stt_install_progress`,

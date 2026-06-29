@@ -145,20 +145,20 @@ pub async fn rename_window(pane: &str, name: &str) -> Result<(), String> {
     tmux_j(&["rename-window", "-t", pane, name]).await.map(|_| ())
 }
 
-/// Ответ на AskUserQuestion клавишами (механика проверена на живом пикере):
-/// single-select — цифра выбирает и подтверждает сразу; multiSelect — цифры
-/// тогглят чекбоксы, Right ведёт на Submit-таб, там Review-экран, где «1» = Submit.
-pub async fn answer_question(pane: &str, indices: &[u32], multi: bool) -> Result<(), String> {
-    if multi {
-        for n in indices {
-            tmux_j(&["send-keys", "-t", pane, &n.to_string()]).await?;
-            sleep(Duration::from_millis(150)).await;
+/// Ответ на вопрос(ы) клавишами в пану. Раскладку строит `answer_keys`
+/// (чистая, протестирована); здесь — только проигрывание с задержками.
+pub async fn answer_question(
+    pane: &str,
+    agent: crate::backend::Agent,
+    q: &crate::model::Question,
+    answers: &[Vec<u32>],
+) -> Result<(), String> {
+    let keys = answer_keys(agent, q, answers);
+    for (i, k) in keys.iter().enumerate() {
+        if i > 0 {
+            sleep(Duration::from_millis(140)).await; // дать пикеру перерисоваться
         }
-        tmux_j(&["send-keys", "-t", pane, "Right"]).await?;
-        sleep(Duration::from_millis(200)).await;
-        tmux_j(&["send-keys", "-t", pane, "1"]).await?; // Review: «1. Submit answers»
-    } else {
-        tmux_j(&["send-keys", "-t", pane, &indices[0].to_string()]).await?;
+        tmux_j(&["send-keys", "-t", pane, k]).await?;
     }
     Ok(())
 }

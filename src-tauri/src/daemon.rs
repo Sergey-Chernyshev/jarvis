@@ -581,20 +581,18 @@ impl Daemon {
                     .max_by_key(|(_, s)| s.updated_at)
                     .map(|(id, _)| id.clone())
             })
-            .map(|sid| (sid.clone(), sessions.get(&sid).and_then(|s| s.question.as_ref())
-                .map(|q| q.questions.first().map(|x| x.multi_select).unwrap_or(false)).unwrap_or(false)))
         };
-        let Some((sid, multi)) = target else {
+        let Some(sid) = target else {
             crate::log::line(&format!("[select] ⌘⌥{n}: нет активного вопроса"));
             return;
         };
-        crate::log::line(&format!("[select] ⌘⌥{n} → sid={} multi={multi}", ellipsize(&sid, 8)));
+        crate::log::line(&format!("[select] ⌘⌥{n} → sid={}", ellipsize(&sid, 8)));
         let h = self.app.clone();
         tauri::async_runtime::spawn(async move {
             let _ = crate::ipc::question_answer(
                 h,
                 sid,
-                serde_json::json!({ "indices": [n], "multiSelect": multi }),
+                serde_json::json!({ "answers": [[n]] }),
             )
             .await;
         });

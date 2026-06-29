@@ -487,7 +487,9 @@ pub async fn terminal_ping(app: AppHandle, session_id: String) -> Value {
     }
 }
 
-/// Ответ на AskUserQuestion клавишами в пану.
+/// Ответ на AskUserQuestion/пикер клавишами в пану.
+/// `choice` = `{ answers: number[][] }` (answers[i] — опции 1-based вопроса i).
+/// Обратная совместимость: `{ indices, multiSelect }` → `answers = [indices]`.
 #[tauri::command]
 pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) -> Value {
     let d = Daemon::get(&app);
@@ -497,22 +499,46 @@ pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) 
     if !tmux::pane_alive(&pane).await {
         return err("Пана сессии не отвечает");
     }
-    let indices: Vec<u32> = choice
-        .get("indices")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_u64)
-                .filter(|&n| (1..=9).contains(&n))
-                .map(|n| n as u32)
-                .collect()
-        })
-        .unwrap_or_default();
-    if indices.is_empty() {
+
+    // парсинг массива выборов вопроса в Vec<u32> (1-based, >0)
+    let parse_row = |v: &Value| -> Vec<u32> {
+        v.as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_u64)
+                    .filter(|&n| n >= 1)
+                    .map(|n| n as u32)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // новый контракт answers[][] либо старый indices[] → [indices]
+    let answers: Vec<Vec<u32>> = if let Some(rows) = choice.get("answers").and_then(Value::as_array) {
+        rows.iter().map(parse_row).collect()
+    } else if let Some(idx) = choice.get("indices") {
+        vec![parse_row(idx)]
+    } else {
+        Vec::new()
+    };
+
+    if answers.is_empty() || answers.iter().all(Vec::is_empty) {
         return err("Пустой выбор");
     }
-    let multi = choice.get("multiSelect").and_then(Value::as_bool).unwrap_or(false);
-    match tmux::answer_question(&pane, &indices, multi).await {
+    // валидация: на каждый вопрос — выбор в пределах его опций
+    for (i, item) in q.questions.iter().enumerate() {
+        let row = answers.get(i).map(Vec::as_slice).unwrap_or(&[]);
+        if row.is_empty() {
+            return err("Не на все вопросы выбран ответ");
+        }
+        let max = item.options.len() as u32;
+        if row.iter().any(|&n| n > max) {
+            return err("Выбран несуществующий вариант");
+        }
+    }
+
+    let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
+    match tmux::answer_question(&pane, agent, &q, &answers).await {
         Ok(()) => {
             // у хук-вопроса карточку закроет post-tool; у экранного — событий
             // нет, снимаем сами (детектор подтвердит по idle-экрану)

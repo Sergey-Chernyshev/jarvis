@@ -134,6 +134,22 @@ impl Store {
             .to_string()
     }
 
+    /// Эффективный egress-прокси для загрузок (модели, зависимости, сайдкары).
+    /// Источник истины — `service.proxy` (туда сохраняет панель настроек через
+    /// `service_set_proxy`); как фолбэк — верхнеуровневый `proxy` (легаси-онбординг).
+    /// Пусто/отсутствует → None. Раньше читался ТОЛЬКО верхнеуровневый `proxy`, из-за
+    /// чего прокси из панели не доходил до скачивания → загрузка шла напрямую и падала.
+    pub fn proxy(&self) -> Option<String> {
+        let all = self.load();
+        let pick = |v: Option<&Value>| {
+            v.and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        pick(all.pointer("/service/proxy")).or_else(|| pick(all.get("proxy")))
+    }
+
     /// Настройки плагина: дефолты ⊕ plugins.<id> из файла.
     pub fn plugin(&self, id: &str, defaults: Value) -> Value {
         let mut out = defaults;
@@ -243,5 +259,47 @@ mod migration_tests {
         let out = run_migrations(m.clone(), SCHEMA_VERSION);
         assert_eq!(out.get("schemaVersion").and_then(Value::as_u64), Some(SCHEMA_VERSION));
         assert_eq!(out.get("stt"), m.get("stt"));
+    }
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+
+    // load() отдаёт кэш, если он есть, минуя файл — подменяем его напрямую.
+    fn store_with(v: Value) -> Store {
+        let s = Store::new();
+        *s.cache.lock().unwrap() = Some(v);
+        s
+    }
+
+    #[test]
+    fn reads_proxy_from_service_block() {
+        // Реальный кейс бага: панель настроек пишет в service.proxy.
+        let s = store_with(json!({ "service": { "proxy": "http://u:p@host:14165" } }));
+        assert_eq!(s.proxy().as_deref(), Some("http://u:p@host:14165"));
+    }
+
+    #[test]
+    fn falls_back_to_top_level_proxy() {
+        // Легаси-онбординг писал верхнеуровневый proxy.
+        let s = store_with(json!({ "proxy": "http://legacy:8080" }));
+        assert_eq!(s.proxy().as_deref(), Some("http://legacy:8080"));
+    }
+
+    #[test]
+    fn service_proxy_wins_over_top_level() {
+        let s = store_with(json!({
+            "proxy": "http://legacy:8080",
+            "service": { "proxy": "http://service:9090" },
+        }));
+        assert_eq!(s.proxy().as_deref(), Some("http://service:9090"));
+    }
+
+    #[test]
+    fn empty_or_missing_is_none() {
+        assert_eq!(store_with(json!({})).proxy(), None);
+        assert_eq!(store_with(json!({ "service": { "proxy": "" } })).proxy(), None);
+        assert_eq!(store_with(json!({ "service": { "proxy": "   " } })).proxy(), None);
     }
 }

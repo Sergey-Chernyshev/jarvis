@@ -17,12 +17,7 @@ pub fn onboarding_status() -> Status {
 pub fn onboarding_run(app: AppHandle, proxy: Option<String>) {
     let d = crate::daemon::Daemon::get(&app);
     // прокси: из аргумента, иначе из сохранённых настроек; непустой — сохраняем
-    let proxy = proxy
-        .filter(|p| !p.trim().is_empty())
-        .or_else(|| {
-            let s = d.settings.string("proxy");
-            (!s.is_empty()).then_some(s)
-        });
+    let proxy = proxy.filter(|p| !p.trim().is_empty()).or_else(|| d.settings.proxy());
     if let Some(p) = &proxy {
         d.settings.set_top("proxy", serde_json::Value::String(p.clone()));
     }
@@ -76,7 +71,7 @@ fn integration_info(app: &AppHandle) -> IntegrationInfo {
         foreign_hooks: install::foreign_hook_count(),
         models: install::model_artifacts(),
         quiet: d.is_quiet(),
-        proxy: d.settings.string("proxy"),
+        proxy: d.settings.proxy().unwrap_or_default(),
     }
 }
 
@@ -112,10 +107,7 @@ pub fn quiet_set(app: AppHandle, on: bool) {
 #[tauri::command]
 pub fn stt_install_whisper(app: AppHandle) {
     let d = crate::daemon::Daemon::get(&app);
-    let proxy = {
-        let s = d.settings.string("proxy");
-        (!s.is_empty()).then_some(s)
-    };
+    let proxy = d.settings.proxy();
     std::thread::spawn(move || {
         let r = install::install_whisper(
             &|step: Step| {
@@ -143,10 +135,7 @@ pub fn stt_install_whisper(app: AppHandle) {
 #[tauri::command]
 pub fn stt_install_sidecar(app: AppHandle) {
     let d = crate::daemon::Daemon::get(&app);
-    let proxy = {
-        let s = d.settings.string("proxy");
-        (!s.is_empty()).then_some(s)
-    };
+    let proxy = d.settings.proxy();
     std::thread::spawn(move || {
         let r = install::install_stt_sidecar(
             &|step: Step| {
@@ -173,10 +162,7 @@ pub fn stt_install_sidecar(app: AppHandle) {
 #[tauri::command]
 pub fn codex_install_sidecar(app: AppHandle) {
     let d = crate::daemon::Daemon::get(&app);
-    let proxy = {
-        let s = d.settings.string("proxy");
-        (!s.is_empty()).then_some(s)
-    };
+    let proxy = d.settings.proxy();
     std::thread::spawn(move || {
         let r = install::install_codex_sdk_sidecar(
             &|step: Step| {
@@ -201,10 +187,7 @@ pub fn codex_install_sidecar(app: AppHandle) {
 #[tauri::command]
 pub fn wake_install_models(app: AppHandle) {
     let d = crate::daemon::Daemon::get(&app);
-    let proxy = {
-        let s = d.settings.string("proxy");
-        (!s.is_empty()).then_some(s)
-    };
+    let proxy = d.settings.proxy();
     std::thread::spawn(move || {
         let r = install::install_wakeword(
             &|step: Step| {
@@ -230,10 +213,7 @@ pub fn wake_install_models(app: AppHandle) {
 #[tauri::command]
 pub fn voice_install_silero(app: AppHandle) {
     let d = crate::daemon::Daemon::get(&app);
-    let proxy = {
-        let s = d.settings.string("proxy");
-        (!s.is_empty()).then_some(s)
-    };
+    let proxy = d.settings.proxy();
     std::thread::spawn(move || {
         let r = install::install_silero(
             &|step: Step| {
@@ -261,10 +241,7 @@ pub fn voice_install_silero(app: AppHandle) {
 #[tauri::command]
 pub fn stt_install_qwen(app: AppHandle, key: String) {
     let d = crate::daemon::Daemon::get(&app);
-    let proxy = {
-        let s = d.settings.string("proxy");
-        (!s.is_empty()).then_some(s)
-    };
+    let proxy = d.settings.proxy();
     std::thread::spawn(move || {
         let r = install::preload_qwen(
             &key,

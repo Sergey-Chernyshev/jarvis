@@ -99,6 +99,7 @@
     wakeSetThreshold: (threshold) => invoke('wake_set_threshold', { threshold }),
     audioSetMute: (val) => invoke('audio_set_mute', { on: val }),
     wakeInstallModels: () => invoke('wake_install_models'),
+    voiceInstallSilero: () => invoke('voice_install_silero'),
     onAudioState: (cb) => on('audio_state', cb),
     onWake: (cb) => on('wake', cb),
     onWakeInstallDone: (cb) => on('wake_install_done', cb),

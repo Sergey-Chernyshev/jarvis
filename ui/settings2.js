@@ -819,7 +819,8 @@
       case 'qwen3-1.7b': return { label: 'Скачать (~1 ГБ)', run: () => window.jarvis.sttInstallQwen('qwen3-1.7b') };
       case 'qwen3-runtime': return { label: 'Установить (~2.6 ГБ)', run: () => window.jarvis.sttInstallSidecar() };
       case 'hey_jarvis': return { label: 'Скачать', run: () => window.jarvis.wakeInstallModels() };
-      default: return null; // silero ставится через интеграцию
+      case 'silero': return { label: 'Установить голос (~1 ГБ)', run: () => window.jarvis.voiceInstallSilero() };
+      default: return null;
     }
   }
   // можно ли удалить (скачана и не активный STT-движок)

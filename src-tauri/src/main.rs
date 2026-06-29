@@ -203,6 +203,10 @@ fn main() {
             // single-instance, поэтому без этого повторный запуск плодит зомби.
             install::prepare_clean_start();
 
+            // миграция схемы settings.json ДО первого чтения настроек (Daemon::new
+            // их читает). Сейчас no-op v0→v1; задел под ломающие изменения формата.
+            settings::Store::new().migrate_on_startup();
+
             // чистое меню-бар приложение: без иконки в доке
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
@@ -275,15 +279,19 @@ fn main() {
 
             spawn_timers(&d);
 
-            // updater: тихая проверка на старте; есть свежий релиз — ставим и просим перезапуск
-            {
+            // updater: тихая проверка на старте; есть свежий релиз — ставим (применится
+            // на следующем запуске). Гейт настройкой autoUpdate (по умолчанию вкл).
+            if d.settings.load().get("autoUpdate").and_then(|v| v.as_bool()).unwrap_or(true) {
                 use tauri_plugin_updater::UpdaterExt;
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     if let Ok(updater) = handle.updater() {
                         if let Ok(Some(update)) = updater.check().await {
                             crate::log::line(&format!("[updater] доступна версия {}", update.version));
-                            let _ = update.download_and_install(|_, _| {}, || {}).await;
+                            match update.download_and_install(|_, _| {}, || {}).await {
+                                Ok(()) => crate::log::line("[updater] обновление установлено, применится при следующем запуске"),
+                                Err(e) => crate::log::line(&format!("[updater] не удалось обновиться: {e}")),
+                            }
                         }
                     }
                 });

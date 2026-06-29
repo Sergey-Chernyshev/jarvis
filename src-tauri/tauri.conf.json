@@ -19,7 +19,7 @@
       "endpoints": [
         "https://github.com/Sergey-Chernyshev/jarvis/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg5QUQ1RjlGN0FDNTNFQkUKUldTK1BzVjZuMSt0aVlqTkhQczJEOGlEL1VpMDBIcTkxckhNM2taUXAxcUV4Ym5pa1NkeVZKSFUK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZGNzk2RTREOUY5M0RDQQpSV1RLUGZuWjVKYjNCdUNjQ3NjYVZ2NjZveTVtdloxb3lzNlVhTlNnenZrN2x4NC9tTFgwb213Ugo="
     }
   },
   "bundle": {
@@ -37,7 +37,8 @@
     "macOS": {
       "minimumSystemVersion": "11.0",
       "entitlements": "entitlements.plist",
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "signingIdentity": "-"
     },
     "createUpdaterArtifacts": true
   }

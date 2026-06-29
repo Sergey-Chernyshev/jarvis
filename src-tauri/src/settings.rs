@@ -1,13 +1,20 @@
 //! Настройки Jarvis: ~/.jarvis/settings.json. Битый файл → дефолты, молча.
 //!
-//! Формат на диске совпадает с Electron-версией один в один — миграция не нужна:
-//! { hotkey, notifyDone, notifyWaiting, position, autoResume, plugins: { id: {...} } }
+//! Загрузка мержит дефолты ⊕ диск, поэтому ДОБАВЛЕНИЕ полей безопасно (старый
+//! файл без поля читается). Ломающие изменения схемы (переименование/смена
+//! смысла/реструктуризация поля) — только через миграцию: подними
+//! `SCHEMA_VERSION`, добавь шаг в `run_migrations`, вызови `migrate_on_startup`.
+//! Политика целиком — docs/release/versioning-and-migration.md.
 
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::sync::Mutex;
 
 use crate::util::jarvis_dir;
+
+/// Текущая версия схемы settings.json. Поднимать при ЛОМАЮЩИХ изменениях формата
+/// (не при простом добавлении полей), добавляя шаг в `run_migrations`.
+pub const SCHEMA_VERSION: u64 = 1;
 
 pub struct Store {
     cache: Mutex<Option<Value>>,
@@ -20,6 +27,8 @@ fn defaults() -> Value {
         "notifyWaiting": true,
         "position": "center", // 'center' | 'corner'
         "autoResume": true,   // после сброса лимита сказать ждавшим сессиям «продолжай»
+        "autoUpdate": true,   // тихо проверять и ставить обновления на старте
+        "schemaVersion": SCHEMA_VERSION,
     })
 }
 
@@ -27,9 +36,46 @@ fn file() -> std::path::PathBuf {
     jarvis_dir().join("settings.json")
 }
 
+/// Чистая миграция настроек: применяет шаги от версии `from` до SCHEMA_VERSION.
+/// Идемпотентна и ТОЛЬКО ВПЕРЁД; пользовательские поля сохраняются. Каждый новый
+/// ломающий формат = новый блок `if v < N { …; v = N; }` с тестом.
+fn run_migrations(mut obj: Map<String, Value>, from: u64) -> Map<String, Value> {
+    let mut v = from;
+    if v < 1 {
+        // 0 → 1: установление базовой версии схемы. Полей не меняем — прежний
+        // формат уже совместим (дефолты домерживаются при загрузке).
+        v = 1;
+    }
+    // Шаблон следующего шага:
+    // if v < 2 { /* преобразование JSON */ v = 2; }
+    obj.insert("schemaVersion".into(), Value::from(v));
+    obj
+}
+
 impl Store {
     pub fn new() -> Self {
         Self { cache: Mutex::new(None) }
+    }
+
+    /// Однократная миграция файла на старте: если версия на диске устарела —
+    /// бэкап + прогон миграций + перезапись. Актуальный/отсутствующий/битый файл
+    /// не трогаем. Вызывать ОДИН раз при инициализации, до чтения настроек.
+    pub fn migrate_on_startup(&self) {
+        let path = file();
+        let Ok(raw) = fs::read_to_string(&path) else { return }; // нет файла → дефолты
+        let Ok(Value::Object(disk)) = serde_json::from_str::<Value>(&raw) else { return }; // битый → не трогаем
+        let from = disk.get("schemaVersion").and_then(Value::as_u64).unwrap_or(0);
+        if from >= SCHEMA_VERSION {
+            return; // уже актуально
+        }
+        let _ = fs::copy(&path, jarvis_dir().join("settings.bak.json")); // бэкап перед изменением
+        let migrated = Value::Object(run_migrations(disk, from));
+        if fs::write(&path, serde_json::to_string_pretty(&migrated).unwrap() + "\n").is_ok() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+            *self.cache.lock().unwrap() = None; // сбросить кэш — перечитается мигрированным
+            crate::log::line(&format!("[settings] миграция схемы {from} → {SCHEMA_VERSION}"));
+        }
     }
 
     /// Настройки целиком (дефолты ⊕ диск). Значения — динамический JSON:
@@ -167,5 +213,35 @@ impl Store {
         let mut root = Map::new();
         root.insert("plugins".into(), plugins);
         self.save(root);
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn v0_file_stamps_version_and_preserves_user_fields() {
+        let mut m = Map::new();
+        m.insert("hotkey".into(), Value::from("Command+K"));
+        m.insert("notifyDone".into(), Value::from(false));
+        m.insert("voice".into(), json!({ "tts": "silero" }));
+        let out = run_migrations(m, 0);
+        // версия проставлена
+        assert_eq!(out.get("schemaVersion").and_then(Value::as_u64), Some(SCHEMA_VERSION));
+        // пользовательские поля целы (настройки не теряются)
+        assert_eq!(out.get("hotkey").and_then(Value::as_str), Some("Command+K"));
+        assert_eq!(out.get("notifyDone").and_then(Value::as_bool), Some(false));
+        assert_eq!(out.get("voice"), Some(&json!({ "tts": "silero" })));
+    }
+
+    #[test]
+    fn current_version_is_idempotent() {
+        let mut m = Map::new();
+        m.insert("schemaVersion".into(), Value::from(SCHEMA_VERSION));
+        m.insert("stt".into(), json!({ "model": "qwen3-0.6b" }));
+        let out = run_migrations(m.clone(), SCHEMA_VERSION);
+        assert_eq!(out.get("schemaVersion").and_then(Value::as_u64), Some(SCHEMA_VERSION));
+        assert_eq!(out.get("stt"), m.get("stt"));
     }
 }

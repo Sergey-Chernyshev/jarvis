@@ -1,13 +1,14 @@
 ---
 name: release-jarvis
-description: Выпустить новый релиз Jarvis (macOS, Tauri) — поднять версию, собрать подписанный/нотаризованный .dmg через GitHub Actions, опубликовать draft-релиз и обеспечить работу авто-обновления. Использовать при словах «катить релиз», «новый релиз», «зарелизь», «bump версию», «выпусти обновление».
+description: Выпустить новый релиз Jarvis (macOS, Tauri) — поднять версию, собрать ad-hoc-подписанный .dmg через GitHub Actions (без Apple Developer), опубликовать draft-релиз и обеспечить работу авто-обновления. Использовать при словах «катить релиз», «новый релиз», «зарелизь», «bump версию», «выпусти обновление».
 ---
 
 # Релиз Jarvis
 
 Jarvis — это Tauri-приложение под macOS. Релиз = тег `vX.Y.Z` → GitHub Actions
-(`.github/workflows/release.yml`) собирает подписанный и нотаризованный `.dmg` +
-артефакты авто-апдейтера и создаёт **draft**-релиз. Публикация — вручную.
+(`.github/workflows/release.yml`) собирает **ad-hoc-подписанный** `.dmg` (без
+Apple Developer) + артефакты авто-апдейтера и создаёт **draft**-релиз.
+Публикация — вручную.
 
 ## TL;DR (happy path)
 
@@ -45,12 +46,17 @@ Jarvis — это Tauri-приложение под macOS. Релиз = тег `
   второй бинарь `jarvis-setup` (`[[bin]]`), который tauri не лило для universal →
   бандл падает с `Failed to copy binary ... jarvis-setup does not exist`.
   Intel-сборка = отдельная задача (нужно отдельно лило все бинари).
-- **Apple-секреты в репо** (для подписи/нотаризации): `APPLE_CERTIFICATE`,
-  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
-  `APPLE_PASSWORD`, `APPLE_TEAM_ID`. Без них сборка упадёт на подписи.
-- **Ключи апдейтера:** `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) в секретах
-  должен соответствовать `plugins.updater.pubkey` в `tauri.conf.json`. Иначе
-  подпись `latest.json` не сойдётся и клиенты не примут апдейт.
+- **Подпись — ad-hoc, без Apple Developer.** В `tauri.conf.json`
+  `macOS.signingIdentity: "-"`; Apple-сертификата у проекта НЕТ (ни в CI, ни
+  локально). Workflow НЕ должен требовать `APPLE_*` секретов — их не существует,
+  сборка упадёт на codesign. Минус: Gatekeeper при первом запуске скажет
+  «неустановленный разработчик» → пользователь ПКМ→Открыть. Нотаризации нет.
+- **Ключ апдейтера (независим от Apple):** секрет `TAURI_SIGNING_PRIVATE_KEY`
+  должен соответствовать `plugins.updater.pubkey` в `tauri.conf.json`. Уже
+  настроено (ключ сгенерён `tauri signer generate`, пароль пустой). Иначе подпись
+  `latest.json` не сойдётся и клиенты не примут апдейт. Перегенерация:
+  `node_modules/.bin/tauri signer generate -w /tmp/k -p "" --ci`, затем
+  `gh secret set TAURI_SIGNING_PRIVATE_KEY < /tmp/k` и обнови pubkey в конфиге.
 - **Endpoint апдейтера** в `tauri.conf.json` обязан указывать на реальный репо:
   `https://github.com/Sergey-Chernyshev/jarvis/releases/latest/download/latest.json`
   (исторически был placeholder `OWNER/REPO` — из-за него апдейты не резолвились).
@@ -88,7 +94,7 @@ Jarvis — это Tauri-приложение под macOS. Релиз = тег `
 `tauri-apps/tauri-action` с `releaseDraft: true`, `includeUpdaterJson: true`,
 `createUpdaterArtifacts: true`:
 - собирает `jarvis` (фичи `wakeword-ort,whisper-native,stt-vad`),
-- подписывает и нотаризует `.app`, пакует `.dmg`,
+- ad-hoc подписывает `.app` (без Apple/нотаризации), пакует `.dmg`,
 - генерит `latest.json` (для авто-апдейтера) с подписью,
 - создаёт draft-релиз «Jarvis vX.Y.Z» с ассетами.
 

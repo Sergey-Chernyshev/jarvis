@@ -210,6 +210,97 @@ fn augmented_path() -> String {
     }
     format!("{}:{base}", extra.join(":"))
 }
+
+/// Версия интерпретатора (major, minor) из `<py> --version`. None — не запустился.
+fn py_version(py: &str) -> Option<(u32, u32)> {
+    let out = Command::new(py).env("PATH", augmented_path()).arg("--version").output().ok()?;
+    // Python печатает версию в stdout (3.4+) либо stderr (старые) — смотрим оба.
+    let s = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = s.split_whitespace().find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()))?;
+    let mut it = v.split('.');
+    let major: u32 = it.next()?.parse().ok()?;
+    let minor: u32 = it.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+fn has_brew() -> bool {
+    Command::new("brew")
+        .env("PATH", augmented_path())
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Совместимый с torch/numpy интерпретатор. У этих колёс есть сборки только под
+/// CPython 3.10–3.13; на 3.14+ (как у некоторых пользователей по умолчанию)
+/// зависимости не встают и сайдкары падают. Ищем подходящий среди установленных;
+/// если нет — ставим `python@3.12` через brew (понять, что есть, и доставить).
+fn compatible_python() -> Result<String, String> {
+    fn fits(v: (u32, u32)) -> bool { v.0 == 3 && (10..=13).contains(&v.1) }
+    // Явные минорные версии — приоритетнее, потом общий `python3`.
+    for c in ["python3.12", "python3.11", "python3.13", "python3.10", "python3"] {
+        if py_version(c).is_some_and(fits) {
+            return Ok(c.to_string());
+        }
+    }
+    if has_brew() {
+        let mut b = Command::new("brew");
+        b.env("PATH", augmented_path()).args(["install", "python@3.12"]);
+        let _ = run_inherit("brew install python@3.12", &mut b);
+        if py_version("python3.12").is_some_and(fits) {
+            return Ok("python3.12".to_string());
+        }
+    }
+    Err("Не нашёл совместимый Python (нужен 3.10–3.13; у вас, похоже, только 3.14+). \
+         Установите его — `brew install python@3.12` — и повторите."
+        .to_string())
+}
+
+/// Стоит ли пакет `pkg` в site-packages venv. Быстрая ФС-проверка (без запуска
+/// python и медленного `import torch`): ищем папку импорта или *.dist-info.
+fn venv_has_pkg(venv: &Path, pkg: &str) -> bool {
+    let Ok(rd) = fs::read_dir(venv.join("lib")) else { return false };
+    let norm = pkg.replace('-', "_").to_lowercase();
+    for e in rd.flatten() {
+        let sp = e.path().join("site-packages");
+        if !sp.is_dir() {
+            continue;
+        }
+        if sp.join(&norm).is_dir() || sp.join(format!("{norm}.py")).exists() {
+            return true;
+        }
+        if let Ok(rd2) = fs::read_dir(&sp) {
+            for f in rd2.flatten() {
+                let n = f.file_name().to_string_lossy().to_lowercase();
+                if n.ends_with(".dist-info") && n.starts_with(&norm) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Голос реально готов: интерпретатор + server.py + ключевые пакеты в venv. Иначе
+/// «установлен» врёт (пустой venv от прерванной/несовместимой установки).
+fn silero_ready() -> bool {
+    silero_python().exists()
+        && silero_server_py().exists()
+        && ["numpy", "torch", "fastapi", "omegaconf"].iter().all(|p| venv_has_pkg(&silero_venv(), p))
+}
+
+/// Qwen3-STT-сайдкар реально готов (venv + server.py + пакеты).
+fn qwen3_sidecar_ready() -> bool {
+    stt_python().exists()
+        && stt_server_py().exists()
+        && ["numpy", "fastapi"].iter().all(|p| venv_has_pkg(&stt_venv(), p))
+}
+
 fn hook_dst() -> PathBuf { jarvis_dir().join("bin/jarvis-hook") }
 fn mcp_dst() -> PathBuf { jarvis_dir().join("bin/jarvis-mcp") }
 fn mcp_config_dst() -> PathBuf { jarvis_dir().join("jarvis-mcp.json") }
@@ -619,12 +710,13 @@ pub fn install_stt_sidecar(progress: &Progress, proxy: Option<&str>) -> Result<(
     atomic_write(&stt_server_py(), STT_SERVER_SRC);
     progress(Step::info("STT-MLX", "stt-server.py установлен"));
 
-    // 2. venv — если ещё нет интерпретатора.
+    // 2. venv — если ещё нет интерпретатора. Берём torch-совместимый Python.
     if !stt_python().exists() {
-        progress(Step::info("STT-MLX", "создаю Python-venv…"));
+        let py = compatible_python()?;
+        progress(Step::info("STT-MLX", format!("создаю Python-venv ({py})…")));
         run_inherit(
-            "python3 -m venv (stt-mlx)",
-            Command::new("python3").env("PATH", augmented_path()).arg("-m").arg("venv").arg(stt_venv()),
+            "python -m venv (stt-mlx)",
+            Command::new(&py).env("PATH", augmented_path()).arg("-m").arg("venv").arg(stt_venv()),
         )?;
     }
 
@@ -692,10 +784,11 @@ pub fn install_codex_sdk_sidecar(progress: &Progress, proxy: Option<&str>) -> Re
     progress(Step::info("Codex-SDK", "codex-summary.py установлен"));
 
     if !codex_sdk_python().exists() {
-        progress(Step::info("Codex-SDK", "создаю Python-venv…"));
+        let py = compatible_python()?;
+        progress(Step::info("Codex-SDK", format!("создаю Python-venv ({py})…")));
         run_inherit(
-            "python3 -m venv (codex-sdk)",
-            Command::new("python3")
+            "python -m venv (codex-sdk)",
+            Command::new(&py)
                 .env("PATH", augmented_path())
                 .arg("-m")
                 .arg("venv")
@@ -823,12 +916,13 @@ fn install_silero(progress: &Progress, proxy: Option<&str>) -> Result<(), String
     // 1. server.py — атомарная запись поверх (держим актуальным).
     atomic_write(&silero_server_py(), SILERO_SERVER_SRC);
 
-    // 2. venv — если ещё нет интерпретатора.
+    // 2. venv — если ещё нет интерпретатора. Берём torch-совместимый Python.
     if !silero_python().exists() {
-        progress(Step::info("Голос", "создаю Python-venv…"));
+        let py = compatible_python()?;
+        progress(Step::info("Голос", format!("создаю Python-venv ({py})…")));
         run_inherit(
-            "python3 -m venv",
-            Command::new("python3").env("PATH", augmented_path()).arg("-m").arg("venv").arg(silero_venv()),
+            "python -m venv",
+            Command::new(&py).env("PATH", augmented_path()).arg("-m").arg("venv").arg(silero_venv()),
         )?;
     }
 
@@ -1328,10 +1422,10 @@ pub fn status() -> Status {
         path_block: rc_files()
             .iter()
             .any(|rc| rc.exists() && has_block(&fs::read_to_string(rc).unwrap_or_default())),
-        silero: silero_python().exists() && silero_server_py().exists(),
+        silero: silero_ready(),
         whisper_model: whisper_model_path().exists(),
         whisper_native_built: cfg!(feature = "whisper-native"),
-        qwen3_sidecar: stt_python().exists() && stt_server_py().exists(),
+        qwen3_sidecar: qwen3_sidecar_ready(),
         codex_sdk_sidecar: codex_sdk_sidecar_present(),
         stt_engine_active: stt_engine(),
         wakeword_models: wakeword_models_present(),
@@ -1365,7 +1459,7 @@ pub fn status_report() -> String {
     }
     let engine = voice_engine();
     let yn = |b: bool| if b { "да" } else { "нет" };
-    let silero_installed = silero_python().exists() && silero_server_py().exists();
+    let silero_installed = silero_ready();
     out += "Голос:\n";
     out += &format!(
         "  silero: установлен={} (venv + server.py), активен={} (voice.engine={engine})\n",
@@ -1373,7 +1467,7 @@ pub fn status_report() -> String {
     );
     let stt_eng = stt_engine();
     let whisper_ok = whisper_model_path().exists();
-    let qwen3_ok = stt_python().exists() && stt_server_py().exists();
+    let qwen3_ok = qwen3_sidecar_ready();
     out += "STT (диктовка, инкр. 9):\n";
     out += &format!("  whisper-turbo: модель={} ({})\n", yn(whisper_ok), whisper_model_path().display());
     out += &format!("  qwen3-mlx-сайдкар: установлен={} ({})\n", yn(qwen3_ok), stt_mlx_dir().display());
@@ -1743,7 +1837,7 @@ pub fn model_inventory() -> Vec<ModelInfo> {
         kind: "voice".into(),
         label: "Silero TTS (v4_ru)".into(),
         bytes: silero_bytes,
-        present: silero_python().exists() && silero_server_py().exists(),
+        present: silero_ready(),
         active: voice_engine() == "silero",
     });
 

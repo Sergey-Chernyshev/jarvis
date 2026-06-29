@@ -181,6 +181,74 @@ pub async fn ping(pane: &str) -> Result<(), String> {
     .map_err(|e| format!("Поповер не показался: {}", crate::util::ellipsize(&crate::util::one_line(&e), 80)))
 }
 
+// Клавиши пикеров. ВЫНЕСЕНЫ В КОНСТАНТЫ намеренно: точные коды подтверждаются
+// живым прогоном — правка здесь же чинит и логику, и тесты.
+const CLAUDE_ADVANCE: &str = "Tab";       // переход к следующему вопросу мульти-вопроса
+const CLAUDE_SUBMIT: &str = "Enter";      // финальный сабмит мульти-вопроса
+const CLAUDE_SUBMIT_RIGHT: &str = "Right"; // Submit-таб одиночного multiSelect-вопроса
+
+/// Плоская последовательность tmux send-keys для ответа на вопрос(ы).
+/// Чистая и детерминированная — тестируется без tmux. `answers[i]` — выбранные
+/// опции (1-based) вопроса `i`. Ветвится по агенту и по позиции вопроса.
+pub fn answer_keys(agent: crate::backend::Agent, q: &crate::model::Question, answers: &[Vec<u32>]) -> Vec<String> {
+    use crate::backend::Agent;
+    let mut keys = Vec::new();
+    let n_q = q.questions.len();
+
+    match agent {
+        Agent::Claude => {
+            // Быстрый путь: один вопрос, single-select — цифра авто-подтверждает.
+            if n_q == 1 && !q.questions[0].multi_select {
+                if let Some(i) = answers.first().and_then(|a| a.first()) {
+                    keys.push(i.to_string());
+                }
+                return keys;
+            }
+            // Один вопрос, multiSelect — тоггл цифр, затем Submit-таб и «1».
+            if n_q == 1 {
+                for i in answers.first().map(Vec::as_slice).unwrap_or(&[]) {
+                    keys.push(i.to_string());
+                }
+                keys.push(CLAUDE_SUBMIT_RIGHT.to_string());
+                keys.push("1".to_string());
+                return keys;
+            }
+            // Несколько вопросов: на каждый — цифры выбора, между вопросами —
+            // переход, в конце — финальный сабмит.
+            for (idx, item) in q.questions.iter().enumerate() {
+                let _ = item; // multiSelect внутри вопроса = те же тогглы цифрами
+                for i in answers.get(idx).map(Vec::as_slice).unwrap_or(&[]) {
+                    keys.push(i.to_string());
+                }
+                if idx + 1 < n_q {
+                    keys.push(CLAUDE_ADVANCE.to_string());
+                }
+            }
+            keys.push(CLAUDE_SUBMIT.to_string());
+        }
+        Agent::Codex => {
+            // Codex всегда один вопрос (скрин-скрейп). Навигация стрелками от
+            // подсветки на опции 1; Space тогглит в мультивыборе; Enter подтверждает.
+            let item_multi = q.questions.first().map(|x| x.multi_select).unwrap_or(false);
+            let mut targets: Vec<u32> =
+                answers.first().cloned().unwrap_or_default();
+            targets.sort_unstable();
+            let mut cursor: u32 = 1; // подсветка стартует на опции 1
+            for t in targets {
+                for _ in cursor..t {
+                    keys.push("Down".to_string());
+                }
+                cursor = t;
+                if item_multi {
+                    keys.push("Space".to_string());
+                }
+            }
+            keys.push("Enter".to_string());
+        }
+    }
+    keys
+}
+
 /// Фокус-лесенка, ступень tmux: switch-client, не вышло — select-window.
 pub async fn focus(pane: &str) -> bool {
     let direct = tokio::process::Command::new("tmux")

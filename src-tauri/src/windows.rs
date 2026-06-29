@@ -196,6 +196,7 @@ pub fn toast_add(
     session_id: Option<&str>,
     kind: &str,
     question: Option<&serde_json::Value>,
+    meta: &serde_json::Value,
 ) {
     toast_emit(
         d,
@@ -203,6 +204,7 @@ pub fn toast_add(
         json!({
             "id": id, "title": title, "body": body,
             "sessionId": session_id, "kind": kind, "question": question,
+            "meta": meta,
         }),
     );
 }

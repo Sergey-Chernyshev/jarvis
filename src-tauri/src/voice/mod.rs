@@ -53,6 +53,7 @@ pub struct Voice {
     mute: Arc<AtomicBool>,
     duck: AtomicBool,        // настройка: паузить чужое медиа на время озвучки
     ducked: AtomicBool,      // сейчас держим чужое медиа на паузе (мы поставили)
+    bluetooth_only: AtomicBool, // говорить только если BT-выход подключён
     sidecar: Arc<sidecar::Sidecar>,
     app: tauri::AppHandle, // для удержания/продления тоста на время речи
     /// Воркер прямо сейчас проигрывает реплику (для полудуплекса разговора:
@@ -83,6 +84,7 @@ impl Voice {
             mute: Arc::new(AtomicBool::new(cfg.mute)),
             duck: AtomicBool::new(cfg.duck_others),
             ducked: AtomicBool::new(false),
+            bluetooth_only: AtomicBool::new(cfg.bluetooth_only),
             sidecar,
             app,
             speaking: Arc::new(AtomicBool::new(false)),
@@ -123,6 +125,11 @@ impl Voice {
         if !on { self.force_unduck(); }
     }
     pub fn duck_enabled(&self) -> bool { self.duck.load(Ordering::SeqCst) }
+
+    pub fn set_bluetooth_only(&self, on: bool) {
+        self.bluetooth_only.store(on, Ordering::SeqCst);
+    }
+    fn cfg_bluetooth_only(&self) -> bool { self.bluetooth_only.load(Ordering::SeqCst) }
 
     /// Включено и что-то играет → пауза (запоминаем, что паузили мы).
     fn ensure_ducked(&self) {
@@ -209,6 +216,12 @@ impl Voice {
     /// держим открытой, пока говорим, и продлеваем после. Fail-safe.
     pub fn speak_text(&self, title: &str, body: &str, kind: &str, toast_id: Option<&str>) {
         if self.is_muted() {
+            return;
+        }
+        // BT-гейт: если bluetooth_only=true и BT-выход не подключён — пропускаем.
+        // Fail-open: bluetooth_audio_output_connected() возвращает true при ошибке.
+        if self.cfg_bluetooth_only() && !crate::macos::bluetooth_audio_output_connected() {
+            crate::log::line(&format!("[voice] speech suppressed — no BT output (kind={kind})"));
             return;
         }
         let text = notif_tts_text(title, body);

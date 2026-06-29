@@ -148,6 +148,26 @@ window.toast.onAdd((d) => {
     crow.append(dot, title, close);
     card.appendChild(crow);
 
+    // мета-строка (ветка/модель/усилие/время) — состав задаётся настройками,
+    // демон присылает готовые сегменты d.meta = [{kind,text}, …]
+    if (Array.isArray(d.meta) && d.meta.length) {
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      d.meta.forEach((seg, i) => {
+        if (i > 0) {
+          const sp = document.createElement('span');
+          sp.className = 'msp';
+          sp.textContent = '·';
+          meta.appendChild(sp);
+        }
+        const s = document.createElement('span');
+        s.className = 'mseg ' + (seg && seg.kind ? seg.kind : 'plain');
+        s.textContent = (seg && seg.text) || '';
+        meta.appendChild(s);
+      });
+      card.appendChild(meta);
+    }
+
     if (d.body) {
       const body = document.createElement('div');
       body.className = 'body';

@@ -29,6 +29,11 @@ fn defaults() -> Value {
         "autoResume": true,   // после сброса лимита сказать ждавшим сессиям «продолжай»
         "autoUpdate": true,   // тихо проверять и ставить обновления на старте
         "schemaVersion": SCHEMA_VERSION,
+        "notify": {
+            "content": { "branch": true, "model": false, "effort": false, "tokens": false, "time": false },
+            "events":  { "done": true, "waiting": true, "limit": true },
+            "ttlSec": 8
+        },
     })
 }
 

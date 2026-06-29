@@ -24,6 +24,49 @@ use crate::model::{
 use crate::util::*;
 use crate::{claude_bin, ru, settings, tail, tmux, transcript, windows};
 
+/// Строит массив мета-сегментов карточки тоста на основе настроек `notify.content`
+/// и полей сессии. Каждый сегмент: `{ "kind": "br"|"md"|"ef"|"plain", "text": "..." }`.
+/// Чистая функция: тестируема без демона.
+pub fn build_meta(content: &Value, session: &Session, now_ms: i64) -> Vec<Value> {
+    let mut out = Vec::new();
+    let flag = |k: &str| content.get(k).and_then(Value::as_bool).unwrap_or(false);
+
+    if flag("branch") {
+        if let Some(br) = session.branch.as_deref().filter(|s| !s.is_empty()) {
+            out.push(serde_json::json!({ "kind": "br", "text": format!("⎇ {}", br) }));
+        }
+    }
+    if flag("model") {
+        if let Some(md) = session.model.as_deref().filter(|s| !s.is_empty()) {
+            out.push(serde_json::json!({ "kind": "md", "text": md }));
+        }
+    }
+    if flag("effort") {
+        if let Some(ef) = session.effort.as_deref().filter(|s| !s.is_empty()) {
+            out.push(serde_json::json!({ "kind": "ef", "text": ef }));
+        }
+    }
+    // tokens: Session не хранит счётчик токенов — пропускаем (поле зарезервировано)
+    if flag("time") {
+        // Форматируем now_ms (Unix ms) как HH:MM в локальном времени.
+        // Используем простую арифметику без внешних крейтов: системное смещение.
+        let secs = now_ms / 1000;
+        // Получить локальное смещение через std нельзя — используем libc/time_t fallback:
+        // форматируем через `date` (быстро, без зависимостей).
+        let time_str = std::process::Command::new("date")
+            .args(["-r", &secs.to_string(), "+%H:%M"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if !time_str.is_empty() {
+            out.push(serde_json::json!({ "kind": "plain", "text": time_str }));
+        }
+    }
+    out
+}
+
 /// Снимок последнего уведомления для хоткея «повторить»: всё нужное, чтобы
 /// заново показать карточку и переозвучить (включая варианты вопроса).
 #[derive(Clone)]
@@ -415,9 +458,8 @@ impl Daemon {
 
         // вопрос (AskUserQuestion): тянем варианты из сессии → тост покажет их
         // списком, а голос прочитает «вопрос + Вариант N: label. описание».
-        let qfull = session_id
-            .and_then(|sid| self.session(sid))
-            .and_then(|s| s.question);
+        let session_snap = session_id.and_then(|sid| self.session(sid));
+        let qfull = session_snap.as_ref().and_then(|s| s.question.clone());
         let qcount = qfull.as_ref().map(|q| q.questions.len()).unwrap_or(0);
         let qitem = qfull.and_then(|q| q.questions.into_iter().next());
         let question = qitem.as_ref().map(|qi| {
@@ -452,11 +494,22 @@ impl Daemon {
             question: question.clone(),
         });
 
+        // мета-сегменты карточки (ветка, модель, effort, время) из настроек notify.content
+        let notify_content = self.settings.load()
+            .pointer("/notify/content")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let now_ms = crate::util::now_ms();
+        let meta: Vec<Value> = session_snap.as_ref()
+            .map(|s| build_meta(&notify_content, s, now_ms))
+            .unwrap_or_default();
+        let meta_val = serde_json::Value::Array(meta);
+
         // тихий режим: статистика уже записана выше по потоку, наружу — ничего
         if self.is_quiet() {
             return;
         }
-        windows::toast_add(self, id, title, body, session_id, kind, question.as_ref());
+        windows::toast_add(self, id, title, body, session_id, kind, question.as_ref(), &meta_val);
 
         // голос (инкремент 7): озвучиваем уведомление. Одна точка на все события;
         // gated по voice-конфигу. Для «done» читаем `speak` (русское произношение),
@@ -544,7 +597,7 @@ impl Daemon {
     /// last_toast (повторять смену режима незачем).
     pub fn mode_toast(self: &std::sync::Arc<Self>, icon: &str, label: &str) {
         let id = format!("mode-{}", self.toast_seq.fetch_add(1, Ordering::SeqCst) + 1);
-        windows::toast_add(self, &id, &format!("{icon}  {label}"), "", None, "mode", None);
+        windows::toast_add(self, &id, &format!("{icon}  {label}"), "", None, "mode", None, &serde_json::Value::Array(vec![]));
     }
 
     /// Переключить «без звука» (mute) хоткеем: глушит/возвращает голос + карточка.
@@ -563,7 +616,7 @@ impl Daemon {
     pub fn repeat_last_toast(self: &std::sync::Arc<Self>) {
         let Some(lt) = self.last_toast.lock().unwrap().clone() else { return };
         let id = format!("repeat-{}", self.toast_seq.fetch_add(1, Ordering::SeqCst) + 1);
-        windows::toast_add(self, &id, &lt.title, &lt.body, lt.sid.as_deref(), &lt.kind, lt.question.as_ref());
+        windows::toast_add(self, &id, &lt.title, &lt.body, lt.sid.as_deref(), &lt.kind, lt.question.as_ref(), &serde_json::Value::Array(vec![]));
         // переозвучка по явному запросу (mute внутри speak_text всё равно уважается)
         self.voice.speak_text(&lt.title, &lt.speak, &lt.kind, Some(&id));
     }
@@ -2074,5 +2127,55 @@ mod tests {
         assert!(task_action_text("skip", 6, None).unwrap().contains("Пропусти задачу 6"));
         assert!(task_action_text("rerun", 2, None).unwrap().contains("Перезапусти задачу 2"));
         assert!(task_action_text("blow-up", 1, None).is_none(), "чужое действие → None, ничего не шлём");
+    }
+
+    #[test]
+    fn build_meta_empty_content_yields_no_segments() {
+        let s = Session::new("sid1".into(), 0);
+        let content = serde_json::json!({});
+        let meta = build_meta(&content, &s, 0);
+        assert!(meta.is_empty());
+    }
+
+    #[test]
+    fn build_meta_branch_included_when_enabled() {
+        let mut s = Session::new("sid1".into(), 0);
+        s.branch = Some("feat/my-feature".into());
+        let content = serde_json::json!({ "branch": true });
+        let meta = build_meta(&content, &s, 0);
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta[0]["kind"], "br");
+        assert!(meta[0]["text"].as_str().unwrap().contains("feat/my-feature"));
+    }
+
+    #[test]
+    fn build_meta_branch_skipped_when_disabled() {
+        let mut s = Session::new("sid1".into(), 0);
+        s.branch = Some("feat/my-feature".into());
+        let content = serde_json::json!({ "branch": false });
+        let meta = build_meta(&content, &s, 0);
+        assert!(meta.is_empty());
+    }
+
+    #[test]
+    fn build_meta_model_and_effort() {
+        let mut s = Session::new("sid1".into(), 0);
+        s.model = Some("claude-sonnet-4".into());
+        s.effort = Some("high".into());
+        let content = serde_json::json!({ "model": true, "effort": true });
+        let meta = build_meta(&content, &s, 0);
+        assert_eq!(meta.len(), 2);
+        assert_eq!(meta[0]["kind"], "md");
+        assert_eq!(meta[1]["kind"], "ef");
+        assert_eq!(meta[1]["text"], "high");
+    }
+
+    #[test]
+    fn build_meta_skips_missing_fields() {
+        // session без branch/model/effort → флаги включены, но полей нет → пусто
+        let s = Session::new("sid1".into(), 0);
+        let content = serde_json::json!({ "branch": true, "model": true, "effort": true });
+        let meta = build_meta(&content, &s, 0);
+        assert!(meta.is_empty(), "нет полей → нет сегментов");
     }
 }

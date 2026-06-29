@@ -415,14 +415,16 @@ impl Daemon {
 
         // вопрос (AskUserQuestion): тянем варианты из сессии → тост покажет их
         // списком, а голос прочитает «вопрос + Вариант N: label. описание».
-        let qitem = session_id
+        let qfull = session_id
             .and_then(|sid| self.session(sid))
-            .and_then(|s| s.question)
-            .and_then(|q| q.questions.into_iter().next());
+            .and_then(|s| s.question);
+        let qcount = qfull.as_ref().map(|q| q.questions.len()).unwrap_or(0);
+        let qitem = qfull.and_then(|q| q.questions.into_iter().next());
         let question = qitem.as_ref().map(|qi| {
             serde_json::json!({
                 "multiSelect": qi.multi_select,
                 "question": qi.question,
+                "count": qcount,
                 "options": qi.options.iter()
                     .map(|o| serde_json::json!({ "label": o.label, "description": o.description }))
                     .collect::<Vec<_>>(),

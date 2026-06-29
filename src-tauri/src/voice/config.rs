@@ -17,6 +17,9 @@ pub struct VoiceConfig {
     pub ev_stop_failure: bool,
     pub ev_subagent_stop: bool,
     pub ev_session_end: bool,
+    /// Говорить ТОЛЬКО если Bluetooth-выход подключён (дефолт: true).
+    /// Fail-open: если определение BT недоступно — говорим.
+    pub bluetooth_only: bool,
 }
 
 impl Default for VoiceConfig {
@@ -27,6 +30,7 @@ impl Default for VoiceConfig {
             sample_rate: 48000, rate: "fast".into(), mute: false, duck_others: true, verbosity: "short".into(),
             ev_stop: true, ev_notification: true, ev_stop_failure: true,
             ev_subagent_stop: false, ev_session_end: false,
+            bluetooth_only: true,
         }
     }
 }
@@ -52,6 +56,7 @@ impl VoiceConfig {
             ev_stop_failure: ev("stopFailure", d.ev_stop_failure),
             ev_subagent_stop: ev("subagentStop", d.ev_subagent_stop),
             ev_session_end: ev("sessionEnd", d.ev_session_end),
+            bluetooth_only: b("bluetoothOnly", d.bluetooth_only),
         }
     }
 }
@@ -80,5 +85,19 @@ mod tests {
         let cfg = VoiceConfig::from_settings(&json!({ "voice": { "sampleRate": "oops", "mute": "yes" } }));
         assert_eq!(cfg.sample_rate, 48000);
         assert!(!cfg.mute);
+    }
+
+    #[test]
+    fn bluetooth_only_default_true() {
+        let cfg = VoiceConfig::from_settings(&json!({}));
+        assert!(cfg.bluetooth_only, "bluetooth_only дефолт — true");
+    }
+
+    #[test]
+    fn bluetooth_only_reads_from_settings() {
+        let cfg = VoiceConfig::from_settings(&json!({ "voice": { "bluetoothOnly": false } }));
+        assert!(!cfg.bluetooth_only);
+        let cfg2 = VoiceConfig::from_settings(&json!({ "voice": { "bluetoothOnly": true } }));
+        assert!(cfg2.bluetooth_only);
     }
 }

@@ -242,3 +242,85 @@ pub fn media_next() {
 pub fn media_prev() {
     let _ = mra_run(&["send", "5"]);
 }
+
+/* ===== Bluetooth аудиовыход ===== */
+
+/// Проверить, подключён ли Bluetooth аудио-выход. Результат кешируется ~10с.
+/// На любой ошибке/таймауте возвращает `true` (fail-open: не глушим речь при ошибке).
+pub fn bluetooth_audio_output_connected() -> bool {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    const TTL: Duration = Duration::from_secs(10);
+
+    {
+        let guard = CACHE.lock().unwrap();
+        if let Some((ts, val)) = *guard {
+            if ts.elapsed() < TTL {
+                return val;
+            }
+        }
+    }
+
+    let result = detect_bluetooth_output();
+
+    {
+        let mut guard = CACHE.lock().unwrap();
+        *guard = Some((Instant::now(), result));
+    }
+    result
+}
+
+fn detect_bluetooth_output() -> bool {
+    // Парсим system_profiler SPAudioDataType -json: ищем default output device
+    // с _transport == "Bluetooth". Timeout 3с — чтобы не подвисать.
+    let out = std::process::Command::new("system_profiler")
+        .args(["SPAudioDataType", "-json"])
+        .output();
+    let out = match out {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return true, // ошибка → fail-open
+    };
+    let text = String::from_utf8_lossy(&out);
+    let val: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    // Структура: { "SPAudioDataType": [ { "_items": [ { ... } ] } ] }
+    let items = val
+        .get("SPAudioDataType")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|o| o.get("_items"))
+        .and_then(|v| v.as_array());
+    let Some(items) = items else { return true };
+
+    for item in items {
+        let obj = match item.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        // Флаг «это дефолтный выход»
+        let is_default_out = obj
+            .get("coreaudio_default_audio_output_device")
+            .and_then(|v| v.as_str())
+            .map(|s| s == "spaudio_yes")
+            .unwrap_or(false);
+        if !is_default_out {
+            continue;
+        }
+        // Транспорт = Bluetooth?
+        let transport = obj
+            .get("coreaudio_device_transport")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if transport.to_ascii_lowercase().contains("bluetooth") {
+            return true;
+        }
+        // Не bluetooth — выход найден, но не BT
+        return false;
+    }
+    // Дефолтный выход не найден → fail-open
+    true
+}

@@ -805,6 +805,11 @@
     group.appendChild(drow('Клавиша диктовки', 'Зажми и говори (push-to-talk). Кликни и нажми новое сочетание.',
       dictationHotkeyField(v.hotkey || 'F8'), { ctlClass: 'hk' }));
 
+    // шумодав (VAD-гейт): пропускать диктовку, если речи не слышно
+    group.appendChild(drow('Шумодав (VAD)',
+      'Пропускать диктовку, если речи нет (фон/тишина) — меньше «придуманных» слов. Если режет вашу речь — выключите.',
+      toggle(v.noiseGate !== false, (on) => fire(() => window.jarvis.sttSetNoiseGate(on)))));
+
     // тест микрофона
     group.appendChild(renderMicTestRow());
     pane.appendChild(group);

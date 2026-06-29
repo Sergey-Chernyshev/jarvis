@@ -1032,6 +1032,7 @@ pub fn stt_get(app: AppHandle) -> Value {
         "qwen3Ready": qwen3_sidecar,
         "qwen3Installed": qwen3_installed,
         "available": qwen3_sidecar || (cfg.engine == "whisper-turbo" && whisper_ready),
+        "noiseGate": cfg.noise_gate,
         "hotkey": if cfg.hotkey.is_empty() { "F8".to_string() } else { cfg.hotkey },
     })
 }
@@ -1189,6 +1190,14 @@ pub fn stt_set_hotkey(app: AppHandle, hotkey: String) -> Value {
     patch.insert("hotkey".into(), Value::String(hotkey.clone()));
     d.settings.set_stt(patch);
     json!({ "ok": true, "hotkey": hotkey })
+}
+
+/// Тумблер шумодава (VAD-гейт диктовки): on=true — пропускать не-речь.
+#[tauri::command]
+pub fn stt_set_noise_gate(app: AppHandle, on: bool) {
+    let mut patch = serde_json::Map::new();
+    patch.insert("noiseGate".into(), Value::Bool(on));
+    Daemon::get(&app).settings.set_stt(patch);
 }
 
 /// Открыть панель и переключить на вкладку «История голоса» (клик по карточке

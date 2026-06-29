@@ -135,7 +135,12 @@ impl Dictation {
 
             // ── VAD-гейт (Tier 3): не пускать не-речь в STT ───────────────────
             // Фон/музыка/тишина → STT пропускаем, чтобы не «придумать» слова.
-            if !crate::stt::vad_silero::has_speech(&pcm) {
+            // Отключаемо настройкой stt.noiseGate («шумодав»).
+            let noise_gate = daemon
+                .as_ref()
+                .map(|d| crate::stt::config::SttConfig::from_settings(&d.settings.load()).noise_gate)
+                .unwrap_or(true);
+            if noise_gate && !crate::stt::vad_silero::has_speech(&pcm) {
                 crate::log::line("[dictation] VAD: речи нет — пропуск (фон/шум/тишина)");
                 if let Some(d) = &daemon {
                     crate::route::hud::emit(d, crate::route::hud::Phase::Empty);

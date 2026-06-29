@@ -73,6 +73,7 @@
     sttGet: () => invoke('stt_get'),
     sttSetEngine: (engine) => invoke('stt_set_engine', { engine }),
     sttSetHotkey: (hotkey) => invoke('stt_set_hotkey', { hotkey }),
+    sttSetNoiseGate: (on) => invoke('stt_set_noise_gate', { on }),
     sttTest: () => invoke('stt_test'),
     sttInputDevices: () => invoke('stt_input_devices'),
     sttSetInputDevice: (name) => invoke('stt_set_input_device', { name }),

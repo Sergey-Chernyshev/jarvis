@@ -938,8 +938,11 @@
     }
 
     // вкл/выкл активацию по фразе
-    group.appendChild(drow('Активация по фразе', 'Скажи «Hey Jarvis», чтобы разбудить ассистента. Работает офлайн.',
-      toggle(!!v.enabled, async (on) => { await safe(() => window.jarvis.wakeSetEnabled(on), null); reRenderPane('wake'); })));
+    group.appendChild(drow('Активация по фразе',
+      v.model_present
+        ? 'Скажи «Hey Jarvis», чтобы разбудить ассистента. Работает офлайн.'
+        : 'Сначала скачайте модель openWakeWord ниже, чтобы включить.',
+      toggle(!!v.enabled, async (on) => { await safe(() => window.jarvis.wakeSetEnabled(on), null); reRenderPane('wake'); }, !v.model_present)));
 
     // заглушить микрофон (mute у источника)
     group.appendChild(drow('Заглушить микрофон', 'Полностью отключить микрофон у источника.',

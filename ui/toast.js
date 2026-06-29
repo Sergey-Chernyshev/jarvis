@@ -155,10 +155,20 @@ window.toast.onAdd((d) => {
       card.appendChild(body);
     }
 
-    // варианты вопроса (AskUserQuestion): номер ⌘⌥N + label + описание.
-    // Выбор — глобальным хоткеем ⌘⌥1..9 (через демон) или кликом по варианту.
-    const opts = d.question && Array.isArray(d.question.options) ? d.question.options : null;
-    if (opts && opts.length) {
+    // варианты вопроса (AskUserQuestion). Payload плоский: первый вопрос +
+    // count. Инлайн-чипы — только для одиночного вопроса; мульти-вопрос
+    // отвечается в приложении (визард).
+    const qq = d.question || null;
+    const count = qq && typeof qq.count === 'number' ? qq.count : (qq && qq.options ? 1 : 0);
+    const opts = qq && Array.isArray(qq.options) ? qq.options : null;
+    if (count > 1) {
+      sticky = true;
+      card.classList.add('sticky');
+      const note = document.createElement('div');
+      note.className = 'body';
+      note.textContent = `Несколько вопросов (${count}) — ответь в приложении`;
+      card.appendChild(note);
+    } else if (opts && opts.length) {
       sticky = true; // ждём выбор — карточка не тикает по TTL
       card.classList.add('sticky');
       const list = document.createElement('div');
@@ -187,8 +197,8 @@ window.toast.onAdd((d) => {
         opt.append(num, otext);
         opt.addEventListener('click', (e) => {
           e.stopPropagation();
-          window.toast.answerQuestion(d.sessionId, [i + 1], !!d.question.multiSelect);
-          if (!d.question.multiSelect) removeCard(d.id);
+          window.toast.answerQuestion(d.sessionId, { answers: [[i + 1]] });
+          if (!qq.multiSelect) removeCard(d.id);
         });
         list.appendChild(opt);
       });
@@ -198,7 +208,7 @@ window.toast.onAdd((d) => {
     // действие «Продолжить» — только для застрявших сессий (ждёт / лимит /
     // оборвалась, напр. сном), но НЕ для нормально завершённых (done) и НЕ для
     // вопросов (там действие — выбрать вариант, «Продолжить» не к месту).
-    if (d.sessionId && d.kind !== 'done' && !(opts && opts.length)) {
+    if (d.sessionId && d.kind !== 'done' && !(count > 0)) {
       const cont = document.createElement('button');
       cont.className = 'cont';
       cont.textContent = 'Продолжить';

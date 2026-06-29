@@ -26,8 +26,8 @@
     resize: (h) => invoke('toast_resize', { h }),
     continueSession: (sessionId) => invoke('session_continue', { sessionId }),
     // ответ на вопрос кликом по варианту (выбор клавишами идёт мимо — глобальный хоткей)
-    answerQuestion: (sessionId, indices, multiSelect) =>
-      invoke('question_answer', { sessionId, choice: { indices, multiSelect } }),
+    answerQuestion: (sessionId, choice) =>
+      invoke('question_answer', { sessionId, choice }),
     // голосовая маршрутизация: фазы HUD + индикатор «слышу» (audio_state).
     // НЕ через armed(): на буфер ранних тостов влияют только onAdd/onUpdate.
     onVoiceHud: (cb) => { listen('voice-hud', (e) => cb(e.payload)); },

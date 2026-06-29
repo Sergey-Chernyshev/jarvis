@@ -181,11 +181,13 @@ pub async fn ping(pane: &str) -> Result<(), String> {
     .map_err(|e| format!("Поповер не показался: {}", crate::util::ellipsize(&crate::util::one_line(&e), 80)))
 }
 
-// Клавиши пикеров. ВЫНЕСЕНЫ В КОНСТАНТЫ намеренно: точные коды подтверждаются
-// живым прогоном — правка здесь же чинит и логику, и тесты.
-const CLAUDE_ADVANCE: &str = "Tab";       // переход к следующему вопросу мульти-вопроса
-const CLAUDE_SUBMIT: &str = "Enter";      // финальный сабмит мульти-вопроса
-const CLAUDE_SUBMIT_RIGHT: &str = "Right"; // Submit-таб одиночного multiSelect-вопроса
+// Клавиши пикеров Claude (выверено вживую на v2.1.172): несколько вопросов =
+// табы [Q1][Q2]…[Submit]. single-select: цифра сама перескакивает на следующий
+// таб; multiSelect: после тогглов нужен Tab/→, чтобы уйти с таба. После
+// последнего вопроса — Review-экран, где «1» = «Submit answers».
+const CLAUDE_ADVANCE: &str = "Tab";         // уйти с multiSelect-таба к следующему
+const CLAUDE_SUBMIT_RIGHT: &str = "Right";  // Submit-таб одиночного multiSelect-вопроса
+const CLAUDE_SUBMIT_CONFIRM: &str = "1";    // на Review-экране «1. Submit answers»
 
 /// Плоская последовательность tmux send-keys для ответа на вопрос(ы).
 /// Чистая и детерминированная — тестируется без tmux. `answers[i]` — выбранные
@@ -210,21 +212,21 @@ pub fn answer_keys(agent: crate::backend::Agent, q: &crate::model::Question, ans
                     keys.push(i.to_string());
                 }
                 keys.push(CLAUDE_SUBMIT_RIGHT.to_string());
-                keys.push("1".to_string());
+                keys.push(CLAUDE_SUBMIT_CONFIRM.to_string());
                 return keys;
             }
-            // Несколько вопросов: на каждый — цифры выбора, между вопросами —
-            // переход, в конце — финальный сабмит.
+            // Несколько вопросов (табы). На каждый — цифры выбора. single-select
+            // авто-перескакивает на следующий таб; multiSelect требует Tab после
+            // тогглов. После последнего вопроса попадаем на Review — там «1».
             for (idx, item) in q.questions.iter().enumerate() {
-                let _ = item; // multiSelect внутри вопроса = те же тогглы цифрами
                 for i in answers.get(idx).map(Vec::as_slice).unwrap_or(&[]) {
                     keys.push(i.to_string());
                 }
-                if idx + 1 < n_q {
+                if item.multi_select {
                     keys.push(CLAUDE_ADVANCE.to_string());
                 }
             }
-            keys.push(CLAUDE_SUBMIT.to_string());
+            keys.push(CLAUDE_SUBMIT_CONFIRM.to_string());
         }
         Agent::Codex => {
             // Codex всегда один вопрос (скрин-скрейп). Навигация стрелками от
@@ -285,57 +287,55 @@ mod answer_keys_tests {
         Question { at: 0, from_screen: false, questions: items }
     }
 
+    // Claude, один вопрос, single-select: цифра авто-подтверждает.
     #[test]
     fn claude_single_question_single_select_just_digit() {
         let keys = answer_keys(Agent::Claude, &q(vec![item(false, 3)]), &[vec![2]]);
         assert_eq!(keys, vec!["2".to_string()]);
     }
 
+    // Claude, один вопрос, multiSelect: тогглы → Right (Submit-таб) → «1».
     #[test]
     fn claude_single_question_multi_select_toggles_then_submit() {
         let keys = answer_keys(Agent::Claude, &q(vec![item(true, 3)]), &[vec![1, 3]]);
-        assert_eq!(
-            keys,
-            vec!["1".to_string(), "3".to_string(), CLAUDE_SUBMIT_RIGHT.to_string(), "1".to_string()]
-        );
+        assert_eq!(keys, vec!["1", "3", "Right", "1"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
     }
 
+    // Claude, два single-select вопроса (выверено вживую): каждая цифра сама
+    // перескакивает на следующий таб; в конце «1» на Review-экране.
     #[test]
-    fn claude_multi_question_advance_between_then_submit() {
+    fn claude_two_single_select_questions_autoadvance_then_submit() {
         let keys = answer_keys(
             Agent::Claude,
             &q(vec![item(false, 3), item(false, 2)]),
             &[vec![2], vec![1]],
         );
-        assert_eq!(
-            keys,
-            vec![
-                "2".to_string(),
-                CLAUDE_ADVANCE.to_string(),
-                "1".to_string(),
-                CLAUDE_SUBMIT.to_string(),
-            ]
-        );
+        assert_eq!(keys, vec!["2", "1", "1"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
     }
 
+    // Claude, multiSelect-вопрос + single-select (выверено вживую): тогглы Q1,
+    // затем Tab (уйти с multi-таба), цифра Q2 авто-перескок, «1» на Review.
+    #[test]
+    fn claude_multi_then_single_question() {
+        let keys = answer_keys(
+            Agent::Claude,
+            &q(vec![item(true, 3), item(false, 2)]),
+            &[vec![1, 3], vec![1]],
+        );
+        assert_eq!(keys, vec!["1", "3", "Tab", "1", "1"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    }
+
+    // Codex, single-select: стрелки вниз от опции 1, затем Enter.
     #[test]
     fn codex_single_select_navigates_down_then_enter() {
         let keys = answer_keys(Agent::Codex, &q(vec![item(false, 4)]), &[vec![3]]);
-        assert_eq!(keys, vec!["Down".to_string(), "Down".to_string(), "Enter".to_string()]);
+        assert_eq!(keys, vec!["Down", "Down", "Enter"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
     }
 
+    // Codex, multiSelect: Space на каждой выбранной по ходу вниз, затем Enter.
     #[test]
     fn codex_multi_select_space_at_each_then_enter() {
         let keys = answer_keys(Agent::Codex, &q(vec![item(true, 4)]), &[vec![1, 3]]);
-        assert_eq!(
-            keys,
-            vec![
-                "Space".to_string(),
-                "Down".to_string(),
-                "Down".to_string(),
-                "Space".to_string(),
-                "Enter".to_string(),
-            ]
-        );
+        assert_eq!(keys, vec!["Space", "Down", "Down", "Space", "Enter"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
     }
 }

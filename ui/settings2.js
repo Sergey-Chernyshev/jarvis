@@ -1189,9 +1189,35 @@
     const meta = await safe(() => window.jarvis.getMeta(), {});
     _sk.remove();
     const group = el('div.dgroup');
-    // app_meta отдаёт только effortLevels; версии/обновлений в IPC нет (см. отчёт).
+    const ver = (meta && meta.version) ? ('v' + meta.version) : 'локально';
     group.appendChild(drow('Версия', 'Jarvis · локальный ассистент.',
-      el('span.sval', { text: 'локально' })));
+      el('span.sval', { text: ver })));
+
+    // Обновления: ручная проверка + установка (авто-проверка и так на старте).
+    const status = el('div.dd', { text: 'Обновляется автоматически при запуске.', style: 'margin-top:0' });
+    const ctl = el('div.dctl');
+    const checkBtn = button('Проверить', async () => {
+      checkBtn.disabled = true;
+      status.textContent = 'Проверяю…';
+      const r = await safe(() => window.jarvis.updateCheckInstall(), { ok: false, error: 'нет связи с апдейтером' });
+      if (r && r.ok && r.updated) {
+        status.textContent = 'Установлена v' + (r.version || '') + ' — перезапустите.';
+        ctl.textContent = '';
+        ctl.appendChild(button('Перезапустить', () => window.jarvis.relaunch(), 'primary'));
+      } else if (r && r.ok) {
+        status.textContent = 'У вас последняя версия.';
+        checkBtn.disabled = false;
+      } else {
+        status.textContent = 'Ошибка: ' + ((r && r.error) || 'не удалось проверить');
+        checkBtn.disabled = false;
+      }
+    }, 'sm');
+    ctl.appendChild(checkBtn);
+    group.appendChild(el('div.drow', null, [
+      el('div.grow', null, [el('div.dt', { text: 'Обновления' }), status]),
+      ctl,
+    ]));
+
     const levels = (meta && Array.isArray(meta.effortLevels)) ? meta.effortLevels.join(' · ') : '';
     if (levels) {
       group.appendChild(drow('Уровни усилия', 'Доступные режимы reasoning effort.',
@@ -1539,8 +1565,13 @@
     ]));
     sidebar.appendChild(el('div.saccount', null, [
       el('span.ava', { text: 'J' }),
-      el('div', null, [el('div.nm', { text: 'Jarvis' }), el('div.sub', { text: 'локально · v1.0' })]),
+      el('div', null, [el('div.nm', { text: 'Jarvis' }), el('div.sub', { id: 's2-ver', text: 'локально' })]),
     ]));
+    // реальная версия приложения в подпись аккаунта (вместо захардкоженной)
+    safe(() => window.jarvis.getMeta(), {}).then((m) => {
+      const s = currentRoot && currentRoot.querySelector('#s2-ver');
+      if (s && m && m.version) s.textContent = 'локально · v' + m.version;
+    });
     const snav = el('div.snav');
     const navItems = {};
     for (const n of NAV) {

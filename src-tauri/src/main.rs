@@ -120,6 +120,8 @@ fn main() {
             ipc::chat_close,
             ipc::commands_get,
             ipc::app_meta,
+            ipc::update_check_install,
+            ipc::app_relaunch,
             ipc::plugins_status,
             ipc::plugins_cmd,
             ipc::usage_summary,

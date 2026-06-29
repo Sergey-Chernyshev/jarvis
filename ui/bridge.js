@@ -40,6 +40,8 @@
     setEffort: (sessionId, level) => invoke('session_set_effort', { sessionId, level }),
     setPin: (sessionId, pinned) => invoke('session_set_pin', { sessionId, pinned }),
     getMeta: () => invoke('app_meta'),
+    updateCheckInstall: () => invoke('update_check_install'),
+    relaunch: () => invoke('app_relaunch'),
     onPlugins: (cb) => on('plugins', cb),
     getPlugins: () => invoke('plugins_status'),
     pluginCmd: (id, cmd, args) => invoke('plugins_cmd', { id, cmd, args: args ?? null }),

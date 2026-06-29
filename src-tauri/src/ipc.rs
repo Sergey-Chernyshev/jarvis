@@ -344,7 +344,41 @@ pub fn commands_get(app: AppHandle, session_id: String) -> Value {
 #[tauri::command]
 pub fn app_meta(app: AppHandle) -> Value {
     let d = Daemon::get(&app);
-    json!({ "effortLevels": *d.effort_levels.lock().unwrap() })
+    json!({
+        "effortLevels": *d.effort_levels.lock().unwrap(),
+        "version": env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// Проверить обновление и, если есть, скачать+установить (применится при
+/// следующем запуске). Возвращает статус для UI «О программе».
+#[tauri::command]
+pub async fn update_check_install(app: AppHandle) -> Value {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => return json!({ "ok": false, "error": format!("апдейтер недоступен: {e}") }),
+    };
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let version = update.version.clone();
+            match update.download_and_install(|_, _| {}, || {}).await {
+                Ok(()) => {
+                    crate::log::line(&format!("[updater] {version} установлен по кнопке"));
+                    json!({ "ok": true, "updated": true, "version": version })
+                }
+                Err(e) => json!({ "ok": false, "error": ellipsize(&one_line(&e.to_string()), 120) }),
+            }
+        }
+        Ok(None) => json!({ "ok": true, "updated": false }),
+        Err(e) => json!({ "ok": false, "error": ellipsize(&one_line(&e.to_string()), 120) }),
+    }
+}
+
+/// Перезапустить приложение (после установки обновления).
+#[tauri::command]
+pub fn app_relaunch(app: AppHandle) {
+    app.restart();
 }
 
 /* ================= плагины, usage, история ================= */

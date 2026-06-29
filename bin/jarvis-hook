@@ -13,6 +13,13 @@
 
 AGENT="${1:-unknown}"
 EVENT="${2:-unknown}"
+
+# Codex парсит stdout хука как JSON и на пустом выводе ругается
+# «invalid <event> JSON output» (Claude же пустой stdout трактует как no-op).
+# Печатаем нейтральный объект ДО любых exit-путей. Claude не трогаем —
+# инвариант «поведение байт-в-байт прежнее».
+[ "$AGENT" = codex ] && printf '{}\n'
+
 # Сокет — рядом с самим хуком: он установлен как <JARVIS_DIR>/bin/jarvis-hook,
 # значит демон слушает <JARVIS_DIR>/run.sock. Так хук знает свой демон по своему
 # расположению (dev → ~/.jarvis-dev, prod → ~/.jarvis) и не привязан жёстко к

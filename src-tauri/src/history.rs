@@ -40,6 +40,9 @@ struct Meta {
     first_at: i64,
     last_at: i64,
     service: bool,
+    /// Какой агент стоял за сессией: "claude" | "codex". Пусто (старый кэш) → claude.
+    /// Нужно фронту, чтобы скопировать ВЕРНУЮ команду resume (codex ≠ claude).
+    agent: String,
 }
 
 pub struct History {
@@ -115,6 +118,7 @@ fn parse_codex_meta(file: &Path, mtime: i64) -> Option<Meta> {
         first_at,
         last_at,
         service: false,
+        agent: crate::backend::Agent::Codex.label().to_string(),
     })
 }
 
@@ -149,6 +153,7 @@ fn parse_meta(file: &Path, mtime: i64) -> Option<Meta> {
         mtime,
         session_id: file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
         last_at: mtime,
+        agent: crate::backend::Agent::Claude.label().to_string(),
         ..Default::default()
     };
 
@@ -318,12 +323,14 @@ impl History {
                 .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
+            // `!agent.is_empty()` — миграция: записи старого кэша без метки агента
+            // пере-парсим, иначе codex-сессии остались бы без agent (issue #10).
             let fresh = self
                 .cache
                 .lock()
                 .unwrap()
                 .get(&key)
-                .is_some_and(|hit| hit.mtime == mtime);
+                .is_some_and(|hit| hit.mtime == mtime && !hit.agent.is_empty());
             if fresh {
                 continue; // не менялся
             }
@@ -345,7 +352,12 @@ impl History {
                 .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
-            let fresh = self.cache.lock().unwrap().get(&key).is_some_and(|hit| hit.mtime == mtime);
+            let fresh = self
+                .cache
+                .lock()
+                .unwrap()
+                .get(&key)
+                .is_some_and(|hit| hit.mtime == mtime && !hit.agent.is_empty());
             if fresh {
                 continue;
             }
@@ -388,6 +400,7 @@ impl History {
             g.sessions.push(serde_json::json!({
                 "id": meta.session_id,
                 "title": meta.title,
+                "agent": if meta.agent.is_empty() { "claude" } else { &meta.agent },
                 "model": model,
                 "tokens": u.get("tok").and_then(Value::as_f64).unwrap_or(0.0),
                 "cost": u.get("cost").and_then(Value::as_f64).unwrap_or(0.0),
@@ -413,5 +426,45 @@ impl History {
             .collect();
         out.sort_by_key(|g| -g.get("lastAt").and_then(Value::as_i64).unwrap_or(0));
         Value::Array(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// История метит сессию агентом, чтобы фронт скопировал верную команду resume
+    /// (issue #10: codex-сессия не должна давать `claude --resume`).
+    #[test]
+    fn parse_meta_labels_claude_and_codex() {
+        let dir = std::env::temp_dir().join("jarvis-history-agent-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Claude-транскрипт (~/.claude/projects/**/<sid>.jsonl).
+        let claude = dir.join("sid-claude.jsonl");
+        fs::write(
+            &claude,
+            r#"{"type":"user","cwd":"/tmp/proj","timestamp":"2026-06-29T10:00:00.000Z","message":{"role":"user","content":"привет, мир, это обычный пользовательский промпт"}}
+"#,
+        )
+        .unwrap();
+        let m = parse_meta(&claude, 1).expect("claude meta");
+        assert_eq!(m.agent, "claude");
+        assert!(!m.service);
+
+        // Codex rollout (~/.codex/sessions/**/rollout-*.jsonl).
+        let codex = dir.join("rollout-1-abc.jsonl");
+        fs::write(
+            &codex,
+            r#"{"type":"session_meta","timestamp":"2026-06-29T10:00:00.000Z","payload":{"id":"abc","cwd":"/tmp/proj"}}
+"#,
+        )
+        .unwrap();
+        let m = parse_codex_meta(&codex, 1).expect("codex meta");
+        assert_eq!(m.agent, "codex");
+        assert_eq!(m.session_id, "abc");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -139,6 +139,7 @@ device = torch.device("cpu")
 model, _ = torch.hub.load(
     "snakers4/silero-models", "silero_tts", language="ru", speaker=args.model,
     trust_repo=True,  # модель уже в кэше; не спрашивать про доверие к репо
+    skip_validation=True,  # не ходить в GitHub API: там легко поймать rate limit
 )
 model.to(device)
 DEFAULT_SPEAKER = args.speaker

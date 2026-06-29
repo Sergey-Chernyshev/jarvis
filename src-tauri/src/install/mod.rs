@@ -212,19 +212,28 @@ fn augmented_path() -> String {
 }
 
 /// Версия интерпретатора (major, minor) из `<py> --version`. None — не запустился.
-fn py_version(py: &str) -> Option<(u32, u32)> {
-    let out = Command::new(py).env("PATH", augmented_path()).arg("--version").output().ok()?;
+fn parse_py_version(stdout: &[u8], stderr: &[u8]) -> Option<(u32, u32)> {
     // Python печатает версию в stdout (3.4+) либо stderr (старые) — смотрим оба.
     let s = format!(
         "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
     );
     let v = s.split_whitespace().find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()))?;
     let mut it = v.split('.');
     let major: u32 = it.next()?.parse().ok()?;
     let minor: u32 = it.next()?.parse().ok()?;
     Some((major, minor))
+}
+
+fn py_version(py: &str) -> Option<(u32, u32)> {
+    let out = Command::new(py).env("PATH", augmented_path()).arg("--version").output().ok()?;
+    parse_py_version(&out.stdout, &out.stderr)
+}
+
+fn py_path_version(py: &Path) -> Option<(u32, u32)> {
+    let out = Command::new(py).env("PATH", augmented_path()).arg("--version").output().ok()?;
+    parse_py_version(&out.stdout, &out.stderr)
 }
 
 fn has_brew() -> bool {
@@ -240,11 +249,12 @@ fn has_brew() -> bool {
 /// CPython 3.10–3.13; на 3.14+ (как у некоторых пользователей по умолчанию)
 /// зависимости не встают и сайдкары падают. Ищем подходящий среди установленных;
 /// если нет — ставим `python@3.12` через brew (понять, что есть, и доставить).
+fn python_fits_ml(v: (u32, u32)) -> bool { v.0 == 3 && (10..=13).contains(&v.1) }
+
 fn compatible_python() -> Result<String, String> {
-    fn fits(v: (u32, u32)) -> bool { v.0 == 3 && (10..=13).contains(&v.1) }
     // Явные минорные версии — приоритетнее, потом общий `python3`.
     for c in ["python3.12", "python3.11", "python3.13", "python3.10", "python3"] {
-        if py_version(c).is_some_and(fits) {
+        if py_version(c).is_some_and(python_fits_ml) {
             return Ok(c.to_string());
         }
     }
@@ -252,7 +262,7 @@ fn compatible_python() -> Result<String, String> {
         let mut b = Command::new("brew");
         b.env("PATH", augmented_path()).args(["install", "python@3.12"]);
         let _ = run_inherit("brew install python@3.12", &mut b);
-        if py_version("python3.12").is_some_and(fits) {
+        if py_version("python3.12").is_some_and(python_fits_ml) {
             return Ok("python3.12".to_string());
         }
     }
@@ -290,6 +300,7 @@ fn venv_has_pkg(venv: &Path, pkg: &str) -> bool {
 /// «установлен» врёт (пустой venv от прерванной/несовместимой установки).
 fn silero_ready() -> bool {
     silero_python().exists()
+        && py_path_version(&silero_python()).is_some_and(python_fits_ml)
         && silero_server_py().exists()
         && ["numpy", "torch", "fastapi", "omegaconf"].iter().all(|p| venv_has_pkg(&silero_venv(), p))
 }
@@ -297,6 +308,7 @@ fn silero_ready() -> bool {
 /// Qwen3-STT-сайдкар реально готов (venv + server.py + пакеты).
 fn qwen3_sidecar_ready() -> bool {
     stt_python().exists()
+        && py_path_version(&stt_python()).is_some_and(python_fits_ml)
         && stt_server_py().exists()
         && ["numpy", "fastapi"].iter().all(|p| venv_has_pkg(&stt_venv(), p))
 }
@@ -626,7 +638,6 @@ fn stt_mlx_dir() -> PathBuf { jarvis_dir().join("stt-mlx") }
 fn stt_server_py() -> PathBuf { stt_mlx_dir().join("stt-server.py") }
 fn stt_venv() -> PathBuf { stt_mlx_dir().join("venv") }
 fn stt_python() -> PathBuf { stt_venv().join("bin/python") }
-fn stt_pip() -> PathBuf { stt_venv().join("bin/pip") }
 
 /// Скачать модель Whisper large-v3-turbo-q5_0.bin (~574 МБ) в ~/.jarvis/stt/.
 /// Идемпотентно: пропускает скачивание если файл уже на месте.
@@ -711,6 +722,7 @@ pub fn install_stt_sidecar(progress: &Progress, proxy: Option<&str>) -> Result<(
     progress(Step::info("STT-MLX", "stt-server.py установлен"));
 
     // 2. venv — если ещё нет интерпретатора. Берём torch-совместимый Python.
+    remove_incompatible_ml_venv("STT-MLX", &stt_venv(), &stt_python(), progress)?;
     if !stt_python().exists() {
         let py = compatible_python()?;
         progress(Step::info("STT-MLX", format!("создаю Python-venv ({py})…")));
@@ -735,19 +747,12 @@ pub fn install_stt_sidecar(progress: &Progress, proxy: Option<&str>) -> Result<(
             "ставлю зависимости (qwen3-asr-mlx mlx-audio fastapi uvicorn numpy certifi) — ~2.6 ГБ для MLX-моделей…",
         ));
 
-        let mut up = Command::new(stt_pip());
-        up.args(["install", "--upgrade", "pip"]);
-        set_proxy(&mut up, proxy);
-        run_inherit("pip install --upgrade pip (stt)", &mut up)?;
-
-        let proxy_arg = match proxy {
-            Some(p) if !p.is_empty() => format!("--proxy '{p}' "),
-            _ => String::new(),
-        };
-        let cmd = format!(
-            "'{}' install --progress-bar raw {}qwen3-asr-mlx mlx-audio fastapi uvicorn numpy certifi",
-            stt_pip().display(),
-            proxy_arg,
+        let py = stt_python();
+        ensure_venv_pip(&py, proxy)?;
+        let cmd = pip_install_shell_cmd(
+            &py,
+            proxy,
+            &["qwen3-asr-mlx", "mlx-audio", "fastapi", "uvicorn", "numpy", "certifi"],
         );
         run_streamed("pip install stt deps", &cmd, proxy, progress, "STT-зависимости")?;
     } else {
@@ -765,7 +770,6 @@ pub fn install_stt_sidecar(progress: &Progress, proxy: Option<&str>) -> Result<(
 fn codex_sdk_dir() -> PathBuf { jarvis_dir().join("codex-sdk") }
 fn codex_sdk_venv() -> PathBuf { codex_sdk_dir().join("venv") }
 fn codex_sdk_python() -> PathBuf { codex_sdk_venv().join("bin/python") }
-fn codex_sdk_pip() -> PathBuf { codex_sdk_venv().join("bin/pip") }
 fn codex_sdk_script() -> PathBuf { codex_sdk_dir().join("codex-summary.py") }
 
 /// Установлен ли Codex-SDK сайдкар: venv с `openai_codex` + скрипт на месте.
@@ -809,19 +813,9 @@ pub fn install_codex_sdk_sidecar(progress: &Progress, proxy: Option<&str>) -> Re
             "Codex-SDK",
             "ставлю openai-codex (Python Codex SDK + pinned codex-бинарь)…",
         ));
-        let mut up = Command::new(codex_sdk_pip());
-        up.args(["install", "--upgrade", "pip"]);
-        set_proxy(&mut up, proxy);
-        run_inherit("pip install --upgrade pip (codex-sdk)", &mut up)?;
-        let proxy_arg = match proxy {
-            Some(p) if !p.is_empty() => format!("--proxy '{p}' "),
-            _ => String::new(),
-        };
-        let cmd = format!(
-            "'{}' install --progress-bar raw {}openai-codex",
-            codex_sdk_pip().display(),
-            proxy_arg,
-        );
+        let py = codex_sdk_python();
+        ensure_venv_pip(&py, proxy)?;
+        let cmd = pip_install_shell_cmd(&py, proxy, &["openai-codex"]);
         run_streamed("pip install openai-codex", &cmd, proxy, progress, "Codex-SDK")?;
     } else {
         progress(Step::info("Codex-SDK", "openai-codex уже установлен"));
@@ -856,7 +850,6 @@ fn install_mediaremote() {
 fn silero_server_py() -> PathBuf { silero_dir().join("silero-server.py") }
 fn silero_venv() -> PathBuf { silero_dir().join("venv") }
 fn silero_python() -> PathBuf { silero_venv().join("bin/python") }
-fn silero_pip() -> PathBuf { silero_venv().join("bin/pip") }
 
 /// Прогнать команду, наследуя stdout/stderr. Ошибка/ненулевой код → Err.
 fn run_inherit(what: &str, cmd: &mut Command) -> Result<(), String> {
@@ -874,6 +867,80 @@ fn set_proxy(cmd: &mut Command, proxy: Option<&str>) {
             cmd.env("HTTP_PROXY", p).env("HTTPS_PROXY", p);
         }
     }
+}
+
+fn remove_incompatible_ml_venv(
+    phase: &str,
+    venv: &Path,
+    python: &Path,
+    progress: &Progress,
+) -> Result<(), String> {
+    if !python.exists() {
+        return Ok(());
+    }
+    match py_path_version(python) {
+        Some(v) if python_fits_ml(v) => Ok(()),
+        Some((major, minor)) => {
+            progress(Step::warn(
+                phase,
+                format!("venv на Python {major}.{minor} несовместим с torch/numpy, пересоздаю…"),
+            ));
+            fs::remove_dir_all(venv).map_err(|e| format!("remove incompatible venv {}: {e}", venv.display()))
+        }
+        None => {
+            progress(Step::warn(phase, "venv-python не запускается, пересоздаю окружение…"));
+            fs::remove_dir_all(venv).map_err(|e| format!("remove broken venv {}: {e}", venv.display()))
+        }
+    }
+}
+
+/// В некоторых venv нет исполняемого `bin/pip`, но модульный запуск остаётся
+/// штатным путём. Гарантируем pip через ensurepip и дальше везде используем
+/// `venv/bin/python -m pip`.
+fn ensure_venv_pip(python: &Path, proxy: Option<&str>) -> Result<(), String> {
+    let has_pip = Command::new(python)
+        .env("PATH", augmented_path())
+        .args(["-m", "pip", "--version"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !has_pip {
+        let mut ensure = Command::new(python);
+        ensure.env("PATH", augmented_path()).args(["-m", "ensurepip", "--upgrade"]);
+        set_proxy(&mut ensure, proxy);
+        run_inherit("python -m ensurepip", &mut ensure)?;
+    }
+
+    let mut up = Command::new(python);
+    up.env("PATH", augmented_path()).args(["-m", "pip", "install", "--upgrade", "pip"]);
+    set_proxy(&mut up, proxy);
+    run_inherit("python -m pip install --upgrade pip", &mut up)
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn pip_install_shell_cmd(python: &Path, proxy: Option<&str>, packages: &[&str]) -> String {
+    let mut parts = vec![
+        shell_quote(&python.display().to_string()),
+        "-m".into(),
+        "pip".into(),
+        "install".into(),
+        "--progress-bar".into(),
+        "raw".into(),
+    ];
+    if let Some(p) = proxy {
+        if !p.is_empty() {
+            parts.push("--proxy".into());
+            parts.push(shell_quote(p));
+        }
+    }
+    parts.extend(packages.iter().map(|p| shell_quote(p)));
+    parts.join(" ")
 }
 
 /// Запустить shell-команду, слив stdout+stderr, и стримить прогресс скачивания.
@@ -917,6 +984,7 @@ pub fn install_silero(progress: &Progress, proxy: Option<&str>) -> Result<(), St
     atomic_write(&silero_server_py(), SILERO_SERVER_SRC);
 
     // 2. venv — если ещё нет интерпретатора. Берём torch-совместимый Python.
+    remove_incompatible_ml_venv("Голос", &silero_venv(), &silero_python(), progress)?;
     if !silero_python().exists() {
         let py = compatible_python()?;
         progress(Step::info("Голос", format!("создаю Python-venv ({py})…")));
@@ -936,20 +1004,14 @@ pub fn install_silero(progress: &Progress, proxy: Option<&str>) -> Result<(), St
         .unwrap_or(false);
     if !deps_ok {
         progress(Step::info("Голос", "ставлю PyTorch CPU — сотни МБ–ГБ, это надолго…"));
-        let mut up = Command::new(silero_pip());
-        up.args(["install", "--upgrade", "pip"]);
-        set_proxy(&mut up, proxy);
-        run_inherit("pip install --upgrade pip", &mut up)?;
+        let py = silero_python();
+        ensure_venv_pip(&py, proxy)?;
 
         // основная установка — со стримом процентов (pip --progress-bar raw)
-        let proxy_arg = match proxy {
-            Some(p) if !p.is_empty() => format!("--proxy '{p}' "),
-            _ => String::new(),
-        };
-        let cmd = format!(
-            "'{}' install --progress-bar raw {}torch fastapi uvicorn numpy certifi omegaconf",
-            silero_pip().display(),
-            proxy_arg,
+        let cmd = pip_install_shell_cmd(
+            &py,
+            proxy,
+            &["torch", "fastapi", "uvicorn", "numpy", "certifi", "omegaconf"],
         );
         run_streamed("pip install torch+deps", &cmd, proxy, progress, "Скачиваю PyTorch")?;
     }
@@ -969,7 +1031,7 @@ pub fn install_silero(progress: &Progress, proxy: Option<&str>) -> Result<(), St
     set_proxy(&mut warm, proxy);
     warm.args([
         "-c",
-        "import torch; torch.hub.load('snakers4/silero-models','silero_tts',language='ru',speaker='v4_ru',trust_repo=True)",
+        "import torch; torch.hub.load('snakers4/silero-models','silero_tts',language='ru',speaker='v4_ru',trust_repo=True,skip_validation=True)",
     ]);
     run_inherit("прогрев модели Silero", &mut warm)?;
 
@@ -1981,6 +2043,7 @@ mod tests {
         assert!(HOOK_SRC.contains("JARVIS_IGNORE"));
         assert!(SHIM_SRC.contains("tmux"));
         assert!(TMUX_CONF_SRC.contains("status off"));
+        assert!(SILERO_SERVER_SRC.contains("skip_validation=True"));
     }
 
     #[test]
@@ -2146,6 +2209,36 @@ mod tests {
         let second = std::fs::read(&path).unwrap();
         assert_eq!(first, second, "повторный проход не меняет уже верный файл");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shell_quote_escapes_spaces_and_single_quotes() {
+        assert_eq!(shell_quote("/tmp/Jarvis Venv/bin/python"), "'/tmp/Jarvis Venv/bin/python'");
+        assert_eq!(shell_quote("a'b c"), "'a'\\''b c'");
+    }
+
+    #[test]
+    fn python_fits_ml_rejects_python_314() {
+        assert!(python_fits_ml((3, 10)));
+        assert!(python_fits_ml((3, 13)));
+        assert!(!python_fits_ml((3, 14)));
+        assert!(!python_fits_ml((2, 7)));
+    }
+
+    #[test]
+    fn pip_install_shell_cmd_uses_venv_python_module() {
+        let cmd = pip_install_shell_cmd(
+            Path::new("/tmp/Jarvis Venv/bin/python"),
+            Some("http://127.0.0.1:8080"),
+            &["torch", "fastapi"],
+        );
+        assert!(
+            cmd.starts_with("'/tmp/Jarvis Venv/bin/python' -m pip install --progress-bar raw"),
+            "pip должен запускаться модулем venv-python: {cmd}"
+        );
+        assert!(cmd.contains("--proxy 'http://127.0.0.1:8080'"), "proxy должен сохраняться: {cmd}");
+        assert!(cmd.contains("'torch'") && cmd.contains("'fastapi'"), "пакеты должны попасть в команду: {cmd}");
+        assert!(!cmd.contains("bin/pip"), "не должен зависеть от отсутствующего bin/pip: {cmd}");
     }
 
     // Phase 8: STT-SERVER_SRC встроен и является валидным Python-скриптом (начало).

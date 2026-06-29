@@ -47,6 +47,6 @@ jobs:
           args: --target aarch64-apple-darwin --features wakeword-ort,whisper-native,stt-vad
           tagName: ${{ github.ref_name }}
           releaseName: Jarvis ${{ github.ref_name }}
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           includeUpdaterJson: true

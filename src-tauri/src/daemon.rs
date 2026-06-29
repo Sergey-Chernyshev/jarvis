@@ -460,9 +460,10 @@ impl Daemon {
         // списком, а голос прочитает «вопрос + Вариант N: label. описание».
         let session_snap = session_id.and_then(|sid| self.session(sid));
         let qfull = session_snap.as_ref().and_then(|s| s.question.clone());
-        let qcount = qfull.as_ref().map(|q| q.questions.len()).unwrap_or(0);
-        let qitem = qfull.and_then(|q| q.questions.into_iter().next());
-        let question = qitem.as_ref().map(|qi| {
+        let qitems = qfull.as_ref().map(|q| q.questions.clone()).unwrap_or_default();
+        let qcount = qitems.len();
+        // payload тоста — первый вопрос (+count); карточка покажет остальные подсказкой.
+        let question = qitems.first().map(|qi| {
             serde_json::json!({
                 "multiSelect": qi.multi_select,
                 "question": qi.question,
@@ -472,15 +473,27 @@ impl Daemon {
                     .collect::<Vec<_>>(),
             })
         });
-        let speak_text = match &qitem {
-            Some(qi) => {
-                let mut t = if qi.question.is_empty() { String::new() } else { qi.question.clone() };
+        // голос читает ВСЕ вопросы (раньше — только первый): «Вопрос N: … Вариант M: …».
+        let speak_text = if qitems.is_empty() {
+            speak.unwrap_or(body).to_string()
+        } else {
+            let multi = qitems.len() > 1;
+            let mut t = String::new();
+            for (qi_idx, qi) in qitems.iter().enumerate() {
+                if !t.is_empty() {
+                    t.push_str(". ");
+                }
+                if multi {
+                    t.push_str(&format!("Вопрос {}: ", qi_idx + 1));
+                }
+                if !qi.question.is_empty() {
+                    t.push_str(&qi.question);
+                }
                 for (i, o) in qi.options.iter().enumerate() {
                     t.push_str(&format!(". Вариант {}: {}. {}", i + 1, o.label, o.description));
                 }
-                t
             }
-            None => speak.unwrap_or(body).to_string(),
+            t
         };
 
         // запоминаем для хоткея «повторить» (даже в тихом режиме — ⌘⌥-повтор

@@ -151,18 +151,6 @@ impl Voice {
 
     /// После реплики: если очередь пуста — вернуть медиа с дебаунсом 400мс
     /// (чтобы между подряд идущими тостами не мигало пауза→плей→пауза).
-    fn maybe_unduck(self: &Arc<Self>) {
-        if !self.ducked.load(Ordering::SeqCst) {
-            return;
-        }
-        let me = self.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            if me.queue.0.lock().unwrap().is_empty() {
-                me.force_unduck();
-            }
-        });
-    }
 
     /// Тик супервизора: сперва глушим по простою (вернуть процесс/память в тихие
     /// периоды), иначе — перезапуск, если умер.
@@ -337,8 +325,20 @@ impl Voice {
             let next = {
                 let (m, cv) = &*self.queue;
                 let mut g = m.lock().unwrap();
-                while g.is_empty() { g = cv.wait(g).unwrap(); }
-                g.next()
+                loop {
+                    if let Some(u) = g.next() { break Some(u); }
+                    // Очередь РЕАЛЬНО пуста (текущая утта доиграна, следующей нет) →
+                    // только теперь возвращаем чужое медиа. Раньше unduck шёл по
+                    // дебаунсу после каждой утты и срабатывал, пока следующая утта
+                    // была «в полёте» (уже снята с очереди) → музыка лезла поверх.
+                    if self.ducked.load(Ordering::SeqCst) {
+                        drop(g);
+                        self.force_unduck(); // media_play без удержания лока
+                        g = m.lock().unwrap();
+                        if let Some(u) = g.next() { break Some(u); } // вдруг успело прийти
+                    }
+                    g = cv.wait(g).unwrap();
+                }
             };
             let Some(u) = next else { continue; };
             // Тело утты в catch_unwind: паника синтеза/плеера не убивает воркер и
@@ -373,7 +373,7 @@ impl Voice {
                         self.player.play_blocking(wav);
                         self.speaking.store(false, Ordering::SeqCst);
                         crate::metrics::record("tts_play", t_play, serde_json::json!({ "chars": u.text.chars().count() }));
-                        self.maybe_unduck(); // очередь пуста → вернуть медиа (с дебаунсом)
+                        // unduck НЕ здесь: вернёт медиа воркер, когда очередь опустеет
                         if let Some(tid) = &u.toast_id {
                             crate::windows::toast_extend(&self.app, tid, 3500);
                         }

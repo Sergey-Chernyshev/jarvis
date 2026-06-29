@@ -35,6 +35,7 @@
     voiceTest: () => invoke('voice_test'),
     voiceSetMute: (on) => invoke('voice_set_mute', { on }),
     voiceSetDuck: (on) => invoke('voice_set_duck', { on }),
+    voiceSetBluetoothOnly: (on) => invoke('voice_set_bluetooth_only', { on }),
     getCommands: (sessionId) => invoke('commands_get', { sessionId }),
     setModel: (sessionId, model) => invoke('session_set_model', { sessionId, model }),
     setEffort: (sessionId, level) => invoke('session_set_effort', { sessionId, level }),

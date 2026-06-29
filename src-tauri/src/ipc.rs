@@ -623,6 +623,7 @@ pub fn voice_get(app: AppHandle) -> Value {
         "rate": d.voice.rate(),
         "mute": d.voice.is_muted(),
         "duck": d.voice.duck_enabled(),
+        "bluetoothOnly": cfg.bluetooth_only,
         // Silero v4_ru — фиксированный набор спикеров
         "speakers": ["aidar", "baya", "kseniya", "xenia", "eugene"],
         // темпы речи (медленнее → быстрее)
@@ -676,6 +677,14 @@ pub fn voice_set_duck(app: AppHandle, on: bool) {
     let mut patch = serde_json::Map::new();
     patch.insert("duckOthers".into(), Value::Bool(on));
     d.settings.set_voice(patch);
+}
+
+/// Тумблер «озвучивать только при Bluetooth-гарнитуре» — сохранить в voice.
+#[tauri::command]
+pub fn voice_set_bluetooth_only(app: AppHandle, on: bool) {
+    let mut patch = serde_json::Map::new();
+    patch.insert("bluetoothOnly".into(), Value::Bool(on));
+    Daemon::get(&app).settings.set_voice(patch);
 }
 
 /// Прогнать действие панели через гейт (Consumer::panel) и вернуть структурный

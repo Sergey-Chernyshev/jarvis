@@ -972,6 +972,10 @@
     group.appendChild(drow('Пауза чужого звука', 'Приглушать музыку/видео на время реплики, как Siri.',
       toggle(v.duck !== false, (on) => fire(() => window.jarvis.voiceSetDuck(on)))));
 
+    // озвучка только при Bluetooth-гарнитуре
+    group.appendChild(drow('Только через Bluetooth', 'Озвучивать, лишь когда подключена Bluetooth-гарнитура.',
+      toggle(v.bluetoothOnly !== false, (on) => fire(() => window.jarvis.voiceSetBluetoothOnly(on)))));
+
     pane.appendChild(group);
   }
 
@@ -1033,14 +1037,47 @@
     const _sk = skelGroup(3); pane.appendChild(_sk);
     const s = await safe(() => window.jarvis.getSettings(), {});
     _sk.remove();
-    const group = el('div.dgroup');
-    group.appendChild(drow('Когда агент закончил', 'Уведомлять о завершении ответа.',
+    // notify-блок шлём целиком при изменении (бэкенд мержит верхний уровень —
+    // полный объект, чтобы не затереть соседние поля).
+    const nf = Object.assign({ content: {}, ttlSec: 8 }, s.notify || {});
+    const content = Object.assign({ branch: true, model: false, effort: false, time: false }, nf.content || {});
+    const saveContent = (k, on) => {
+      content[k] = on;
+      fire(() => window.jarvis.setSettings({ notify: Object.assign({}, nf, { content: Object.assign({}, content) }) }));
+    };
+
+    pane.appendChild(el('div.dsection', { text: 'Содержимое карточки' }));
+    const cg = el('div.dgroup');
+    cg.appendChild(drow('Текущая ветка', '⎇ рядом с проектом — удобно прыгать между задачами',
+      toggle(content.branch, (on) => saveContent('branch', on))));
+    cg.appendChild(drow('Модель', 'напр. Opus 4.8 — если несколько агентов',
+      toggle(content.model, (on) => saveContent('model', on))));
+    cg.appendChild(drow('Уровень усилия', 'reasoning effort: low / high / max',
+      toggle(content.effort, (on) => saveContent('effort', on))));
+    cg.appendChild(drow('Время', 'когда пришло уведомление',
+      toggle(content.time, (on) => saveContent('time', on))));
+    pane.appendChild(cg);
+
+    pane.appendChild(el('div.dsection', { text: 'Уведомлять о' }));
+    const eg = el('div.dgroup');
+    eg.appendChild(drow('Когда агент закончил', 'Уведомлять о завершении ответа.',
       toggle(s.notifyDone, (on) => fire(() => window.jarvis.setSettings({ notifyDone: on })))));
-    group.appendChild(drow('Когда ждёт тебя', 'Уведомлять, когда агенту нужен ответ.',
+    eg.appendChild(drow('Когда ждёт тебя', 'Уведомлять, когда агенту нужен ответ.',
       toggle(s.notifyWaiting, (on) => fire(() => window.jarvis.setSettings({ notifyWaiting: on })))));
-    group.appendChild(drow('Продолжать после лимита', 'Авто-«продолжай» при сбросе лимита.',
+    eg.appendChild(drow('Продолжать после лимита', 'Авто-«продолжай» при сбросе лимита.',
       toggle(s.autoResume !== false, (on) => fire(() => window.jarvis.setSettings({ autoResume: on })))));
-    pane.appendChild(group);
+    pane.appendChild(eg);
+
+    pane.appendChild(el('div.dsection', { text: 'Вид и поведение' }));
+    const vg = el('div.dgroup');
+    vg.appendChild(drow('Позиция', 'где появляются карточки',
+      segmented([{ value: 'center', label: 'Центр' }, { value: 'corner', label: 'Угол' }],
+        s.position || 'center', (v) => fire(() => window.jarvis.setSettings({ position: v })))));
+    const ttlNow = (typeof nf.ttlSec === 'number') ? nf.ttlSec : 8;
+    vg.appendChild(drow('Автоскрытие', 'через сколько прятать карточку (после озвучки, если она есть)',
+      segmented([{ value: 5, label: '5с' }, { value: 8, label: '8с' }, { value: 0, label: 'Не прятать' }],
+        ttlNow, (v) => fire(() => window.jarvis.setSettings({ notify: Object.assign({}, nf, { ttlSec: Number(v) }) })))));
+    pane.appendChild(vg);
   }
 
   // 6. Бодрость (awake) — keep-awake через плагины (getPlugins / pluginCmd)

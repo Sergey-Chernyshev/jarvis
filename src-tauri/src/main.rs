@@ -140,6 +140,7 @@ fn main() {
             ipc::voice_test,
             ipc::voice_set_mute,
             ipc::voice_set_duck,
+            ipc::voice_set_bluetooth_only,
             ipc::session_reply,
             ipc::session_continue,
             ipc::agent_confirm,

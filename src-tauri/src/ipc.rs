@@ -1446,6 +1446,11 @@ pub fn wake_get(app: AppHandle) -> Value {
 #[tauri::command]
 pub fn wake_set_enabled(app: AppHandle, on: bool) -> Value {
     let d = Daemon::get(&app);
+    // Гейт: без скачанных моделей openWakeWord детектор молча инертен (стаб) —
+    // не даём включить, пока модель не установлена в разделе «Модели».
+    if on && !crate::install::status().wakeword_models {
+        return err("Сначала скачайте модели wake-word в разделе «Модели»");
+    }
     let mut patch = serde_json::Map::new();
     patch.insert("enabled".into(), json!(on));
     d.settings.set_block("wake", patch);

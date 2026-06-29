@@ -113,10 +113,22 @@ impl Sidecar {
             .arg(&self.model)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // stderr → лог: чтобы краш Python (например, битый venv: ModuleNotFoundError)
+            // был виден в ~/.jarvis/jarvis.log, а не терялся молча («не говорит»).
+            .stderr(Stdio::piped())
             .spawn()
         {
-            Ok(c) => {
+            Ok(mut c) => {
+                if let Some(err) = c.stderr.take() {
+                    std::thread::spawn(move || {
+                        use std::io::{BufRead, BufReader};
+                        for line in BufReader::new(err).lines().map_while(Result::ok) {
+                            if !line.trim().is_empty() {
+                                crate::log::line(&format!("[voice] silero stderr: {line}"));
+                            }
+                        }
+                    });
+                }
                 *g = Some(c);
                 crate::log::line(&format!("[voice] silero: сайдкар запущен на :{}", self.port));
             }

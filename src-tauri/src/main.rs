@@ -195,6 +195,7 @@ fn main() {
             ipc::wake_set_threshold,
             ipc::audio_set_mute,
             onboarding::wake_install_models,
+            onboarding::voice_install_silero,
         ])
         .setup(|app| {
             // чистый старт: прибить прежние демоны + осиротевшие сайдкары на :8731/:8732

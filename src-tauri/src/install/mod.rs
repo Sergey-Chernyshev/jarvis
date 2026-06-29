@@ -910,7 +910,7 @@ fn run_streamed(label: &str, shell_cmd: &str, proxy: Option<&str>, progress: &Pr
 /// Установить Silero-сайдкар: server.py + venv с torch(CPU)/fastapi/uvicorn/numpy
 /// + прогрев модели. Веса PyTorch — сотни МБ–ГБ, ставятся один раз. Идемпотентно.
 /// `proxy` (если задан) идёт в окружение pip/torch. `progress` стримит проценты.
-fn install_silero(progress: &Progress, proxy: Option<&str>) -> Result<(), String> {
+pub fn install_silero(progress: &Progress, proxy: Option<&str>) -> Result<(), String> {
     fs::create_dir_all(silero_dir()).map_err(|e| format!("mkdir silero: {e}"))?;
 
     // 1. server.py — атомарная запись поверх (держим актуальным).

@@ -115,7 +115,8 @@ impl SttSidecar {
             .arg(&self.model)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            // stderr → лог: краш Python (битый venv и т.п.) виден в jarvis.log, а не молча.
+            .stderr(Stdio::piped());
         // huggingface.co заблокирован на части сетей (напр. RU) → тянем модель
         // через зеркало, если HF_ENDPOINT не задан явно снаружи. XET-протокол
         // отключаем — он ломал соединение (`[Errno 22]`) на этой сети.
@@ -124,7 +125,17 @@ impl SttSidecar {
         }
         cmd.env("HF_HUB_DISABLE_XET", "1");
         match cmd.spawn() {
-            Ok(c) => {
+            Ok(mut c) => {
+                if let Some(err) = c.stderr.take() {
+                    std::thread::spawn(move || {
+                        use std::io::{BufRead, BufReader};
+                        for line in BufReader::new(err).lines().map_while(Result::ok) {
+                            if !line.trim().is_empty() {
+                                crate::log::line(&format!("[stt] сайдкар stderr: {line}"));
+                            }
+                        }
+                    });
+                }
                 *g = Some(c);
                 crate::log::line(&format!("[stt] сайдкар запущен на :{}", self.port));
                 Ok(())

@@ -1348,14 +1348,14 @@
   justify-content: space-between; flex: none;
 }
 #voicehist .mhead .h { font-size: 21px; font-weight: 600; }
-#voicehist .pane { flex: 1; min-height: 0; overflow-y: auto; display: none; }
+#voicehist .pane { flex: 1; min-height: 0; overflow-y: auto; display: none; padding-bottom: 72px; }
 #voicehist .pane.on { display: block; }
 #voicehist .pane::-webkit-scrollbar { width: 0; }
 
 /* ════ История: лента + правый рейл ════ */
 #voicehist .home { display: flex; height: 100%; }
 #voicehist .feed {
-  flex: 1; min-width: 0; overflow-y: auto; padding: 6px 8px 22px 24px;
+  flex: 1; min-width: 0; overflow-y: auto; padding: 6px 8px 80px 24px;
   display: flex; flex-direction: column;
 }
 #voicehist .feed::-webkit-scrollbar { width: 0; }

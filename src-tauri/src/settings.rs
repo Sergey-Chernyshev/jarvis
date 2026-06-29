@@ -23,11 +23,17 @@ pub struct Store {
 fn defaults() -> Value {
     json!({
         "hotkey": "Command+J",
+        "quietHotkey": "Command+Alt+J",
+        "continueHotkey": "Command+Alt+C",
+        "repeatHotkey": "Command+Alt+R",
+        "muteHotkey": "Command+Alt+M",
+        "selectHotkeyTemplate": "Command+Alt+{n}",
         "notifyDone": true,
         "notifyWaiting": true,
         "position": "center", // 'center' | 'corner'
         "autoResume": true,   // после сброса лимита сказать ждавшим сессиям «продолжай»
         "autoUpdate": true,   // тихо проверять и ставить обновления на старте
+        "diagnostics": true,  // режим логов: тайминги/RAM/CPU/события → metrics.jsonl + jarvis.log (без текста промптов/ответов)
         "schemaVersion": SCHEMA_VERSION,
         "notify": {
             "content": { "branch": true, "model": false, "effort": false, "tokens": false, "time": false },

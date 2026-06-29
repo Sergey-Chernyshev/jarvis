@@ -172,6 +172,7 @@ fn main() {
             ipc::prompts_set_smart,
             ipc::prompts_get,
             ipc::stt_set_engine,
+            ipc::stt_set_hotkey,
             ipc::stt_test,
             ipc::voice_history_open,
             ipc::stt_input_devices,

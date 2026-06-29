@@ -313,16 +313,43 @@ const WHISPER_MODEL_URL: &str =
  * редиректов вручную и выбираем канал по хосту каждого хопа. На reqwest (а не curl):
  * нет утечки пароля прокси в argv, и нет наследования env-прокси для прямого хопа. */
 
-/// Хосты CDN, к которым ходим НАПРЯМУЮ (в обход прокси).
-fn is_direct_cdn_host(host: &str) -> bool {
-    host.ends_with(".cdn.hf.co")
-        || host.ends_with(".xethub.hf.co")
-        || host.ends_with(".githubusercontent.com")
-        || host.starts_with("cdn-lfs")
+/// Порядок каналов загрузки (значение = `direct`: true — напрямую, false — через
+/// прокси). Если прокси задан — гоним ВСЁ через него (вкл. CDN), как просил
+/// пользователь, с фолбэком на прямой канал (на случай сети, где CDN доступен
+/// только напрямую). Без прокси — только прямой.
+fn download_channels(has_proxy: bool) -> Vec<bool> {
+    if has_proxy {
+        vec![false, true] // прокси → фолбэк прямой
+    } else {
+        vec![true] // только прямой
+    }
 }
 
-/// reqwest-клиент с ручной проходкой редиректов. `direct=true` → без прокси (CDN);
-/// иначе через `proxy` (если задан) — для huggingface.co/github.com.
+/// Отправить GET, перебирая каналы (прокси → прямой) до первого успешного
+/// коннекта. Фолбэк только на ТРАНСПОРТНЫХ ошибках (DNS/коннект/таймаут);
+/// HTTP-статус (404/403/302) — валидный ответ, его возвращаем как есть. При
+/// провале всех каналов — ошибка с перечислением попыток (видно в UI).
+fn send_get(
+    url: &reqwest::Url,
+    proxy: Option<&str>,
+    label: &str,
+) -> Result<reqwest::blocking::Response, String> {
+    let host = url.host_str().unwrap_or("").to_string();
+    let has_proxy = proxy.map(|p| !p.is_empty()).unwrap_or(false);
+    let mut errs = Vec::new();
+    for direct in download_channels(has_proxy) {
+        let how = if direct { "напрямую" } else { "через прокси" };
+        let client = dl_client(proxy, direct)?;
+        match client.get(url.clone()).send() {
+            Ok(resp) => return Ok(resp),
+            Err(e) => errs.push(format!("{how} к {host}: {e}")),
+        }
+    }
+    Err(format!("{label}: не удалось подключиться — {}", errs.join(" · ")))
+}
+
+/// reqwest-клиент с ручной проходкой редиректов. `direct=true` → без прокси;
+/// иначе через `proxy` (если задан).
 fn dl_client(proxy: Option<&str>, direct: bool) -> Result<reqwest::blocking::Client, String> {
     let mut b = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -352,12 +379,7 @@ fn fetch_to_file(
     let mut current = reqwest::Url::parse(url).map_err(|e| format!("{label}: url: {e}"))?;
     for _hop in 0..8 {
         let host = current.host_str().unwrap_or("").to_string();
-        let direct = is_direct_cdn_host(&host);
-        let client = dl_client(proxy, direct)?;
-        let resp = client
-            .get(current.clone())
-            .send()
-            .map_err(|e| format!("{label}: запрос к {host}: {e}"))?;
+        let resp = send_get(&current, proxy, label)?;
         let status = resp.status();
         if status.is_redirection() {
             let loc = resp
@@ -1805,6 +1827,13 @@ mod tests {
 
     const DIR: &str = "/Users/test/.jarvis/shims";
 
+    // download_channels: с прокси — прокси первым, прямой как фолбэк; без — только прямой.
+    #[test]
+    fn download_channels_proxy_then_direct() {
+        assert_eq!(super::download_channels(true), vec![false, true]);
+        assert_eq!(super::download_channels(false), vec![true]);
+    }
+
     #[test]
     fn mcp_config_has_token_and_command() {
         let cfg = super::build_mcp_config("/x/.jarvis/bin/jarvis-mcp", "feedface");
@@ -2135,20 +2164,8 @@ mod tests {
         assert!(s.contains("stt-mlx") && s.contains("models"), "путь внутри stt-mlx/models: {s}");
     }
 
-    // --- Инкр.2: гибридная загрузка ---
-
-    #[test]
-    fn direct_cdn_hosts_detected() {
-        // CDN-хосты (качаем напрямую, в обход прокси)
-        assert!(is_direct_cdn_host("us.aws.cdn.hf.co"));
-        assert!(is_direct_cdn_host("cas-bridge.xethub.hf.co"));
-        assert!(is_direct_cdn_host("objects.githubusercontent.com"));
-        assert!(is_direct_cdn_host("cdn-lfs-us-1.huggingface.co"));
-        // не-CDN (идут через прокси)
-        assert!(!is_direct_cdn_host("huggingface.co"));
-        assert!(!is_direct_cdn_host("github.com"));
-        assert!(!is_direct_cdn_host(""));
-    }
+    // --- Инкр.2: гибридная загрузка (теперь: прокси-на-всё + фолбэк, см.
+    // download_channels_proxy_then_direct выше) ---
 
     #[test]
     fn qwen_repo_mapping() {

@@ -21,7 +21,7 @@ pub struct SttConfig {
 impl Default for SttConfig {
     fn default() -> Self {
         SttConfig {
-            engine: "qwen3-0.6b".into(),
+            engine: "whisper-turbo".into(),
             dominant_lang: "ru".into(),
             task: SttTask::Transcribe,
             audio_device: None,
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn garbage_types_fall_back() {
         let cfg = SttConfig::from_settings(&json!({ "stt": { "engine": 42, "hotkey": true } }));
-        assert_eq!(cfg.engine, "qwen3-0.6b", "wrong type → default engine");
+        assert_eq!(cfg.engine, "whisper-turbo", "wrong type → default engine");
         assert_eq!(cfg.hotkey, "F8", "wrong type → default hotkey");
     }
 
@@ -123,8 +123,8 @@ mod tests {
 
     // SttConfig defaults
     #[test]
-    fn default_engine_is_qwen3_06b() {
-        assert_eq!(SttConfig::default().engine, "qwen3-0.6b");
+    fn default_engine_is_whisper_turbo() {
+        assert_eq!(SttConfig::default().engine, "whisper-turbo");
     }
 
     #[test]

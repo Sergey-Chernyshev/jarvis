@@ -1092,6 +1092,36 @@ pub fn stt_set_engine(app: AppHandle, engine: String) -> Value {
     json!({ "ok": true, "restart": false })
 }
 
+/// Переназначить хоткей диктовки (push-to-talk). Валидирует аксельератор,
+/// снимает старый глобальный шорткат, пишет в `settings.stt.hotkey` и регистрирует
+/// новый. При провале регистрации (сочетание занято) — откат на прежний.
+#[tauri::command]
+pub fn stt_set_hotkey(app: AppHandle, hotkey: String) -> Value {
+    let hotkey = hotkey.trim().to_string();
+    if hotkey.is_empty() {
+        return err("Пустое сочетание");
+    }
+    // Должно парситься как глобальный шорткат tauri (например "F8" или "Command+Shift+D").
+    if hotkey.parse::<Shortcut>().is_err() {
+        return err(format!("Не разобрал сочетание: {hotkey}"));
+    }
+    let d = Daemon::get(&app);
+    let old = dictation_accelerator(&d);
+    if hotkey == old {
+        return json!({ "ok": true, "hotkey": hotkey });
+    }
+    let gs = d.app.global_shortcut();
+    let _ = gs.unregister(old.as_str());
+    if gs.register(hotkey.as_str()).is_err() {
+        let _ = gs.register(old.as_str()); // откат на прежний
+        return err(format!("Сочетание {hotkey} занято системой"));
+    }
+    let mut patch = serde_json::Map::new();
+    patch.insert("hotkey".into(), Value::String(hotkey.clone()));
+    d.settings.set_stt(patch);
+    json!({ "ok": true, "hotkey": hotkey })
+}
+
 /// Открыть панель и переключить на вкладку «История голоса» (клик по карточке
 /// «Услышал»). Зеркалит onboarding_open_settings: show_panel + событие в main.
 #[tauri::command]

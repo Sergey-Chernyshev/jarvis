@@ -69,6 +69,7 @@
     // STT — диктовка (инкремент 9): состояние, выбор движка, тест
     sttGet: () => invoke('stt_get'),
     sttSetEngine: (engine) => invoke('stt_set_engine', { engine }),
+    sttSetHotkey: (hotkey) => invoke('stt_set_hotkey', { hotkey }),
     sttTest: () => invoke('stt_test'),
     sttInputDevices: () => invoke('stt_input_devices'),
     sttSetInputDevice: (name) => invoke('stt_set_input_device', { name }),

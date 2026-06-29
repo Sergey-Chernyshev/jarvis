@@ -284,18 +284,20 @@ mod tests {
         assert_eq!(svc.engine_name(), "mock");
     }
 
-    // SttService с Qwen3Engine (дефолтный конфиг engine=qwen3-0.6b): available()==false
+    // SttService с Qwen3Engine (явный engine=qwen3-0.6b): available()==false
     // когда сайдкар не запущен (порт 8732 закрыт в тестах)
     #[test]
     fn qwen3_engine_service_not_available() {
-        let svc = SttService::new(SttConfig::default());
+        let cfg = SttConfig { engine: "qwen3-0.6b".into(), ..SttConfig::default() };
+        let svc = SttService::new(cfg);
         assert!(!svc.available());
     }
 
     // SttService с Qwen3Engine: transcribe → Err когда сайдкар не запущен
     #[test]
     fn qwen3_engine_service_transcribe_errors() {
-        let svc = SttService::new(SttConfig::default());
+        let cfg = SttConfig { engine: "qwen3-0.6b".into(), ..SttConfig::default() };
+        let svc = SttService::new(cfg);
         let result = svc.transcribe(&[0.0f32; 16], &SttOptions::default());
         assert!(result.is_err());
     }
@@ -324,11 +326,11 @@ mod tests {
         assert_eq!(opts.task, SttTask::Translate);
     }
 
-    // SttService::new строит правильно из конфига — дефолт = qwen3-0.6b (Phase 3)
+    // SttService::new строит правильно из конфига — дефолт = whisper-turbo
     #[test]
-    fn new_service_engine_name_is_qwen3_for_default_config() {
+    fn new_service_engine_name_is_whisper_turbo_for_default_config() {
         let svc = SttService::new(SttConfig::default());
-        assert_eq!(svc.engine_name(), "qwen3-0.6b");
+        assert_eq!(svc.engine_name(), "whisper-turbo");
     }
 
     // Инкр.6: set_engine горячо подменяет движок без пересоздания SttService.

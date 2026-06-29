@@ -20,6 +20,11 @@
   let activePane = 'general'; // выбранная вкладка сайдбара
   const renderingPane = {};   // pane → идёт ли сейчас рендер (анти-гонка)
   const renderPending = {};   // pane → запрошен ли повторный рендер во время текущего
+  // Состояние загрузок моделей. `activeDownload` — id модели, что качается СЕЙЧАС
+  // (чтобы прогресс шёл только в её строку, а не во все). `dlState[id].error` —
+  // текст последней ошибки (показываем в строке + retry), вместо тихого сброса.
+  let activeDownload = null;
+  const dlState = {};
 
   // ── Дефолты хоткеев (сверено с HK_DEFAULTS + settings_get в renderer.js) ──
   const HK_DEFAULTS = {
@@ -357,6 +362,87 @@
     return nodes;
   }
 
+  /* ── Инлайн-заметка ошибки загрузки (красная, под строкой модели) ───────
+   * Показывает реальную причину провала скачивания (раньше ошибка молча
+   * глоталась и статус «сбрасывался» в «не скачана»). */
+  function dlErrorNote(msg) {
+    const n = el('div.s2err');
+    n.appendChild(el('span.s2err-ic', icon('alert-triangle')));
+    n.appendChild(el('span.s2err-txt', { text: msg }));
+    return n;
+  }
+
+  /* ── KeyboardEvent → tauri-аксельератор ("Command+Shift+D" / "F8") ───────
+   * isFn=true для F1..F24 (их можно биндить без модификатора — push-to-talk).
+   * Голую букву/цифру без модификатора биндить нельзя: глобальный шорткат
+   * перехватит её ввод во всей системе. */
+  function eventToAccel(e) {
+    const mods = [];
+    if (e.metaKey) mods.push('Command');
+    if (e.ctrlKey) mods.push('Control');
+    if (e.altKey) mods.push('Alt');
+    if (e.shiftKey) mods.push('Shift');
+    const code = e.code || '';
+    const isFn = /^F\d{1,2}$/.test(code);
+    let key = null;
+    if (isFn) key = code;
+    else if (/^Key[A-Z]$/.test(code)) key = code.slice(3);  // KeyD → D
+    else if (/^Digit\d$/.test(code)) key = code.slice(5);   // Digit5 → 5
+    else if (code === 'Space') key = 'Space';
+    return { mods, key, isFn };
+  }
+
+  /* ── Поле хоткея диктовки с ЗАПИСЬЮ сочетания ────────────────────────────
+   * Клик → режим записи (лови нажатие), Esc — отмена, кнопка сброса → F8.
+   * Сохраняет через sttSetHotkey (бэкенд валидирует и перерегистрирует). */
+  function dictationHotkeyField(current) {
+    let acc = current || 'F8';
+    const hkey = el('div.hkey.rec', { title: 'Кликни и нажми новое сочетание' });
+    const paint = () => {
+      hkey.classList.remove('recording');
+      hkey.replaceChildren();
+      for (const k of hotkeyKeys(acc)) hkey.appendChild(el('kbd', { text: k }));
+    };
+    const note = (txt) => { hkey.replaceChildren(el('kbd', { text: txt })); };
+    let recording = false, onKey = null;
+    function onAway(e) { if (!hkey.contains(e.target)) stop(); }
+    function stop() {
+      recording = false;
+      if (onKey) { document.removeEventListener('keydown', onKey, true); onKey = null; }
+      document.removeEventListener('click', onAway, true);
+      paint();
+    }
+    function start() {
+      if (recording) return;
+      recording = true;
+      hkey.classList.add('recording');
+      note('Нажмите сочетание…');
+      onKey = async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (e.key === 'Escape') { stop(); return; }
+        if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return; // ждём основную клавишу
+        const { mods, key, isFn } = eventToAccel(e);
+        if (!key) { note('Эта клавиша не поддерживается'); return; }
+        if (!isFn && mods.length === 0) { note('Нужен модификатор (⌘/⌥/⌃) или F-клавиша'); return; }
+        const next = [...mods, key].join('+');
+        const res = await safe(() => window.jarvis.sttSetHotkey(next), null);
+        if (res && res.ok) { acc = res.hotkey || next; stop(); }
+        else { note((res && res.error) || 'не удалось'); setTimeout(stop, 1500); }
+      };
+      document.addEventListener('keydown', onKey, true);
+      document.addEventListener('click', onAway, true);
+    }
+    hkey.addEventListener('click', (e) => { e.stopPropagation(); start(); });
+    paint();
+    const rb = el('button.hkreset', { title: 'Сбросить на F8' }, icon('rotate-ccw'));
+    rb.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const res = await safe(() => window.jarvis.sttSetHotkey('F8'), null);
+      if (res && res.ok) { acc = 'F8'; paint(); }
+    });
+    return [hkey, rb];
+  }
+
   /* ── Полоса загрузки модели (.progress.striped) ─────────────────────────*/
   function progressBar(pct) {
     const bar = el('div.progress.striped', { style: 'margin-top:9px;max-width:280px' });
@@ -508,8 +594,10 @@
 #settings2 .hkey { display:inline-flex; align-items:center; gap:8px; padding:8px 13px; border-radius:8px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.08); cursor:default; transition:background .15s ease; }
 #settings2 .hkey:hover { background:rgba(255,255,255,0.08); }
 #settings2 .hkey kbd { font:500 13px/1 var(--s2-font); color:var(--text,#e7e7ea); background:transparent; border:0; padding:0; }
-#settings2 .hkey.rec { background:rgba(108,160,255,0.1); border-color:rgba(108,160,255,0.25); }
+#settings2 .hkey.rec { background:rgba(108,160,255,0.1); border-color:rgba(108,160,255,0.25); cursor:pointer; }
+#settings2 .hkey.rec:hover { border-color:rgba(108,160,255,0.45); }
 #settings2 .hkey.rec kbd { color:var(--working,#6ca0ff); }
+#settings2 .hkey.rec.recording { background:rgba(108,160,255,0.18); border-color:var(--working,#6ca0ff); }
 #settings2 .hkreset { width:32px; height:32px; border-radius:8px; display:grid; place-items:center; background:transparent; border:0; color:var(--faint,#55555c); cursor:default; }
 #settings2 .hkreset:hover { color:var(--text-body,#d6d6db); background:rgba(255,255,255,0.06); }
 #settings2 .hkreset svg.lucide { width:15px; height:15px; }
@@ -536,6 +624,12 @@
 #settings2 .spin svg.lucide { width:14px; height:14px; color:var(--working,#6ca0ff); animation: s2spin .8s linear infinite; }
 @keyframes s2spin { to { transform:rotate(360deg); } }
 #settings2 .loadcap { font-size:11px; color:var(--muted,#76767e); }
+
+/* ── ошибка загрузки модели (инлайн, красная) ────────────────────────── */
+#settings2 .s2err { display:flex; align-items:center; gap:6px; margin-top:6px; font-size:11.5px;
+  color:var(--danger,#f2615c); max-width:340px; line-height:1.35; }
+#settings2 .s2err .s2err-ic svg.lucide { width:13px; height:13px; }
+#settings2 .s2err-txt { word-break:break-word; }
 
 /* ── lucide общая геометрия ──────────────────────────────────────────── */
 #settings2 svg.lucide { width:15px; height:15px; stroke-width:2; vertical-align:middle; flex:none; }
@@ -663,8 +757,8 @@
       devSel.node));
 
     // клавиша диктовки (read-only капс)
-    group.appendChild(drow('Клавиша диктовки', 'Зажми и говори (push-to-talk).',
-      hotkeyField(v.hotkey || 'F8', { rec: true }), { ctlClass: 'hk' }));
+    group.appendChild(drow('Клавиша диктовки', 'Зажми и говори (push-to-talk). Кликни и нажми новое сочетание.',
+      dictationHotkeyField(v.hotkey || 'F8'), { ctlClass: 'hk' }));
 
     // тест микрофона
     group.appendChild(renderMicTestRow());
@@ -745,14 +839,21 @@
       titleRow.appendChild(el('span.sval.on', { text: ' · активна', style: 'margin-left:8px;font-size:11.5px' }));
     }
     grow.appendChild(titleRow);
-    grow.appendChild(el('div.dd', { text: m.present ? fmtBytes(m.bytes) : 'не скачана' }));
+    // Статус: явный успех «✓ размер» (видно, что скачалось) либо «не скачана».
+    grow.appendChild(el('div.dd', { text: m.present ? '✓ установлена · ' + fmtBytes(m.bytes) : 'не скачана' }));
+    // Ошибка прошлой попытки — прямо в строке (вместо тихого сброса), с подсказкой про retry.
+    if (dlState[m.id] && dlState[m.id].error) grow.appendChild(dlErrorNote(dlState[m.id].error));
 
     const action = downloadActionFor(m);
     if (action) {
-      // не скачана: кнопка «Скачать» + место для прогресса (live через onSttInstallProgress)
+      // не скачана: кнопка «Скачать» (или «Повторить» после ошибки) + место прогресса
       const wrap = el('div.dctl', { style: 'flex-direction:column;align-items:flex-end;gap:6px' });
-      const btn = el('button.btn.sm', null, [iconSpan('download'), document.createTextNode(action.label)]);
+      const retry = !!(dlState[m.id] && dlState[m.id].error);
+      const label = retry ? 'Повторить' : action.label;
+      const btn = el('button.btn.sm', null, [iconSpan(retry ? 'rotate-ccw' : 'download'), document.createTextNode(label)]);
       btn.addEventListener('click', async () => {
+        activeDownload = m.id;            // прогресс пойдёт только в ЭТУ строку
+        delete dlState[m.id];             // сбросить прежнюю ошибку
         btn.disabled = true; btn.replaceChildren(document.createTextNode('Качаю…'));
         await safe(action.run, null);
         // финал прилетит событием stt_install_done / wake_install_done → перерисует панель
@@ -856,9 +957,16 @@
       group.appendChild(drow('Модели openWakeWord', 'ONNX-модели «Hey Jarvis» на месте.',
         el('span.sval.on', { text: 'на месте' }), { dot: 'done' }));
     } else {
+      const werr = dlState['hey_jarvis'] && dlState['hey_jarvis'].error;
+      const wctl = el('div.dctl', { style: 'flex-direction:column;align-items:flex-end;gap:6px' });
+      wctl.appendChild(button(werr ? 'Повторить' : 'Скачать (~3.5 МБ)', async (b) => {
+        activeDownload = 'hey_jarvis'; delete dlState['hey_jarvis'];
+        b.disabled = true; b.textContent = 'Скачиваю…';
+        await safe(() => window.jarvis.wakeInstallModels(), null);
+      }, 'sm'));
+      if (werr) wctl.appendChild(dlErrorNote(werr));
       group.appendChild(drow('Модели openWakeWord', 'Нужно скачать модели (~3.5 МБ), чтобы детектор заработал.',
-        button('Скачать (~3.5 МБ)', async (b) => { b.disabled = true; b.textContent = 'Скачиваю…'; await safe(() => window.jarvis.wakeInstallModels(), null); }, 'sm'),
-        { dot: '' }));
+        wctl, { dot: '' }));
     }
 
     pane.appendChild(group);
@@ -1328,27 +1436,39 @@
     }
   }
 
+  /* Финал загрузки: разнести успех/ошибку по активной модели. Бэкенд шлёт
+   * {ok, error} — раньше это игнорировалось и статус молча «сбрасывался». */
+  function finishDownload(res) {
+    const id = activeDownload;
+    activeDownload = null;
+    if (!id) return;
+    if (res && res.ok === false) {
+      dlState[id] = { error: (res && res.error) || 'неизвестная ошибка (подробности в логах ~/.jarvis/jarvis.log)' };
+    } else {
+      delete dlState[id]; // успех — present-статус («✓ установлена») придёт перерисовкой
+    }
+  }
+
   /* ========================================================================
    * Подписка на live-события (идемпотентно — модульный флаг subscribed).
    * ====================================================================== */
   function subscribeOnce() {
     if (subscribed) return;
     subscribed = true;
-    // прогресс установки STT → обновить прогресс-полосы в панели stt
+    // прогресс установки STT → ТОЛЬКО в строку качаемой модели (не во все сразу)
     try {
       window.jarvis.onSttInstallProgress((step) => {
-        if (!currentRoot) return;
+        if (!currentRoot || !activeDownload) return;
         const pct = step && typeof step.pct === 'number' ? step.pct : null;
-        const holders = currentRoot.querySelectorAll('#s2-pane-stt [data-model]');
-        for (const h of holders) {
-          h.textContent = '';
-          if (step && step.msg) h.appendChild(el('span.loadcap', { text: step.msg }));
-          if (pct != null) h.appendChild(progressBar(pct));
-        }
+        const h = currentRoot.querySelector('#s2-pane-stt [data-model="' + activeDownload + '"]');
+        if (!h) return;
+        h.textContent = '';
+        if (step && step.msg) h.appendChild(el('span.loadcap', { text: step.msg }));
+        if (pct != null) h.appendChild(progressBar(pct));
       });
     } catch (e) {}
-    // финал установки STT → перерисовать stt-панель
-    try { window.jarvis.onSttInstallDone(() => { reRenderPane('stt'); }); } catch (e) {}
+    // финал установки STT → записать успех/ошибку и перерисовать stt-панель
+    try { window.jarvis.onSttInstallDone((res) => { finishDownload(res); reRenderPane('stt'); }); } catch (e) {}
     // прогресс установки Codex-SDK сайдкара → обновить плейсхолдер в панели service
     try {
       window.jarvis.onCodexInstallProgress((step) => {
@@ -1363,8 +1483,8 @@
     } catch (e) {}
     // финал установки Codex-SDK → перерисовать service-панель
     try { window.jarvis.onCodexInstallDone(() => { reRenderPane('service'); }); } catch (e) {}
-    // финал установки wake-моделей → перерисовать wake + stt
-    try { window.jarvis.onWakeInstallDone(() => { reRenderPane('wake'); reRenderPane('stt'); }); } catch (e) {}
+    // финал установки wake-моделей → записать успех/ошибку, перерисовать wake + stt
+    try { window.jarvis.onWakeInstallDone((res) => { finishDownload(res); reRenderPane('wake'); reRenderPane('stt'); }); } catch (e) {}
     // состояние аудио → обновить индикаторы wake-панели (если открыта)
     try { window.jarvis.onAudioState(() => { if (activePane === 'wake') reRenderPane('wake'); }); } catch (e) {}
   }

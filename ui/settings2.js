@@ -435,12 +435,35 @@
     hkey.addEventListener('click', (e) => { e.stopPropagation(); start(); });
     paint();
     const rb = el('button.hkreset', { title: 'Сбросить на F8' }, icon('rotate-ccw'));
-    rb.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const res = await safe(() => window.jarvis.sttSetHotkey('F8'), null);
-      if (res && res.ok) { acc = 'F8'; paint(); }
-    });
-    return [hkey, rb];
+    // Применить готовый аксельератор (пресет/сброс) БЕЗ keydown-захвата. Нужно,
+    // потому что webview на macOS «съедает» ⌘/⌥-комбинации до JS — записать их
+    // нажатием не выходит; зато зарегистрированный глобальный шорткат срабатывает
+    // на уровне ОС нормально. Поэтому ⌘K и т.п. ставим кнопкой-пресетом.
+    const apply = async (accel) => {
+      const res = await safe(() => window.jarvis.sttSetHotkey(accel), null);
+      if (res && res.ok) { acc = res.hotkey || accel; paint(); }
+      else { note((res && res.error) || 'не удалось'); setTimeout(paint, 1500); }
+    };
+    rb.addEventListener('click', (e) => { e.stopPropagation(); apply('F8'); });
+
+    const PRESETS = [
+      ['F8', 'F8'], ['F9', 'F9'],
+      ['⌥Space', 'Alt+Space'], ['⌘⌥D', 'Command+Alt+D'], ['⌘K', 'Command+K'],
+    ];
+    const chips = el('div.hkpresets');
+    for (const [label, accel] of PRESETS) {
+      const c = el('button.hkchip', { text: label, title: 'Поставить ' + label });
+      c.addEventListener('click', (e) => { e.stopPropagation(); apply(accel); });
+      chips.appendChild(c);
+    }
+
+    const wrap = el('div', { style: 'display:flex;flex-direction:column;align-items:flex-end;gap:7px' });
+    const topRow = el('div', { style: 'display:flex;align-items:center;gap:8px' });
+    topRow.appendChild(hkey);
+    topRow.appendChild(rb);
+    wrap.appendChild(topRow);
+    wrap.appendChild(chips);
+    return wrap;
   }
 
   /* ── Полоса загрузки модели (.progress.striped) ─────────────────────────*/
@@ -598,6 +621,10 @@
 #settings2 .hkey.rec:hover { border-color:rgba(108,160,255,0.45); }
 #settings2 .hkey.rec kbd { color:var(--working,#6ca0ff); }
 #settings2 .hkey.rec.recording { background:rgba(108,160,255,0.18); border-color:var(--working,#6ca0ff); }
+#settings2 .hkpresets { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+#settings2 .hkchip { font-size:11.5px; padding:3px 8px; border-radius:7px; background:rgba(255,255,255,0.05);
+  border:1px solid rgba(255,255,255,0.1); color:var(--muted,#9a9aa2); cursor:pointer; }
+#settings2 .hkchip:hover { background:rgba(108,160,255,0.12); border-color:rgba(108,160,255,0.3); color:var(--working,#6ca0ff); }
 #settings2 .hkreset { width:32px; height:32px; border-radius:8px; display:grid; place-items:center; background:transparent; border:0; color:var(--faint,#55555c); cursor:default; }
 #settings2 .hkreset:hover { color:var(--text-body,#d6d6db); background:rgba(255,255,255,0.06); }
 #settings2 .hkreset svg.lucide { width:15px; height:15px; }

@@ -1720,10 +1720,7 @@
 
     // ── Детальная колонка ──
     const detail = el('div.detail');
-    detail.appendChild(el('div.dnav', null, [
-      el('button', null, icon('chevron-left')),
-      el('button', null, icon('chevron-right')),
-    ]));
+    // (стрелки ‹ › убраны — навигация только по сайдбару)
     // по одной панели-контейнеру на вкладку; активная получит .on
     const paneNodes = {};
     for (const n of NAV) {

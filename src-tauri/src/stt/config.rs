@@ -16,7 +16,8 @@ pub struct SttConfig {
     pub audio_device: Option<String>,
     /// Хоткей диктовки (дефолт "F8").
     pub hotkey: String,
-    /// Шумодав (VAD-гейт): пропускать диктовку, если речи нет. Дефолт true.
+    /// Шумодав (VAD-гейт): пропускать диктовку, если речи нет. АЛЬФА, нестабилен —
+    /// дефолт false (выключен), пока не доведём.
     pub noise_gate: bool,
 }
 
@@ -28,7 +29,7 @@ impl Default for SttConfig {
             task: SttTask::Transcribe,
             audio_device: None,
             hotkey: "F8".into(),
-            noise_gate: true,
+            noise_gate: false,
         }
     }
 }

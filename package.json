@@ -1,6 +1,6 @@
 {
   "name": "jarvis-mvp",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "description": "Монитор сессий Claude Code: уведомления и панель статусов (Rust + Tauri)",
   "license": "MIT",

@@ -1,6 +1,6 @@
 [package]
 name = "jarvis"
-version = "0.3.2"
+version = "0.3.3"
 description = "Монитор сессий Claude Code: меню-бар, панель статусов, уведомления"
 license = "MIT"
 edition = "2021"

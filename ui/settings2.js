@@ -740,7 +740,9 @@
       })));
 
     // режим логов / диагностика
-    group.appendChild(drow('Режим логов', 'Собирать метрики (RAM/CPU/события) в jarvis.log.',
+    group.appendChild(drow('Режим логов',
+      'Тайминги пайплайна, RAM/CPU и события (доставка ответов, уведомления, лимиты) → ~/.jarvis/metrics.jsonl и jarvis.log. ' +
+      'Без конф. данных: текст промптов/ответов, тело уведомлений и транскрипты не пишутся — только типы событий, счётчики и усечённые id сессий. Файлы локальные, никуда не отправляются.',
       toggle(!!s.diagnostics, (on) => fire(() => window.jarvis.setSettings({ diagnostics: on })))));
 
     pane.appendChild(group);

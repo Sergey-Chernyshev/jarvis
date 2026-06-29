@@ -11,6 +11,14 @@ const chatDotEl = document.getElementById('chatDot');
 const settingsEl = document.getElementById('settings');
 const queryEl = document.getElementById('query');
 const replyEl = document.getElementById('reply');
+
+// Фокус в редактируемом поле? Тогда нативные текст-комбо (⌘⌫ = удалить до начала
+// строки) НЕ должны перехватываться глобальными хоткеями приложения — иначе ⌘⌫ при
+// печати в чате стирал завершённые сессии (clearFinished). См. обработчик ниже.
+function editingText(el = document.activeElement) {
+  if (!el) return false;
+  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable === true;
+}
 const footerLeftEl = document.getElementById('footerLeft');
 const tabSessionsEl = document.getElementById('tabSessions');
 const tabSettingsEl = document.getElementById('tabSettings');
@@ -685,6 +693,14 @@ const tmuxHintEl = document.getElementById('tmuxHint');
 const chatStatusEl = document.getElementById('chatStatus');
 
 const MODELS = [['fable', 'Fable'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku']];
+// Набор моделей Codex — зеркало backend/codex.rs::models(). У codex-сессии
+// `/model`-пикер не должен предлагать модели Claude (issue #10 — тот же класс
+// бага: claude-специфика в codex-сессии). Значение = id для `/model <id>`.
+const MODELS_CODEX = [['gpt-5.5', 'GPT-5.5'], ['gpt-5-codex', 'Codex'], ['gpt-5', 'GPT-5']];
+
+function modelsFor(agent) {
+  return agent === 'codex' ? MODELS_CODEX : MODELS;
+}
 
 // базовые уровни приезжают из `claude --help` через демона (не отстаём от CLI);
 // ultracode в help не публикуется — это знание с живого слайдера Fable/Opus
@@ -1329,11 +1345,14 @@ function buildValuePicker(kind) {
   const s = curSession();
   if (kind === 'model') {
     const cur = ((s && s.model) || '').toLowerCase();
-    paletteItems = MODELS.map(([val, label]) => ({
+    paletteItems = modelsFor(s && s.agent).map(([val, label]) => ({
       name: label, desc: 'модель сессии', active: cur === label.toLowerCase(),
       apply: () => applyValue('setModel', val),
     }));
   } else {
+    // У Codex отдельного /effort нет — reasoning меняется в /model-пикере; не
+    // показываем claude-only уровни в codex-сессии (бэкенд их всё равно отклонит).
+    if (s && s.agent === 'codex') { hidePalette(); return; }
     paletteItems = effortsFor(s && s.model).map(([val, label]) => ({
       name: label, desc: 'уровень рассуждения', active: !!(s && s.effort === val),
       apply: () => applyValue('setEffort', val),
@@ -2294,7 +2313,12 @@ function histTime(ts) {
 }
 
 function resumeCommand(s, cwd) {
-  const base = `claude --resume ${s.id} --dangerously-skip-permissions`;
+  // Команда возобновления зависит от агента сессии: codex-сессию нельзя продолжить
+  // через `claude --resume` (issue #10). Аналог `--dangerously-skip-permissions`
+  // у Codex — `--dangerously-bypass-approvals-and-sandbox`.
+  const base = s.agent === 'codex'
+    ? `codex resume ${s.id} --dangerously-bypass-approvals-and-sandbox`
+    : `claude --resume ${s.id} --dangerously-skip-permissions`;
   return cwd ? `cd "${cwd}" && ${base}` : base;
 }
 
@@ -2375,7 +2399,7 @@ function renderHistChats(g, q) {
   head.appendChild(Object.assign(document.createElement('span'), { className: 'hcount', textContent: `${g.count} ${plural(g.count, 'чат', 'чата', 'чатов')}` }));
   historyEl.appendChild(head);
 
-  historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — скопировать команду продолжения (--resume --dangerously-skip-permissions) · esc — к проектам' }));
+  historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — скопировать команду продолжения (resume, авто-подтверждение) · esc — к проектам' }));
 
   const sessions = q ? g.sessions.filter((s) => s.title.toLowerCase().includes(q)) : g.sessions;
   if (!sessions.length) {
@@ -3607,6 +3631,9 @@ window.addEventListener('keydown', async (e) => {
   }
 
   if (e.metaKey && e.key === 'Backspace') { // ⌘⌫ — очистить завершённые
+    // НЕ в поле ввода: иначе ⌘⌫ (удалить до начала строки) при печати в чате
+    // молча сносил все Done/Idle сессии. В поле — отдаём комбо нативному редактору.
+    if (editingText()) return;
     e.preventDefault();
     window.jarvis.clearFinished();
     return;

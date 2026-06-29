@@ -157,7 +157,8 @@ pub async fn detect_stuck_prompt(d: &Arc<Daemon>, sid: &str) {
         d.notify(&format!("{project} — спрашивает"), &detail, Some(sid), "waiting");
     }
     d.push();
-    println!("[jarvis] экранный промпт у {project}: {}", prompt.title);
+    // Не пишем текст промпта в лог (конф. данные) — только факт и кол-во опций.
+    crate::log::line(&format!("[screen-prompt] {project}: {} опц.", prompt.options.len()));
 }
 
 #[cfg(test)]

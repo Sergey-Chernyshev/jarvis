@@ -264,3 +264,78 @@ pub async fn focus(pane: &str) -> bool {
         .await;
     matches!(&select, Ok(o) if o.status.success())
 }
+
+#[cfg(test)]
+mod answer_keys_tests {
+    use super::*;
+    use crate::backend::Agent;
+    use crate::model::{Question, QuestionItem, QuestionOption};
+
+    fn item(multi: bool, n: usize) -> QuestionItem {
+        QuestionItem {
+            question: "q".into(),
+            header: String::new(),
+            multi_select: multi,
+            options: (0..n)
+                .map(|i| QuestionOption { label: format!("o{i}"), description: String::new() })
+                .collect(),
+        }
+    }
+    fn q(items: Vec<QuestionItem>) -> Question {
+        Question { at: 0, from_screen: false, questions: items }
+    }
+
+    #[test]
+    fn claude_single_question_single_select_just_digit() {
+        let keys = answer_keys(Agent::Claude, &q(vec![item(false, 3)]), &[vec![2]]);
+        assert_eq!(keys, vec!["2".to_string()]);
+    }
+
+    #[test]
+    fn claude_single_question_multi_select_toggles_then_submit() {
+        let keys = answer_keys(Agent::Claude, &q(vec![item(true, 3)]), &[vec![1, 3]]);
+        assert_eq!(
+            keys,
+            vec!["1".to_string(), "3".to_string(), CLAUDE_SUBMIT_RIGHT.to_string(), "1".to_string()]
+        );
+    }
+
+    #[test]
+    fn claude_multi_question_advance_between_then_submit() {
+        let keys = answer_keys(
+            Agent::Claude,
+            &q(vec![item(false, 3), item(false, 2)]),
+            &[vec![2], vec![1]],
+        );
+        assert_eq!(
+            keys,
+            vec![
+                "2".to_string(),
+                CLAUDE_ADVANCE.to_string(),
+                "1".to_string(),
+                CLAUDE_SUBMIT.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_single_select_navigates_down_then_enter() {
+        let keys = answer_keys(Agent::Codex, &q(vec![item(false, 4)]), &[vec![3]]);
+        assert_eq!(keys, vec!["Down".to_string(), "Down".to_string(), "Enter".to_string()]);
+    }
+
+    #[test]
+    fn codex_multi_select_space_at_each_then_enter() {
+        let keys = answer_keys(Agent::Codex, &q(vec![item(true, 4)]), &[vec![1, 3]]);
+        assert_eq!(
+            keys,
+            vec![
+                "Space".to_string(),
+                "Down".to_string(),
+                "Down".to_string(),
+                "Space".to_string(),
+                "Enter".to_string(),
+            ]
+        );
+    }
+}

@@ -13,10 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Rust toolchain (+ x86_64 for universal)
+      - name: Rust toolchain (aarch64 — Apple Silicon)
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin
 
       - name: Cargo cache
         uses: swatinem/rust-cache@v2
@@ -47,7 +47,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          args: --target universal-apple-darwin --features wakeword-ort,whisper-native,stt-vad
+          args: --target aarch64-apple-darwin --features wakeword-ort,whisper-native,stt-vad
           tagName: ${{ github.ref_name }}
           releaseName: Jarvis ${{ github.ref_name }}
           releaseDraft: true

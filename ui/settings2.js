@@ -141,6 +141,11 @@
       ['path', { d: 'M9 2v2' }],
       ['path', { d: 'M9 20v2' }],
     ],
+    'terminal': [
+      ['path', { d: 'm7 11 2-2-2-2' }],
+      ['path', { d: 'M11 13h4' }],
+      ['rect', { width: 18, height: 18, x: 3, y: 3, rx: 2 }],
+    ],
     'chevron-down': [['path', { d: 'm6 9 6 6 6-6' }]],
     'chevron-left': [['path', { d: 'm15 18-6-6 6-6' }]],
     'chevron-right': [['path', { d: 'm9 18 6-6-6-6' }]],
@@ -701,6 +706,7 @@
     { pane: 'notify', label: 'Уведомления', icon: 'bell', ic: 'amber' },
     { pane: 'awake', label: 'Бодрость', icon: 'coffee', ic: 'orange' },
     { pane: 'keys', label: 'Горячие клавиши', icon: 'keyboard', ic: 'violet' },
+    { pane: 'launch', label: 'Запуск', icon: 'terminal', ic: 'green' },
     { sep: true },
     { pane: 'service', label: 'Под капотом', icon: 'cpu', ic: 'purple' },
     { pane: 'integration', label: 'Интеграция', icon: 'cable', ic: 'teal' },
@@ -1567,6 +1573,89 @@
     pane.appendChild(cg);
   }
 
+  // Запуск — параметры запуска сессии из вкладки «Проекты»: терминал, прокси-команда,
+  // «опасный режим». Флэт-ключи settings (launchTerminal/launchCustomCmd/launchProxyCmd/
+  // launchDangerous) пишутся через generic setSettings (поверхностный merge).
+  async function renderLaunch(pane) {
+    pane.appendChild(el('div.dtitle', { text: 'Запуск' }));
+    const _sk = skelGroup(3); pane.appendChild(_sk);
+    const s = await safe(() => window.jarvis.getSettings(), {});
+    _sk.remove();
+    const term = s.launchTerminal || 'terminal-app';
+    const group = el('div.dgroup');
+
+    // выбор терминала
+    const termSel = customSelect(
+      [
+        { value: 'terminal-app', label: 'Terminal.app' },
+        { value: 'iterm2', label: 'iTerm2' },
+        { value: 'custom', label: 'Кастомная команда' },
+      ],
+      term,
+      async (v) => {
+        await safe(() => window.jarvis.setSettings({ launchTerminal: v }), null);
+        reRenderPane('launch'); // показать/скрыть поле шаблона
+      });
+    group.appendChild(drow('Терминал',
+      'Где открывать сессию. «Кастомная команда» — любой эмулятор через шаблон с {cmd}.', termSel.node));
+
+    // шаблон кастомной команды — только для custom
+    if (term === 'custom') {
+      const tmplInput = el('input.s2-secret', {
+        type: 'text', placeholder: 'ghostty -e bash -lc {cmd}',
+        autocomplete: 'off', spellcheck: 'false', value: s.launchCustomCmd || '',
+      });
+      const tmplCap = el('span.loadcap', { style: 'display:none' });
+      const tmplSave = button('Сохранить', async (b) => {
+        const val = (tmplInput.value || '').trim();
+        b.disabled = true; b.textContent = 'Сохраняю…';
+        await safe(() => window.jarvis.setSettings({ launchCustomCmd: val }), null);
+        b.disabled = false; b.textContent = 'Сохранить';
+        tmplCap.style.display = ''; tmplCap.textContent = 'сохранено ✓';
+      }, 'sm primary');
+      tmplInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') tmplSave.click(); });
+      group.appendChild(el('div.drow', null, [
+        el('div.grow', null, [
+          el('div.dt', { text: 'Шаблон команды' }),
+          el('div.dd', { text: 'Плейсхолдер {cmd} заменяется на команду запуска (cd + агент). Без {cmd} запуск не сработает.' }),
+          tmplInput, tmplCap,
+        ]),
+        el('div.dctl', null, [tmplSave]),
+      ]));
+    }
+
+    // команда прокси — выполняется ПЕРЕД запуском агента
+    const proxyInput = el('input.s2-secret', {
+      type: 'text', placeholder: 'export HTTPS_PROXY=http://…   (пусто — без прокси)',
+      autocomplete: 'off', spellcheck: 'false', value: s.launchProxyCmd || '',
+    });
+    const proxyCap = el('span.loadcap', { style: 'display:none' });
+    const proxySave = button('Сохранить', async (b) => {
+      const val = (proxyInput.value || '').trim();
+      b.disabled = true; b.textContent = 'Сохраняю…';
+      await safe(() => window.jarvis.setSettings({ launchProxyCmd: val }), null);
+      b.disabled = false; b.textContent = 'Сохранить';
+      proxyCap.style.display = ''; proxyCap.textContent = val ? 'сохранено ✓' : 'очищено';
+    }, 'sm primary');
+    proxyInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') proxySave.click(); });
+    group.appendChild(el('div.drow', null, [
+      el('div.grow', null, [
+        el('div.dt', { text: 'Команда прокси' }),
+        el('div.dd', { text: 'Выполняется в терминале ПЕРЕД запуском агента (напр. export HTTPS_PROXY=…). Это не egress-прокси из «Под капотом».' }),
+        proxyInput, proxyCap,
+      ]),
+      el('div.dctl', null, [proxySave]),
+    ]));
+
+    // опасный режим — один глобальный тумблер на claude и codex
+    group.appendChild(drow('Опасный режим',
+      'Claude — --dangerously-skip-permissions, Codex — YOLO (--dangerously-bypass-approvals-and-sandbox). '
+      + 'Один тумблер на обоих агентов, глобально.',
+      toggle(!!s.launchDangerous, (on) => fire(() => window.jarvis.setSettings({ launchDangerous: on })))));
+
+    pane.appendChild(group);
+  }
+
   const RENDERERS = {
     general: renderGeneral,
     stt: renderStt,
@@ -1575,6 +1664,7 @@
     notify: renderNotify,
     awake: renderAwake,
     keys: renderKeys,
+    launch: renderLaunch,
     service: renderService,
     integration: renderIntegration,
     about: renderAbout,

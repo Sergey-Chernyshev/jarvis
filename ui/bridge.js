@@ -23,6 +23,7 @@
     closeChat: () => invoke('chat_close'),
     onChatAppend: (cb) => on('chat:append', cb),
     focusTerminal: (sessionId) => invoke('terminal_focus', { sessionId }),
+    launchSession: (cwd, agent, sessionId) => invoke('session_launch', { cwd, agent, sessionId: sessionId ?? null }),
     sendReply: (sessionId, text) => invoke('session_reply', { sessionId, text }),
     pingTerminal: (sessionId) => invoke('terminal_ping', { sessionId }),
     answerQuestion: (sessionId, choice) => invoke('question_answer', { sessionId, choice }),

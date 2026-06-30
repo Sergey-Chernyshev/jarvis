@@ -841,6 +841,34 @@ pub async fn terminal_focus(app: AppHandle, session_id: String) -> Value {
     json!({ "ok": false, "error": "Терминал не нашёлся — открываю чат", "fallbackChat": true })
 }
 
+/// Запуск сессии прямо из вкладки «Проекты»: открыть терминал из настроек,
+/// (опц.) выполнить прокси-команду, затем `claude`/`codex` в директории `cwd`.
+/// `session_id == None` → новая сессия; иначе `--resume`/`resume`. Параметры
+/// запуска (терминал, прокси-команда, «опасный режим») берутся из настроек.
+#[tauri::command]
+pub async fn session_launch(
+    app: AppHandle,
+    cwd: String,
+    agent: String,
+    session_id: Option<String>,
+) -> Value {
+    let d = Daemon::get(&app);
+    if cwd.trim().is_empty() {
+        return err("Не указана директория проекта");
+    }
+    let terminal = d.settings.string("launchTerminal");
+    let custom = d.settings.string("launchCustomCmd");
+    let proxy = d.settings.string("launchProxyCmd");
+    let dangerous = d.settings.bool("launchDangerous");
+
+    let agent_cmd = crate::launch::agent_command(&agent, session_id.as_deref(), dangerous);
+    let inner = crate::launch::inner_command(&cwd, &proxy, &agent_cmd);
+    match crate::launch::spawn(&terminal, &custom, &inner).await {
+        Ok(()) => ok(),
+        Err(e) => err(e),
+    }
+}
+
 /* ================= тосты ================= */
 
 #[tauri::command]

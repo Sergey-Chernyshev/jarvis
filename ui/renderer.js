@@ -2313,18 +2313,20 @@ function histTime(ts) {
 }
 
 function resumeCommand(s, cwd) {
-  // Команда возобновления зависит от агента сессии: codex-сессию нельзя продолжить
-  // через `claude --resume` (issue #10). Аналог `--dangerously-skip-permissions`
-  // у Codex — `--dangerously-bypass-approvals-and-sandbox`.
-  const base = s.agent === 'codex'
-    ? `codex resume ${s.id} --dangerously-bypass-approvals-and-sandbox`
-    : `claude --resume ${s.id} --dangerously-skip-permissions`;
+  // Подсказка для tooltip: что именно запустится. Реальная команда (с флагами
+  // «опасного режима» и прокси-командой) собирается на бэкенде из настроек запуска.
+  const base = s.agent === 'codex' ? `codex resume ${s.id}` : `claude --resume ${s.id}`;
   return cwd ? `cd "${cwd}" && ${base}` : base;
 }
 
-async function copyResume(s, cwd) {
-  try { await navigator.clipboard.writeText(resumeCommand(s, cwd)); showToast('Команда скопирована'); }
-  catch { showToast('Не удалось скопировать'); }
+// Запуск сессии в терминале из настроек: agent='claude'|'codex'; sessionId=null —
+// новая сессия, иначе продолжение; cwd — директория проекта. Реальную команду
+// (терминал, прокси, флаги «опасного режима») собирает бэкенд session_launch.
+async function launchSession(agent, sessionId, cwd) {
+  try {
+    const r = await window.jarvis.launchSession(cwd, agent, sessionId);
+    showToast(r && r.ok ? 'Запускаю в терминале…' : ((r && r.error) || 'Не удалось запустить'));
+  } catch { showToast('Не удалось запустить'); }
 }
 
 function openHistProject(key) {
@@ -2389,7 +2391,7 @@ function renderHistProjects(q) {
 
 /* уровень 2: чаты проекта */
 function renderHistChats(g, q) {
-  primaryLabelEl.textContent = 'Скопировать команду';
+  primaryLabelEl.textContent = 'Запустить в терминале';
   const head = document.createElement('div');
   head.className = 'hgroup';
   const back = Object.assign(document.createElement('span'), { className: 'hback', textContent: '‹ Проекты' });
@@ -2397,9 +2399,18 @@ function renderHistChats(g, q) {
   head.appendChild(back);
   head.appendChild(Object.assign(document.createElement('span'), { textContent: g.project }));
   head.appendChild(Object.assign(document.createElement('span'), { className: 'hcount', textContent: `${g.count} ${plural(g.count, 'чат', 'чата', 'чатов')}` }));
+  // новые сессии в директории проекта — отдельно для Claude и Codex
+  const newClaude = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Claude' });
+  newClaude.title = 'Новая сессия Claude в этой директории';
+  newClaude.addEventListener('click', (e) => { e.stopPropagation(); launchSession('claude', null, g.cwd); });
+  const newCodex = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Codex' });
+  newCodex.title = 'Новая сессия Codex в этой директории';
+  newCodex.addEventListener('click', (e) => { e.stopPropagation(); launchSession('codex', null, g.cwd); });
+  head.appendChild(newClaude);
+  head.appendChild(newCodex);
   historyEl.appendChild(head);
 
-  historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — скопировать команду продолжения (resume, авто-подтверждение) · esc — к проектам' }));
+  historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — запустить продолжение в терминале · + Claude / + Codex — новая сессия · esc — к проектам' }));
 
   const sessions = q ? g.sessions.filter((s) => s.title.toLowerCase().includes(q)) : g.sessions;
   if (!sessions.length) {
@@ -2429,10 +2440,10 @@ function renderHistChats(g, q) {
     meta.textContent = parts.join(' · ');
     row.appendChild(meta);
 
-    row.appendChild(Object.assign(document.createElement('span'), { className: 'hcopy', textContent: 'копировать ↵' }));
+    row.appendChild(Object.assign(document.createElement('span'), { className: 'hcopy', textContent: 'запустить ↵' }));
 
     row.addEventListener('mouseenter', () => { histSel = idx; paintHistSel(); });
-    row.addEventListener('click', () => copyResume(s, g.cwd));
+    row.addEventListener('click', () => launchSession(s.agent, s.id, g.cwd));
     historyEl.appendChild(row);
   }
 }
@@ -3584,14 +3595,14 @@ window.addEventListener('keydown', async (e) => {
     return; // прочее (печать) идёт в #query
   }
 
-  if (view === 'history') { // ↑↓ выбор · ↵ открыть проект / скопировать команду · esc — на уровень вверх
+  if (view === 'history') { // ↑↓ выбор · ↵ открыть проект / запустить в терминале · esc — на уровень вверх
     if (e.key === 'ArrowDown') { e.preventDefault(); histSel = Math.min(histRows.length - 1, histSel + 1); paintHistSel(); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); histSel = Math.max(0, histSel - 1); paintHistSel(); return; }
     if (e.key === 'Enter' && histRows[histSel]) {
       e.preventDefault();
       const r = histRows[histSel];
       if (r.type === 'project') openHistProject(r.key);
-      else copyResume(r.s, r.cwd);
+      else launchSession(r.s.agent, r.s.id, r.cwd);
       return;
     }
     if (e.key === 'Escape') {

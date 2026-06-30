@@ -34,6 +34,12 @@ fn defaults() -> Value {
         "autoResume": true,   // после сброса лимита сказать ждавшим сессиям «продолжай»
         "autoUpdate": true,   // тихо проверять и ставить обновления на старте
         "diagnostics": true,  // режим логов: тайминги/RAM/CPU/события → metrics.jsonl + jarvis.log (без текста промптов/ответов)
+        // Запуск сессии прямо из Jarvis (вкладка «Запуск»). Флэт-ключи: settings_set
+        // мержит лишь верхний уровень, вложенный объект затирался бы целиком.
+        "launchTerminal": "terminal-app", // 'terminal-app' | 'iterm2' | 'custom'
+        "launchCustomCmd": "",            // шаблон для 'custom', плейсхолдер {cmd}
+        "launchProxyCmd": "",             // команда, выполняемая в терминале ПЕРЕД запуском агента (опц.)
+        "launchDangerous": false,         // глобальный «опасный режим»: claude --dangerously-skip-permissions / codex YOLO
         "schemaVersion": SCHEMA_VERSION,
         "notify": {
             "content": { "branch": true, "model": false, "effort": false, "tokens": false, "time": false },

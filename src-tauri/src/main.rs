@@ -19,6 +19,7 @@ mod daemon;
 mod history;
 mod install;
 mod ipc;
+mod launch; // запуск новой/возобновляемой сессии в терминале из вкладки «Проекты»
 mod limits;
 mod log;
 mod macos;
@@ -151,6 +152,7 @@ fn main() {
             ipc::voice_abort,
             ipc::agent_chat_open,
             ipc::terminal_focus,
+            ipc::session_launch,
             ipc::toast_resize,
             ipc::toast_ready,
             ipc::toast_click,

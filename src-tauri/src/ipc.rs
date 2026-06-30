@@ -718,6 +718,49 @@ pub async fn session_reply(app: AppHandle, session_id: String, text: String) -> 
     via_gate_panel(&d, "sessions.reply", json!({ "session_id": session_id, "text": text })).await
 }
 
+/// Сохранить вставленную в поле ответа картинку во временный файл и вернуть
+/// абсолютный путь. Доставка картинок агенту (Claude/Codex) — ссылкой на файл:
+/// путь уходит в промпт обычным текстом, TUI его читает и подгружает картинку.
+/// `data_base64` — содержимое без префикса `data:…;base64,`; `ext` — расширение.
+#[tauri::command]
+pub async fn session_save_image(data_base64: String, ext: String) -> Value {
+    use base64::Engine as _;
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(data_base64.trim()) {
+        Ok(b) => b,
+        Err(e) => return err(format!("base64: {e}")),
+    };
+    if bytes.is_empty() {
+        return err("Пустая картинка");
+    }
+    // Защита от мусора в буфере обмена: не пишем гигантские блобы на диск.
+    if bytes.len() > 25 * 1024 * 1024 {
+        return err("Картинка больше 25 МБ");
+    }
+    // Разрешаем только безопасное короткое расширение из белого списка.
+    let ext = match ext.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+        "png" => "png",
+        "jpg" | "jpeg" => "jpg",
+        "gif" => "gif",
+        "webp" => "webp",
+        "bmp" => "bmp",
+        "heic" => "heic",
+        "tiff" | "tif" => "tiff",
+        _ => "png",
+    };
+    let dir = std::env::temp_dir().join("jarvis-paste");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return err(format!("temp: {e}"));
+    }
+    // Уникальное имя без коллизий в пределах одной мс — счётчик процесса.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = dir.join(format!("img-{}-{}.{}", now_ms(), seq, ext));
+    if let Err(e) = std::fs::write(&path, &bytes) {
+        return err(format!("write: {e}"));
+    }
+    json!({ "ok": true, "path": path.to_string_lossy() })
+}
+
 /// Продолжить сессию (кнопка на тосте / хоткей): послать «продолжай» — например
 /// после прерывания сном. Под капотом — обычная доставка в пану.
 #[tauri::command]

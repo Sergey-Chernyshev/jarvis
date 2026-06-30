@@ -889,6 +889,43 @@
     overflow-wrap: anywhere;
   }
   .chatinput textarea::placeholder { color: var(--muted); }
+  /* лента превью вставленных картинок над полем ответа */
+  .chatattach {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 14px 0;
+    flex: none;
+  }
+  .chatattach .thumb {
+    position: relative;
+    width: 52px;
+    height: 52px;
+    border-radius: 7px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.04);
+    flex: none;
+  }
+  .chatattach .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .chatattach .thumb .rm {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.62);
+    color: #fff;
+    line-height: 1;
+  }
+  .chatattach .thumb .rm:hover { background: rgba(0, 0, 0, 0.85); }
   /* подсказка «/ команды» у правого края поля */
   .chatinput .cmdhintpill { display: flex; align-items: center; gap: 5px; flex: none; }
   .chatinput .cmdhintpill .keycap { font-size: 10px; padding: 1.5px 6px; }
@@ -1304,6 +1341,7 @@
         <div class="chatstatus" id="chatStatus" hidden></div>
         <div class="tmuxhint" id="tmuxHint" hidden></div>
         <div class="cmdpalette" id="cmdPalette" hidden></div>
+        <div class="chatattach" id="chatAttach" hidden></div>
         <div class="chatinput">
           <!-- lucide: plus -->
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>

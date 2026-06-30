@@ -142,6 +142,7 @@ fn main() {
             ipc::voice_set_duck,
             ipc::voice_set_bluetooth_only,
             ipc::session_reply,
+            ipc::session_save_image,
             ipc::session_continue,
             ipc::agent_confirm,
             ipc::voice_pick_resolve,

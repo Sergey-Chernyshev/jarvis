@@ -11,6 +11,13 @@ const chatDotEl = document.getElementById('chatDot');
 const settingsEl = document.getElementById('settings');
 const queryEl = document.getElementById('query');
 const replyEl = document.getElementById('reply');
+const chatAttachEl = document.getElementById('chatAttach');
+
+// Вставленные в поле ответа картинки, ждущие отправки. Каждая — { id, base64,
+// ext, dataUrl }. На отправке пишутся во временные файлы, пути уходят в промпт.
+let pendingImages = [];
+let attachSeq = 0;
+const MAX_IMAGES = 8;
 
 // Фокус в редактируемом поле? Тогда нативные текст-комбо (⌘⌫ = удалить до начала
 // строки) НЕ должны перехватываться глобальными хоткеями приложения — иначе ⌘⌫ при
@@ -547,6 +554,8 @@ function extractAttachments(raw) {
   const chips = [];
   let text = String(raw);
   text = text.replace(/\[Image #(\d+)\]/g, (_, n) => { chips.push({ type: 'image', label: `Image #${n}` }); return ''; });
+  // голый абсолютный путь к картинке (вставлено из Jarvis) — чип-картинка по имени файла
+  text = text.replace(/(^|\s)(\/[^\s]+\.(?:png|jpe?g|gif|webp|bmp|heic|tiff?))\b/gi, (m, pre, p) => { chips.push({ type: 'image', label: p.split('/').pop() }); return pre; });
   // @file: только если выглядит как путь (есть точка или слэш) — не трогаем @everyone и т.п.
   text = text.replace(/(^|\s)@([\w./\-]*[./][\w./\-]*)/g, (m, pre, p) => { chips.push({ type: 'file', label: `@${p}` }); return pre; });
   return { chips, text: text.replace(/[ \t]{2,}/g, ' ').trim() };
@@ -951,6 +960,9 @@ async function openChat(sessionId, project) {
   toolsGroup = null;
   pendingReplies = []; // оптимистичные реплики прошлого чата не тащим в новый
   replyEl.value = ''; // черновик прошлого чата не должен уехать в этот
+  autoGrowReply();
+  pendingImages = []; // и вставленные картинки прошлого чата тоже не тащим
+  renderAttachments();
   hidePalette();
   loadCommands();
   setView('chat');
@@ -1255,6 +1267,7 @@ async function runTaskAction(taskRef, action) {
   if (!res || !res.ok) { showToast((res && res.error) || 'Не вышло'); return; }
   closeBoard();
   replyEl.value = res.text;
+  autoGrowReply();
   replyEl.focus();
   replyEl.setSelectionRange(replyEl.value.length, replyEl.value.length);
   showToast('Проверь и отправь — Jarvis не шлёт сам');
@@ -1366,6 +1379,7 @@ async function applyValue(method, val) {
   if (!chatSessionId) return;
   const res = await window.jarvis[method](chatSessionId, val);
   replyEl.value = '';
+  autoGrowReply();
   hidePalette();
   if (!res.ok) showToast(res.error || (res.needsTmux ? 'Сессия вне tmux' : 'Не удалось'));
   else replyEl.focus();
@@ -1429,6 +1443,7 @@ function paletteOpen() {
 function completeCommand(c) {
   if (c.hint) {
     replyEl.value = '/' + c.name + ' ';
+    autoGrowReply();
     refreshPalette();
     replyEl.focus();
   } else {
@@ -1443,14 +1458,29 @@ function completeCommand(c) {
 let sending = false;
 async function sendReplyNow() {
   const text = replyEl.value.trim();
-  if (!text || sending || !chatSessionId) return;
+  const imgs = pendingImages.slice();
+  if ((!text && !imgs.length) || sending || !chatSessionId) return;
   sending = true;
   replyEl.disabled = true;
   try {
-    const res = await window.jarvis.sendReply(chatSessionId, text);
+    // Картинки → временные файлы; их абсолютные пути уходят агенту в промпте
+    // (Claude/Codex читают путь и подгружают картинку). Каждый путь — с новой строки.
+    const paths = [];
+    for (const im of imgs) {
+      const r = await window.jarvis.saveImage(im.base64, im.ext);
+      if (r && r.ok && r.path) paths.push(r.path);
+      else showToast((r && r.error) || 'Не удалось сохранить картинку');
+    }
+    if (imgs.length && !paths.length) return; // были только картинки, но ни одна не сохранилась
+    const finalText = paths.length ? (text ? text + '\n' : '') + paths.join('\n') : text;
+
+    const res = await window.jarvis.sendReply(chatSessionId, finalText);
     if (res.ok) {
       replyEl.value = '';
-      appendPendingReply(text, !!res.queued); // сразу видно в ленте (снимется эхом из транскрипта)
+      autoGrowReply();
+      pendingImages = [];
+      renderAttachments();
+      appendPendingReply(finalText, !!res.queued); // сразу видно в ленте (снимется эхом из транскрипта)
     } else if (res.needsTmux) {
       showToast('Сессия вне tmux — запусти команду из подсказки ниже');
     } else {
@@ -1463,17 +1493,103 @@ async function sendReplyNow() {
   }
 }
 
-replyEl.addEventListener('input', refreshPalette);
+// Авто-рост поля под многострочный текст: от одной строки до max-height,
+// дальше включается внутренний скролл (max-height задан в CSS).
+function autoGrowReply() {
+  replyEl.style.height = 'auto';
+  // scrollHeight === 0, когда поле ещё скрыто (чат не показан) — не схлопываем его в 0px.
+  const h = replyEl.scrollHeight;
+  replyEl.style.height = (h > 0 ? h : 18) + 'px';
+}
+
+// Вставка переноса строки в позицию курсора (для Shift/Alt+Enter).
+function insertNewlineAtReply() {
+  const start = replyEl.selectionStart ?? replyEl.value.length;
+  const end = replyEl.selectionEnd ?? replyEl.value.length;
+  replyEl.value = replyEl.value.slice(0, start) + '\n' + replyEl.value.slice(end);
+  const pos = start + 1;
+  replyEl.setSelectionRange(pos, pos);
+  autoGrowReply();
+}
+
+// ---------- вставка картинок в поле ответа ----------
+
+function extFromType(type) {
+  const m = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/bmp': 'bmp', 'image/heic': 'heic', 'image/tiff': 'tiff' };
+  if (m[type]) return m[type];
+  const sub = String(type || '').split('/')[1];
+  return (sub && /^[a-z0-9]+$/i.test(sub)) ? sub.toLowerCase() : 'png';
+}
+
+function renderAttachments() {
+  chatAttachEl.textContent = '';
+  chatAttachEl.hidden = pendingImages.length === 0;
+  for (const im of pendingImages) {
+    const thumb = document.createElement('div');
+    thumb.className = 'thumb';
+    const img = document.createElement('img');
+    img.src = im.dataUrl;
+    img.alt = 'вставленная картинка';
+    thumb.appendChild(img);
+    const rm = document.createElement('button');
+    rm.className = 'rm';
+    rm.type = 'button';
+    rm.title = 'Убрать';
+    rm.textContent = '×';
+    rm.addEventListener('click', () => removePendingImage(im.id));
+    thumb.appendChild(rm);
+    chatAttachEl.appendChild(thumb);
+  }
+}
+
+function removePendingImage(id) {
+  pendingImages = pendingImages.filter((im) => im.id !== id);
+  renderAttachments();
+}
+
+function addPendingImage(file) {
+  if (pendingImages.length >= MAX_IMAGES) { showToast(`Не больше ${MAX_IMAGES} картинок`); return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = String(reader.result || '');
+    const comma = dataUrl.indexOf(',');
+    if (comma < 0) return;
+    pendingImages.push({ id: 'att' + (attachSeq++), base64: dataUrl.slice(comma + 1), ext: extFromType(file.type), dataUrl });
+    renderAttachments();
+  };
+  reader.readAsDataURL(file);
+}
+
+replyEl.addEventListener('paste', (e) => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  const files = [...items].filter((it) => it.kind === 'file' && it.type.startsWith('image/'));
+  if (!files.length) return; // обычный текстовый пейст — не вмешиваемся
+  e.preventDefault();
+  for (const it of files) { const f = it.getAsFile(); if (f) addPendingImage(f); }
+});
+
+replyEl.addEventListener('input', () => { autoGrowReply(); refreshPalette(); });
 
 replyEl.addEventListener('keydown', (e) => {
   if (e.metaKey) return; // ⌘↵ — в терминал, обрабатывается глобально
   if (paletteOpen()) {
     if (e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); cmdSel = Math.min(paletteItems.length - 1, cmdSel + 1); paintPalette(); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); cmdSel = Math.max(0, cmdSel - 1); paintPalette(); return; }
-    if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); paletteItems[cmdSel] && paletteItems[cmdSel].apply(); return; }
+    // Tab/Enter применяют команду из палитры; но Shift/Alt+Enter — это перенос строки,
+    // его пропускаем дальше, к обработке ниже.
+    if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.altKey)) { e.preventDefault(); e.stopPropagation(); paletteItems[cmdSel] && paletteItems[cmdSel].apply(); return; }
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); hidePalette(); return; }
   }
   if (e.key === 'Enter') {
+    // Shift+Enter (везде) или Alt/Option+Enter (Win/Linux/Mac) — перенос строки.
+    if (e.shiftKey || e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      insertNewlineAtReply();
+      return;
+    }
+    // Чистый Enter — отправка.
     e.preventDefault();
     e.stopPropagation();
     sendReplyNow();

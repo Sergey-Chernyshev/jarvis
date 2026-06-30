@@ -1472,7 +1472,9 @@ async function sendReplyNow() {
 // дальше включается внутренний скролл (max-height задан в CSS).
 function autoGrowReply() {
   replyEl.style.height = 'auto';
-  replyEl.style.height = replyEl.scrollHeight + 'px';
+  // scrollHeight === 0, когда поле ещё скрыто (чат не показан) — не схлопываем его в 0px.
+  const h = replyEl.scrollHeight;
+  replyEl.style.height = (h > 0 ? h : 18) + 'px';
 }
 
 // Вставка переноса строки в позицию курсора (для Shift/Alt+Enter).

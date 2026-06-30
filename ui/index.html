@@ -882,7 +882,7 @@
     resize: none;
     margin: 0;
     padding: 0;
-    height: 18px;            /* одна строка по умолчанию */
+    min-height: 18px;        /* одна строка по умолчанию (страховка, если inline-height окажется 0) */
     max-height: 144px;       /* ~8 строк, дальше — внутренний скролл */
     overflow-y: auto;
     word-break: break-word;

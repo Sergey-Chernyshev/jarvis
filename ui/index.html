@@ -861,25 +861,34 @@
 
   .chatinput {
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     gap: 10px;
-    height: 46px;
-    padding: 0 14px;
+    min-height: 46px;
+    padding: 14px;
     border-top: 1px solid var(--hairline);
     flex: none;
     color: var(--muted);
   }
   .chatinput svg { flex: none; color: var(--muted); }
-  .chatinput input {
+  .chatinput textarea {
     flex: 1;
     background: transparent;
     border: none;
     outline: none;
     font-family: inherit;
     font-size: 13px;
+    line-height: 18px;
     color: var(--text);
+    resize: none;
+    margin: 0;
+    padding: 0;
+    height: 18px;            /* одна строка по умолчанию */
+    max-height: 144px;       /* ~8 строк, дальше — внутренний скролл */
+    overflow-y: auto;
+    word-break: break-word;
+    overflow-wrap: anywhere;
   }
-  .chatinput input::placeholder { color: var(--muted); }
+  .chatinput textarea::placeholder { color: var(--muted); }
   /* подсказка «/ команды» у правого края поля */
   .chatinput .cmdhintpill { display: flex; align-items: center; gap: 5px; flex: none; }
   .chatinput .cmdhintpill .keycap { font-size: 10px; padding: 1.5px 6px; }
@@ -1298,7 +1307,7 @@
         <div class="chatinput">
           <!-- lucide: plus -->
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-          <input id="reply" placeholder="Ответить агенту…" spellcheck="false" autocomplete="off" />
+          <textarea id="reply" placeholder="Ответить агенту…" spellcheck="false" autocomplete="off" rows="1"></textarea>
           <span class="cmdhintpill"><span class="keycap">/</span><span>команды</span></span>
         </div>
         <!-- доска задач: слайд-овер поверх чата (источник — оркестратор, read-only) -->

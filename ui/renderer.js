@@ -951,6 +951,7 @@ async function openChat(sessionId, project) {
   toolsGroup = null;
   pendingReplies = []; // оптимистичные реплики прошлого чата не тащим в новый
   replyEl.value = ''; // черновик прошлого чата не должен уехать в этот
+  autoGrowReply();
   hidePalette();
   loadCommands();
   setView('chat');
@@ -1255,6 +1256,7 @@ async function runTaskAction(taskRef, action) {
   if (!res || !res.ok) { showToast((res && res.error) || 'Не вышло'); return; }
   closeBoard();
   replyEl.value = res.text;
+  autoGrowReply();
   replyEl.focus();
   replyEl.setSelectionRange(replyEl.value.length, replyEl.value.length);
   showToast('Проверь и отправь — Jarvis не шлёт сам');
@@ -1366,6 +1368,7 @@ async function applyValue(method, val) {
   if (!chatSessionId) return;
   const res = await window.jarvis[method](chatSessionId, val);
   replyEl.value = '';
+  autoGrowReply();
   hidePalette();
   if (!res.ok) showToast(res.error || (res.needsTmux ? 'Сессия вне tmux' : 'Не удалось'));
   else replyEl.focus();
@@ -1429,6 +1432,7 @@ function paletteOpen() {
 function completeCommand(c) {
   if (c.hint) {
     replyEl.value = '/' + c.name + ' ';
+    autoGrowReply();
     refreshPalette();
     replyEl.focus();
   } else {
@@ -1450,6 +1454,7 @@ async function sendReplyNow() {
     const res = await window.jarvis.sendReply(chatSessionId, text);
     if (res.ok) {
       replyEl.value = '';
+      autoGrowReply();
       appendPendingReply(text, !!res.queued); // сразу видно в ленте (снимется эхом из транскрипта)
     } else if (res.needsTmux) {
       showToast('Сессия вне tmux — запусти команду из подсказки ниже');
@@ -1463,17 +1468,44 @@ async function sendReplyNow() {
   }
 }
 
-replyEl.addEventListener('input', refreshPalette);
+// Авто-рост поля под многострочный текст: от одной строки до max-height,
+// дальше включается внутренний скролл (max-height задан в CSS).
+function autoGrowReply() {
+  replyEl.style.height = 'auto';
+  replyEl.style.height = replyEl.scrollHeight + 'px';
+}
+
+// Вставка переноса строки в позицию курсора (для Shift/Alt+Enter).
+function insertNewlineAtReply() {
+  const start = replyEl.selectionStart ?? replyEl.value.length;
+  const end = replyEl.selectionEnd ?? replyEl.value.length;
+  replyEl.value = replyEl.value.slice(0, start) + '\n' + replyEl.value.slice(end);
+  const pos = start + 1;
+  replyEl.setSelectionRange(pos, pos);
+  autoGrowReply();
+}
+
+replyEl.addEventListener('input', () => { autoGrowReply(); refreshPalette(); });
 
 replyEl.addEventListener('keydown', (e) => {
   if (e.metaKey) return; // ⌘↵ — в терминал, обрабатывается глобально
   if (paletteOpen()) {
     if (e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); cmdSel = Math.min(paletteItems.length - 1, cmdSel + 1); paintPalette(); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); cmdSel = Math.max(0, cmdSel - 1); paintPalette(); return; }
-    if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); paletteItems[cmdSel] && paletteItems[cmdSel].apply(); return; }
+    // Tab/Enter применяют команду из палитры; но Shift/Alt+Enter — это перенос строки,
+    // его пропускаем дальше, к обработке ниже.
+    if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.altKey)) { e.preventDefault(); e.stopPropagation(); paletteItems[cmdSel] && paletteItems[cmdSel].apply(); return; }
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); hidePalette(); return; }
   }
   if (e.key === 'Enter') {
+    // Shift+Enter (везде) или Alt/Option+Enter (Win/Linux/Mac) — перенос строки.
+    if (e.shiftKey || e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      insertNewlineAtReply();
+      return;
+    }
+    // Чистый Enter — отправка.
     e.preventDefault();
     e.stopPropagation();
     sendReplyNow();

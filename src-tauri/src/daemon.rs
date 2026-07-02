@@ -581,7 +581,15 @@ impl Daemon {
             if !d.interaction.is_active() {
                 return;
             }
-            if crate::macos::media_is_playing() {
+            // MediaRemote после недавнего play (напр. авто-возврат прошлой
+            // диктовкой) может ещё секунду отдавать paused — одна повторная
+            // проверка закрывает это окно (иначе музыка играет прямо в диктовку).
+            let mut playing = crate::macos::media_is_playing();
+            if !playing && d.interaction.is_active() {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                playing = crate::macos::media_is_playing();
+            }
+            if playing {
                 crate::macos::media_pause();
                 d.media_ducked.store(true, Ordering::SeqCst);
                 crate::log::line("[dictation] медиа на паузу (диктовка)");
@@ -590,6 +598,10 @@ impl Daemon {
                 if !d.interaction.is_active() {
                     d.unduck_media_for_capture();
                 }
+            } else if d.interaction.is_active() {
+                // видимый след: пауза НЕ встала (media_is_playing=false) — если
+                // музыка при этом слышна, виноват MediaRemote-шелаут, не логика.
+                crate::log::line("[dictation] медиа не на паузе: MediaRemote говорит «не играет»");
             }
         });
     }

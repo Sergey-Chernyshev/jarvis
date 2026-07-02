@@ -90,7 +90,11 @@ pub fn register_hotkey(d: &Arc<Daemon>, accelerator: &str) -> Result<(), String>
 /// Аккселератор тумблера тихого режима: настройка `quietHotkey`, дефолт ⌘⌥J.
 pub fn quiet_accelerator(d: &Arc<Daemon>) -> String {
     let s = d.settings.string("quietHotkey");
-    if s.is_empty() { "Command+Alt+J".to_string() } else { s }
+    if s.is_empty() {
+        "Command+Alt+J".to_string()
+    } else {
+        s
+    }
 }
 
 /// Совпал ли сработавший shortcut с хоткеем тихого режима.
@@ -113,7 +117,11 @@ pub fn register_quiet_hotkey(d: &Arc<Daemon>) {
 /// Аккселератор «Продолжить»: настройка `continueHotkey`, дефолт ⌘⌥C.
 pub fn continue_accelerator(d: &Arc<Daemon>) -> String {
     let s = d.settings.string("continueHotkey");
-    if s.is_empty() { "Command+Alt+C".to_string() } else { s }
+    if s.is_empty() {
+        "Command+Alt+C".to_string()
+    } else {
+        s
+    }
 }
 
 pub fn is_continue_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
@@ -134,7 +142,11 @@ pub fn register_continue_hotkey(d: &Arc<Daemon>) {
 /// Аккселератор диктовки: из `SttConfig.hotkey`, дефолт "F8".
 pub fn dictation_accelerator(d: &Arc<Daemon>) -> String {
     let cfg = crate::stt::config::SttConfig::from_settings(&d.settings.load());
-    if cfg.hotkey.is_empty() { "F8".to_string() } else { cfg.hotkey }
+    if cfg.hotkey.is_empty() {
+        "F8".to_string()
+    } else {
+        cfg.hotkey
+    }
 }
 
 /// Совпал ли сработавший shortcut с хоткеем диктовки.
@@ -151,7 +163,9 @@ pub fn register_dictation_hotkey(d: &Arc<Daemon>) {
     let gs = d.app.global_shortcut();
     if !gs.is_registered(accel.as_str()) {
         if let Err(e) = gs.register(accel.as_str()) {
-            crate::log::line(&format!("[dictation] хоткей {accel} не зарегистрировался: {e:?}"));
+            crate::log::line(&format!(
+                "[dictation] хоткей {accel} не зарегистрировался: {e:?}"
+            ));
         }
     }
 }
@@ -159,11 +173,18 @@ pub fn register_dictation_hotkey(d: &Arc<Daemon>) {
 /// Аккселератор «повторить уведомление»: настройка `repeatHotkey`, дефолт ⌘⌥R.
 pub fn repeat_accelerator(d: &Arc<Daemon>) -> String {
     let s = d.settings.string("repeatHotkey");
-    if s.is_empty() { "Command+Alt+R".to_string() } else { s }
+    if s.is_empty() {
+        "Command+Alt+R".to_string()
+    } else {
+        s
+    }
 }
 
 pub fn is_repeat_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
-    repeat_accelerator(d).parse::<Shortcut>().map(|s| &s == shortcut).unwrap_or(false)
+    repeat_accelerator(d)
+        .parse::<Shortcut>()
+        .map(|s| &s == shortcut)
+        .unwrap_or(false)
 }
 
 pub fn register_repeat_hotkey(d: &Arc<Daemon>) {
@@ -177,11 +198,18 @@ pub fn register_repeat_hotkey(d: &Arc<Daemon>) {
 /// Аккселератор «без звука» (mute): настройка `muteHotkey`, дефолт ⌘⌥M.
 pub fn mute_accelerator(d: &Arc<Daemon>) -> String {
     let s = d.settings.string("muteHotkey");
-    if s.is_empty() { "Command+Alt+M".to_string() } else { s }
+    if s.is_empty() {
+        "Command+Alt+M".to_string()
+    } else {
+        s
+    }
 }
 
 pub fn is_mute_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
-    mute_accelerator(d).parse::<Shortcut>().map(|s| &s == shortcut).unwrap_or(false)
+    mute_accelerator(d)
+        .parse::<Shortcut>()
+        .map(|s| &s == shortcut)
+        .unwrap_or(false)
 }
 
 pub fn register_mute_hotkey(d: &Arc<Daemon>) {
@@ -192,15 +220,56 @@ pub fn register_mute_hotkey(d: &Arc<Daemon>) {
     }
 }
 
-/// Выбор варианта вопроса: ⌘⌥1 … ⌘⌥9. Регистрируем ДИНАМИЧЕСКИ — только пока
-/// есть активный вопрос (зовётся из do_push), чтобы не перехватывать ⌘⌥-цифры
-/// глобально всё время. Идемпотентно: трогаем только при смене состояния.
+/// Дефолт шаблона хоткеев выбора варианта: ⌘⌥<цифра>.
+pub const SELECT_TEMPLATE_DEFAULT: &str = "Command+Alt+{n}";
+
+/// Подставить номер варианта в шаблон ("Command+Alt+{n}", 3 → "Command+Alt+3").
+pub fn select_accel(template: &str, n: u32) -> String {
+    template.replace("{n}", &n.to_string())
+}
+
+/// Нормализовать шаблон из настроек: без «{n}» или с непарсибельным
+/// экземпляром → дефолт (мягкая деградация вместо мёртвых хоткеев).
+pub fn normalize_select_template(raw: &str) -> String {
+    let valid = raw.contains("{n}") && select_accel(raw, 1).parse::<Shortcut>().is_ok();
+    if valid {
+        raw.to_string()
+    } else {
+        SELECT_TEMPLATE_DEFAULT.to_string()
+    }
+}
+
+/// Шаблон хоткеев выбора варианта: настройка `selectHotkeyTemplate`.
+pub fn select_template(d: &Arc<Daemon>) -> String {
+    normalize_select_template(&d.settings.string("selectHotkeyTemplate"))
+}
+
+/// Если shortcut — экземпляр шаблона с цифрой, вернуть номер варианта (1..9).
+pub fn match_select_template(template: &str, shortcut: &Shortcut) -> Option<u32> {
+    (1..=9).find(|n| {
+        select_accel(template, *n)
+            .parse::<Shortcut>()
+            .map(|s| &s == shortcut)
+            .unwrap_or(false)
+    })
+}
+
+/// Выбор варианта вопроса: <шаблон>+1 … +9 (дефолт ⌘⌥1-9). Регистрируем
+/// ДИНАМИЧЕСКИ — только пока есть активный вопрос (зовётся из do_push), чтобы
+/// не перехватывать цифровые комбо глобально всё время. Идемпотентно: трогаем
+/// только при смене состояния.
 pub fn set_select_hotkeys(d: &Arc<Daemon>, on: bool) {
+    set_select_hotkeys_tpl(d, on, &select_template(d));
+}
+
+/// То же с явным шаблоном — при смене selectHotkeyTemplate старый набор
+/// снимается по прежнему шаблону, новый ставится по новому.
+pub fn set_select_hotkeys_tpl(d: &Arc<Daemon>, on: bool, template: &str) {
     let gs = d.app.global_shortcut();
     let mut touched = 0;
     let mut failed = 0;
     for n in 1..=9 {
-        let accel = format!("Command+Alt+{n}");
+        let accel = select_accel(template, n);
         let reg = gs.is_registered(accel.as_str());
         if on && !reg {
             touched += 1;
@@ -214,35 +283,52 @@ pub fn set_select_hotkeys(d: &Arc<Daemon>, on: bool) {
     }
     if touched > 0 {
         crate::log::line(&format!(
-            "[select] ⌘⌥1-9 {}{}",
-            if on { "включены (вопрос активен)" } else { "сняты" },
-            if failed > 0 { format!(", провал: {failed}") } else { String::new() },
+            "[select] {} {}{}",
+            select_accel(template, 1).replace('1', "1-9"),
+            if on {
+                "включены (вопрос активен)"
+            } else {
+                "сняты"
+            },
+            if failed > 0 {
+                format!(", провал: {failed}")
+            } else {
+                String::new()
+            },
         ));
     }
 }
 
-/// Если shortcut — это ⌘⌥<цифра>, вернуть номер варианта (1..9).
-pub fn is_select_hotkey(shortcut: &Shortcut) -> Option<u32> {
-    (1..=9).find(|n| {
-        format!("Command+Alt+{n}").parse::<Shortcut>().map(|s| &s == shortcut).unwrap_or(false)
-    })
+/// Если shortcut — это <шаблон>+<цифра>, вернуть номер варианта (1..9).
+pub fn is_select_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> Option<u32> {
+    match_select_template(&select_template(d), shortcut)
 }
 
 #[tauri::command]
 pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
     let d = Daemon::get(&app);
-    let Some(patch) = patch.as_object() else { return err("bad patch") };
+    let Some(patch) = patch.as_object() else {
+        return err("bad patch");
+    };
     let mut rest = patch.clone();
 
     if let Some(Value::Bool(open)) = rest.remove("openAtLogin") {
         let autolaunch = app.autolaunch();
-        let res = if open { autolaunch.enable() } else { autolaunch.disable() };
+        let res = if open {
+            autolaunch.enable()
+        } else {
+            autolaunch.disable()
+        };
         if let Err(e) = res {
             // не глотаем: видно в консоли `npm run start`, а UI перечитает
             // реальное is_enabled() и честно покажет, что не сработало
             eprintln!(
                 "[jarvis:autostart] не смог {} автозапуск: {e}",
-                if open { "включить" } else { "выключить" }
+                if open {
+                    "включить"
+                } else {
+                    "выключить"
+                }
             );
         }
     }
@@ -284,6 +370,33 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
         let _ = via_gate_panel(&d, "settings.set", json!({ "patch": { key: hk } })).await;
     }
 
+    // шаблон хоткеев выбора варианта (⌘⌥1-9 по умолчанию): валидация + если
+    // вопрос сейчас активен (набор зарегистрирован) — перерегистрация на лету.
+    if let Some(v) = rest.remove("selectHotkeyTemplate") {
+        if let Some(tpl) = v.as_str().filter(|s| !s.is_empty()).map(String::from) {
+            if normalize_select_template(&tpl) != tpl {
+                return err(format!(
+                    "Битый шаблон «{tpl}» — нужен вид Command+Alt+{{n}}"
+                ));
+            }
+            let old = select_template(&d);
+            let gs = d.app.global_shortcut();
+            let active = gs.is_registered(select_accel(&old, 1).as_str());
+            if active && tpl != old {
+                set_select_hotkeys_tpl(&d, false, &old);
+            }
+            let _ = via_gate_panel(
+                &d,
+                "settings.set",
+                json!({ "patch": { "selectHotkeyTemplate": tpl } }),
+            )
+            .await;
+            if active && tpl != old {
+                set_select_hotkeys_tpl(&d, true, &tpl);
+            }
+        }
+    }
+
     if !rest.is_empty() {
         let _ = via_gate_panel(&d, "settings.set", json!({ "patch": Value::Object(rest) })).await;
     }
@@ -300,7 +413,9 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
 #[tauri::command]
 pub fn chat_open(app: AppHandle, session_id: String) -> Value {
     let d = Daemon::get(&app);
-    let Some(s) = d.session(&session_id) else { return err("Сессия не найдена") };
+    let Some(s) = d.session(&session_id) else {
+        return err("Сессия не найдена");
+    };
     let Some(tr) = s.transcript else {
         return err("Нет транскрипта — сессия ещё не слала событий (перезапусти claude)");
     };
@@ -314,7 +429,8 @@ pub fn chat_open(app: AppHandle, session_id: String) -> Value {
         .collect();
     let tail_start = items.len().saturating_sub(80);
     let items = &items[tail_start..];
-    d.tail.start(app.clone(), agent, session_id.clone(), tr.clone());
+    d.tail
+        .start(app.clone(), agent, session_id.clone(), tr.clone());
     println!(
         "[jarvis] chat:open {} items={} file={}",
         ellipsize(&session_id, 8),
@@ -332,11 +448,12 @@ pub fn chat_close(app: AppHandle) {
 #[tauri::command]
 pub fn commands_get(app: AppHandle, session_id: String) -> Value {
     let d = Daemon::get(&app);
-    let Some(s) = d.session(&session_id) else { return json!([]) };
-    // Палитра слэш-команд claude-специфична (BUILTINS + ~/.claude/commands). У Codex
-    // слэш-набор иной — не показываем чужие команды (codex-каталог — будущее).
-    if crate::backend::Agent::from_opt(s.agent.as_deref()) == crate::backend::Agent::Codex {
+    let Some(s) = d.session(&session_id) else {
         return json!([]);
+    };
+    if crate::backend::Agent::from_opt(s.agent.as_deref()) == crate::backend::Agent::Codex {
+        return serde_json::to_value(crate::commands_catalog::codex_commands())
+            .unwrap_or_else(|_| json!([]));
     }
     serde_json::to_value(d.commands.get_for_cwd(s.cwd.as_deref())).unwrap_or_else(|_| json!([]))
 }
@@ -367,7 +484,9 @@ pub async fn update_check_install(app: AppHandle) -> Value {
                     crate::log::line(&format!("[updater] {version} установлен по кнопке"));
                     json!({ "ok": true, "updated": true, "version": version })
                 }
-                Err(e) => json!({ "ok": false, "error": ellipsize(&one_line(&e.to_string()), 120) }),
+                Err(e) => {
+                    json!({ "ok": false, "error": ellipsize(&one_line(&e.to_string()), 120) })
+                }
             }
         }
         Ok(None) => json!({ "ok": true, "updated": false }),
@@ -397,7 +516,9 @@ pub async fn plugins_cmd(app: AppHandle, id: String, cmd: String, args: Option<V
 
 #[tauri::command]
 pub fn usage_summary(app: AppHandle, period: Option<String>) -> Value {
-    Daemon::get(&app).usage.stats(period.as_deref().unwrap_or("today"))
+    Daemon::get(&app)
+        .usage
+        .stats(period.as_deref().unwrap_or("today"))
 }
 
 #[tauri::command]
@@ -413,7 +534,10 @@ pub fn history_get(app: AppHandle) -> Value {
 
 #[tauri::command]
 pub fn usage_session(app: AppHandle, id: String) -> Value {
-    Daemon::get(&app).usage.for_session(&id).unwrap_or(Value::Null)
+    Daemon::get(&app)
+        .usage
+        .for_session(&id)
+        .unwrap_or(Value::Null)
 }
 
 /* ================= управление сессией ================= */
@@ -435,9 +559,13 @@ pub(crate) async fn set_via_slash(
     slash: String,
     apply: impl FnOnce(&mut crate::model::Session),
 ) -> Value {
-    let Some(s) = d.session(session_id) else { return err("Сессия не найдена") };
+    let Some(s) = d.session(session_id) else {
+        return err("Сессия не найдена");
+    };
     let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
-    let Some(pane) = s.tmux_pane else { return tmux_needed(agent, session_id) };
+    let Some(pane) = s.tmux_pane else {
+        return tmux_needed(agent, session_id);
+    };
     if !tmux::pane_alive(&pane).await {
         return tmux_needed(agent, session_id);
     }
@@ -454,7 +582,12 @@ pub(crate) async fn set_via_slash(
 #[tauri::command]
 pub async fn session_set_model(app: AppHandle, session_id: String, model: String) -> Value {
     let d = Daemon::get(&app);
-    via_gate_panel(&d, "sessions.control", json!({ "session_id": session_id, "model": model })).await
+    via_gate_panel(
+        &d,
+        "sessions.control",
+        json!({ "session_id": session_id, "model": model }),
+    )
+    .await
 }
 
 /// Ядро смены модели — общее для IPC и капабилити `sessions.control` (инкр. 8).
@@ -484,7 +617,12 @@ pub(crate) async fn set_model_core(d: &Arc<Daemon>, session_id: &str, model: &st
 #[tauri::command]
 pub async fn session_set_effort(app: AppHandle, session_id: String, level: String) -> Value {
     let d = Daemon::get(&app);
-    via_gate_panel(&d, "sessions.control", json!({ "session_id": session_id, "effort": level })).await
+    via_gate_panel(
+        &d,
+        "sessions.control",
+        json!({ "session_id": session_id, "effort": level }),
+    )
+    .await
 }
 
 /// Ядро смены effort — общее для IPC и капабилити `sessions.control` (инкр. 8).
@@ -513,8 +651,12 @@ pub(crate) async fn set_effort_core(d: &Arc<Daemon>, session_id: &str, level: &s
 #[tauri::command]
 pub async fn terminal_ping(app: AppHandle, session_id: String) -> Value {
     let d = Daemon::get(&app);
-    let Some(s) = d.session(&session_id) else { return err("Сессия не найдена") };
-    let Some(pane) = s.tmux_pane else { return err("Сессия не в tmux — пингануть нечем") };
+    let Some(s) = d.session(&session_id) else {
+        return err("Сессия не найдена");
+    };
+    let Some(pane) = s.tmux_pane else {
+        return err("Сессия не в tmux — пингануть нечем");
+    };
     match tmux::ping(&pane).await {
         Ok(()) => ok(),
         Err(e) => err(e),
@@ -527,9 +669,15 @@ pub async fn terminal_ping(app: AppHandle, session_id: String) -> Value {
 #[tauri::command]
 pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) -> Value {
     let d = Daemon::get(&app);
-    let Some(s) = d.session(&session_id) else { return err("Вопрос уже неактуален") };
-    let Some(q) = s.question.clone() else { return err("Вопрос уже неактуален") };
-    let Some(pane) = s.tmux_pane else { return err("Сессия вне tmux — ответь в терминале") };
+    let Some(s) = d.session(&session_id) else {
+        return err("Вопрос уже неактуален");
+    };
+    let Some(q) = s.question.clone() else {
+        return err("Вопрос уже неактуален");
+    };
+    let Some(pane) = s.tmux_pane else {
+        return err("Сессия вне tmux — ответь в терминале");
+    };
     if !tmux::pane_alive(&pane).await {
         return err("Пана сессии не отвечает");
     }
@@ -548,7 +696,8 @@ pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) 
     };
 
     // новый контракт answers[][] либо старый indices[] → [indices]
-    let answers: Vec<Vec<u32>> = if let Some(rows) = choice.get("answers").and_then(Value::as_array) {
+    let answers: Vec<Vec<u32>> = if let Some(rows) = choice.get("answers").and_then(Value::as_array)
+    {
         rows.iter().map(parse_row).collect()
     } else if let Some(idx) = choice.get("indices") {
         vec![parse_row(idx)]
@@ -639,7 +788,8 @@ pub fn voice_set_rate(app: AppHandle, rate: String) {
     let mut patch = serde_json::Map::new();
     patch.insert("rate".into(), Value::String(rate));
     d.settings.set_voice(patch);
-    d.voice.test_phrase("Так звучит выбранная скорость. Пиксела закончила, изменён один файл.");
+    d.voice
+        .test_phrase("Так звучит выбранная скорость. Пиксела закончила, изменён один файл.");
 }
 
 /// Сменить спикера на лету (без перезапуска) + сохранить + дать послушать.
@@ -715,7 +865,12 @@ pub(crate) async fn via_gate_panel(d: &Arc<Daemon>, id: &str, args: Value) -> Va
 #[tauri::command]
 pub async fn session_reply(app: AppHandle, session_id: String, text: String) -> Value {
     let d = Daemon::get(&app);
-    via_gate_panel(&d, "sessions.reply", json!({ "session_id": session_id, "text": text })).await
+    via_gate_panel(
+        &d,
+        "sessions.reply",
+        json!({ "session_id": session_id, "text": text }),
+    )
+    .await
 }
 
 /// Продолжить сессию (кнопка на тосте / хоткей): послать «продолжай» — например
@@ -723,14 +878,21 @@ pub async fn session_reply(app: AppHandle, session_id: String, text: String) -> 
 #[tauri::command]
 pub async fn session_continue(app: AppHandle, session_id: String) -> Value {
     let d = Daemon::get(&app);
-    via_gate_panel(&d, "sessions.reply", json!({ "session_id": session_id, "text": "продолжай" })).await
+    via_gate_panel(
+        &d,
+        "sessions.reply",
+        json!({ "session_id": session_id, "text": "продолжай" }),
+    )
+    .await
 }
 
 /// Ядро отправки в сессию — общее для IPC-команды панели и капабилити
 /// `sessions.reply` (инкр. 8). Форма ответа панельная: {ok:true, channel,…} /
 /// {ok:false, error} / {ok:false, needsTmux, resumeCmd}.
 pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String) -> Value {
-    let Some(s) = d.session(&session_id) else { return err("Сессия не найдена") };
+    let Some(s) = d.session(&session_id) else {
+        return err("Сессия не найдена");
+    };
     let prompt = text.trim().to_string();
     if prompt.is_empty() {
         return err("Пустой текст");
@@ -753,9 +915,14 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
             }
 
             // Свободная сессия обработает сразу — ждём короткое подтверждение.
-            if d.await_prompt_ack(&session_id, t0, std::time::Duration::from_millis(2500)).await {
+            if d.await_prompt_ack(&session_id, t0, std::time::Duration::from_millis(2500))
+                .await
+            {
                 d.mark_prompt_sent(&session_id, &prompt);
-                crate::log::line(&format!("[reply] доставлено sid={} pane={pane}", ellipsize(&session_id, 8)));
+                crate::log::line(&format!(
+                    "[reply] доставлено sid={} pane={pane}",
+                    ellipsize(&session_id, 8)
+                ));
                 crate::metrics::record("reply_ack", t_reply, json!({ "queued": false }));
                 return json!({ "ok": true, "channel": "tmux" });
             }
@@ -766,16 +933,28 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
                 // НЕ ретраим вставку (повтор продублировал бы сообщение в очереди).
                 // Подтверждаем асинхронно: когда Claude дойдёт до ввода, прилетит
                 // prompt-хук — тогда и отметим доставку «из очереди».
-                crate::log::line(&format!("[reply] в очереди (сессия занята) sid={} pane={pane}", ellipsize(&session_id, 8)));
+                crate::log::line(&format!(
+                    "[reply] в очереди (сессия занята) sid={} pane={pane}",
+                    ellipsize(&session_id, 8)
+                ));
                 let d2 = d.clone();
                 let sid2 = session_id.clone();
                 let p2 = prompt.clone();
                 tauri::async_runtime::spawn(async move {
-                    if d2.await_prompt_ack(&sid2, t0, std::time::Duration::from_secs(300)).await {
+                    if d2
+                        .await_prompt_ack(&sid2, t0, std::time::Duration::from_secs(300))
+                        .await
+                    {
                         d2.mark_prompt_sent(&sid2, &p2);
-                        crate::log::line(&format!("[reply] доставлено из очереди sid={}", ellipsize(&sid2, 8)));
+                        crate::log::line(&format!(
+                            "[reply] доставлено из очереди sid={}",
+                            ellipsize(&sid2, 8)
+                        ));
                     } else {
-                        crate::log::line(&format!("[reply] очередь: 5 мин без подтверждения sid={}", ellipsize(&sid2, 8)));
+                        crate::log::line(&format!(
+                            "[reply] очередь: 5 мин без подтверждения sid={}",
+                            ellipsize(&sid2, 8)
+                        ));
                     }
                 });
                 return json!({ "ok": true, "channel": "tmux", "queued": true });
@@ -788,9 +967,14 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
             if let Err(e) = tmux::reply(&pane, &prompt).await {
                 return err(format!("tmux: {}", ellipsize(&one_line(&e), 120)));
             }
-            if d.await_prompt_ack(&session_id, t1, std::time::Duration::from_millis(2500)).await {
+            if d.await_prompt_ack(&session_id, t1, std::time::Duration::from_millis(2500))
+                .await
+            {
                 d.mark_prompt_sent(&session_id, &prompt);
-                crate::log::line(&format!("[reply] доставлено sid={} pane={pane} (2-я попытка)", ellipsize(&session_id, 8)));
+                crate::log::line(&format!(
+                    "[reply] доставлено sid={} pane={pane} (2-я попытка)",
+                    ellipsize(&session_id, 8)
+                ));
                 return json!({ "ok": true, "channel": "tmux", "attempts": 2 });
             }
             return err("Агент не подтвердил получение — проверь терминал");
@@ -811,7 +995,9 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
 #[tauri::command]
 pub async fn terminal_focus(app: AppHandle, session_id: String) -> Value {
     let d = Daemon::get(&app);
-    let Some(s) = d.session(&session_id) else { return err("Сессия не найдена") };
+    let Some(s) = d.session(&session_id) else {
+        return err("Сессия не найдена");
+    };
 
     // 1) tmux — точнее некуда
     if let Some(pane) = &s.tmux_pane {
@@ -918,10 +1104,11 @@ pub fn voice_confirm_resolve(app: AppHandle, nonce: String, approved: bool) -> V
 #[tauri::command]
 pub fn voice_abort(app: AppHandle) -> Value {
     let d = Daemon::get(&app);
-    d.convo_abort.store(true, std::sync::atomic::Ordering::SeqCst);
+    d.convo_abort
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     d.voice.stop(); // оборвать речь + очистить очередь TTS
-    // HUD убираем ТИХО (Phase::Dismiss), БЕЗ тоста «Отменено»: × — это «закрой/
-    // останови», а не «отмена действия»; «Отменено» на каждый крестик раздражает.
+                    // HUD убираем ТИХО (Phase::Dismiss), БЕЗ тоста «Отменено»: × — это «закрой/
+                    // останови», а не «отмена действия»; «Отменено» на каждый крестик раздражает.
     crate::route::hud::emit(&d, crate::route::hud::Phase::Dismiss);
     json!({ "ok": true })
 }
@@ -945,7 +1132,10 @@ pub async fn agent_send(app: AppHandle, message: String, session_id: Option<Stri
     use crate::capability::{build_registry, grant::Consumer};
     use crate::util::jarvis_dir;
 
-    let mcp_config = jarvis_dir().join("jarvis-mcp.json").to_string_lossy().to_string();
+    let mcp_config = jarvis_dir()
+        .join("jarvis-mcp.json")
+        .to_string_lossy()
+        .to_string();
 
     // Собрать список инструментов из реестра капабилити агента
     let reg = build_registry();
@@ -964,7 +1154,10 @@ pub async fn agent_send(app: AppHandle, message: String, session_id: Option<Stri
     // Выбор хоста по доступности («auto»): Claude (жёсткий INV-TOOLS на init) если
     // есть, иначе Codex (чистый CODEX_HOME + обязательный per-item kill).
     if crate::claude_bin::resolve_claude_bin().is_some() {
-        let host = ClaudeCliHost { app: app.clone(), mcp_config };
+        let host = ClaudeCliHost {
+            app: app.clone(),
+            mcp_config,
+        };
         tauri::async_runtime::spawn(async move {
             host.run(&message, &tools, resume.as_deref()).await;
         });
@@ -972,7 +1165,11 @@ pub async fn agent_send(app: AppHandle, message: String, session_id: Option<Stri
         let Some((mcp_bin, token)) = read_mcp_bin_token(&mcp_config) else {
             return err("jarvis-mcp.json не прочитан — Codex-агент недоступен");
         };
-        let host = crate::backend::codex_agent::CodexCliHost { app: app.clone(), mcp_bin, token };
+        let host = crate::backend::codex_agent::CodexCliHost {
+            app: app.clone(),
+            mcp_bin,
+            token,
+        };
         tauri::async_runtime::spawn(async move {
             host.run(&message, &tools, resume.as_deref()).await;
         });
@@ -1074,7 +1271,9 @@ pub async fn transcript_retranscribe(app: AppHandle, id: u64) -> Value {
     let opts = stt.options();
     let res = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let pcm = crate::stt::audio_store::load(id)?;
-        let r = stt.transcribe(&pcm, &opts).map_err(|e| format!("распознавание: {e}"))?;
+        let r = stt
+            .transcribe(&pcm, &opts)
+            .map_err(|e| format!("распознавание: {e}"))?;
         Ok(r.text.trim().to_string())
     })
     .await;
@@ -1145,7 +1344,8 @@ pub fn stt_set_engine(app: AppHandle, engine: String) -> Value {
         // Честная, конкретная ошибка под каждый режим отказа (правда по модели).
         let msg = if engine == "whisper-turbo" && st.whisper_model && !st.whisper_native_built {
             "whisper-turbo: модель скачана, но нужна нативная сборка \
-             (--features whisper-native) — пересоберите приложение".to_string()
+             (--features whisper-native) — пересоберите приложение"
+                .to_string()
         } else {
             format!("{engine}: модель не скачана — сначала скачайте её в разделе «Модели»")
         };
@@ -1427,12 +1627,9 @@ pub async fn claude_auth_connect(app: AppHandle, mode: String, value: String) ->
     if crate::claude_bin::resolve_claude_bin().is_none() {
         return err("claude не найден в PATH — установи Claude Code");
     }
-    let valid = crate::claude_bin::validate_claude_auth(
-        &mode,
-        &value,
-        std::time::Duration::from_secs(40),
-    )
-    .await;
+    let valid =
+        crate::claude_bin::validate_claude_auth(&mode, &value, std::time::Duration::from_secs(40))
+            .await;
     if !valid {
         return err("не сработало: проверь ключ/токен (или claude недоступен)");
     }
@@ -1471,9 +1668,9 @@ pub async fn stt_test(app: AppHandle) -> Value {
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let session = hub.open_capture(false);
         std::thread::sleep(std::time::Duration::from_secs(4));
-        let pcm = session.finish()
-            .map_err(|e| format!("захват: {e}"))?;
-        let r = stt.transcribe(&pcm, &opts)
+        let pcm = session.finish().map_err(|e| format!("захват: {e}"))?;
+        let r = stt
+            .transcribe(&pcm, &opts)
             .map_err(|e| format!("транскрипция: {e}"))?;
         Ok(r.text)
     })
@@ -1533,4 +1730,47 @@ pub fn audio_set_mute(app: AppHandle, on: bool) -> Value {
     patch.insert("mute".into(), json!(on));
     d.settings.set_stt(patch);
     json!({ "ok": true, "muted": on, "state": d.audio.state().as_str() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- шаблон хоткеев выбора варианта (selectHotkeyTemplate) ---
+
+    #[test]
+    fn select_accel_substitutes_number() {
+        assert_eq!(select_accel("Command+Alt+{n}", 3), "Command+Alt+3");
+        assert_eq!(select_accel("Control+Shift+{n}", 9), "Control+Shift+9");
+    }
+
+    #[test]
+    fn normalize_keeps_valid_template() {
+        assert_eq!(
+            normalize_select_template("Control+Shift+{n}"),
+            "Control+Shift+{n}"
+        );
+    }
+
+    #[test]
+    fn normalize_falls_back_on_broken_template() {
+        // без {n}, пусто, непарсибельный экземпляр → дефолт ⌘⌥{n}
+        assert_eq!(normalize_select_template("Command+Alt+5"), SELECT_TEMPLATE_DEFAULT);
+        assert_eq!(normalize_select_template(""), SELECT_TEMPLATE_DEFAULT);
+        assert_eq!(normalize_select_template("Bogus+{n}"), SELECT_TEMPLATE_DEFAULT);
+    }
+
+    #[test]
+    fn match_select_template_finds_number() {
+        let sc: Shortcut = "Control+Shift+4".parse().unwrap();
+        assert_eq!(match_select_template("Control+Shift+{n}", &sc), Some(4));
+        // чужой шаблон это сочетание не матчит
+        assert_eq!(match_select_template("Command+Alt+{n}", &sc), None);
+    }
+
+    #[test]
+    fn match_select_template_rejects_non_digit_combo() {
+        let sc: Shortcut = "Command+Alt+K".parse().unwrap();
+        assert_eq!(match_select_template("Command+Alt+{n}", &sc), None);
+    }
 }

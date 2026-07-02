@@ -1306,7 +1306,7 @@ async function loadCommands() {
 function curSession() { return state.find((x) => x.id === chatSessionId); }
 
 function srcLabel(src) {
-  return { builtin: 'встр', project: 'проект', user: 'мои', plugin: 'плагин' }[src] || '';
+  return { builtin: 'встр', project: 'проект', user: 'мои', plugin: 'плагин', codex: 'codex' }[src] || '';
 }
 
 // /model и /effort без значения → свой пикер; иначе автокомплит команд

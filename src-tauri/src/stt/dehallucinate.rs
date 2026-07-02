@@ -47,6 +47,16 @@ const BLOCKLIST: &[&str] = &[
     "like and subscribe",
     "see you next time",
     "bye",
+    // — затравки initial_prompt (см. engine_whisper::punctuation_seed): если
+    // декодер «протёк» затравкой на тишине — это не речь пользователя.
+    // Нормализация сохраняет ВНУТРЕННЮЮ пунктуацию; протечка бывает и целиком,
+    // и по предложениям — покрываем оба варианта —
+    "диктовка началась, говорю обычным тоном. знаки препинания — запятые, точки, вопросы — расставляем правильно, верно",
+    "диктовка началась, говорю обычным тоном",
+    "знаки препинания — запятые, точки, вопросы — расставляем правильно, верно",
+    "the dictation has started, i am speaking normally. punctuation marks — commas, periods, questions — are placed correctly, right",
+    "the dictation has started, i am speaking normally",
+    "punctuation marks — commas, periods, questions — are placed correctly, right",
 ];
 
 /// bracket-маркеры тишины/звука, которые модель иногда печатает дословно.
@@ -118,6 +128,41 @@ pub fn scrub(text: &str) -> String {
     kept.join(" ").trim().to_string()
 }
 
+/// Схлопнуть дегенеративные петли декодера: whisper (жадный best_of:1) иногда
+/// зацикливается и печатает одно «предложение» подряд много раз («Писать. Писать.
+/// Писать…», «Минт, витамин. Минт, витамин.») — это не речь. Встроенный детектор
+/// повторов whisper.cpp (`entropy_thold`) заперт за `result_len > 32` токенов и
+/// короткие петли пропускает, а блоклист их не ловит (фразы осмысленные) — поэтому
+/// чистим тут. Консервативно: схлопываем ТОЛЬКО прогон одинаковых (нормализованных)
+/// подряд длиной ≥3 до одного вхождения; пары (эмфатическое «Нет. Нет.») не трогаем.
+pub fn collapse_repeats(text: &str) -> String {
+    const MIN_RUN: usize = 3;
+    let sentences = split_sentences(text);
+    if sentences.is_empty() {
+        return String::new();
+    }
+    let mut kept: Vec<&str> = Vec::with_capacity(sentences.len());
+    let mut i = 0;
+    while i < sentences.len() {
+        // длина прогона одинаковых по норме подряд
+        let mut j = i + 1;
+        while j < sentences.len() && norm(&sentences[j]) == norm(&sentences[i]) {
+            j += 1;
+        }
+        let run = j - i;
+        // прогон ≥ MIN_RUN → оставить одно вхождение; иначе оставить все
+        let take = if run >= MIN_RUN { 1 } else { run };
+        for s in &sentences[i..i + take] {
+            kept.push(s.as_str());
+        }
+        i = j;
+    }
+    if kept.len() == sentences.len() {
+        return text.trim().to_string(); // ничего не схлопнули — формат сохранён
+    }
+    kept.join(" ").trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +204,35 @@ mod tests {
         let t = "Просто обычный текст без проблем.";
         assert_eq!(scrub(t), t);
         assert_eq!(scrub(""), "");
+    }
+
+    // --- collapse_repeats: дегенеративные петли декодера Whisper ---
+
+    #[test]
+    fn collapse_run_of_identical_sentences() {
+        // Классическая петля жадного декодера: одно «предложение» подряд ≥3 раз.
+        assert_eq!(collapse_repeats("Писать. Писать. Писать. Писать."), "Писать.");
+    }
+
+    #[test]
+    fn collapse_keeps_unique_prefix_then_collapses_loop() {
+        assert_eq!(
+            collapse_repeats("Минт, витамин, кафе. Минт, витамин. Минт, витамин. Минт, витамин."),
+            "Минт, витамин, кафе. Минт, витамин."
+        );
+    }
+
+    #[test]
+    fn collapse_leaves_double_repeat_alone() {
+        // Пара повторов — законный эмфатический приём, НЕ трогаем (консервативно).
+        let t = "Нет. Нет.";
+        assert_eq!(collapse_repeats(t), t);
+    }
+
+    #[test]
+    fn collapse_clean_text_unchanged() {
+        let t = "Обычная фраза диктовки без повторов.";
+        assert_eq!(collapse_repeats(t), t);
+        assert_eq!(collapse_repeats(""), "");
     }
 }

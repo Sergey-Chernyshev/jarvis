@@ -96,7 +96,7 @@ fn main() {
                         d.repeat_last_toast();
                     } else if ipc::is_mute_hotkey(&d, shortcut) {
                         d.toggle_mute();
-                    } else if let Some(n) = ipc::is_select_hotkey(shortcut) {
+                    } else if let Some(n) = ipc::is_select_hotkey(&d, shortcut) {
                         d.answer_question_hotkey(n);
                     } else {
                         windows::toggle_hotkey_panel(&d);
@@ -426,6 +426,23 @@ fn spawn_timers(d: &Arc<Daemon>) {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let a = dd.audio.clone();
             let _ = tokio::task::spawn_blocking(move || a.tick()).await;
+        }
+    });
+
+    // watchdog залипшего PTT: раз в 10с принудительно ЗАВЕРШАЕМ (транскрипция +
+    // вставка, не выброс) сессию диктовки старше 5 минут. Диктовка — hold-PTT,
+    // поэтому по одному времени «залип» не отличить от честного долгого
+    // удержания: порог должен быть заведомо больше реальной длинной диктовки
+    // (60с рубил живую речь: медиа возобновлялось прямо в микрофон, HUD
+    // застревал на «Слушаю…», следующая транскрипция шла под музыку → мусор).
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let dict = dd.dictation.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || dict.abort_if_stuck(Duration::from_secs(300)))
+                    .await;
         }
     });
 

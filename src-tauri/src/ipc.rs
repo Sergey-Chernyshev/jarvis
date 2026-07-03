@@ -207,6 +207,36 @@ pub fn action_accel(d: &Arc<Daemon>, a: HkAction) -> Option<String> {
     accel_from_raw(&raw, a)
 }
 
+/// Акселератор действия → конкретные шорткаты (select → до 9 экземпляров).
+/// Битые части молча выпадают — битое не конфликтует.
+pub fn action_shortcuts(a: HkAction, accel: &str) -> Vec<Shortcut> {
+    if a == HkAction::Select {
+        (1..=9)
+            .filter_map(|n| select_accel(accel, n).parse::<Shortcut>().ok())
+            .collect()
+    } else {
+        accel.parse::<Shortcut>().ok().into_iter().collect()
+    }
+}
+
+/// Конфликт нового сочетания действия `a` с текущими привязками ОСТАЛЬНЫХ
+/// действий. bindings — (действие, акселератор), «не назначенные» не передавать.
+/// Чистая функция — покрыта юнитами без Daemon.
+pub fn find_conflict(
+    bindings: &[(HkAction, String)],
+    a: HkAction,
+    accel: &str,
+) -> Option<HkAction> {
+    let new = action_shortcuts(a, accel);
+    bindings.iter().find_map(|(other, cur)| {
+        if *other == a {
+            return None;
+        }
+        let cur_sc = action_shortcuts(*other, cur);
+        new.iter().any(|n| cur_sc.contains(n)).then_some(*other)
+    })
+}
+
 /// Аккселератор тумблера тихого режима ("" = не назначен), дефолт ⌘⌥J.
 pub fn quiet_accelerator(d: &Arc<Daemon>) -> String {
     action_accel(d, HkAction::Quiet).unwrap_or_default()
@@ -1916,5 +1946,58 @@ mod tests {
             accel_from_raw("Command+Alt+5", HkAction::Select),
             Some(SELECT_TEMPLATE_DEFAULT.to_string())
         );
+    }
+
+    // --- детект конфликтов ---
+
+    fn b(a: HkAction, acc: &str) -> (HkAction, String) {
+        (a, acc.to_string())
+    }
+
+    #[test]
+    fn conflict_direct_hit() {
+        let bindings = vec![b(HkAction::Mute, "Command+Alt+M")];
+        assert_eq!(
+            find_conflict(&bindings, HkAction::Quiet, "Command+Alt+M"),
+            Some(HkAction::Mute)
+        );
+    }
+
+    #[test]
+    fn conflict_ignores_self_and_free() {
+        let bindings = vec![
+            b(HkAction::Quiet, "Command+Alt+J"),
+            b(HkAction::Mute, "Command+Alt+M"),
+        ];
+        // то же действие — не конфликт (перезапись самого себя)
+        assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+J"), None);
+        // свободное сочетание — не конфликт
+        assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+X"), None);
+    }
+
+    #[test]
+    fn conflict_with_select_instance() {
+        // ⌘⌥3 бьётся с экземпляром шаблона ⌘⌥{n}
+        let bindings = vec![b(HkAction::Select, "Command+Alt+{n}")];
+        assert_eq!(
+            find_conflict(&bindings, HkAction::Dictation, "Command+Alt+3"),
+            Some(HkAction::Select)
+        );
+    }
+
+    #[test]
+    fn conflict_new_select_template_vs_plain() {
+        // новый шаблон ⌘⌃{n} бьётся с уже занятым ⌘⌃5
+        let bindings = vec![b(HkAction::Repeat, "Command+Control+5")];
+        assert_eq!(
+            find_conflict(&bindings, HkAction::Select, "Command+Control+{n}"),
+            Some(HkAction::Repeat)
+        );
+    }
+
+    #[test]
+    fn conflict_skips_broken_bindings() {
+        let bindings = vec![b(HkAction::Mute, "Bogus+Nope")];
+        assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+M"), None);
     }
 }

@@ -46,6 +46,54 @@ pub fn whisper_lang_and_translate(opts: &SttOptions) -> (String, bool) {
     (opts.dominant_lang.clone(), translate)
 }
 
+/// Минимум сэмплов PCM (16кГц моно) перед подачей в whisper — ~1с. Короче этого
+/// whisper.cpp нестабилен (жёсткий 100-мс гейт, шаткий avg_logprob по горстке
+/// токенов), из-за чего короткие фразы иногда декодируются в пустоту.
+const MIN_PCM_SAMPLES: usize = 16_000;
+
+/// Пунктуированная затравка декодера (initial_prompt) по языку. Whisper
+/// мимикрирует под стиль затравки: без неё greedy-декод на длинных диктовках
+/// почти не ставит знаки препинания. По исходнику whisper.cpp затравка попадает
+/// в rolling-контекст первого окна и её стиль распространяется по цепочке окон;
+/// с нашим no_context совместимо (тот чистит контекст только на старте вызова,
+/// а state создаётся свежий на каждый transcribe). Фразы затравок добавлены в
+/// блоклист dehallucinate — если модель «протечёт» затравкой на тишине, сегмент
+/// будет отброшен.
+pub fn punctuation_seed(lang: &str) -> &'static str {
+    match lang {
+        // Два предложения: пример точки И вопроса (whisper мимикрирует стиль,
+        // инструкции не выполняет). Фразы намеренно «нечеловеческие» — их можно
+        // безопасно держать в блоклисте, не рискуя выкинуть живую речь.
+        "ru" => "Диктовка началась, говорю обычным тоном. Знаки препинания — запятые, точки, вопросы — расставляем правильно, верно?",
+        "en" => "The dictation has started, I am speaking normally. Punctuation marks — commas, periods, questions — are placed correctly, right?",
+        _ => "", // не навязываем языковой стиль неизвестному языку
+    }
+}
+
+/// Оставлять ли сегмент whisper, судя по его `no_speech_probability`. Порог
+/// намеренно высокий: whisper.cpp роняет сегмент как «не речь» только когда
+/// `nsp > 0.6` И `avg_logprob < -1.0`; мы же раньше роняли по одному `nsp > 0.6`
+/// и выкидывали валидные короткие фразы в пустоту. Оставляем всё, кроме случаев
+/// экстремальной уверенности в тишине — по логарифм-вероятности решает сам движок.
+fn keep_by_no_speech(no_speech_prob: f32) -> bool {
+    const NO_SPEECH_MAX: f32 = 0.95;
+    no_speech_prob <= NO_SPEECH_MAX
+}
+
+/// Дополнить короткий PCM хвостовой тишиной до `min_samples`. Если буфер уже не
+/// короче — вернуть как есть (без лишней аллокации). Хвостовая (а не ведущая)
+/// тишина не сдвигает онсет и не рискует обрезать начало фразы.
+fn pad_pcm_to_min(pcm: &[f32], min_samples: usize) -> std::borrow::Cow<'_, [f32]> {
+    if pcm.len() >= min_samples {
+        std::borrow::Cow::Borrowed(pcm)
+    } else {
+        let mut v = Vec::with_capacity(min_samples);
+        v.extend_from_slice(pcm);
+        v.resize(min_samples, 0.0);
+        std::borrow::Cow::Owned(v)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // WhisperEngine: реализация с whisper-rs (только при feature "whisper-native")
 // ---------------------------------------------------------------------------
@@ -137,6 +185,12 @@ impl SttEngine for WhisperEngine {
         // Anti-hallucination для коротких PTT-клипов (Tier 1, см. ресёрч): на тишине/
         // шуме Whisper сваливается в языковую модель и печатает субтитры-фразы.
         params.set_no_context(true); // клипы независимы — не «засевать» след. галлюцинацией
+        // Пунктуированная затравка: без неё greedy-декод на длинных диктовках
+        // выдаёт сплошной поток слов без знаков препинания.
+        let seed = punctuation_seed(&lang);
+        if !seed.is_empty() {
+            params.set_initial_prompt(seed);
+        }
         params.set_temperature(0.0); // без сэмплинга
         params.set_temperature_inc(0.2); // fallback против повторов
         params.set_logprob_thold(-1.0); // низкий avg logprob → провал декода
@@ -147,16 +201,18 @@ impl SttEngine for WhisperEngine {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
 
-        state.full(params, pcm).map_err(|e| format!("whisper: full: {e}"))?;
+        // Короткий клип дополняем хвостовой тишиной до ~1с — иначе whisper.cpp
+        // нестабилен и короткая фраза иногда декодируется в пустоту.
+        let pcm = pad_pcm_to_min(pcm, MIN_PCM_SAMPLES);
+        state.full(params, &pcm).map_err(|e| format!("whisper: full: {e}"))?;
 
         let mut text_parts: Vec<String> = Vec::new();
         let mut segments: Vec<SttSeg> = Vec::new();
 
-        // Tier 2: посегментный фильтр. no_speech_probability выше порога → модель
+        // Tier 2: посегментный фильтр. Очень высокая no_speech_probability → модель
         // «придумала» текст на не-речи; блок-фраза → известная галлюцинация.
-        const NO_SPEECH_MAX: f32 = 0.6;
         for seg in state.as_iter() {
-            if seg.no_speech_probability() > NO_SPEECH_MAX {
+            if !keep_by_no_speech(seg.no_speech_probability()) {
                 continue;
             }
             let seg_text = seg.to_str_lossy().map_err(|e| format!("whisper: seg text: {e}"))?;
@@ -267,6 +323,69 @@ mod tests {
     fn name_is_whisper_turbo() {
         let engine = WhisperEngine::new();
         assert_eq!(engine.name(), "whisper-turbo");
+    }
+
+    // --- punctuation_seed: затравка стиля пунктуации ---
+
+    #[test]
+    fn seed_is_punctuated_for_known_langs() {
+        for lang in ["ru", "en"] {
+            let s = punctuation_seed(lang);
+            assert!(!s.is_empty(), "{lang}: затравка есть");
+            assert!(s.contains(',') && s.contains('?'), "{lang}: есть запятая и вопрос");
+        }
+    }
+
+    #[test]
+    fn seed_empty_for_unknown_lang() {
+        assert_eq!(punctuation_seed("de"), "");
+        assert_eq!(punctuation_seed(""), "");
+    }
+
+    #[test]
+    fn seed_leak_is_caught_by_blocklist() {
+        // Протечка затравки на тишине обязана отбрасываться как галлюцинация.
+        for lang in ["ru", "en"] {
+            assert!(
+                crate::stt::dehallucinate::is_hallucination(punctuation_seed(lang)),
+                "{lang}: затравка в блоклисте"
+            );
+        }
+    }
+
+    // --- keep_by_no_speech: не ронять валидные короткие фразы в пустоту ---
+
+    #[test]
+    fn no_speech_keeps_moderate_segments() {
+        // Раньше порог 0.6 ронял такой сегмент — теперь оставляем (это чинило
+        // «короткая фраза → пустой результат»).
+        assert!(keep_by_no_speech(0.6), "0.6 больше не считается тишиной");
+        assert!(keep_by_no_speech(0.9), "даже 0.9 оставляем — движок сам решает по avg_logprob");
+    }
+
+    #[test]
+    fn no_speech_drops_only_extreme() {
+        assert!(!keep_by_no_speech(0.99), "экстремальная уверенность в тишине → дроп");
+        assert!(keep_by_no_speech(0.95), "граница включительно — оставляем");
+    }
+
+    // --- pad_pcm_to_min: стабилизировать короткий декод ---
+
+    #[test]
+    fn pad_extends_short_pcm_with_trailing_silence() {
+        let pcm = vec![0.3f32; 100];
+        let out = pad_pcm_to_min(&pcm, 16_000);
+        assert_eq!(out.len(), 16_000, "дополнено до минимума");
+        assert_eq!(&out[..100], &pcm[..], "исходное аудио в начале сохранено");
+        assert!(out[100..].iter().all(|&s| s == 0.0), "хвост — тишина");
+    }
+
+    #[test]
+    fn pad_leaves_long_pcm_untouched() {
+        let pcm = vec![0.2f32; 20_000];
+        let out = pad_pcm_to_min(&pcm, 16_000);
+        assert_eq!(out.len(), 20_000, "длинный буфер не трогаем");
+        assert_eq!(&out[..], &pcm[..]);
     }
 
     // --- transcribe без модели → Err ---

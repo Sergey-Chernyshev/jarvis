@@ -25,6 +25,8 @@
     focusTerminal: (sessionId) => invoke('terminal_focus', { sessionId }),
     launchSession: (cwd, agent, sessionId) => invoke('session_launch', { cwd: cwd ?? null, agent, sessionId: sessionId ?? null }),
     sendReply: (sessionId, text) => invoke('session_reply', { sessionId, text }),
+    // вставленная картинка → временный файл; путь уйдёт агенту в промпте
+    saveImage: (dataBase64, ext) => invoke('session_save_image', { dataBase64, ext }),
     pingTerminal: (sessionId) => invoke('terminal_ping', { sessionId }),
     answerQuestion: (sessionId, choice) => invoke('question_answer', { sessionId, choice }),
     // действие с доски задач → редактируемый текст-инструкция (НЕ отправка)

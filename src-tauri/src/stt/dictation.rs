@@ -18,8 +18,10 @@ use super::SttService;
 pub struct Dictation {
     service: Arc<SttService>,
     hub: Arc<AudioHub>,
-    /// Активная сессия захвата аудио (None = не пишем).
-    capturing: Mutex<Option<CaptureSession>>,
+    /// Активная сессия захвата аудио + момент старта (None = не пишем). Метка
+    /// времени нужна watchdog'у `abort_if_stuck`: если key-up PTT потерялся,
+    /// сессия висела бы вечно и держала микрофон.
+    capturing: Mutex<Option<(CaptureSession, std::time::Instant)>>,
     /// AppHandle для HUD-фаз («Слушаю…/Анализирую…/Услышал») и истории реплик.
     /// None в юнит-тестах — тогда HUD/история становятся no-op.
     app: Option<tauri::AppHandle>,
@@ -57,7 +59,7 @@ impl Dictation {
                 return;
             }
             // Захват через общий хаб (без преролла — PTT пишет с момента нажатия).
-            *guard = Some(self.hub.open_capture(false));
+            *guard = Some((self.hub.open_capture(false), std::time::Instant::now()));
         } // лок захвата отпущен ДО прогрева (spawn питона его не держит)
         // Греем STT-модель ПОКА человек говорит: к отпусканию клавиши она уже
         // загружена (прячет cold-start после idle-stop). Неблокирующий вызов.
@@ -85,14 +87,20 @@ impl Dictation {
                     return;
                 }
             };
-            guard.take()
+            guard.take().map(|(s, _started)| s)
         };
 
         let Some(session) = session else {
             // Нет активного захвата — no-op.
             return;
         };
+        self.finish_session(session);
+    }
 
+    /// Общий финал диктовки: транскрибировать накопленное и вставить текст.
+    /// Зовётся из on_release (обычный путь) и из watchdog'а залипшего PTT —
+    /// принудительное завершение тоже отдаёт человеку его текст, а не тишину.
+    fn finish_session(&self, session: CaptureSession) {
         let service = self.service.clone();
         let daemon = self.daemon();
         std::thread::spawn(move || {
@@ -160,10 +168,12 @@ impl Dictation {
                     return;
                 }
             };
-            // Anti-hallucination (Tier 2): убрать известные фразы-галлюцинации из
-            // финального текста — общая сетка для whisper и qwen (qwen не отдаёт
-            // посегментный no_speech_prob, поэтому чистим здесь).
-            let text = crate::stt::dehallucinate::scrub(text.trim());
+            // Anti-hallucination (Tier 2): сперва схлопнуть дегенеративные петли
+            // декодера («Писать. Писать…»), затем убрать известные фразы-галлюцинации
+            // — общая сетка для whisper и qwen (qwen не отдаёт посегментный
+            // no_speech_prob, поэтому чистим здесь).
+            let collapsed = crate::stt::dehallucinate::collapse_repeats(text.trim());
+            let text = crate::stt::dehallucinate::scrub(&collapsed);
             if text.is_empty() {
                 crate::log::line("[dictation] пустой результат транскрипции, пропуск");
                 if let Some(d) = &daemon {
@@ -222,6 +232,41 @@ impl Dictation {
         });
     }
 
+    /// Watchdog залипшего PTT: если сессия захвата открыта дольше `max` (потерян
+    /// key-up хоткея / паника потребителя), принудительно её ЗАВЕРШИТЬ — иначе
+    /// микрофон держится бессрочно («индикатор вечно слушает»). Завершение идёт
+    /// обычным путём (finish_session): накопленная речь транскрибируется и
+    /// вставляется, HUD обновляется, медиа возвращается LeaveGuard'ом — человек
+    /// не теряет надиктованное, даже если порог сработал на живой длинной
+    /// диктовке. Возвращает true, если сессию пришлось завершить. Зовётся
+    /// периодически из супервизора.
+    pub fn abort_if_stuck(&self, max: std::time::Duration) -> bool {
+        let stuck = {
+            let mut guard = match self.capturing.lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    crate::log::line(&format!("[dictation] abort_if_stuck lock: {e}"));
+                    return false;
+                }
+            };
+            match guard.as_ref() {
+                Some((_, started)) if started.elapsed() >= max => {
+                    guard.take().map(|(s, _)| s)
+                }
+                _ => None,
+            }
+        }; // лок захвата отпущен ДО finish (Drop сессии) — без взаимоблокировки
+        let Some(session) = stuck else {
+            return false;
+        };
+        crate::log::line(&format!(
+            "[dictation] PTT дольше {}с — принудительное завершение диктовки",
+            max.as_secs()
+        ));
+        self.finish_session(session);
+        true
+    }
+
     /// Вспомогательный предикат: возвращает true, если захват активен.
     /// Используется в тестах для проверки state machine.
     pub fn is_capturing(&self) -> bool {
@@ -265,6 +310,35 @@ mod tests {
     fn initial_state_not_capturing() {
         let d = make_dictation();
         assert!(!d.is_capturing());
+    }
+
+    // Залипший PTT (потерянный key-up): сессия старше порога — авто-освобождение.
+    #[test]
+    fn abort_if_stuck_releases_old_session() {
+        let d = make_dictation();
+        d.on_press();
+        assert!(d.is_capturing(), "on_press открыл сессию");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let aborted = d.abort_if_stuck(std::time::Duration::from_millis(1));
+        assert!(aborted, "старая сессия должна быть освобождена");
+        assert!(!d.is_capturing(), "после аборта захват очищен");
+    }
+
+    // Свежая сессия (в пределах порога) не трогается.
+    #[test]
+    fn abort_if_stuck_keeps_fresh_session() {
+        let d = make_dictation();
+        d.on_press();
+        let aborted = d.abort_if_stuck(std::time::Duration::from_secs(60));
+        assert!(!aborted, "свежую сессию не трогаем");
+        assert!(d.is_capturing());
+    }
+
+    // Нет активного захвата — абортить нечего, no-op.
+    #[test]
+    fn abort_if_stuck_noop_when_idle() {
+        let d = make_dictation();
+        assert!(!d.abort_if_stuck(std::time::Duration::from_millis(0)));
     }
 
     // Двойной on_press не паникует (идемпотентный guard)

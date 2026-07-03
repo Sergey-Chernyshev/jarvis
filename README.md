@@ -1,244 +1,358 @@
-<p align="center"><b>Русский</b> · <a href="README.en.md">English</a></p>
+<p align="center"><b>English</b> · <a href="README.ru.md">Русский</a></p>
 
 <h1 align="center">Jarvis</h1>
 
 <p align="center">
-  Меню-бар для&nbsp;macOS, который следит за&nbsp;всеми сессиями Claude&nbsp;Code разом&nbsp;— и&nbsp;говорит, когда ты&nbsp;нужен.
+  Mission control for your coding agents, right in the macOS menu bar.<br>
+  Jarvis watches every Claude&nbsp;Code and Codex session you run — and tells you, even out loud, the moment one needs you.
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="Лицензия: MIT"></a>
-  <img src="https://img.shields.io/badge/macOS-11%2B%20·%20universal-black?logo=apple" alt="macOS 11+, universal">
-  <img src="https://img.shields.io/github/v/release/Sergey-Chernyshev/jarvis?include_prereleases&sort=semver&label=release" alt="Последний релиз">
-  <img src="https://img.shields.io/badge/status-pre--1.0-orange" alt="Статус: pre-1.0">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/macOS-11%2B%20·%20Apple%20Silicon-black?logo=apple" alt="macOS 11+, Apple Silicon">
+  <img src="https://img.shields.io/github/v/release/Sergey-Chernyshev/jarvis?include_prereleases&sort=semver&label=release" alt="Latest release">
+  <img src="https://img.shields.io/github/actions/workflow/status/Sergey-Chernyshev/jarvis/ci.yml?branch=master&label=CI" alt="CI">
+  <img src="https://img.shields.io/badge/status-pre--1.0-orange" alt="Status: pre-1.0">
 </p>
 
-<p align="center"><i>🖼 Скриншот и демо — скоро. Что снять и как подключить: <a href="docs/assets/README.md">docs/assets/README.md</a>.</i></p>
-<!-- <p align="center"><img src="docs/assets/hero.png" alt="Jarvis: панель ⌘J, счётчики в меню-баре, тост поверх фуллскрина" width="760"></p> -->
+<p align="center"><i>🖼 Screenshot and demo coming soon. What to capture and how to wire it in: <a href="docs/assets/README.md">docs/assets/README.md</a>.</i></p>
+<!-- <p align="center"><img src="docs/assets/hero.png" alt="Jarvis: the ⌘J panel, menu-bar counters, a toast over fullscreen" width="760"></p> -->
 
-## Проблема
+## Why Jarvis
 
-Когда ты гоняешь несколько агентов Claude&nbsp;Code разом, **узким местом становишься ты сам**. Сессии раскиданы по терминалам, вкладкам и Spaces — и с одного взгляда не видно, какой агент **встал на запросе разрешения**, какой **уже закончил и простаивает**, сжигая твоё время, а какой **упёрся в лимит**. Родные уведомления Claude&nbsp;Code — по одной сессии и привязаны к терминалу (в расширении для VS&nbsp;Code их вообще нет), единой картины по всем сессиям нет. А уснувший мак **молча морозит** claude-процессы и рвёт API-запросы, убивая долгие ночные прогоны — и на Apple&nbsp;Silicon закрытая крышка форсит сон, который обычный `caffeinate` не обходит.
+Running several coding agents at once turns **you** into the bottleneck. Sessions are spread across terminals, tabs and macOS Spaces, and you can't see at a glance which agent is **blocked on a permission prompt**, which **finished half an hour ago and is idling** while you think it's working, and which **hit a rate limit**. The agents' own notifications are per-session and terminal-scoped (they don't even fire in the VS Code extension) — there is no single pane showing the aggregate state. And a sleeping Mac **silently freezes** agent processes and severs in-flight API requests, killing long overnight runs; on Apple Silicon, closing the lid forces a sleep that plain `caffeinate` can't prevent.
 
-**Jarvis — это mission-control для твоих агентов Claude Code прямо в меню-баре:** видь, слышь и отвечай каждой сессии, чтобы ни одна не простаивала в ожидании тебя, а уснувший мак не убивал долгий прогон.
+**Jarvis is that missing single pane.** It sits in the menu bar, watches every interactive Claude Code and Codex CLI session on your machine, and makes sure no agent ever waits on you silently:
 
-## Что умеет
+- you **see** the aggregate state at all times (live counters in the menu bar, a Raycast-style ⌘J panel);
+- you **hear** it — toast notifications that render over fullscreen apps, and an optional local voice that speaks session events out loud;
+- you **act** without hunting for the right terminal — reply straight into any session, switch its model or reasoning effort, and let Jarvis keep the Mac awake through the night.
 
-- **🖥 Мульти-сессионный монитор в меню-баре** — все сессии Claude Code во всех терминалах сразу, живые счётчики **⏸ ждут · ⚙ работают**.
-- **🔔 Тосты поверх фуллскрина** — «нужно разрешение» видно даже в полноэкранном приложении.
-- **🎛 Панель ⌘J, always-on-top** — открыл, глянул, сделал, закрыл (как Raycast); фокус не ворует.
-- **↩️ Ответ прямо в сессию** — печатаешь в сессию через tmux, даже если окно свёрнуто или на другом Space.
-- **⚙️ Пульт: модель и effort** — Opus/Sonnet/Haiku и уровень рассуждений переключаются из панели.
-- **🗣 Jarvis говорит** — локальный TTS озвучивает по-русски, что сессия сделала или чего ждёт.
-- **🎙 Голосовой ввод (диктовка)** — push-to-talk (F8), речь распознаётся и вставляется в активную сессию.
-- **☕ Не давать маку уснуть** — анти-сон (аналог `caffeinate`) и страхуемый режим закрытой крышки для ночных прогонов.
-- **✅ Доска задач (read-only)** — живой прогресс `TodoWrite` (готово / в работе / в очереди) по сессии.
-- **🔒 Событийно и приватно** — на родных хуках Claude Code (без чтения экрана), всё локально, без телеметрии.
+## Highlights
 
-> **Граница:** Jarvis — **монитор и пульт, не оркестратор.** Он не плодит агентов и не владеет планом; он дополняет оркестраторы (Claude Squad, Conductor, Crystal, нативные Agent Teams) и те сессии, что ты уже запустил.
+- **🖥 Multi-session monitor** — every Claude Code and Codex session across every terminal, with live **⏸ waiting · ⚙ working** counters in the menu bar.
+- **🔔 Toasts over fullscreen** — "needs permission" is visible even inside a fullscreen app, with customizable content (branch, model, effort, tokens, duration).
+- **🎛 Always-on-top ⌘J panel** — open, glance, act, dismiss (Raycast-style); never steals focus.
+- **↩️ Reply into any session** — type back into a session via tmux even if its window is minimized or on another Space; a `/` command palette included.
+- **⚙️ Remote control** — switch model (Opus / Sonnet / Haiku) and reasoning effort from the panel; answer multi-choice agent questions with native pickers.
+- **📊 Usage, costs and limits** — token and cost tracking per model and project; when a session hits the usage limit, Jarvis shows when it resets and can auto-resume it.
+- **🗣 Jarvis speaks** — a local TTS voice reads out what a session did or what it's waiting for (Russian-first for now).
+- **🎤 "Hey Jarvis" voice assistant** *(experimental)* — say the wake word and talk to your sessions: route a reply by voice, ask what an agent did, control media/volume, ask a general question.
+- **🎙 Dictation** — push-to-talk (F8): speech is transcribed locally (Whisper / Qwen3) and inserted into the active session; full dictation history with re-transcription.
+- **☕ Keep the Mac awake** — anti-sleep (a `caffeinate` equivalent) plus a guarded closed-lid mode for overnight runs.
+- **✅ Read-only task board** — live `TodoWrite` progress (done / in-progress / queued) per session.
+- **📦 Model manager** — download, delete and hot-swap the local TTS/STT/wake-word models from settings; guided first-run onboarding.
+- **🔒 Event-driven & private** — built on the agents' own hooks (no screen scraping), everything runs locally, no telemetry, removable with one command.
 
-## Установка
+> **Boundary:** Jarvis is a **monitor and a remote, not an orchestrator.** It does not spawn agents and does not own the plan; it complements orchestrators (Claude Squad, Conductor, Crystal, native Agent Teams) and the sessions you already run.
 
-### Из релиза (рекомендуется)
+## Who it's for
 
-1. Скачай `Jarvis_x.y.z_universal.dmg` со страницы [releases](https://github.com/Sergey-Chernyshev/jarvis/releases).
-2. Открой DMG, перетащи **Jarvis** в **Applications**, запусти из Launchpad.
-3. При первом запуске Jarvis сам предложит доустановить интеграцию с Claude Code и голос — нажми **«Настроить»** (прогресс по шагам прямо в окне).
+Jarvis is a power-user tool. It pays off once you cross the pain threshold of **3+ parallel agent sessions**:
 
-Обновления приложение проверяет само (встроенный updater). Переустановить интеграцию можно в любой момент: меню-бар → «Переустановить интеграцию…».
+- **Solo developers running an agent fleet** — several Claude Code / Codex sessions across projects, where checking each terminal by hand eats the very time the agents were supposed to save.
+- **Overnight and long unattended runs** — big refactors, test-fix loops, batch migrations on a MacBook: Jarvis keeps the Mac awake (even lid-closed) and auto-resumes sessions when the usage limit window resets.
+- **People who like to stay heads-down** — you keep writing code or reading while agents grind; Jarvis interrupts you only when one of them actually needs a decision, with a toast or a spoken line.
+- **Small teams standardizing agent workflows** — Jarvis is fully local per machine (no server, no accounts), so every developer just installs it and gets the same visibility.
 
-**Требования:** macOS 11+ (Big Sur), Apple Silicon или Intel — универсальный бинарь, подписан Developer&nbsp;ID и **нотаризован**. Для пульта и ответа в сессию нужен tmux (`brew install tmux`).
+It's probably **not** for you if you run one session in one terminal (native notifications may be enough), or if you're looking for something to *spawn and plan* agents — pair Jarvis with an orchestrator for that.
+
+## Install
+
+### From a release (recommended)
+
+1. Download `Jarvis_x.y.z_aarch64.dmg` from the [releases](https://github.com/Sergey-Chernyshev/jarvis/releases) page.
+2. Open the DMG, drag **Jarvis** into **Applications**, launch it.
+3. First launch: the build is **ad-hoc signed** (no Apple Developer ID yet, not notarized), so macOS will warn about an unidentified developer. Right-click the app → **Open** → **Open**. If macOS claims the app is "damaged", clear the quarantine flag:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/Jarvis.app
+   ```
+
+4. On first launch Jarvis offers to set up the Claude Code / Codex integration and download voice models — click **«Настроить»** ("Set up"); progress is shown step by step in the window.
+
+The app checks for updates itself (built-in updater). You can reinstall the integration anytime: menu bar → "Reinstall integration…".
+
+**Requirements:**
+
+- an **Apple Silicon** Mac (M1 or newer), macOS 11+ — the prebuilt DMG is aarch64-only; Intel Macs can build from source (below);
+- **tmux** for the reply-into-session and remote-control features: `brew install tmux`;
+- **Claude Code** (CLI) and/or **Codex** (CLI) — the agents Jarvis monitors.
 
 <details>
-<summary>Сборка из исходников / для разработчиков</summary>
+<summary>Build from source / for developers</summary>
 
-Нужны: Rust stable (rustup; минимальная версия — поле `rust-version` в [`src-tauri/Cargo.toml`](src-tauri/Cargo.toml)), tmux (опционально).
+You need: Rust stable ([rustup](https://rustup.rs/); the minimum version is the `rust-version` field in [`src-tauri/Cargo.toml`](src-tauri/Cargo.toml)), Node.js 20+, CMake (`brew install cmake`), tmux (optional).
 
 ```bash
-npm run setup     # вшить хуки в ~/.claude/settings.json (с бэкапом, идемпотентно)
-npm start         # собрать и поднять демон + меню-бар (◇ справа сверху)
+npm ci
+npm run setup     # install hooks into ~/.claude/settings.json (backed up, idempotent)
+npm start         # build and launch the daemon + menu bar (◇ top-right) against the dev profile (~/.jarvis-dev)
 ```
 
-(npm здесь — только привычный раннер: внутри это `cargo run --release`. Без npm: `cargo run --release --manifest-path src-tauri/Cargo.toml`.)
+(npm here is just a familiar runner: under the hood it's `cargo build --release` plus an ad-hoc `codesign` needed for microphone access.)
 
-Дальше **перезапусти активные сессии** `claude` — хуки снимаются снапшотом на старте сессии. Снести всё: `npm run teardown`. Посмотреть состояние каждого компонента: `npm run status`. Локально собрать DMG (без подписи, host-арка): `npm run bundle`.
+Then **restart any active** `claude` sessions — hooks are snapshotted at session start. Remove everything: `npm run teardown`. Check the status of each component: `npm run status`. Build a DMG locally (unsigned, host arch): `npm run bundle`. Run the prod profile: `npm run start:prod`.
 
-**Пощупать без Claude Code** (демон должен быть запущен) — вручную, как это делает настоящий хук:
+**Try it without Claude Code** (the daemon must be running) — manually, the way a real hook does it:
 
 ```bash
 echo '{"session_id":"t1","cwd":"'$PWD'"}' | ~/.jarvis/bin/jarvis-hook claude session-start
-echo '{"session_id":"t1","cwd":"'$PWD'","prompt":"добавь тесты"}' | ~/.jarvis/bin/jarvis-hook claude prompt
+echo '{"session_id":"t1","cwd":"'$PWD'","prompt":"add tests"}' | ~/.jarvis/bin/jarvis-hook claude prompt
 echo '{"session_id":"t1","cwd":"'$PWD'","message":"Claude needs your permission to use Bash"}' | ~/.jarvis/bin/jarvis-hook claude notification
 echo '{"session_id":"t1","cwd":"'$PWD'"}' | ~/.jarvis/bin/jarvis-hook claude stop
 ```
 
-Проверка, что демон жив: `curl -s --unix-socket ~/.jarvis/run.sock http://jarvis/`
+Check the daemon is alive: `curl -s --unix-socket ~/.jarvis/run.sock http://jarvis/`
 
 </details>
 
-## Возможности
+## Features
 
-### 🖥 Мониторинг сессий
+### 🖥 Session monitoring
 
-Реестр всех сессий Claude Code: статус (idle / работает / ждёт / закончила / упёрлась в лимит), проект, модель, активность. Счётчик в меню-баре (**◇ ⏸N ⚙M**) — сводка по всем терминалам.
+A registry of every interactive Claude Code / Codex session: status (idle / working / waiting / finished / hit the limit), project, branch, model, activity. The menu-bar counter (**◇ ⏸N ⚙M**) is the cross-terminal summary; the ⌘J panel is the detailed view.
 
 <details>
-<summary>Как это работает</summary>
+<summary>How it works</summary>
 
-Никакого парсинга экрана — только структурированные события от самого Claude Code через хуки: `SessionStart` → idle, `UserPromptSubmit` → working, `Notification` → waiting (+уведомление), `Stop` → done (+уведомление), `SessionEnd` → сессия исчезает. Реестр-редьюсер живёт в Rust-демоне; состояние переживает перезапуск демона (`~/.jarvis/state.json`). Экран паны читается только детектором интерактивных промптов и пультом (регуляркой, не скриншотами).
+No screen parsing — only structured events from the agents themselves, via their native hooks: `SessionStart` → idle, `UserPromptSubmit` → working, `Notification` → waiting (+a notification), `Stop` → done (+a notification), `SessionEnd` → the session disappears. The registry-reducer lives in the Rust daemon; state survives a daemon restart (`~/.jarvis/state.json`) and live tmux sessions are re-adopted. The pane's screen is read only by the interactive-prompt detector and the remote (a regex, not screenshots).
 
 </details>
 
-### 🔔 Уведомления и 🎛 панель ⌘J
+### 🔔 Notifications & 🎛 the ⌘J panel
 
-Собственные тосты-уведомления рендерятся **поверх фуллскрина**; панель (`alwaysOnTop`) не ворует фокус. Глобальный хоткей **⌘J** открывает панель по центру экрана — Esc, клик мимо или повторный ⌘J закрывают.
+Jarvis's own toast notifications render **over fullscreen**; the panel (`alwaysOnTop`) does not steal focus. The global **⌘J** hotkey opens the panel centered on screen — Esc, a click outside, or ⌘J again closes it.
 
 <details>
-<summary>Подробности</summary>
+<summary>Details</summary>
 
-Клик по ◇ — панель. Правый клик — меню (тест уведомления, автозапуск, выход). Хоткей, позиция панели, тумблеры уведомлений и автозапуск — в настройках (⚙ в шапке панели), хранятся в `~/.jarvis/settings.json`. Учти: глобальный ⌘J перехватывает эту клавишу во всех приложениях (Chrome «загрузки», VS Code «панель») — поменяй сочетание в настройках, если мешает.
+Click ◇ for the panel. Right-click for the menu (test notification, autostart, quit). The hotkey, panel position, notification toggles and autostart live in settings (⚙ in the panel header), stored in `~/.jarvis/settings.json`. Notification content is composable from segments (branch · model · effort · tokens · duration) with a live preview; a separate toggle speaks notifications only when a Bluetooth headset is connected. Note: the global ⌘J intercepts that key across all apps (Chrome "downloads", VS Code "panel") — change the shortcut in settings if it gets in the way.
 
 </details>
 
-### ↩️ Ответ в сессию (tmux) и ⚙️ пульт
+### ↩️ Reply into a session & ⚙️ the remote
 
-В чате сессии поле **«Ответить»** вставляет текст прямо в терминал сессии — даже если окно свёрнуто или на другом Space. Под полем — **пульт**: сегменты **Модель** (Opus / Sonnet / Haiku) и **Effort** (auto / low / med / high / xhigh) шлют слэш-команду (`/model sonnet`, `/effort high`) в живую сессию.
+In a session's chat the **Reply** field inserts text straight into the session's terminal — even if the window is minimized or on another Space. Below it sits the **remote**: **Model** segments (Opus / Sonnet / Haiku) and **Effort** (auto / low / med / high / xhigh) send a slash command (`/model sonnet`, `/effort high`) into the live session. When an agent asks a multiple-choice question, the panel renders native pickers (multi-select included) instead of making you type numbers into a terminal.
 
 <details>
-<summary>Как это работает</summary>
+<summary>How it works</summary>
 
-`npm run setup` ставит PATH-шим `~/.jarvis/shims/claude` (паттерн pyenv, managed-блок в `~/.zshrc` между маркерами jarvis). После `exec zsh` каждый интерактивный запуск `claude` прозрачно оборачивается в tmux на **отдельном сервере** (`-L jarvis`, конфиг `~/.jarvis/tmux.conf`): без статус-бара, мышь скроллит, личный tmux не затрагивается. В iTerm2 — control mode (`-CC`), родные табы. Headless-запуски (`-p`, пайпы, `$TMUX`) не оборачиваются. Вставка: `set-buffer → paste-buffer -p → send-keys Enter` (многострочные промпты доходят одним куском). Палитра команд (`/` в поле ответа) даёт доступ к остальным слэш-командам.
+`npm run setup` installs a PATH shim `~/.jarvis/shims/claude` (pyenv pattern, a managed block in `~/.zshrc` between jarvis markers). After `exec zsh`, every interactive `claude` launch is transparently wrapped in tmux on a **separate server** (`-L jarvis`, config `~/.jarvis/tmux.conf`): no status bar, mouse scrolls, your personal tmux untouched. In iTerm2 — control mode (`-CC`), native tabs. Headless runs (`-p`, pipes, `$TMUX`) are not wrapped. Insertion: `set-buffer → paste-buffer -p → send-keys Enter` (multi-line prompts arrive as one chunk). The command palette (`/` in the reply field) reaches the session's other slash commands.
 
-**Codex CLI** оборачивается тем же механизмом: если при `npm run setup` найден `codex`, Jarvis ставит хуки в `~/.codex/hooks.json` (метка `codex`) и шим `~/.jarvis/shims/codex` (один скрипт `agent-shim`, поведение выбирается по `basename "$0"`). Интерактивные сессии `codex` попадают в панель с бейджем `codex`: статус, тосты, голос, чат, ответ-в-сессию, команда продолжения `codex resume <session_id>`. Модель и reasoning меняются через `/model`-пикер Codex (отдельного `/effort` у него нет). Голосовая активация «Hey Jarvis» работает как обычно — она не зависит от того, какой агент запущен. **Headless `codex exec` хуки НЕ шлёт** — такие запуски Jarvis не мониторит (по дизайну, как и `claude -p`). На свежей машине хуки Codex требуют доверия (`~/.codex/config.toml [hooks.state]`); шим Codex добавляет `--dangerously-bypass-hook-trust` (если этот флаг поддерживается установленной версией `codex` — установщик проверяет `codex --help`) — это **снимает проверку доверия для всех хуков Codex** при интерактивном запуске, имей в виду этот компромисс.
-
-- Сессия вне tmux помечена «вне tmux» — управлять ей нельзя; панель подскажет, как завести её в tmux (`claude --resume <session_id>`).
-- Закрыл окно терминала — агент жив: tmux-сессия уходит в detach, Jarvis продолжает следить. Переподключиться: `tmux -L jarvis attach -t <имя>`.
-- **Модель** видна бесплатно (пишется в transcript каждым ходом ассистента). **Effort** снаружи не читается — панель ведёт оптимистичное состояние, подсвечивая то, что выставила сама.
+- A session outside tmux is flagged "outside tmux" — it can't be controlled; the panel shows how to bring it in (`claude --resume <session_id>`).
+- Close the terminal window and the agent lives on: the tmux session detaches, Jarvis keeps watching. Reattach: `tmux -L jarvis attach -t <name>`.
+- **Model** is free to read (written to the transcript on every assistant turn). **Effort** can't be read from outside — the panel keeps optimistic state, highlighting what it set itself.
 
 </details>
 
-### ☕ Не спать · ⌒ Крышка (power-плагины)
+### 🤝 Claude Code and Codex, side by side
 
-Уснувший мак — замороженные claude-процессы и оборванные API-запросы. Два подключаемых плагина (тумблеры в настройках), UX списан с Raycast Coffee и Amphetamine.
-
-- **☕ Не спать** — вето на idle-сон через power assertion (IOPMAssertion, как у `caffeinate`): бессрочно, на время (15м…8ч), пока жив процесс, или авто — пока агенты работают.
-- **⌒ Крышка** — closed-display mode (`pmset disablesleep`): мак работает с закрытой крышкой. На Apple Silicon это то, что обычный `caffeinate` не даёт.
+If `codex` is found during setup, Jarvis wires it up too: hooks in `~/.codex/hooks.json` and a `codex` shim using the same tmux mechanism. Interactive Codex sessions appear in the panel with a `codex` badge and get the same treatment — status, toasts, voice, chat, reply-into-session, and a resume command (`codex resume <session_id>`).
 
 <details>
-<summary>Безопасность и страховка</summary>
+<summary>Codex specifics</summary>
 
-Assertion живёт в процессе демона: краш = автоснятие, «застрявший» запрет сна невозможен. Проверка: `pmset -g assertions | grep -i jarvis`.
-
-«Крышка» — это root и термо-риски, поэтому плагин **детектит и подсказывает, а не молча sudo**: после прерванного сна предлагает включить closed-display; с внешним дисплеем советует родной clamshell (root не нужен). Ручной тумблер — честный admin-диалог; для тихого режима — «Настроить тихий режим» (`/etc/sudoers.d/jarvis-pmset`, ровно две команды через `visudo -c`). Fail-safe: маркер `~/.jarvis/clamshell.json`, восстановление сна на старте/выходе демона, батарейный сторож (≤15% → вернуть сон). MacBook Air без вентилятора под крышкой троттлит — плагин предупреждает.
+Model and reasoning are changed via Codex's own `/model` picker (there is no separate `/effort`). **Headless `codex exec` does not fire hooks** — such runs aren't monitored (by design, same as `claude -p`). On a fresh machine Codex hooks require trust (`~/.codex/config.toml [hooks.state]`); the Codex shim adds `--dangerously-bypass-hook-trust` when the installed `codex` supports it — this **disables trust verification for all Codex hooks** on interactive launches, so keep that trade-off in mind. Codex usage/cost numbers are estimates.
 
 </details>
 
-### 🗣 Голос (TTS) — Jarvis говорит
+### 📊 Usage, costs and limits
 
-После события сессии Jarvis коротко проговаривает по-русски, что произошло, локальным TTS. Текст собирается шаблоном из структурных сигналов; числа разворачиваются в слова с русским согласованием.
+Jarvis tracks token usage and estimated cost per session, model and project, and understands the rolling usage-limit window. When a session hits the limit, the panel and the voice line tell you when it resets — and, with auto-resume enabled, Jarvis picks the session back up the moment the window opens.
 
-- ход закончен → «Пиксела: четыре из шести задач, сейчас docker-compose» (есть доска) · «Рекрю готов, изменено три файла» (есть diff) · «Тикетинг закончил»;
-- ждёт тебя → **приоритетно**: «Пиксела ждёт — нужно разрешение на Bash»; упёрлась в лимит → «Пиксела упёрлась в лимит, сброс через два часа».
+### 🗣 Voice: Jarvis speaks (TTS)
+
+After a session event Jarvis briefly says out loud what happened, via a local TTS engine — currently in Russian. The text is assembled from structural signals by template; numbers are spelled out with correct grammatical agreement.
+
+- turn finished → "Pixela: four of six tasks, now docker-compose" (board present) · "Recru is done, three files changed" (diff present);
+- waiting on you → **priority**: "Pixela is waiting — needs permission for Bash"; hit the limit → "Pixela hit the limit, resets in two hours".
 
 <details>
-<summary>Движок, конфиг, граница</summary>
+<summary>Engine, config, boundary</summary>
 
-Движок — **Silero** (локальный Python-сайдкар, FastAPI, модель в памяти; слушает только `127.0.0.1`), которым демон рулит сам: поднимает, перезапускает при падении, гасит на простое/выходе. Спикеры: `aidar` · `baya` · `kseniya` · `xenia` · `eugene`. Реплики не накладываются: очередь сериализована, «ждёт» идёт вперёд «готово», затор `Stop`-реплик коалесцируется. Конфиг — в `~/.jarvis/settings.json`:
+The engine is **Silero** (a local Python sidecar, FastAPI, model held in memory; binds to `127.0.0.1` only), managed by the daemon: started on demand, restarted on crash, stopped when idle and on exit. Speakers: `aidar` · `baya` · `kseniya` · `xenia` · `eugene`. Utterances don't overlap: the queue is serialized, "waiting" jumps ahead of "done", a pile-up of `Stop` lines is coalesced. Config lives in `~/.jarvis/settings.json`:
 
 ```json
 "voice": { "engine": "silero", "mute": false,
            "events": { "stop": true, "notification": true, "stopFailure": true } }
 ```
 
-Меню-бар: тумблер **«Без звука»** и **«Тест голоса»**. Если движок недоступен — демон работает как раньше, Claude Code не затронут, причина в логе.
+Menu bar: a **"Mute"** toggle and **"Test voice"**. If the engine is unavailable the daemon runs as before, the agents are untouched, the reason is in the log.
 
-⚠️ **Лицензия голоса:** дефолтный русский голос Silero `v4_ru` — **некоммерческий** (CC BY-NC-SA 4.0). Для коммерческого использования — см. [раздел «Лицензия»](#лицензия).
+⚠️ **Voice license:** the default Russian Silero voice `v4_ru` is **non-commercial** (CC BY-NC-SA 4.0). For commercial use see the [License](#license) section.
 
 </details>
 
-### 🎙 Голосовой ввод (диктовка)
+### 🎤 "Hey Jarvis" — the voice assistant *(experimental)*
 
-Push-to-talk: зажми **F8**, говори, отпусти — речь распознаётся локально и вставляется в активную сессию. Движок по умолчанию — Qwen3 через MLX-сайдкар; опционально Whisper (нативно, за фича-флагом `whisper-native`).
+Say the wake word and talk — no keyboard, no window switching:
 
-### ✅ Доска задач (наблюдатель)
+- **route a reply by voice** — Jarvis figures out which session you're addressing by content (and shows a picker when unsure), stages the text, and sends it;
+- **ask what happened** — "what did the ticketing session do?" gets a spoken summary;
+- **quick OS commands** — media play/pause/next, system volume, open an app;
+- **general questions** — handed to a separate local assistant agent that can search the web and answers out loud.
 
-Сессии с многошаговым планом (`TodoWrite`) показывают кольцо «N/M задач» → слайд-овер «Задачи»: агрегат, прогресс-бар, список со статусами, где удаётся — модель и время сабагента. Доска живая: следующий `TodoWrite` перерисовывает её сам.
+Replies are half-duplex: Jarvis pauses listening while it speaks, and notifications wait while you're talking. Wake-word detection (openWakeWord) is included in release builds but **off by default** — enable it in the panel; the detector model is downloaded on demand (non-commercial license — see [License](#license)). There is no speaker verification yet — anyone in the room can say the wake word.
+
+### 🎙 Dictation (push-to-talk STT)
+
+Hold **F8**, speak, release — your speech is transcribed locally and inserted into the active session. The default engine is Qwen3-ASR via an MLX sidecar; Whisper (whisper.cpp, Metal) is built in as an alternative. Mixed Russian/English speech — including inline code terms — is handled.
 
 <details>
-<summary>Почему read-only</summary>
+<summary>Dictation history and anti-hallucination</summary>
 
-Источник истины по задачам — **оркестратор внутри сессии**. У списка `TodoWrite` нет внешнего API «отметь сделанным» — мутировать извне нельзя. Jarvis доску **только читает** (`PostToolUse`, last-write-wins) и **отображает**. Действие с задачи (перейти / пропустить / перезапустить) — это **инструкция оркестратору**: префилит поле ответа редактируемым текстом, который ты правишь и отправляешь сам. Доска меняется только когда прилетит следующий реальный `TodoWrite` — так видно, что агент реально делает, а не что мы попросили.
+The panel keeps a full dictation history: search, day grouping, stats, transcript enhancement, export, delete — and the last dictations keep their compressed audio, so you can **re-transcribe** them with a different engine. Against STT hallucinations on silence/noise there is a VAD gate (Silero, alpha toggle, off by default), a phrase blocklist, and tuned decoding parameters.
 
 </details>
 
-## Jarvis и соседи
+### ☕ Keep awake · ⌒ Clamshell (power plugins)
 
-| | **Jarvis** | Мониторы меню-бара | Оркестраторы | Claude Code (native) |
+A sleeping Mac means frozen agent processes and severed API requests. Two pluggable power plugins (toggles in settings), UX modeled on Raycast Coffee and Amphetamine:
+
+- **☕ Keep awake** — vetoes idle sleep via a power assertion (IOPMAssertion, like `caffeinate`): indefinitely, for a duration (15m…8h), while a process lives, or auto — while agents are working.
+- **⌒ Clamshell** — closed-display mode (`pmset disablesleep`): the Mac keeps running with the lid shut. On Apple Silicon this is exactly what plain `caffeinate` can't do.
+
+<details>
+<summary>Safety and fail-safes</summary>
+
+The assertion lives in the daemon process: a crash auto-releases it, so a "stuck" sleep block is impossible. Check: `pmset -g assertions | grep -i jarvis`.
+
+Clamshell means root and thermal risk, so the plugin **detects and suggests rather than silently sudo-ing**: after an interrupted sleep it offers closed-display mode; with an external display it advises native clamshell (no root needed). The manual toggle is an honest admin dialog; for silent switching there's "Set up silent mode" (`/etc/sudoers.d/jarvis-pmset`, exactly two commands, validated via `visudo -c`). Fail-safes: the `~/.jarvis/clamshell.json` marker, sleep restored on daemon start/exit, a battery guard (≤15% → restore sleep). A fanless MacBook Air throttles under a closed lid — the plugin warns about it.
+
+</details>
+
+### ✅ Task board (observer)
+
+Sessions running a multi-step plan (`TodoWrite`) show an "N/M tasks" ring → a "Tasks" slide-over: an aggregate, a progress bar, a list with statuses, and where possible the model and duration of the correlated subagent. The board is live: the next `TodoWrite` redraws it on its own.
+
+<details>
+<summary>Why read-only</summary>
+
+The source of truth for tasks is the **orchestrator inside the session**. The `TodoWrite` list has no external "mark done" API — it can't be mutated from outside. Jarvis only **reads** the board (`PostToolUse`, last-write-wins) and **displays** it. A task action (go to / skip / restart) is an **instruction to the orchestrator**: it pre-fills the reply field with editable text that you review and send yourself. The board changes only when the next real `TodoWrite` arrives — so you see what the agent actually does, not what we asked for.
+
+</details>
+
+### 📦 Model manager
+
+All local models — TTS voices, STT engines, the wake-word detector — are managed from a single "Models" section in settings: status, size on disk, download, delete, and hot-swapping the active STT engine without restarting the daemon. First-run onboarding offers a model checklist with unified download progress. Nothing is bundled with the app; weights are fetched from their upstream sources into `~/.jarvis/`.
+
+## Jarvis vs neighbors
+
+| | **Jarvis** | Menu-bar monitors | Orchestrators | Claude Code (native) |
 |---|:---:|:---:|:---:|:---:|
-| Детект состояния | хуки (события) | опрос процессов | спавнят сами | сам себе |
-| Все сессии в одном месте | ✅ | ✅ | частично | ❌ |
-| Ответ в сессию | ✅ (tmux) | ❌ | ✅ | — |
-| Пульт модель/effort | ✅ | ❌ | частично | вручную |
-| Голос (TTS) | ✅ | ❌ | ❌ | ❌ |
-| Анти-сон + крышка | ✅ | ❌ | ❌ | ❌ |
-| Доска задач | ✅ read-only | ❌ | ✅ владеет | ✅ TodoWrite |
-| Спавнит агентов | ❌ (намеренно) | ❌ | ✅ | — |
-| Лицензия | MIT | разные | разные | проприетарная |
+| State detection | hooks (events) | process polling | spawn their own | itself |
+| All sessions in one place | ✅ | ✅ | partial | ❌ |
+| Reply into a session | ✅ (tmux) | ❌ | ✅ | — |
+| Remote model/effort | ✅ | ❌ | partial | manual |
+| Voice (TTS + assistant) | ✅ | ❌ | ❌ | ❌ |
+| Usage & limit tracking | ✅ | partial | partial | per-session |
+| Anti-sleep + clamshell | ✅ | ❌ | ❌ | ❌ |
+| Task board | ✅ read-only | ❌ | ✅ owns it | ✅ TodoWrite |
+| Spawns agents | ❌ (by design) | ❌ | ✅ | — |
+| License | MIT | varies | varies | proprietary |
 
-Ближайший по духу — мониторы меню-бара; их козырь — нулевая настройка. Jarvis отвечает точностью (хуки, а не догадки), ответом-в-сессию с пультом, голосом и управлением питанием.
+The closest in spirit are menu-bar monitors; their edge is zero setup. Jarvis answers with accuracy (hooks, not guessing), reply-into-session plus a remote, voice, and power management.
 
-## Как это работает
+## How it works
 
 ```
-claude (любой терминал)
-  └─ hooks из ~/.claude/settings.json   ← вшивает npm run setup
-       └─ ~/.jarvis/bin/jarvis-hook     ← fail-silent шим, curl за 0.3с
-            └─ unix-сокет ~/.jarvis/run.sock
-                 └─ Rust-демон (Tauri) = реестр сессий
-                      ├─ собственные тосты-уведомления (поверх фуллскрина)
-                      ├─ панель (alwaysOnTop, фокус не ворует)
-                      └─ счётчик в меню-баре: ⏸ ждут · ⚙ работают
+claude / codex (any terminal)
+  └─ native hooks (~/.claude/settings.json · ~/.codex/hooks.json)  ← installed by setup
+       └─ ~/.jarvis/bin/jarvis-hook        ← fail-silent shim, 0.3 s curl
+            └─ unix socket ~/.jarvis/run.sock
+                 └─ Rust daemon (Tauri) = session registry + effects
+                      ├─ toasts over fullscreen · ⌘J panel (always-on-top)
+                      ├─ tmux reply & remote · TTS/STT sidecars · power plugins
+                      └─ menu-bar counter: ⏸ waiting · ⚙ working
 ```
 
-Фронтенд (панель `ui/index.html` + `ui/renderer.js`, тосты `ui/toast.*`) работает в системном WKWebView; контракт `window.jarvis` реализует тонкий адаптер `ui/bridge.js` поверх Tauri IPC. Main-процесс на Rust (`src-tauri/src/`): unix-сокет на axum, реестр-редьюсер с эффектами, tmux, транскрипты, usage/история, плагины питания. Состояние, настройки и статистика лежат в `~/.jarvis/` в стабильных форматах.
+The frontend (panel `ui/index.html` + `ui/renderer.js`, toasts `ui/toast.*`) runs in the system WKWebView; the `window.jarvis` contract is implemented by a thin adapter `ui/bridge.js` over Tauri IPC. The main process is Rust (`src-tauri/src/`): a unix socket on axum, the registry-reducer with effects, tmux, transcripts, usage/history, voice, STT, wake-word, the power plugins. State, settings and stats live in `~/.jarvis/` in stable formats.
 
-**Принципы:** без чтения экрана (только структурные события) · хуки fail-silent (никогда не ломают Claude Code) · всё локально, без телеметрии · снести всё одной командой (`npm run teardown`). История разработки по инкрементам видна в [`docs/superpowers/`](docs/superpowers/).
+**Principles:** no screen reading (structured events only) · fail-silent hooks (they never break the agents) · everything local, no telemetry · remove everything with one command (`npm run teardown`). The increment-by-increment development history — specs, plans, mockups — is in [`docs/superpowers/`](docs/superpowers/).
 
-## Статус и ограничения
+## Tips & recommended setup
 
-Pre-1.0 MVP. Что стабильно — в разделе «Возможности» выше. Сознательные границы и known-issues:
+- **Install tmux** (`brew install tmux`) — without it Jarvis still monitors and notifies, but can't reply into sessions or drive the remote. In iTerm2 sessions get native tabs (tmux control mode).
+- **Pair with an orchestrator.** Claude Squad, Conductor, Crystal, native Agent Teams — they spawn and plan; Jarvis watches everything they (and you) run interactively, in one place.
+- **Overnight runs:** enable **Keep awake → auto** (awake while agents work) and let the clamshell guard handle the lid; enable auto-resume so a limit reset doesn't strand the run.
+- **Office-friendly voice:** the "speak only into a Bluetooth headset" toggle keeps summaries out of the room's speakers.
+- **⌘J clashes** with Chrome's Downloads and VS Code's panel toggle — rebind it in settings if you use those.
+- **Commercial use:** the default voice and wake-word models are non-commercial; switch to the commercial-clean set (Silero `v5_cis_base`, Whisper/Qwen3, own or no wake-word) — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+- A session started outside the shim shows as "outside tmux" — restart it via `claude --resume <session_id>` to make it controllable.
 
-- **macOS-only**; поддержаны **Claude Code (CLI)** и **Codex (CLI)** — мониторятся **интерактивные** сессии (headless `claude -p` / `codex exec` хуки не шлют — не мониторятся); для пульта и ответа нужен **tmux**.
-- **Effort** снаружи не читается → панель ведёт оптимистичное состояние.
-- **Схема хуков Claude Code дрейфует между версиями.** Если после апдейта `claude` события перестали приходить — сверь с актуальной докой по hooks и поправь `EVENTS`/формат в `src-tauri/src/bin/setup.rs`.
-- Жёстко убитый терминал (без `SessionEnd`) оставляет висящую сессию — кнопка «Очистить» в панели убирает done/idle.
-- **Wake-word** («Hey Jarvis») — голосовая активация (openWakeWord/`ort`), включена в прод-сборке (релизный DMG, `npm run bundle` / `start:prod`); в панели **по умолчанию выключена**, модель детектора (некоммерческая — см. «Лицензия») ставится по запросу. Верификации говорящего пока нет (v1 — шов). Дев-сборка `npm start` идёт без фичи — детектор инертен.
-- **Agent-chat** (capability-платформа, MCP-мост `jarvis-mcp`) — мост есть, UI не зашипан. *In progress.*
+## Roadmap
 
-## Версии
+Jarvis is a solo-maintained pre-1.0 project; this is a direction, not a promise. The best way to influence it is an [issue](https://github.com/Sergey-Chernyshev/jarvis/issues).
 
-Pre-1.0 (**SemVer 0.x**): контракт хуков и форматы на диске (`~/.jarvis/`) могут меняться. Бамп `0.MINOR` — фичи/breaking, `0.x.PATCH` — фиксы. `1.0` заморозит контракт хуков и формат состояния.
+**Voice assistant → hands-free mission control**
 
-## Вклад
+- Create a *new* session by voice ("Jarvis, start an agent in ~/myproject") — today voice only routes into existing sessions.
+- Acoustic barge-in: interrupt Jarvis mid-sentence without the mic picking up its own speech (echo cancellation via macOS `VoiceProcessingIO`).
+- Streaming word-by-word dictation (today transcription happens on release).
+- Persistent assistant memory across conversations; a dedicated conversation-history view.
+- Speaker verification for the wake word (today anyone in the room can trigger it).
+- A full voice HUD.
 
-Issues и PR — велкам! Как собрать, прогнать тесты и оформить PR — в [CONTRIBUTING.md](CONTRIBUTING.md). Участвуя, ты соблюдаешь [Кодекс поведения](CODE_OF_CONDUCT.md). Об уязвимостях — приватно по [SECURITY.md](SECURITY.md). Спеки и планы по инкрементам лежат в [`docs/superpowers/`](docs/superpowers/).
+**Agent platform**
 
-Прямой push в `master` закрыт — изменения вливаются только через Pull Request с зелёным CI.
+- Ship the agent-chat UI on top of the capability platform — the security gate and the `jarvis-mcp` MCP bridge are already in place.
+- A plugin system (manifests, sandboxing, signing) and deeper security layers (span-level provenance, egress control).
+- Exposing Jarvis capabilities as an MCP server for external clients.
 
-## Лицензия
+**Engines & models**
 
-Код Jarvis — под лицензией **[MIT](LICENSE)** © 2026 Sergey Chernyshev.
+- Fully native TTS — dropping the Python sidecar (Piper via `ort`, or Silero via `ort` with native Russian stress handling).
+- Quantized STT models (4-bit Qwen3) once accuracy is validated; production-grade noise suppression (the current toggle is alpha).
 
-**Модели скачиваются, не входят в репозиторий** и сохраняют свои лицензии — они ограничивают **использование** соответствующей фичи независимо от MIT-кода:
+**Codex parity** — limit tracking with auto-resume and exact (not estimated) usage numbers for Codex sessions.
 
-| Артефакт | Для чего | Лицензия | Коммерч. |
+**Distribution & polish**
+
+- Proper Developer ID signing and notarization (today's builds are ad-hoc signed).
+- A hero demo GIF and screenshots; a prebuilt Intel DMG if there's demand.
+- `1.0`: freeze the hook contract and the on-disk formats.
+
+**Exploring** — English UI and English spoken summaries (the interface and voice are currently Russian-first).
+
+**Explicitly out of scope:** spawning/orchestrating agents (by design — see the boundary note), Windows/Linux (deeply macOS-native: IOPMAssertion, `pmset`, WKWebView, MLX), and the Mac App Store (its sandbox is incompatible with hooks and tmux).
+
+## Status & limitations
+
+A pre-1.0 MVP, developed in the open. Deliberate boundaries and known issues:
+
+- **macOS-only**; **Claude Code (CLI)** and **Codex (CLI)** are supported — **interactive** sessions only (headless `claude -p` / `codex exec` don't fire hooks — not monitored); the remote and reply need **tmux**.
+- **The UI and voice are currently Russian-first.** Monitoring, notifications, dictation and the remote work regardless of your language; English localization is on the roadmap.
+- **Effort** can't be read from outside → the panel keeps optimistic state.
+- **Hook schemas drift between agent versions.** If events stop arriving after a `claude` update, compare against the current hooks docs and fix `EVENTS`/the format in `src-tauri/src/bin/setup.rs`.
+- A hard-killed terminal (no `SessionEnd`) leaves a session hanging — the panel's "Clear" button removes done/idle ones.
+- **Wake-word** ("Hey Jarvis") is experimental: no speaker verification, detector model is non-commercial (see [License](#license)), off by default. The dev build (`npm start`) includes the feature flag but the detector stays inert until enabled in the panel.
+- **Agent chat** (the capability platform, MCP bridge `jarvis-mcp`) — the bridge exists, the UI isn't shipped. *In progress.*
+
+## Versioning
+
+Pre-1.0 (**SemVer 0.x**): the hook contract and the on-disk formats (`~/.jarvis/`) may change. `0.MINOR` bumps for features/breaking changes, `0.x.PATCH` for fixes. `1.0` will freeze the hook contract and the state format. Updates never touch your data: everything user-owned lives in `~/.jarvis/`, outside the app bundle — see [docs/release/versioning-and-migration.md](docs/release/versioning-and-migration.md).
+
+## Contributing
+
+Issues and PRs are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, test, and open a PR. By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). Report vulnerabilities privately via [SECURITY.md](SECURITY.md). Specs and per-increment plans live in [`docs/superpowers/`](docs/superpowers/).
+
+Direct pushes to `master` are disabled — changes land only via Pull Request with green CI.
+
+## License
+
+Jarvis's code is licensed under the **[MIT License](LICENSE)** © 2026 Sergey Chernyshev.
+
+**Model weights are downloaded, not part of the repo**, and keep their own licenses — these restrict **use** of the corresponding feature independently of the MIT code:
+
+| Artifact | Used for | License | Commercial |
 |---|---|---|:---:|
-| Silero `v4_ru` | **голос по умолчанию** | CC BY-NC-SA 4.0 | ❌ |
-| Silero `v5_cis_base` / `_nostress` | голос | MIT | ✅ |
-| openWakeWord `hey_jarvis_v0.1` | **wake-word по умолчанию** | CC BY-NC-SA 4.0 | ❌ |
-| whisper.cpp `ggml-*` | распознавание речи | MIT | ✅ |
-| Qwen3 (`mlx-community`) | распознавание речи | Apache-2.0 | ✅ |
+| Silero `v4_ru` | **default voice** | CC BY-NC-SA 4.0 | ❌ |
+| Silero `v5_cis_base` / `_nostress` | voice | MIT | ✅ |
+| openWakeWord `hey_jarvis_v0.1` | **default wake-word** | CC BY-NC-SA 4.0 | ❌ |
+| whisper.cpp `ggml-*` | speech-to-text | MIT | ✅ |
+| Qwen3 (`mlx-community`) | speech-to-text | Apache-2.0 | ✅ |
 
-> ⚠️ Дефолтные голос (`v4_ru`) и wake-word (`hey_jarvis`) — **некоммерческие**. Для коммерческого использования: голос → Silero `v5_cis_base` (MIT); wake-word → обучить свой или выключить; STT → Whisper или Qwen3. Полный разбор и обязательства по сторонним компонентам — в [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) (включая BSD-3 атрибуцию `mediaremote-adapter`).
+> ⚠️ The default voice (`v4_ru`) and wake-word (`hey_jarvis`) are **non-commercial**. For commercial use: voice → Silero `v5_cis_base` (MIT); wake-word → train your own or disable it; STT → Whisper or Qwen3. The full breakdown and third-party obligations are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) (including the BSD-3 attribution for `mediaremote-adapter`).
 
-**Неаффилиация.** Jarvis — независимый open-source-проект. Он **не аффилирован с Anthropic, PBC** и не одобрен ею; «Claude» и «Claude Code» — товарные знаки Anthropic, использованы **номинативно** (для описания совместимости). Jarvis работает поверх **официальных хуков** Claude Code. Проект также не связан с Marvel/Disney; сходство с вымышленным «J.A.R.V.I.S.» непреднамеренно.
+**Non-affiliation.** Jarvis is an independent open-source project. It is **not affiliated with, or endorsed by, Anthropic, PBC**; "Claude" and "Claude Code" are trademarks of Anthropic, used **nominatively** (to describe compatibility). It is likewise not affiliated with OpenAI; "Codex" is referenced nominatively. Jarvis works on top of the agents' **official hooks**. The project is also unaffiliated with Marvel/Disney; any resemblance to the fictional "J.A.R.V.I.S." is unintentional.

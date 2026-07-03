@@ -573,6 +573,7 @@ impl AudioHub {
             g.threads.take()
         };
         if let Some(t) = threads {
+            crate::log::line("[audio] захват остановлен (спрос=0)");
             t.stop.store(true, Ordering::SeqCst);
             // НЕ джойним под локом: cpal/CoreAudio-teardown может зависнуть, а
             // `unsubscribe`/`set_device` держат `lifecycle` — это морозило ВЕСЬ
@@ -625,13 +626,25 @@ impl CaptureSession {
     }
 
     /// Остановить захват, вернуть накопленный 16к моно PCM (с прероллом впереди).
-    pub fn finish(self) -> Result<Vec<f32>, String> {
-        let mut out = self.preroll;
+    /// Отписку выполняет `Drop` (ниже) — здесь её НЕ дублируем, иначе спрос
+    /// декрементился бы дважды и остановил бы захват для других подписчиков.
+    pub fn finish(mut self) -> Result<Vec<f32>, String> {
+        let mut out = std::mem::take(&mut self.preroll);
         while let Ok(frame) = self.rx.try_recv() {
             out.extend_from_slice(&frame);
         }
-        self.hub.unsubscribe(self.id);
         Ok(out)
+        // self выходит из области видимости здесь → Drop::drop → unsubscribe (ровно раз)
+    }
+}
+
+impl Drop for CaptureSession {
+    /// Освобождение захвата на ЛЮБОМ пути выхода — включая потерянный key-up PTT
+    /// или панику потребителя, когда `finish()` не вызвали. Без этого спрос тёк и
+    /// микрофон держался бессрочно («индикатор вечно слушает»). Ровно один
+    /// декремент спроса на сессию: `finish()` больше сам не отписывается.
+    fn drop(&mut self) {
+        self.hub.unsubscribe(self.id);
     }
 }
 
@@ -776,7 +789,13 @@ fn capture_thread(
     while !stop.load(Ordering::SeqCst) {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    // Сначала pause (глушит realtime-callback), потом drop — teardown AudioUnit
+    // при живом callback'e умеет зависать, а зависший drop = микрофон (и оранжевый
+    // индикатор) держатся бессрочно. Лог ПОСЛЕ drop — маркер, что teardown прошёл:
+    // если строки нет после «захват остановлен», значит CoreAudio завис здесь.
+    let _ = stream.pause();
     drop(stream); // остановить захват — на этом же потоке
+    crate::log::line("[audio] стрим микрофона освобождён");
     // native_tx уронится здесь → proc-поток завершит цикл recv()
 }
 
@@ -899,6 +918,31 @@ mod tests {
         let d_before = hub.inner.lock().unwrap().demand;
         let _ = cap.finish();
         assert_eq!(hub.inner.lock().unwrap().demand, d_before - 1);
+    }
+
+    // Потерянный key-up PTT / паника: сессию дропнули БЕЗ finish() — микрофон
+    // всё равно обязан освободиться (иначе индикатор «вечно слушает»).
+    #[test]
+    fn capture_session_drop_without_finish_unsubscribes() {
+        let hub = AudioHub::new(None, None);
+        let cap = hub.open_capture(false);
+        assert_eq!(hub.inner.lock().unwrap().demand, 1);
+        drop(cap);
+        assert_eq!(hub.inner.lock().unwrap().demand, 0, "Drop сессии освобождает захват");
+    }
+
+    // finish()+Drop не должны декрементить спрос ДВАЖДЫ: завершение одной сессии
+    // не имеет права остановить захват для другого активного подписчика.
+    #[test]
+    fn finish_one_session_leaves_other_subscribed() {
+        let hub = AudioHub::new(None, None);
+        let a = hub.open_capture(false);
+        let b = hub.open_capture(false);
+        assert_eq!(hub.inner.lock().unwrap().demand, 2);
+        let _ = a.finish();
+        assert_eq!(hub.inner.lock().unwrap().demand, 1, "ровно один декремент на сессию");
+        drop(b);
+        assert_eq!(hub.inner.lock().unwrap().demand, 0);
     }
 
     #[test]

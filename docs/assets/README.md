@@ -1,35 +1,35 @@
-# docs/assets — изображения для README
+# docs/assets — images for the README
 
-Сюда кладём визуалы, на которые ссылаются **оба** README (`README.md` и
-`README.en.md`) по относительным путям. Один общий набор картинок на оба языка —
-не дублируем по языкам.
+Visuals referenced by **both** READMEs (`README.md` and `README.ru.md`) live here,
+linked by relative paths. One shared set of images for both languages — no
+per-language duplicates.
 
-## Что нужно снять (по приоритету)
+## What to capture (by priority)
 
-1. **`hero.png`** или **`hero.gif`** — главный визуал «над сгибом». Лучше всего
-   короткий GIF 5–15 с, 10–15 fps, ширина ≈720–960 px, показывающий:
-   - открытие панели по **⌘J** (по центру экрана, как Raycast);
-   - счётчики в меню-баре, меняющиеся вживую (**⏸ ждут · ⚙ работают**);
-   - тост-уведомление, всплывающее **поверх полноэкранного** приложения.
-   Статичный скриншот панели — приемлемый минимум, GIF — лучше.
-2. `panel.png` — панель со списком сессий, бейджами модели и полем «Ответить».
-3. `toast.png` — тост поверх фуллскрина.
-4. `taskboard.png` — слайд-овер «Задачи» (доска TodoWrite).
+1. **`hero.png`** or **`hero.gif`** — the main above-the-fold visual. Best: a
+   short GIF, 5–15 s, 10–15 fps, ≈720–960 px wide, showing:
+   - the panel opening on **⌘J** (centered, Raycast-style);
+   - the menu-bar counters changing live (**⏸ waiting · ⚙ working**);
+   - a toast notification appearing **over a fullscreen** app.
+   A static screenshot of the panel is an acceptable minimum; a GIF is better.
+2. `panel.png` — the panel with the session list, model badges and the reply field.
+3. `toast.png` — a toast over fullscreen.
+4. `taskboard.png` — the "Tasks" slide-over (the TodoWrite board).
 
-## Как подключить
+## How to wire it in
 
-В обоих README уже есть закомментированный тег под hero-визуал:
+Both READMEs already contain a commented-out tag for the hero visual:
 
 ```html
-<!-- <p align="center"><img src="docs/assets/hero.png" alt="…" width="720"></p> -->
+<!-- <p align="center"><img src="docs/assets/hero.png" alt="…" width="760"></p> -->
 ```
 
-Сними картинку, положи сюда под именем `hero.png` (или `hero.gif`), раскомментируй
-тег в **обоих** файлах и удали строку-плейсхолдер «Скриншот и демо — скоро».
+Capture the image, drop it here as `hero.png` (or `hero.gif`), uncomment the tag
+in **both** files and remove the "Screenshot and demo coming soon" placeholder line.
 
-## Как снять (macOS)
+## How to capture (macOS)
 
-- Скриншот области: **⌘⇧4** (или окна: **⌘⇧4**, затем пробел).
-- Запись экрана/области в видео: **⌘⇧5**. Видео → GIF: `ffmpeg` или
-  [Gifski](https://gif.ski/). Пример: `ffmpeg -i screen.mov -vf "fps=12,scale=720:-1" hero.gif`.
-- Демонстрируй на чистом рабочем столе, без личных данных в путях/заголовках.
+- Area screenshot: **⌘⇧4** (or a window: **⌘⇧4**, then Space).
+- Screen/area recording: **⌘⇧5**. Video → GIF: `ffmpeg` or
+  [Gifski](https://gif.ski/). Example: `ffmpeg -i screen.mov -vf "fps=12,scale=720:-1" hero.gif`.
+- Record on a clean desktop, with no personal data in paths or window titles.

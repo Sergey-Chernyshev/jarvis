@@ -1,7 +1,7 @@
 [package]
 name = "jarvis"
 version = "0.3.3"
-description = "Монитор сессий Claude Code: меню-бар, панель статусов, уведомления"
+description = "macOS menu-bar mission control for Claude Code and Codex sessions"
 license = "MIT"
 edition = "2021"
 rust-version = "1.77.2"

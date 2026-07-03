@@ -4,8 +4,8 @@ Jarvis itself is licensed under the **MIT License** (see [`LICENSE`](LICENSE)).
 It bundles, links against, and downloads third-party components that are
 licensed separately. This file lists the obligations that apply.
 
-> Эта страница на английском — это стандарт для лицензионных уведомлений.
-> Краткая суть для пользователя — в разделе «Лицензия» в [README.md](README.md).
+> The user-facing summary lives in the [License](README.md#license) section of the
+> README (Russian: [«Лицензия»](README.ru.md#лицензия)).
 
 ---
 

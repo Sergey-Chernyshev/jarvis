@@ -2,7 +2,7 @@
   "name": "jarvis-mvp",
   "version": "0.3.3",
   "private": true,
-  "description": "Монитор сессий Claude Code: уведомления и панель статусов (Rust + Tauri)",
+  "description": "macOS menu-bar mission control for Claude Code and Codex sessions: status panel, notifications, voice (Rust + Tauri)",
   "license": "MIT",
   "scripts": {
     "start": "JARVIS_DEV_SIGN=1 cargo build --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort,whisper-native,stt-vad --bin jarvis && codesign --force --sign - --entitlements src-tauri/entitlements.plist src-tauri/target/release/jarvis && JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 src-tauri/target/release/jarvis",

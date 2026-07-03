@@ -35,6 +35,7 @@
     repeatHotkey: 'Command+Alt+R',
     muteHotkey: 'Command+Alt+M',
     quietHotkey: 'Command+Alt+J',
+    selectHotkeyTemplate: 'Command+Alt+{n}',
   };
 
   // ── IPC-обёртка: никогда не бросает наружу, возвращает fallback ──────────
@@ -364,6 +365,122 @@
     return nodes;
   }
 
+  /* ── Редактор хоткея: конструктор модификаторов ──────────────────────────
+   * macOS-webview «съедает» ⌘/⌥-комбо до JS (см. dictationHotkeyField), поэтому
+   * модификаторы задаются тоггл-чипами, а нажатием ловится только ОСНОВНАЯ
+   * клавиша — одиночные буквы/цифры/F-клавиши webview отдаёт нормально.
+   * opts.fixedKey — режим «Варианты ответа»: клавиша показана фиксированно
+   * (напр. '1…9'), редактируются только модификаторы, в акселератор идёт {n}.
+   * opts.onApply(accel) → Promise<{ok,error?}> (бэкенд валидирует и
+   * перерегистрирует); opts.onReset — кнопка сброса на дефолт. */
+  function hotkeyEditorField(current, opts) {
+    const MODS = [['Command', '⌘'], ['Control', '⌃'], ['Alt', '⌥'], ['Shift', '⇧']];
+    const MOD_NAMES = MODS.map(([n]) => n);
+    const fixedKey = opts && opts.fixedKey;
+    let applied = current || '';
+    let mods = new Set(), key = '';
+    const parse = (acc) => {
+      mods = new Set(); key = '';
+      for (const part of String(acc || '').split('+')) {
+        if (MOD_NAMES.includes(part)) mods.add(part);
+        else if (part && part !== '{n}') key = part;
+      }
+    };
+    parse(applied);
+    const accel = () => MOD_NAMES.filter((n) => mods.has(n))
+      .concat(fixedKey ? '{n}' : key).join('+');
+
+    const chipsRow = el('div.hkmods');
+    const hkey = el('div.hkey' + (fixedKey ? '' : '.rec'),
+      fixedKey ? {} : { title: 'Кликни и нажми клавишу' });
+    const note = (txt) => { hkey.replaceChildren(el('kbd', { text: txt })); };
+    const paintKey = () => {
+      hkey.classList.remove('recording');
+      hkey.replaceChildren();
+      const shown = fixedKey || (key ? displayHotkey(key) : '—');
+      hkey.appendChild(el('kbd', { text: shown }));
+    };
+    const paintChips = () => {
+      chipsRow.replaceChildren();
+      for (const [name, sym] of MODS) {
+        const c = el('button.hkchip' + (mods.has(name) ? '.on' : ''), { text: sym, title: name });
+        c.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (mods.has(name)) mods.delete(name); else mods.add(name);
+          apply();
+        });
+        chipsRow.appendChild(c);
+      }
+    };
+    const paintAll = () => { paintChips(); paintKey(); };
+    const revert = () => { parse(applied); paintAll(); };
+    const isFnKey = (k) => /^F\d{1,2}$/.test(k);
+    // без модификатора допустимы только F-клавиши (голая буква/цифра перехватит
+    // ввод во всей системе); для {n}-шаблона модификатор обязателен всегда
+    const valid = () => (fixedKey ? mods.size > 0 : !!key && (mods.size > 0 || isFnKey(key)));
+
+    async function apply() {
+      paintChips();
+      if (!valid()) {
+        note(fixedKey ? 'Нужен модификатор' : 'Нужен модификатор (⌘/⌥/⌃) или F-клавиша');
+        setTimeout(revert, 1500);
+        return;
+      }
+      const next = accel();
+      if (next === applied) { paintAll(); return; }
+      const res = await safe(() => opts.onApply(next), null);
+      if (res && res.ok) { applied = next; parse(applied); paintAll(); }
+      else { note((res && res.error) || 'не удалось'); setTimeout(revert, 1600); }
+    }
+
+    // запись основной клавиши (только не-fixedKey)
+    let recording = false, onKey = null;
+    function onAway(e) { if (!hkey.contains(e.target)) stopRec(); }
+    function stopRec() {
+      recording = false;
+      if (onKey) { document.removeEventListener('keydown', onKey, true); onKey = null; }
+      document.removeEventListener('click', onAway, true);
+      paintAll();
+    }
+    function startRec() {
+      if (fixedKey || recording) return;
+      recording = true;
+      hkey.classList.add('recording');
+      note('Нажмите клавишу…');
+      onKey = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (e.key === 'Escape') { stopRec(); return; }
+        if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return; // ждём основную
+        const r = eventToAccel(e);
+        if (!r.key) { note('Эта клавиша не поддерживается'); return; }
+        key = r.key;
+        for (const m of r.mods) mods.add(m); // Ctrl/Shift-комбо доходят — учитываем
+        recording = false;
+        if (onKey) { document.removeEventListener('keydown', onKey, true); onKey = null; }
+        document.removeEventListener('click', onAway, true);
+        apply();
+      };
+      document.addEventListener('keydown', onKey, true);
+      document.addEventListener('click', onAway, true);
+    }
+    hkey.addEventListener('click', (e) => { e.stopPropagation(); startRec(); });
+
+    paintAll();
+    const row = el('div', { style: 'display:flex;align-items:center;gap:8px' });
+    row.appendChild(chipsRow);
+    row.appendChild(hkey);
+    if (opts && opts.onReset) {
+      const rb = el('button.hkreset', { title: 'Сбросить' }, icon('rotate-ccw'));
+      rb.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const res = await safe(() => opts.onReset(), null);
+        if (res && res.ok !== false) { applied = opts.defaultAccel || applied; parse(applied); paintAll(); }
+      });
+      row.appendChild(rb);
+    }
+    return row;
+  }
+
   /* ── Инлайн-заметка ошибки загрузки (красная, под строкой модели) ───────
    * Показывает реальную причину провала скачивания (раньше ошибка молча
    * глоталась и статус «сбрасывался» в «не скачана»). */
@@ -627,6 +744,8 @@
 #settings2 .hkchip { font-size:11.5px; padding:3px 8px; border-radius:7px; background:rgba(255,255,255,0.05);
   border:1px solid rgba(255,255,255,0.1); color:var(--muted,#9a9aa2); cursor:pointer; }
 #settings2 .hkchip:hover { background:rgba(108,160,255,0.12); border-color:rgba(108,160,255,0.3); color:var(--working,#6ca0ff); }
+#settings2 .hkchip.on { background:rgba(108,160,255,0.18); border-color:rgba(108,160,255,0.45); color:var(--working,#6ca0ff); }
+#settings2 .hkmods { display:inline-flex; gap:5px; }
 #settings2 .hkreset { width:32px; height:32px; border-radius:8px; display:grid; place-items:center; background:transparent; border:0; color:var(--faint,#55555c); cursor:default; }
 #settings2 .hkreset:hover { color:var(--text-body,#d6d6db); background:rgba(255,255,255,0.06); }
 #settings2 .hkreset svg.lucide { width:15px; height:15px; }
@@ -1221,15 +1340,25 @@
       ['continueHotkey', 'Продолжить сессию', 'Возобновить последнюю сессию.'],
       ['repeatHotkey', 'Повторить', 'Повторить последнее действие.'],
       ['muteHotkey', 'Без звука', 'Заглушить уведомления и голос.'],
-      ['quietHotkey', 'Тихий режим', 'Копить статистику без тостов · ⌘⌥J.'],
+      ['quietHotkey', 'Тихий режим', 'Копить статистику без тостов.'],
     ];
     for (const [key, title, desc] of HKS) {
       const acc = s[key] || HK_DEFAULTS[key] || '';
       group.appendChild(drow(title, desc,
-        hotkeyField(acc, {
-          onReset: () => { fire(() => window.jarvis.setSettings({ [key]: HK_DEFAULTS[key] })); reRenderPane('keys'); },
+        hotkeyEditorField(acc, {
+          onApply: (accel) => window.jarvis.setSettings({ [key]: accel }),
+          defaultAccel: HK_DEFAULTS[key],
+          onReset: () => window.jarvis.setSettings({ [key]: HK_DEFAULTS[key] }),
         }), { ctlClass: 'hk' }));
     }
+    // варианты ответа: цифра фиксирована, редактируются только модификаторы
+    group.appendChild(drow('Варианты ответа', 'Выбрать вариант активного вопроса (цифра 1-9).',
+      hotkeyEditorField(s.selectHotkeyTemplate || HK_DEFAULTS.selectHotkeyTemplate, {
+        fixedKey: '1…9',
+        onApply: (accel) => window.jarvis.setSettings({ selectHotkeyTemplate: accel }),
+        defaultAccel: HK_DEFAULTS.selectHotkeyTemplate,
+        onReset: () => window.jarvis.setSettings({ selectHotkeyTemplate: HK_DEFAULTS.selectHotkeyTemplate }),
+      }), { ctlClass: 'hk' }));
     pane.appendChild(group);
   }
 

@@ -28,16 +28,6 @@
   // Мультивыбор моделей для «Скачать выбранное» (чекбоксы в строках, id → выбран).
   const selectedModels = new Set();
 
-  // ── Дефолты хоткеев (сверено с HK_DEFAULTS + settings_get в renderer.js) ──
-  const HK_DEFAULTS = {
-    hotkey: 'Command+J',
-    continueHotkey: 'Command+Alt+C',
-    repeatHotkey: 'Command+Alt+R',
-    muteHotkey: 'Command+Alt+M',
-    quietHotkey: 'Command+Alt+J',
-    selectHotkeyTemplate: 'Command+Alt+{n}',
-  };
-
   // ── IPC-обёртка: никогда не бросает наружу, возвращает fallback ──────────
   async function safe(fn, fallback) {
     try {
@@ -350,134 +340,120 @@
     return seg;
   }
 
-  /* ── Хоткей-поле: клавиши-капсы (read-only) + кнопка сброса ──────────────*/
-  function hotkeyField(acc, opts) {
-    const keys = hotkeyKeys(acc);
-    const hkey = el('div.hkey' + (opts && opts.rec ? '.rec' : ''));
-    for (const k of keys) hkey.appendChild(el('kbd', { text: k }));
-    if (!keys.length) hkey.appendChild(el('kbd', { text: '—' }));
-    const nodes = [hkey];
-    if (opts && opts.onReset) {
-      const rb = el('button.hkreset', { title: 'Сбросить' }, icon('rotate-ccw'));
-      rb.addEventListener('click', () => { try { opts.onReset(); } catch (e) {} });
-      nodes.push(rb);
-    }
-    return nodes;
-  }
+  /* ── Строка хоткея с инлайн-рекордером (Raycast-style) ────────────────────
+   * b: { action, label, accel, default } из hotkeyBindings() (accel: null =
+   * «не назначен»). Клик по капсуле → запись: бэкенд снимает ВСЕ глобальные
+   * хоткеи (hotkeysSuspend — команды не срабатывают, и наши шорткаты не
+   * съедают keydown), жмёшь комбо целиком → hotkeyAssign. Esc / клик мимо /
+   * 12 с тишины — отмена (бэкенд сам вернёт хоткеи через 15 с, если UI умер).
+   * Конфликт со своим хоткеем → красная строка + «Всё равно назначить»
+   * (steal: у конфликтующего действия сочетание снимается в «не назначен»).
+   * action='select': основная клавиша фиксирована «1…9» — в записи нужна
+   * любая цифра, в акселератор идёт {n}. opts.after() — после успешного
+   * применения (перерисовать пары-дубли в других вкладках). */
+  function hotkeyRow(b, desc, opts) {
+    const isSel = b.action === 'select';
+    let acc = b.accel; // string | null
+    const row = el('div.drow');
+    const left = el('div.grow');
+    left.appendChild(el('div.dt', { text: b.label }));
+    if (desc) left.appendChild(el('div.dd', { text: desc }));
+    const errBox = el('div.hkerr');
+    errBox.style.display = 'none';
+    left.appendChild(errBox);
+    const cap = el('div.hkey.rec', { title: 'Кликни и нажми сочетание' });
+    const rb = el('button.hkreset', { title: 'Сбросить' }, icon('rotate-ccw'));
+    const ctl = el('div.dctl.hk', null, [cap, rb]);
+    row.appendChild(left);
+    row.appendChild(ctl);
 
-  /* ── Редактор хоткея: конструктор модификаторов ──────────────────────────
-   * macOS-webview «съедает» ⌘/⌥-комбо до JS (см. dictationHotkeyField), поэтому
-   * модификаторы задаются тоггл-чипами, а нажатием ловится только ОСНОВНАЯ
-   * клавиша — одиночные буквы/цифры/F-клавиши webview отдаёт нормально.
-   * opts.fixedKey — режим «Варианты ответа»: клавиша показана фиксированно
-   * (напр. '1…9'), редактируются только модификаторы, в акселератор идёт {n}.
-   * opts.onApply(accel) → Promise<{ok,error?}> (бэкенд валидирует и
-   * перерегистрирует); opts.onReset — кнопка сброса на дефолт. */
-  function hotkeyEditorField(current, opts) {
-    const MODS = [['Command', '⌘'], ['Control', '⌃'], ['Alt', '⌥'], ['Shift', '⇧']];
-    const MOD_NAMES = MODS.map(([n]) => n);
-    const fixedKey = opts && opts.fixedKey;
-    let applied = current || '';
-    let mods = new Set(), key = '';
-    const parse = (acc) => {
-      mods = new Set(); key = '';
-      for (const part of String(acc || '').split('+')) {
-        if (MOD_NAMES.includes(part)) mods.add(part);
-        else if (part && part !== '{n}') key = part;
+    const clearErr = () => { row.classList.remove('conflict'); errBox.style.display = 'none'; errBox.replaceChildren(); };
+    const paint = () => {
+      clearErr();
+      cap.classList.remove('recording');
+      cap.classList.toggle('none', !acc);
+      cap.replaceChildren();
+      if (!acc) { cap.appendChild(el('span.hknone', { text: 'не назначен' })); return; }
+      if (isSel) {
+        for (const k of hotkeyKeys(acc.replace('+{n}', ''))) cap.appendChild(el('kbd', { text: k }));
+        cap.appendChild(el('kbd.fix', { text: '1…9' }));
+      } else {
+        for (const k of hotkeyKeys(acc)) cap.appendChild(el('kbd', { text: k }));
       }
     };
-    parse(applied);
-    const accel = () => MOD_NAMES.filter((n) => mods.has(n))
-      .concat(fixedKey ? '{n}' : key).join('+');
+    const note = (txt) => { cap.replaceChildren(el('span.ph', { text: txt })); };
+    const done = () => { paint(); if (opts && opts.after) opts.after(); };
 
-    const chipsRow = el('div.hkmods');
-    const hkey = el('div.hkey' + (fixedKey ? '' : '.rec'),
-      fixedKey ? {} : { title: 'Кликни и нажми клавишу' });
-    const note = (txt) => { hkey.replaceChildren(el('kbd', { text: txt })); };
-    const paintKey = () => {
-      hkey.classList.remove('recording');
-      hkey.replaceChildren();
-      const shown = fixedKey || (key ? displayHotkey(key) : '—');
-      hkey.appendChild(el('kbd', { text: shown }));
+    const showConflict = (conf, next) => {
+      paint();
+      row.classList.add('conflict');
+      const shown = isSel ? displayHotkey(next.replace('{n}', '1…9')) : displayHotkey(next);
+      errBox.appendChild(el('span', { text: '⚠ ' + shown + ' занято «' + conf.label + '» · ' }));
+      const steal = el('button.hksteal', { text: 'Всё равно назначить' });
+      steal.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const res = await safe(() => window.jarvis.hotkeyAssign(b.action, next, true), null);
+        if (res && res.ok) { acc = res.accel; done(); }
+        else { note((res && res.error) || 'не удалось'); setTimeout(paint, 1600); }
+      });
+      errBox.appendChild(steal);
+      errBox.style.display = '';
     };
-    const paintChips = () => {
-      chipsRow.replaceChildren();
-      for (const [name, sym] of MODS) {
-        const c = el('button.hkchip' + (mods.has(name) ? '.on' : ''), { text: sym, title: name });
-        c.addEventListener('click', (e) => {
-          e.stopPropagation();
-          if (mods.has(name)) mods.delete(name); else mods.add(name);
-          apply();
-        });
-        chipsRow.appendChild(c);
-      }
+
+    const applyAccel = async (next) => {
+      const res = await safe(() => window.jarvis.hotkeyAssign(b.action, next, false), null);
+      if (res && res.ok) { acc = res.accel; done(); return; }
+      if (res && res.conflict) { showConflict(res.conflict, next); return; }
+      note((res && res.error) || 'не удалось');
+      setTimeout(paint, 1600);
     };
-    const paintAll = () => { paintChips(); paintKey(); };
-    const revert = () => { parse(applied); paintAll(); };
-    const isFnKey = (k) => /^F\d{1,2}$/.test(k);
-    // без модификатора допустимы только F-клавиши (голая буква/цифра перехватит
-    // ввод во всей системе); для {n}-шаблона модификатор обязателен всегда
-    const valid = () => (fixedKey ? mods.size > 0 : !!key && (mods.size > 0 || isFnKey(key)));
 
-    async function apply() {
-      paintChips();
-      if (!valid()) {
-        note(fixedKey ? 'Нужен модификатор' : 'Нужен модификатор (⌘/⌥/⌃) или F-клавиша');
-        setTimeout(revert, 1500);
-        return;
-      }
-      const next = accel();
-      if (next === applied) { paintAll(); return; }
-      const res = await safe(() => opts.onApply(next), null);
-      if (res && res.ok) { applied = next; parse(applied); paintAll(); }
-      else { note((res && res.error) || 'не удалось'); setTimeout(revert, 1600); }
-    }
-
-    // запись основной клавиши (только не-fixedKey)
-    let recording = false, onKey = null;
-    function onAway(e) { if (!hkey.contains(e.target)) stopRec(); }
+    let recording = false, onKey = null, recTimer = 0;
     function stopRec() {
+      if (!recording) return;
       recording = false;
+      clearTimeout(recTimer);
       if (onKey) { document.removeEventListener('keydown', onKey, true); onKey = null; }
       document.removeEventListener('click', onAway, true);
-      paintAll();
+      fire(() => window.jarvis.hotkeysSuspend(false));
+      paint();
     }
+    function onAway(e) { if (!cap.contains(e.target)) stopRec(); }
     function startRec() {
-      if (fixedKey || recording) return;
+      if (recording) return;
       recording = true;
-      hkey.classList.add('recording');
-      note('Нажмите клавишу…');
+      clearErr();
+      fire(() => window.jarvis.hotkeysSuspend(true));
+      cap.classList.add('recording');
+      cap.classList.remove('none');
+      note(isSel ? 'Нажмите сочетание с цифрой…' : 'Нажмите сочетание…');
+      recTimer = setTimeout(stopRec, 12000); // раньше авто-ресюма бэкенда (15 с)
       onKey = (e) => {
         e.preventDefault(); e.stopPropagation();
         if (e.key === 'Escape') { stopRec(); return; }
         if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return; // ждём основную
-        const r = eventToAccel(e);
-        if (!r.key) { note('Эта клавиша не поддерживается'); return; }
-        key = r.key;
-        for (const m of r.mods) mods.add(m); // Ctrl/Shift-комбо доходят — учитываем
+        const { mods, key, isFn } = eventToAccel(e);
+        if (!key) { note('Эта клавиша не поддерживается'); return; }
+        if (isSel) {
+          if (!/^\d$/.test(key)) { note('Нужна цифра 1–9'); return; }
+          if (!mods.length) { note('Нужен модификатор (⌘/⌥/⌃)'); return; }
+        } else if (!isFn && mods.length === 0) {
+          note('Нужен модификатор (⌘/⌥/⌃) или F-клавиша'); return;
+        }
+        const next = mods.concat(isSel ? '{n}' : key).join('+');
         recording = false;
-        if (onKey) { document.removeEventListener('keydown', onKey, true); onKey = null; }
+        clearTimeout(recTimer);
+        document.removeEventListener('keydown', onKey, true); onKey = null;
         document.removeEventListener('click', onAway, true);
-        apply();
+        fire(() => window.jarvis.hotkeysSuspend(false));
+        applyAccel(next);
       };
       document.addEventListener('keydown', onKey, true);
       document.addEventListener('click', onAway, true);
     }
-    hkey.addEventListener('click', (e) => { e.stopPropagation(); startRec(); });
-
-    paintAll();
-    const row = el('div', { style: 'display:flex;align-items:center;gap:8px' });
-    row.appendChild(chipsRow);
-    row.appendChild(hkey);
-    if (opts && opts.onReset) {
-      const rb = el('button.hkreset', { title: 'Сбросить' }, icon('rotate-ccw'));
-      rb.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const res = await safe(() => opts.onReset(), null);
-        if (res && res.ok !== false) { applied = opts.defaultAccel || applied; parse(applied); paintAll(); }
-      });
-      row.appendChild(rb);
-    }
+    cap.addEventListener('click', (e) => { e.stopPropagation(); startRec(); });
+    rb.addEventListener('click', (e) => { e.stopPropagation(); applyAccel(b.default); });
+    paint();
     return row;
   }
 
@@ -509,80 +485,6 @@
     else if (/^Digit\d$/.test(code)) key = code.slice(5);   // Digit5 → 5
     else if (code === 'Space') key = 'Space';
     return { mods, key, isFn };
-  }
-
-  /* ── Поле хоткея диктовки с ЗАПИСЬЮ сочетания ────────────────────────────
-   * Клик → режим записи (лови нажатие), Esc — отмена, кнопка сброса → F8.
-   * Сохраняет через sttSetHotkey (бэкенд валидирует и перерегистрирует). */
-  function dictationHotkeyField(current) {
-    let acc = current || 'F8';
-    const hkey = el('div.hkey.rec', { title: 'Кликни и нажми новое сочетание' });
-    const paint = () => {
-      hkey.classList.remove('recording');
-      hkey.replaceChildren();
-      for (const k of hotkeyKeys(acc)) hkey.appendChild(el('kbd', { text: k }));
-    };
-    const note = (txt) => { hkey.replaceChildren(el('kbd', { text: txt })); };
-    let recording = false, onKey = null;
-    function onAway(e) { if (!hkey.contains(e.target)) stop(); }
-    function stop() {
-      recording = false;
-      if (onKey) { document.removeEventListener('keydown', onKey, true); onKey = null; }
-      document.removeEventListener('click', onAway, true);
-      paint();
-    }
-    function start() {
-      if (recording) return;
-      recording = true;
-      hkey.classList.add('recording');
-      note('Нажмите сочетание…');
-      onKey = async (e) => {
-        e.preventDefault(); e.stopPropagation();
-        if (e.key === 'Escape') { stop(); return; }
-        if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return; // ждём основную клавишу
-        const { mods, key, isFn } = eventToAccel(e);
-        if (!key) { note('Эта клавиша не поддерживается'); return; }
-        if (!isFn && mods.length === 0) { note('Нужен модификатор (⌘/⌥/⌃) или F-клавиша'); return; }
-        const next = [...mods, key].join('+');
-        const res = await safe(() => window.jarvis.sttSetHotkey(next), null);
-        if (res && res.ok) { acc = res.hotkey || next; stop(); }
-        else { note((res && res.error) || 'не удалось'); setTimeout(stop, 1500); }
-      };
-      document.addEventListener('keydown', onKey, true);
-      document.addEventListener('click', onAway, true);
-    }
-    hkey.addEventListener('click', (e) => { e.stopPropagation(); start(); });
-    paint();
-    const rb = el('button.hkreset', { title: 'Сбросить на F8' }, icon('rotate-ccw'));
-    // Применить готовый аксельератор (пресет/сброс) БЕЗ keydown-захвата. Нужно,
-    // потому что webview на macOS «съедает» ⌘/⌥-комбинации до JS — записать их
-    // нажатием не выходит; зато зарегистрированный глобальный шорткат срабатывает
-    // на уровне ОС нормально. Поэтому ⌘K и т.п. ставим кнопкой-пресетом.
-    const apply = async (accel) => {
-      const res = await safe(() => window.jarvis.sttSetHotkey(accel), null);
-      if (res && res.ok) { acc = res.hotkey || accel; paint(); }
-      else { note((res && res.error) || 'не удалось'); setTimeout(paint, 1500); }
-    };
-    rb.addEventListener('click', (e) => { e.stopPropagation(); apply('F8'); });
-
-    const PRESETS = [
-      ['F8', 'F8'], ['F9', 'F9'],
-      ['⌥Space', 'Alt+Space'], ['⌘⌥D', 'Command+Alt+D'], ['⌘K', 'Command+K'],
-    ];
-    const chips = el('div.hkpresets');
-    for (const [label, accel] of PRESETS) {
-      const c = el('button.hkchip', { text: label, title: 'Поставить ' + label });
-      c.addEventListener('click', (e) => { e.stopPropagation(); apply(accel); });
-      chips.appendChild(c);
-    }
-
-    const wrap = el('div', { style: 'display:flex;flex-direction:column;align-items:flex-end;gap:7px' });
-    const topRow = el('div', { style: 'display:flex;align-items:center;gap:8px' });
-    topRow.appendChild(hkey);
-    topRow.appendChild(rb);
-    wrap.appendChild(topRow);
-    wrap.appendChild(chips);
-    return wrap;
   }
 
   /* ── Полоса загрузки модели (.progress.striped) ─────────────────────────*/
@@ -731,24 +633,27 @@
 #settings2 .progress.striped > i { background-image:linear-gradient(90deg, var(--working,#6ca0ff), #9ec1ff, var(--working,#6ca0ff)); background-size:200% 100%; animation: s2stripe 1.2s linear infinite; }
 @keyframes s2stripe { to { background-position:200% 0; } }
 
-/* ── Хоткей-поле (Raycast-style) ─────────────────────────────────────── */
+/* ── Хоткей-поле (Raycast-style, инлайн-рекордер) ─────────────────────── */
 #settings2 .dctl.hk { gap:6px; }
-#settings2 .hkey { display:inline-flex; align-items:center; gap:8px; padding:8px 13px; border-radius:8px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.08); cursor:default; transition:background .15s ease; }
-#settings2 .hkey:hover { background:rgba(255,255,255,0.08); }
+#settings2 .hkey { display:inline-flex; align-items:center; gap:8px; padding:8px 13px; border-radius:8px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.08); transition:background .15s ease, box-shadow .15s ease; }
 #settings2 .hkey kbd { font:500 13px/1 var(--s2-font); color:var(--text,#e7e7ea); background:transparent; border:0; padding:0; }
+#settings2 .hkey kbd.fix { color:var(--working,#6ca0ff); }
 #settings2 .hkey.rec { background:rgba(108,160,255,0.1); border-color:rgba(108,160,255,0.25); cursor:pointer; }
 #settings2 .hkey.rec:hover { border-color:rgba(108,160,255,0.45); }
 #settings2 .hkey.rec kbd { color:var(--working,#6ca0ff); }
-#settings2 .hkey.rec.recording { background:rgba(108,160,255,0.18); border-color:var(--working,#6ca0ff); }
-#settings2 .hkpresets { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
-#settings2 .hkchip { font-size:11.5px; padding:3px 8px; border-radius:7px; background:rgba(255,255,255,0.05);
-  border:1px solid rgba(255,255,255,0.1); color:var(--muted,#9a9aa2); cursor:pointer; }
-#settings2 .hkchip:hover { background:rgba(108,160,255,0.12); border-color:rgba(108,160,255,0.3); color:var(--working,#6ca0ff); }
-#settings2 .hkchip.on { background:rgba(108,160,255,0.18); border-color:rgba(108,160,255,0.45); color:var(--working,#6ca0ff); }
-#settings2 .hkmods { display:inline-flex; gap:5px; }
-#settings2 .hkreset { width:32px; height:32px; border-radius:8px; display:grid; place-items:center; background:transparent; border:0; color:var(--faint,#55555c); cursor:default; }
+#settings2 .hkey .ph { font:500 12px/1 var(--s2-font); color:var(--working,#6ca0ff); }
+#settings2 .hkey.recording { background:rgba(108,160,255,0.18); border-color:var(--working,#6ca0ff); animation:s2hkpulse 1.2s ease-in-out infinite; }
+@keyframes s2hkpulse { 0%,100% { box-shadow:0 0 0 3px rgba(108,160,255,.10); } 50% { box-shadow:0 0 0 6px rgba(108,160,255,.22); } }
+#settings2 .hkey.none { border-style:dashed; }
+#settings2 .hknone { font:400 12px/1 var(--s2-font); color:var(--faint,#55555c); font-style:italic; }
+#settings2 .hkreset { width:32px; height:32px; border-radius:8px; display:grid; place-items:center; background:transparent; border:0; color:var(--faint,#55555c); cursor:default; visibility:hidden; }
+#settings2 .drow:hover .hkreset { visibility:visible; }
 #settings2 .hkreset:hover { color:var(--text-body,#d6d6db); background:rgba(255,255,255,0.06); }
 #settings2 .hkreset svg.lucide { width:15px; height:15px; }
+#settings2 .drow.conflict { background:rgba(242,97,92,.05); }
+#settings2 .drow.conflict .hkey { border-color:rgba(242,97,92,.55); }
+#settings2 .hkerr { display:flex; align-items:center; gap:6px; margin-top:7px; font-size:11.5px; color:var(--danger,#f2615c); flex-wrap:wrap; }
+#settings2 .hksteal { appearance:none; border:0; background:transparent; padding:0; font:500 11.5px/1 var(--s2-font); color:var(--waiting,#f2a33c); text-decoration:underline; cursor:pointer; }
 
 /* ── Custom Select ───────────────────────────────────────────────────── */
 #settings2 .cselect { position:relative; display:inline-block; }
@@ -839,11 +744,10 @@
     _sk.remove();
     const group = el('div.dgroup');
 
-    // глобальный хоткей (read-only капсы) + сброс
-    group.appendChild(drow('Глобальный хоткей', 'Открыть панель Jarvis из любого места.',
-      hotkeyField(s.hotkey || HK_DEFAULTS.hotkey, {
-        onReset: () => { fire(() => window.jarvis.setSettings({ hotkey: HK_DEFAULTS.hotkey })); reRenderPane('general'); },
-      }), { ctlClass: 'hk' }));
+    // глобальный хоткей — тот же рекордер, что во вкладке «Горячие клавиши»
+    const hkr = await safe(() => window.jarvis.hotkeyBindings(), null);
+    const pb = hkr && hkr.ok && (hkr.bindings || []).find((x) => x.action === 'panel');
+    if (pb) group.appendChild(hotkeyRow(pb, 'Открыть панель Jarvis из любого места.', {}));
 
     // позиция панели (seg: Центр / Угол)
     group.appendChild(drow('Позиция панели', 'Где появляется панель на экране.',
@@ -922,9 +826,10 @@
       'С какого устройства писать речь. Выбери встроенный микрофон, если гарнитура шумит.',
       devSel.node));
 
-    // клавиша диктовки (read-only капс)
-    group.appendChild(drow('Клавиша диктовки', 'Зажми и говори (push-to-talk). Кликни и нажми новое сочетание.',
-      dictationHotkeyField(v.hotkey || 'F8'), { ctlClass: 'hk' }));
+    // клавиша диктовки — общий рекордер (пресеты убраны: запись работает)
+    const hkr = await safe(() => window.jarvis.hotkeyBindings(), null);
+    const db = hkr && hkr.ok && (hkr.bindings || []).find((x) => x.action === 'dictation');
+    if (db) group.appendChild(hotkeyRow(db, 'Зажми и говори (push-to-talk). Кликни и нажми новое сочетание.', {}));
 
     // шумодав (VAD-гейт): пропускать диктовку, если речи не слышно. АЛЬФА.
     group.appendChild(drow('Шумодав (VAD) · альфа',
@@ -1328,38 +1233,40 @@
     pane.appendChild(group);
   }
 
-  // 7. Горячие клавиши (keys) — settings_get
+  // 7. Горячие клавиши (keys) — hotkey_bindings (единый реестр действий)
   async function renderKeys(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Горячие клавиши' }));
     const _sk = skelGroup(4); pane.appendChild(_sk);
-    const s = await safe(() => window.jarvis.getSettings(), {});
+    const r = await safe(() => window.jarvis.hotkeyBindings(), null);
     _sk.remove();
-    const group = el('div.dgroup');
-    const HKS = [
-      ['hotkey', 'Открыть панель', 'Показать или скрыть Jarvis.'],
-      ['continueHotkey', 'Продолжить сессию', 'Возобновить последнюю сессию.'],
-      ['repeatHotkey', 'Повторить', 'Повторить последнее действие.'],
-      ['muteHotkey', 'Без звука', 'Заглушить уведомления и голос.'],
-      ['quietHotkey', 'Тихий режим', 'Копить статистику без тостов.'],
-    ];
-    for (const [key, title, desc] of HKS) {
-      const acc = s[key] || HK_DEFAULTS[key] || '';
-      group.appendChild(drow(title, desc,
-        hotkeyEditorField(acc, {
-          onApply: (accel) => window.jarvis.setSettings({ [key]: accel }),
-          defaultAccel: HK_DEFAULTS[key],
-          onReset: () => window.jarvis.setSettings({ [key]: HK_DEFAULTS[key] }),
-        }), { ctlClass: 'hk' }));
+    if (!r || !r.ok) {
+      pane.appendChild(el('div.dgroup', null, [drow('Недоступно', 'Не удалось получить привязки хоткеев.', [])]));
+      return;
     }
-    // варианты ответа: цифра фиксирована, редактируются только модификаторы
-    group.appendChild(drow('Варианты ответа', 'Выбрать вариант активного вопроса (цифра 1-9).',
-      hotkeyEditorField(s.selectHotkeyTemplate || HK_DEFAULTS.selectHotkeyTemplate, {
-        fixedKey: '1…9',
-        onApply: (accel) => window.jarvis.setSettings({ selectHotkeyTemplate: accel }),
-        defaultAccel: HK_DEFAULTS.selectHotkeyTemplate,
-        onReset: () => window.jarvis.setSettings({ selectHotkeyTemplate: HK_DEFAULTS.selectHotkeyTemplate }),
-      }), { ctlClass: 'hk' }));
-    pane.appendChild(group);
+    const by = {};
+    for (const x of r.bindings || []) by[x.action] = x;
+    const DESC = {
+      panel: 'Показать или скрыть Jarvis.',
+      continue: 'Возобновить последнюю сессию.',
+      repeat: 'Повторить последнее уведомление.',
+      select: 'Выбрать вариант активного вопроса — сочетание + цифра.',
+      mute: 'Заглушить уведомления и голос.',
+      quiet: 'Копить статистику без тостов.',
+      dictation: 'Зажми и говори (push-to-talk). Дублируется в «Голосовом вводе».',
+    };
+    const GROUPS = [
+      ['Панель и сессии', ['panel', 'continue', 'repeat', 'select']],
+      ['Звук и уведомления', ['mute', 'quiet']],
+      ['Голос', ['dictation']],
+    ];
+    // перехват меняет ЧУЖУЮ строку («не назначен») — перерисовать вкладку
+    const after = () => reRenderPane('keys');
+    for (const [title, actions] of GROUPS) {
+      pane.appendChild(el('div.dsection', { text: title }));
+      const g = el('div.dgroup');
+      for (const id of actions) if (by[id]) g.appendChild(hotkeyRow(by[id], DESC[id], { after }));
+      pane.appendChild(g);
+    }
   }
 
   // 8. Интеграция (integration) — integrationGet

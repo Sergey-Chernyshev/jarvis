@@ -751,6 +751,17 @@ pub async fn session_save_image(data_base64: String, ext: String) -> Value {
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return err(format!("temp: {e}"));
     }
+    // Каталог никто больше не чистит — подметаем старьё сами (агент читает файл
+    // вскоре после отправки; трое суток — с большим запасом).
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 24 * 3600);
+        for e in entries.flatten() {
+            let old = e.metadata().and_then(|m| m.modified()).map(|t| t < cutoff).unwrap_or(false);
+            if old {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
     // Уникальное имя без коллизий в пределах одной мс — счётчик процесса.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

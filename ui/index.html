@@ -2,7 +2,8 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'" />
+<!-- img-src data: — превью вставленных картинок живут в data-URL (FileReader) -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:" />
 <title>Jarvis</title>
 <style>
   :root {

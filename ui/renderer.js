@@ -554,8 +554,9 @@ function extractAttachments(raw) {
   const chips = [];
   let text = String(raw);
   text = text.replace(/\[Image #(\d+)\]/g, (_, n) => { chips.push({ type: 'image', label: `Image #${n}` }); return ''; });
-  // голый абсолютный путь к картинке (вставлено из Jarvis) — чип-картинка по имени файла
-  text = text.replace(/(^|\s)(\/[^\s]+\.(?:png|jpe?g|gif|webp|bmp|heic|tiff?))\b/gi, (m, pre, p) => { chips.push({ type: 'image', label: p.split('/').pop() }); return pre; });
+  // путь к картинке, вставленной из Jarvis (только наш temp-каталог jarvis-paste —
+  // произвольные пути, набранные юзером руками, из текста не выдёргиваем)
+  text = text.replace(/(^|\s)(\/[^\s]*\/jarvis-paste\/[^\s]+\.(?:png|jpe?g|gif|webp|bmp|heic|tiff?))\b/gi, (m, pre, p) => { chips.push({ type: 'image', label: p.split('/').pop() }); return pre; });
   // @file: только если выглядит как путь (есть точка или слэш) — не трогаем @everyone и т.п.
   text = text.replace(/(^|\s)@([\w./\-]*[./][\w./\-]*)/g, (m, pre, p) => { chips.push({ type: 'file', label: `@${p}` }); return pre; });
   return { chips, text: text.replace(/[ \t]{2,}/g, ' ').trim() };
@@ -1471,7 +1472,10 @@ async function sendReplyNow() {
       if (r && r.ok && r.path) paths.push(r.path);
       else showToast((r && r.error) || 'Не удалось сохранить картинку');
     }
-    if (imgs.length && !paths.length) return; // были только картинки, но ни одна не сохранилась
+    // Любой сбой сохранения — не отправляем ничего: частичная отправка молча
+    // теряла бы упавшие картинки (их base64 живёт только в pendingImages).
+    // Текст и миниатюры остаются в поле — можно убрать битую картинку (×) и повторить.
+    if (paths.length < imgs.length) return;
     const finalText = paths.length ? (text ? text + '\n' : '') + paths.join('\n') : text;
 
     const res = await window.jarvis.sendReply(chatSessionId, finalText);
@@ -1551,6 +1555,9 @@ function addPendingImage(file) {
   if (pendingImages.length >= MAX_IMAGES) { showToast(`Не больше ${MAX_IMAGES} картинок`); return; }
   const reader = new FileReader();
   reader.onload = () => {
+    // повторная проверка лимита: push асинхронный, и один paste с пачкой файлов
+    // проходил бы синхронную проверку выше весь целиком
+    if (pendingImages.length >= MAX_IMAGES) { showToast(`Не больше ${MAX_IMAGES} картинок`); return; }
     const dataUrl = String(reader.result || '');
     const comma = dataUrl.indexOf(',');
     if (comma < 0) return;

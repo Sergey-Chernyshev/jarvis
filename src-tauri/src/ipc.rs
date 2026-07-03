@@ -237,6 +237,158 @@ pub fn find_conflict(
     })
 }
 
+/// Снять регистрацию текущего сочетания действия (select — весь набор).
+fn unregister_action(d: &Arc<Daemon>, a: HkAction) {
+    let Some(accel) = action_accel(d, a) else { return };
+    let gs = d.app.global_shortcut();
+    match a {
+        HkAction::Select => {
+            for n in 1..=9 {
+                let _ = gs.unregister(select_accel(&accel, n).as_str());
+            }
+        }
+        _ => {
+            let _ = gs.unregister(accel.as_str());
+        }
+    }
+}
+
+/// Зарегистрировать сочетание действия. select регистрируется ТОЛЬКО при
+/// активном вопросе (набор динамический — см. set_select_hotkeys), поэтому
+/// принимает флаг. Err = сочетание занято системой.
+fn register_action_accel(
+    d: &Arc<Daemon>,
+    a: HkAction,
+    accel: &str,
+    select_active: bool,
+) -> Result<(), ()> {
+    let gs = d.app.global_shortcut();
+    match a {
+        HkAction::Select => {
+            if !select_active {
+                return Ok(());
+            }
+            for n in 1..=9 {
+                if gs.register(select_accel(accel, n).as_str()).is_err() {
+                    for k in 1..n {
+                        let _ = gs.unregister(select_accel(accel, k).as_str());
+                    }
+                    return Err(());
+                }
+            }
+            Ok(())
+        }
+        _ => gs.register(accel).map_err(|_| ()),
+    }
+}
+
+/// Сохранить сырое значение акселератора действия (HK_NONE = «не назначен»).
+async fn persist_accel(d: &Arc<Daemon>, a: HkAction, raw: &str) {
+    match a.settings_key() {
+        Some(key) => {
+            let _ = via_gate_panel(d, "settings.set", json!({ "patch": { key: raw } })).await;
+        }
+        None => {
+            // диктовка: settings.stt.hotkey
+            let mut patch = serde_json::Map::new();
+            patch.insert("hotkey".into(), Value::String(raw.to_string()));
+            d.settings.set_stt(patch);
+        }
+    }
+}
+
+/// Привязки всех действий для UI настроек: id, подпись, текущее сочетание
+/// (null = не назначен), дефолт.
+#[tauri::command]
+pub fn hotkey_bindings(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    let list: Vec<Value> = HkAction::ALL
+        .iter()
+        .map(|a| {
+            json!({
+                "action": a.id(),
+                "label": a.label(),
+                "accel": action_accel(&d, *a),
+                "default": a.default_accel(),
+            })
+        })
+        .collect();
+    json!({ "ok": true, "bindings": list })
+}
+
+/// Назначить хоткей действию. Валидация → конфликт со своими (steal=false →
+/// { ok:false, conflict } и ничего не меняется; steal=true → у конфликтующего
+/// действия хоткей снимается в «не назначен») → перерегистрация с откатом
+/// («занято системой» — как раньше).
+#[tauri::command]
+pub async fn hotkey_assign(
+    app: AppHandle,
+    action: String,
+    accel: String,
+    steal: Option<bool>,
+) -> Value {
+    let d = Daemon::get(&app);
+    let Some(a) = HkAction::parse(&action) else {
+        return err(format!("Неизвестное действие: {action}"));
+    };
+    let accel = accel.trim().to_string();
+    if accel.is_empty() {
+        return err("Пустое сочетание");
+    }
+    if a == HkAction::Select {
+        if normalize_select_template(&accel) != accel {
+            return err(format!("Битый шаблон «{accel}» — нужен вид Command+Alt+{{n}}"));
+        }
+    } else if accel.parse::<Shortcut>().is_err() {
+        return err(format!("Не разобрал сочетание: {accel}"));
+    }
+
+    let old = action_accel(&d, a);
+    if old.as_deref() == Some(accel.as_str()) {
+        return json!({ "ok": true, "accel": accel });
+    }
+
+    // конфликты со своими хоткеями; перехват может каскадом задеть несколько
+    // действий (напр. новый шаблон {n} бьётся с двумя) — снимаем в цикле
+    let steal = steal.unwrap_or(false);
+    loop {
+        let bindings: Vec<(HkAction, String)> = HkAction::ALL
+            .iter()
+            .filter_map(|o| action_accel(&d, *o).map(|acc| (*o, acc)))
+            .collect();
+        let Some(other) = find_conflict(&bindings, a, &accel) else { break };
+        if !steal {
+            return json!({ "ok": false, "conflict": { "action": other.id(), "label": other.label() } });
+        }
+        unregister_action(&d, other);
+        persist_accel(&d, other, HK_NONE).await;
+        crate::log::line(&format!(
+            "[hotkeys] перехват: «{}» остался без сочетания",
+            other.label()
+        ));
+    }
+
+    // активность набора 1..9 фиксируем ДО снятия старого
+    let select_active = a == HkAction::Select
+        && old
+            .as_ref()
+            .map(|o| {
+                d.app
+                    .global_shortcut()
+                    .is_registered(select_accel(o, 1).as_str())
+            })
+            .unwrap_or(false);
+    unregister_action(&d, a);
+    if register_action_accel(&d, a, &accel, select_active).is_err() {
+        if let Some(oldacc) = &old {
+            let _ = register_action_accel(&d, a, oldacc, select_active);
+        }
+        return err(format!("Сочетание {accel} занято системой"));
+    }
+    persist_accel(&d, a, &accel).await;
+    json!({ "ok": true, "accel": accel })
+}
+
 /// Аккселератор тумблера тихого режима ("" = не назначен), дефолт ⌘⌥J.
 pub fn quiet_accelerator(d: &Arc<Daemon>) -> String {
     action_accel(d, HkAction::Quiet).unwrap_or_default()

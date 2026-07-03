@@ -5,6 +5,7 @@
 //! macOS-only в текущей итерации. `custom`-терминал (sh -lc по шаблону) — точка
 //! расширения под Ghostty/Warp/kitty сейчас и под Windows/Linux в будущем.
 
+use crate::util::shell_quote;
 use std::process::Stdio;
 
 /// Команда агента: новая сессия или `--resume`/`resume`, с dangerous-флагами при
@@ -26,27 +27,27 @@ pub fn agent_command(agent: &str, session_id: Option<&str>, dangerous: bool) -> 
     }
 }
 
-/// Обернуть строку в одинарные кавычки для POSIX-шелла (экранируя `'`).
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
-/// Полная команда для терминала: `[<proxy> && ] cd '<cwd>' && <agent_cmd>`.
+/// Полная команда для терминала: `[<proxy> && ][cd '<cwd>' && ]<agent_cmd>`.
+/// Пустой `cwd` допустим (сессии без известной директории, группа «другое»):
+/// тогда `cd` опускается — как в прежнем «скопировать команду».
 pub fn inner_command(cwd: &str, proxy_cmd: &str, agent_cmd: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     let proxy = proxy_cmd.trim();
     if !proxy.is_empty() {
         parts.push(proxy.to_string());
     }
-    parts.push(format!("cd {}", shell_quote(cwd)));
+    if !cwd.trim().is_empty() {
+        parts.push(format!("cd {}", shell_quote(cwd)));
+    }
     parts.push(agent_cmd.to_string());
     parts.join(" && ")
 }
 
-/// Экранирование под двойные кавычки AppleScript-строки: `\` и `"`.
+/// Экранирование под двойные кавычки AppleScript-строки: `\`, `"` и переводы
+/// строк (сырой `\n` внутри "…" — синтаксическая ошибка osascript).
 /// Одинарные кавычки (из shell_quote) внутри неё безопасны.
 fn applescript_escape(s: &str) -> String {
-    s.replace('\\', r"\\").replace('"', "\\\"")
+    s.replace('\\', r"\\").replace('"', "\\\"").replace('\n', r"\n").replace('\r', r"\r")
 }
 
 async fn osascript(args: &[String]) -> Result<(), String> {
@@ -90,7 +91,7 @@ pub async fn spawn(terminal: &str, custom_cmd: &str, inner: &str) -> Result<(), 
                 return Err("в шаблоне нет плейсхолдера {cmd}".into());
             }
             let expanded = tmpl.replace("{cmd}", &shell_quote(inner));
-            let status = tokio::process::Command::new("sh")
+            let mut child = tokio::process::Command::new("sh")
                 .arg("-lc")
                 .arg(&expanded)
                 .stdin(Stdio::null())
@@ -98,9 +99,16 @@ pub async fn spawn(terminal: &str, custom_cmd: &str, inner: &str) -> Result<(), 
                 .stderr(Stdio::null())
                 .spawn()
                 .map_err(|e| format!("не удалось запустить терминал: {e}"))?;
-            // Не ждём завершения: терминал живёт своей жизнью.
-            drop(status);
-            Ok(())
+            // Терминал живёт своей жизнью — завершения не ждём. Но мгновенную
+            // смерть (опечатка в бинарнике → exit 127) ловим, иначе юзер видит
+            // «Запускаю…» при полностью нерабочем шаблоне.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            match child.try_wait() {
+                Ok(Some(status)) if !status.success() => Err(format!(
+                    "команда терминала сразу завершилась ({status}) — проверь шаблон в настройках «Запуск»"
+                )),
+                _ => Ok(()),
+            }
         }
         // 'terminal-app' и любое неизвестное значение → системный Terminal.app.
         _ => {
@@ -140,13 +148,17 @@ mod tests {
     }
 
     #[test]
-    fn shell_quote_escapes_single_quote() {
-        assert_eq!(shell_quote("/a b/c"), "'/a b/c'");
-        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    fn inner_command_without_cwd_skips_cd() {
+        assert_eq!(inner_command("", "", "claude --resume abc"), "claude --resume abc");
+        assert_eq!(
+            inner_command("  ", "export X=1", "codex resume x1"),
+            "export X=1 && codex resume x1"
+        );
     }
 
     #[test]
-    fn applescript_escape_quotes_and_backslash() {
+    fn applescript_escape_quotes_backslash_and_newlines() {
         assert_eq!(applescript_escape(r#"a"b\c"#), r#"a\"b\\c"#);
+        assert_eq!(applescript_escape("a\nb\rc"), r"a\nb\rc");
     }
 }

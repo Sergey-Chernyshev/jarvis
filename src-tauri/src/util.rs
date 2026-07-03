@@ -50,6 +50,11 @@ pub fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Обернуть строку в одинарные кавычки для POSIX-шелла (экранируя `'`).
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 /// Обрезка по СИМВОЛАМ (JS slice работает по кодпоинтам; байтовый срез
 /// русского текста ломал бы UTF-8 на границе).
 pub fn ellipsize(s: &str, max_chars: usize) -> String {
@@ -113,6 +118,12 @@ mod tests {
     #[test]
     fn one_line_collapses_whitespace() {
         assert_eq!(one_line("  a\n\tb   c "), "a b c");
+    }
+
+    #[test]
+    fn shell_quote_escapes_spaces_and_single_quotes() {
+        assert_eq!(shell_quote("/a b/c"), "'/a b/c'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 
     #[test]

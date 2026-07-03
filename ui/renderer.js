@@ -2313,10 +2313,10 @@ function histTime(ts) {
 }
 
 function resumeCommand(s, cwd) {
-  // Подсказка для tooltip: что именно запустится. Реальная команда (с флагами
-  // «опасного режима» и прокси-командой) собирается на бэкенде из настроек запуска.
+  // Подсказка для tooltip. Реальная команда собирается на бэкенде из настроек
+  // «Запуска» — честно предупреждаем, что она может отличаться (прокси, dangerous-флаги).
   const base = s.agent === 'codex' ? `codex resume ${s.id}` : `claude --resume ${s.id}`;
-  return cwd ? `cd "${cwd}" && ${base}` : base;
+  return (cwd ? `cd "${cwd}" && ${base}` : base) + '\n(+ параметры из настроек «Запуск»)';
 }
 
 // Запуск сессии в терминале из настроек: agent='claude'|'codex'; sessionId=null —
@@ -2399,15 +2399,18 @@ function renderHistChats(g, q) {
   head.appendChild(back);
   head.appendChild(Object.assign(document.createElement('span'), { textContent: g.project }));
   head.appendChild(Object.assign(document.createElement('span'), { className: 'hcount', textContent: `${g.count} ${plural(g.count, 'чат', 'чата', 'чатов')}` }));
-  // новые сессии в директории проекта — отдельно для Claude и Codex
-  const newClaude = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Claude' });
-  newClaude.title = 'Новая сессия Claude в этой директории';
-  newClaude.addEventListener('click', (e) => { e.stopPropagation(); launchSession('claude', null, g.cwd); });
-  const newCodex = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Codex' });
-  newCodex.title = 'Новая сессия Codex в этой директории';
-  newCodex.addEventListener('click', (e) => { e.stopPropagation(); launchSession('codex', null, g.cwd); });
-  head.appendChild(newClaude);
-  head.appendChild(newCodex);
+  // новые сессии в директории проекта — отдельно для Claude и Codex; для групп
+  // без известной директории («другое», g.cwd == null) новая сессия бессмысленна
+  if (g.cwd) {
+    const newClaude = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Claude' });
+    newClaude.title = 'Новая сессия Claude в этой директории';
+    newClaude.addEventListener('click', (e) => { e.stopPropagation(); launchSession('claude', null, g.cwd); });
+    const newCodex = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Codex' });
+    newCodex.title = 'Новая сессия Codex в этой директории';
+    newCodex.addEventListener('click', (e) => { e.stopPropagation(); launchSession('codex', null, g.cwd); });
+    head.appendChild(newClaude);
+    head.appendChild(newCodex);
+  }
   historyEl.appendChild(head);
 
   historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — запустить продолжение в терминале · + Claude / + Codex — новая сессия · esc — к проектам' }));

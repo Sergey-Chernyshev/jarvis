@@ -968,6 +968,8 @@ fn ensure_venv_pip(python: &Path, proxy: Option<&str>) -> Result<(), String> {
     run_inherit("python -m pip install --upgrade pip", &mut up)
 }
 
+// Локальная копия util::shell_quote: модуль включается в бинарь jarvis-setup
+// через #[path] без остального crate, поэтому crate::util здесь недоступен.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }

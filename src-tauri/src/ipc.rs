@@ -848,12 +848,16 @@ pub async fn terminal_focus(app: AppHandle, session_id: String) -> Value {
 #[tauri::command]
 pub async fn session_launch(
     app: AppHandle,
-    cwd: String,
+    cwd: Option<String>,
     agent: String,
     session_id: Option<String>,
 ) -> Value {
     let d = Daemon::get(&app);
-    if cwd.trim().is_empty() {
+    // cwd бывает null: история группирует сессии без директории в «другое».
+    // Resume без cwd допустим (как прежнее «скопировать команду» без cd),
+    // а вот новая сессия без директории бессмысленна.
+    let cwd = cwd.unwrap_or_default();
+    if cwd.trim().is_empty() && session_id.is_none() {
         return err("Не указана директория проекта");
     }
     let terminal = d.settings.string("launchTerminal");

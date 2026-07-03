@@ -1626,7 +1626,7 @@
 
     // команда прокси — выполняется ПЕРЕД запуском агента
     const proxyInput = el('input.s2-secret', {
-      type: 'text', placeholder: 'export HTTPS_PROXY=http://…   (пусто — без прокси)',
+      type: 'text', placeholder: 'export HTTPS_PROXY=http://…',
       autocomplete: 'off', spellcheck: 'false', value: s.launchProxyCmd || '',
     });
     const proxyCap = el('span.loadcap', { style: 'display:none' });
@@ -1641,7 +1641,7 @@
     group.appendChild(el('div.drow', null, [
       el('div.grow', null, [
         el('div.dt', { text: 'Команда прокси' }),
-        el('div.dd', { text: 'Выполняется в терминале ПЕРЕД запуском агента (напр. export HTTPS_PROXY=…). Это не egress-прокси из «Под капотом».' }),
+        el('div.dd', { text: 'Выполняется в терминале ПЕРЕД запуском агента (напр. export HTTPS_PROXY=…). Пусто — без прокси. Это не egress-прокси из «Под капотом».' }),
         proxyInput, proxyCap,
       ]),
       el('div.dctl', null, [proxySave]),

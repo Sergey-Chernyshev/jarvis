@@ -93,6 +93,11 @@ pub struct Daemon {
     /// Тихий режим (разработчик): демон жив и копит статистику с хуков, но наружу
     /// ничего — ни тостов, ни голоса, ни авто-показа. Панель открываема вручную.
     pub quiet: AtomicBool,
+    /// Хоткеи приостановлены на время записи сочетания в настройках:
+    /// 0 = работают; иначе поколение приостановки (для авто-ресюма).
+    pub hk_suspend_gen: AtomicU64,
+    /// Был ли активен набор 1..9 в момент приостановки (вернуть при ресюме).
+    pub hk_select_was_on: AtomicBool,
     pub effort_levels: Mutex<Vec<String>>,
     toast_seq: AtomicU64,
     /// Окно тостов загрузилось и слушает события (до этого — буферим).
@@ -222,6 +227,8 @@ impl Daemon {
             power: crate::power::Power::new(),
             tail: tail::TailHandle::new(),
             quiet: AtomicBool::new(quiet0),
+            hk_suspend_gen: AtomicU64::new(0),
+            hk_select_was_on: AtomicBool::new(false),
             effort_levels: Mutex::new(
                 ["low", "medium", "high", "xhigh", "max"].map(String::from).to_vec(),
             ),

@@ -178,6 +178,7 @@ fn main() {
             ipc::stt_set_hotkey,
             ipc::hotkey_bindings,
             ipc::hotkey_assign,
+            ipc::hotkeys_suspend,
             ipc::stt_set_noise_gate,
             ipc::stt_test,
             ipc::voice_history_open,

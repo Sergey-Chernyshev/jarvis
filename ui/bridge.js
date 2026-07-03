@@ -76,6 +76,7 @@
     // Хоткеи — единый реестр действий (рекордер в настройках)
     hotkeyBindings: () => invoke('hotkey_bindings'),
     hotkeyAssign: (action, accel, steal) => invoke('hotkey_assign', { action, accel, steal: !!steal }),
+    hotkeysSuspend: (on) => invoke('hotkeys_suspend', { on }),
     sttSetNoiseGate: (on) => invoke('stt_set_noise_gate', { on }),
     sttTest: () => invoke('stt_test'),
     sttInputDevices: () => invoke('stt_input_devices'),

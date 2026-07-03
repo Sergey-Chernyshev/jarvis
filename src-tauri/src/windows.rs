@@ -257,6 +257,8 @@ pub fn panel_visible(d: &Arc<Daemon>) -> bool {
 }
 
 pub fn hide_panel(d: &Arc<Daemon>) {
+    // запись сочетания не должна пережить панель — вернуть хоткеи
+    crate::ipc::hotkeys_set_suspended(d, false);
     if let Some(panel) = d.app.get_webview_window("main") {
         let _ = panel.hide();
     }

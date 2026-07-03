@@ -389,6 +389,65 @@ pub async fn hotkey_assign(
     json!({ "ok": true, "accel": accel })
 }
 
+/// Приостановить/вернуть ВСЕ глобальные хоткеи Jarvis — режим записи
+/// сочетания в настройках: пока пользователь жмёт комбо, команды не должны
+/// срабатывать (и наши же шорткаты не должны съедать keydown у webview).
+/// Идемпотентно. Страховки от «умершего» UI: авто-ресюм через 15 с
+/// (повторный suspend продлевает) и ресюм при скрытии панели.
+pub fn hotkeys_set_suspended(d: &Arc<Daemon>, on: bool) {
+    use std::sync::atomic::Ordering;
+    let was = d.hk_suspend_gen.load(Ordering::SeqCst) != 0;
+    if on {
+        if !was {
+            // активность набора 1..9 запоминаем ДО снятия
+            let select_on = action_accel(d, HkAction::Select)
+                .map(|t| {
+                    d.app
+                        .global_shortcut()
+                        .is_registered(select_accel(&t, 1).as_str())
+                })
+                .unwrap_or(false);
+            d.hk_select_was_on.store(select_on, Ordering::SeqCst);
+            for a in HkAction::ALL {
+                unregister_action(d, a);
+            }
+            crate::log::line("[hotkeys] приостановлены (запись сочетания)");
+        }
+        let gen = d.hk_suspend_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let d2 = d.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(15));
+            if d2.hk_suspend_gen.load(Ordering::SeqCst) == gen {
+                crate::log::line("[hotkeys] авто-ресюм по таймауту — UI не вернул хоткеи");
+                hotkeys_set_suspended(&d2, false);
+            }
+        });
+    } else {
+        if !was {
+            return;
+        }
+        d.hk_suspend_gen.store(0, Ordering::SeqCst);
+        if let Err(e) = register_hotkey(d, &action_accel(d, HkAction::Panel).unwrap_or_default()) {
+            crate::log::line(&format!("[hotkeys] ресюм панели: {e}"));
+        }
+        register_quiet_hotkey(d);
+        register_continue_hotkey(d);
+        register_dictation_hotkey(d);
+        register_repeat_hotkey(d);
+        register_mute_hotkey(d);
+        if d.hk_select_was_on.load(Ordering::SeqCst) {
+            set_select_hotkeys(d, true);
+        }
+        crate::log::line("[hotkeys] возвращены");
+    }
+}
+
+#[tauri::command]
+pub fn hotkeys_suspend(app: AppHandle, on: bool) -> Value {
+    hotkeys_set_suspended(&Daemon::get(&app), on);
+    ok()
+}
+
 /// Аккселератор тумблера тихого режима ("" = не назначен), дефолт ⌘⌥J.
 pub fn quiet_accelerator(d: &Arc<Daemon>) -> String {
     action_accel(d, HkAction::Quiet).unwrap_or_default()

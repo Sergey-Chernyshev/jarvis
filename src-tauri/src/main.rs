@@ -271,7 +271,8 @@ fn main() {
                 ));
             });
 
-            if let Err(e) = ipc::register_hotkey(&d, &d.settings.string("hotkey")) {
+            let hk0 = ipc::action_accel(&d, ipc::HkAction::Panel).unwrap_or_default();
+            if let Err(e) = ipc::register_hotkey(&d, &hk0) {
                 eprintln!("[jarvis] хоткей не зарегистрировался: {e}");
             }
             ipc::register_quiet_hotkey(&d); // тумблер тихого режима (⌘⌥J)

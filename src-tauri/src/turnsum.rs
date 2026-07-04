@@ -34,6 +34,9 @@ fn file_for(base: &Path, sid: &str) -> PathBuf {
 }
 
 fn load_in(base: &Path, sid: &str) -> HashMap<String, TurnCard> {
+    if sanitize(sid).is_empty() {
+        return HashMap::new(); // иначе все такие сессии делили бы общий файл ".json"
+    }
     let Ok(raw) = fs::read_to_string(file_for(base, sid)) else {
         return HashMap::new();
     };
@@ -43,13 +46,23 @@ fn load_in(base: &Path, sid: &str) -> HashMap<String, TurnCard> {
     }
 }
 
+// Эвикшена нет: файл на сессию мал (карточки ~1КБ), пересоздаётся при смене
+// PROMPT_VERSION; вернуться, если файлы разрастутся.
 fn save_in(base: &Path, sid: &str, key: &str, card: &TurnCard) {
+    if sanitize(sid).is_empty() {
+        return; // defense-in-depth, симметрично load_in
+    }
     let _g = WRITE.lock().unwrap();
     let mut c = CacheFile { v: PROMPT_VERSION, turns: load_in(base, sid) };
     c.turns.insert(key.to_string(), card.clone());
     let _ = fs::create_dir_all(base);
-    if let Ok(json) = serde_json::to_string(&c) {
-        let _ = fs::write(file_for(base, sid), json);
+    let Ok(json) = serde_json::to_string(&c) else { return };
+    // Атомарно (tmp + rename на одной ФС): незалоченный читатель load_cards
+    // не должен увидеть обрезанный файл.
+    let dst = file_for(base, sid);
+    let tmp = dst.with_extension("json.tmp");
+    if let Err(e) = fs::write(&tmp, json).and_then(|()| fs::rename(&tmp, &dst)) {
+        eprintln!("[jarvis] turnsum: не смог записать кэш {}: {e}", dst.display());
     }
 }
 
@@ -99,5 +112,15 @@ mod tests {
     fn sid_sanitized_for_filename() {
         assert_eq!(sanitize("a1-b2"), "a1-b2");
         assert_eq!(sanitize("../evil/й"), "evil");
+    }
+
+    #[test]
+    fn empty_sid_is_noop() {
+        // sid, схлопывающийся в пустоту, не должен создавать общий файл ".json"
+        let base = tmp("empty-sid");
+        let card = TurnCard { summary: "x".into(), ..Default::default() };
+        save_in(&base, "///", "1", &card);
+        assert!(!base.exists(), "save_in с пустым sanitize(sid) ничего не пишет");
+        assert!(load_in(&base, "///").is_empty());
     }
 }

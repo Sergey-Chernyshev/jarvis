@@ -472,12 +472,11 @@ const turnFacts = new Map(); // key → {files, commands} из chat_open.spans
 let chatLlmOk = false; // есть ли служебный LLM (кнопка «Сводка»)
 const turnTarget = () => (curTurn ? curTurn.raw : chatlogEl);
 
-function startTurn(key, complete) {
+function startTurn(key) {
   toolsGroup = null; // чипы прошлого хода не продолжаем в новом
   const wrap = document.createElement('div');
   wrap.className = 'turn';
   wrap.dataset.key = key;
-  if (complete) wrap.dataset.complete = '1';
   const raw = document.createElement('div');
   raw.className = 'turnraw';
   wrap.appendChild(raw);
@@ -808,7 +807,7 @@ function appendChatItems(items) {
       msg.className = 'msg user';
       msg.appendChild(userBubble(it.text));
       chatlogEl.appendChild(msg);
-      startTurn(String(it.ts), true); // ответ агента на эту реплику — новый ход
+      startTurn(String(it.ts)); // ответ агента на эту реплику — новый ход
     } else {
       turnTarget().appendChild(assistantMsg(it));
     }

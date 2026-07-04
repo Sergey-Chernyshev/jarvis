@@ -62,12 +62,14 @@ pub async fn invoke<C>(
     };
     let meta = &entry.meta;
 
-    // фабрика записи аудита с уже известными meta
+    // фабрика записи аудита с уже известными meta. Аргументы снимаем до инъекции
+    // _consumer: в аудите потребитель и так пишется отдельным полем.
+    let audit_args = args.clone();
     let entry_for = |outcome: String, ms: u128| AuditEntry {
         consumer: consumer.id.clone(),
         id: meta.id.to_string(),
         class: meta.class.as_str(),
-        args: args.clone(),
+        args: audit_args.clone(),
         provenance: meta.provenance.as_str(),
         outcome,
         ms,
@@ -99,6 +101,14 @@ pub async fn invoke<C>(
                 )));
             }
         }
+    }
+
+    // 2б. Личность вызывающего для consumer-aware капабилити (entities.publish):
+    // ключ служебный, перезаписывается всегда — подделать нельзя. Инъекция после
+    // проверки самоэскалации, чтобы _consumer не считался «изменяемым ключом».
+    let mut args = args;
+    if let Value::Object(ref mut m) = args {
+        m.insert("_consumer".into(), Value::String(consumer.id.clone()));
     }
 
     // 3. Подтверждение side-effect — с дедлайном (R3): нет ответа → Rejected.
@@ -141,4 +151,58 @@ fn touched_key(args: &Value, pred: impl Fn(&str) -> bool) -> Option<String> {
         .and_then(|p| p.as_object())
         .or_else(|| args.as_object())?;
     obj.keys().find(|k| pred(k.as_str())).cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::audit::MemAudit;
+    use crate::capability::confirm::AutoApprove;
+    use crate::capability::contract::{CapabilityMeta, Provenance};
+    use crate::capability::grant::ConfirmPolicy;
+    use crate::capability::registry::{make_handler, Registry};
+    use serde_json::json;
+
+    /// Реестр с одной Read-капабилити, возвращающей свои args как есть.
+    fn echo_registry() -> Registry<()> {
+        let mut reg = Registry::new();
+        reg.register(
+            CapabilityMeta {
+                id: "test.echo",
+                class: RiskClass::Read,
+                provenance: Provenance::Trusted,
+                description: "эхо аргументов (тест)",
+                input_schema: json!({ "type": "object" }),
+            },
+            make_handler(|_: (), args| async move { Ok(args) }),
+        );
+        reg
+    }
+
+    #[tokio::test]
+    async fn injects_consumer_identity_into_args() {
+        let reg = echo_registry();
+        let c = Consumer::custom("plugin:test", &[RiskClass::Read], ConfirmPolicy::Never);
+        let out = invoke(
+            &reg, (), &c, "test.echo", json!({ "x": 1 }),
+            &AutoApprove, &MemAudit::new(), GateConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.value["_consumer"], "plugin:test");
+        assert_eq!(out.value["x"], 1, "остальные args не тронуты");
+    }
+
+    #[tokio::test]
+    async fn overwrites_spoofed_consumer() {
+        let reg = echo_registry();
+        let c = Consumer::custom("plugin:test", &[RiskClass::Read], ConfirmPolicy::Never);
+        let out = invoke(
+            &reg, (), &c, "test.echo", json!({ "_consumer": "panel" }),
+            &AutoApprove, &MemAudit::new(), GateConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.value["_consumer"], "plugin:test", "подделка перезаписана");
+    }
 }

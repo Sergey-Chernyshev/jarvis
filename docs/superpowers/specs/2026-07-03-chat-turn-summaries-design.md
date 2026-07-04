@@ -94,9 +94,10 @@ Stop) отображается как **одно саммари-сообщени
 
 ### IPC / события
 
-- `chat_open` → `{ items, turns: [{key, from_ts, to_ts, card|null}] }` —
+- `chat_open` → `{ ok, items (хвост 80), spans: [{key, start, end, complete,
+  files, commands}] (координаты хвоста), cards: {key: card}, llm, project }` —
   сырые items остаются (нужны для «развернуть» и режима «Лента»), поверх —
-  разметка ходов.
+  разметка ходов; карточки — отдельной мапой, чтобы не дублировать в спанах.
 - Событие `chat:summary` `{ session_id, turn_key, card }` — рендерер
   подменяет/схлопывает карточку.
 - **`file_open(session_id, path, reveal: bool)`** — новый IPC: относительный

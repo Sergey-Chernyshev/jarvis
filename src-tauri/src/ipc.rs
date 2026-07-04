@@ -845,6 +845,9 @@ pub fn file_open(app: AppHandle, session_id: String, path: String, reveal: bool)
         Ok(p) => p,
         Err(e) => return err(&e),
     };
+    // Путь из транскрипта — недоверенный: `open evil.command` ЗАПУСТИЛ бы
+    // скрипт. Исполняемые документы не открываем — только показываем в Finder.
+    let reveal = reveal || force_reveal(&p);
     let mut cmd = std::process::Command::new("open");
     if reveal {
         cmd.arg("-R"); // показать в Finder
@@ -855,8 +858,22 @@ pub fn file_open(app: AppHandle, session_id: String, path: String, reveal: bool)
     }
 }
 
+/// Типы, которые macOS `open` ВЫПОЛНЯЕТ, а не показывает (Terminal/Automator/
+/// AppleScript и т.п.) — такие принудительно уводим в reveal.
+fn force_reveal(p: &std::path::Path) -> bool {
+    const EXECUTABLE_DOCS: [&str; 8] = [
+        "command", "terminal", "workflow", "webloc", "tool", "applescript", "scpt", "app",
+    ];
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| EXECUTABLE_DOCS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 /// Путь юзер-файла: абсолютный как есть, относительный — от cwd сессии;
-/// канонизация отсекает несуществующее и ../-фокусы, берём только файлы.
+/// канонизация резолвит симлинки и отсекает несуществующее, берём только
+/// обычные файлы. Пути НЕ ограничены cwd — агент легитимно трогает файлы вне
+/// проекта (напр. ~/.claude/...), а клик по чипу — явное действие пользователя.
 fn resolve_user_file(cwd: Option<&str>, path: &str) -> Result<std::path::PathBuf, String> {
     let raw = if std::path::Path::new(path).is_absolute() {
         std::path::PathBuf::from(path)
@@ -2381,6 +2398,7 @@ mod turn_ipc_tests {
     #[test]
     fn resolve_user_file_relative_and_missing() {
         let dir = std::env::temp_dir().join(format!("jarvis-ipc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub/a.rs"), "x").unwrap();
         let cwd = dir.to_string_lossy().to_string();
@@ -2393,5 +2411,15 @@ mod turn_ipc_tests {
         assert!(resolve_user_file(Some(&cwd), "нет/такого.rs").is_err());
         assert!(resolve_user_file(None, "relative/without/cwd.rs").is_err());
         assert!(resolve_user_file(Some(&cwd), "sub").is_err(), "каталог — не файл");
+    }
+
+    #[test]
+    fn force_reveal_blocks_executable_docs() {
+        use std::path::Path;
+        assert!(force_reveal(Path::new("a.command")), "исполняемый документ");
+        assert!(force_reveal(Path::new("A.COMMAND")), "регистр не важен");
+        assert!(force_reveal(Path::new("/tmp/x/run.scpt")));
+        assert!(!force_reveal(Path::new("a.rs")), "обычный файл открываем");
+        assert!(!force_reveal(Path::new("Makefile")), "без расширения — не блок");
     }
 }

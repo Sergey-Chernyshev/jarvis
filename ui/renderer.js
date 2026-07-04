@@ -473,6 +473,7 @@ let chatLlmOk = false; // есть ли служебный LLM (кнопка «�
 const turnTarget = () => (curTurn ? curTurn.raw : chatlogEl);
 
 function startTurn(key, complete) {
+  toolsGroup = null; // чипы прошлого хода не продолжаем в новом
   const wrap = document.createElement('div');
   wrap.className = 'turn';
   wrap.dataset.key = key;
@@ -738,7 +739,9 @@ function buildCard(key, card) {
       gen.textContent = 'готовлю…';
       gen.disabled = true;
       window.jarvis.summarizeTurn(chatSessionId, key);
-      // сбой/таймаут LLM события не даёт — возвращаем кнопку (2 попытки × 45с + запас)
+      // сбой/таймаут LLM события не даёт — возвращаем кнопку через 100с
+      // (2 попытки × 45с + запас); гейт по isConnected: если карточка успела
+      // прийти, applyCard заменил .turnsum целиком и кнопка вне DOM — не оживёт
       setTimeout(() => {
         if (gen.isConnected) { gen.textContent = 'Сводка'; gen.disabled = false; }
       }, 100000);
@@ -1114,11 +1117,18 @@ async function openChat(sessionId, project) {
   replyEl.focus();
   if (res.items.length) {
     appendChatItems(res.items);
+    const sess = state.find((x) => x.id === chatSessionId);
+    const lastCompleteKey = (res.spans || []).filter((s) => s.complete).map((s) => s.key).pop();
     for (const sp of res.spans || []) {
       if (sp.key === 'pre') continue; // частичный головной ход — только сырьё
       turnFacts.set(sp.key, { files: sp.files || [], commands: sp.commands || [] });
       if (!sp.complete) continue;
-      applyCard(sp.key, (res.cards || {})[sp.key] || null);
+      const card = (res.cards || {})[sp.key] || null;
+      // живой ход не схлопываем дет-карточкой: агент ещё пишет, стрим должен быть
+      // виден; карточка придёт событием chat:summary на Stop. Кэшированная
+      // LLM-карточка означает, что Stop по этому ходу уже был — её применяем.
+      if (!card && sp.key === lastCompleteKey && sess && sess.status === 'working') continue;
+      applyCard(sp.key, card);
     }
     chatlogEl.scrollTop = chatlogEl.scrollHeight;
   } else {

@@ -37,6 +37,7 @@ mod terminal;
 mod tmux;
 mod transcript;
 mod tray;
+mod turns;
 mod usage;
 mod util;
 mod voice;

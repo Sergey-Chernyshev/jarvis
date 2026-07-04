@@ -131,6 +131,12 @@ pub fn apply_publish(store: &EntityStore, args: &Value) -> Result<Value, String>
     }
     let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
     let object_id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if kind.is_empty() || object_id.is_empty() {
+        return Err("kind и id обязательны".into());
+    }
+    if kind.contains('.') {
+        return Err(format!("kind не может содержать точку: '{kind}'"));
+    }
     match args.get("op").and_then(|v| v.as_str()).unwrap_or("upsert") {
         "upsert" => {
             let state = args.get("state").and_then(|v| v.as_str()).unwrap_or("");
@@ -242,6 +248,16 @@ mod tests {
         .unwrap();
         assert_eq!(out["removed"], true);
         assert!(s.query(None, None).is_empty());
+    }
+
+    #[test]
+    fn publish_remove_requires_kind_and_id() {
+        let s = EntityStore::new();
+        s.upsert("plugin:avm", "vm", "my-api", "on", json!({})).unwrap();
+        let err = apply_publish(&s, &json!({"_consumer": "plugin:avm", "op": "remove", "id": "my-api"}))
+            .unwrap_err();
+        assert!(err.contains("обязательны"), "{err}");
+        assert_eq!(s.query(None, None).len(), 1, "сущность жива");
     }
 
     #[test]

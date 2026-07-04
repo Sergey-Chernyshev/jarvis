@@ -15,23 +15,33 @@ use crate::windows;
 
 pub struct TailHandle {
     current: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// Сессия открытого чата — гейт для сводок ходов (Stop суммаризирует
+    /// только открытый чат, чтобы не жечь служебный LLM на каждый Stop).
+    session: Mutex<Option<String>>,
 }
 
 impl TailHandle {
     pub fn new() -> Self {
-        Self { current: Mutex::new(None) }
+        Self { current: Mutex::new(None), session: Mutex::new(None) }
     }
 
     pub fn stop(&self) {
         if let Some(h) = self.current.lock().unwrap().take() {
             h.abort();
         }
+        *self.session.lock().unwrap() = None;
     }
 
     pub fn start(&self, app: AppHandle, agent: Agent, session_id: String, file: String) {
         self.stop();
+        *self.session.lock().unwrap() = Some(session_id.clone());
         let handle = tauri::async_runtime::spawn(tail_loop(app, agent, session_id, PathBuf::from(file)));
         *self.current.lock().unwrap() = Some(handle);
+    }
+
+    /// Сессия, чей чат сейчас открыт (tail активен), либо None.
+    pub fn active_session(&self) -> Option<String> {
+        self.session.lock().unwrap().clone()
     }
 }
 
@@ -82,4 +92,17 @@ fn read_range(file: &PathBuf, from: u64, to: u64) -> Option<String> {
     let mut buf = vec![0u8; (to - from) as usize];
     f.read_exact(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_session_none_by_default_and_after_stop() {
+        let t = TailHandle::new();
+        assert_eq!(t.active_session(), None);
+        t.stop();
+        assert_eq!(t.active_session(), None);
+    }
 }

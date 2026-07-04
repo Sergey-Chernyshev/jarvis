@@ -208,7 +208,7 @@ impl Dictation {
                 _ => (text, None),
             };
 
-            // история «что я говорил» (с пометкой стиля) + видимая фаза «Услышал …»
+            // история «что я говорил» (с пометкой стиля)
             if let Some(d) = &daemon {
                 let id = d.transcripts.push_styled(&text, "dictation", applied.as_deref(), true);
                 // сохранить СЖАТОЕ аудио диктовки → можно перегенерировать
@@ -218,16 +218,31 @@ impl Dictation {
                         crate::log::line(&format!("[dictation] сохранение аудио: {e}"));
                     }
                 }
-                crate::route::hud::emit(d, crate::route::hud::Phase::Heard { text: text.clone() });
             }
 
             // ── insert_text() → ⌘V ──────────────────────────────────────────
-            if let Err(e) = super::insert::insert_text(&text) {
-                crate::log::line(&format!("[dictation] insert_text: {e}"));
-            }
+            let inserted = match super::insert::insert_text(&text) {
+                Ok(v) => v == super::insert::InsertVerdict::Confirmed,
+                Err(e) => {
+                    crate::log::line(&format!("[dictation] insert_text: {e}"));
+                    false
+                }
+            };
+            crate::log::line(&format!(
+                "[dictation] вставка {}",
+                if inserted { "подтверждена (тост 2с)" } else { "не подтверждена (тост 5с)" }
+            ));
             // Авто-копия в буфер (остаётся поверх restore) — вставить ещё раз вручную.
             if let Err(e) = super::insert::copy_to_clipboard(&text) {
                 crate::log::line(&format!("[dictation] copy_to_clipboard: {e}"));
+            }
+            // «Услышал …» — ПОСЛЕ вставки: тост знает её исход и живёт короче,
+            // если текст уже на месте (inserted). Задержка эмита ~0.2с не заметна.
+            if let Some(d) = &daemon {
+                crate::route::hud::emit(
+                    d,
+                    crate::route::hud::Phase::Heard { text: text.clone(), inserted },
+                );
             }
         });
     }

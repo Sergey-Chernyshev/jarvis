@@ -15,8 +15,9 @@ pub enum Phase {
     Listening { secs: u32 },
     /// Идёт распознавание (анализ) реплики.
     Analyzing,
-    /// Распознали реплику.
-    Heard { text: String },
+    /// Распознали реплику. `inserted` — вставка в сфокусированное поле
+    /// подтверждена (тост исчезает быстрее: текст уже на месте).
+    Heard { text: String, inserted: bool },
     /// Мозг думает (идёт вызов Haiku); показываем распознанную реплику как тело,
     /// чтобы пользователь видел, ЧТО услышали, пока идёт многосекундный вызов.
     Thinking { text: String },
@@ -55,12 +56,13 @@ pub fn hud_payload(p: Phase) -> Value {
             v
         }
         Phase::Analyzing => base("analyzing", "Анализирую…", ""),
-        Phase::Heard { text } => {
+        Phase::Heard { text, inserted } => {
             // body — текст для карточки; визуальное усечение (до 6 строк + «…») делает
             // CSS-клэмп тоста, поэтому шлём щедро (не режем на 100 символов посреди
             // слова без многоточия). full — полный текст для кнопки «Копировать».
             let mut v = base("heard", "Услышал", &crate::util::ellipsize(&text, 400));
             v["full"] = json!(text);
+            v["inserted"] = json!(inserted);
             v
         }
         Phase::Thinking { text } => base("thinking", "Думаю…", &text),
@@ -113,11 +115,14 @@ mod tests {
 
     #[test]
     fn phase_payload_shape() {
-        let v = hud_payload(Phase::Heard { text: "привет".into() });
+        let v = hud_payload(Phase::Heard { text: "привет".into(), inserted: true });
         assert_eq!(v["id"], HUD_ID);
         assert_eq!(v["kind"], "voice");
         assert_eq!(v["phase"], "heard");
         assert_eq!(v["body"], "привет");
+        assert_eq!(v["inserted"], true);
+        let u = hud_payload(Phase::Heard { text: "п".into(), inserted: false });
+        assert_eq!(u["inserted"], false);
     }
 
     #[test]

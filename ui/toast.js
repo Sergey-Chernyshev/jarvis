@@ -343,8 +343,9 @@ function renderVoiceHud(p) {
   if (p.phase === 'dismiss') { removeCard(p.id, true); return; }
   const id = p.id;
   const terminal = VOICE_TERMINAL.has(p.phase);
-  // «Услышал» — даём дольше прочитать/скопировать/кликнуть в историю.
-  const ttl = p.phase === 'heard' ? 7000 : 4200;
+  // «Услышал»: вставка подтверждена (текст уже в поле) — короткие 2с;
+  // не подтверждена — 5с, успеть прочитать/скопировать/кликнуть в историю.
+  const ttl = p.phase === 'heard' ? (p.inserted ? 2000 : 5000) : 4200;
 
   const existing = cards.get(id);
   const firstTime = !existing;

@@ -30,14 +30,28 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Исход вставки: подтверждена ли она наблюдением за сфокусированным полем.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertVerdict {
+    /// Фокус был на редактируемом элементе и его значение изменилось,
+    /// включая хвост вставленного текста, — «точно вставилось».
+    Confirmed,
+    /// Вставка отправлена (⌘V ушёл), но подтвердить не вышло: нет фокуса на
+    /// поле ввода / AX недоступен / значение не читается. НЕ ошибка.
+    Unconfirmed,
+}
+
 /// Вставить `text` в активное приложение через ⌘V.
 ///
-/// Пустая строка → Ok(()) без операций.
+/// Пустая строка → Ok(Unconfirmed) без операций.
 /// Ошибки буфера обмена или CGEvent → Err(String); не паникует.
-pub fn insert_text(text: &str) -> Result<(), String> {
+pub fn insert_text(text: &str) -> Result<InsertVerdict, String> {
     if text.is_empty() {
-        return Ok(());
+        return Ok(InsertVerdict::Unconfirmed);
     }
+
+    // ── 0. Снимок сфокусированного элемента ДО вставки (best-effort AX) ─────
+    let focus_before = super::ax::focus_snapshot();
 
     // ── 1. Снапшот буфера обмена ────────────────────────────────────────────
     let snapshot = {
@@ -111,7 +125,19 @@ pub fn insert_text(text: &str) -> Result<(), String> {
         }
     }
 
-    Ok(())
+    // ── 5. Подтверждение вставки: тот же элемент, значение изменилось ───────
+    // (после пауз из шага 3 приложение уже переварило ⌘V)
+    let confirmed = match (&focus_before, super::ax::focus_snapshot()) {
+        (Some(before), Some(after)) if before.editable => {
+            super::ax::value_confirms_insert(&before.value, &after.value, text)
+        }
+        _ => false,
+    };
+    Ok(if confirmed {
+        InsertVerdict::Confirmed
+    } else {
+        InsertVerdict::Unconfirmed
+    })
 }
 
 #[cfg(test)]

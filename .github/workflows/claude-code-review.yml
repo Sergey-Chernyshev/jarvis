@@ -12,13 +12,20 @@ jobs:
       contents: read
       pull-requests: write
       id-token: write
+    env:
+      # secrets недоступны в if напрямую — прокидываем флаг через env.
+      # Без ANTHROPIC_API_KEY шаги пропускаются и обязательный чек остаётся
+      # зелёным, вместо гарантированного «Environment variable validation failed».
+      HAS_ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
     steps:
       - name: Checkout
+        if: env.HAS_ANTHROPIC_KEY == 'true'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Review with Claude
+        if: env.HAS_ANTHROPIC_KEY == 'true'
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

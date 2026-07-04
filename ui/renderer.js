@@ -13,11 +13,16 @@ const queryEl = document.getElementById('query');
 const replyEl = document.getElementById('reply');
 const chatAttachEl = document.getElementById('chatAttach');
 
-// Вставленные в поле ответа картинки, ждущие отправки. Каждая — { id, base64,
-// ext, dataUrl }. На отправке пишутся во временные файлы, пути уходят в промпт.
+// Вставленные в поле ответа картинки, ждущие отправки. Каждая — { id, ext,
+// dataUrl } (base64 для IPC режется из dataUrl на отправке — не храним дважды).
+// На отправке пишутся во временные файлы, пути уходят в промпт.
 let pendingImages = [];
 let attachSeq = 0;
 const MAX_IMAGES = 8;
+// Расширения, с которыми session_save_image (Rust) пишет файлы на диск, — единый
+// список для чип-regex и extFromType; источник истины для записи — белый список в ipc.rs.
+const IMG_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'heic', 'tiff', 'tif'];
+const PASTED_IMG_RE = new RegExp(String.raw`(^|\s)(\/[^\s]*\/jarvis-paste\/[^\s]+\.(?:${IMG_EXTS.join('|')}))\b`, 'gi');
 
 // Фокус в редактируемом поле? Тогда нативные текст-комбо (⌘⌫ = удалить до начала
 // строки) НЕ должны перехватываться глобальными хоткеями приложения — иначе ⌘⌫ при
@@ -556,7 +561,7 @@ function extractAttachments(raw) {
   text = text.replace(/\[Image #(\d+)\]/g, (_, n) => { chips.push({ type: 'image', label: `Image #${n}` }); return ''; });
   // путь к картинке, вставленной из Jarvis (только наш temp-каталог jarvis-paste —
   // произвольные пути, набранные юзером руками, из текста не выдёргиваем)
-  text = text.replace(/(^|\s)(\/[^\s]*\/jarvis-paste\/[^\s]+\.(?:png|jpe?g|gif|webp|bmp|heic|tiff?))\b/gi, (m, pre, p) => { chips.push({ type: 'image', label: p.split('/').pop() }); return pre; });
+  text = text.replace(PASTED_IMG_RE, (m, pre, p) => { chips.push({ type: 'image', label: p.split('/').pop() }); return pre; });
   // @file: только если выглядит как путь (есть точка или слэш) — не трогаем @everyone и т.п.
   text = text.replace(/(^|\s)@([\w./\-]*[./][\w./\-]*)/g, (m, pre, p) => { chips.push({ type: 'file', label: `@${p}` }); return pre; });
   return { chips, text: text.replace(/[ \t]{2,}/g, ' ').trim() };
@@ -1464,11 +1469,13 @@ async function sendReplyNow() {
   sending = true;
   replyEl.disabled = true;
   try {
-    // Картинки → временные файлы; их абсолютные пути уходят агенту в промпте
-    // (Claude/Codex читают путь и подгружают картинку). Каждый путь — с новой строки.
+    // Картинки → временные файлы (параллельно); их абсолютные пути уходят агенту
+    // в промпте (Claude/Codex читают путь и подгружают картинку), каждый с новой строки.
+    const results = await Promise.all(imgs.map((im) =>
+      window.jarvis.saveImage(im.dataUrl.slice(im.dataUrl.indexOf(',') + 1), im.ext).catch(() => null)
+    ));
     const paths = [];
-    for (const im of imgs) {
-      const r = await window.jarvis.saveImage(im.base64, im.ext);
+    for (const r of results) {
       if (r && r.ok && r.path) paths.push(r.path);
       else showToast((r && r.error) || 'Не удалось сохранить картинку');
     }
@@ -1521,8 +1528,8 @@ function insertNewlineAtReply() {
 function extFromType(type) {
   const m = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/bmp': 'bmp', 'image/heic': 'heic', 'image/tiff': 'tiff' };
   if (m[type]) return m[type];
-  const sub = String(type || '').split('/')[1];
-  return (sub && /^[a-z0-9]+$/i.test(sub)) ? sub.toLowerCase() : 'png';
+  const sub = String(type || '').split('/')[1]?.toLowerCase();
+  return IMG_EXTS.includes(sub) ? sub : 'png'; // незнакомый тип Rust всё равно нормализует в png
 }
 
 function renderAttachments() {
@@ -1561,7 +1568,7 @@ function addPendingImage(file) {
     const dataUrl = String(reader.result || '');
     const comma = dataUrl.indexOf(',');
     if (comma < 0) return;
-    pendingImages.push({ id: 'att' + (attachSeq++), base64: dataUrl.slice(comma + 1), ext: extFromType(file.type), dataUrl });
+    pendingImages.push({ id: 'att' + (attachSeq++), ext: extFromType(file.type), dataUrl });
     renderAttachments();
   };
   reader.readAsDataURL(file);

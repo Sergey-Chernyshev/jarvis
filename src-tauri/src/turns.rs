@@ -221,6 +221,97 @@ fn patch_files(patch: &str) -> Vec<(String, &'static str)> {
     out
 }
 
+/// Версия промпта/схемы — растёт при любом изменении PROMPT_HEAD/бюджетов,
+/// инвалидирует кэш сводок (turnsum.rs).
+pub const PROMPT_VERSION: u32 = 1;
+
+/// Шапка: правила + схема + few-shot (по ресёрчу: пример держит язык и форму
+/// JSON лучше инструкций; префилл `{` через CLI недоступен — компенсируем).
+const PROMPT_HEAD: &str = r#"Ты суммаризируешь один ход кодинг-агента для ленты чата. Отвечай СТРОГО одним JSON-объектом, без markdown и текста вокруг.
+Правила:
+- Пиши по-русски. Пути файлов, команды, имена функций/тестов, флаги — оставляй как есть на английском, НЕ переводи и НЕ транслитерируй.
+- Используй ТОЛЬКО факты из блока FACTS и текста хода. Не выдумывай файлы, команды или результаты, которых там нет.
+- files: ровно те пути, что даны в FACTS.files (копируй посимвольно); note — одна фраза до 60 символов, что изменилось.
+- summary: 2–5 предложений, что сделано и итог.
+- docs_digest: если агент выдал доку/отчёт/длинные выводы — сжатый пересказ в 3–6 пунктов, числа/имена/пути дословно; иначе пустая строка.
+- commands: итог команд/тестов одной строкой; не было — пустая строка.
+Схема: {"summary": string, "files": [{"path": string, "note": string}], "docs_digest": string, "commands": string}
+
+Пример.
+FACTS:
+files: ui/settings2.js (edited)
+commands: npm test
+---
+ХОД:
+Пользователь: почини сохранение хоткеев и прогони тесты
+Агент: Исправил сериализацию биндингов в settings2.js — раньше терялся сентинел "none". Тесты зелёные: 281 passed.
+
+Ответ:
+{"summary": "Починено сохранение хоткеев: при сериализации биндингов терялось состояние «не назначен» (сентинел none). Тесты прогнаны, все зелёные.", "files": [{"path": "ui/settings2.js", "note": "исправлена сериализация биндингов"}], "docs_digest": "", "commands": "npm test — 281 passed"}
+
+Теперь реальный ход.
+"#;
+
+/// «Голова+хвост»: длинный текст режем с серединой-заглушкой (середина наименее
+/// информативна — lost in the middle). Лимиты в символах (chars, не bytes).
+pub fn head_tail(s: &str, max: usize, head: usize, tail: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    let h: String = chars[..head].iter().collect();
+    let t: String = chars[chars.len() - tail..].iter().collect();
+    format!("{h}\n[…]\n{t}")
+}
+
+/// Промпт сводки хода. Бюджеты из спеки: FACTS ~1К, юзер 0.5К (уже порезан в
+/// segment), финальный ответ 4К (голова+хвост), хроника тулов 1.5К, дока 2К.
+pub fn build_prompt(user_prompt: &str, facts: &TurnFacts) -> String {
+    let mut p = String::from(PROMPT_HEAD);
+    p.push_str("FACTS:\nfiles:");
+    if facts.files.is_empty() {
+        p.push_str(" (нет)");
+    }
+    p.push('\n');
+    for f in facts.files.iter().take(20) {
+        p.push_str(&format!("  {} ({})\n", f.path, f.kind));
+    }
+    p.push_str("commands:");
+    if facts.commands.is_empty() {
+        p.push_str(" (нет)");
+    }
+    p.push('\n');
+    let mut cmd_budget = 600usize;
+    for c in &facts.commands {
+        let line = format!("  {c}\n");
+        if line.chars().count() > cmd_budget {
+            break;
+        }
+        cmd_budget -= line.chars().count();
+        p.push_str(&line);
+    }
+    p.push_str("---\nХОД:\n");
+    p.push_str(&format!("Пользователь: {user_prompt}\n"));
+    p.push_str(&format!("Агент: {}\n", head_tail(&facts.final_reply, 4000, 2600, 1200)));
+    if !facts.tool_log.is_empty() {
+        p.push_str(&format!(
+            "Инструменты: {}\n",
+            ellipsize(&facts.tool_log.join("; "), 1500)
+        ));
+    }
+    let mut md_budget = 2000usize;
+    for m in &facts.md_heads {
+        if md_budget < 200 {
+            break;
+        }
+        let head = ellipsize(&m.head, md_budget);
+        md_budget = md_budget.saturating_sub(head.chars().count());
+        p.push_str(&format!("Записанная дока {}:\n{}\n", m.path, head));
+    }
+    p.push_str("\nНапоминание: ответ — ОДИН JSON-объект по схеме, проза по-русски, идентификаторы as-is.");
+    p
+}
+
 fn push_file(f: &mut TurnFacts, path: &str, kind: &str) {
     if let Some(existing) = f.files.iter_mut().find(|x| x.path == path) {
         if kind == "created" {
@@ -392,5 +483,35 @@ mod tests {
         push_file(&mut f, "a.rs", "created");
         push_file(&mut f, "a.rs", "edited");
         assert_eq!(f.files, vec![FileTouch { path: "a.rs".into(), kind: "created".into() }]);
+    }
+
+    #[test]
+    fn prompt_contains_facts_fewshot_and_reminder() {
+        let mut facts = TurnFacts::default();
+        push_file(&mut facts, "src/a.rs", "edited");
+        facts.commands.push("cargo test".into());
+        facts.final_reply = "Готово.".into();
+        let p = build_prompt("сделай A", &facts);
+        assert!(p.contains("src/a.rs (edited)"));
+        assert!(p.contains("cargo test"));
+        assert!(p.contains("Пользователь: сделай A"));
+        assert!(p.contains("Пример."), "few-shot присутствует");
+        assert!(p.trim_end().ends_with("идентификаторы as-is."), "языковой якорь в конце");
+    }
+
+    #[test]
+    fn prompt_trims_long_reply_head_tail() {
+        let mut facts = TurnFacts::default();
+        facts.final_reply = "начало ".repeat(400) + &"конец ".repeat(400); // ~5.4К
+        let p = build_prompt("x", &facts);
+        assert!(p.contains("[…]"), "длинный ответ порезан головой+хвостом");
+        assert!(p.contains("начало") && p.contains("конец"));
+    }
+
+    #[test]
+    fn head_tail_short_passthrough() {
+        assert_eq!(head_tail("абв", 10, 5, 3), "абв");
+        let cut = head_tail(&"x".repeat(100), 10, 5, 3);
+        assert_eq!(cut, format!("{}\n[…]\n{}", "x".repeat(5), "x".repeat(3)));
     }
 }

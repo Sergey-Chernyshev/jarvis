@@ -127,7 +127,9 @@ mod tests {
         let out = super::invoke(&reg, (), &Consumer::agent(), "echo.read", json!({"x":1}), &AutoApprove, &audit, GateConfig::default())
             .await
             .expect("read должен пройти");
-        assert_eq!(out.value, json!({"echo":{"x":1}}));
+        assert_eq!(out.value["echo"]["x"], 1);
+        // гейт инжектит _consumer (см. gate.rs, шаг 2б)
+        assert_eq!(out.value["echo"]["_consumer"], "agent");
         assert_eq!(out.provenance, Provenance::Trusted);
         assert_eq!(audit.len(), 1);
         assert_eq!(audit.last().unwrap().outcome, "ok");
@@ -141,7 +143,9 @@ mod tests {
         let out = super::invoke(&reg, (), &Consumer::agent(), "echo.control", json!({"to":"recrew"}), &AutoApprove, &audit, GateConfig::default())
             .await
             .expect("control с approve должен пройти");
-        assert_eq!(out.value, json!({"did":{"to":"recrew"}}));
+        assert_eq!(out.value["did"]["to"], "recrew");
+        // гейт инжектит _consumer (см. gate.rs, шаг 2б)
+        assert_eq!(out.value["did"]["_consumer"], "agent");
         assert_eq!(audit.last().unwrap().outcome, "ok");
     }
 

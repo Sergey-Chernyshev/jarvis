@@ -342,8 +342,12 @@ pub fn parse_card(out: &str, facts: &TurnFacts) -> Option<TurnCard> {
     let start = out.find('{')?;
     let cut = &out[start..];
     let mut card: Option<TurnCard> = None;
-    // 1) кандидаты «до каждой } с конца» — отрезают прозу/заборы после JSON
+    // 1) кандидаты «до каждой } с конца» — отрезают прозу/заборы после JSON.
+    // 6 кандидатов достаточно: промпт требует один JSON-объект, проза после
+    // него (если есть) — короткий хвост с редкими `}`.
     for (i, _) in cut.char_indices().rev().filter(|(_, c)| *c == '}').take(6) {
+        // Десериализация all-or-nothing намеренно: битое поле → None → зовущий
+        // уходит в ретрай/фолбэк, частичную карточку не собираем.
         if let Ok(c) = serde_json::from_str::<TurnCard>(&cut[..=i]) {
             card = Some(c);
             break;
@@ -361,11 +365,16 @@ pub fn parse_card(out: &str, facts: &TurnFacts) -> Option<TurnCard> {
     let mut card = card?;
     let allowed: std::collections::HashSet<&str> =
         facts.files.iter().map(|f| f.path.as_str()).collect();
-    card.files.retain(|f| allowed.contains(f.path.as_str()));
+    // Только пути из фактов + дедуп (модель может выдать один path дважды):
+    // остаётся первое вхождение.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    card.files
+        .retain(|f| allowed.contains(f.path.as_str()) && seen.insert(f.path.clone()));
     for f in &mut card.files {
         f.note = ellipsize(&one_line(&f.note), 80);
     }
     card.summary = ellipsize(&one_line(&card.summary), 600);
+    // docs_digest без one_line намеренно: это многострочные пункты дайджеста.
     card.docs_digest = ellipsize(&card.docs_digest, 1200);
     card.commands = ellipsize(&one_line(&card.commands), 200);
     (!card.summary.is_empty()).then_some(card)
@@ -602,6 +611,15 @@ mod tests {
         // модель оборвалась посреди строки — докручиваем "}
         let out = r#"{"summary": "Полдела сделано"#;
         assert_eq!(parse_card(out, &facts_with(&[])).unwrap().summary, "Полдела сделано");
+    }
+
+    #[test]
+    fn parse_card_dedups_duplicate_paths() {
+        // модель дважды выдала один path — в карточке остаётся первое вхождение
+        let out = r#"{"summary": "Ок.", "files": [{"path": "a.rs", "note": "первая"}, {"path": "a.rs", "note": "вторая"}], "docs_digest": "", "commands": ""}"#;
+        let c = parse_card(out, &facts_with(&["a.rs"])).unwrap();
+        assert_eq!(c.files.len(), 1, "дубль пути отброшен");
+        assert_eq!(c.files[0].note, "первая");
     }
 
     #[test]

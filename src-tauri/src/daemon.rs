@@ -1168,10 +1168,24 @@ impl Daemon {
         sid: &str,
         t: &crate::turns::Turn,
     ) -> Option<crate::turns::TurnCard> {
-        if !claude_bin::any_service_bin() || !self.busy_take("turnsum", sid) {
+        // гейт на ход: backfill не должен блокировать сводку свежего Stop;
+        // конкуренция возможна только за один и тот же ход
+        let busy_key = format!("{sid}/{}", t.span.key);
+        if !claude_bin::any_service_bin() || !self.busy_take("turnsum", &busy_key) {
             return None;
         }
         let result = async {
+            // пере-проверка кэша после захвата гейта: два быстрых chat_open могли
+            // снять снапшот todo до кэширования; заодно повторный запрос сводки
+            // мгновенно отдаёт готовую карточку (эмит — чтобы UI снял спиннер)
+            if let Some(card) = crate::turnsum::load_cards(sid).get(&t.span.key) {
+                windows::emit_to_panel(
+                    &self.app,
+                    "chat:summary",
+                    &serde_json::json!({ "sessionId": sid, "turnKey": t.span.key, "card": card }),
+                );
+                return Some(card.clone());
+            }
             let prompt = crate::turns::build_prompt(&t.user_prompt, &t.facts);
             for _attempt in 0..2 {
                 let Some(out) = claude_bin::run_service_llm(&prompt, Duration::from_secs(45)).await
@@ -1193,7 +1207,7 @@ impl Daemon {
             None
         }
         .await;
-        self.busy_release("turnsum", sid);
+        self.busy_release("turnsum", &busy_key);
         result
     }
 

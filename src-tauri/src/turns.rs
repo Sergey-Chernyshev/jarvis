@@ -317,6 +317,60 @@ pub fn build_prompt(user_prompt: &str, facts: &TurnFacts) -> String {
     p
 }
 
+/// Карточка сводки хода — то, что кэшируется и уходит в UI (поля как в схеме
+/// промпта, snake_case: JS читает card.docs_digest).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TurnCard {
+    pub summary: String,
+    pub files: Vec<CardFile>,
+    pub docs_digest: String,
+    pub commands: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CardFile {
+    pub path: String,
+    pub note: String,
+}
+
+/// Выход LLM → карточка: срез {..}, ремонт усечённого JSON, валидация
+/// (пути ⊆ facts, клампы длин). None → зовущий падает на детерминированную
+/// карточку. Ремонт свой, маленький: полноценный json-repair тут оверкилл.
+pub fn parse_card(out: &str, facts: &TurnFacts) -> Option<TurnCard> {
+    let start = out.find('{')?;
+    let cut = &out[start..];
+    let mut card: Option<TurnCard> = None;
+    // 1) кандидаты «до каждой } с конца» — отрезают прозу/заборы после JSON
+    for (i, _) in cut.char_indices().rev().filter(|(_, c)| *c == '}').take(6) {
+        if let Ok(c) = serde_json::from_str::<TurnCard>(&cut[..=i]) {
+            card = Some(c);
+            break;
+        }
+    }
+    // 2) усечённый вывод: докрутить закрытие строки/объекта
+    if card.is_none() {
+        for fix in ["\"}", "}", "\"}]}", "]}"] {
+            if let Ok(c) = serde_json::from_str::<TurnCard>(&format!("{cut}{fix}")) {
+                card = Some(c);
+                break;
+            }
+        }
+    }
+    let mut card = card?;
+    let allowed: std::collections::HashSet<&str> =
+        facts.files.iter().map(|f| f.path.as_str()).collect();
+    card.files.retain(|f| allowed.contains(f.path.as_str()));
+    for f in &mut card.files {
+        f.note = ellipsize(&one_line(&f.note), 80);
+    }
+    card.summary = ellipsize(&one_line(&card.summary), 600);
+    card.docs_digest = ellipsize(&card.docs_digest, 1200);
+    card.commands = ellipsize(&one_line(&card.commands), 200);
+    (!card.summary.is_empty()).then_some(card)
+}
+
 fn push_file(f: &mut TurnFacts, path: &str, kind: &str) {
     if let Some(existing) = f.files.iter_mut().find(|x| x.path == path) {
         if kind == "created" {
@@ -518,5 +572,46 @@ mod tests {
         assert_eq!(head_tail("абв", 10, 5, 3), "абв");
         let cut = head_tail(&"x".repeat(100), 10, 5, 3);
         assert_eq!(cut, format!("{}\n[…]\n{}", "x".repeat(5), "x".repeat(3)));
+    }
+
+    fn facts_with(paths: &[&str]) -> TurnFacts {
+        let mut f = TurnFacts::default();
+        for p in paths {
+            push_file(&mut f, p, "edited");
+        }
+        f
+    }
+
+    #[test]
+    fn parse_card_clean_json() {
+        let out = r#"{"summary": "Сделано.", "files": [{"path": "a.rs", "note": "правка"}], "docs_digest": "", "commands": "cargo test — ok"}"#;
+        let c = parse_card(out, &facts_with(&["a.rs"])).unwrap();
+        assert_eq!(c.summary, "Сделано.");
+        assert_eq!(c.files.len(), 1);
+        assert_eq!(c.commands, "cargo test — ok");
+    }
+
+    #[test]
+    fn parse_card_strips_prose_and_fences() {
+        let out = "Вот JSON:\n```json\n{\"summary\": \"Готово.\", \"files\": [], \"docs_digest\": \"\", \"commands\": \"\"}\n```";
+        assert_eq!(parse_card(out, &facts_with(&[])).unwrap().summary, "Готово.");
+    }
+
+    #[test]
+    fn parse_card_repairs_truncated_json() {
+        // модель оборвалась посреди строки — докручиваем "}
+        let out = r#"{"summary": "Полдела сделано"#;
+        assert_eq!(parse_card(out, &facts_with(&[])).unwrap().summary, "Полдела сделано");
+    }
+
+    #[test]
+    fn parse_card_drops_foreign_paths_and_empty_summary() {
+        let out = r#"{"summary": "Ок.", "files": [{"path": "a.rs", "note": "x"}, {"path": "hallucinated.rs", "note": "y"}], "docs_digest": "", "commands": ""}"#;
+        let c = parse_card(out, &facts_with(&["a.rs"])).unwrap();
+        assert_eq!(c.files.len(), 1, "чужой путь отброшен");
+        assert_eq!(c.files[0].path, "a.rs");
+        let empty = r#"{"summary": "", "files": [], "docs_digest": "", "commands": ""}"#;
+        assert!(parse_card(empty, &facts_with(&[])).is_none(), "пустое summary → None");
+        assert!(parse_card("совсем не json", &facts_with(&[])).is_none());
     }
 }

@@ -12,3 +12,7 @@ src-tauri/gen/
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# Артефакты брейншторма/браузерных сессий
+.superpowers/
+.playwright-mcp/

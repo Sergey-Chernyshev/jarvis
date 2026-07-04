@@ -38,6 +38,7 @@ mod tmux;
 mod transcript;
 mod tray;
 mod turns;
+mod turnsum;
 mod usage;
 mod util;
 mod voice;

@@ -95,7 +95,12 @@ pub fn segment(be: &dyn Backend, entries: &[Value]) -> (Vec<ChatItem>, Vec<Turn>
             facts: TurnFacts::default(),
         })
         .collect();
-    // факты — по сырым записям, в ход, которому принадлежит первый item записи
+    // Факты — по сырым записям, в ход, которому принадлежит первый item записи.
+    // Инвариант: каждая запись, из которой collect_facts достаёт факты
+    // (assistant с tool_use у Claude; function_call/custom_tool_call у Codex),
+    // ОБЯЗАНА давать хотя бы один item в to_chat_items — иначе idx укажет на
+    // первый item СЛЕДУЮЩЕЙ записи и факты уедут в чужой ход. Сегодня это так:
+    // tool_use → чип "tool"; менять to_chat_items — только вместе с этим циклом.
     for (ei, e) in entries.iter().enumerate() {
         let idx = entry_first_item[ei];
         let Some(t) = turns.iter_mut().find(|t| t.span.start <= idx && idx < t.span.end) else {
@@ -353,6 +358,31 @@ mod tests {
         );
         assert_eq!(f.commands, vec!["npm test".to_string()]);
         assert_eq!(f.final_reply, "сделал");
+    }
+
+    #[test]
+    fn segment_attributes_facts_to_own_turn() {
+        // два хода: факты записи не должны утекать в соседний ход
+        let entries = vec![
+            json!({"type":"user","uuid":"u1","timestamp":"2026-07-04T10:00:00Z",
+                   "message":{"content":"сделай A"}}),
+            json!({"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"2026-07-04T10:00:05Z",
+                   "message":{"content":[
+                       {"type":"tool_use","name":"Edit","input":{"file_path":"a.rs"}},
+                       {"type":"tool_use","name":"Bash","input":{"command":"cmd A"}}]}}),
+            json!({"type":"user","uuid":"u2","timestamp":"2026-07-04T10:01:00Z",
+                   "message":{"content":"сделай B"}}),
+            json!({"type":"assistant","uuid":"a2","parentUuid":"u2","timestamp":"2026-07-04T10:01:05Z",
+                   "message":{"content":[
+                       {"type":"tool_use","name":"Edit","input":{"file_path":"b.rs"}},
+                       {"type":"tool_use","name":"Bash","input":{"command":"cmd B"}}]}}),
+        ];
+        let (_items, turns) = segment(backend(Agent::Claude), &entries);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].facts.files, vec![FileTouch { path: "a.rs".into(), kind: "edited".into() }]);
+        assert_eq!(turns[0].facts.commands, vec!["cmd A".to_string()]);
+        assert_eq!(turns[1].facts.files, vec![FileTouch { path: "b.rs".into(), kind: "edited".into() }]);
+        assert_eq!(turns[1].facts.commands, vec!["cmd B".to_string()]);
     }
 
     #[test]

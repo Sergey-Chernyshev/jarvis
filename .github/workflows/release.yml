@@ -35,7 +35,7 @@ jobs:
         run: cmake --version || brew install cmake
 
       - name: Build (ad-hoc sign), updater artifacts, release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Ad-hoc подпись (signingIdentity "-" в tauri.conf) — без Apple Developer.

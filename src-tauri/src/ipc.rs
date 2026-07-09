@@ -13,7 +13,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use crate::daemon::Daemon;
 use crate::model::Status;
 use crate::util::*;
-use crate::{claude_bin, limits, tmux, windows};
+use crate::{limits, tmux, transcript, windows};
 
 fn ok() -> Value {
     json!({ "ok": true })
@@ -774,119 +774,27 @@ pub fn chat_open(app: AppHandle, session_id: String) -> Value {
     // Парсер транскрипта — по бэкенду сессии (Claude JSONL vs Codex rollout).
     let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
     let be = crate::backend::backend(agent);
-    let entries = be.read_entries(std::path::Path::new(&tr), 512 * 1024);
-    let (all_items, turns) = crate::turns::segment(be, &entries);
-    let tail_start = all_items.len().saturating_sub(80);
-    let items = &all_items[tail_start..];
-    // разметка ходов в координатах видимого хвоста; факты — для дет-карточек
-    let spans: Vec<Value> = turns
+    let items: Vec<transcript::ChatItem> = be
+        .read_entries(std::path::Path::new(&tr), 512 * 1024)
         .iter()
-        .filter(|t| t.span.end > tail_start)
-        .map(|t| {
-            json!({
-                "key": t.span.key,
-                "start": t.span.start.saturating_sub(tail_start),
-                "end": t.span.end - tail_start,
-                // ход, чья юзер-реплика отрезана хвостом, не суммаризируем из UI
-                "complete": t.span.complete && t.span.start >= tail_start,
-                "files": t.facts.files,
-                "commands": t.facts.commands,
-            })
-        })
+        .flat_map(|e| be.to_chat_items(e))
         .collect();
-    let cards = crate::turnsum::load_cards(&session_id);
+    let tail_start = items.len().saturating_sub(80);
+    let items = &items[tail_start..];
     d.tail
         .start(app.clone(), agent, session_id.clone(), tr.clone());
-    let llm = claude_bin::any_service_bin();
-    if llm {
-        d.turn_backfill(session_id.clone(), 5);
-    }
     println!(
-        "[jarvis] chat:open {} items={} turns={} cards={} file={}",
+        "[jarvis] chat:open {} items={} file={}",
         ellipsize(&session_id, 8),
         items.len(),
-        spans.len(),
-        cards.len(),
         short_home(&tr)
     );
-    json!({ "ok": true, "items": items, "spans": spans, "cards": cards, "llm": llm, "project": s.project })
+    json!({ "ok": true, "items": items, "project": s.project })
 }
 
 #[tauri::command]
 pub fn chat_close(app: AppHandle) {
     Daemon::get(&app).tail.stop();
-}
-
-/// Сводка конкретного хода по кнопке. Fire-and-forget: карточку принесёт
-/// событие chat:summary (кэш — turnsum), UI показывает спиннер сам.
-#[tauri::command]
-pub fn chat_summarize(app: AppHandle, session_id: String, turn_key: String) -> Value {
-    let d = Daemon::get(&app);
-    if d.session(&session_id).is_none() {
-        return err("Сессия не найдена");
-    }
-    tauri::async_runtime::spawn(async move {
-        let Some((be, entries)) = d.turn_entries(&session_id) else { return };
-        let (_items, turns) = crate::turns::segment(be, &entries);
-        if let Some(t) = turns.iter().find(|t| t.span.key == turn_key) {
-            d.turn_generate(&session_id, t).await;
-        }
-    });
-    ok()
-}
-
-/// Открыть файл из карточки сводки. path из транскрипта (запись агента),
-/// не свободный ввод; резолв от cwd сессии + канонизация + только обычные файлы.
-#[tauri::command]
-pub fn file_open(app: AppHandle, session_id: String, path: String, reveal: bool) -> Value {
-    let d = Daemon::get(&app);
-    let cwd = d.session(&session_id).and_then(|s| s.cwd);
-    let p = match resolve_user_file(cwd.as_deref(), &path) {
-        Ok(p) => p,
-        Err(e) => return err(&e),
-    };
-    // Путь из транскрипта — недоверенный: `open evil.command` ЗАПУСТИЛ бы
-    // скрипт. Исполняемые документы не открываем — только показываем в Finder.
-    let reveal = reveal || force_reveal(&p);
-    let mut cmd = std::process::Command::new("open");
-    if reveal {
-        cmd.arg("-R"); // показать в Finder
-    }
-    match cmd.arg(&p).spawn() {
-        Ok(_) => ok(),
-        Err(e) => err(&format!("open: {e}")),
-    }
-}
-
-/// Типы, которые macOS `open` ВЫПОЛНЯЕТ, а не показывает (Terminal/Automator/
-/// AppleScript и т.п.) — такие принудительно уводим в reveal.
-fn force_reveal(p: &std::path::Path) -> bool {
-    const EXECUTABLE_DOCS: [&str; 8] = [
-        "command", "terminal", "workflow", "webloc", "tool", "applescript", "scpt", "app",
-    ];
-    p.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| EXECUTABLE_DOCS.contains(&e.to_ascii_lowercase().as_str()))
-        .unwrap_or(false)
-}
-
-/// Путь юзер-файла: абсолютный как есть, относительный — от cwd сессии;
-/// канонизация резолвит симлинки и отсекает несуществующее, берём только
-/// обычные файлы. Пути НЕ ограничены cwd — агент легитимно трогает файлы вне
-/// проекта (напр. ~/.claude/...), а клик по чипу — явное действие пользователя.
-fn resolve_user_file(cwd: Option<&str>, path: &str) -> Result<std::path::PathBuf, String> {
-    let raw = if std::path::Path::new(path).is_absolute() {
-        std::path::PathBuf::from(path)
-    } else {
-        std::path::PathBuf::from(cwd.ok_or("нет рабочего каталога сессии")?).join(path)
-    };
-    let p = raw
-        .canonicalize()
-        .map_err(|_| format!("файл не найден: {path}"))?;
-    if !p.is_file() {
-        return Err(format!("не файл: {path}"));
-    }
-    Ok(p)
 }
 
 #[tauri::command]
@@ -2388,38 +2296,5 @@ mod tests {
     fn conflict_skips_broken_bindings() {
         let bindings = vec![b(HkAction::Mute, "Bogus+Nope")];
         assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+M"), None);
-    }
-}
-
-#[cfg(test)]
-mod turn_ipc_tests {
-    use super::*;
-
-    #[test]
-    fn resolve_user_file_relative_and_missing() {
-        let dir = std::env::temp_dir().join(format!("jarvis-ipc-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("sub")).unwrap();
-        std::fs::write(dir.join("sub/a.rs"), "x").unwrap();
-        let cwd = dir.to_string_lossy().to_string();
-
-        let ok = resolve_user_file(Some(&cwd), "sub/a.rs").unwrap();
-        assert!(ok.ends_with("sub/a.rs"));
-        let abs = resolve_user_file(None, ok.to_str().unwrap()).unwrap();
-        assert_eq!(abs, ok);
-
-        assert!(resolve_user_file(Some(&cwd), "нет/такого.rs").is_err());
-        assert!(resolve_user_file(None, "relative/without/cwd.rs").is_err());
-        assert!(resolve_user_file(Some(&cwd), "sub").is_err(), "каталог — не файл");
-    }
-
-    #[test]
-    fn force_reveal_blocks_executable_docs() {
-        use std::path::Path;
-        assert!(force_reveal(Path::new("a.command")), "исполняемый документ");
-        assert!(force_reveal(Path::new("A.COMMAND")), "регистр не важен");
-        assert!(force_reveal(Path::new("/tmp/x/run.scpt")));
-        assert!(!force_reveal(Path::new("a.rs")), "обычный файл открываем");
-        assert!(!force_reveal(Path::new("Makefile")), "без расширения — не блок");
     }
 }

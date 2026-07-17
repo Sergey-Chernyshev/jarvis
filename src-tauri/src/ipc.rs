@@ -978,6 +978,62 @@ fn read_head_tail(p: &std::path::Path) -> std::io::Result<(String, bool)> {
     Ok((content, true))
 }
 
+/// Дифф файла для таба «Изменения» вьюера (спека 2026-07-18 §3.2). Тот же
+/// гейт по фактам, что file_read; сам дифф считает git (gitdiff.rs) от cwd
+/// сессии. Не в git / бинарь / нет cwd → mode "none" (таб просто не покажется).
+#[tauri::command]
+pub fn file_diff(app: AppHandle, session_id: String, path: String) -> Value {
+    let d = Daemon::get(&app);
+    let cwd = d.session(&session_id).and_then(|s| s.cwd);
+    file_diff_dispatch(d.turn_entries(&session_id).map(|(be, e)| (cwd, be, e)), &path)
+}
+
+/// Диспетчер file_diff, отделён от команды ради тестов (как file_read_dispatch).
+fn file_diff_dispatch(
+    sess: Option<(Option<String>, &dyn crate::backend::Backend, Vec<Value>)>,
+    path: &str,
+) -> Value {
+    let Some((cwd, be, entries)) = sess else {
+        return err("Сессия не найдена или без транскрипта");
+    };
+    file_diff_impl(cwd.as_deref(), be, &entries, path)
+}
+
+/// Ядро file_diff. Гейт §4 идентичен file_read_impl: путь обязан входить в
+/// множество файлов из фактов ходов сессии (сверка канонизированных путей),
+/// иначе инъекция пути в транскрипт дала бы дифф произвольного файла.
+fn file_diff_impl(
+    cwd: Option<&str>,
+    be: &dyn crate::backend::Backend,
+    entries: &[Value],
+    path: &str,
+) -> Value {
+    let p = match resolve_user_file(cwd, path) {
+        Ok(p) => p,
+        Err(e) => return err(&e),
+    };
+    let (_items, turns) = crate::turns::segment(be, entries);
+    let allowed = turns
+        .iter()
+        .flat_map(|t| t.facts.files.iter())
+        .filter_map(|f| resolve_user_file(cwd, &f.path).ok())
+        .any(|q| q == p);
+    if !allowed {
+        return err("Файл не из фактов этой сессии");
+    }
+    // git ищет репозиторий от cwd сессии — без него дифф не построить
+    let Some(cwd) = cwd else {
+        return json!({ "ok": true, "mode": "none", "label": "", "hunks": [] });
+    };
+    let diff = crate::gitdiff::diff_for_file(cwd, &p);
+    json!({
+        "ok": true,
+        "mode": diff.mode,
+        "label": diff.label,
+        "hunks": diff.hunks,
+    })
+}
+
 /// Открыть внешнюю ссылку из отрендеренного документа в браузере по клику.
 /// markdown.js уже режет не-http(s) схемы, но UI-слою не доверяем — схема
 /// валидируется и здесь; url уходит одним аргументом (без шелла).
@@ -2488,6 +2544,58 @@ mod tests {
         let cwd = d.to_str().unwrap();
         let res = file_read_impl(Some(cwd), claude_be(), &entries_touching("нет.md"), "нет.md");
         assert_eq!(res["ok"], json!(false));
+    }
+
+    // --- file_diff: тот же гейт по фактам + режимы git (§3.2) ---
+
+    fn git_q(dir: &std::path::Path, args: &[&str]) {
+        let st = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn file_diff_rejects_path_outside_facts() {
+        // b.md существует, но факты знают только a.md — дифф не отдаём
+        let d = tmp_dir("diff-outside");
+        std::fs::write(d.join("a.md"), "# a").unwrap();
+        std::fs::write(d.join("b.md"), "секрет").unwrap();
+        let res = file_diff_impl(
+            Some(d.to_str().unwrap()),
+            claude_be(),
+            &entries_touching("a.md"),
+            "b.md",
+        );
+        assert_eq!(res["ok"], json!(false));
+        assert!(res["error"].as_str().unwrap().contains("не из фактов"), "{res}");
+    }
+
+    #[test]
+    fn file_diff_worktree_mode_for_edited_doc() {
+        // файл в фактах + незакоммиченная правка → mode worktree с ханками
+        let d = tmp_dir("diff-wt").canonicalize().unwrap();
+        git_q(&d, &["init", "-q"]);
+        std::fs::write(d.join("a.md"), "один\nдва\nтри\n").unwrap();
+        git_q(&d, &["add", "."]);
+        git_q(&d, &["commit", "-q", "-m", "база"]);
+        std::fs::write(d.join("a.md"), "один\nДВА\nтри\n").unwrap();
+        let abs = d.join("a.md");
+        let res = file_diff_impl(
+            Some(d.to_str().unwrap()),
+            claude_be(),
+            &entries_touching(abs.to_str().unwrap()),
+            "a.md",
+        );
+        assert_eq!(res["ok"], json!(true), "{res}");
+        assert_eq!(res["mode"], json!("worktree"), "{res}");
+        assert!(res["hunks"].as_array().unwrap().len() >= 1, "{res}");
     }
 
     // --- шаблон хоткеев выбора варианта (selectHotkeyTemplate) ---

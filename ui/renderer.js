@@ -710,7 +710,7 @@ function buildCard(key, card) {
       }
       // клик — вьюер в панели; ⌥ — Finder (открытие в редакторе — из вьюера)
       chip.addEventListener('click', async (ev) => {
-        if (!ev.altKey) { openDocViewer(f.path); return; }
+        if (!ev.altKey) { openDocViewer(f.path, kindOf(f)); return; }
         const res = await window.jarvis.openFile(chatSessionId, f.path, true);
         if (res && res.error) showToast(res.error);
       });
@@ -745,7 +745,7 @@ function buildCard(key, card) {
     const docBtn = document.createElement('button');
     docBtn.className = 'tsum-btn';
     docBtn.textContent = 'Открыть документ';
-    docBtn.addEventListener('click', () => openDocViewer(firstDoc.path));
+    docBtn.addEventListener('click', () => openDocViewer(firstDoc.path, kindOf(firstDoc)));
     foot.appendChild(docBtn);
   }
   const exp = document.createElement('button');
@@ -1372,19 +1372,37 @@ const docWrap = document.getElementById('docWrap');
 const docTitleEl = document.getElementById('docTitle');
 const docBodyEl = document.getElementById('docBody');
 const docTruncEl = document.getElementById('docTrunc');
+const docTabsEl = document.getElementById('docTabs');
+const docDiffEl = document.getElementById('docDiff');
+const docDiffLabelEl = document.getElementById('docDiffLabel');
+const docTabDiffEl = document.getElementById('docTabDiff');
+const docTabDocEl = document.getElementById('docTabDoc');
 let docOpen = false;
 let docPath = null; // путь открытого файла — для «Редактор»/«Finder»
+let docHasDiff = false;
 
-async function openDocViewer(path) {
+// Переключить активный таб вьюера. «Документ» — рендер файла (docBody);
+// «Изменения» — git-дифф (docDiff). Без диффа виден только «Документ».
+function docSelectTab(tab) {
+  const diff = tab === 'diff' && docHasDiff;
+  docBodyEl.hidden = diff;
+  docDiffEl.hidden = !diff;
+  docTruncEl.hidden = !docTruncEl.dataset.trunc || diff;
+  docTabDiffEl.classList.toggle('active', diff);
+  docTabDocEl.classList.toggle('active', !diff);
+  docDiffLabelEl.textContent = diff ? docDiffLabelEl.dataset.label || '' : '';
+}
+
+async function openDocViewer(path, kind) {
   const res = await window.jarvis.readFile(chatSessionId, path);
   if (!res || !res.ok) { showToast((res && res.error) || 'Не удалось открыть файл'); return; }
   docPath = path;
   docTitleEl.textContent = res.name || path.split('/').pop();
   docTitleEl.title = path;
-  docTruncEl.hidden = !res.truncated;
+  docTruncEl.dataset.trunc = res.truncated ? '1' : '';
   docBodyEl.textContent = '';
   if (JarvisMarkdown.isMarkdownPath(path)) {
-    // единственный innerHTML в файле: markdown.js полностью экранирует
+    // единственный innerHTML здесь: markdown.js полностью экранирует
     // недоверенное содержимое (см. ui/markdown.test.mjs), сырой HTML не пройдёт
     docBodyEl.innerHTML = JarvisMarkdown.render(res.content);
   } else {
@@ -1395,6 +1413,22 @@ async function openDocViewer(path) {
   docBodyEl.scrollTop = 0;
   docOpen = true;
   docWrap.hidden = false;
+
+  // дифф — асинхронно; таб «Изменения» по умолчанию, если ход правил док
+  // (kind edited) и дифф есть, иначе сразу показываем «Документ»
+  docHasDiff = false;
+  docTabsEl.hidden = true;
+  docSelectTab('doc');
+  const diff = await window.jarvis.diffFile(chatSessionId, path);
+  if (docPath !== path) return; // вьюер уже переключили на другой файл
+  if (diff && diff.ok && diff.mode !== 'none' && (diff.hunks || []).length) {
+    docHasDiff = true;
+    docDiffLabelEl.dataset.label = diff.label || '';
+    // diffview.js строит узлы через textContent (без innerHTML) — см. diffview.test.mjs
+    JarvisDiffView.renderTo(docDiffEl, diff.hunks);
+    docTabsEl.hidden = false;
+    docSelectTab(kind === 'edited' ? 'diff' : 'doc');
+  }
 }
 
 function closeDocViewer() {
@@ -1402,6 +1436,9 @@ function closeDocViewer() {
   docWrap.hidden = true;
   docPath = null;
 }
+
+docTabDiffEl.addEventListener('click', () => docSelectTab('diff'));
+docTabDocEl.addEventListener('click', () => docSelectTab('doc'));
 
 document.getElementById('docClose').addEventListener('click', closeDocViewer);
 document.getElementById('docScrim').addEventListener('click', closeDocViewer);

@@ -1344,6 +1344,24 @@
   .doc-body .md-link { color: var(--working); text-decoration: underline; cursor: pointer; }
   .doc-body .md-link-rel { text-decoration: underline dotted; color: var(--muted); } /* v1: не кликабельна */
   .doc-body .md-link-dead { color: var(--muted); }
+  /* табы «Изменения / Документ» вьюера (§3.2) */
+  .doc-tabs { display: flex; align-items: center; gap: 4px; padding: 6px 12px; border-bottom: 1px solid var(--hairline); flex: none; }
+  .doc-tab { font-size: 11.5px; color: var(--muted); background: none; border: none; cursor: pointer; padding: 3px 9px; border-radius: 6px; }
+  .doc-tab:hover { color: var(--text); }
+  .doc-tab.active { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+  .doc-difflabel { margin-left: auto; font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  /* дифф: моноширинный, гутеры номеров, схлопнутый контекст */
+  .doc-diff { flex: 1; overflow: auto; min-height: 0; padding: 8px 0 24px; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; }
+  .doc-diff .diff-row { display: flex; white-space: pre-wrap; word-break: break-word; padding: 0 10px 0 0; }
+  .doc-diff .diff-ln { flex: none; width: 34px; text-align: right; padding-right: 8px; color: var(--muted); opacity: .6; user-select: none; }
+  .doc-diff .diff-mark { flex: none; width: 12px; text-align: center; color: var(--muted); user-select: none; }
+  .doc-diff .diff-s { flex: 1; min-width: 0; }
+  .doc-diff .diff-del { background: rgba(229, 72, 77, .12); }
+  .doc-diff .diff-del .diff-s, .doc-diff .diff-del .diff-mark { color: #e5848a; }
+  .doc-diff .diff-add { background: rgba(65, 201, 142, .12); }
+  .doc-diff .diff-add .diff-s, .doc-diff .diff-add .diff-mark { color: #6fd6a6; }
+  .doc-diff .diff-gap { padding: 3px 12px; margin: 2px 0; font-size: 10.5px; color: var(--muted); background: rgba(127, 127, 127, .06); text-align: center; }
+  .doc-diff .diff-empty { padding: 16px; color: var(--muted); text-align: center; }
 </style>
 </head>
 <body>
@@ -1472,8 +1490,14 @@
                 </button>
               </div>
             </div>
+            <div class="doc-tabs" id="docTabs" hidden>
+              <button class="doc-tab" id="docTabDiff" data-tab="diff">Изменения</button>
+              <button class="doc-tab" id="docTabDoc" data-tab="doc">Документ</button>
+              <span class="doc-difflabel" id="docDiffLabel"></span>
+            </div>
             <div class="doc-trunc" id="docTrunc" hidden>Файл больше 512 КБ — показаны начало и конец.</div>
             <div class="doc-body" id="docBody"></div>
+            <div class="doc-diff" id="docDiff" hidden></div>
           </div>
         </div>
       </div>
@@ -1598,6 +1622,7 @@
   </div>
   <script src="./bridge.js"></script>
   <script src="./markdown.js"></script>
+  <script src="./diffview.js"></script>
   <script src="./question-answer.js"></script>
   <script src="./settings2.js"></script>
   <script src="./voice-history.js"></script>

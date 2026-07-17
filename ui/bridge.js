@@ -25,6 +25,8 @@
     openFile: (sessionId, path, reveal) => invoke('file_open', { sessionId, path, reveal: !!reveal }),
     // вьюер документов (спека 2026-07-18 §3.1): чтение файла из фактов сессии
     readFile: (sessionId, path) => invoke('file_read', { sessionId, path }),
+    // дифф файла для таба «Изменения» (§3.2): git-ханки или mode:"none"
+    diffFile: (sessionId, path) => invoke('file_diff', { sessionId, path }),
     // внешняя http(s)-ссылка из отрендеренного дока → системный браузер
     openUrl: (url) => invoke('url_open', { url }),
     onChatAppend: (cb) => on('chat:append', cb),

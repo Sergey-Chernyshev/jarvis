@@ -890,6 +890,108 @@ fn resolve_user_file(cwd: Option<&str>, path: &str) -> Result<std::path::PathBuf
     Ok(p)
 }
 
+/// Прочитать файл для вьюера документов (спека 2026-07-18 §3.1). Путь обязан
+/// входить в множество файлов из фактов ходов сессии — сверка по
+/// канонизированным путям, см. file_read_impl.
+#[tauri::command]
+pub fn file_read(app: AppHandle, session_id: String, path: String) -> Value {
+    let d = Daemon::get(&app);
+    let cwd = d.session(&session_id).and_then(|s| s.cwd);
+    file_read_dispatch(d.turn_entries(&session_id).map(|(be, e)| (cwd, be, e)), &path)
+}
+
+/// Диспетчер file_read, отделён от команды ради тестов: None — сессии нет
+/// (или у неё нет транскрипта, т.е. фактов, — для вьюера это одно и то же).
+fn file_read_dispatch(
+    sess: Option<(Option<String>, &dyn crate::backend::Backend, Vec<Value>)>,
+    path: &str,
+) -> Value {
+    let Some((cwd, be, entries)) = sess else {
+        return err("Сессия не найдена или без транскрипта");
+    };
+    file_read_impl(cwd.as_deref(), be, &entries, path)
+}
+
+/// Лимит содержимого file_read; больше — голова+хвост с truncated:true
+/// (середина наименее информативна — как head_tail в turns.rs).
+const FILE_READ_LIMIT: u64 = 512 * 1024;
+const FILE_READ_HEAD: usize = 448 * 1024;
+const FILE_READ_TAIL: usize = 64 * 1024;
+
+/// Ядро file_read. Безопасность (§4 спеки): содержимое транскрипта
+/// недоверенное, поэтому мало резолва файла — путь ОБЯЗАН входить в множество
+/// файлов из фактов ходов этой сессии (пересчёт turns::segment по транскрипту),
+/// сравнение канонизированных путей. Инъекция пути в транскрипт не даст чипу
+/// открыть произвольный файл: путь вне фактов tool_use не пройдёт.
+fn file_read_impl(
+    cwd: Option<&str>,
+    be: &dyn crate::backend::Backend,
+    entries: &[Value],
+    path: &str,
+) -> Value {
+    let p = match resolve_user_file(cwd, path) {
+        Ok(p) => p,
+        Err(e) => return err(&e),
+    };
+    let (_items, turns) = crate::turns::segment(be, entries);
+    let allowed = turns
+        .iter()
+        .flat_map(|t| t.facts.files.iter())
+        .filter_map(|f| resolve_user_file(cwd, &f.path).ok())
+        .any(|q| q == p);
+    if !allowed {
+        return err("Файл не из фактов этой сессии");
+    }
+    match read_head_tail(&p) {
+        Ok((content, truncated)) => json!({
+            "ok": true,
+            "name": p.file_name().and_then(|n| n.to_str()).unwrap_or(path),
+            "content": content,
+            "truncated": truncated,
+        }),
+        Err(e) => err(&format!("чтение: {e}")),
+    }
+}
+
+/// Файл целиком до FILE_READ_LIMIT; больше — голова+хвост (UTF-8 lossy на
+/// каждом куске: разрез посреди символа даёт replacement char на стыке — ок).
+fn read_head_tail(p: &std::path::Path) -> std::io::Result<(String, bool)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(p)?;
+    let len = f.metadata()?.len();
+    if len <= FILE_READ_LIMIT {
+        let mut buf = Vec::with_capacity(len as usize);
+        f.read_to_end(&mut buf)?;
+        return Ok((String::from_utf8_lossy(&buf).into_owned(), false));
+    }
+    let mut head = vec![0u8; FILE_READ_HEAD];
+    f.read_exact(&mut head)?;
+    f.seek(SeekFrom::End(-(FILE_READ_TAIL as i64)))?;
+    let mut tail = vec![0u8; FILE_READ_TAIL];
+    f.read_exact(&mut tail)?;
+    let content = format!(
+        "{}\n\n[… обрезано: файл {} КБ …]\n\n{}",
+        String::from_utf8_lossy(&head),
+        len / 1024,
+        String::from_utf8_lossy(&tail)
+    );
+    Ok((content, true))
+}
+
+/// Открыть внешнюю ссылку из отрендеренного документа в браузере по клику.
+/// markdown.js уже режет не-http(s) схемы, но UI-слою не доверяем — схема
+/// валидируется и здесь; url уходит одним аргументом (без шелла).
+#[tauri::command]
+pub fn url_open(url: String) -> Value {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return err("не-http ссылка");
+    }
+    match std::process::Command::new("open").arg(&url).spawn() {
+        Ok(_) => ok(),
+        Err(e) => err(&format!("open: {e}")),
+    }
+}
+
 #[tauri::command]
 pub fn commands_get(app: AppHandle, session_id: String) -> Value {
     let d = Daemon::get(&app);
@@ -2296,6 +2398,97 @@ pub fn audio_set_mute(app: AppHandle, on: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- file_read: путь только из фактов сессии (спека 2026-07-18 §3.1/§4) ---
+
+    // каталог на тест (cargo test параллелен — общий каталог дал бы гонку)
+    fn tmp_dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("jarvis-fileread-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    // Claude-транскрипт из одного хода, где агент правил `path` (Edit)
+    fn entries_touching(path: &str) -> Vec<Value> {
+        vec![
+            json!({"type":"user","uuid":"u1","timestamp":"2026-07-18T10:00:00Z",
+                   "message":{"content":"поправь док"}}),
+            json!({"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"2026-07-18T10:00:05Z",
+                   "message":{"content":[
+                       {"type":"tool_use","name":"Edit","input":{"file_path": path}},
+                       {"type":"text","text":"готово"}]}}),
+        ]
+    }
+
+    fn claude_be() -> &'static dyn crate::backend::Backend {
+        crate::backend::backend(crate::backend::Agent::Claude)
+    }
+
+    #[test]
+    fn file_read_rejects_missing_session() {
+        let res = file_read_dispatch(None, "docs/a.md");
+        assert_eq!(res["ok"], json!(false));
+        assert!(res["error"].as_str().unwrap().contains("Сессия"));
+    }
+
+    #[test]
+    fn file_read_rejects_path_outside_facts() {
+        // оба файла существуют, но в фактах только a.md — b.md не отдаём,
+        // даже если путь пришёл «от чипа» (инъекция в транскрипт)
+        let d = tmp_dir("outside");
+        std::fs::write(d.join("a.md"), "# a").unwrap();
+        std::fs::write(d.join("b.md"), "секрет").unwrap();
+        let cwd = d.to_str().unwrap();
+        let res = file_read_impl(Some(cwd), claude_be(), &entries_touching("a.md"), "b.md");
+        assert_eq!(res["ok"], json!(false));
+        assert!(res["error"].as_str().unwrap().contains("не из фактов"), "{res}");
+    }
+
+    #[test]
+    fn file_read_returns_file_from_facts() {
+        let d = tmp_dir("ok");
+        std::fs::write(d.join("a.md"), "# Заголовок\nтело").unwrap();
+        let cwd = d.to_str().unwrap();
+        // в фактах путь абсолютный (как пишет Claude), запрос — относительный:
+        // сверка канонизированных путей обязана их сматчить
+        let abs = d.join("a.md");
+        let res = file_read_impl(
+            Some(cwd),
+            claude_be(),
+            &entries_touching(abs.to_str().unwrap()),
+            "a.md",
+        );
+        assert_eq!(res["ok"], json!(true), "{res}");
+        assert_eq!(res["name"], json!("a.md"));
+        assert_eq!(res["content"], json!("# Заголовок\nтело"));
+        assert_eq!(res["truncated"], json!(false));
+    }
+
+    #[test]
+    fn file_read_truncates_large_file_head_tail() {
+        let d = tmp_dir("trunc");
+        let mut big = vec![b'H'; FILE_READ_HEAD];
+        big.extend(std::iter::repeat(b'M').take(300 * 1024)); // середина — вырезается
+        big.extend(std::iter::repeat(b'T').take(FILE_READ_TAIL));
+        std::fs::write(d.join("big.log"), &big).unwrap();
+        let cwd = d.to_str().unwrap();
+        let res = file_read_impl(Some(cwd), claude_be(), &entries_touching("big.log"), "big.log");
+        assert_eq!(res["ok"], json!(true), "{res}");
+        assert_eq!(res["truncated"], json!(true));
+        let content = res["content"].as_str().unwrap();
+        assert!(content.starts_with('H') && content.ends_with('T'));
+        assert!(content.contains("обрезано"));
+        assert!(!content.contains('M'), "середина вырезана");
+    }
+
+    #[test]
+    fn file_read_rejects_missing_file() {
+        let d = tmp_dir("missing");
+        let cwd = d.to_str().unwrap();
+        let res = file_read_impl(Some(cwd), claude_be(), &entries_touching("нет.md"), "нет.md");
+        assert_eq!(res["ok"], json!(false));
+    }
 
     // --- шаблон хоткеев выбора варианта (selectHotkeyTemplate) ---
 

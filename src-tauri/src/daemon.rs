@@ -119,6 +119,8 @@ pub struct Daemon {
     /// Реестр капабилити (инкремент 8): источник истины для агента/панели/MCP.
     /// Гейт безопасности проходится при каждом вызове через `capability::invoke`.
     pub caps: crate::capability::DaemonRegistry,
+    /// Реестр сущностей плагинов (спека plugin-system §6.4): vm.*, agent.* …
+    pub entities: crate::entities::EntityStore,
     /// Токены потребителей сокета (R2): резолв token → Consumer (panel недостижим).
     pub tokens: crate::capability::tokens::TokenStore,
     /// Реестр ожидающих подтверждений агента (R4) — вне локов Daemon.
@@ -243,6 +245,7 @@ impl Daemon {
             last_toast: Mutex::new(None),
             voice,
             caps: crate::capability::build_registry(),
+            entities: crate::entities::EntityStore::new(),
             tokens: crate::capability::tokens::TokenStore::new(),
             pending: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
             stt,

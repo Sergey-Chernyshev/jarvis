@@ -8,6 +8,7 @@ use super::DaemonRegistry;
 mod audit_cap;
 mod chats;
 mod control;
+mod entities_cap;
 mod metrics;
 mod notifications;
 mod sessions;
@@ -26,6 +27,7 @@ pub fn register_all(reg: &mut DaemonRegistry) {
     settings_cap::register(reg);
     audit_cap::register(reg);
     chats::register(reg);
+    entities_cap::register(reg); // реестр сущностей плагинов (plugin-system, инкр. 1)
     // фаза 3 — control/settings
     control::register(reg); // sessions.reply, sessions.control
     // settings.set регистрируется в settings_cap::register выше.

@@ -737,7 +737,7 @@ fn capture_thread(
             return;
         }
     };
-    let src_rate = config.sample_rate().0;
+    let src_rate = config.sample_rate();
     let channels = config.channels();
     let fmt = config.sample_format();
     let stream_config: cpal::StreamConfig = config.into();

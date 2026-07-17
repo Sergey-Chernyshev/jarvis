@@ -466,6 +466,40 @@ function renderMarkdown(root, text) {
 
 let toolsGroup = null; // текущая группа чипов (обнуляется текстовой репликой)
 
+/* --- сводки ходов: лента группируется в .turn-блоки по юзер-репликам --- */
+let curTurn = null; // { key, wrap, raw } — текущий ход агента
+const turnFacts = new Map(); // key → {files, commands} из chat_open.spans
+let chatLlmOk = false; // есть ли служебный LLM (кнопка «Сводка»)
+const turnTarget = () => (curTurn ? curTurn.raw : chatlogEl);
+
+function startTurn(key) {
+  toolsGroup = null; // чипы прошлого хода не продолжаем в новом
+  const wrap = document.createElement('div');
+  wrap.className = 'turn';
+  wrap.dataset.key = key;
+  const raw = document.createElement('div');
+  raw.className = 'turnraw';
+  wrap.appendChild(raw);
+  chatlogEl.appendChild(wrap);
+  curTurn = { key, wrap, raw };
+}
+
+/* тумблер «Сводка/Лента» — запоминается локально, по умолчанию сводка.
+ * Объявлен здесь (до openChat): const-стрелки не хойстятся. */
+const sumToggleEl = document.getElementById('sumToggle');
+const summaryModeOn = () => localStorage.getItem('chatSummary') !== '0';
+function renderSumToggle() {
+  const on = summaryModeOn();
+  sumToggleEl.classList.toggle('on', on);
+  sumToggleEl.textContent = on ? 'Сводка' : 'Лента';
+  chatlogEl.classList.toggle('sum', on);
+}
+sumToggleEl.addEventListener('click', () => {
+  localStorage.setItem('chatSummary', summaryModeOn() ? '0' : '1');
+  renderSumToggle();
+});
+renderSumToggle();
+
 // имя тула (англ., как в транскрипте) → [русский глагол, иконка]
 const TOOL_VERB = {
   edit: ['изменил', 'pencil'], multiedit: ['изменил', 'pencil'],
@@ -519,7 +553,7 @@ function addToolChip(label) {
   if (!toolsGroup) {
     toolsGroup = document.createElement('div');
     toolsGroup.className = 'msg tools';
-    chatlogEl.appendChild(toolsGroup);
+    turnTarget().appendChild(toolsGroup);
   }
   const last = toolsGroup.lastElementChild;
   if (last && last.dataset.label === label) { bumpCount(last); return; }
@@ -633,6 +667,108 @@ function assistantMsg(it) {
   return msg;
 }
 
+/* Карточка сводки хода. card=null → детерминированная (факты + сжатый ответ). */
+function buildCard(key, card) {
+  const facts = turnFacts.get(key) || { files: [], commands: [] };
+  const box = document.createElement('div');
+  box.className = 'turnsum';
+
+  const files = card ? card.files : facts.files.map((f) => ({ path: f.path, note: '' }));
+  const sumText = card ? card.summary : detSummary(key);
+  if (sumText) {
+    const s = document.createElement('div');
+    renderMarkdown(s, sumText);
+    box.appendChild(s);
+  }
+  if (files.length) {
+    const fl = document.createElement('div');
+    fl.className = 'tsum-files';
+    for (const f of files) {
+      const chip = document.createElement('span');
+      chip.className = 'fchip';
+      chip.title = `${f.path} — клик: открыть, ⌥клик: показать в Finder`;
+      const p = document.createElement('span');
+      p.textContent = '📄 ' + f.path.split('/').pop();
+      chip.appendChild(p);
+      if (f.note) {
+        const n = document.createElement('span');
+        n.className = 'fnote';
+        n.textContent = '· ' + f.note;
+        chip.appendChild(n);
+      }
+      chip.addEventListener('click', async (ev) => {
+        const res = await window.jarvis.openFile(chatSessionId, f.path, ev.altKey);
+        if (res && res.error) showToast(res.error);
+      });
+      fl.appendChild(chip);
+    }
+    box.appendChild(fl);
+  }
+  if (card && card.docs_digest) {
+    const det = document.createElement('details');
+    const sm = document.createElement('summary');
+    sm.textContent = 'Дока';
+    det.appendChild(sm);
+    const body = document.createElement('div');
+    renderMarkdown(body, card.docs_digest);
+    det.appendChild(body);
+    box.appendChild(det);
+  }
+  const cmds = card ? card.commands : facts.commands.slice(0, 3).join(' · ');
+  if (cmds) {
+    const c = document.createElement('div');
+    c.className = 'tsum-cmds';
+    c.textContent = cmds;
+    box.appendChild(c);
+  }
+
+  const foot = document.createElement('div');
+  foot.className = 'tsum-foot';
+  const exp = document.createElement('button');
+  exp.className = 'tsum-btn';
+  const wrapOf = () => box.closest('.turn');
+  const relabel = () => { exp.textContent = wrapOf()?.classList.contains('expanded') ? 'свернуть' : 'развернуть'; };
+  exp.addEventListener('click', () => { wrapOf()?.classList.toggle('expanded'); relabel(); });
+  foot.appendChild(exp);
+  if (!card && chatLlmOk) {
+    const gen = document.createElement('button');
+    gen.className = 'tsum-btn';
+    gen.textContent = 'Сводка';
+    gen.addEventListener('click', () => {
+      gen.textContent = 'готовлю…';
+      gen.disabled = true;
+      window.jarvis.summarizeTurn(chatSessionId, key);
+      // сбой/таймаут LLM события не даёт — возвращаем кнопку через 100с
+      // (2 попытки × 45с + запас); гейт по isConnected: если карточка успела
+      // прийти, applyCard заменил .turnsum целиком и кнопка вне DOM — не оживёт
+      setTimeout(() => {
+        if (gen.isConnected) { gen.textContent = 'Сводка'; gen.disabled = false; }
+      }, 100000);
+    });
+    foot.appendChild(gen);
+  }
+  box.appendChild(foot);
+  queueMicrotask(relabel);
+  return box;
+}
+
+// детерминированное саммари: сжатый хвост последней реплики агента в ходе
+function detSummary(key) {
+  const wrap = chatlogEl.querySelector(`.turn[data-key="${CSS.escape(key)}"]`);
+  const bubbles = wrap ? wrap.querySelectorAll('.msg.assistant .bubble') : [];
+  const last = bubbles.length ? bubbles[bubbles.length - 1].textContent.trim() : '';
+  return last.length > 220 ? last.slice(0, 220) + '…' : last;
+}
+
+/* Вставить/заменить карточку хода; card=null — детерминированная. */
+function applyCard(key, card) {
+  const wrap = chatlogEl.querySelector(`.turn[data-key="${CSS.escape(key)}"]`);
+  if (!wrap) return;
+  wrap.querySelector('.turnsum')?.remove();
+  wrap.insertBefore(buildCard(key, card), wrap.firstChild);
+  wrap.classList.add('done');
+}
+
 // оптимистично показанные ответы юзера, ждут «эха» из транскрипта (для дедупа)
 let pendingReplies = [];
 
@@ -671,8 +807,9 @@ function appendChatItems(items) {
       msg.className = 'msg user';
       msg.appendChild(userBubble(it.text));
       chatlogEl.appendChild(msg);
+      startTurn(String(it.ts)); // ответ агента на эту реплику — новый ход
     } else {
-      chatlogEl.appendChild(assistantMsg(it));
+      turnTarget().appendChild(assistantMsg(it));
     }
   }
   if (items.length && nearBottom) chatlogEl.scrollTop = chatlogEl.scrollHeight;
@@ -985,6 +1122,10 @@ async function openChat(sessionId, project) {
   updateChatChannelMark();
   chatlogEl.textContent = '';
   toolsGroup = null;
+  curTurn = null;
+  turnFacts.clear();
+  chatLlmOk = !!res.llm;
+  chatlogEl.classList.toggle('sum', summaryModeOn());
   pendingReplies = []; // оптимистичные реплики прошлого чата не тащим в новый
   replyEl.value = ''; // черновик прошлого чата не должен уехать в этот
   autoGrowReply();
@@ -996,6 +1137,19 @@ async function openChat(sessionId, project) {
   replyEl.focus();
   if (res.items.length) {
     appendChatItems(res.items);
+    const sess = state.find((x) => x.id === chatSessionId);
+    const lastCompleteKey = (res.spans || []).filter((s) => s.complete).map((s) => s.key).pop();
+    for (const sp of res.spans || []) {
+      if (sp.key === 'pre') continue; // частичный головной ход — только сырьё
+      turnFacts.set(sp.key, { files: sp.files || [], commands: sp.commands || [] });
+      if (!sp.complete) continue;
+      const card = (res.cards || {})[sp.key] || null;
+      // живой ход не схлопываем дет-карточкой: агент ещё пишет, стрим должен быть
+      // виден; карточка придёт событием chat:summary на Stop. Кэшированная
+      // LLM-карточка означает, что Stop по этому ходу уже был — её применяем.
+      if (!card && sp.key === lastCompleteKey && sess && sess.status === 'working') continue;
+      applyCard(sp.key, card);
+    }
     chatlogEl.scrollTop = chatlogEl.scrollHeight;
   } else {
     const empty = document.createElement('div');
@@ -1007,6 +1161,10 @@ async function openChat(sessionId, project) {
 
 window.jarvis.onChatAppend(({ sessionId, items }) => {
   if (view === 'chat' && sessionId === chatSessionId) appendChatItems(items);
+});
+
+window.jarvis.onChatSummary(({ sessionId, turnKey, card }) => {
+  if (view === 'chat' && sessionId === chatSessionId) applyCard(turnKey, card);
 });
 
 document.getElementById('chatBack').addEventListener('click', () => { closeBoard(); setView('list'); render(); });

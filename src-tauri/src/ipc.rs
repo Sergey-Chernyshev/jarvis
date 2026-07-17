@@ -1016,25 +1016,11 @@ pub async fn terminal_ping(app: AppHandle, session_id: String) -> Value {
     }
 }
 
-/// Ответ на AskUserQuestion/пикер клавишами в пану.
-/// `choice` = `{ answers: number[][] }` (answers[i] — опции 1-based вопроса i).
-/// Обратная совместимость: `{ indices, multiSelect }` → `answers = [indices]`.
-#[tauri::command]
-pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) -> Value {
-    let d = Daemon::get(&app);
-    let Some(s) = d.session(&session_id) else {
-        return err("Вопрос уже неактуален");
-    };
-    let Some(q) = s.question.clone() else {
-        return err("Вопрос уже неактуален");
-    };
-    let Some(pane) = s.tmux_pane else {
-        return err("Сессия вне tmux — ответь в терминале");
-    };
-    if !tmux::pane_alive(&pane).await {
-        return err("Пана сессии не отвечает");
-    }
-
+/// Разбор payload'а ответа на вопрос(ы): выборы по вопросам + свои тексты.
+/// Новый контракт `{ answers: number[][], texts?: (string|null)[] }`; обратная
+/// совместимость: `{ indices }` → `answers = [indices]`, без texts. Пустые и
+/// пробельные тексты приводятся к None — «нет кастома».
+fn parse_question_choice(choice: &Value) -> (Vec<Vec<u32>>, Vec<Option<String>>) {
     // парсинг массива выборов вопроса в Vec<u32> (1-based, >0)
     let parse_row = |v: &Value| -> Vec<u32> {
         v.as_array()
@@ -1058,13 +1044,53 @@ pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) 
         Vec::new()
     };
 
-    if answers.is_empty() || answers.iter().all(Vec::is_empty) {
+    let texts: Vec<Option<String>> = choice
+        .get("texts")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    (answers, texts)
+}
+
+/// Ответ на AskUserQuestion/пикер клавишами в пану.
+/// `choice` = `{ answers: number[][], texts?: (string|null)[] }` (answers[i] —
+/// опции 1-based вопроса i, texts[i] — свой ответ строкой «Other», только Claude).
+/// Обратная совместимость: `{ indices, multiSelect }` → `answers = [indices]`.
+#[tauri::command]
+pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) -> Value {
+    let d = Daemon::get(&app);
+    let Some(s) = d.session(&session_id) else {
+        return err("Вопрос уже неактуален");
+    };
+    let Some(q) = s.question.clone() else {
+        return err("Вопрос уже неактуален");
+    };
+    let Some(pane) = s.tmux_pane else {
+        return err("Сессия вне tmux — ответь в терминале");
+    };
+    if !tmux::pane_alive(&pane).await {
+        return err("Пана сессии не отвечает");
+    }
+
+    let (answers, texts) = parse_question_choice(&choice);
+
+    if answers.iter().all(Vec::is_empty) && texts.iter().all(Option::is_none) {
         return err("Пустой выбор");
     }
-    // валидация: на каждый вопрос — выбор в пределах его опций
+    // валидация: на каждый вопрос — выбор в пределах его опций либо свой текст
     for (i, item) in q.questions.iter().enumerate() {
         let row = answers.get(i).map(Vec::as_slice).unwrap_or(&[]);
-        if row.is_empty() {
+        if row.is_empty() && texts.get(i).map_or(true, Option::is_none) {
             return err("Не на все вопросы выбран ответ");
         }
         let max = item.options.len() as u32;
@@ -1074,7 +1100,11 @@ pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) 
     }
 
     let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
-    match tmux::answer_question(&pane, agent, &q, &answers).await {
+    // в codex-пикере строки «Other» нет — свой текст доставить некуда
+    if agent == crate::backend::Agent::Codex && texts.iter().any(Option::is_some) {
+        return err("Свой ответ недоступен в codex-сессии — выбери вариант");
+    }
+    match tmux::answer_question(&pane, agent, &q, &answers, &texts).await {
         Ok(()) => {
             // у хук-вопроса карточку закроет post-tool; у экранного — событий
             // нет, снимаем сами (детектор подтвердит по idle-экрану)
@@ -2297,5 +2327,49 @@ mod tests {
     fn conflict_skips_broken_bindings() {
         let bindings = vec![b(HkAction::Mute, "Bogus+Nope")];
         assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+M"), None);
+    }
+
+    // --- контракт question_answer (parse_question_choice) ---
+
+    #[test]
+    fn choice_new_contract_answers_and_texts() {
+        let (answers, texts) = parse_question_choice(&json!({
+            "answers": [[2], [], [1, 3]],
+            "texts": [null, "свой ответ", null],
+        }));
+        assert_eq!(answers, vec![vec![2], vec![], vec![1, 3]]);
+        assert_eq!(texts, vec![None, Some("свой ответ".to_string()), None]);
+    }
+
+    #[test]
+    fn choice_back_compat_answers_without_texts() {
+        let (answers, texts) = parse_question_choice(&json!({ "answers": [[1], [2]] }));
+        assert_eq!(answers, vec![vec![1], vec![2]]);
+        assert!(texts.is_empty());
+    }
+
+    #[test]
+    fn choice_back_compat_legacy_indices() {
+        // старый тост-контракт `{ indices }` — один вопрос, без кастома
+        let (answers, texts) = parse_question_choice(&json!({ "indices": [1, 3] }));
+        assert_eq!(answers, vec![vec![1, 3]]);
+        assert!(texts.is_empty());
+    }
+
+    #[test]
+    fn choice_texts_normalize_blank_to_none() {
+        // пустые/пробельные строки — не кастом; края текста подрезаются
+        let (_, texts) = parse_question_choice(&json!({
+            "answers": [[1], [1], [1]],
+            "texts": ["", "   ", "  да  "],
+        }));
+        assert_eq!(texts, vec![None, None, Some("да".to_string())]);
+    }
+
+    #[test]
+    fn choice_garbage_is_empty() {
+        let (answers, texts) = parse_question_choice(&json!({ "bogus": true }));
+        assert!(answers.is_empty());
+        assert!(texts.is_empty());
     }
 }

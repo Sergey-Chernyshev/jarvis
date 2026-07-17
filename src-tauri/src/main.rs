@@ -16,6 +16,7 @@ mod commands_catalog;
 mod convo; // голосовой разговор: снапшот → Haiku-план → скилы → голосовой ответ (п/п-2)
 mod coord; // координация голоса: пока юзер диктует/говорит — уведомления ждут, wake подавлен
 mod daemon;
+mod git; // ветка сессии из .git/HEAD — фоллбэк, когда её нет в транскрипте (#24)
 mod history;
 mod install;
 mod ipc;

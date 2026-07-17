@@ -1436,7 +1436,8 @@ impl Daemon {
 
             let entries = transcript::read_recent_entries(std::path::Path::new(&tr), 64 * 1024);
 
-            // ветка: Claude — gitBranch в каждой записи; в rollout Codex её нет.
+            // ветка: Claude — gitBranch в каждой записи; в rollout Codex её нет —
+            // фоллбэк для обоих: .git/HEAD по cwd сессии (#24).
             let branch = if is_codex {
                 None
             } else {
@@ -1446,7 +1447,12 @@ impl Daemon {
                         .filter(|b| !b.is_empty() && *b != "HEAD")
                         .map(String::from)
                 })
-            };
+            }
+            .or_else(|| {
+                snap.cwd
+                    .as_deref()
+                    .and_then(|cwd| crate::git::branch_of(std::path::Path::new(cwd)))
+            });
             // заголовок: Claude — type:ai-title/summary; Codex — первая user-реплика.
             let raw_title = if is_codex {
                 crate::backend::codex_transcript::extract_title(&entries)

@@ -42,8 +42,8 @@ mod tray;
 mod usage;
 mod util;
 mod voice;
-mod wakeword;
-mod windows; // инкремент 10: wake-word детектор + шов верификации
+mod wakeword; // wake-word детектор + шов верификации
+mod windows;
 
 use std::io;
 use std::sync::Arc;

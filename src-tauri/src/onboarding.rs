@@ -387,6 +387,7 @@ pub fn onboarding_run(app: AppHandle, proxy: Option<String>) -> InstallJobSnapsh
         let mut service = Map::new();
         service.insert("proxy".into(), Value::String(proxy.trim().to_string()));
         d.settings.set_block("service", service);
+        d.settings.remove_top("proxy");
     }
     std::thread::spawn(move || {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

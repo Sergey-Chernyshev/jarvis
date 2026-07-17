@@ -256,6 +256,15 @@ impl Store {
         out
     }
 
+    /// Удалить верхнеуровневый ключ. Нужен онбордингу: явная запись прокси
+    /// убирает легаси `proxy`, иначе пустой `service.proxy` провалится в него
+    /// и очищенный пользователем прокси «воскреснет».
+    pub fn remove_top(&self, key: &str) {
+        self.update(|m| {
+            m.remove(key);
+        });
+    }
+
     /// Установить верхнеуровневый ключ (merge поверх остального).
     pub fn set_top(&self, key: &str, value: Value) {
         let mut root = Map::new();
@@ -404,6 +413,26 @@ mod persistence_tests {
 
     fn store_at(dir: &Path) -> Store {
         Store::with_path(dir.join("settings.json"))
+    }
+
+    #[test]
+    fn remove_top_kills_legacy_proxy_resurrection() {
+        // Сценарий бага: онбординг очищает прокси (service.proxy=""), но
+        // остался легаси верхнеуровневый proxy — proxy() «воскрешал» его.
+        let dir = temp_dir("remove-top");
+        let store = store_at(&dir);
+        store.set_top("proxy", Value::from("http://legacy:8080"));
+        let mut service = Map::new();
+        service.insert("proxy".into(), Value::from(""));
+        store.set_block("service", service);
+        assert_eq!(store.proxy().as_deref(), Some("http://legacy:8080"));
+
+        store.remove_top("proxy");
+        assert_eq!(store.proxy(), None, "легаси-ключ удалён — прокси очищен");
+        assert!(
+            store.load().get("proxy").is_none(),
+            "ключ удалён и из файла, не только замаскирован"
+        );
     }
 
     #[test]

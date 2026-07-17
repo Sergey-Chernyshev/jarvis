@@ -718,22 +718,19 @@ function buildCard(key, card) {
     }
     box.appendChild(fl);
   }
-  if (card && card.docs_digest) {
+  // финальный ответ агента — под сворачиваемым блоком (фокус на разборе,
+  // дословный ответ в один клик). Только у LLM-карточки с непустым reply.
+  if (card && card.reply) {
     const det = document.createElement('details');
+    det.className = 'tsum-reply';
     const sm = document.createElement('summary');
-    sm.textContent = 'Дока';
+    sm.textContent = '💬 Ответ агента';
     det.appendChild(sm);
     const body = document.createElement('div');
-    renderMarkdown(body, card.docs_digest);
+    body.className = 'tsum-reply-body';
+    renderMarkdown(body, card.reply);
     det.appendChild(body);
     box.appendChild(det);
-  }
-  const cmds = card ? card.commands : facts.commands.slice(0, 3).join(' · ');
-  if (cmds) {
-    const c = document.createElement('div');
-    c.className = 'tsum-cmds';
-    c.textContent = cmds;
-    box.appendChild(c);
   }
 
   const foot = document.createElement('div');

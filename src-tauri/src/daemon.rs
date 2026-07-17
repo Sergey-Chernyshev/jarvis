@@ -1335,7 +1335,8 @@ impl Daemon {
             }
             let prompt = crate::turns::build_prompt(&t.user_prompt, &t.facts);
             for _attempt in 0..2 {
-                let Some(out) = claude_bin::run_service_llm(&prompt, Duration::from_secs(45)).await
+                // 60с: разбор длиннее прежней выжимки — даём модели дописать
+                let Some(out) = claude_bin::run_service_llm(&prompt, Duration::from_secs(60)).await
                 else {
                     continue;
                 };

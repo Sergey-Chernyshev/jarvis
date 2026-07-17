@@ -22,6 +22,20 @@ test('session chat has the turn-summary surface on top of the transcript feed', 
   assert.match(renderer, /onChatSummary\(/);
 });
 
+// Карточка хода — ИИ-разбор результатов, а не список действий
+// (спека 2026-07-18-turn-ai-analysis-redesign): финальный ответ агента под
+// сворачиваемым блоком; строка команд и tool-лог из карточки убраны.
+test('turn card is an AI analysis with a collapsible agent reply, no command line', () => {
+  // сворачиваемый «Ответ агента» из card.reply
+  assert.match(renderer, /card\.reply/);
+  assert.match(renderer, /Ответ агента/);
+  assert.match(renderer, /tsum-reply/);
+  // фактовые остатки старой карточки в UI не рендерятся
+  assert.doesNotMatch(renderer, /card\.docs_digest/);
+  assert.doesNotMatch(renderer, /card\.commands/);
+  assert.doesNotMatch(renderer, /\btsum-cmds\b/);
+});
+
 // Слой «Документы», инкремент 2 (спека 2026-07-18 §3.1/§3.3): вьюер документа
 // в панели — слайд-овер, безопасный markdown-рендер, открытие с файл-чипа.
 test('doc viewer surface exists on top of the summary cards', () => {

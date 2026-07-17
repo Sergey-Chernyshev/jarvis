@@ -125,6 +125,8 @@ fn main() {
             ipc::chat_open,
             ipc::chat_summarize,
             ipc::file_open,
+            ipc::file_read,
+            ipc::url_open,
             ipc::chat_close,
             ipc::commands_get,
             ipc::app_meta,

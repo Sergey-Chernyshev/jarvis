@@ -333,6 +333,10 @@ pub struct TurnCard {
 pub struct CardFile {
     pub path: String,
     pub note: String,
+    /// "created"|"edited" — из фактов при валидации (LLM его не выдаёт);
+    /// поле опциональное: у карточек, закэшированных до него, — пустая строка,
+    /// UI тогда фоллбэчит на факты хода (PROMPT_VERSION не трогаем).
+    pub kind: String,
 }
 
 /// Выход LLM → карточка: срез {..}, ремонт усечённого JSON, валидация
@@ -372,6 +376,14 @@ pub fn parse_card(out: &str, facts: &TurnFacts) -> Option<TurnCard> {
         .retain(|f| allowed.contains(f.path.as_str()) && seen.insert(f.path.clone()));
     for f in &mut card.files {
         f.note = ellipsize(&one_line(&f.note), 80);
+        // created|edited берём из фактов, не из LLM: бейджи UI (§3.3 спеки
+        // 2026-07-18) должны опираться на детерминированный признак
+        f.kind = facts
+            .files
+            .iter()
+            .find(|x| x.path == f.path)
+            .map(|x| x.kind.clone())
+            .unwrap_or_default();
     }
     card.summary = ellipsize(&one_line(&card.summary), 600);
     // docs_digest без one_line намеренно: это многострочные пункты дайджеста.
@@ -611,6 +623,18 @@ mod tests {
         // модель оборвалась посреди строки — докручиваем "}
         let out = r#"{"summary": "Полдела сделано"#;
         assert_eq!(parse_card(out, &facts_with(&[])).unwrap().summary, "Полдела сделано");
+    }
+
+    #[test]
+    fn parse_card_fills_kind_from_facts() {
+        // kind в карточке — детерминированный признак из фактов, не выдумка LLM
+        let mut facts = TurnFacts::default();
+        push_file(&mut facts, "docs/a.md", "created");
+        push_file(&mut facts, "b.rs", "edited");
+        let out = r#"{"summary": "Ок.", "files": [{"path": "docs/a.md", "note": "x", "kind": "edited"}, {"path": "b.rs", "note": "y"}], "docs_digest": "", "commands": ""}"#;
+        let c = parse_card(out, &facts).unwrap();
+        assert_eq!(c.files[0].kind, "created", "kind из фактов перебивает выдачу LLM");
+        assert_eq!(c.files[1].kind, "edited");
     }
 
     #[test]

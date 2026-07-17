@@ -673,7 +673,12 @@ function buildCard(key, card) {
   const box = document.createElement('div');
   box.className = 'turnsum';
 
-  const files = card ? card.files : facts.files.map((f) => ({ path: f.path, note: '' }));
+  // kind (created|edited) — детерминированный признак из фактов; у LLM-карточек
+  // из старого кэша поля может не быть — фоллбэк на факты хода по пути
+  const kindOf = (f) => f.kind || (facts.files.find((x) => x.path === f.path) || {}).kind || '';
+  let files = card ? card.files : facts.files.map((f) => ({ path: f.path, note: '', kind: f.kind }));
+  // doc-файлы (docs/** или *.md) — первыми: главный артефакт хода (§3.3)
+  files = [...files.filter((f) => JarvisMarkdown.isDocPath(f.path)), ...files.filter((f) => !JarvisMarkdown.isDocPath(f.path))];
   const sumText = card ? card.summary : detSummary(key);
   if (sumText) {
     const s = document.createElement('div');
@@ -684,20 +689,29 @@ function buildCard(key, card) {
     const fl = document.createElement('div');
     fl.className = 'tsum-files';
     for (const f of files) {
+      const isDoc = JarvisMarkdown.isDocPath(f.path);
       const chip = document.createElement('span');
       chip.className = 'fchip';
-      chip.title = `${f.path} — клик: открыть, ⌥клик: показать в Finder`;
+      chip.title = `${f.path} — клик: посмотреть, ⌥клик: показать в Finder`;
       const p = document.createElement('span');
-      p.textContent = '📄 ' + f.path.split('/').pop();
+      p.textContent = (isDoc ? '📄 ' : '') + f.path.split('/').pop();
       chip.appendChild(p);
+      if (isDoc && kindOf(f)) { // бейдж «создан/изменён» — только на доках
+        const b = document.createElement('span');
+        b.className = 'fbadge';
+        b.textContent = kindOf(f) === 'created' ? 'создан' : 'изменён';
+        chip.appendChild(b);
+      }
       if (f.note) {
         const n = document.createElement('span');
         n.className = 'fnote';
         n.textContent = '· ' + f.note;
         chip.appendChild(n);
       }
+      // клик — вьюер в панели; ⌥ — Finder (открытие в редакторе — из вьюера)
       chip.addEventListener('click', async (ev) => {
-        const res = await window.jarvis.openFile(chatSessionId, f.path, ev.altKey);
+        if (!ev.altKey) { openDocViewer(f.path); return; }
+        const res = await window.jarvis.openFile(chatSessionId, f.path, true);
         if (res && res.error) showToast(res.error);
       });
       fl.appendChild(chip);
@@ -724,6 +738,16 @@ function buildCard(key, card) {
 
   const foot = document.createElement('div');
   foot.className = 'tsum-foot';
+  // ход трогал док → CTA «Открыть документ» (первый док) — сценарий
+  // «отревьюить, что агент написал» (§3.3)
+  const firstDoc = files.find((f) => JarvisMarkdown.isDocPath(f.path));
+  if (firstDoc) {
+    const docBtn = document.createElement('button');
+    docBtn.className = 'tsum-btn';
+    docBtn.textContent = 'Открыть документ';
+    docBtn.addEventListener('click', () => openDocViewer(firstDoc.path));
+    foot.appendChild(docBtn);
+  }
   const exp = document.createElement('button');
   exp.className = 'tsum-btn';
   const wrapOf = () => box.closest('.turn');
@@ -1119,6 +1143,7 @@ async function openChat(sessionId, project) {
   boardExpanded = 0;
   closeBoard(); // доска прошлого чата не должна оставаться открытой
   closeVarPanel(); // и слайд-овер вариантов прошлого чата
+  closeDocViewer(); // и вьюер документов
   updateChatChannelMark();
   chatlogEl.textContent = '';
   toolsGroup = null;
@@ -1335,6 +1360,71 @@ window.addEventListener('keydown', (e) => {
     if (n <= qData.options.length) { stop(); qSel = n - 1; activateQ(); }
   }
 }, true);
+
+/* ---------- вьюер документов (спека 2026-07-18 §3.1) ----------
+ * Слайд-овер поверх чата по образцу доски задач. Тело: .md/.markdown —
+ * рендер markdown.js (экранированная HTML-строка), остальное — <pre>.
+ * Открывается кликом по файл-чипу карточки сводки и кнопкой «Открыть документ».
+ * Инкремент 3 добавит сюда табы «Изменения/Документ» — держим тело отдельным
+ * контейнером, чтобы табы легли рядом без переделки. */
+
+const docWrap = document.getElementById('docWrap');
+const docTitleEl = document.getElementById('docTitle');
+const docBodyEl = document.getElementById('docBody');
+const docTruncEl = document.getElementById('docTrunc');
+let docOpen = false;
+let docPath = null; // путь открытого файла — для «Редактор»/«Finder»
+
+async function openDocViewer(path) {
+  const res = await window.jarvis.readFile(chatSessionId, path);
+  if (!res || !res.ok) { showToast((res && res.error) || 'Не удалось открыть файл'); return; }
+  docPath = path;
+  docTitleEl.textContent = res.name || path.split('/').pop();
+  docTitleEl.title = path;
+  docTruncEl.hidden = !res.truncated;
+  docBodyEl.textContent = '';
+  if (JarvisMarkdown.isMarkdownPath(path)) {
+    // единственный innerHTML в файле: markdown.js полностью экранирует
+    // недоверенное содержимое (см. ui/markdown.test.mjs), сырой HTML не пройдёт
+    docBodyEl.innerHTML = JarvisMarkdown.render(res.content);
+  } else {
+    const pre = document.createElement('pre');
+    pre.textContent = res.content;
+    docBodyEl.appendChild(pre);
+  }
+  docBodyEl.scrollTop = 0;
+  docOpen = true;
+  docWrap.hidden = false;
+}
+
+function closeDocViewer() {
+  docOpen = false;
+  docWrap.hidden = true;
+  docPath = null;
+}
+
+document.getElementById('docClose').addEventListener('click', closeDocViewer);
+document.getElementById('docScrim').addEventListener('click', closeDocViewer);
+document.getElementById('docEdit').addEventListener('click', async () => {
+  if (!docPath) return;
+  const res = await window.jarvis.openFile(chatSessionId, docPath, false);
+  if (res && res.error) showToast(res.error);
+});
+document.getElementById('docFinder').addEventListener('click', async () => {
+  if (!docPath) return;
+  const res = await window.jarvis.openFile(chatSessionId, docPath, true);
+  if (res && res.error) showToast(res.error);
+});
+// Esc закрывает вьюер раньше «назад» чата (capture, как доска/варианты)
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && docOpen) { e.preventDefault(); e.stopImmediatePropagation(); closeDocViewer(); }
+}, true);
+// внешние http(s)-ссылки дока: настоящих href нет (навигация вебвью запрещена),
+// клик по .md-link уходит в системный браузер через ipc
+docBodyEl.addEventListener('click', (e) => {
+  const a = e.target.closest('a.md-link[data-href]');
+  if (a) { e.preventDefault(); window.jarvis.openUrl(a.dataset.href); }
+});
 
 // иконка статуса задачи (через DOM — без innerHTML)
 function tpStatusIcon(status) {

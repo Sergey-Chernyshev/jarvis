@@ -22,6 +22,18 @@ test('session chat has the turn-summary surface on top of the transcript feed', 
   assert.match(renderer, /onChatSummary\(/);
 });
 
+// Слой «Документы», инкремент 2 (спека 2026-07-18 §3.1/§3.3): вьюер документа
+// в панели — слайд-овер, безопасный markdown-рендер, открытие с файл-чипа.
+test('doc viewer surface exists on top of the summary cards', () => {
+  assert.match(html, /id="docWrap"/);
+  assert.match(html, /id="docBody"/);
+  assert.match(html, /markdown\.js/);
+
+  assert.match(renderer, /\bfunction openDocViewer\(/);
+  assert.match(renderer, /JarvisMarkdown\.render\(/);
+  assert.match(renderer, /JarvisMarkdown\.isDocPath\(/); // doc-чипы первыми + CTA
+});
+
 // Легаси-заготовка «саммари сессии» (chatModeSeg/chatSummaryEl/setChatMode)
 // не возвращается: v1 её заменил тумблером сводок, а не воскресил.
 test('legacy summary-mode stub stays absent', () => {

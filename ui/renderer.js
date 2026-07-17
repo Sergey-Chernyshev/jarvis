@@ -960,7 +960,6 @@ async function openChat(sessionId, project) {
   boardExpanded = 0;
   closeBoard(); // доска прошлого чата не должна оставаться открытой
   closeVarPanel(); // и слайд-овер вариантов прошлого чата
-  setChatMode('dialog'); // всегда открываем чат в режиме диалога
   updateChatChannelMark();
   chatlogEl.textContent = '';
   toolsGroup = null;
@@ -1287,27 +1286,6 @@ setInterval(() => {
     renderBoardPanel(curSession(), b);
   }
 }, 1000);
-
-/* ---------- заготовка: режим чата Диалог/Саммари (Часть 3) ----------
- * Пока ни к чему не привязано — просто визуальный переключатель и плейсхолдер
- * под будущий саммаризированный вид сессии. */
-const chatModeSeg = document.getElementById('chatModeSeg');
-const chatSummaryEl = document.getElementById('chatSummary');
-let chatMode = 'dialog';
-
-function setChatMode(m) {
-  chatMode = m;
-  for (const b of chatModeSeg.querySelectorAll('.chatmode-btn')) {
-    b.classList.toggle('active', b.dataset.m === m);
-  }
-  chatlogEl.hidden = m !== 'dialog';
-  chatSummaryEl.hidden = m !== 'summary';
-}
-
-chatModeSeg.addEventListener('click', (e) => {
-  const m = e.target && e.target.dataset ? e.target.dataset.m : null;
-  if (m) setChatMode(m);
-});
 
 /* ---------- палитра команд: / в поле ответа ---------- */
 

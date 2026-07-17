@@ -29,13 +29,23 @@ pub struct Dictation {
 
 impl Dictation {
     pub fn new(service: Arc<SttService>, hub: Arc<AudioHub>, app: tauri::AppHandle) -> Arc<Self> {
-        Arc::new(Dictation { service, hub, capturing: Mutex::new(None), app: Some(app) })
+        Arc::new(Dictation {
+            service,
+            hub,
+            capturing: Mutex::new(None),
+            app: Some(app),
+        })
     }
 
     /// Конструктор для тестов: без AppHandle (HUD/история — no-op).
     #[cfg(test)]
     fn new_headless(service: Arc<SttService>, hub: Arc<AudioHub>) -> Arc<Self> {
-        Arc::new(Dictation { service, hub, capturing: Mutex::new(None), app: None })
+        Arc::new(Dictation {
+            service,
+            hub,
+            capturing: Mutex::new(None),
+            app: None,
+        })
     }
 
     /// Daemon для HUD/истории (None, если нет AppHandle — например в тестах).
@@ -61,8 +71,8 @@ impl Dictation {
             // Захват через общий хаб (без преролла — PTT пишет с момента нажатия).
             *guard = Some((self.hub.open_capture(false), std::time::Instant::now()));
         } // лок захвата отпущен ДО прогрева (spawn питона его не держит)
-        // Греем STT-модель ПОКА человек говорит: к отпусканию клавиши она уже
-        // загружена (прячет cold-start после idle-stop). Неблокирующий вызов.
+          // Греем STT-модель ПОКА человек говорит: к отпусканию клавиши она уже
+          // загружена (прячет cold-start после idle-stop). Неблокирующий вызов.
         self.service.warm();
         // видимая фаза «Слушаю…» в тосте (PTT — без кольца отсчёта, secs=0)
         if let Some(d) = self.daemon() {
@@ -128,7 +138,12 @@ impl Dictation {
                 Err(e) => {
                     crate::log::line(&format!("[dictation] finish: {e}"));
                     if let Some(d) = &daemon {
-                        crate::route::hud::emit(d, crate::route::hud::Phase::Error { msg: "захват не удался".into() });
+                        crate::route::hud::emit(
+                            d,
+                            crate::route::hud::Phase::Error {
+                                msg: "захват не удался".into(),
+                            },
+                        );
                     }
                     return;
                 }
@@ -146,7 +161,9 @@ impl Dictation {
             // Отключаемо настройкой stt.noiseGate («шумодав»).
             let noise_gate = daemon
                 .as_ref()
-                .map(|d| crate::stt::config::SttConfig::from_settings(&d.settings.load()).noise_gate)
+                .map(|d| {
+                    crate::stt::config::SttConfig::from_settings(&d.settings.load()).noise_gate
+                })
                 .unwrap_or(true);
             if noise_gate && !crate::stt::vad_silero::has_speech(&pcm) {
                 crate::log::line("[dictation] VAD: речи нет — пропуск (фон/шум/тишина)");
@@ -163,7 +180,12 @@ impl Dictation {
                 Err(e) => {
                     crate::log::line(&format!("[dictation] transcribe: {e}"));
                     if let Some(d) = &daemon {
-                        crate::route::hud::emit(d, crate::route::hud::Phase::Error { msg: "распознавание не удалось".into() });
+                        crate::route::hud::emit(
+                            d,
+                            crate::route::hud::Phase::Error {
+                                msg: "распознавание не удалось".into(),
+                            },
+                        );
                     }
                     return;
                 }
@@ -182,8 +204,8 @@ impl Dictation {
                 return;
             }
             crate::log::line(&format!(
-                "[dictation] транскрипция: «{}»",
-                crate::util::ellipsize(&text, 80)
+                "[dictation] транскрипция готова: chars={}",
+                text.chars().count()
             ));
             // ── умные промпты: если включён «умный режим» — один Haiku-проход САМ
             // классифицирует и преобразует надиктованное (коммит/промпт/чистовик).
@@ -198,7 +220,9 @@ impl Dictation {
                         Some(raw) => {
                             let r = crate::stt::prompts::parse_smart_result(&raw, &text);
                             if let Some(a) = &r.applied {
-                                crate::log::line(&format!("[dictation] умный промпт применён: {a}"));
+                                crate::log::line(&format!(
+                                    "[dictation] умный промпт применён: {a}"
+                                ));
                             }
                             (r.text, r.applied)
                         }
@@ -210,7 +234,9 @@ impl Dictation {
 
             // история «что я говорил» (с пометкой стиля)
             if let Some(d) = &daemon {
-                let id = d.transcripts.push_styled(&text, "dictation", applied.as_deref(), true);
+                let id = d
+                    .transcripts
+                    .push_styled(&text, "dictation", applied.as_deref(), true);
                 // сохранить СЖАТОЕ аудио диктовки → можно перегенерировать
                 // распознавание, если анализ дал ошибку/мусор. Best-effort.
                 if id != 0 {
@@ -221,7 +247,8 @@ impl Dictation {
             }
 
             // ── insert_text() → ⌘V ──────────────────────────────────────────
-            let inserted = match super::insert::insert_text(&text) {
+            let app = daemon.as_ref().map(|d| &d.app);
+            let inserted = match super::insert::insert_text(&text, app) {
                 Ok(v) => v == super::insert::InsertVerdict::Confirmed,
                 Err(e) => {
                     crate::log::line(&format!("[dictation] insert_text: {e}"));
@@ -230,7 +257,11 @@ impl Dictation {
             };
             crate::log::line(&format!(
                 "[dictation] вставка {}",
-                if inserted { "подтверждена (тост 2с)" } else { "не подтверждена (тост 5с)" }
+                if inserted {
+                    "подтверждена (тост 2с)"
+                } else {
+                    "не подтверждена (тост 5с)"
+                }
             ));
             // Авто-копия в буфер (остаётся поверх restore) — вставить ещё раз вручную.
             if let Err(e) = super::insert::copy_to_clipboard(&text) {
@@ -241,7 +272,10 @@ impl Dictation {
             if let Some(d) = &daemon {
                 crate::route::hud::emit(
                     d,
-                    crate::route::hud::Phase::Heard { text: text.clone(), inserted },
+                    crate::route::hud::Phase::Heard {
+                        text: text.clone(),
+                        inserted,
+                    },
                 );
             }
         });
@@ -265,9 +299,7 @@ impl Dictation {
                 }
             };
             match guard.as_ref() {
-                Some((_, started)) if started.elapsed() >= max => {
-                    guard.take().map(|(s, _)| s)
-                }
+                Some((_, started)) if started.elapsed() >= max => guard.take().map(|(s, _)| s),
                 _ => None,
             }
         }; // лок захвата отпущен ДО finish (Drop сессии) — без взаимоблокировки

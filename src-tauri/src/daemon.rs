@@ -24,6 +24,44 @@ use crate::model::{
 use crate::util::*;
 use crate::{claude_bin, ru, settings, tail, tmux, transcript, windows};
 
+/// Claude emits both actionable and informational `Notification` events.
+/// Older releases did not include `notification_type`, so a non-empty message
+/// remains the compatibility signal only when the typed contract is absent.
+fn claude_notification_requires_attention(payload: &serde_json::Map<String, Value>) -> bool {
+    match payload.get("notification_type").and_then(Value::as_str) {
+        Some("permission_prompt" | "idle_prompt" | "elicitation_dialog") => true,
+        Some(_) => false,
+        None => payload
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| !message.trim().is_empty()),
+    }
+}
+
+/// Codex Stop carries the final assistant reply directly. Keep it in the
+/// in-memory effect path instead of persisting it in Session/state.json.
+fn stop_hook_reply(
+    agent: crate::backend::Agent,
+    payload: &serde_json::Map<String, Value>,
+) -> Option<String> {
+    if agent != crate::backend::Agent::Codex {
+        return None;
+    }
+    payload
+        .get("last_assistant_message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|reply| !reply.is_empty())
+        .map(String::from)
+}
+
+fn prefer_final_reply(
+    hook_reply: Option<String>,
+    transcript_fallback: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    hook_reply.or_else(transcript_fallback)
+}
+
 /// Строит массив мета-сегментов карточки тоста на основе настроек `notify.content`
 /// и полей сессии. Каждый сегмент: `{ "kind": "br"|"md"|"ef"|"plain", "text": "..." }`.
 /// Чистая функция: тестируема без демона.
@@ -156,35 +194,59 @@ pub struct Daemon {
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
 enum Effect {
-    ResolveTmuxName { sid: String, pane: String },
-    ResolveGuiApp { sid: String, pid: i64 },
-    RefreshMeta { sid: String },
-    RefreshTasks { sid: String },
+    ResolveTmuxName {
+        sid: String,
+        pane: String,
+    },
+    ResolveGuiApp {
+        sid: String,
+        pid: i64,
+    },
+    RefreshMeta {
+        sid: String,
+    },
+    RefreshTasks {
+        sid: String,
+    },
     /// Выжимка «над чем идёт работа» для строки списка (на промт юзера).
-    GenSummary { sid: String },
+    GenSummary {
+        sid: String,
+    },
     /// Уведомление «спрашивает» (карточка вопроса).
-    NotifyWaiting { title: String, body: String, sid: String },
+    NotifyWaiting {
+        title: String,
+        body: String,
+        sid: String,
+    },
     /// Снять карточку тоста по id (вопрос ответили → убрать «липкую» карточку).
-    RemoveToast { id: String },
+    RemoveToast {
+        id: String,
+    },
     /// Завершение: одна ИИ-выжимка результата — и в строку списка, и в тост.
-    DoneSummary { sid: String },
+    DoneSummary {
+        sid: String,
+        hook_reply: Option<String>,
+    },
     /// Ручной /compact завершился (session-start, source=compact) — явный тост.
-    NotifyCompact { title: String, sid: String },
-    StopFailure { sid: String, payload: Value },
+    NotifyCompact {
+        title: String,
+        sid: String,
+    },
+    StopFailure {
+        sid: String,
+        payload: Value,
+    },
 }
 
 impl Daemon {
     pub fn new(app: AppHandle) -> Self {
         // голос строим до литерала: cfg читаем из тех же settings.json
         let settings = settings::Store::new();
-        crate::metrics::set_enabled(settings.bool("diagnostics")); // режим логов = метрики
+        crate::metrics::set_enabled(settings.bool("diagnostics"));
+        crate::log::set_enabled(settings.bool("diagnostics"));
         let quiet0 = settings.bool("quietMode"); // читаем до move в литерал
         let vcfg = crate::voice::config::VoiceConfig::from_settings(&settings.load());
-        let voice = crate::voice::Voice::new(
-            &vcfg,
-            jarvis_dir().join("silero"),
-            app.clone(),
-        );
+        let voice = crate::voice::Voice::new(&vcfg, jarvis_dir().join("silero"), app.clone());
         // прогрев движка на старте — первая реальная реплика не ловит холодный старт
         {
             let v = voice.clone();
@@ -197,10 +259,16 @@ impl Daemon {
         let stt = crate::stt::SttService::new(stt_cfg);
         // Единый владелец захвата; mute восстанавливаем из настроек.
         let audio = crate::stt::hub::AudioHub::new(audio_device, Some(app.clone()));
-        if root.get("stt").and_then(|s| s.get("mute")).and_then(|v| v.as_bool()).unwrap_or(false) {
+        if root
+            .get("stt")
+            .and_then(|s| s.get("mute"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             audio.set_muted(true);
         }
-        let dictation = crate::stt::dictation::Dictation::new(stt.clone(), audio.clone(), app.clone());
+        let dictation =
+            crate::stt::dictation::Dictation::new(stt.clone(), audio.clone(), app.clone());
         // Wake-word: действие = STT-захват(преролл)→агент; verifier — NullVerifier (v1).
         let wake_cfg = crate::wakeword::config::WakeConfig::from_settings(&root);
         let verify_cfg = crate::wakeword::config::VerifyConfig::from_settings(&root);
@@ -214,7 +282,13 @@ impl Daemon {
             let v = voice.clone();
             std::sync::Arc::new(move || i.is_active() || v.is_speaking())
         };
-        let wake = crate::wakeword::WakeWord::new(audio.clone(), wake_cfg, verify_cfg, wake_action, wake_gate);
+        let wake = crate::wakeword::WakeWord::new(
+            audio.clone(),
+            wake_cfg,
+            verify_cfg,
+            wake_action,
+            wake_gate,
+        );
         Self {
             app,
             sessions: Mutex::new(HashMap::new()),
@@ -230,7 +304,9 @@ impl Daemon {
             hk_suspend_gen: AtomicU64::new(0),
             hk_select_was_on: AtomicBool::new(false),
             effort_levels: Mutex::new(
-                ["low", "medium", "high", "xhigh", "max"].map(String::from).to_vec(),
+                ["low", "medium", "high", "xhigh", "max"]
+                    .map(String::from)
+                    .to_vec(),
             ),
             toast_seq: AtomicU64::new(0),
             toast_ready: AtomicBool::new(false),
@@ -307,7 +383,10 @@ impl Daemon {
         let arr: Vec<Session> = self.sessions.lock().unwrap().values().cloned().collect();
         let _ = std::fs::create_dir_all(jarvis_dir());
         if let Ok(json) = serde_json::to_string(&arr) {
-            let _ = std::fs::write(Self::state_file(), json + "\n");
+            let _ = crate::stt::transcripts::write_private_atomic(
+                &Self::state_file(),
+                (json + "\n").as_bytes(),
+            );
         }
     }
 
@@ -324,8 +403,12 @@ impl Daemon {
     }
 
     pub fn restore_state(&self) {
-        let Ok(raw) = std::fs::read_to_string(Self::state_file()) else { return };
-        let Ok(arr) = serde_json::from_str::<Vec<Session>>(&raw) else { return };
+        let Ok(raw) = std::fs::read_to_string(Self::state_file()) else {
+            return;
+        };
+        let Ok(arr) = serde_json::from_str::<Vec<Session>>(&raw) else {
+            return;
+        };
         let cutoff = now_ms() - 24 * 3600 * 1000; // суточный мусор не тащим
         let mut sessions = self.sessions.lock().unwrap();
         for mut s in arr {
@@ -360,7 +443,9 @@ impl Daemon {
 
     async fn pump_translations(self: std::sync::Arc<Self>) {
         loop {
-            let Some(batch) = self.translator.take_batch() else { return };
+            let Some(batch) = self.translator.take_batch() else {
+                return;
+            };
             let prompt = ru::Translator::prompt_for(&batch);
             let out = claude_bin::run_service_llm(&prompt, Duration::from_secs(60)).await;
             let changed = self.translator.finish_batch(&batch, out.as_deref());
@@ -422,7 +507,10 @@ impl Daemon {
     pub fn set_quiet(self: &std::sync::Arc<Self>, on: bool) {
         self.quiet.store(on, Ordering::SeqCst);
         self.settings.set_top("quietMode", Value::Bool(on));
-        crate::log::line(&format!("[quiet] тихий режим: {}", if on { "ВКЛ" } else { "выкл" }));
+        crate::log::line(&format!(
+            "[quiet] тихий режим: {}",
+            if on { "ВКЛ" } else { "выкл" }
+        ));
         crate::tray::update(self, &self.snapshot()); // перерисовать меню (галка)
     }
 
@@ -437,7 +525,14 @@ impl Daemon {
     /// То же, но со стабильным id: повторное уведомление того же id окно тостов
     /// применяет к существующей карточке, а не плодит новую (дедуп «закончил»
     /// для одной сессии — не было «одно за другим»).
-    pub fn notify_id(&self, id: &str, title: &str, body: &str, session_id: Option<&str>, kind: &str) {
+    pub fn notify_id(
+        &self,
+        id: &str,
+        title: &str,
+        body: &str,
+        session_id: Option<&str>,
+        kind: &str,
+    ) {
         self.notify_id_voiced(id, title, body, session_id, kind, None);
     }
 
@@ -467,7 +562,10 @@ impl Daemon {
         // списком, а голос прочитает «вопрос + Вариант N: label. описание».
         let session_snap = session_id.and_then(|sid| self.session(sid));
         let qfull = session_snap.as_ref().and_then(|s| s.question.clone());
-        let qitems = qfull.as_ref().map(|q| q.questions.clone()).unwrap_or_default();
+        let qitems = qfull
+            .as_ref()
+            .map(|q| q.questions.clone())
+            .unwrap_or_default();
         let qcount = qitems.len();
         // payload тоста — первый вопрос (+count); карточка покажет остальные подсказкой.
         let question = qitems.first().map(|qi| {
@@ -497,7 +595,12 @@ impl Daemon {
                     t.push_str(&qi.question);
                 }
                 for (i, o) in qi.options.iter().enumerate() {
-                    t.push_str(&format!(". Вариант {}: {}. {}", i + 1, o.label, o.description));
+                    t.push_str(&format!(
+                        ". Вариант {}: {}. {}",
+                        i + 1,
+                        o.label,
+                        o.description
+                    ));
                 }
             }
             t
@@ -515,12 +618,15 @@ impl Daemon {
         });
 
         // мета-сегменты карточки (ветка, модель, effort, время) из настроек notify.content
-        let notify_content = self.settings.load()
+        let notify_content = self
+            .settings
+            .load()
             .pointer("/notify/content")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
         let now_ms = crate::util::now_ms();
-        let meta: Vec<Value> = session_snap.as_ref()
+        let meta: Vec<Value> = session_snap
+            .as_ref()
             .map(|s| build_meta(&notify_content, s, now_ms))
             .unwrap_or_default();
         let meta_val = serde_json::Value::Array(meta);
@@ -529,7 +635,16 @@ impl Daemon {
         if self.is_quiet() {
             return;
         }
-        windows::toast_add(self, id, title, body, session_id, kind, question.as_ref(), &meta_val);
+        windows::toast_add(
+            self,
+            id,
+            title,
+            body,
+            session_id,
+            kind,
+            question.as_ref(),
+            &meta_val,
+        );
 
         // голос (инкремент 7): озвучиваем уведомление. Одна точка на все события;
         // gated по voice-конфигу. Для «done» читаем `speak` (русское произношение),
@@ -569,7 +684,8 @@ impl Daemon {
     pub fn interaction_leave_and_flush(&self) {
         let (_idle, drained) = self.interaction.leave();
         for v in drained {
-            self.voice.speak_text(&v.title, &v.speak, &v.kind, Some(&v.id));
+            self.voice
+                .speak_text(&v.title, &v.speak, &v.kind, Some(&v.id));
         }
     }
 
@@ -578,7 +694,8 @@ impl Daemon {
     /// уходит в ФОН: `on_press` вызывается СИНХРОННО из глобального хоткея на ГЛАВНОМ
     /// потоке — блокировать его нельзя, иначе UI зависает на каждое нажатие диктовки.
     pub fn duck_media_for_capture(self: &std::sync::Arc<Self>) {
-        let duck = crate::voice::config::VoiceConfig::from_settings(&self.settings.load()).duck_others;
+        let duck =
+            crate::voice::config::VoiceConfig::from_settings(&self.settings.load()).duck_others;
         if !duck || self.media_ducked.load(Ordering::SeqCst) {
             return;
         }
@@ -629,14 +746,26 @@ impl Daemon {
     /// last_toast (повторять смену режима незачем).
     pub fn mode_toast(self: &std::sync::Arc<Self>, icon: &str, label: &str) {
         let id = format!("mode-{}", self.toast_seq.fetch_add(1, Ordering::SeqCst) + 1);
-        windows::toast_add(self, &id, &format!("{icon}  {label}"), "", None, "mode", None, &serde_json::Value::Array(vec![]));
+        windows::toast_add(
+            self,
+            &id,
+            &format!("{icon}  {label}"),
+            "",
+            None,
+            "mode",
+            None,
+            &serde_json::Value::Array(vec![]),
+        );
     }
 
     /// Переключить «без звука» (mute) хоткеем: глушит/возвращает голос + карточка.
     pub fn toggle_mute(self: &std::sync::Arc<Self>) {
         let on = !self.voice.is_muted();
         self.voice.set_mute(on);
-        crate::log::line(&format!("[mute] без звука: {}", if on { "ВКЛ" } else { "выкл" }));
+        crate::log::line(&format!(
+            "[mute] без звука: {}",
+            if on { "ВКЛ" } else { "выкл" }
+        ));
         if on {
             self.mode_toast("🔇", "Без звука");
         } else {
@@ -646,11 +775,26 @@ impl Daemon {
 
     /// Повторить последнее уведомление: пере-показ карточки + переозвучка.
     pub fn repeat_last_toast(self: &std::sync::Arc<Self>) {
-        let Some(lt) = self.last_toast.lock().unwrap().clone() else { return };
-        let id = format!("repeat-{}", self.toast_seq.fetch_add(1, Ordering::SeqCst) + 1);
-        windows::toast_add(self, &id, &lt.title, &lt.body, lt.sid.as_deref(), &lt.kind, lt.question.as_ref(), &serde_json::Value::Array(vec![]));
+        let Some(lt) = self.last_toast.lock().unwrap().clone() else {
+            return;
+        };
+        let id = format!(
+            "repeat-{}",
+            self.toast_seq.fetch_add(1, Ordering::SeqCst) + 1
+        );
+        windows::toast_add(
+            self,
+            &id,
+            &lt.title,
+            &lt.body,
+            lt.sid.as_deref(),
+            &lt.kind,
+            lt.question.as_ref(),
+            &serde_json::Value::Array(vec![]),
+        );
         // переозвучка по явному запросу (mute внутри speak_text всё равно уважается)
-        self.voice.speak_text(&lt.title, &lt.speak, &lt.kind, Some(&id));
+        self.voice
+            .speak_text(&lt.title, &lt.speak, &lt.kind, Some(&id));
     }
 
     /// Ответ на активный вопрос хоткеем ⌘⌥N: вариант `n` (1-based).
@@ -660,7 +804,12 @@ impl Daemon {
         let target = {
             let sessions = self.sessions.lock().unwrap();
             let has_q = |id: &str| sessions.get(id).is_some_and(|s| s.question.is_some());
-            let last = self.last_session.lock().unwrap().clone().filter(|s| has_q(s));
+            let last = self
+                .last_session
+                .lock()
+                .unwrap()
+                .clone()
+                .filter(|s| has_q(s));
             last.or_else(|| {
                 sessions
                     .iter()
@@ -676,12 +825,8 @@ impl Daemon {
         crate::log::line(&format!("[select] ⌘⌥{n} → sid={}", ellipsize(&sid, 8)));
         let h = self.app.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = crate::ipc::question_answer(
-                h,
-                sid,
-                serde_json::json!({ "answers": [[n]] }),
-            )
-            .await;
+            let _ =
+                crate::ipc::question_answer(h, sid, serde_json::json!({ "answers": [[n]] })).await;
         });
     }
 
@@ -729,7 +874,9 @@ impl Daemon {
     /* ================= редьюсер ================= */
 
     pub fn reduce(self: &std::sync::Arc<Self>, evt: &Value) {
-        let Some(evt_obj) = evt.as_object() else { return };
+        let Some(evt_obj) = evt.as_object() else {
+            return;
+        };
         let payload = evt.get("payload").and_then(Value::as_object);
         let empty = serde_json::Map::new();
         let p = payload.unwrap_or(&empty);
@@ -746,7 +893,13 @@ impl Daemon {
         // лог жизненного цикла (tool-события не пишем — их сотни)
         if matches!(
             event,
-            "session-start" | "prompt" | "notification" | "permission" | "stop" | "stop-failure" | "session-end"
+            "session-start"
+                | "prompt"
+                | "notification"
+                | "permission"
+                | "stop"
+                | "stop-failure"
+                | "session-end"
         ) {
             crate::log::line(&format!("[event] {event} sid={}", ellipsize(&sid, 8)));
         }
@@ -799,8 +952,12 @@ impl Daemon {
             // ручной выбор: тот же 30с-guard по model_at, что и в refresh_meta.
             let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
             if agent == crate::backend::Agent::Codex {
-                if let Some(m) = p.get("model").and_then(Value::as_str).filter(|m| !m.is_empty()) {
-                    if s.model_at.is_none_or(|t| now - t > 30_000) {
+                if let Some(m) = p
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|m| !m.is_empty())
+                {
+                    if s.model_at.map_or(true, |t| now - t > 30_000) {
                         s.model = Some(crate::backend::backend(agent).friendly_model(m));
                     }
                 }
@@ -808,7 +965,10 @@ impl Daemon {
             if let Some(pane) = evt_obj.get("tmux_pane").and_then(Value::as_str) {
                 if !pane.is_empty() && s.tmux_pane.as_deref() != Some(pane) {
                     s.tmux_pane = Some(pane.to_string());
-                    effects.push(Effect::ResolveTmuxName { sid: sid.clone(), pane: pane.to_string() });
+                    effects.push(Effect::ResolveTmuxName {
+                        sid: sid.clone(),
+                        pane: pane.to_string(),
+                    });
                 }
             }
             if let Some(host) = evt_obj.get("host").and_then(Value::as_str) {
@@ -831,7 +991,10 @@ impl Daemon {
                 if pid > 0 && s.pid != Some(pid) {
                     s.pid = Some(pid);
                     if s.app.is_none() {
-                        effects.push(Effect::ResolveGuiApp { sid: sid.clone(), pid });
+                        effects.push(Effect::ResolveGuiApp {
+                            sid: sid.clone(),
+                            pid,
+                        });
                     }
                 }
             }
@@ -844,7 +1007,10 @@ impl Daemon {
                     // ручной /compact: SessionStart c source=compact — явно говорим, что сжатие готово
                     if source == "compact" && self.settings.bool("notifyDone") {
                         effects.push(Effect::NotifyCompact {
-                            title: format!("{} — компакт завершён", s.project.as_deref().unwrap_or("?")),
+                            title: format!(
+                                "{} — компакт завершён",
+                                s.project.as_deref().unwrap_or("?")
+                            ),
                             sid: sid.clone(),
                         });
                     }
@@ -863,7 +1029,7 @@ impl Daemon {
                     if !txt.is_empty() && !txt.starts_with('<') {
                         s.detail = txt.clone();
                         s.last_prompt = Some(txt); // живёт дольше detail
-                        // саммари пересчитывается после каждого промта юзера
+                                                   // саммари пересчитывается после каждого промта юзера
                         effects.push(Effect::GenSummary { sid: sid.clone() });
                     }
                     s.limit_wait = false; // юзер сам продолжил — авто-резюме не нужно
@@ -886,12 +1052,18 @@ impl Daemon {
                                 .unwrap_or_else(|| "Опрос".into());
                             s.question = Some(q);
                             effects.push(Effect::NotifyWaiting {
-                                title: format!("{} — спрашивает", s.project.as_deref().unwrap_or("?")),
+                                title: format!(
+                                    "{} — спрашивает",
+                                    s.project.as_deref().unwrap_or("?")
+                                ),
                                 body: s.detail.clone(),
                                 sid: sid.clone(),
                             });
                         }
-                    } else if matches!(tool, "TaskCreate" | "TaskUpdate" | "TaskGet" | "TaskList" | "TodoWrite") {
+                    } else if matches!(
+                        tool,
+                        "TaskCreate" | "TaskUpdate" | "TaskGet" | "TaskList" | "TodoWrite"
+                    ) {
                         // таск-тулы: обновляем «текущую задачу», в живую ленту их не пишем
                         s.status = Status::Working;
                         if tool == "TodoWrite" {
@@ -908,7 +1080,8 @@ impl Daemon {
                         s.status = Status::Working;
                         track_activity(s, tool, p.get("tool_input"));
                         if s.branch.is_none() && s.title.is_none() {
-                            effects.push(Effect::RefreshMeta { sid: sid.clone() }); // ожила после рестарта демона
+                            effects.push(Effect::RefreshMeta { sid: sid.clone() });
+                            // ожила после рестарта демона
                         }
                     }
                 }
@@ -918,7 +1091,9 @@ impl Daemon {
                     if tool == "AskUserQuestion" && s.question.is_some() {
                         s.question = None; // ответили (в терминале или из панели)
                         s.detail = "ответ получен".into();
-                        effects.push(Effect::RemoveToast { id: format!("q-{sid}") });
+                        effects.push(Effect::RemoveToast {
+                            id: format!("q-{sid}"),
+                        });
                     }
                     if tool == "Task" {
                         // сабагент завершился — закрываем запись в реестре
@@ -928,27 +1103,36 @@ impl Daemon {
                 }
 
                 "notification" => {
-                    // AskUserQuestion дублируется PermissionRequest-уведомлением — вопрос
-                    // уже показан карточкой, «Claude needs your permission» его не перетирает
-                    let raw = one_line(p.get("message").and_then(Value::as_str).unwrap_or(""));
-                    // «ждёт твоего ввода» сразу после ответа — дубль тоста «закончил».
-                    // Пока сессия в Done (юзер ещё не реагировал), не пишем второй раз;
-                    // статус оставляем Done, чтобы строка списка так и читалась «готово».
-                    let redundant_idle =
-                        ru::is_idle_input_notification(&raw) && s.status == Status::Done;
-                    if s.question.is_none() && !redundant_idle {
-                        let msg = ru::ru_notification(&raw);
-                        let msg = if msg.is_empty() { "Claude ждёт ввода".to_string() } else { msg };
-                        // Claude Code повторяет idle-уведомления — не спамим одним и тем же
-                        let is_new = !(s.status == Status::Waiting && s.detail == msg);
-                        s.status = Status::Waiting;
-                        s.detail = msg.clone();
-                        if is_new && self.settings.bool("notifyWaiting") {
-                            effects.push(Effect::NotifyWaiting {
-                                title: format!("{} — нужен ты", s.project.as_deref().unwrap_or("?")),
-                                body: msg,
-                                sid: sid.clone(),
-                            });
+                    if claude_notification_requires_attention(p) {
+                        // AskUserQuestion дублируется PermissionRequest-уведомлением — вопрос
+                        // уже показан карточкой, «Claude needs your permission» его не перетирает
+                        let raw = one_line(p.get("message").and_then(Value::as_str).unwrap_or(""));
+                        // «ждёт твоего ввода» сразу после ответа — дубль тоста «закончил».
+                        // Пока сессия в Done (юзер ещё не реагировал), не пишем второй раз;
+                        // статус оставляем Done, чтобы строка списка так и читалась «готово».
+                        let redundant_idle =
+                            ru::is_idle_input_notification(&raw) && s.status == Status::Done;
+                        if s.question.is_none() && !redundant_idle {
+                            let msg = ru::ru_notification(&raw);
+                            let msg = if msg.is_empty() {
+                                "Claude ждёт ввода".to_string()
+                            } else {
+                                msg
+                            };
+                            // Claude Code повторяет idle-уведомления — не спамим одним и тем же
+                            let is_new = !(s.status == Status::Waiting && s.detail == msg);
+                            s.status = Status::Waiting;
+                            s.detail = msg.clone();
+                            if is_new && self.settings.bool("notifyWaiting") {
+                                effects.push(Effect::NotifyWaiting {
+                                    title: format!(
+                                        "{} — нужен ты",
+                                        s.project.as_deref().unwrap_or("?")
+                                    ),
+                                    body: msg,
+                                    sid: sid.clone(),
+                                });
+                            }
                         }
                     }
                 }
@@ -962,7 +1146,10 @@ impl Daemon {
                     // одна выжимка результата: строка списка + тост (если включён).
                     // GenSummary тут не нужен — DoneSummary даёт ту же строку, но
                     // в стиле «что сделано», как в уведомлении
-                    effects.push(Effect::DoneSummary { sid: sid.clone() });
+                    effects.push(Effect::DoneSummary {
+                        sid: sid.clone(),
+                        hook_reply: stop_hook_reply(agent, p),
+                    });
                 }
 
                 "stop-failure" => {
@@ -997,12 +1184,18 @@ impl Daemon {
                 // Claude Task). Лепим синтетический input под subagent_start/stop.
                 "subagent-start" => {
                     s.status = Status::Working;
-                    let at = p.get("agent_type").and_then(Value::as_str).unwrap_or("сабагент");
+                    let at = p
+                        .get("agent_type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("сабагент");
                     let inp = serde_json::json!({ "subagent_type": at, "description": at });
                     subagent_start(s, Some(&inp), now);
                 }
                 "subagent-stop" => {
-                    let at = p.get("agent_type").and_then(Value::as_str).filter(|x| !x.is_empty());
+                    let at = p
+                        .get("agent_type")
+                        .and_then(Value::as_str)
+                        .filter(|x| !x.is_empty());
                     let inp = at.map(|a| serde_json::json!({ "description": a }));
                     subagent_stop(s, inp.as_ref(), now);
                 }
@@ -1055,7 +1248,7 @@ impl Daemon {
                     }
                 }
                 Effect::RemoveToast { id } => windows::toast_remove(&d, &id),
-                Effect::DoneSummary { sid } => d.done_summary(sid),
+                Effect::DoneSummary { sid, hook_reply } => d.done_summary(sid, hook_reply),
                 Effect::NotifyCompact { title, sid } => {
                     d.notify_id(
                         &format!("compact-{sid}"),
@@ -1085,7 +1278,7 @@ impl Daemon {
     /// обновился мгновенно через push, а тост-карточку показываем один раз
     /// финальной — без плейсхолдера и подмен (любое изменение уже показанной
     /// карточки читалось как второе уведомление).
-    fn done_summary(self: &std::sync::Arc<Self>, sid: String) {
+    fn done_summary(self: &std::sync::Arc<Self>, sid: String, hook_reply: Option<String>) {
         let d = self.clone();
         tauri::async_runtime::spawn(async move {
             // тайминг «результат (Stop) → показано уведомление»
@@ -1094,7 +1287,7 @@ impl Daemon {
                 return;
             }
             // (display — для показа, speak — как читать вслух по-русски)
-            let ai = d.ai_toast_summary(&sid).await;
+            let ai = d.ai_toast_summary(&sid, hook_reply).await;
             let display = ai.as_ref().map(|(d, _)| d.clone());
             let speak = ai.as_ref().map(|(_, s)| s.clone());
 
@@ -1122,8 +1315,19 @@ impl Daemon {
             let title = format!("{} — закончил", s.project.as_deref().unwrap_or("?"));
             // стабильный id на сессию: повторный «закончил» переиспользует карточку.
             // голос читает `speak` (русское произношение), тост показывает body.
-            d.notify_id_voiced(&format!("done-{sid}"), &title, &body, Some(&sid), "done", speak.as_deref());
-            crate::metrics::record("stop_to_notify", t_notify, serde_json::json!({ "sid": sid }));
+            d.notify_id_voiced(
+                &format!("done-{sid}"),
+                &title,
+                &body,
+                Some(&sid),
+                "done",
+                speak.as_deref(),
+            );
+            crate::metrics::record(
+                "stop_to_notify",
+                t_notify,
+                serde_json::json!({ "sid": sid }),
+            );
         });
     }
 
@@ -1132,23 +1336,29 @@ impl Daemon {
     /// ПРОИЗНОСИТЬ вслух, только кириллицей (англ. слова транслитерированы, числа
     /// словами). Так голос не глотает английский — лечим на уровне модели-суммаризатора,
     /// а не словарём. None — нет claude/квоты/короткий ответ/англоязычный мета-ответ.
-    async fn ai_toast_summary(self: &std::sync::Arc<Self>, sid: &str) -> Option<(String, String)> {
+    async fn ai_toast_summary(
+        self: &std::sync::Arc<Self>,
+        sid: &str,
+        hook_reply: Option<String>,
+    ) -> Option<(String, String)> {
         if !claude_bin::any_service_bin() || !self.busy_take("aisum", sid) {
             return None;
         }
         let result = async {
             let s = self.session(sid)?;
-            let tr = s.transcript.as_deref()?;
             // финальный ответ — по бэкенду: Claude из JSONL-цепочки, Codex из rollout
             let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
-            let reply = match agent {
-                crate::backend::Agent::Claude => transcript::full_final_reply(tr)?,
-                crate::backend::Agent::Codex => {
-                    let entries = crate::backend::backend(agent)
-                        .read_entries(std::path::Path::new(tr), 512 * 1024);
-                    crate::backend::codex_transcript::full_final_reply(&entries)?
+            let reply = prefer_final_reply(hook_reply, || {
+                let tr = s.transcript.as_deref()?;
+                match agent {
+                    crate::backend::Agent::Claude => transcript::full_final_reply(tr),
+                    crate::backend::Agent::Codex => {
+                        let entries = crate::backend::backend(agent)
+                            .read_entries(std::path::Path::new(tr), 512 * 1024);
+                        crate::backend::codex_transcript::full_final_reply(&entries)
+                    }
                 }
-            };
+            })?;
             // длинный ответ режем — haiku отвечает быстрее, а сути хватает
             let reply = ellipsize(&reply, 3000);
             let prompt = format!(
@@ -1259,9 +1469,7 @@ impl Daemon {
             // turn_context.model в rollout (раньше полагались только на hook-payload;
             // при пропущенном по hook-trust SessionStart модель оставалась дефолтной
             // «Opus»). Claude — из транскрипта, фолбэк на ~/.claude/projects.
-            let model_fresh = snap
-                .model_at
-                .is_some_and(|at| now_ms() - at <= 30_000);
+            let model_fresh = snap.model_at.is_some_and(|at| now_ms() - at <= 30_000);
             let model = if model_fresh {
                 None
             } else if is_codex {
@@ -1340,7 +1548,9 @@ impl Daemon {
             tokio::time::sleep(Duration::from_millis(800)).await;
             d.busy_release("tasks", &sid);
             let dir = claude_dir().join("tasks").join(&sid);
-            let Ok(rd) = std::fs::read_dir(&dir) else { return }; // тасками не пользуется
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                return;
+            }; // тасками не пользуется
             let mut tasks: Vec<(i64, String, String)> = rd
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
@@ -1365,8 +1575,10 @@ impl Daemon {
                 return;
             }
             tasks.sort_by_key(|t| t.0);
-            let items: Vec<(String, String)> =
-                tasks.into_iter().map(|(_, text, status)| (text, status)).collect();
+            let items: Vec<(String, String)> = tasks
+                .into_iter()
+                .map(|(_, text, status)| (text, status))
+                .collect();
             d.apply_tasks(&sid, items);
         });
     }
@@ -1395,8 +1607,10 @@ impl Daemon {
                 format!("{mark} {}", ellipsize(&one_line(text), 70))
             })
             .collect();
-        let board_items: Vec<(String, String, Option<String>)> =
-            items.into_iter().map(|(text, st)| (text, st, None)).collect();
+        let board_items: Vec<(String, String, Option<String>)> = items
+            .into_iter()
+            .map(|(text, st)| (text, st, None))
+            .collect();
         let now = now_ms();
         let mut changed = false;
         self.with_session(sid, |s| {
@@ -1422,7 +1636,9 @@ impl Daemon {
             // только пауза, чтобы транскрипт успел дописаться на диск
             tokio::time::sleep(Duration::from_millis(1200)).await;
             let Some(s) = d.session(&sid) else { return };
-            let Some(tr) = s.transcript.clone() else { return };
+            let Some(tr) = s.transcript.clone() else {
+                return;
+            };
             if !claude_bin::any_service_bin() || !d.busy_take("summary", &sid) {
                 return;
             }
@@ -1436,7 +1652,14 @@ impl Daemon {
                 .flat_map(|e| be.to_chat_items(e))
                 .filter(|i| i.kind == "text")
                 .collect();
-            let turns: Vec<_> = turns.into_iter().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect();
+            let turns: Vec<_> = turns
+                .into_iter()
+                .rev()
+                .take(12)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
             if turns.len() < 2 {
                 d.busy_release("summary", &sid);
                 return;
@@ -1446,7 +1669,11 @@ impl Daemon {
                 .map(|i| {
                     format!(
                         "{}: {}",
-                        if i.role == "user" { "Юзер" } else { "Агент" },
+                        if i.role == "user" {
+                            "Юзер"
+                        } else {
+                            "Агент"
+                        },
                         ellipsize(&i.text, 240)
                     )
                 })
@@ -1458,7 +1685,7 @@ impl Daemon {
             let out = claude_bin::run_service_llm(&prompt, Duration::from_secs(90)).await;
             d.busy_release("summary", &sid);
             let Some(out) = out else { return }; // без квоты/сети живём на lastPrompt/title
-            // squeeze_reply страхует от форматирования, если модель его всё же выдала
+                                                 // squeeze_reply страхует от форматирования, если модель его всё же выдала
             let clean = transcript::squeeze_reply(&out);
             let t = ellipsize(
                 clean.trim_matches(|c| c == '"' || c == '«' || c == '»'),
@@ -1496,7 +1723,13 @@ impl Daemon {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        self.last_prompt_at.lock().unwrap().get(sid).copied().unwrap_or(0) > after
+        self.last_prompt_at
+            .lock()
+            .unwrap()
+            .get(sid)
+            .copied()
+            .unwrap_or(0)
+            > after
     }
 
     pub fn mark_prompt_sent(self: &std::sync::Arc<Self>, sid: &str, prompt: &str) {
@@ -1518,7 +1751,7 @@ impl Daemon {
         // Сессии заводятся ТОЛЬКО из хуков — здесь ничего не подхватываем.
         let alive: Option<std::collections::HashSet<String>> = match tmux::list_panes_meta().await {
             Ok(Some(panes)) => Some(panes.iter().map(|p| p.pane_id.clone()).collect()),
-            Ok(None) => None,                                  // tmux не установлен — реестр не трогаем
+            Ok(None) => None, // tmux не установлен — реестр не трогаем
             Err(()) => Some(std::collections::HashSet::new()), // ошибка = сервер пуст
         };
 
@@ -1578,13 +1811,19 @@ impl Daemon {
         let mut snap = serde_json::Map::new();
         if let Some((rss, cpu)) = ps_metrics(std::process::id()).await {
             parts.push(format!("демон rss={rss:.0}МБ cpu={cpu}%"));
-            snap.insert("daemon_rss_mb".into(), serde_json::json!(rss.round() as i64));
+            snap.insert(
+                "daemon_rss_mb".into(),
+                serde_json::json!(rss.round() as i64),
+            );
             snap.insert("daemon_cpu".into(), serde_json::json!(cpu));
         }
         if let Some(pid) = self.voice.sidecar_pid() {
             if let Some((rss, cpu)) = ps_metrics(pid).await {
                 parts.push(format!("silero rss={rss:.0}МБ cpu={cpu}%"));
-                snap.insert("silero_rss_mb".into(), serde_json::json!(rss.round() as i64));
+                snap.insert(
+                    "silero_rss_mb".into(),
+                    serde_json::json!(rss.round() as i64),
+                );
                 snap.insert("silero_cpu".into(), serde_json::json!(cpu));
             }
         }
@@ -1598,7 +1837,10 @@ impl Daemon {
         ));
         snap.insert("sessions".into(), serde_json::json!(sessions));
         snap.insert("engine".into(), serde_json::json!(self.voice.engine_name()));
-        snap.insert("voice_queue".into(), serde_json::json!(self.voice.queue_len()));
+        snap.insert(
+            "voice_queue".into(),
+            serde_json::json!(self.voice.queue_len()),
+        );
         crate::log::line(&format!("[metrics] {}", parts.join(" · ")));
         crate::metrics::snapshot("proc", serde_json::Value::Object(snap));
     }
@@ -1641,9 +1883,18 @@ fn build_question(input: Option<&Value>, now: i64) -> Option<Question> {
         .iter()
         .take(4)
         .map(|q| QuestionItem {
-            question: ellipsize(&one_line(q.get("question").and_then(Value::as_str).unwrap_or("")), 300),
-            header: ellipsize(&one_line(q.get("header").and_then(Value::as_str).unwrap_or("")), 40),
-            multi_select: q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
+            question: ellipsize(
+                &one_line(q.get("question").and_then(Value::as_str).unwrap_or("")),
+                300,
+            ),
+            header: ellipsize(
+                &one_line(q.get("header").and_then(Value::as_str).unwrap_or("")),
+                40,
+            ),
+            multi_select: q
+                .get("multiSelect")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             options: q
                 .get("options")
                 .and_then(Value::as_array)
@@ -1651,9 +1902,14 @@ fn build_question(input: Option<&Value>, now: i64) -> Option<Question> {
                     opts.iter()
                         .take(9)
                         .map(|o| QuestionOption {
-                            label: ellipsize(&one_line(o.get("label").and_then(Value::as_str).unwrap_or("")), 80),
+                            label: ellipsize(
+                                &one_line(o.get("label").and_then(Value::as_str).unwrap_or("")),
+                                80,
+                            ),
                             description: ellipsize(
-                                &one_line(o.get("description").and_then(Value::as_str).unwrap_or("")),
+                                &one_line(
+                                    o.get("description").and_then(Value::as_str).unwrap_or(""),
+                                ),
                                 140,
                             ),
                         })
@@ -1662,7 +1918,11 @@ fn build_question(input: Option<&Value>, now: i64) -> Option<Question> {
                 .unwrap_or_default(),
         })
         .collect();
-    Some(Question { at: now, from_screen: false, questions })
+    Some(Question {
+        at: now,
+        from_screen: false,
+        questions,
+    })
 }
 
 /// Слой 2: последняя команда + тронутые директории из tool-событий.
@@ -1704,7 +1964,11 @@ fn track_activity(s: &mut Session, name: &str, input: Option<&Value>) {
     };
     if is_command {
         s.detail = ellipsize(
-            &format!("▸ {}{}", s.last_cmd.as_deref().unwrap_or(""), touched_suffix),
+            &format!(
+                "▸ {}{}",
+                s.last_cmd.as_deref().unwrap_or(""),
+                touched_suffix
+            ),
             140,
         );
     } else if !label.is_empty() && label != "tool" {
@@ -1725,7 +1989,9 @@ fn parse_todos(d: &std::sync::Arc<Daemon>, s: &mut Session, input: Option<&Value
         // payload был, но не распарсился в массив — schema drift. Не падаем,
         // доску не трогаем (degraded), но причину пишем в лог (сценарий 9).
         if had_payload {
-            crate::log::line("[board] TodoWrite: неизвестная форма tool_input.todos — доска не обновлена");
+            crate::log::line(
+                "[board] TodoWrite: неизвестная форма tool_input.todos — доска не обновлена",
+            );
         }
         return;
     };
@@ -1738,7 +2004,12 @@ fn parse_todos(d: &std::sync::Arc<Daemon>, s: &mut Session, input: Option<&Value
         .iter()
         .filter_map(|t| t.as_object())
         .map(|t| {
-            let content = t.get("content").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            let content = t
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
             let active = t
                 .get("activeForm")
                 .and_then(Value::as_str)
@@ -1750,7 +2021,11 @@ fn parse_todos(d: &std::sync::Arc<Daemon>, s: &mut Session, input: Option<&Value
                 .and_then(Value::as_str)
                 .unwrap_or("pending")
                 .to_string();
-            let text = if content.is_empty() { active.clone().unwrap_or_default() } else { content };
+            let text = if content.is_empty() {
+                active.clone().unwrap_or_default()
+            } else {
+                content
+            };
             (text, status, active)
         })
         .filter(|(text, _, _)| !text.is_empty())
@@ -1816,7 +2091,14 @@ fn subagent_start(s: &mut Session, input: Option<&Value>, now: i64) {
         .map(str::trim)
         .filter(|x| !x.is_empty())
         .map(String::from);
-    s.subagents.push(Subagent { name, kind, model: None, started_at: now, stopped_at: None, task_ref: None });
+    s.subagents.push(Subagent {
+        name,
+        kind,
+        model: None,
+        started_at: now,
+        stopped_at: None,
+        task_ref: None,
+    });
     // реестр не растёт бесконечно — держим последние 64
     let n = s.subagents.len();
     if n > 64 {
@@ -1828,11 +2110,14 @@ fn subagent_start(s: &mut Session, input: Option<&Value>, now: i64) {
 /// Стоп сабагента: PostToolUse(Task). Закрываем последний открытый с таким
 /// описанием (а если описания нет — просто последний открытый).
 fn subagent_stop(s: &mut Session, input: Option<&Value>, now: i64) {
-    let name = input.and_then(|i| i.get("description")).and_then(Value::as_str).map(str::trim);
+    let name = input
+        .and_then(|i| i.get("description"))
+        .and_then(Value::as_str)
+        .map(str::trim);
     let pos = s
         .subagents
         .iter()
-        .rposition(|sa| sa.stopped_at.is_none() && name.is_none_or(|n| sa.name == n));
+        .rposition(|sa| sa.stopped_at.is_none() && name.map_or(true, |n| sa.name == n));
     if let Some(i) = pos {
         s.subagents[i].stopped_at = Some(now);
     }
@@ -1875,9 +2160,17 @@ fn build_board(
             let mut dur_ms = prev_t.and_then(|t| t.dur_ms);
             if status == "in_progress" {
                 // переносим момент начала, если задача уже была в работе; иначе now
-                started_at = if was_ip { prev_t.and_then(|t| t.started_at) } else { None }.or(Some(now));
+                started_at = if was_ip {
+                    prev_t.and_then(|t| t.started_at)
+                } else {
+                    None
+                }
+                .or(Some(now));
             } else if status == "completed" && dur_ms.is_none() {
-                if let Some(st) = prev_t.filter(|t| t.status == "in_progress").and_then(|t| t.started_at) {
+                if let Some(st) = prev_t
+                    .filter(|t| t.status == "in_progress")
+                    .and_then(|t| t.started_at)
+                {
                     dur_ms = Some((now - st).max(0));
                 }
             }
@@ -1917,7 +2210,12 @@ fn build_board(
         }
     }
 
-    TaskBoard { tasks, subagents: strip, updated_at: now, stopped: false }
+    TaskBoard {
+        tasks,
+        subagents: strip,
+        updated_at: now,
+        stopped: false,
+    }
 }
 
 /// Текст-инструкция оркестратору для действия с доски. НИЧЕГО не отправляет —
@@ -2029,7 +2327,11 @@ mod tests {
         let evicted = evict_pane(&mut m, "b", "%1");
 
         assert!(evicted.is_empty());
-        assert_eq!(m.len(), 2, "две параллельные сессии в разных панах живут обе");
+        assert_eq!(
+            m.len(),
+            2,
+            "две параллельные сессии в разных панах живут обе"
+        );
     }
 
     #[test]
@@ -2037,21 +2339,96 @@ mod tests {
         // Codex SubagentStart/Stop несут agent_type (не tool_input как Claude Task);
         // reduce лепит синтетический input — проверяем, что контракт держится.
         let mut s = sess("x", None);
-        let inp = serde_json::json!({ "subagent_type": "code-reviewer", "description": "code-reviewer" });
+        let inp =
+            serde_json::json!({ "subagent_type": "code-reviewer", "description": "code-reviewer" });
         subagent_start(&mut s, Some(&inp), 100);
         assert_eq!(s.subagents.len(), 1);
         assert_eq!(s.subagents[0].name, "code-reviewer");
         assert_eq!(s.subagents[0].kind.as_deref(), Some("code-reviewer"));
         assert!(s.subagents[0].stopped_at.is_none());
-        subagent_stop(&mut s, Some(&serde_json::json!({ "description": "code-reviewer" })), 200);
+        subagent_stop(
+            &mut s,
+            Some(&serde_json::json!({ "description": "code-reviewer" })),
+            200,
+        );
         assert_eq!(s.subagents[0].stopped_at, Some(200));
+    }
+
+    #[test]
+    fn claude_notification_waits_only_for_actionable_types() {
+        for notification_type in ["permission_prompt", "idle_prompt", "elicitation_dialog"] {
+            let payload = serde_json::json!({
+                "notification_type": notification_type,
+                "message": "Claude needs your input",
+            });
+            assert!(
+                claude_notification_requires_attention(payload.as_object().unwrap()),
+                "{notification_type} требует реакции пользователя"
+            );
+        }
+
+        for notification_type in ["auth_success", "tool_result", "unknown_future_type"] {
+            let payload = serde_json::json!({
+                "notification_type": notification_type,
+                "message": "Informational notification",
+            });
+            assert!(
+                !claude_notification_requires_attention(payload.as_object().unwrap()),
+                "{notification_type} не должен создавать Waiting/тост"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_notification_keeps_message_based_legacy_fallback() {
+        let legacy = serde_json::json!({ "message": "Claude needs your permission" });
+        let empty = serde_json::json!({});
+
+        assert!(claude_notification_requires_attention(
+            legacy.as_object().unwrap()
+        ));
+        assert!(
+            !claude_notification_requires_attention(empty.as_object().unwrap()),
+            "пустое legacy-событие не доказывает, что Claude ждёт"
+        );
+    }
+
+    #[test]
+    fn codex_stop_extracts_last_assistant_message_without_flattening_it() {
+        let payload = serde_json::json!({
+            "last_assistant_message": "  Готово.\n\n- Тесты проходят.  "
+        });
+
+        assert_eq!(
+            stop_hook_reply(crate::backend::Agent::Codex, payload.as_object().unwrap()).as_deref(),
+            Some("Готово.\n\n- Тесты проходят.")
+        );
+        assert_eq!(
+            stop_hook_reply(crate::backend::Agent::Claude, payload.as_object().unwrap()),
+            None,
+            "Claude продолжает брать финал из транскрипта"
+        );
+    }
+
+    #[test]
+    fn hook_reply_wins_without_reading_unflushed_rollout() {
+        let reply = prefer_final_reply(Some("свежий ответ".into()), || {
+            panic!("rollout нельзя читать, когда Stop уже принёс финал")
+        });
+        assert_eq!(reply.as_deref(), Some("свежий ответ"));
+
+        let fallback = prefer_final_reply(None, || Some("ответ из rollout".into()));
+        assert_eq!(fallback.as_deref(), Some("ответ из rollout"));
     }
 
     #[test]
     fn pid_alive_detects_self_and_dead() {
         assert!(pid_alive(std::process::id() as i64), "свой процесс жив");
         assert!(pid_alive(0), "нет валидного pid → не судим (true)");
-        assert!(!pid_alive(2_000_000_000), "заведомо несуществующий pid мёртв");
+        assert!(
+            !pid_alive(2_000_000_000),
+            "заведомо несуществующий pid мёртв"
+        );
     }
 
     /* ----- доска задач (инкремент 6) ----- */
@@ -2080,7 +2457,11 @@ mod tests {
         assert_eq!(agg(&b), (4, 2, 1, 1));
         assert_eq!(b.tasks[2].n, 3, "номера 1-based позиционные");
         assert_eq!(b.tasks[2].status, "in_progress");
-        assert_eq!(b.tasks[2].started_at, Some(1000), "in_progress получил старт");
+        assert_eq!(
+            b.tasks[2].started_at,
+            Some(1000),
+            "in_progress получил старт"
+        );
     }
 
     #[test]
@@ -2088,9 +2469,17 @@ mod tests {
         let first = [it("A", "completed"), it("B", "in_progress")];
         let b1 = build_board(None, &first, &[], 0);
         // агент переписал план целиком: добавил Task 3, B завершил
-        let second = [it("A", "completed"), it("B", "completed"), it("C", "pending")];
+        let second = [
+            it("A", "completed"),
+            it("B", "completed"),
+            it("C", "pending"),
+        ];
         let b2 = build_board(Some(&b1), &second, &[], 5000);
-        assert_eq!(b2.tasks.len(), 3, "ровно новый список, без осколков старого");
+        assert_eq!(
+            b2.tasks.len(),
+            3,
+            "ровно новый список, без осколков старого"
+        );
         assert_eq!(agg(&b2), (3, 2, 0, 1));
         // B был in_progress с t=0 → completed на t=5000: длительность зафиксирована
         assert_eq!(b2.tasks[1].dur_ms, Some(5000));
@@ -2108,23 +2497,54 @@ mod tests {
     #[test]
     fn subagent_correlates_by_task_number_else_strip() {
         let subs = vec![
-            Subagent { name: "Implement Task 3: controllers".into(), kind: Some("general-purpose".into()), model: Some("sonnet".into()), started_at: 0, stopped_at: Some(2000), task_ref: None },
-            Subagent { name: "code-reviewer".into(), kind: Some("code-reviewer".into()), model: Some("opus".into()), started_at: 0, stopped_at: Some(3000), task_ref: None },
+            Subagent {
+                name: "Implement Task 3: controllers".into(),
+                kind: Some("general-purpose".into()),
+                model: Some("sonnet".into()),
+                started_at: 0,
+                stopped_at: Some(2000),
+                task_ref: None,
+            },
+            Subagent {
+                name: "code-reviewer".into(),
+                kind: Some("code-reviewer".into()),
+                model: Some("opus".into()),
+                started_at: 0,
+                stopped_at: Some(3000),
+                task_ref: None,
+            },
         ];
-        let items = [it("Скелет", "completed"), it("Модель", "completed"), it("Контроллеры", "in_progress")];
+        let items = [
+            it("Скелет", "completed"),
+            it("Модель", "completed"),
+            it("Контроллеры", "in_progress"),
+        ];
         let b = build_board(None, &items, &subs, 0);
         // "Task 3" → бейдж на третьей задаче
         assert_eq!(b.tasks[2].model.as_deref(), Some("sonnet"));
         assert_eq!(b.tasks[2].dur_ms, Some(2000));
         // "code-reviewer" без номера → полоска, НЕ привязан наугад
-        assert_eq!(b.subagents.len(), 1, "несопоставленный сабагент уходит в полоску");
+        assert_eq!(
+            b.subagents.len(),
+            1,
+            "несопоставленный сабагент уходит в полоску"
+        );
         assert_eq!(b.subagents[0].name, "code-reviewer");
-        assert!(b.tasks.iter().all(|t| t.model.as_deref() != Some("opus")), "opus никуда не прилеплен");
+        assert!(
+            b.tasks.iter().all(|t| t.model.as_deref() != Some("opus")),
+            "opus никуда не прилеплен"
+        );
     }
 
     #[test]
     fn subagent_out_of_range_number_not_correlated() {
-        let subs = vec![Subagent { name: "Task 9 — что-то".into(), model: Some("sonnet".into()), started_at: 0, stopped_at: Some(10), ..Default::default() }];
+        let subs = vec![Subagent {
+            name: "Task 9 — что-то".into(),
+            model: Some("sonnet".into()),
+            started_at: 0,
+            stopped_at: Some(10),
+            ..Default::default()
+        }];
         let items = [it("A", "completed"), it("B", "in_progress")]; // только 2 задачи
         let b = build_board(None, &items, &subs, 0);
         assert_eq!(b.subagents.len(), 1, "номер вне диапазона → не привязан");
@@ -2133,7 +2553,11 @@ mod tests {
 
     #[test]
     fn freeze_marks_in_progress_interrupted() {
-        let items = [it("A", "completed"), it("B", "in_progress"), it("C", "pending")];
+        let items = [
+            it("A", "completed"),
+            it("B", "in_progress"),
+            it("C", "pending"),
+        ];
         let mut s = Session::new("x".into(), 0);
         s.board = Some(build_board(None, &items, &[], 0));
         freeze_board(&mut s);
@@ -2149,16 +2573,27 @@ mod tests {
         assert_eq!(task_ref_from("Implement Task 5: docker"), Some(5));
         assert_eq!(task_ref_from("TASK#12 review"), Some(12));
         assert_eq!(task_ref_from("code-reviewer"), None);
-        assert_eq!(task_ref_from("multitask runner"), None, "не ловим внутри слова");
+        assert_eq!(
+            task_ref_from("multitask runner"),
+            None,
+            "не ловим внутри слова"
+        );
     }
 
     #[test]
     fn task_action_text_generates_and_rejects() {
         let goto = task_action_text("goto", 5, Some("docker-compose · .env")).unwrap();
         assert!(goto.contains("задаче 5") && goto.contains("docker-compose"));
-        assert!(task_action_text("skip", 6, None).unwrap().contains("Пропусти задачу 6"));
-        assert!(task_action_text("rerun", 2, None).unwrap().contains("Перезапусти задачу 2"));
-        assert!(task_action_text("blow-up", 1, None).is_none(), "чужое действие → None, ничего не шлём");
+        assert!(task_action_text("skip", 6, None)
+            .unwrap()
+            .contains("Пропусти задачу 6"));
+        assert!(task_action_text("rerun", 2, None)
+            .unwrap()
+            .contains("Перезапусти задачу 2"));
+        assert!(
+            task_action_text("blow-up", 1, None).is_none(),
+            "чужое действие → None, ничего не шлём"
+        );
     }
 
     #[test]
@@ -2177,7 +2612,10 @@ mod tests {
         let meta = build_meta(&content, &s, 0);
         assert_eq!(meta.len(), 1);
         assert_eq!(meta[0]["kind"], "br");
-        assert!(meta[0]["text"].as_str().unwrap().contains("feat/my-feature"));
+        assert!(meta[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("feat/my-feature"));
     }
 
     #[test]

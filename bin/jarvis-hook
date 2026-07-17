@@ -7,18 +7,18 @@
 # Демон не запущен / сокет умер / приложение снесли — молча выходим,
 # чтобы осиротевший конфиг никогда не ломал и не тормозил Claude Code.
 
-# Служебные запуски claude самим Jarvis (resume-ответ, генерация заголовков)
-# не должны попадать в реестр — демон сам ведёт их жизненный цикл.
-[ -n "$JARVIS_IGNORE" ] && exit 0
-
 AGENT="${1:-unknown}"
 EVENT="${2:-unknown}"
 
-# Codex парсит stdout хука как JSON и на пустом выводе ругается
-# «invalid <event> JSON output» (Claude же пустой stdout трактует как no-op).
-# Печатаем нейтральный объект ДО любых exit-путей. Claude не трогаем —
-# инвариант «поведение байт-в-байт прежнее».
-[ "$AGENT" = codex ] && printf '{}\n'
+# Claude Code и Codex парсят stdout Stop-хука как JSON. Пустой вывод
+# теперь считается ошибкой, поэтому до любых exit-путей возвращаем
+# нейтральный объект: событие продолжает работать, не управляя агентом.
+case "$AGENT" in claude|codex) printf '{}\n' ;; esac
+
+# Служебные запуски claude самим Jarvis (resume-ответ, генерация заголовков)
+# не должны попадать в реестр — демон сам ведёт их жизненный цикл. Нейтральный
+# JSON уже напечатан выше, поэтому и этот early exit соблюдает hook-контракт.
+[ -n "$JARVIS_IGNORE" ] && exit 0
 
 # Сокет — рядом с самим хуком: он установлен как <JARVIS_DIR>/bin/jarvis-hook,
 # значит демон слушает <JARVIS_DIR>/run.sock. Так хук знает свой демон по своему
@@ -44,8 +44,20 @@ HOST_TERM="${TERM_PROGRAM:-${TERMINAL_EMULATOR:-unknown}}"
 TTY=$(ps -o tty= -p "$PPID" 2>/dev/null | tr -d ' ')
 [ "$TTY" = '??' ] && TTY=''
 
+# Поля envelope приходят из окружения/argv. Экранируем кавычки и backslash,
+# control whitespace заменяем пробелами; payload остаётся исходным JSON value.
+json_safe() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\r\n\t' '   '
+}
+AGENT_JSON=$(json_safe "$AGENT")
+EVENT_JSON=$(json_safe "$EVENT")
+PANE_JSON=$(json_safe "${TMUX_PANE:-}")
+HOST_JSON=$(json_safe "$HOST_TERM")
+TTY_JSON=$(json_safe "$TTY")
+case "${PPID:-}" in ''|*[!0-9]*) HOOK_PID=0 ;; *) HOOK_PID=$PPID ;; esac
+
 printf '{"agent":"%s","event":"%s","tmux_pane":"%s","host":"%s","tty":"%s","pid":%d,"payload":%s}' \
-  "$AGENT" "$EVENT" "${TMUX_PANE:-}" "$HOST_TERM" "$TTY" "${PPID:-0}" "$PAYLOAD" \
+  "$AGENT_JSON" "$EVENT_JSON" "$PANE_JSON" "$HOST_JSON" "$TTY_JSON" "$HOOK_PID" "$PAYLOAD" \
 | curl -s --max-time 0.3 --unix-socket "$SOCK" \
     -X POST --data-binary @- \
     http://jarvis/event >/dev/null 2>&1 || true

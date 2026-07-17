@@ -23,9 +23,9 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
     }
     #[cfg(not(test))]
     {
-        let mut cb =
-            arboard::Clipboard::new().map_err(|e| format!("[copy] clipboard new: {e}"))?;
-        cb.set_text(text).map_err(|e| format!("[copy] clipboard set: {e}"))?;
+        let mut cb = arboard::Clipboard::new().map_err(|e| format!("[copy] clipboard new: {e}"))?;
+        cb.set_text(text)
+            .map_err(|e| format!("[copy] clipboard set: {e}"))?;
     }
     Ok(())
 }
@@ -43,18 +43,21 @@ pub enum InsertVerdict {
 
 /// Вставить `text` в активное приложение через ⌘V.
 ///
+/// `app` — для AX-снимков с главного потока (клиентский AX не потокобезопасен);
+/// None (тесты/нет хэндла) → вердикт всегда Unconfirmed.
 /// Пустая строка → Ok(Unconfirmed) без операций.
 /// Ошибки буфера обмена или CGEvent → Err(String); не паникует.
-pub fn insert_text(text: &str) -> Result<InsertVerdict, String> {
+pub fn insert_text(text: &str, app: Option<&tauri::AppHandle>) -> Result<InsertVerdict, String> {
     if text.is_empty() {
         return Ok(InsertVerdict::Unconfirmed);
     }
 
     // ── 0. Снимок сфокусированного элемента ДО вставки (best-effort AX) ─────
-    let focus_before = super::ax::focus_snapshot();
+    let snap = || app.and_then(super::ax::focus_snapshot_main);
+    let focus_before = snap();
 
     // ── 1. Снапшот буфера обмена ────────────────────────────────────────────
-    let snapshot = {
+    let _snapshot = {
         #[cfg(not(test))]
         {
             let mut cb =
@@ -73,7 +76,8 @@ pub fn insert_text(text: &str) -> Result<InsertVerdict, String> {
     {
         let mut cb =
             arboard::Clipboard::new().map_err(|e| format!("[insert] clipboard new: {e}"))?;
-        cb.set_text(text).map_err(|e| format!("[insert] clipboard set: {e}"))?;
+        cb.set_text(text)
+            .map_err(|e| format!("[insert] clipboard set: {e}"))?;
     }
 
     // ── 3. Синтезировать ⌘V ─────────────────────────────────────────────────
@@ -109,9 +113,9 @@ pub fn insert_text(text: &str) -> Result<InsertVerdict, String> {
     // ── 4. Восстановить буфер обмена ────────────────────────────────────────
     #[cfg(not(test))]
     {
-        let mut cb =
-            arboard::Clipboard::new().map_err(|e| format!("[insert] clipboard restore new: {e}"))?;
-        match snapshot {
+        let mut cb = arboard::Clipboard::new()
+            .map_err(|e| format!("[insert] clipboard restore new: {e}"))?;
+        match _snapshot {
             Some(prev) => {
                 // Ошибка при восстановлении — не фатальна: текст уже вставлен.
                 if let Err(e) = cb.set_text(prev) {
@@ -127,7 +131,23 @@ pub fn insert_text(text: &str) -> Result<InsertVerdict, String> {
 
     // ── 5. Подтверждение вставки: тот же элемент, значение изменилось ───────
     // (после пауз из шага 3 приложение уже переварило ⌘V)
-    let confirmed = match (&focus_before, super::ax::focus_snapshot()) {
+    let focus_after = snap();
+    // диагностика без конф. данных: роль/editable/длина значения, не текст
+    let dbg = |f: &Option<super::ax::FocusSnapshot>| match f {
+        Some(s) => format!(
+            "role={} editable={} value_len={:?}",
+            s.role,
+            s.editable,
+            s.value.as_ref().map(|v| v.chars().count())
+        ),
+        None => "нет".to_string(),
+    };
+    crate::log::line(&format!(
+        "[insert] AX до: {} · после: {}",
+        dbg(&focus_before),
+        dbg(&focus_after)
+    ));
+    let confirmed = match (&focus_before, focus_after) {
         (Some(before), Some(after)) if before.editable => {
             super::ax::value_confirms_insert(&before.value, &after.value, text)
         }
@@ -150,18 +170,22 @@ mod tests {
         assert_eq!(paste_keycode(), 9);
     }
 
-    // insert_text("") — пустая строка: нет операций, возвращает Ok
+    // insert_text("") — пустая строка: нет операций, возвращает Ok(Unconfirmed)
     #[test]
     fn empty_text_is_noop() {
         // Не должен трогать буфер обмена и не должен паниковать.
-        assert!(insert_text("").is_ok());
+        assert_eq!(insert_text("", None), Ok(InsertVerdict::Unconfirmed));
     }
 
     // insert_text с непустой строкой в тест-режиме (без реального CGEvent/clipboard):
-    // должен вернуть Ok (все #[cfg(not(test))] пути вырезаны).
+    // должен вернуть Ok (все #[cfg(not(test))] пути вырезаны); без AppHandle
+    // подтверждения быть не может → Unconfirmed.
     #[test]
     fn nonempty_text_returns_ok_in_test_mode() {
-        assert!(insert_text("привет мир").is_ok());
+        assert_eq!(
+            insert_text("привет мир", None),
+            Ok(InsertVerdict::Unconfirmed)
+        );
     }
 
     #[test]

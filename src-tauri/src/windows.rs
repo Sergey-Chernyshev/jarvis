@@ -56,27 +56,28 @@ pub fn create_onboarding(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         let _ = win.set_focus();
         return Ok(win);
     }
-    let win = WebviewWindowBuilder::new(app, "onboarding", WebviewUrl::App("onboarding.html".into()))
-        .title("Jarvis")
-        .inner_size(ONBOARD_W, ONBOARD_H)
-        .visible(true)
-        .decorations(false)
-        .transparent(true)
-        .effects(WindowEffectsConfig {
-            effects: vec![Effect::UnderWindowBackground],
-            state: Some(EffectState::Active),
-            radius: Some(16.0),
-            color: None,
-        })
-        .resizable(false)
-        .minimizable(false)
-        .maximizable(false)
-        .skip_taskbar(true)
-        .shadow(true)
-        .center()
-        .theme(Some(Theme::Dark))
-        .accept_first_mouse(true)
-        .build()?;
+    let win =
+        WebviewWindowBuilder::new(app, "onboarding", WebviewUrl::App("onboarding.html".into()))
+            .title("Jarvis")
+            .inner_size(ONBOARD_W, ONBOARD_H)
+            .visible(true)
+            .decorations(false)
+            .transparent(true)
+            .effects(WindowEffectsConfig {
+                effects: vec![Effect::UnderWindowBackground],
+                state: Some(EffectState::Active),
+                radius: Some(16.0),
+                color: None,
+            })
+            .resizable(false)
+            .minimizable(false)
+            .maximizable(false)
+            .skip_taskbar(true)
+            .shadow(true)
+            .center()
+            .theme(Some(Theme::Dark))
+            .accept_first_mouse(true)
+            .build()?;
     let _ = win.set_focus();
     Ok(win)
 }
@@ -89,28 +90,29 @@ pub fn create_agent_chat(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         let _ = win.set_focus();
         return Ok(win);
     }
-    let win = WebviewWindowBuilder::new(app, "agent-chat", WebviewUrl::App("agent-chat.html".into()))
-        .title("Jarvis · агент")
-        .inner_size(AGENT_W, AGENT_H)
-        .min_inner_size(360.0, 380.0)
-        .visible(true)
-        .decorations(false)
-        .transparent(true)
-        .effects(WindowEffectsConfig {
-            effects: vec![Effect::UnderWindowBackground],
-            state: Some(EffectState::Active),
-            radius: Some(16.0),
-            color: None,
-        })
-        .resizable(true)
-        .minimizable(false)
-        .maximizable(false)
-        .skip_taskbar(true)
-        .shadow(true)
-        .center()
-        .theme(Some(Theme::Dark))
-        .accept_first_mouse(true)
-        .build()?;
+    let win =
+        WebviewWindowBuilder::new(app, "agent-chat", WebviewUrl::App("agent-chat.html".into()))
+            .title("Jarvis · агент")
+            .inner_size(AGENT_W, AGENT_H)
+            .min_inner_size(360.0, 380.0)
+            .visible(true)
+            .decorations(false)
+            .transparent(true)
+            .effects(WindowEffectsConfig {
+                effects: vec![Effect::UnderWindowBackground],
+                state: Some(EffectState::Active),
+                radius: Some(16.0),
+                color: None,
+            })
+            .resizable(true)
+            .minimizable(false)
+            .maximizable(false)
+            .skip_taskbar(true)
+            .shadow(true)
+            .center()
+            .theme(Some(Theme::Dark))
+            .accept_first_mouse(true)
+            .build()?;
     let _ = win.set_focus();
     Ok(win)
 }
@@ -182,7 +184,8 @@ pub fn hud_emit(d: &Daemon, payload: serde_json::Value) {
 
 /// Мост тостов загрузился: доливаем накопленное в исходном порядке.
 pub fn toast_flush(d: &Daemon) {
-    d.toast_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+    d.toast_ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     for (event, payload) in d.pending_toasts.lock().unwrap().drain(..) {
         let _ = d.app.emit_to("toast", event, payload);
     }
@@ -198,15 +201,41 @@ pub fn toast_add(
     question: Option<&serde_json::Value>,
     meta: &serde_json::Value,
 ) {
-    toast_emit(
-        d,
-        "toast-add",
-        json!({
-            "id": id, "title": title, "body": body,
-            "sessionId": session_id, "kind": kind, "question": question,
-            "meta": meta,
-        }),
+    let payload = toast_payload(
+        &d.settings.load(),
+        id,
+        title,
+        body,
+        session_id,
+        kind,
+        question,
+        meta,
     );
+    toast_emit(d, "toast-add", payload);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn toast_payload(
+    settings: &serde_json::Value,
+    id: &str,
+    title: &str,
+    body: &str,
+    session_id: Option<&str>,
+    kind: &str,
+    question: Option<&serde_json::Value>,
+    meta: &serde_json::Value,
+) -> serde_json::Value {
+    let ttl_ms = settings
+        .pointer("/notify/ttlSec")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(8)
+        .saturating_mul(1_000);
+
+    json!({
+        "id": id, "title": title, "body": body,
+        "sessionId": session_id, "kind": kind, "question": question,
+        "meta": meta, "ttlMs": ttl_ms,
+    })
 }
 
 /* ================= позиционирование и показ панели ================= */
@@ -215,7 +244,9 @@ pub fn toast_add(
 /// AppKit-поинты, без конвертаций Tauri, иначе на смешанном DPI окно
 /// уезжает на предыдущий экран).
 pub fn position_panel(d: &Arc<Daemon>) {
-    let Some(panel) = d.app.get_webview_window("main") else { return };
+    let Some(panel) = d.app.get_webview_window("main") else {
+        return;
+    };
     let corner = d.settings.string("position") == "corner";
     macos::place_panel(&panel, PANEL_W, PANEL_H, corner);
 }
@@ -224,11 +255,13 @@ pub fn position_panel(d: &Arc<Daemon>) {
 /// у кино/терминала.
 pub fn show_panel(d: &Arc<Daemon>) {
     // пока интеграция не установлена — основное приложение «заперто»: ведём к онбордингу
-    if !crate::install::status().integrated() {
+    if !crate::install::integration_health().ok() {
         let _ = create_onboarding(&d.app);
         return;
     }
-    let Some(panel) = d.app.get_webview_window("main") else { return };
+    let Some(panel) = d.app.get_webview_window("main") else {
+        return;
+    };
     position_panel(d);
     emit_to_panel(&d.app, "panel-shown", &json!(null));
     macos::show_inactive(&panel);
@@ -237,11 +270,13 @@ pub fn show_panel(d: &Arc<Daemon>) {
 
 /// Raycast-режим: хоткей — с фокусом, потеря фокуса спрячет панель.
 pub fn show_panel_focused(d: &Arc<Daemon>) {
-    if !crate::install::status().integrated() {
+    if !crate::install::integration_health().ok() {
         let _ = create_onboarding(&d.app);
         return;
     }
-    let Some(panel) = d.app.get_webview_window("main") else { return };
+    let Some(panel) = d.app.get_webview_window("main") else {
+        return;
+    };
     position_panel(d);
     emit_to_panel(&d.app, "panel-shown", &json!(null));
     let _ = panel.show();
@@ -285,7 +320,9 @@ pub fn toggle_hotkey_panel(d: &Arc<Daemon>) {
 /// Рендерер тостов сообщает нужную высоту стека; 0 — спрятаться.
 /// Низ прибит к краю экрана — окно растёт вверх.
 pub fn toast_resize(d: &Arc<Daemon>, h: f64) {
-    let Some(toast) = d.app.get_webview_window("toast") else { return };
+    let Some(toast) = d.app.get_webview_window("toast") else {
+        return;
+    };
     if h <= 0.0 {
         let _ = toast.hide();
         return;
@@ -294,5 +331,51 @@ pub fn toast_resize(d: &Arc<Daemon>, h: f64) {
     macos::place_toast(&toast, TOAST_W, height);
     if !toast.is_visible().unwrap_or(false) {
         macos::show_inactive(&toast);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_toast_ttl_reaches_payload_in_milliseconds() {
+        for (seconds, milliseconds) in [(5, 5_000), (8, 8_000), (0, 0)] {
+            let settings = json!({ "notify": { "ttlSec": seconds } });
+            let payload = toast_payload(
+                &settings,
+                "id",
+                "title",
+                "body",
+                None,
+                "done",
+                None,
+                &json!([]),
+            );
+
+            assert_eq!(payload["ttlMs"], milliseconds);
+        }
+    }
+
+    #[test]
+    fn invalid_toast_ttl_falls_back_to_eight_seconds() {
+        for settings in [
+            json!({}),
+            json!({ "notify": { "ttlSec": "5" } }),
+            json!({ "notify": { "ttlSec": -1 } }),
+        ] {
+            let payload = toast_payload(
+                &settings,
+                "id",
+                "title",
+                "body",
+                None,
+                "done",
+                None,
+                &json!([]),
+            );
+
+            assert_eq!(payload["ttlMs"], 8_000);
+        }
     }
 }

@@ -49,7 +49,9 @@ function armTimer(id) {
   }
   c.el.classList.remove('paused');
   restartRing(c.el);
-  c.timer = setTimeout(() => removeCard(id), c.ttl || TTL);
+  // `0` — явный пользовательский выбор «Не прятать», а не отсутствие TTL.
+  if (c.ttl === 0) return;
+  c.timer = setTimeout(() => removeCard(id), c.ttl);
 }
 
 // карточка под курсором по y (DOM-координата из нативного поллинга) → .hot
@@ -100,7 +102,8 @@ window.toast.onAdd((d) => {
 
   // карточка смены режима: компактная, по центру, с «поп»-анимацией, живёт недолго
   const isMode = d.kind === 'mode';
-  const ttl = isMode ? 1900 : TTL;
+  const configuredTtl = Number.isFinite(d.ttlMs) && d.ttlMs >= 0 ? d.ttlMs : TTL;
+  const ttl = isMode ? 1900 : configuredTtl;
   let sticky = false; // вопрос — «липкая» карточка (не исчезает по таймеру)
 
   const card = document.createElement('div');
@@ -270,8 +273,13 @@ window.toast.onExtend((d) => {
   clearTimeout(c.timer);
   if (hovering) { c.el.classList.add('paused'); return; } // под курсором не тикаем
   c.el.classList.remove('paused');
-  const ms = d.ms || 3500;
+  // После озвучки отсчёт начинается заново, но длительность остаётся той,
+  // которую пользователь выбрал в notify.ttlSec (включая `0`).
+  const ms = Number.isFinite(c.ttl)
+    ? c.ttl
+    : (Number.isFinite(d.ms) && d.ms >= 0 ? d.ms : 3500);
   c.el.style.setProperty('--ttl', `${ms}ms`);
+  if (ms === 0) return;
   restartRing(c.el);
   c.timer = setTimeout(() => removeCard(d.id), ms);
 });

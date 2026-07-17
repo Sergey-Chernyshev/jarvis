@@ -42,6 +42,9 @@ jobs:
       - name: Ensure cmake
         run: cmake --version || brew install cmake
 
+      - name: Webview contract tests
+        run: npm run test:ui
+
       # Информационно: проект использует компактный авторский стиль, не совпадающий
       # с дефолтным rustfmt. Показываем расхождения, но не блокируем мерж.
       - name: Format check (informational)

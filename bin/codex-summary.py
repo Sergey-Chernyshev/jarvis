@@ -12,7 +12,7 @@ Input schema (stdin, single JSON object):
     {
       "prompt": "<required: the task text>",
       "model":  "gpt-5.5",          # optional; SDK/account default if omitted
-      "effort": "low",              # optional: none|minimal|low|medium|high|xhigh
+      "effort": "low",              # optional: none|minimalp|low|medium|high|xhigh
       "instructions": "...",        # optional: system/developer steering text
       "timeout": 120                # optional: seconds (default 120)
     }

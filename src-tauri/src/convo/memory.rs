@@ -79,7 +79,7 @@ impl Memory {
     pub fn save_to(&self, path: &std::path::Path, now_ms: i64) {
         let p = Persisted { saved_at_ms: now_ms, turns: self.turns.iter().cloned().collect() };
         if let Ok(bytes) = serde_json::to_vec(&p) {
-            let _ = std::fs::write(path, bytes);
+            let _ = crate::stt::transcripts::write_private_atomic(path, &bytes);
         }
     }
 
@@ -116,6 +116,17 @@ impl Memory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn file_mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    }
 
     #[test]
     fn keeps_last_n_turns() {
@@ -206,5 +217,33 @@ mod tests {
         assert!(is_fresh(0, STALE_AFTER_MS)); // ровно на границе
         assert!(!is_fresh(0, STALE_AFTER_MS + 1)); // за границей
         assert!(!is_fresh(1000, 500)); // часы назад (битое будущее) → не свеж
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_memory_replaces_public_file_with_private_complete_json() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = tmp_path("private-atomic");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, br#"{"saved_at_ms":0,"turns":[]}"#).expect("seed memory");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("public mode");
+        let mut memory = Memory::new(4);
+        memory.push("секретный вопрос", "приватный ответ", None);
+
+        memory.save_to(&path, 123);
+
+        assert_eq!(
+            file_mode(&path),
+            0o600,
+            "память разговора доступна только владельцу"
+        );
+        let persisted: Persisted =
+            serde_json::from_slice(&std::fs::read(&path).expect("read memory"))
+                .expect("complete JSON");
+        assert_eq!(persisted.turns.len(), 1);
+        assert_eq!(persisted.turns[0].user, "секретный вопрос");
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -754,6 +754,7 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
     }
     // тумблер «Режим логов» применяем сразу (без перезапуска)
     crate::metrics::set_enabled(d.settings.bool("diagnostics"));
+    crate::log::set_enabled(d.settings.bool("diagnostics"));
     if windows::panel_visible(&d) {
         windows::position_panel(&d); // позиция могла смениться
     }

@@ -167,10 +167,7 @@ impl AssistantHost {
         let cwd = ensure_assistant_cwd();
         let args = build_assistant_args(query, ASSISTANT_MODEL);
 
-        crate::log::line(&format!(
-            "[assistant] → {}",
-            crate::util::ellipsize(&crate::util::one_line(query), 200)
-        ));
+        crate::log::line(&format!("[assistant] → query_chars={}", query.chars().count()));
 
         let mut cmd = tokio::process::Command::new(bin);
         cmd.args(&args)
@@ -213,11 +210,8 @@ impl AssistantHost {
         let events: Vec<AgentEvent> = text.lines().flat_map(parse_stream_line).collect();
         let ans = extract_answer(&events);
         crate::log::line(&format!(
-            "[assistant] ← {}",
-            match &ans {
-                Some(s) => crate::util::ellipsize(&crate::util::one_line(s), 200),
-                None => "<пусто>".into(),
-            }
+            "[assistant] ← answer_chars={}",
+            ans.as_deref().map(str::chars).map(Iterator::count).unwrap_or(0)
         ));
         ans
     }
@@ -241,8 +235,8 @@ impl AssistantHost {
         let cwd = ensure_assistant_cwd();
         let args = build_assistant_args(query, ASSISTANT_MODEL);
         crate::log::line(&format!(
-            "[assistant] → (stream) {}",
-            crate::util::ellipsize(&crate::util::one_line(query), 200)
+            "[assistant] → (stream) query_chars={}",
+            query.chars().count()
         ));
 
         let mut cmd = tokio::process::Command::new(bin);
@@ -337,11 +331,12 @@ impl AssistantHost {
         }
 
         crate::log::line(&format!(
-            "[assistant] ← (stream) {}",
-            match &final_answer {
-                Some(s) => crate::util::ellipsize(&crate::util::one_line(s), 200),
-                None => "<пусто>".into(),
-            }
+            "[assistant] ← (stream) answer_chars={}",
+            final_answer
+                .as_deref()
+                .map(str::chars)
+                .map(Iterator::count)
+                .unwrap_or(0)
         ));
         final_answer
     }

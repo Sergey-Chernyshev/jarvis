@@ -848,35 +848,6 @@
     color: var(--faint);
     flex: none;
   }
-  /* --- сводки ходов --- */
-  .sumtoggle {
-    margin-left: 6px; padding: 2px 8px; font-size: 11px; border-radius: 9px;
-    border: 1px solid var(--line, rgba(128,128,128,.35)); background: none;
-    color: var(--muted); cursor: pointer;
-  }
-  .sumtoggle.on { color: var(--fg, inherit); border-color: currentColor; }
-  .turnsum {
-    margin: 6px 0; padding: 8px 10px; border-radius: 10px;
-    background: rgba(127,127,127,.08); border: 1px solid rgba(127,127,127,.15);
-    font-size: 12.5px; line-height: 1.45;
-  }
-  .turnsum .tsum-files { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
-  .turnsum .fchip {
-    display: inline-flex; gap: 4px; align-items: baseline; max-width: 100%;
-    padding: 2px 8px; border-radius: 8px; font-size: 11.5px; cursor: pointer;
-    background: rgba(127,127,127,.12);
-  }
-  .turnsum .fchip:hover { background: rgba(127,127,127,.22); }
-  .turnsum .fchip .fnote { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .turnsum .tsum-cmds { margin-top: 6px; font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); }
-  .turnsum details { margin-top: 6px; }
-  .turnsum details summary { cursor: pointer; color: var(--muted); font-size: 11.5px; }
-  .turnsum .tsum-foot { margin-top: 6px; display: flex; gap: 10px; }
-  .turnsum .tsum-btn { background: none; border: none; padding: 0; font-size: 11px; color: var(--muted); cursor: pointer; text-decoration: underline; }
-  /* режим «Сводка»: сырьё завершённых ходов спрятано, пока не развернули */
-  #chatlog.sum .turn.done .turnraw { display: none; }
-  #chatlog.sum .turn.done.expanded .turnraw { display: block; }
-  #chatlog:not(.sum) .turnsum { display: none; }
   .chatempty {
     flex: 1;
     display: flex;
@@ -1167,14 +1138,6 @@
   .ap-item .spacer { flex: 1; }
   .ap-item .keycap { font-size: 10px; padding: 1.5px 6px; }
 
-  /* ---------- заготовка: режим чата Диалог/Саммари ---------- */
-  .chatmode-seg { display: flex; gap: 2px; background: rgba(255, 255, 255, 0.05); border-radius: 6px; padding: 2px; flex: none; }
-  .chatmode-btn { appearance: none; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 11px; font-weight: 500; padding: 2.5px 9px; border-radius: 4px; cursor: default; }
-  .chatmode-btn:hover { color: var(--text); }
-  .chatmode-btn.active { background: rgba(255, 255, 255, 0.09); color: var(--text); }
-  .chatsummary { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 24px; }
-  .chatsummary-stub { max-width: 360px; text-align: center; font-size: 12.5px; line-height: 1.6; color: var(--faint); }
-
   /* ---------- палитра быстрых команд (/) в главном поиске ---------- */
   .cpal { padding: 8px 8px; }
   .cpal-label {
@@ -1338,7 +1301,6 @@
           </button>
           <span class="chattitle" id="chatTitle"></span>
           <span class="badge" id="chatModel" hidden></span>
-          <button id="sumToggle" class="sumtoggle" title="Сводка ходов / полная лента">Сводка</button>
           <span class="badge host" id="chatChannel" hidden>вне терминала</span>
           <span class="spacer"></span>
           <!-- доска задач: появляется только если у сессии есть план (board) -->
@@ -1357,18 +1319,10 @@
             <span class="varbtn-dot"></span>
             <span class="varbtn-label" id="varBtnLabel">варианты</span>
           </button>
-          <!-- заготовка: режим чата Диалог/Саммари (пока ни к чему не привязан) -->
-          <div class="chatmode-seg" id="chatModeSeg">
-            <button class="chatmode-btn active" data-m="dialog">Диалог</button>
-            <button class="chatmode-btn" data-m="summary">Саммари</button>
-          </div>
           <span class="chatsub" id="chatSub"></span>
           <span class="chatdot" id="chatDot"></span>
         </div>
         <div class="chatlog" id="chatlog"></div>
-        <div class="chatsummary" id="chatSummary" hidden>
-          <div class="chatsummary-stub">Саммари сессии — заготовка дизайна. Скоро здесь будет сжатый разбор работы по фазам; пока переключатель ни к чему не привязан.</div>
-        </div>
         <div class="chatstatus" id="chatStatus" hidden></div>
         <div class="tmuxhint" id="tmuxHint" hidden></div>
         <div class="cmdpalette" id="cmdPalette" hidden></div>

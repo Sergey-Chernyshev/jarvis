@@ -91,9 +91,7 @@ fn handle_rpc(req: &Value, call: &dyn SocketCall) -> Option<Value> {
     let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let id = req.get("id").cloned();
     // нотификация (нет id) — ничего не отвечаем
-    if id.is_none() {
-        return None;
-    }
+    id.as_ref()?;
     let id = id.unwrap();
 
     match method {

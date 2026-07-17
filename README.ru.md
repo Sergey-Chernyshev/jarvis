@@ -155,7 +155,7 @@ echo '{"session_id":"t1","cwd":"'$PWD'"}' | ~/.jarvis/bin/jarvis-hook claude sto
 <details>
 <summary>Особенности Codex</summary>
 
-Модель и reasoning меняются через родной `/model`-пикер Codex (отдельного `/effort` у него нет). **Headless `codex exec` хуки не шлёт** — такие запуски не мониторятся (по дизайну, как и `claude -p`). На свежей машине хуки Codex требуют доверия (`~/.codex/config.toml [hooks.state]`); шим Codex добавляет `--dangerously-bypass-hook-trust`, если установленный `codex` поддерживает флаг, — это **снимает проверку доверия для всех хуков Codex** при интерактивном запуске, имей этот компромисс в виду. Цифры расхода/стоимости для Codex — оценочные.
+Модель и reasoning меняются через родной `/model`-пикер Codex (отдельного `/effort` у него нет). **Headless `codex exec` хуки не шлёт** — такие запуски не мониторятся (по дизайну, как и `claude -p`). На свежей машине Codex может попросить доверить `~/.codex/hooks.json`; Jarvis никогда не добавляет глобальный флаг `--dangerously-bypass-hook-trust`. Цифры расхода/стоимости для Codex — оценочные.
 
 </details>
 

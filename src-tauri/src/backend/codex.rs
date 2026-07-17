@@ -63,18 +63,29 @@ fn find_rollout_in(root: &Path, sid: &str) -> Option<PathBuf> {
     }
     let needle = format!("-{sid}.jsonl");
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    fn walk(dir: &Path, needle: &str, best: &mut Option<(std::time::SystemTime, PathBuf)>, depth: u8) {
+    fn walk(
+        dir: &Path,
+        needle: &str,
+        best: &mut Option<(std::time::SystemTime, PathBuf)>,
+        depth: u8,
+    ) {
         if depth > 4 {
             return;
         }
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
                 walk(&p, needle, best, depth + 1);
-            } else if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(needle)) {
+            } else if p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(needle))
+            {
                 if let Ok(mt) = e.metadata().and_then(|m| m.modified()) {
-                    if best.as_ref().is_none_or(|(bt, _)| mt > *bt) {
+                    if best.as_ref().map_or(true, |(bt, _)| mt > *bt) {
                         *best = Some((mt, p));
                     }
                 }
@@ -129,7 +140,11 @@ impl Backend for CodexBackend {
         id.split('-').next().unwrap_or("").to_string()
     }
     fn models(&self) -> &'static [(&'static str, &'static str)] {
-        &[("gpt-5.5", "GPT-5.5"), ("gpt-5-codex", "Codex"), ("gpt-5", "GPT-5")]
+        &[
+            ("gpt-5.5", "GPT-5.5"),
+            ("gpt-5-codex", "Codex"),
+            ("gpt-5", "GPT-5"),
+        ]
     }
     fn effort_levels(&self) -> &'static [&'static str] {
         &["minimal", "low", "medium", "high", "xhigh"]
@@ -166,7 +181,10 @@ mod tests {
         std::fs::write(&want, b"{}\n").unwrap();
         std::fs::write(day.join("rollout-100-CCC-DDD.jsonl"), b"{}\n").unwrap();
 
-        assert_eq!(find_rollout_in(&root, "AAA-BBB").as_deref(), Some(want.as_path()));
+        assert_eq!(
+            find_rollout_in(&root, "AAA-BBB").as_deref(),
+            Some(want.as_path())
+        );
         assert_eq!(find_rollout_in(&root, "ZZZ"), None, "нет матча → None");
         assert_eq!(find_rollout_in(&root, ""), None, "пустой sid → None");
 

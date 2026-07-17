@@ -180,7 +180,7 @@ pub fn schedule_auto_resume(d: &Arc<Daemon>) {
     }
     let reset_at = d.limits.state.lock().unwrap().reset_at;
     // +90с джиттера после сброса; не раньше 10с и не позже 6ч
-    let delay = ((reset_at - now_ms() + 90_000).max(10_000) as u64).min(6 * 3600_000);
+    let delay = ((reset_at - now_ms() + 90_000).max(10_000) as u64).min(6 * 3_600_000);
     println!("[jarvis] авто-продолжение через {} мин", delay / 60_000);
     let d2 = d.clone();
     *timer = Some(tauri::async_runtime::spawn(async move {

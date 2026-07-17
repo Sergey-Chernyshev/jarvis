@@ -5,8 +5,47 @@
 //! никакой интерполяции в shell-строку.
 
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
+
+const BRACKETED_PASTE_SETTLE: Duration = Duration::from_millis(90);
+static BUFFER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy)]
+enum BufferKind {
+    Reply,
+    Command,
+}
+
+fn unique_buffer_name(kind: BufferKind) -> String {
+    let kind = match kind {
+        BufferKind::Reply => "reply",
+        BufferKind::Command => "cmd",
+    };
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = BUFFER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "jarvis-{kind}-{}-{timestamp}-{sequence}",
+        std::process::id()
+    )
+}
+
+fn set_buffer_args<'a>(buffer: &'a str, text: &'a str) -> [&'a str; 5] {
+    ["set-buffer", "-b", buffer, "--", text]
+}
+
+fn paste_buffer_args<'a>(buffer: &'a str, pane: &'a str) -> [&'a str; 7] {
+    ["paste-buffer", "-p", "-d", "-b", buffer, "-t", pane]
+}
+
+fn focus_args<'a>(command: &'a str, pane: &'a str) -> [&'a str; 5] {
+    ["-L", "jarvis", command, "-t", pane]
+}
 
 /// `tmux -L jarvis <args>`: stdout при успехе, текст ошибки при провале.
 pub async fn tmux_j(args: &[&str]) -> Result<String, String> {
@@ -26,12 +65,18 @@ pub async fn tmux_j(args: &[&str]) -> Result<String, String> {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        Err(if err.is_empty() { "tmux: ошибка".into() } else { err })
+        Err(if err.is_empty() {
+            "tmux: ошибка".into()
+        } else {
+            err
+        })
     }
 }
 
 pub async fn pane_alive(pane: &str) -> bool {
-    tmux_j(&["display-message", "-p", "-t", pane, "ok"]).await.is_ok()
+    tmux_j(&["display-message", "-p", "-t", pane, "ok"])
+        .await
+        .is_ok()
 }
 
 pub async fn capture_pane(pane: &str) -> Option<String> {
@@ -52,11 +97,12 @@ pub async fn session_name(pane: &str) -> Option<String> {
 /// set-buffer → paste-buffer (bracketed, ради многострочных) → отдельный Enter.
 pub async fn reply(pane: &str, prompt: &str) -> Result<(), String> {
     tmux_j(&["send-keys", "-t", pane, "C-u"]).await?;
-    tmux_j(&["set-buffer", "-b", "jarvis-reply", "--", prompt]).await?;
-    tmux_j(&["paste-buffer", "-p", "-d", "-b", "jarvis-reply", "-t", pane]).await?;
+    let buffer = unique_buffer_name(BufferKind::Reply);
+    tmux_j(&set_buffer_args(&buffer, prompt)).await?;
+    tmux_j(&paste_buffer_args(&buffer, pane)).await?;
     // даём TUI дожевать bracketed-paste, иначе Enter иногда обгоняет вставку
     // и текст остаётся в строке ввода неотправленным
-    sleep(Duration::from_millis(90)).await;
+    sleep(BRACKETED_PASTE_SETTLE).await;
     tmux_j(&["send-keys", "-t", pane, "Enter"]).await?;
     Ok(())
 }
@@ -66,8 +112,10 @@ pub async fn reply(pane: &str, prompt: &str) -> Result<(), String> {
 /// выделенный по умолчанию вариант (Yes) ещё одним Enter, если он есть.
 pub async fn paste_slash(pane: &str, text: &str) -> Result<(), String> {
     tmux_j(&["send-keys", "-t", pane, "C-u"]).await?; // не клеимся к черновику
-    tmux_j(&["set-buffer", "-b", "jarvis-cmd", "--", text]).await?;
-    tmux_j(&["paste-buffer", "-p", "-d", "-b", "jarvis-cmd", "-t", pane]).await?;
+    let buffer = unique_buffer_name(BufferKind::Command);
+    tmux_j(&set_buffer_args(&buffer, text)).await?;
+    tmux_j(&paste_buffer_args(&buffer, pane)).await?;
+    sleep(BRACKETED_PASTE_SETTLE).await;
     tmux_j(&["send-keys", "-t", pane, "Enter"]).await?;
     sleep(Duration::from_millis(700)).await;
     if let Some(screen) = capture_pane(pane).await {
@@ -142,7 +190,9 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
 
 /// Подписать tmux-окно заголовком сессии (терминал подписывает сам себя).
 pub async fn rename_window(pane: &str, name: &str) -> Result<(), String> {
-    tmux_j(&["rename-window", "-t", pane, name]).await.map(|_| ())
+    tmux_j(&["rename-window", "-t", pane, name])
+        .await
+        .map(|_| ())
 }
 
 /// Ответ на вопрос(ы) клавишами в пану. Раскладку строит `answer_keys`
@@ -173,26 +223,42 @@ pub async fn ping(pane: &str) -> Result<(), String> {
         return Err("Окно терминала не подключено (detached) — показать негде".into());
     }
     tmux_j(&[
-        "display-popup", "-t", pane, "-w", "34", "-h", "3", "-E",
+        "display-popup",
+        "-t",
+        pane,
+        "-w",
+        "34",
+        "-h",
+        "3",
+        "-E",
         "printf \"\\n   ◇ Jarvis: вот эта сессия\"; sleep 1",
     ])
     .await
     .map(|_| ())
-    .map_err(|e| format!("Поповер не показался: {}", crate::util::ellipsize(&crate::util::one_line(&e), 80)))
+    .map_err(|e| {
+        format!(
+            "Поповер не показался: {}",
+            crate::util::ellipsize(&crate::util::one_line(&e), 80)
+        )
+    })
 }
 
 // Клавиши пикеров Claude (выверено вживую на v2.1.172): несколько вопросов =
 // табы [Q1][Q2]…[Submit]. single-select: цифра сама перескакивает на следующий
 // таб; multiSelect: после тогглов нужен Tab/→, чтобы уйти с таба. После
 // последнего вопроса — Review-экран, где «1» = «Submit answers».
-const CLAUDE_ADVANCE: &str = "Tab";         // уйти с multiSelect-таба к следующему
-const CLAUDE_SUBMIT_RIGHT: &str = "Right";  // Submit-таб одиночного multiSelect-вопроса
-const CLAUDE_SUBMIT_CONFIRM: &str = "1";    // на Review-экране «1. Submit answers»
+const CLAUDE_ADVANCE: &str = "Tab"; // уйти с multiSelect-таба к следующему
+const CLAUDE_SUBMIT_RIGHT: &str = "Right"; // Submit-таб одиночного multiSelect-вопроса
+const CLAUDE_SUBMIT_CONFIRM: &str = "1"; // на Review-экране «1. Submit answers»
 
 /// Плоская последовательность tmux send-keys для ответа на вопрос(ы).
 /// Чистая и детерминированная — тестируется без tmux. `answers[i]` — выбранные
 /// опции (1-based) вопроса `i`. Ветвится по агенту и по позиции вопроса.
-pub fn answer_keys(agent: crate::backend::Agent, q: &crate::model::Question, answers: &[Vec<u32>]) -> Vec<String> {
+pub fn answer_keys(
+    agent: crate::backend::Agent,
+    q: &crate::model::Question,
+    answers: &[Vec<u32>],
+) -> Vec<String> {
     use crate::backend::Agent;
     let mut keys = Vec::new();
     let n_q = q.questions.len();
@@ -232,8 +298,7 @@ pub fn answer_keys(agent: crate::backend::Agent, q: &crate::model::Question, ans
             // Codex всегда один вопрос (скрин-скрейп). Навигация стрелками от
             // подсветки на опции 1; Space тогглит в мультивыборе; Enter подтверждает.
             let item_multi = q.questions.first().map(|x| x.multi_select).unwrap_or(false);
-            let mut targets: Vec<u32> =
-                answers.first().cloned().unwrap_or_default();
+            let mut targets: Vec<u32> = answers.first().cloned().unwrap_or_default();
             targets.sort_unstable();
             let mut cursor: u32 = 1; // подсветка стартует на опции 1
             for t in targets {
@@ -253,15 +318,17 @@ pub fn answer_keys(agent: crate::backend::Agent, q: &crate::model::Question, ans
 
 /// Фокус-лесенка, ступень tmux: switch-client, не вышло — select-window.
 pub async fn focus(pane: &str) -> bool {
+    let direct_args = focus_args("switch-client", pane);
     let direct = tokio::process::Command::new("tmux")
-        .args(["switch-client", "-t", pane])
+        .args(direct_args)
         .output()
         .await;
     if matches!(&direct, Ok(o) if o.status.success()) {
         return true;
     }
+    let select_args = focus_args("select-window", pane);
     let select = tokio::process::Command::new("tmux")
-        .args(["select-window", "-t", pane])
+        .args(select_args)
         .output()
         .await;
     matches!(&select, Ok(o) if o.status.success())
@@ -279,12 +346,19 @@ mod answer_keys_tests {
             header: String::new(),
             multi_select: multi,
             options: (0..n)
-                .map(|i| QuestionOption { label: format!("o{i}"), description: String::new() })
+                .map(|i| QuestionOption {
+                    label: format!("o{i}"),
+                    description: String::new(),
+                })
                 .collect(),
         }
     }
     fn q(items: Vec<QuestionItem>) -> Question {
-        Question { at: 0, from_screen: false, questions: items }
+        Question {
+            at: 0,
+            from_screen: false,
+            questions: items,
+        }
     }
 
     // Claude, один вопрос, single-select: цифра авто-подтверждает.
@@ -298,7 +372,13 @@ mod answer_keys_tests {
     #[test]
     fn claude_single_question_multi_select_toggles_then_submit() {
         let keys = answer_keys(Agent::Claude, &q(vec![item(true, 3)]), &[vec![1, 3]]);
-        assert_eq!(keys, vec!["1", "3", "Right", "1"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            keys,
+            vec!["1", "3", "Right", "1"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     // Claude, два single-select вопроса (выверено вживую): каждая цифра сама
@@ -310,7 +390,13 @@ mod answer_keys_tests {
             &q(vec![item(false, 3), item(false, 2)]),
             &[vec![2], vec![1]],
         );
-        assert_eq!(keys, vec!["2", "1", "1"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            keys,
+            vec!["2", "1", "1"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     // Claude, multiSelect-вопрос + single-select (выверено вживую): тогглы Q1,
@@ -322,20 +408,98 @@ mod answer_keys_tests {
             &q(vec![item(true, 3), item(false, 2)]),
             &[vec![1, 3], vec![1]],
         );
-        assert_eq!(keys, vec!["1", "3", "Tab", "1", "1"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            keys,
+            vec!["1", "3", "Tab", "1", "1"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     // Codex, single-select: стрелки вниз от опции 1, затем Enter.
     #[test]
     fn codex_single_select_navigates_down_then_enter() {
         let keys = answer_keys(Agent::Codex, &q(vec![item(false, 4)]), &[vec![3]]);
-        assert_eq!(keys, vec!["Down", "Down", "Enter"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            keys,
+            vec!["Down", "Down", "Enter"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     // Codex, multiSelect: Space на каждой выбранной по ходу вниз, затем Enter.
     #[test]
     fn codex_multi_select_space_at_each_then_enter() {
         let keys = answer_keys(Agent::Codex, &q(vec![item(true, 4)]), &[vec![1, 3]]);
-        assert_eq!(keys, vec!["Space", "Down", "Down", "Space", "Enter"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            keys,
+            vec!["Space", "Down", "Down", "Space", "Enter"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn generated_buffer_names_are_unique_and_tmux_safe() {
+        let reply = unique_buffer_name(BufferKind::Reply);
+        let another_reply = unique_buffer_name(BufferKind::Reply);
+        let command = unique_buffer_name(BufferKind::Command);
+
+        assert_ne!(reply, another_reply);
+        assert_ne!(reply, command);
+        assert!(reply.starts_with("jarvis-reply-"));
+        assert!(command.starts_with("jarvis-cmd-"));
+        for name in [reply, another_reply, command] {
+            assert!(name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')));
+        }
+    }
+
+    #[test]
+    fn buffer_command_args_keep_each_name_and_delete_after_paste() {
+        assert_eq!(
+            set_buffer_args("jarvis-reply-42", "line one\nline two"),
+            [
+                "set-buffer",
+                "-b",
+                "jarvis-reply-42",
+                "--",
+                "line one\nline two",
+            ]
+        );
+        assert_eq!(
+            paste_buffer_args("jarvis-reply-42", "%7"),
+            [
+                "paste-buffer",
+                "-p",
+                "-d",
+                "-b",
+                "jarvis-reply-42",
+                "-t",
+                "%7",
+            ]
+        );
+    }
+
+    #[test]
+    fn focus_command_args_always_select_the_jarvis_server() {
+        assert_eq!(
+            focus_args("switch-client", "%3"),
+            ["-L", "jarvis", "switch-client", "-t", "%3"]
+        );
+        assert_eq!(
+            focus_args("select-window", "%3"),
+            ["-L", "jarvis", "select-window", "-t", "%3"]
+        );
     }
 }

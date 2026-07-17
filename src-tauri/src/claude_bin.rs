@@ -84,12 +84,26 @@ const HAIKU_SYSTEM: &str = "Ты — функция обработки текс�
 упоминать рабочую папку, git, репозиторий, проект, контекст или их отсутствие, использовать английский язык. \
 Если входных данных мало — всё равно дай максимально короткий разумный ответ строго по присланному тексту.";
 
+fn service_request_metadata(backend: &str, prompt: &str) -> String {
+    format!(
+        "[{backend}] request prompt_chars={}",
+        prompt.chars().count()
+    )
+}
+
+fn service_response_metadata(backend: &str, response: Option<&str>) -> String {
+    match response {
+        Some(text) => format!(
+            "[{backend}] response status=ok response_chars={}",
+            text.chars().count()
+        ),
+        None => format!("[{backend}] response status=unavailable response_chars=0"),
+    }
+}
+
 /// Headless-вызов haiku одним промптом — общий путь переводов и саммари.
 pub async fn run_haiku(prompt: &str, timeout: Duration) -> Option<String> {
-    crate::log::line(&format!(
-        "[haiku] → {}",
-        crate::util::ellipsize(&crate::util::one_line(prompt), 300)
-    ));
+    crate::log::line(&service_request_metadata("haiku", prompt));
     let out = run_claude(
         &[
             "-p",
@@ -117,13 +131,7 @@ pub async fn run_haiku(prompt: &str, timeout: Duration) -> Option<String> {
         timeout,
     )
     .await;
-    crate::log::line(&format!(
-        "[haiku] ← {}",
-        match &out {
-            Some(s) => crate::util::ellipsize(&crate::util::one_line(s), 300),
-            None => "<нет ответа / таймаут>".into(),
-        }
-    ));
+    crate::log::line(&service_response_metadata("haiku", out.as_deref()));
     out
 }
 
@@ -158,7 +166,10 @@ pub async fn run_codex_summary(prompt: &str, timeout: Duration) -> Option<String
     .stderr(Stdio::null())
     .kill_on_drop(true);
     apply_proxy(&mut cmd); // Codex → OpenAI по HTTPS: без HTTPS_PROXY висит в таймаут
-    let out = tokio::time::timeout(timeout, cmd.output()).await.ok()?.ok()?;
+    let out = tokio::time::timeout(timeout, cmd.output())
+        .await
+        .ok()?
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -225,9 +236,7 @@ pub fn service_order(
     let codex = [Backend::CodexSdk, Backend::CodexExec];
     // Базовый порядок предпочтения по выбору пользователя; фолбэк — остальное.
     let prefs: Vec<Backend> = match backend {
-        ServiceBackend::Auto | ServiceBackend::Claude => {
-            claude.into_iter().chain(codex).collect()
-        }
+        ServiceBackend::Auto | ServiceBackend::Claude => claude.into_iter().chain(codex).collect(),
         ServiceBackend::Codex => codex.into_iter().chain(claude).collect(),
     };
     prefs
@@ -363,7 +372,11 @@ impl ServiceConfig {
         ServiceConfig {
             backend: ServiceBackend::from_str(g("backend")),
             codex_model: g("codexModel").to_string(),
-            codex_effort: if effort.is_empty() { "low".into() } else { effort.into() },
+            codex_effort: if effort.is_empty() {
+                "low".into()
+            } else {
+                effort.into()
+            },
             claude_auth_mode: g("claudeAuthMode").to_string(),
             claude_secret: g("claudeSecret").to_string(),
             proxy: g("proxy").to_string(),
@@ -503,12 +516,7 @@ pub async fn run_codex_sdk(
         "timeout": timeout.as_secs_f64(),
     })
     .to_string();
-    crate::log::line(&format!(
-        "[codex-sdk] → model={} effort={} {}",
-        if model.is_empty() { "<default>" } else { model },
-        effort,
-        crate::util::ellipsize(&crate::util::one_line(prompt), 240)
-    ));
+    crate::log::line(&service_request_metadata("codex-sdk", prompt));
     let mut cmd = tokio::process::Command::new(py);
     cmd.arg(script)
         .current_dir(std::env::temp_dir())
@@ -532,25 +540,7 @@ pub async fn run_codex_sdk(
         .ok()?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let parsed = parse_codex_sdk_output(&stdout);
-    // Доказательство транспорта: сайдкар печатает `via` (версии официального SDK +
-    // bundled codex-бинаря, через app-server). Видно в jarvis.log на каждый вызов.
-    let via = stdout.lines().rev().find_map(|l| {
-        let l = l.trim();
-        if !l.starts_with('{') {
-            return None;
-        }
-        serde_json::from_str::<serde_json::Value>(l)
-            .ok()
-            .and_then(|v| v.get("via").and_then(serde_json::Value::as_str).map(String::from))
-    });
-    crate::log::line(&format!(
-        "[codex-sdk] ← {}{}",
-        via.map(|v| format!("(via {v}) ")).unwrap_or_default(),
-        match &parsed {
-            Some(s) => crate::util::ellipsize(&crate::util::one_line(s), 240),
-            None => "<нет ответа / ошибка сайдкара>".into(),
-        }
-    ));
+    crate::log::line(&service_response_metadata("codex-sdk", parsed.as_deref()));
     parsed
 }
 
@@ -589,15 +579,24 @@ mod tests {
     #[test]
     fn auto_and_claude_prefer_claude_then_codex() {
         let all = service_order(ServiceBackend::Auto, true, true, true);
-        assert_eq!(all, vec![Backend::Claude, Backend::CodexSdk, Backend::CodexExec]);
+        assert_eq!(
+            all,
+            vec![Backend::Claude, Backend::CodexSdk, Backend::CodexExec]
+        );
         let all_claude = service_order(ServiceBackend::Claude, true, true, true);
-        assert_eq!(all_claude, vec![Backend::Claude, Backend::CodexSdk, Backend::CodexExec]);
+        assert_eq!(
+            all_claude,
+            vec![Backend::Claude, Backend::CodexSdk, Backend::CodexExec]
+        );
     }
 
     #[test]
     fn codex_selected_prefers_codex_then_claude() {
         let o = service_order(ServiceBackend::Codex, true, true, true);
-        assert_eq!(o, vec![Backend::CodexSdk, Backend::CodexExec, Backend::Claude]);
+        assert_eq!(
+            o,
+            vec![Backend::CodexSdk, Backend::CodexExec, Backend::Claude]
+        );
     }
 
     #[test]
@@ -628,8 +627,14 @@ mod tests {
 
     #[test]
     fn parse_sidecar_error_and_empty_return_none() {
-        assert_eq!(parse_codex_sdk_output("{\"ok\": false, \"error\": \"boom\"}"), None);
-        assert_eq!(parse_codex_sdk_output("{\"ok\": true, \"text\": \"   \"}"), None);
+        assert_eq!(
+            parse_codex_sdk_output("{\"ok\": false, \"error\": \"boom\"}"),
+            None
+        );
+        assert_eq!(
+            parse_codex_sdk_output("{\"ok\": true, \"text\": \"   \"}"),
+            None
+        );
         assert_eq!(parse_codex_sdk_output("не json вовсе"), None);
         assert_eq!(parse_codex_sdk_output(""), None);
     }
@@ -655,5 +660,39 @@ mod tests {
         // stderr перенаправлен в сайдкаре, но на всякий — берём последнюю JSON-строку
         let s = "loading model...\nsome warning\n{\"ok\": true, \"text\": \"итог\"}\n";
         assert_eq!(parse_codex_sdk_output(s), Some("итог".to_string()));
+    }
+
+    #[test]
+    fn service_request_metadata_contains_length_but_not_prompt() {
+        let prompt = "секретный текст пользовательского запроса";
+
+        let metadata = service_request_metadata("haiku", prompt);
+
+        assert_eq!(
+            metadata,
+            format!("[haiku] request prompt_chars={}", prompt.chars().count())
+        );
+        assert!(!metadata.contains(prompt));
+    }
+
+    #[test]
+    fn service_response_metadata_contains_status_and_length_but_not_text() {
+        let response = "чувствительный ответ модели";
+
+        let ok = service_response_metadata("codex-sdk", Some(response));
+        let failed = service_response_metadata("codex-sdk", None);
+
+        assert_eq!(
+            ok,
+            format!(
+                "[codex-sdk] response status=ok response_chars={}",
+                response.chars().count()
+            )
+        );
+        assert!(!ok.contains(response));
+        assert_eq!(
+            failed,
+            "[codex-sdk] response status=unavailable response_chars=0"
+        );
     }
 }

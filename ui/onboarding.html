@@ -1,211 +1,228 @@
 <!doctype html>
 <html lang="ru">
 <head>
-<meta charset="utf-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:" />
-<title>Настройка Jarvis</title>
-<style>
-  :root {
-    --bg: rgba(10, 10, 12, 0.82);
-    --border: rgba(255, 255, 255, 0.08);
-    --hairline: rgba(255, 255, 255, 0.06);
-    --text: #e7e7ea;
-    --muted: #8b8b93;
-    --faint: #5b5b62;
-    --working: #6ca0ff;
-    --done: #41c98e;
-    --waiting: #f2a33c;
-    --card: rgba(255, 255, 255, 0.04);
-  }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  /* атрибут hidden должен побеждать display из классов (.howto{display:flex} и т.п.) */
-  [hidden] { display: none !important; }
-  html, body { height: 100%; background: transparent; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
-    color: var(--text);
-    -webkit-font-smoothing: antialiased;
-    user-select: none;
-    overflow: hidden;
-  }
-  .shell {
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
-    background: var(--bg);
-    backdrop-filter: blur(14px) saturate(150%);
-    -webkit-backdrop-filter: blur(14px) saturate(150%);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    overflow: hidden;
-  }
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:" />
+  <title>Jarvis · Инициализация</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --void: #07090c;
+      --surface: #0c1015;
+      --text: #edf3f8;
+      --muted: #7e8995;
+      --dim: #46515d;
+      --signal: #91d9ff;
+      --ready: #65e9b6;
+      --warn: #f4bd73;
+      --danger: #ff7f8b;
+      --line: rgba(201, 225, 241, .095);
+      --soft: rgba(201, 225, 241, .035);
+    }
 
-  /* перетаскивание окна + кнопка закрытия */
-  .titlebar { height: 30px; flex: 0 0 auto; position: relative; }
-  .close {
-    position: absolute; top: 9px; right: 12px; width: 13px; height: 13px;
-    border-radius: 50%; border: none; cursor: pointer;
-    background: rgba(255,255,255,0.10); transition: background 120ms;
-  }
-  .close:hover { background: var(--waiting); }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; background: transparent; }
+    body {
+      overflow: hidden;
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      user-select: none;
+    }
+    button, input, select { font: inherit; }
+    button { color: inherit; }
+    [hidden] { display: none !important; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
-  .body { flex: 1 1 auto; display: flex; flex-direction: column; padding: 4px 30px 26px; }
+    .shell {
+      position: relative;
+      isolation: isolate;
+      height: 100vh;
+      display: grid;
+      grid-template-rows: 38px minmax(0, 1fr) 68px;
+      overflow: hidden;
+      border: 1px solid rgba(201, 225, 241, .13);
+      border-radius: 20px;
+      background: radial-gradient(300px 210px at 50% -10%, rgba(94,182,231,.085), transparent 74%), rgba(7,9,12,.97);
+      box-shadow: inset 0 1px rgba(255,255,255,.045), 0 28px 90px rgba(0,0,0,.44);
+      backdrop-filter: blur(26px) saturate(125%);
+      -webkit-backdrop-filter: blur(26px) saturate(125%);
+    }
+    .shell::before { content: none; }
+    .shell::after {
+      content: "";
+      position: absolute; z-index: 8; left: 0; right: 0; top: -2px; height: 1px;
+      background: linear-gradient(90deg, transparent, var(--signal), transparent);
+      opacity: .18; pointer-events: none;
+      animation: scan-shell 7s ease-in-out infinite;
+    }
 
-  /* hero */
-  .hero { text-align: center; padding: 6px 0 22px; }
-  .logo {
-    width: 72px; height: 72px; margin: 0 auto 16px; border-radius: 19px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.09);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-    position: relative;
-  }
-  /* тонкая моно-«J» — в одном языке с клавишами (.k) и карточками, без градиента */
-  .logo::after {
-    content: "J"; position: absolute; inset: 0; display: grid; place-items: center;
-    font-size: 38px; font-weight: 400; color: #cfcfd5;
-    font-family: "SF Pro Display", -apple-system, sans-serif;
-  }
-  h1 { font-size: 21px; font-weight: 600; letter-spacing: 0.1px; }
-  .sub { margin-top: 7px; font-size: 13px; line-height: 1.45; color: var(--muted); }
+    .titlebar { position: relative; display: flex; align-items: center; padding: 0 16px; }
+    .brand { display: flex; align-items: center; gap: 8px; color: var(--dim); font: 650 8px/1 "SF Mono", ui-monospace, monospace; letter-spacing: .18em; }
+    .brand-signal { width: 5px; height: 5px; border-radius: 50%; background: var(--ready); box-shadow: 0 0 10px rgba(101,233,182,.68); animation: breathe 2.8s ease-in-out infinite; }
+    .brand span:last-child { display: none; }
+    .close {
+      position: absolute; top: 12px; right: 14px; width: 12px; height: 12px; padding: 0;
+      border: 0; border-radius: 50%; background: rgba(201,225,241,.14); cursor: pointer;
+      transition: background .16s, transform .16s;
+    }
+    .close:hover { background: var(--danger); transform: scale(1.1); }
 
-  /* шаги */
-  .steps {
-    background: var(--card); border: 1px solid var(--hairline); border-radius: 12px;
-    padding: 6px 4px; margin-top: 4px;
-  }
-  .step { display: flex; align-items: center; gap: 12px; padding: 11px 14px; }
-  .step + .step { border-top: 1px solid var(--hairline); }
-  .ico { width: 18px; height: 18px; flex: 0 0 auto; position: relative; }
-  /* pending — полый кружок */
-  .ico::before {
-    content: ""; position: absolute; inset: 2px; border-radius: 50%;
-    border: 1.5px solid var(--faint); box-sizing: border-box;
-  }
-  .meta { display: flex; flex-direction: column; min-width: 0; }
-  .name { font-size: 13px; font-weight: 500; }
-  .desc { font-size: 11.5px; color: var(--muted); margin-top: 1px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 360px; }
+    .workspace { min-height: 0; display: grid; grid-template-rows: 29px minmax(0, 1fr); padding: 0 22px; }
+    .rail { position: relative; width: 178px; justify-self: center; display: grid; grid-template-columns: repeat(4, 1fr); align-items: start; padding-top: 4px; }
+    .rail::before {
+      content: ""; position: absolute; left: 12.5%; right: 12.5%; top: 9px; height: 1px;
+      background: linear-gradient(90deg, var(--signal) var(--rail-fill, 0%), var(--line) var(--rail-fill, 0%));
+      transition: background .45s cubic-bezier(.2,.8,.2,1);
+    }
+    .rail-step {
+      z-index: 1; min-width: 0; display: grid; justify-items: center;
+      padding: 0; border: 0; background: none; color: var(--dim); cursor: default;
+    }
+    .rail-dot {
+      width: 10px; height: 10px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%;
+      background: var(--void); color: transparent; font-size: 0; transition: .22s ease;
+    }
+    .rail-copy { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+    .rail-step[data-state="active"] { color: var(--signal); }
+    .rail-step[data-state="active"] .rail-dot { border-color: var(--signal); box-shadow: 0 0 0 4px rgba(145,217,255,.07), 0 0 13px rgba(145,217,255,.22); }
+    .rail-step[data-state="done"] { color: var(--muted); }
+    .rail-step[data-state="done"] .rail-dot { border-color: var(--ready); background: var(--ready); color: #07110d; }
 
-  /* состояния шага */
-  .step[data-state="run"] .ico::before { border: none; }
-  .step[data-state="run"] .ico::after {
-    content: ""; position: absolute; inset: 1px; border-radius: 50%;
-    border: 2px solid rgba(108,160,255,0.25); border-top-color: var(--working);
-    animation: spin 0.7s linear infinite;
-  }
-  .step[data-state="done"] .ico::before { border: none; }
-  .step[data-state="done"] .ico::after {
-    content: ""; position: absolute; left: 2px; top: 8px; width: 5px; height: 9px;
-    border: solid var(--done); border-width: 0 2px 2px 0; transform: rotate(45deg);
-    transform-origin: center;
-  }
-  .step[data-state="warn"] .ico::before { border-color: var(--waiting); }
-  .step[data-state="warn"] .ico::after {
-    content: "!"; position: absolute; inset: 0; display: grid; place-items: center;
-    font-size: 11px; font-weight: 700; color: var(--waiting);
-  }
-  .step[data-state="done"] .name { color: var(--text); }
-  .step[data-state="pending"] .name,
-  .step[data-state="pending"] .desc { opacity: 0.6; }
-  @keyframes spin { to { transform: rotate(360deg); } }
+    .content {
+      min-width: 0; min-height: 0; overflow: auto; padding: 16px 30px 30px;
+      scrollbar-width: thin; scrollbar-color: rgba(201,225,241,.12) transparent;
+    }
+    .content[data-screen="welcome"], .content[data-screen="checking"], .content[data-screen="ready"] {
+      display: flex; flex-direction: column; align-items: center; text-align: center; padding-top: 42px;
+    }
+    .content[data-screen="welcome"] .lead, .content[data-screen="checking"] .lead, .content[data-screen="ready"] .lead { max-width: 325px; }
+    .content.enter { animation: enter .38s cubic-bezier(.2,.75,.2,1) both; }
+    .eyebrow { display: flex; align-items: center; gap: 7px; margin-bottom: 13px; color: var(--signal); font: 650 8px/1.2 "SF Mono", ui-monospace, monospace; letter-spacing: .17em; text-transform: uppercase; }
+    .pulse { width: 4px; height: 4px; border-radius: 50%; background: currentColor; box-shadow: 0 0 9px currentColor; }
+    h1 { margin: 0; max-width: 355px; font: 570 23px/1.11 "SF Pro Display", -apple-system, sans-serif; letter-spacing: -.022em; }
+    .lead { margin: 9px 0 0; max-width: 355px; color: var(--muted); font-size: 11.5px; line-height: 1.48; }
 
-  /* подвал */
-  .foot { margin-top: auto; padding-top: 20px; }
-  /* экран «как пользоваться» (после установки) — центрируем по вертикали,
-     чтобы не было пустого провала между подсказками и кнопками */
-  .howto { display: flex; flex-direction: column; justify-content: center; gap: 4px; flex: 1 1 auto; }
-  .tip { display: flex; align-items: center; gap: 14px; padding: 11px 6px; }
-  .tip + .tip { border-top: 1px solid var(--hairline); }
-  .tip .k {
-    flex: 0 0 auto; min-width: 38px; height: 28px; padding: 0 9px;
-    display: grid; place-items: center; border-radius: 8px;
-    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.07);
-    color: #cfcfd5; font-size: 13px; font-weight: 600;
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  }
-  /* строки-фичи (не хоткеи) — мягкая моно-иконка, выровнена как клавиша, но без чипа */
-  .tip .ic {
-    flex: 0 0 auto; min-width: 38px; height: 28px;
-    display: grid; place-items: center; color: #9a9aa2;
-  }
-  .tip .ic svg { width: 19px; height: 19px; display: block; }
-  .tip .tx { display: flex; flex-direction: column; min-width: 0; }
-  .tip .tx b { font-size: 13px; font-weight: 600; }
-  .tip .tx span { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
-  .proxy {
-    width: 100%; height: 34px; margin-bottom: 10px; padding: 0 12px;
-    border: 1px solid var(--border); border-radius: 9px;
-    background: rgba(255,255,255,0.04); color: var(--text);
-    font: inherit; font-size: 12.5px; outline: none; transition: border-color 120ms;
-  }
-  .proxy::placeholder { color: var(--faint); }
-  .proxy:focus { border-color: var(--working); }
-  .hint { font-size: 11.5px; color: var(--faint); text-align: center; margin-bottom: 12px; min-height: 14px; }
-  .btn {
-    width: 100%; height: 40px; border: none; border-radius: 10px; cursor: pointer;
-    font-size: 14px; font-weight: 600; color: #fff;
-    background: var(--working); transition: filter 120ms, background 200ms, opacity 120ms;
-    font-family: inherit;
-  }
-  .btn:hover { filter: brightness(1.08); }
-  .btn:active { filter: brightness(0.95); }
-  .btn:disabled { opacity: 0.55; cursor: default; filter: none; }
-  .btn.ok { background: var(--done); }
-  .btn.ghost { background: rgba(255,255,255,0.08); color: var(--text); }
-  /* Шаг выбора моделей */
-  .models { display: flex; flex-direction: column; gap: 9px; margin-top: 4px; }
-  .models-title { font-size: 12.5px; color: var(--faint); margin-bottom: 2px; }
-  .mrow { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text); cursor: pointer; }
-  .mrow input[type=checkbox] { width: 15px; height: 15px; }
-  .mrow select { margin-left: auto; background: rgba(255,255,255,0.05); color: var(--text);
-    border: 1px solid rgba(255,255,255,0.12); border-radius: 7px; padding: 2px 6px; font-family: inherit; }
-  .msize { color: var(--faint); font-size: 12px; }
-  #models-progress { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
-  #models-progress > div { font-size: 12px; color: var(--faint); }
-</style>
+    .hero-mark, .ready-orbit {
+      position: relative; width: 62px; height: 62px; margin: 5px 0 19px; display: grid; place-items: center;
+      border: 1px solid rgba(145,217,255,.28); border-radius: 50%;
+      background: radial-gradient(circle, rgba(145,217,255,.13), rgba(145,217,255,.025) 56%, transparent 58%);
+      color: var(--text); font: 480 21px/1 "SF Pro Display", sans-serif;
+      box-shadow: 0 0 34px rgba(81,161,209,.075);
+      animation: core-float 4.4s ease-in-out infinite;
+    }
+    .hero-mark::before, .ready-orbit::before {
+      content: ""; position: absolute; inset: -7px; border: 1px solid transparent; border-top-color: rgba(145,217,255,.42); border-right-color: rgba(145,217,255,.09); border-radius: 50%; animation: orbit 9s linear infinite;
+    }
+    .hero-mark::after, .ready-orbit::after {
+      content: ""; position: absolute; width: 5px; height: 5px; top: -9px; left: 50%; border-radius: 50%; background: var(--signal); box-shadow: 0 0 10px var(--signal); transform: translateX(-50%);
+    }
+    .ready-orbit { color: var(--ready); border-color: rgba(101,233,182,.36); background: radial-gradient(circle, rgba(101,233,182,.12), transparent 62%); }
+    .ready-orbit::before { border-top-color: rgba(101,233,182,.58); border-right-color: rgba(101,233,182,.08); }
+    .ready-orbit::after { background: var(--ready); box-shadow: 0 0 10px var(--ready); }
+
+    .facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; width: 100%; margin-top: 22px; }
+    .fact { min-width: 0; padding: 0; }
+    .fact + .fact { border-left: 0; }
+    .fact b { display: block; color: var(--text); font: 600 10px/1.2 "SF Mono", ui-monospace, monospace; letter-spacing: .03em; }
+    .fact span { display: block; margin-top: 4px; color: var(--dim); font-size: 8.5px; line-height: 1.25; }
+    .system-note { margin-top: 24px; color: var(--dim); font: 600 8px/1.4 "SF Mono", ui-monospace, monospace; letter-spacing: .12em; text-transform: uppercase; }
+    .shortcut { margin-top: 27px; display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 9px; }
+    .shortcut kbd { min-width: 36px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: var(--soft); font: 600 10px/1 "SF Mono", ui-monospace, monospace; }
+
+    .section-title { margin: 18px 0 4px; color: var(--dim); font: 650 8px/1.2 "SF Mono", ui-monospace, monospace; letter-spacing: .12em; text-transform: uppercase; }
+    .list { display: grid; }
+    .item {
+      display: grid; grid-template-columns: 25px minmax(0,1fr) auto; gap: 10px; align-items: center;
+      min-height: 47px; padding: 6px 2px; border-bottom: 1px solid rgba(201,225,241,.065); background: transparent;
+    }
+    .status-icon, .cap-check {
+      width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid rgba(244,189,115,.2); border-radius: 50%;
+      color: var(--warn); background: rgba(244,189,115,.045); font: 650 9px/1 "SF Mono", ui-monospace, monospace;
+    }
+    .item[data-ready="true"] .status-icon { border-color: rgba(101,233,182,.24); color: var(--ready); background: rgba(101,233,182,.045); }
+    .item-title { font-size: 11px; font-weight: 570; }
+    .item-detail { margin-top: 2px; color: var(--muted); font-size: 9px; line-height: 1.35; }
+    .badge { display: none; }
+    .item[data-ready="true"] .badge { color: var(--ready); }
+
+    .capability { position: relative; display: block; cursor: pointer; }
+    .capability input { position: absolute; opacity: 0; pointer-events: none; }
+    .capability .item { transition: padding .18s, background .18s; }
+    .capability input:focus-visible + .item { outline: 1px solid var(--signal); outline-offset: 2px; }
+    .capability input:checked + .item { padding-left: 8px; padding-right: 7px; background: linear-gradient(90deg, rgba(145,217,255,.07), transparent 82%); }
+    .capability input:disabled + .item { cursor: default; opacity: .7; }
+    .cap-check { border-color: var(--line); background: transparent; color: transparent; border-radius: 7px; }
+    .capability input:checked + .item .cap-check { color: #071019; background: var(--signal); border-color: var(--signal); }
+    .capability input:disabled + .item .cap-check { color: #07110d; background: var(--ready); border-color: var(--ready); }
+    .cap-side { text-align: right; }
+    .cap-side b { display: block; color: var(--dim); font: 600 8px/1.2 "SF Mono", ui-monospace, monospace; }
+    .qwen-size { margin-top: 4px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--muted); font-size: 8.5px; }
+
+    .notice { position: relative; margin-top: 13px; padding: 2px 0 2px 14px; border: 0; border-radius: 0; background: none; color: var(--muted); font-size: 8.8px; line-height: 1.45; }
+    .notice::before { content: "·"; position: absolute; left: 1px; top: 1px; color: var(--warn); font: 650 11px/1 "SF Mono", monospace; }
+    .warnings { margin: 11px 0 0; padding: 4px 0 4px 16px; border: 0; border-left: 1px solid rgba(255,127,139,.26); border-radius: 0; background: none; color: #d8a2a8; font-size: 9px; line-height: 1.48; }
+
+    .progress-card { position: relative; margin-top: 20px; padding: 14px 0 12px; border-top: 1px solid var(--line); border-bottom: 0; overflow: hidden; }
+    .content[data-screen="checking"] .progress-card { width: 100%; max-width: 330px; text-align: left; }
+    .progress-card::after { content: ""; position: absolute; top: 0; bottom: 0; width: 80px; background: linear-gradient(90deg, transparent, rgba(145,217,255,.04), transparent); animation: data-sweep 2.4s ease-in-out infinite; }
+    .progress-head { display: flex; align-items: center; gap: 9px; font-size: 11px; font-weight: 570; }
+    .spinner { width: 13px; height: 13px; border: 1px solid rgba(145,217,255,.18); border-top-color: var(--signal); border-radius: 50%; animation: orbit .75s linear infinite; }
+    .progress-line { margin-top: 7px; color: var(--muted); font-size: 9.5px; line-height: 1.4; }
+    .progress-track { height: 2px; margin-top: 11px; overflow: hidden; background: rgba(201,225,241,.055); }
+    .progress-fill { height: 100%; width: var(--pct, 12%); background: linear-gradient(90deg, rgba(145,217,255,.45), var(--signal)); box-shadow: 0 0 10px rgba(145,217,255,.32); transition: width .28s ease; }
+
+    .proxy-toggle { margin-top: 13px; padding: 0; border: 0; background: none; color: var(--dim); font-size: 9px; cursor: pointer; }
+    .proxy-field { width: 100%; height: 32px; margin-top: 8px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; outline: none; background: rgba(201,225,241,.025); color: var(--text); font-size: 9.5px; user-select: text; }
+    .proxy-field:focus { border-color: rgba(145,217,255,.5); }
+
+    .footer { z-index: 3; display: flex; align-items: center; padding: 14px 52px 16px; border-top: 1px solid rgba(201,225,241,.055); background: rgba(7,9,12,.9); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
+    .footer-actions { width: 100%; display: flex; gap: 8px; }
+    .btn { min-height: 37px; padding: 0 15px; border: 1px solid var(--line); border-radius: 8px; background: rgba(201,225,241,.035); cursor: pointer; font-size: 10.5px; font-weight: 620; letter-spacing: .01em; transition: border-color .16s, background .16s, transform .16s; }
+    .btn:hover:not(:disabled) { border-color: rgba(145,217,255,.26); background: rgba(145,217,255,.06); }
+    .btn:active:not(:disabled) { transform: translateY(1px); }
+    .btn.primary { flex: 1; border-color: rgba(145,217,255,.26); background: rgba(145,217,255,.9); color: #071019; box-shadow: none; }
+    .btn:disabled { opacity: .45; cursor: default; }
+    .btn:focus-visible, .close:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+
+    @keyframes orbit { to { transform: rotate(360deg); } }
+    @keyframes breathe { 50% { opacity: .42; transform: scale(.82); } }
+    @keyframes core-float { 50% { transform: translateY(-3px); box-shadow: 0 0 48px rgba(81,161,209,.14), inset 0 0 22px rgba(145,217,255,.05); } }
+    @keyframes data-sweep { from { left: -90px; } to { left: calc(100% + 20px); } }
+    @keyframes scan-shell { 0%,100% { transform: translateX(-45%); opacity: 0; } 20%,80% { opacity: .35; } 50% { transform: translateX(45%); } }
+    @keyframes enter { from { opacity: 0; transform: translateY(5px); filter: blur(3px); } to { opacity: 1; transform: none; filter: none; } }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+    }
+  </style>
 </head>
 <body>
-  <div class="shell">
+  <main class="shell" aria-labelledby="screen-title">
     <div class="titlebar" data-tauri-drag-region>
-      <button class="close" id="close" title="Закрыть"></button>
+      <div class="brand" aria-hidden="true"><i class="brand-signal"></i>JARVIS <span>/ SYSTEM INIT</span></div>
+      <button class="close" id="close" type="button" aria-label="Закрыть онбординг"></button>
     </div>
-    <div class="body">
-      <div class="hero">
-        <div class="logo"></div>
-        <h1 id="title">Настроим Jarvis</h1>
-        <div class="sub" id="subtitle">Подключим Jarvis к Claude Code: уведомления,<br/>озвучка и удобный запуск — за один шаг.</div>
-      </div>
 
-      <div class="steps" id="steps"></div>
-
-      <div class="models" id="models" hidden>
-        <div class="models-title">Модели — можно скачать сейчас или позже в настройках</div>
-        <label class="mrow"><input type="checkbox" id="m-whisper" checked> Whisper large-v3-turbo <span class="msize">~574 МБ</span></label>
-        <label class="mrow"><input type="checkbox" id="m-qwen"> Qwen3-ASR <span class="msize">~1 ГБ</span>
-          <select id="m-qwen-size"><option value="qwen3-0.6b">0.6B</option><option value="qwen3-1.7b">1.7B</option></select></label>
-        <label class="mrow"><input type="checkbox" id="m-wake" checked> Голосовая активация <span class="msize">~3.5 МБ</span></label>
-        <label class="mrow"><input type="checkbox" id="m-silero" checked> Голос Silero <span class="msize">~1 ГБ</span></label>
-        <button class="btn" id="models-go" style="margin-top:6px">Скачать выбранное</button>
-        <div id="models-progress"></div>
-      </div>
-
-      <div class="howto" id="howto" hidden>
-        <div class="tip"><span class="ic" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.75" y="3.75" width="14.5" height="12.5" rx="2.5"/><line x1="2.75" y1="7.5" x2="17.25" y2="7.5"/><circle cx="14.4" cy="5.6" r="0.7" fill="currentColor" stroke="none"/></svg></span><div class="tx"><b>Меню-бар</b><span>Статусы агентов, тихий режим, переустановка</span></div></div>
-        <div class="tip"><span class="ic" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M14.8 12.4c-.6-.7-1.4-1.8-1.4-4.5a3.4 3.4 0 0 0-6.8 0c0 2.7-.8 3.8-1.4 4.5-.3.3-.1.85.4.85h8.8c.5 0 .7-.55.4-.85Z"/><path d="M8.6 15.2a1.5 1.5 0 0 0 2.8 0"/><path d="M10 4.5V2.9"/></svg></span><div class="tx"><b>Уведомления</b><span>Тосты снизу и озвучка, когда агент закончил или ждёт тебя</span></div></div>
-        <div class="tip"><span class="k">⌘J</span><div class="tx"><b>Панель</b><span>Список сессий и настройки (хоткей задаётся в настройках)</span></div></div>
-        <div class="tip"><span class="k">⌘⌥J</span><div class="tx"><b>Тихий режим</b><span>Фон без уведомлений — для разработки</span></div></div>
-      </div>
-
-      <div class="foot">
-        <input class="proxy" id="proxy" type="text" spellcheck="false" autocomplete="off"
-               placeholder="Прокси для скачивания (если нужен): http://user:pass@host:port" />
-        <div class="hint" id="hint"></div>
-        <button class="btn ghost" id="settings" hidden>Открыть настройки</button>
-        <button class="btn" id="action">Настроить</button>
-      </div>
+    <div class="workspace">
+      <nav class="rail" id="rail" aria-label="Этапы настройки">
+        <button class="rail-step" type="button" data-screen="welcome" aria-label="Старт"><span class="rail-dot">✓</span><span class="rail-copy"><strong>Старт</strong><span>контекст</span></span></button>
+        <button class="rail-step" type="button" data-screen="agents" aria-label="Связь с агентами"><span class="rail-dot">✓</span><span class="rail-copy"><strong>Связь</strong><span>hooks</span></span></button>
+        <button class="rail-step" type="button" data-screen="capabilities" aria-label="Локальные модули"><span class="rail-dot">✓</span><span class="rail-copy"><strong>Модули</strong><span>локально</span></span></button>
+        <button class="rail-step" type="button" data-screen="ready" aria-label="Система online"><span class="rail-dot">✓</span><span class="rail-copy"><strong>Online</strong><span>запуск</span></span></button>
+      </nav>
+      <section class="content" id="content" tabindex="-1"></section>
     </div>
-  </div>
+
+    <footer class="footer">
+      <div class="footer-actions">
+        <button class="btn" id="secondary" type="button" hidden>Назад</button>
+        <button class="btn primary" id="primary" type="button">Продолжить</button>
+      </div>
+    </footer>
+    <div id="announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+  </main>
+  <script src="onboarding-state.js"></script>
   <script src="onboarding.js"></script>
 </body>
 </html>

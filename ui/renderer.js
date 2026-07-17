@@ -797,6 +797,8 @@ const qOptsEl = document.getElementById('qOpts');
 const qHeaderEl = document.getElementById('qHeader');
 const qTitleEl = document.getElementById('qTitle');
 const qFootEl = document.getElementById('qFoot');
+const qCustomRowEl = document.getElementById('qCustomRow');
+const qCustomEl = document.getElementById('qCustom');
 let qSessionId = null;
 let qData = null;        // текущий вопрос визарда
 let qSel = 0;
@@ -804,6 +806,7 @@ let qChosen = new Set();
 let qItems = [];         // все вопросы опроса (s.question.questions)
 let qIdx = 0;            // индекс текущего вопроса
 let qAnswers = [];       // собранные выборы по каждому вопросу: number[][]
+let qTexts = [];         // свои ответы по каждому вопросу: (string|null)[]
 
 function keycap(text) {
   const k = document.createElement('span');
@@ -817,6 +820,7 @@ function openQuestion(s) {
   qItems = (s.question && s.question.questions) || [];
   qIdx = 0;
   qAnswers = qItems.map(() => []);
+  qTexts = qItems.map(() => null);
   loadQ();
   setView('question');
   renderQuestion();
@@ -831,6 +835,7 @@ function loadQ() {
 }
 
 let activeQOpts = qOptsEl; // контейнер опций: полноэкранный qview или слайд-овер вариантов
+let activeQCustom = null;  // видимое поле «Свой ответ…» активного контейнера (null — скрыто)
 
 function paintQOptions() {
   for (const [i, btn] of [...activeQOpts.children].entries()) {
@@ -893,6 +898,15 @@ function renderQOpts(optsEl, footEl) {
   footEl.appendChild(hint('esc', 'назад'));
 }
 
+// Поле «Свой ответ…» под опциями — аналог строки Other пикера Claude;
+// в codex-сессии скрыто (у codex-пикера строки Other нет).
+function renderQCustom(rowEl, inputEl) {
+  const s = state.find((x) => x.id === qSessionId);
+  rowEl.hidden = !JarvisQuestionAnswer.customAllowed(s && s.agent);
+  inputEl.value = qTexts[qIdx] || '';
+  activeQCustom = rowEl.hidden ? null : inputEl;
+}
+
 function renderQuestion() {
   qHeaderEl.textContent = qData.header || '';
   qHeaderEl.hidden = !qData.header;
@@ -902,6 +916,7 @@ function renderQuestion() {
   else prog.hidden = true;
   activeQOpts = qOptsEl;
   renderQOpts(qOptsEl, qFootEl);
+  renderQCustom(qCustomRowEl, qCustomEl);
 }
 
 function toggleQ(i) {
@@ -917,12 +932,18 @@ function activateQ() {
 }
 
 // Записать выбор текущего вопроса и пойти дальше (или отправить весь опрос).
+// В single-select свой текст приоритетен (это выбор строки Other), в
+// multiSelect он добавляется к тогглам — логика в JarvisQuestionAnswer.
 function commitCurrentQ() {
-  const sel = qData.multiSelect
-    ? [...qChosen].sort((a, b) => a - b)
-    : [qSel + 1];
-  if (!sel.length) { showToast('Отметь хотя бы один вариант'); return false; }
-  qAnswers[qIdx] = sel;
+  const res = JarvisQuestionAnswer.commitRow({
+    multiSelect: qData.multiSelect,
+    chosen: qChosen,
+    sel: qSel,
+    text: activeQCustom ? activeQCustom.value : qTexts[qIdx],
+  });
+  if (!res) { showToast('Отметь хотя бы один вариант'); return false; }
+  qAnswers[qIdx] = res.row;
+  qTexts[qIdx] = res.text;
   return true;
 }
 
@@ -938,7 +959,8 @@ function advanceQ() {
 
 async function finalizeQ() {
   const sid = qSessionId;
-  const res = await window.jarvis.answerQuestion(sid, { answers: qAnswers });
+  const payload = JarvisQuestionAnswer.buildPayload(qAnswers, qTexts);
+  const res = await window.jarvis.answerQuestion(sid, payload);
   if (res.ok) {
     if (varOpen) closeVarPanel();
     else { setView('list'); render(); }
@@ -1063,6 +1085,8 @@ const qpOptsEl = document.getElementById('qpOpts');
 const qpFootEl = document.getElementById('qpFoot');
 const qpHeaderEl = document.getElementById('qpHeader');
 const qpTitleEl = document.getElementById('qpTitle');
+const qpCustomRowEl = document.getElementById('qpCustomRow');
+const qpCustomEl = document.getElementById('qpCustom');
 let varOpen = false;
 
 const questionOf = (s) =>
@@ -1088,6 +1112,7 @@ function renderVarPanel(s) {
   qpTitleEl.textContent = q.question;
   activeQOpts = qpOptsEl;
   renderQOpts(qpOptsEl, qpFootEl);
+  renderQCustom(qpCustomRowEl, qpCustomEl);
   if (q.multiSelect) { // мульти-выбор: клик-сабмит (на полноэкранном экране это Enter)
     const send = document.createElement('button');
     send.className = 'qp-send';
@@ -1104,6 +1129,7 @@ function openVarPanel() {
   qItems = s.question.questions;
   qIdx = 0;
   qAnswers = qItems.map(() => []);
+  qTexts = qItems.map(() => null);
   loadQ();
   varOpen = true;
   qWrap.hidden = false;
@@ -1123,9 +1149,22 @@ varBtn.addEventListener('click', () => (varOpen ? closeVarPanel() : openVarPanel
 document.getElementById('qpClose').addEventListener('click', closeVarPanel);
 document.getElementById('qScrim').addEventListener('click', closeVarPanel);
 
+// Поле «Свой ответ…» обоих контейнеров: печать не должна дёргать навигацию
+// пикера (stopPropagation режет window-обработчики); Enter — отправить,
+// Esc — вернуть клавиши пикеру.
+for (const el of [qCustomEl, qpCustomEl]) {
+  el.addEventListener('input', () => { qTexts[qIdx] = JarvisQuestionAnswer.normalizeText(el.value); });
+  el.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); submitQ(); }
+    else if (e.key === 'Escape') { e.preventDefault(); el.blur(); }
+  });
+}
+
 // Клавиатура слайд-овера — capture-фаза, чтобы перехватить раньше обработчиков чата
 window.addEventListener('keydown', (e) => {
   if (!varOpen) return;
+  if (e.target === qpCustomEl || e.target === qCustomEl) return; // печать в «Свой ответ» — клавиши полю
   if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); closeVarPanel(); return; }
   if (!qData) return;
   const stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };

@@ -657,6 +657,24 @@
   .qdesc { font-size: 11.5px; color: var(--muted); line-height: 1.4; }
   .qcheck { margin-left: auto; align-self: center; color: var(--waiting); font-size: 13px; flex: none; }
 
+  /* поле «Свой ответ…» под опциями — аналог строки Other в TUI (только Claude) */
+  .qcustomrow { flex: none; padding: 4px 12px 10px; }
+  .qcustom {
+    width: 100%;
+    box-sizing: border-box;
+    appearance: none;
+    outline: none;
+    font: inherit;
+    font-size: 13px;
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 9px 13px;
+  }
+  .qcustom::placeholder { color: var(--muted); }
+  .qcustom:focus { background: rgba(108, 160, 255, 0.06); border-color: rgba(108, 160, 255, 0.35); }
+
   .qvfoot {
     flex: none;
     display: flex;
@@ -1372,6 +1390,9 @@
               <div class="qp-question" id="qpTitle"></div>
             </div>
             <div class="qvopts" id="qpOpts"></div>
+            <div class="qcustomrow" id="qpCustomRow" hidden>
+              <input class="qcustom" id="qpCustom" placeholder="Свой ответ…" spellcheck="false" autocomplete="off" />
+            </div>
             <div class="qvfoot" id="qpFoot"></div>
           </div>
         </div>
@@ -1386,6 +1407,9 @@
           <span class="qprogress" id="qProgress" hidden></span>
         </div>
         <div class="qvopts" id="qOpts"></div>
+        <div class="qcustomrow" id="qCustomRow" hidden>
+          <input class="qcustom" id="qCustom" placeholder="Свой ответ…" spellcheck="false" autocomplete="off" />
+        </div>
         <div class="qvfoot" id="qFoot"></div>
       </div>
       <div class="stats" id="stats" hidden></div>
@@ -1493,6 +1517,7 @@
     <div class="actions-pop" id="actionsPop" hidden></div>
   </div>
   <script src="./bridge.js"></script>
+  <script src="./question-answer.js"></script>
   <script src="./settings2.js"></script>
   <script src="./voice-history.js"></script>
   <script src="./renderer.js"></script>

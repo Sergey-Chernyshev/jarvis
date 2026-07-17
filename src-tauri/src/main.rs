@@ -38,6 +38,8 @@ mod terminal;
 mod tmux;
 mod transcript;
 mod tray;
+mod turns;
+mod turnsum;
 mod usage;
 mod util;
 mod voice;
@@ -119,6 +121,8 @@ fn main() {
             ipc::settings_get,
             ipc::settings_set,
             ipc::chat_open,
+            ipc::chat_summarize,
+            ipc::file_open,
             ipc::chat_close,
             ipc::commands_get,
             ipc::app_meta,

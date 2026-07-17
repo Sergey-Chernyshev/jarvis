@@ -170,6 +170,8 @@ enum Effect {
     RemoveToast { id: String },
     /// Завершение: одна ИИ-выжимка результата — и в строку списка, и в тост.
     DoneSummary { sid: String },
+    /// Сводка последнего хода для открытого чата (панель показывает карточку).
+    TurnSummary { sid: String },
     /// Ручной /compact завершился (session-start, source=compact) — явный тост.
     NotifyCompact { title: String, sid: String },
     StopFailure { sid: String, payload: Value },
@@ -690,11 +692,11 @@ impl Daemon {
 
     /* ================= busy-флаги фоновых задач ================= */
 
-    fn busy_take(&self, kind: &'static str, sid: &str) -> bool {
+    pub(crate) fn busy_take(&self, kind: &'static str, sid: &str) -> bool {
         self.busy.lock().unwrap().insert((kind, sid.to_string()))
     }
 
-    fn busy_release(&self, kind: &'static str, sid: &str) {
+    pub(crate) fn busy_release(&self, kind: &'static str, sid: &str) {
         self.busy.lock().unwrap().remove(&(kind, sid.to_string()));
     }
 
@@ -966,6 +968,7 @@ impl Daemon {
                     // GenSummary тут не нужен — DoneSummary даёт ту же строку, но
                     // в стиле «что сделано», как в уведомлении
                     effects.push(Effect::DoneSummary { sid: sid.clone() });
+                    effects.push(Effect::TurnSummary { sid: sid.clone() });
                 }
 
                 "stop-failure" => {
@@ -1059,6 +1062,7 @@ impl Daemon {
                 }
                 Effect::RemoveToast { id } => windows::toast_remove(&d, &id),
                 Effect::DoneSummary { sid } => d.done_summary(sid),
+                Effect::TurnSummary { sid } => d.turn_stop_summary(sid),
                 Effect::NotifyCompact { title, sid } => {
                     d.notify_id(
                         &format!("compact-{sid}"),
@@ -1127,6 +1131,109 @@ impl Daemon {
             // голос читает `speak` (русское произношение), тост показывает body.
             d.notify_id_voiced(&format!("done-{sid}"), &title, &body, Some(&sid), "done", speak.as_deref());
             crate::metrics::record("stop_to_notify", t_notify, serde_json::json!({ "sid": sid }));
+        });
+    }
+
+    /// Stop: сводка последнего завершённого хода — только если чат этой сессии
+    /// открыт (гейт по tail), иначе сводка догонит лениво при открытии чата.
+    fn turn_stop_summary(self: &std::sync::Arc<Self>, sid: String) {
+        let d = self.clone();
+        tauri::async_runtime::spawn(async move {
+            if d.tail.active_session().as_deref() != Some(sid.as_str()) {
+                return;
+            }
+            let Some((be, entries)) = d.turn_entries(&sid) else { return };
+            let (_items, turns) = crate::turns::segment(be, &entries);
+            let Some(t) = turns.iter().rev().find(|t| t.span.complete) else { return };
+            if crate::turnsum::load_cards(&sid).contains_key(&t.span.key) {
+                return;
+            }
+            d.turn_generate(&sid, t).await;
+        });
+    }
+
+    /// Транскрипт сессии → (бэкенд, записи). None — сессии/файла нет.
+    pub(crate) fn turn_entries(
+        &self,
+        sid: &str,
+    ) -> Option<(&'static dyn crate::backend::Backend, Vec<Value>)> {
+        let s = self.session(sid)?;
+        let tr = s.transcript?;
+        let be = crate::backend::backend(crate::backend::Agent::from_opt(s.agent.as_deref()));
+        Some((be, be.read_entries(std::path::Path::new(&tr), 512 * 1024)))
+    }
+
+    /// Один LLM-вызов сводки хода: промпт → парс/валидация → кириллица-гейт с
+    /// одним ретраем → кэш + событие chat:summary. None — фолбэк на
+    /// детерминированную карточку (UI уже её показывает).
+    pub(crate) async fn turn_generate(
+        self: &std::sync::Arc<Self>,
+        sid: &str,
+        t: &crate::turns::Turn,
+    ) -> Option<crate::turns::TurnCard> {
+        // гейт на ход: backfill не должен блокировать сводку свежего Stop;
+        // конкуренция возможна только за один и тот же ход
+        let busy_key = format!("{sid}/{}", t.span.key);
+        if !claude_bin::any_service_bin() || !self.busy_take("turnsum", &busy_key) {
+            return None;
+        }
+        let result = async {
+            // пере-проверка кэша после захвата гейта: два быстрых chat_open могли
+            // снять снапшот todo до кэширования; заодно повторный запрос сводки
+            // мгновенно отдаёт готовую карточку (эмит — чтобы UI снял спиннер)
+            if let Some(card) = crate::turnsum::load_cards(sid).get(&t.span.key) {
+                windows::emit_to_panel(
+                    &self.app,
+                    "chat:summary",
+                    &serde_json::json!({ "sessionId": sid, "turnKey": t.span.key, "card": card }),
+                );
+                return Some(card.clone());
+            }
+            let prompt = crate::turns::build_prompt(&t.user_prompt, &t.facts);
+            for _attempt in 0..2 {
+                let Some(out) = claude_bin::run_service_llm(&prompt, Duration::from_secs(45)).await
+                else {
+                    continue;
+                };
+                let Some(card) = crate::turns::parse_card(&out, &t.facts) else { continue };
+                if !ru::has_cyrillic(&card.summary) {
+                    continue; // модель съехала в английский — ретрай
+                }
+                crate::turnsum::save_card(sid, &t.span.key, &card);
+                windows::emit_to_panel(
+                    &self.app,
+                    "chat:summary",
+                    &serde_json::json!({ "sessionId": sid, "turnKey": t.span.key, "card": card }),
+                );
+                return Some(card);
+            }
+            None
+        }
+        .await;
+        self.busy_release("turnsum", &busy_key);
+        result
+    }
+
+    /// Ленивый дозабор: последние `max` завершённых ходов без кэша,
+    /// последовательно (не душим служебный LLM), со стопом при закрытии чата.
+    pub(crate) fn turn_backfill(self: &std::sync::Arc<Self>, sid: String, max: usize) {
+        let d = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let Some((be, entries)) = d.turn_entries(&sid) else { return };
+            let (_items, turns) = crate::turns::segment(be, &entries);
+            let cards = crate::turnsum::load_cards(&sid);
+            let todo: Vec<crate::turns::Turn> = turns
+                .into_iter()
+                .rev()
+                .filter(|t| t.span.complete && !cards.contains_key(&t.span.key))
+                .take(max)
+                .collect();
+            for t in todo {
+                if d.tail.active_session().as_deref() != Some(sid.as_str()) {
+                    break; // чат закрыли — не тратим вызовы
+                }
+                d.turn_generate(&sid, &t).await;
+            }
         });
     }
 

@@ -7,12 +7,57 @@
 //! оставлен чисто-памятным (без диска) для тестов/фолбэка; демон — `load()`.
 
 use std::collections::VecDeque;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 /// Safety-cap: храним «всё», но не даём файлу расти бесконечно (старое вытесняется).
 const CAP: usize = 5000;
+
+static PRIVATE_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Атомарно заменить чувствительный файл через приватный временный inode в том
+/// же каталоге. `pub(crate)` — этот же примитив нужен аудио и памяти разговора.
+pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().and_then(|v| v.to_str()).unwrap_or("jarvis-data");
+
+    for _ in 0..16 {
+        let id = PRIVATE_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let temp = parent.join(format!(".{file_name}.tmp-{}-{id}", std::process::id()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let mut file = match options.open(&temp) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        let result = (|| {
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temp, path)?;
+            let _ = std::fs::File::open(parent).and_then(|dir| dir.sync_all());
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        return result;
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "не удалось создать временный приватный файл",
+    ))
+}
 
 /// Одна распознанная реплика.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -93,7 +138,7 @@ impl Transcripts {
         let Some(path) = &self.path else { return };
         let p = Persisted { items: items.iter().cloned().collect() };
         if let Ok(bytes) = serde_json::to_vec(&p) {
-            let _ = std::fs::write(path, bytes);
+            let _ = write_private_atomic(path, &bytes);
         }
     }
 
@@ -192,6 +237,17 @@ impl Transcripts {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn file_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
     fn tmp(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("jarvis-voicehist-{}-{}.json", std::process::id(), tag))
     }
@@ -270,6 +326,33 @@ mod tests {
         let path = tmp("corrupt");
         std::fs::write(&path, b"{ not json").unwrap();
         assert!(Transcripts::load_from(path.clone()).list().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_history_replaces_public_file_with_private_complete_json() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = tmp("private-atomic");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, br#"{"items":[]}"#).expect("seed history");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("public mode");
+
+        let history = Transcripts::load_from(path.clone());
+        history.push("секретная фраза", "dictation");
+
+        assert_eq!(
+            file_mode(&path),
+            0o600,
+            "текст диктовки доступен только владельцу"
+        );
+        let persisted: Persisted =
+            serde_json::from_slice(&std::fs::read(&path).expect("read history"))
+                .expect("complete JSON");
+        assert_eq!(persisted.items.len(), 1);
+        assert_eq!(persisted.items[0].text, "секретная фраза");
         let _ = std::fs::remove_file(&path);
     }
 }

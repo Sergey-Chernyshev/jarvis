@@ -97,7 +97,8 @@ pub async fn route_transcript(d: Arc<Daemon>, transcript: String, guard: SfGuard
         hud::emit(&d, hud::Phase::Empty);
         return;
     }
-    hud::emit(&d, hud::Phase::Heard { text: text.clone() });
+    // здесь вставки нет (реплика уходит в маршрутизацию) — inserted: false
+    hud::emit(&d, hud::Phase::Heard { text: text.clone(), inserted: false });
 
     let sessions = d.snapshot();
     let scored = score::rank(&text, &sessions);

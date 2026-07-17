@@ -6,7 +6,7 @@
 //! сохранение чистим выпавшее из окна. Всё best-effort: ошибка не валит диктовку.
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Частота PCM, который приходит в `SttService::transcribe` (см. `hub::DST_RATE`).
 const RATE: u32 = 16_000;
@@ -18,6 +18,11 @@ fn dir() -> PathBuf {
 }
 fn path(id: u64) -> PathBuf {
     dir().join(format!("{id}.wav.gz"))
+}
+
+fn save_encoded_to(path: &Path, pcm: &[f32]) -> Result<(), String> {
+    let bytes = encode(pcm)?;
+    crate::stt::transcripts::write_private_atomic(path, &bytes).map_err(|e| format!("запись: {e}"))
 }
 
 /// Закодировать PCM (f32, моно) в gzip-сжатый WAV (i16). Чистая — тестируема.
@@ -58,8 +63,7 @@ pub fn decode(gz: &[u8]) -> Result<Vec<f32>, String> {
 pub fn save(id: u64, pcm: &[f32]) -> Result<(), String> {
     let d = dir();
     std::fs::create_dir_all(&d).map_err(|e| format!("mkdir: {e}"))?;
-    let bytes = encode(pcm)?;
-    std::fs::write(path(id), bytes).map_err(|e| format!("запись: {e}"))?;
+    save_encoded_to(&path(id), pcm)?;
     if id > RETAIN {
         let _ = std::fs::remove_file(path(id - RETAIN));
     }
@@ -85,6 +89,17 @@ pub fn delete(id: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn file_mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    }
 
     #[test]
     fn encode_decode_roundtrip_preserves_signal() {
@@ -118,5 +133,32 @@ mod tests {
     fn empty_pcm_roundtrips() {
         let gz = encode(&[]).expect("encode empty");
         assert_eq!(decode(&gz).expect("decode empty").len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_audio_replaces_public_file_with_private_complete_gzip() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("jarvis-audio-private-{}", std::process::id()));
+        let target = root.join("42.wav.gz");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp dir");
+        std::fs::write(&target, b"old audio").expect("seed audio");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644))
+            .expect("public mode");
+
+        let pcm = vec![0.25f32, -0.25, 0.0];
+        save_encoded_to(&target, &pcm).expect("save private audio");
+
+        assert_eq!(
+            file_mode(&target),
+            0o600,
+            "аудио диктовки доступно только владельцу"
+        );
+        let restored = decode(&std::fs::read(&target).expect("read audio")).expect("complete gzip");
+        assert_eq!(restored.len(), pcm.len());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

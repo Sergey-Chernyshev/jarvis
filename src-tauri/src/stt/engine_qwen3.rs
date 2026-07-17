@@ -103,7 +103,7 @@ pub fn parse_transcribe_resp(json: &str) -> Result<SttResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stt::engine::{SttOptions, SttEngine};
+    use crate::stt::engine::SttEngine;
 
     // --- pcm_to_le_bytes ---
 

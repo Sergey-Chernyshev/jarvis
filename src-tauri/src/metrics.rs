@@ -9,6 +9,7 @@
 //!   jq 'select(.kind=="stop_to_notify")|.ms'            ~/.jarvis/metrics.jsonl  # результат→увед
 
 use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -69,9 +70,17 @@ fn write_line(v: &Value) {
     let p = path();
     let _ = std::fs::create_dir_all(jarvis_dir());
     if std::fs::metadata(&p).map(|m| m.len() > MAX_BYTES).unwrap_or(false) {
-        let _ = std::fs::rename(&p, p.with_extension("jsonl.old"));
+        let old = p.with_extension("jsonl.old");
+        let _ = std::fs::rename(&p, &old);
+        let _ = std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o600));
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&p)
+    {
+        let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
         let _ = writeln!(f, "{v}");
     }
 }

@@ -25,10 +25,6 @@ JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
 SHIM_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 BIN_NAME=$(basename -- "$0")
 
-# Codex: установщик запекает сюда '--dangerously-bypass-hook-trust', если флаг
-# поддерживается (свежая машина без записанного hook-trust). Claude игнорирует.
-CODEX_BYPASS=''
-
 # Сетевые переменные, которые шим синхронизирует с текущим терминалом.
 NET_VARS="HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy"
 [ "$BIN_NAME" = claude ] && NET_VARS="$NET_VARS ANTHROPIC_BASE_URL NODE_EXTRA_CA_CERTS"
@@ -75,15 +71,7 @@ command -v tmux >/dev/null 2>&1 || wrap=0  # tmux не установлен — 
 if [ "$wrap" = 0 ]; then
   # Сквозной exec наследует окружение шима (= твоего терминала) как есть.
   JARVIS_SHIM=1 export JARVIS_SHIM
-  # Codex: даже БЕЗ tmux-обёртки (запуск ВНУТРИ tmux / JARVIS_TMUX=off / без tty) —
-  # снимаем требование trust хуков. Иначе SessionStart/UserPromptSubmit codex молча
-  # пропускаются (trusted_hash в config.toml не покрывает свежие события), демон не
-  # видит сессию как codex → модель показывается как «Opus», нет текста/промта.
-  # Флаг глобальный (идёт перед сабкомандой), запекается установщиком; не-codex — пусто.
-  PASS_EXTRA=''
-  [ "$BIN_NAME" = codex ] && PASS_EXTRA="$CODEX_BYPASS"
-  # shellcheck disable=SC2086  # $PASS_EXTRA: пустой или один флаг
-  exec "$REAL" $PASS_EXTRA "$@"
+  exec "$REAL" "$@"
 fi
 
 # --- обёртка в tmux ---
@@ -93,34 +81,19 @@ CONF="$JARVIS_DIR/tmux.conf"
 [ -f "$CONF" ] && CONF_OPT="-f $CONF" || CONF_OPT=''
 NAME="$(basename -- "$PWD" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-32)$$"
 
-# Codex на свежей машине: хуки не доверены (trusted_hash в config.toml). Флаг
-# (если запечён установщиком) снимает требование trust для этого запуска.
-EXTRA=''
-[ "$BIN_NAME" = codex ] && EXTRA="$CODEX_BYPASS"
-
 # tmux склеивает несколько аргументов shell-command через пробел и отдаёт
 # /bin/sh -c — поэтому квотируем каждый аргумент сами и передаём одну строку.
-# shellcheck disable=SC2086  # $EXTRA должен расщепляться (пустой или один флаг)
 quoted=''
-for a in "$REAL" $EXTRA "$@"; do
+for a in "$REAL" "$@"; do
   q=$(printf '%s' "$a" | sed "s/'/'\\\\''/g")
   quoted="$quoted '$q'"
 done
 
-# Пейн наследует env tmux-СЕРВЕРА, а не шима, поэтому синхронизируем сетевые
-# переменные явно: заданные в текущем терминале экспортируем, отсутствующие
-# снимаем, чтобы stale proxy/API из tmux-сервера не протекали в агента.
-PRE=''
-for v in $NET_VARS; do
-  eval "val=\${$v:-}"
-  if [ -n "$val" ]; then
-    q=$(printf '%s' "$val" | sed "s/'/'\\\\''/g")
-    PRE="${PRE}export $v='$q'; "
-  else
-    PRE="${PRE}unset $v; "
-  fi
-done
-CMD="${PRE}JARVIS_SHIM=1 exec$quoted"
+# tmux.conf перечисляет эти переменные в update-environment: new-session
+# копирует их из env клиента и удаляет stale отсутствующие значения. Секреты
+# больше не интерполируются в shell-command/argv долгоживущего tmux-процесса.
+JARVIS_SHIM=1 export JARVIS_SHIM
+CMD="exec$quoted"
 
 # iTerm2 умеет control mode: родные табы вместо tmux-рендеринга
 CC=''

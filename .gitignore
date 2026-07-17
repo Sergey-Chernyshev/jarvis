@@ -16,3 +16,6 @@ __pycache__/
 # Артефакты брейншторма/браузерных сессий
 .superpowers/
 .playwright-mcp/
+
+# Ворктри параллельных сессий Claude
+.claude/worktrees/

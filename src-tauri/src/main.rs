@@ -5,12 +5,12 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-#[allow(dead_code)] // проекции/фасады подключаются по фазам (инкр. 8)
-mod capability;
 #[allow(dead_code)] // UI-потребитель подключается в фазе 7 (chat UI)
 mod agent;
 #[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
 mod backend;
+#[allow(dead_code)] // проекции/фасады подключаются по фазам (инкр. 8)
+mod capability;
 mod claude_bin;
 mod commands_catalog;
 mod convo; // голосовой разговор: снапшот → Haiku-план → скилы → голосовой ответ (п/п-2)
@@ -33,21 +33,20 @@ mod ru;
 mod screen_prompt;
 mod server;
 mod settings;
+#[allow(dead_code)] // STT-потребители подключаются в фазах 4-6 (инкр. 9)
+mod stt;
 mod tail;
 mod terminal;
 mod tmux;
 mod transcript;
 mod tray;
-mod turns;
-mod turnsum;
 mod usage;
 mod util;
 mod voice;
+mod wakeword; // wake-word детектор + шов верификации
 mod windows;
-#[allow(dead_code)] // STT-потребители подключаются в фазах 4-6 (инкр. 9)
-mod stt;
-mod wakeword; // инкремент 10: wake-word детектор + шов верификации
 
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Manager;
@@ -121,8 +120,6 @@ fn main() {
             ipc::settings_get,
             ipc::settings_set,
             ipc::chat_open,
-            ipc::chat_summarize,
-            ipc::file_open,
             ipc::chat_close,
             ipc::commands_get,
             ipc::app_meta,
@@ -163,9 +160,11 @@ fn main() {
             ipc::toast_ready,
             ipc::toast_click,
             onboarding::onboarding_status,
+            onboarding::onboarding_get,
             onboarding::onboarding_run,
             onboarding::onboarding_open,
             onboarding::onboarding_close,
+            onboarding::onboarding_open_panel,
             onboarding::onboarding_open_settings,
             onboarding::integration_get,
             onboarding::integration_remove,
@@ -214,10 +213,11 @@ fn main() {
             onboarding::models_install,
         ])
         .setup(|app| {
-            // чистый старт: прибить прежние демоны + осиротевшие сайдкары на :8731/:8732
-            // ДО Daemon::new (он спавнит прогрев голоса → silero-сайдкар). В dev нет
-            // single-instance, поэтому без этого повторный запуск плодит зомби.
-            install::prepare_clean_start();
+            // Профильный lock ДО Daemon::new: второй процесс того же JARVIS_DIR
+            // не стартует, но prod/dev и чужие listeners больше не убиваются.
+            install::prepare_clean_start().map_err(|err| {
+                io::Error::new(io::ErrorKind::AlreadyExists, format!("Jarvis profile already running: {err}"))
+            })?;
 
             // миграция схемы settings.json ДО первого чтения настроек (Daemon::new
             // их читает). Сейчас no-op v0→v1; задел под ломающие изменения формата.
@@ -242,7 +242,7 @@ fn main() {
 
             // первый запуск без интеграции — онбординг; иначе показываем панель,
             // чтобы запуск приложения был видимым (а не «ничего не открылось»).
-            if !install::status().integrated() {
+            if !install::integration_health().ok() {
                 let _ = windows::create_onboarding(app.handle());
             } else {
                 windows::show_panel(&d);

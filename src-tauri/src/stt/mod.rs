@@ -4,6 +4,7 @@
 
 pub mod audio;
 pub mod audio_store; // сжатое хранение аудио диктовок → перегенерация при ошибке анализа
+pub mod ax; // best-effort детект «вставилось ли» через Accessibility (для TTL тоста)
 pub mod config;
 pub mod dehallucinate; // anti-hallucination фильтр (блоклист фраз тишины/шума)
 pub mod dictation;

@@ -49,4 +49,4 @@ jobs:
           releaseName: Jarvis ${{ github.ref_name }}
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true

@@ -14,9 +14,13 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
+use std::io::{self, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 const HOOK_SRC: &str = include_str!("../../../bin/jarvis-hook");
 const SHIM_SRC: &str = include_str!("../../../bin/agent-shim");
@@ -30,7 +34,9 @@ const CODEX_SUMMARY_SRC: &str = include_str!("../../../bin/codex-summary.py");
 // MediaRemote-адаптер (BSD-3, ungive/mediaremote-adapter): пауза ЛЮБОГО медиа на
 // время озвучки. Системный perl энтайтлен на MediaRemote — он dlopen-ит фреймворк.
 const MRA_PL_SRC: &str = include_str!("../../../bin/mediaremote-adapter/mediaremote-adapter.pl");
-const MRA_FW_SRC: &[u8] = include_bytes!("../../../bin/mediaremote-adapter/MediaRemoteAdapter.framework/MediaRemoteAdapter");
+const MRA_FW_SRC: &[u8] = include_bytes!(
+    "../../../bin/mediaremote-adapter/MediaRemoteAdapter.framework/MediaRemoteAdapter"
+);
 
 /// Признак «это наша запись» — путь шима в команде. Матчим без префикса каталога
 /// данных, чтобы распознавать И прод (`.jarvis/bin/jarvis-hook`), И дев
@@ -38,7 +44,7 @@ const MRA_FW_SRC: &[u8] = include_bytes!("../../../bin/mediaremote-adapter/Media
 const MARKER: &str = "bin/jarvis-hook";
 
 /// Событие Claude Code → аргумент шима.
-const EVENTS: [(&str, &str); 8] = [
+const EVENTS: [(&str, &str); 10] = [
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "prompt"),
     ("PreToolUse", "pre-tool"),
@@ -47,7 +53,15 @@ const EVENTS: [(&str, &str); 8] = [
     ("Stop", "stop"),
     ("StopFailure", "stop-failure"),
     ("SessionEnd", "session-end"),
+    ("SubagentStart", "subagent-start"),
+    ("SubagentStop", "subagent-stop"),
 ];
+
+const CORE_INSTALL_PHASES: [&str; 2] = ["Хуки", "Транспорт"];
+
+fn core_install_phases() -> &'static [&'static str] {
+    &CORE_INSTALL_PHASES
+}
 
 /// Событие Codex → аргумент шима. PermissionRequest→waiting, SubagentStart/Stop
 /// →доска. У Codex нет Notification/StopFailure/SessionEnd. (Дублируется с
@@ -90,15 +104,33 @@ pub struct Step {
 
 impl Step {
     fn new(phase: &str, state: StepState, msg: impl Into<String>) -> Step {
-        Step { phase: phase.into(), state, msg: msg.into(), pct: None }
+        Step {
+            phase: phase.into(),
+            state,
+            msg: msg.into(),
+            pct: None,
+        }
     }
-    fn start(phase: &str) -> Step { Step::new(phase, StepState::Start, "") }
-    fn done(phase: &str, msg: impl Into<String>) -> Step { Step::new(phase, StepState::Done, msg) }
-    fn warn(phase: &str, msg: impl Into<String>) -> Step { Step::new(phase, StepState::Warn, msg) }
-    fn info(phase: &str, msg: impl Into<String>) -> Step { Step::new(phase, StepState::Info, msg) }
+    fn start(phase: &str) -> Step {
+        Step::new(phase, StepState::Start, "")
+    }
+    fn done(phase: &str, msg: impl Into<String>) -> Step {
+        Step::new(phase, StepState::Done, msg)
+    }
+    fn warn(phase: &str, msg: impl Into<String>) -> Step {
+        Step::new(phase, StepState::Warn, msg)
+    }
+    fn info(phase: &str, msg: impl Into<String>) -> Step {
+        Step::new(phase, StepState::Info, msg)
+    }
     /// Шаг загрузки с процентом — UI рисует полосу прогресса по полю `pct`.
     fn progress(phase: &str, msg: impl Into<String>, pct: u8) -> Step {
-        Step { phase: phase.into(), state: StepState::Info, msg: msg.into(), pct: Some(pct) }
+        Step {
+            phase: phase.into(),
+            state: StepState::Info,
+            msg: msg.into(),
+            pct: Some(pct),
+        }
     }
 }
 
@@ -165,22 +197,40 @@ pub fn plan_install(ids: &[String], inst: &Installed) -> Vec<InstallTask> {
     let needs_qwen =
         (want("qwen3-0.6b") && !inst.qwen_0_6b) || (want("qwen3-1.7b") && !inst.qwen_1_7b);
     if needs_qwen && !inst.runtime {
-        tasks.push(InstallTask { id: "qwen3-runtime".into(), kind: "runtime" });
+        tasks.push(InstallTask {
+            id: "qwen3-runtime".into(),
+            kind: "runtime",
+        });
     }
     if want("whisper-turbo") && !inst.whisper {
-        tasks.push(InstallTask { id: "whisper-turbo".into(), kind: "stt" });
+        tasks.push(InstallTask {
+            id: "whisper-turbo".into(),
+            kind: "stt",
+        });
     }
     if want("qwen3-0.6b") && !inst.qwen_0_6b {
-        tasks.push(InstallTask { id: "qwen3-0.6b".into(), kind: "stt" });
+        tasks.push(InstallTask {
+            id: "qwen3-0.6b".into(),
+            kind: "stt",
+        });
     }
     if want("qwen3-1.7b") && !inst.qwen_1_7b {
-        tasks.push(InstallTask { id: "qwen3-1.7b".into(), kind: "stt" });
+        tasks.push(InstallTask {
+            id: "qwen3-1.7b".into(),
+            kind: "stt",
+        });
     }
     if want("silero") && !inst.silero {
-        tasks.push(InstallTask { id: "silero".into(), kind: "voice" });
+        tasks.push(InstallTask {
+            id: "silero".into(),
+            kind: "voice",
+        });
     }
     if want("hey_jarvis") && !inst.wake {
-        tasks.push(InstallTask { id: "hey_jarvis".into(), kind: "wake" });
+        tasks.push(InstallTask {
+            id: "hey_jarvis".into(),
+            kind: "wake",
+        });
     }
     tasks
 }
@@ -198,48 +248,43 @@ fn jarvis_dir() -> PathBuf {
     }
 }
 
-/// Чистый старт демона (зовётся ПЕРВЫМ в main::setup, ДО Daemon::new). Прибивает
-/// прежние демоны и осиротевшие сайдкары, чтобы повторный запуск — в т.ч.
-/// параллельным агентом — не плодил зомби-демонов и не уходил в цикл «порт занят».
-/// В dev single-instance ВЫКЛ (см. main.rs), поэтому чистим руками. Best-effort:
-/// ошибки молча игнорируются (системные pgrep/lsof/kill из /usr/bin).
-pub fn prepare_clean_start() {
-    let me = std::process::id().to_string();
-    let kill = |pid: &str| {
-        if !pid.is_empty() && pid != me {
-            let _ = std::process::Command::new("kill").args(["-9", pid]).status();
-        }
-    };
-    // 1) Прежние демоны: pgrep -x по имени процесса `jarvis` — матчит только бинарь
-    //    демона, НЕ задевая cargo/rustc сборки (их comm = cargo/rustc).
-    if let Ok(out) = std::process::Command::new("pgrep").args(["-x", "jarvis"]).output() {
-        for pid in String::from_utf8_lossy(&out.stdout).split_whitespace() {
-            if pid != me {
-                kill(pid);
-                // install/mod.rs компилируется и в jarvis-setup, где нет `crate::log`
-                // (см. конвенцию модуля выше). `log::line` всё равно начинается с
-                // println! → daemon.log под nohup, поэтому stdout сохраняет диагностику.
-                println!("[startup] прибит прежний демон pid {pid}");
-            }
-        }
+static PROFILE_LOCK: OnceLock<fs::File> = OnceLock::new();
+
+fn acquire_profile_lock(path: &Path) -> io::Result<fs::File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
-    // 2) Освободить порты сайдкаров (осиротевшие/чужие сайдкары держат :8731/:8732).
-    for port in ["8731", "8732"] {
-        if let Ok(out) = std::process::Command::new("lsof")
-            .args(["-ti", &format!("tcp:{port}"), "-sTCP:LISTEN"])
-            .output()
-        {
-            let pids = String::from_utf8_lossy(&out.stdout);
-            for pid in pids.split_whitespace() {
-                kill(pid);
-            }
-            if !pids.trim().is_empty() {
-                println!("[startup] порт :{port} освобождён");
-            }
-        }
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
     }
-    // 3) Stale unix-сокет — чтобы следующий bind прошёл чисто.
-    let _ = std::fs::remove_file(jarvis_dir().join("run.sock"));
+    file.set_len(0)?;
+    writeln!(file, "{}", std::process::id())?;
+    file.sync_all()?;
+    Ok(file)
+}
+
+/// Claim only the active `JARVIS_DIR`. Earlier versions used global `pkill` and
+/// killed any listener on 8731/8732, which could terminate another profile or
+/// an unrelated local service. An OS lock is released automatically on crash;
+/// after ownership is proven, removing this profile's stale socket is safe.
+pub fn prepare_clean_start() -> io::Result<()> {
+    if PROFILE_LOCK.get().is_some() {
+        return Ok(());
+    }
+    let lock = acquire_profile_lock(&jarvis_dir().join("daemon.lock"))?;
+    PROFILE_LOCK
+        .set(lock)
+        .map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "profile lock already set"))?;
+    let _ = fs::remove_file(jarvis_dir().join("run.sock"));
+    Ok(())
 }
 
 /// PATH с добавленными Homebrew + nvm путями. GUI-приложение из /Applications
@@ -247,7 +292,10 @@ pub fn prepare_clean_start() {
 /// tmux (Homebrew) и claude (nvm) не находятся. Префиксуем их явно.
 fn augmented_path() -> String {
     let base = std::env::var("PATH").unwrap_or_default();
-    let mut extra = vec!["/opt/homebrew/bin".to_string(), "/usr/local/bin".to_string()];
+    let mut extra = vec![
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+    ];
     if let Ok(rd) = fs::read_dir(home().join(".nvm/versions/node")) {
         for e in rd.flatten() {
             let bin = e.path().join("bin");
@@ -267,7 +315,9 @@ fn parse_py_version(stdout: &[u8], stderr: &[u8]) -> Option<(u32, u32)> {
         String::from_utf8_lossy(stdout),
         String::from_utf8_lossy(stderr)
     );
-    let v = s.split_whitespace().find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()))?;
+    let v = s
+        .split_whitespace()
+        .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()))?;
     let mut it = v.split('.');
     let major: u32 = it.next()?.parse().ok()?;
     let minor: u32 = it.next()?.parse().ok()?;
@@ -275,12 +325,20 @@ fn parse_py_version(stdout: &[u8], stderr: &[u8]) -> Option<(u32, u32)> {
 }
 
 fn py_version(py: &str) -> Option<(u32, u32)> {
-    let out = Command::new(py).env("PATH", augmented_path()).arg("--version").output().ok()?;
+    let out = Command::new(py)
+        .env("PATH", augmented_path())
+        .arg("--version")
+        .output()
+        .ok()?;
     parse_py_version(&out.stdout, &out.stderr)
 }
 
 fn py_path_version(py: &Path) -> Option<(u32, u32)> {
-    let out = Command::new(py).env("PATH", augmented_path()).arg("--version").output().ok()?;
+    let out = Command::new(py)
+        .env("PATH", augmented_path())
+        .arg("--version")
+        .output()
+        .ok()?;
     parse_py_version(&out.stdout, &out.stderr)
 }
 
@@ -297,32 +355,45 @@ fn has_brew() -> bool {
 /// CPython 3.10–3.13; на 3.14+ (как у некоторых пользователей по умолчанию)
 /// зависимости не встают и сайдкары падают. Ищем подходящий среди установленных;
 /// если нет — ставим `python@3.12` через brew (понять, что есть, и доставить).
-fn python_fits_ml(v: (u32, u32)) -> bool { v.0 == 3 && (10..=13).contains(&v.1) }
+fn python_fits_ml(v: (u32, u32)) -> bool {
+    v.0 == 3 && (10..=13).contains(&v.1)
+}
 
 fn compatible_python() -> Result<String, String> {
     // Явные минорные версии — приоритетнее, потом общий `python3`.
-    for c in ["python3.12", "python3.11", "python3.13", "python3.10", "python3"] {
+    for c in [
+        "python3.12",
+        "python3.11",
+        "python3.13",
+        "python3.10",
+        "python3",
+    ] {
         if py_version(c).is_some_and(python_fits_ml) {
             return Ok(c.to_string());
         }
     }
     if has_brew() {
         let mut b = Command::new("brew");
-        b.env("PATH", augmented_path()).args(["install", "python@3.12"]);
+        b.env("PATH", augmented_path())
+            .args(["install", "python@3.12"]);
         let _ = run_inherit("brew install python@3.12", &mut b);
         if py_version("python3.12").is_some_and(python_fits_ml) {
             return Ok("python3.12".to_string());
         }
     }
-    Err("Не нашёл совместимый Python (нужен 3.10–3.13; у вас, похоже, только 3.14+). \
+    Err(
+        "Не нашёл совместимый Python (нужен 3.10–3.13; у вас, похоже, только 3.14+). \
          Установите его — `brew install python@3.12` — и повторите."
-        .to_string())
+            .to_string(),
+    )
 }
 
 /// Стоит ли пакет `pkg` в site-packages venv. Быстрая ФС-проверка (без запуска
 /// python и медленного `import torch`): ищем папку импорта или *.dist-info.
 fn venv_has_pkg(venv: &Path, pkg: &str) -> bool {
-    let Ok(rd) = fs::read_dir(venv.join("lib")) else { return false };
+    let Ok(rd) = fs::read_dir(venv.join("lib")) else {
+        return false;
+    };
     let norm = pkg.replace('-', "_").to_lowercase();
     for e in rd.flatten() {
         let sp = e.path().join("site-packages");
@@ -350,7 +421,9 @@ fn silero_ready() -> bool {
     silero_python().exists()
         && py_path_version(&silero_python()).is_some_and(python_fits_ml)
         && silero_server_py().exists()
-        && ["numpy", "torch", "fastapi", "omegaconf"].iter().all(|p| venv_has_pkg(&silero_venv(), p))
+        && ["numpy", "torch", "fastapi", "omegaconf"]
+            .iter()
+            .all(|p| venv_has_pkg(&silero_venv(), p))
 }
 
 /// Qwen3-STT-сайдкар реально готов (venv + server.py + пакеты).
@@ -358,12 +431,27 @@ fn qwen3_sidecar_ready() -> bool {
     stt_python().exists()
         && py_path_version(&stt_python()).is_some_and(python_fits_ml)
         && stt_server_py().exists()
-        && ["numpy", "fastapi"].iter().all(|p| venv_has_pkg(&stt_venv(), p))
+        && [
+            "numpy",
+            "fastapi",
+            "uvicorn",
+            "certifi",
+            "mlx",
+            "qwen3_asr_mlx",
+        ]
+        .iter()
+        .all(|p| venv_has_pkg(&stt_venv(), p))
 }
 
-fn hook_dst() -> PathBuf { jarvis_dir().join("bin/jarvis-hook") }
-fn mcp_dst() -> PathBuf { jarvis_dir().join("bin/jarvis-mcp") }
-fn mcp_config_dst() -> PathBuf { jarvis_dir().join("jarvis-mcp.json") }
+fn hook_dst() -> PathBuf {
+    jarvis_dir().join("bin/jarvis-hook")
+}
+fn mcp_dst() -> PathBuf {
+    jarvis_dir().join("bin/jarvis-mcp")
+}
+fn mcp_config_dst() -> PathBuf {
+    jarvis_dir().join("jarvis-mcp.json")
+}
 
 /// Выдать/прочитать токен агента в ~/.jarvis/tokens.json (0600). Самодостаточно:
 /// install/mod.rs компилируется и в jarvis-setup (без `crate::capability`), поэтому
@@ -388,7 +476,12 @@ fn ensure_agent_token() -> String {
         obj.insert("agent".into(), json!(tok));
     }
     let _ = fs::create_dir_all(jarvis_dir());
-    if fs::write(&path, serde_json::to_string_pretty(&v).unwrap_or_default() + "\n").is_ok() {
+    if fs::write(
+        &path,
+        serde_json::to_string_pretty(&v).unwrap_or_default() + "\n",
+    )
+    .is_ok()
+    {
         let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
     }
     tok
@@ -406,11 +499,21 @@ pub fn build_mcp_config(mcp_bin: &str, token: &str) -> Value {
         }
     })
 }
-fn shims_dir() -> PathBuf { jarvis_dir().join("shims") }
-fn shim_dst() -> PathBuf { shims_dir().join("claude") }
-fn codex_shim_dst() -> PathBuf { shims_dir().join("codex") }
-fn tmux_conf_dst() -> PathBuf { jarvis_dir().join("tmux.conf") }
-fn settings_path() -> PathBuf { home().join(".claude/settings.json") }
+fn shims_dir() -> PathBuf {
+    jarvis_dir().join("shims")
+}
+fn shim_dst() -> PathBuf {
+    shims_dir().join("claude")
+}
+fn codex_shim_dst() -> PathBuf {
+    shims_dir().join("codex")
+}
+fn tmux_conf_dst() -> PathBuf {
+    jarvis_dir().join("tmux.conf")
+}
+fn settings_path() -> PathBuf {
+    home().join(".claude/settings.json")
+}
 /// Codex: $CODEX_HOME или ~/.codex; файл регистрации хуков.
 fn codex_home() -> PathBuf {
     match std::env::var("CODEX_HOME") {
@@ -418,8 +521,12 @@ fn codex_home() -> PathBuf {
         _ => home().join(".codex"),
     }
 }
-fn codex_hooks_path() -> PathBuf { codex_home().join("hooks.json") }
-fn jarvis_settings_path() -> PathBuf { jarvis_dir().join("settings.json") }
+fn codex_hooks_path() -> PathBuf {
+    codex_home().join("hooks.json")
+}
+fn jarvis_settings_path() -> PathBuf {
+    jarvis_dir().join("settings.json")
+}
 
 /// Установлен ли `codex` в PATH (минуя наш шим).
 fn codex_found() -> bool {
@@ -432,25 +539,17 @@ fn codex_found() -> bool {
         .unwrap_or(false)
 }
 
-/// Поддерживает ли установленный codex `--dangerously-bypass-hook-trust`
-/// (feature-detect один раз при установке — чтобы не дёргать `codex --help`
-/// на каждый интерактивный запуск из шима).
-fn codex_supports_bypass_hook_trust() -> bool {
-    Command::new("/bin/sh")
-        .args(["-c", "codex --help 2>/dev/null | grep -q -- --dangerously-bypass-hook-trust"])
-        .env("PATH", augmented_path())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 /* ================= STT: Whisper + Qwen3-MLX (инкр. 9, Phase 8) ================= */
 
 /// Каталог для Whisper-модели: ~/.jarvis/stt/
-fn stt_dir() -> PathBuf { jarvis_dir().join("stt") }
+fn stt_dir() -> PathBuf {
+    jarvis_dir().join("stt")
+}
 
 /// Бинарный файл модели Whisper large-v3-turbo-q5 (~574 МБ).
-fn whisper_model_path() -> PathBuf { stt_dir().join("ggml-large-v3-turbo-q5_0.bin") }
+fn whisper_model_path() -> PathBuf {
+    stt_dir().join("ggml-large-v3-turbo-q5_0.bin")
+}
 
 /// URL скачивания модели Whisper (HuggingFace, ggerganov).
 const WHISPER_MODEL_URL: &str =
@@ -488,14 +587,21 @@ fn send_get(
     let has_proxy = proxy.map(|p| !p.is_empty()).unwrap_or(false);
     let mut errs = Vec::new();
     for direct in download_channels(has_proxy) {
-        let how = if direct { "напрямую" } else { "через прокси" };
+        let how = if direct {
+            "напрямую"
+        } else {
+            "через прокси"
+        };
         let client = dl_client(proxy, direct)?;
         match client.get(url.clone()).send() {
             Ok(resp) => return Ok(resp),
             Err(e) => errs.push(format!("{how} к {host}: {e}")),
         }
     }
-    Err(format!("{label}: не удалось подключиться — {}", errs.join(" · ")))
+    Err(format!(
+        "{label}: не удалось подключиться — {}",
+        errs.join(" · ")
+    ))
 }
 
 /// reqwest-клиент с ручной проходкой редиректов. `direct=true` → без прокси;
@@ -537,7 +643,9 @@ fn fetch_to_file(
                 .get(reqwest::header::LOCATION)
                 .and_then(|v| v.to_str().ok())
                 .ok_or_else(|| format!("{label}: редирект {status} без Location"))?;
-            current = current.join(loc).map_err(|e| format!("{label}: bad Location: {e}"))?;
+            current = current
+                .join(loc)
+                .map_err(|e| format!("{label}: bad Location: {e}"))?;
             continue;
         }
         if !status.is_success() {
@@ -578,7 +686,11 @@ fn fetch_to_file(
                     let pct = ((done as f64 / t as f64) * 100.0) as i64;
                     if pct - last_pct >= 4 || pct >= 100 {
                         last_pct = pct;
-                        progress(Step::progress("Модель", format!("{label} — {pct}%"), pct.clamp(0, 100) as u8));
+                        progress(Step::progress(
+                            "Модель",
+                            format!("{label} — {pct}%"),
+                            pct.clamp(0, 100) as u8,
+                        ));
                     }
                 }
             }
@@ -616,7 +728,10 @@ fn hf_tree(repo: &str, proxy: Option<&str>) -> Result<Vec<(String, u64)>, String
         _ => b.no_proxy(),
     };
     let client = b.build().map_err(|e| format!("http client: {e}"))?;
-    let resp = client.get(&url).send().map_err(|e| format!("tree {repo}: {e}"))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("tree {repo}: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("tree {repo}: HTTP {}", resp.status()));
     }
@@ -664,9 +779,15 @@ pub fn preload_qwen(key: &str, progress: &Progress, proxy: Option<&str>) -> Resu
     }
     let dir = qwen_weights_dir(key);
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir {key}: {e}"))?;
-    progress(Step::info("STT-Qwen", format!("{key}: получаю список файлов…")));
+    progress(Step::info(
+        "STT-Qwen",
+        format!("{key}: получаю список файлов…"),
+    ));
     let files = hf_tree(repo, proxy)?;
-    progress(Step::info("STT-Qwen", format!("{key}: {} файлов, качаю (~1 ГБ)…", files.len())));
+    progress(Step::info(
+        "STT-Qwen",
+        format!("{key}: {} файлов, качаю (~1 ГБ)…", files.len()),
+    ));
     for (path, size) in &files {
         let out = dir.join(path);
         if out.exists() && *size > 0 && fs::metadata(&out).map(|m| m.len()).unwrap_or(0) == *size {
@@ -676,16 +797,27 @@ pub fn preload_qwen(key: &str, progress: &Progress, proxy: Option<&str>) -> Resu
         let exp = if *size > 0 { Some(*size) } else { None };
         fetch_to_file(&url, &out, proxy, progress, &format!("{key}/{path}"), exp)?;
     }
-    progress(Step::done("STT-Qwen", format!("{key}: веса установлены (локально, без HF)")));
+    progress(Step::done(
+        "STT-Qwen",
+        format!("{key}: веса установлены (локально, без HF)"),
+    ));
     Ok(())
 }
 
 /// Каталог STT-MLX сайдкара (Qwen3-ASR): ~/.jarvis/stt-mlx/
-fn stt_mlx_dir() -> PathBuf { jarvis_dir().join("stt-mlx") }
+fn stt_mlx_dir() -> PathBuf {
+    jarvis_dir().join("stt-mlx")
+}
 
-fn stt_server_py() -> PathBuf { stt_mlx_dir().join("stt-server.py") }
-fn stt_venv() -> PathBuf { stt_mlx_dir().join("venv") }
-fn stt_python() -> PathBuf { stt_venv().join("bin/python") }
+fn stt_server_py() -> PathBuf {
+    stt_mlx_dir().join("stt-server.py")
+}
+fn stt_venv() -> PathBuf {
+    stt_mlx_dir().join("venv")
+}
+fn stt_python() -> PathBuf {
+    stt_venv().join("bin/python")
+}
 
 /// Скачать модель Whisper large-v3-turbo-q5_0.bin (~574 МБ) в ~/.jarvis/stt/.
 /// Идемпотентно: пропускает скачивание если файл уже на месте.
@@ -696,7 +828,10 @@ pub fn install_whisper(progress: &Progress, proxy: Option<&str>) -> Result<(), S
 
     // Идемпотентность: если модель уже на месте — ничего не делаем.
     if whisper_model_path().exists() {
-        progress(Step::info("STT-Whisper", "модель ggml-large-v3-turbo-q5_0.bin уже установлена"));
+        progress(Step::info(
+            "STT-Whisper",
+            "модель ggml-large-v3-turbo-q5_0.bin уже установлена",
+        ));
         return Ok(());
     }
 
@@ -706,7 +841,14 @@ pub fn install_whisper(progress: &Progress, proxy: Option<&str>) -> Result<(), S
     ));
 
     // Гибридная загрузка: HF-resolve через прокси → CDN-блоб напрямую (атомарно).
-    fetch_to_file(WHISPER_MODEL_URL, &whisper_model_path(), proxy, progress, "Whisper-модель", None)?;
+    fetch_to_file(
+        WHISPER_MODEL_URL,
+        &whisper_model_path(),
+        proxy,
+        progress,
+        "Whisper-модель",
+        None,
+    )?;
 
     progress(Step::done("STT-Whisper", "модель установлена (~574 МБ)"));
     Ok(())
@@ -736,7 +878,9 @@ const WAKEWORD_MODELS: [(&str, &str); 3] = [
 
 /// Все ли 3 модели wake-word на месте.
 fn wakeword_models_present() -> bool {
-    WAKEWORD_MODELS.iter().all(|(f, _)| wakeword_dir().join(f).exists())
+    WAKEWORD_MODELS
+        .iter()
+        .all(|(f, _)| wakeword_dir().join(f).exists())
 }
 
 /// Скачать 3 ONNX-модели wake-word в ~/.jarvis/wakeword/.
@@ -776,7 +920,11 @@ pub fn install_stt_sidecar(progress: &Progress, proxy: Option<&str>) -> Result<(
         progress(Step::info("STT-MLX", format!("создаю Python-venv ({py})…")));
         run_inherit(
             "python -m venv (stt-mlx)",
-            Command::new(&py).env("PATH", augmented_path()).arg("-m").arg("venv").arg(stt_venv()),
+            Command::new(&py)
+                .env("PATH", augmented_path())
+                .arg("-m")
+                .arg("venv")
+                .arg(stt_venv()),
         )?;
     }
 
@@ -800,25 +948,49 @@ pub fn install_stt_sidecar(progress: &Progress, proxy: Option<&str>) -> Result<(
         let cmd = pip_install_shell_cmd(
             &py,
             proxy,
-            &["qwen3-asr-mlx", "mlx-audio", "fastapi", "uvicorn", "numpy", "certifi"],
+            &[
+                "qwen3-asr-mlx",
+                "mlx-audio",
+                "fastapi",
+                "uvicorn",
+                "numpy",
+                "certifi",
+            ],
         );
-        run_streamed("pip install stt deps", &cmd, proxy, progress, "STT-зависимости")?;
+        run_streamed(
+            "pip install stt deps",
+            &cmd,
+            proxy,
+            progress,
+            "STT-зависимости",
+        )?;
     } else {
         progress(Step::info("STT-MLX", "зависимости уже установлены"));
     }
 
     // Примечание: модели Qwen3 (HuggingFace Hub) сайдкар скачает сам при первом запросе.
     // Принудительного preload здесь нет — пользователь может это сделать вручную.
-    progress(Step::done("STT-MLX", "сайдкар установлен (модели Qwen3 загрузятся при первом запуске)"));
+    progress(Step::done(
+        "STT-MLX",
+        "сайдкар установлен (модели Qwen3 загрузятся при первом запуске)",
+    ));
     Ok(())
 }
 
 /* ====== Codex-SDK сайдкар (openai-codex): служебный LLM «под капотом» ====== */
 
-fn codex_sdk_dir() -> PathBuf { jarvis_dir().join("codex-sdk") }
-fn codex_sdk_venv() -> PathBuf { codex_sdk_dir().join("venv") }
-fn codex_sdk_python() -> PathBuf { codex_sdk_venv().join("bin/python") }
-fn codex_sdk_script() -> PathBuf { codex_sdk_dir().join("codex-summary.py") }
+fn codex_sdk_dir() -> PathBuf {
+    jarvis_dir().join("codex-sdk")
+}
+fn codex_sdk_venv() -> PathBuf {
+    codex_sdk_dir().join("venv")
+}
+fn codex_sdk_python() -> PathBuf {
+    codex_sdk_venv().join("bin/python")
+}
+fn codex_sdk_script() -> PathBuf {
+    codex_sdk_dir().join("codex-summary.py")
+}
 
 /// Установлен ли Codex-SDK сайдкар: venv с `openai_codex` + скрипт на месте.
 /// Источник правды для гейта настроек «Под капотом» (кнопка «Установить»).
@@ -837,7 +1009,10 @@ pub fn install_codex_sdk_sidecar(progress: &Progress, proxy: Option<&str>) -> Re
 
     if !codex_sdk_python().exists() {
         let py = compatible_python()?;
-        progress(Step::info("Codex-SDK", format!("создаю Python-venv ({py})…")));
+        progress(Step::info(
+            "Codex-SDK",
+            format!("создаю Python-venv ({py})…"),
+        ));
         run_inherit(
             "python -m venv (codex-sdk)",
             Command::new(&py)
@@ -864,7 +1039,13 @@ pub fn install_codex_sdk_sidecar(progress: &Progress, proxy: Option<&str>) -> Re
         let py = codex_sdk_python();
         ensure_venv_pip(&py, proxy)?;
         let cmd = pip_install_shell_cmd(&py, proxy, &["openai-codex"]);
-        run_streamed("pip install openai-codex", &cmd, proxy, progress, "Codex-SDK")?;
+        run_streamed(
+            "pip install openai-codex",
+            &cmd,
+            proxy,
+            progress,
+            "Codex-SDK",
+        )?;
     } else {
         progress(Step::info("Codex-SDK", "openai-codex уже установлен"));
     }
@@ -878,10 +1059,14 @@ pub fn install_codex_sdk_sidecar(progress: &Progress, proxy: Option<&str>) -> Re
 
 /* ================= Silero: Python-sidecar (venv + torch + модель) ================= */
 
-fn silero_dir() -> PathBuf { jarvis_dir().join("silero") }
+fn silero_dir() -> PathBuf {
+    jarvis_dir().join("silero")
+}
 
 /* ===== MediaRemote-адаптер: пауза чужого медиа на время озвучки ===== */
-fn mra_dir() -> PathBuf { jarvis_dir().join("mediaremote-adapter") }
+fn mra_dir() -> PathBuf {
+    jarvis_dir().join("mediaremote-adapter")
+}
 
 /// Положить perl-скрипт + фреймворк адаптера в ~/.jarvis. Идемпотентно.
 fn install_mediaremote() {
@@ -895,9 +1080,15 @@ fn install_mediaremote() {
         let _ = fs::set_permissions(&bin, fs::Permissions::from_mode(0o755));
     }
 }
-fn silero_server_py() -> PathBuf { silero_dir().join("silero-server.py") }
-fn silero_venv() -> PathBuf { silero_dir().join("venv") }
-fn silero_python() -> PathBuf { silero_venv().join("bin/python") }
+fn silero_server_py() -> PathBuf {
+    silero_dir().join("silero-server.py")
+}
+fn silero_venv() -> PathBuf {
+    silero_dir().join("venv")
+}
+fn silero_python() -> PathBuf {
+    silero_venv().join("bin/python")
+}
 
 /// Прогнать команду, наследуя stdout/stderr. Ошибка/ненулевой код → Err.
 fn run_inherit(what: &str, cmd: &mut Command) -> Result<(), String> {
@@ -933,11 +1124,16 @@ fn remove_incompatible_ml_venv(
                 phase,
                 format!("venv на Python {major}.{minor} несовместим с torch/numpy, пересоздаю…"),
             ));
-            fs::remove_dir_all(venv).map_err(|e| format!("remove incompatible venv {}: {e}", venv.display()))
+            fs::remove_dir_all(venv)
+                .map_err(|e| format!("remove incompatible venv {}: {e}", venv.display()))
         }
         None => {
-            progress(Step::warn(phase, "venv-python не запускается, пересоздаю окружение…"));
-            fs::remove_dir_all(venv).map_err(|e| format!("remove broken venv {}: {e}", venv.display()))
+            progress(Step::warn(
+                phase,
+                "venv-python не запускается, пересоздаю окружение…",
+            ));
+            fs::remove_dir_all(venv)
+                .map_err(|e| format!("remove broken venv {}: {e}", venv.display()))
         }
     }
 }
@@ -957,13 +1153,16 @@ fn ensure_venv_pip(python: &Path, proxy: Option<&str>) -> Result<(), String> {
 
     if !has_pip {
         let mut ensure = Command::new(python);
-        ensure.env("PATH", augmented_path()).args(["-m", "ensurepip", "--upgrade"]);
+        ensure
+            .env("PATH", augmented_path())
+            .args(["-m", "ensurepip", "--upgrade"]);
         set_proxy(&mut ensure, proxy);
         run_inherit("python -m ensurepip", &mut ensure)?;
     }
 
     let mut up = Command::new(python);
-    up.env("PATH", augmented_path()).args(["-m", "pip", "install", "--upgrade", "pip"]);
+    up.env("PATH", augmented_path())
+        .args(["-m", "pip", "install", "--upgrade", "pip"]);
     set_proxy(&mut up, proxy);
     run_inherit("python -m pip install --upgrade pip", &mut up)
 }
@@ -996,18 +1195,30 @@ fn pip_install_shell_cmd(python: &Path, proxy: Option<&str>, packages: &[&str]) 
 /// Запустить shell-команду, слив stdout+stderr, и стримить прогресс скачивания.
 /// pip с `--progress-bar raw` печатает строки `Progress <done> of <total>` —
 /// парсим их в проценты и шлём минималистичный `Step::info`.
-fn run_streamed(label: &str, shell_cmd: &str, proxy: Option<&str>, progress: &Progress, what: &str) -> Result<(), String> {
+fn run_streamed(
+    label: &str,
+    shell_cmd: &str,
+    proxy: Option<&str>,
+    progress: &Progress,
+    what: &str,
+) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(format!("{shell_cmd} 2>&1"));
     set_proxy(&mut cmd, proxy);
     cmd.stdout(std::process::Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("запуск {label}: {e}"))?;
-    let out = child.stdout.take().ok_or_else(|| format!("{label}: нет stdout"))?;
+    let out = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{label}: нет stdout"))?;
     let mut last: i16 = -10;
     for line in BufReader::new(out).lines().map_while(Result::ok) {
         if let Some(rest) = line.strip_prefix("Progress ") {
-            let nums: Vec<u64> = rest.split(" of ").filter_map(|s| s.trim().parse::<u64>().ok()).collect();
+            let nums: Vec<u64> = rest
+                .split(" of ")
+                .filter_map(|s| s.trim().parse::<u64>().ok())
+                .collect();
             if nums.len() == 2 && nums[1] > 0 {
                 let pct = ((nums[0] as f64 / nums[1] as f64) * 100.0).round() as i16;
                 if (pct - last).abs() >= 4 || pct >= 100 {
@@ -1026,7 +1237,7 @@ fn run_streamed(label: &str, shell_cmd: &str, proxy: Option<&str>, progress: &Pr
 
 /// Установить Silero-сайдкар: server.py + venv с torch(CPU)/fastapi/uvicorn/numpy
 /// + прогрев модели. Веса PyTorch — сотни МБ–ГБ, ставятся один раз. Идемпотентно.
-/// `proxy` (если задан) идёт в окружение pip/torch. `progress` стримит проценты.
+///   `proxy` (если задан) идёт в окружение pip/torch. `progress` стримит проценты.
 pub fn install_silero(progress: &Progress, proxy: Option<&str>) -> Result<(), String> {
     fs::create_dir_all(silero_dir()).map_err(|e| format!("mkdir silero: {e}"))?;
 
@@ -1040,20 +1251,30 @@ pub fn install_silero(progress: &Progress, proxy: Option<&str>) -> Result<(), St
         progress(Step::info("Голос", format!("создаю Python-venv ({py})…")));
         run_inherit(
             "python -m venv",
-            Command::new(&py).env("PATH", augmented_path()).arg("-m").arg("venv").arg(silero_venv()),
+            Command::new(&py)
+                .env("PATH", augmented_path())
+                .arg("-m")
+                .arg("venv")
+                .arg(silero_venv()),
         )?;
     }
 
     // 3. Зависимости — идемпотентно: пропускаем, если уже импортируются.
     let deps_ok = Command::new(silero_python())
-        .args(["-c", "import torch, fastapi, uvicorn, numpy, certifi, omegaconf"])
+        .args([
+            "-c",
+            "import torch, fastapi, uvicorn, numpy, certifi, omegaconf",
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     if !deps_ok {
-        progress(Step::info("Голос", "ставлю PyTorch CPU — сотни МБ–ГБ, это надолго…"));
+        progress(Step::info(
+            "Голос",
+            "ставлю PyTorch CPU — сотни МБ–ГБ, это надолго…",
+        ));
         let py = silero_python();
         ensure_venv_pip(&py, proxy)?;
 
@@ -1061,9 +1282,22 @@ pub fn install_silero(progress: &Progress, proxy: Option<&str>) -> Result<(), St
         let cmd = pip_install_shell_cmd(
             &py,
             proxy,
-            &["torch", "fastapi", "uvicorn", "numpy", "certifi", "omegaconf"],
+            &[
+                "torch",
+                "fastapi",
+                "uvicorn",
+                "numpy",
+                "certifi",
+                "omegaconf",
+            ],
         );
-        run_streamed("pip install torch+deps", &cmd, proxy, progress, "Скачиваю PyTorch")?;
+        run_streamed(
+            "pip install torch+deps",
+            &cmd,
+            proxy,
+            progress,
+            "Скачиваю PyTorch",
+        )?;
     }
 
     // 4. Прогрев + скачивание модели через torch.hub. SSL_CERT_FILE из certifi —
@@ -1096,7 +1330,11 @@ fn stt_engine() -> String {
     };
     serde_json::from_str::<Value>(&raw)
         .ok()
-        .and_then(|v| v.pointer("/stt/engine").and_then(Value::as_str).map(String::from))
+        .and_then(|v| {
+            v.pointer("/stt/engine")
+                .and_then(Value::as_str)
+                .map(String::from)
+        })
         .unwrap_or_else(|| "qwen3-0.6b".into())
 }
 
@@ -1108,7 +1346,11 @@ fn voice_engine() -> String {
     };
     serde_json::from_str::<Value>(&raw)
         .ok()
-        .and_then(|v| v.pointer("/voice/engine").and_then(Value::as_str).map(String::from))
+        .and_then(|v| {
+            v.pointer("/voice/engine")
+                .and_then(Value::as_str)
+                .map(String::from)
+        })
         .unwrap_or_else(|| "silero".into())
 }
 
@@ -1137,9 +1379,15 @@ fn merge_block(content: &str, shims_dir: &str) -> String {
             regex::escape(END)
         ))
         .unwrap();
-        return re.replace_all(content, regex::NoExpand(block.as_str())).into_owned();
+        return re
+            .replace_all(content, regex::NoExpand(block.as_str()))
+            .into_owned();
     }
-    let sep = if !content.is_empty() && !content.ends_with('\n') { "\n" } else { "" };
+    let sep = if !content.is_empty() && !content.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
     format!("{content}{sep}\n{block}\n")
 }
 
@@ -1155,7 +1403,10 @@ fn remove_block(content: &str) -> String {
     ))
     .unwrap();
     let out = re.replace_all(content, "\n").into_owned();
-    regex::Regex::new("\n{3,}").unwrap().replace_all(&out, "\n\n").into_owned()
+    regex::Regex::new("\n{3,}")
+        .unwrap()
+        .replace_all(&out, "\n\n")
+        .into_owned()
 }
 
 /* ================= helpers ================= */
@@ -1225,7 +1476,11 @@ fn install_hooks_into(path: &Path, label: &str, events: &[(&str, &str)], progres
                         gh.retain(|h| !is_ours(h));
                     }
                 }
-                arr.retain(|g| g.get("hooks").and_then(Value::as_array).is_some_and(|h| !h.is_empty()));
+                arr.retain(|g| {
+                    g.get("hooks")
+                        .and_then(Value::as_array)
+                        .is_some_and(|h| !h.is_empty())
+                });
 
                 // Ставим единственный правильный.
                 arr.push(json!({
@@ -1273,14 +1528,20 @@ fn uninstall_hooks_from(path: &Path, progress: &Progress) {
             let hooks = json["hooks"].as_object_mut().unwrap();
             let events: Vec<String> = hooks.keys().cloned().collect();
             for event in events {
-                let Some(arr) = hooks.get_mut(&event).and_then(Value::as_array_mut) else { continue };
+                let Some(arr) = hooks.get_mut(&event).and_then(Value::as_array_mut) else {
+                    continue;
+                };
                 let before = arr.len();
                 for group in arr.iter_mut() {
                     if let Some(gh) = group.get_mut("hooks").and_then(Value::as_array_mut) {
                         gh.retain(|h| !is_ours(h));
                     }
                 }
-                arr.retain(|g| g.get("hooks").and_then(Value::as_array).is_some_and(|h| !h.is_empty()));
+                arr.retain(|g| {
+                    g.get("hooks")
+                        .and_then(Value::as_array)
+                        .is_some_and(|h| !h.is_empty())
+                });
                 if arr.len() != before {
                     removed.push(event.clone());
                 }
@@ -1293,7 +1554,10 @@ fn uninstall_hooks_from(path: &Path, progress: &Progress) {
             }
             atomic_write(path, &(serde_json::to_string_pretty(&json).unwrap() + "\n"));
             if !removed.is_empty() {
-                progress(Step::done("Хуки", format!("{}: удалены {}", path.display(), removed.join(", "))));
+                progress(Step::done(
+                    "Хуки",
+                    format!("{}: удалены {}", path.display(), removed.join(", ")),
+                ));
             }
         }
         Ok(_) => {} // файла/хуков нет — тихо
@@ -1301,14 +1565,40 @@ fn uninstall_hooks_from(path: &Path, progress: &Progress) {
     }
 }
 
-fn atomic_write(file: &Path, content: &str) {
+static ATOMIC_WRITE_NONCE: AtomicU64 = AtomicU64::new(0);
+
+fn atomic_write_mode(file: &Path, content: &str, mode: u32) -> io::Result<()> {
+    if let Some(parent) = file.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let nonce = ATOMIC_WRITE_NONCE.fetch_add(1, Ordering::Relaxed);
     let tmp = file.with_file_name(format!(
-        ".{}.tmp-{}",
+        ".{}.tmp-{}-{nonce}",
         file.file_name().unwrap_or_default().to_string_lossy(),
         std::process::id()
     ));
-    fs::write(&tmp, content).expect("запись tmp-файла");
-    fs::rename(&tmp, file).expect("rename tmp-файла");
+    let result = (|| {
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        output.set_permissions(fs::Permissions::from_mode(mode))?;
+        output.write_all(content.as_bytes())?;
+        output.sync_all()?;
+        fs::rename(&tmp, file)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn atomic_write(file: &Path, content: &str) {
+    let mode = fs::metadata(file)
+        .map(|m| m.permissions().mode() & 0o777)
+        .unwrap_or(0o644);
+    atomic_write_mode(file, content, mode).expect("атомарная запись файла");
 }
 
 fn backup(file: &Path) -> Option<PathBuf> {
@@ -1385,6 +1675,8 @@ pub struct IntegrationHealth {
     pub hook_bin: bool,
     /// Сокет демона существует (события есть куда слать).
     pub socket: bool,
+    /// `claude` найден в PATH.
+    pub claude_present: bool,
     /// Все хуки Claude в ~/.claude/settings.json — с актуальной командой.
     pub claude_hooks_ok: bool,
     /// `codex` найден в PATH (иначе codex-интеграция неприменима).
@@ -1393,7 +1685,7 @@ pub struct IntegrationHealth {
     pub codex_hooks_ok: bool,
     /// Шим `claude` установлен в shims-каталог.
     pub claude_shim: bool,
-    /// Шим `codex` установлен (нужен для bypass-hook-trust при запуске codex).
+    /// Шим `codex` установлен (опциональный tmux remote transport).
     pub codex_shim: bool,
 }
 
@@ -1401,7 +1693,11 @@ impl IntegrationHealth {
     /// Всё критичное на месте: бинарь хука + корректные регистрации обоих агентов
     /// (codex учитывается, только если установлен).
     pub fn ok(&self) -> bool {
-        self.hook_bin && self.claude_hooks_ok && (!self.codex_present || self.codex_hooks_ok)
+        let any_agent = self.claude_present || self.codex_present;
+        self.hook_bin
+            && any_agent
+            && (!self.claude_present || self.claude_hooks_ok)
+            && (!self.codex_present || self.codex_hooks_ok)
     }
 }
 
@@ -1412,6 +1708,7 @@ pub fn integration_health() -> IntegrationHealth {
         jarvis_dir: jarvis_dir().display().to_string(),
         hook_bin: hook_dst().exists(),
         socket: jarvis_dir().join("run.sock").exists(),
+        claude_present: claude_found(),
         claude_hooks_ok: hooks_all_correct(&settings_path(), "claude", &EVENTS),
         codex_present,
         codex_hooks_ok: !codex_present
@@ -1433,17 +1730,13 @@ pub fn reconcile_hooks(progress: &Progress) {
     }
 }
 
-/// Починить/обновить ТОЛЬКО интеграцию агентов: хуки (claude+codex) + транспорт-шим
-/// (claude+codex с bypass-hook-trust) + PATH-блок. БЕЗ тяжёлых шагов (Silero/STT/
+/// Починить/обновить ТОЛЬКО интеграцию агентов: hook binary + хуки
+/// (claude+codex) + transport shim + PATH-блок. БЕЗ тяжёлых шагов (Silero/STT/
 /// модели) — в отличие от `install`. Идемпотентно. Доустанавливает codex-шим, если
 /// codex появился после первичной установки, и лечит дрейф путей/меток в хуках.
 /// Для `jarvis-setup repair` и кнопки «Починить интеграцию» в настройках.
 pub fn repair(progress: &Progress) {
-    progress(Step::start("Хуки"));
-    reconcile_hooks(progress);
-    progress(Step::start("Транспорт"));
-    install_tmux_transport(progress);
-    let h = integration_health();
+    let h = install_core(progress);
     progress(Step::info(
         "Интеграция",
         format!(
@@ -1577,17 +1870,47 @@ pub fn status_report() -> String {
     let mut out = String::new();
     out += &format!(
         "Шим:      {}\n",
-        if hook_dst().exists() { format!("✓ {}", hook_dst().display()) } else { "✗ не установлен".into() }
+        if hook_dst().exists() {
+            format!("✓ {}", hook_dst().display())
+        } else {
+            "✗ не установлен".into()
+        }
     );
     out += &format!(
         "Сокет:    {}\n",
-        if jarvis_dir().join("run.sock").exists() { "✓ демон, похоже, запущен" } else { "✗ демон не запущен" }
+        if jarvis_dir().join("run.sock").exists() {
+            "✓ демон, похоже, запущен"
+        } else {
+            "✗ демон не запущен"
+        }
     );
-    out += &format!("claude:   {}\n", if claude_found() { "✓ найден в PATH" } else { "✗ не найден" });
+    out += &format!(
+        "claude:   {}\n",
+        if claude_found() {
+            "✓ найден в PATH"
+        } else {
+            "✗ не найден"
+        }
+    );
     out += "tmux-транспорт:\n";
-    out += &format!("  {}\n", if tmux_found() { "✓ tmux в PATH" } else { "✗ tmux не установлен (brew install tmux)" });
-    out += &format!("  {} шим claude ({})\n", mark(shim_dst().exists()), shim_dst().display());
-    out += &format!("  {} конфиг ({})\n", mark(tmux_conf_dst().exists()), tmux_conf_dst().display());
+    out += &format!(
+        "  {}\n",
+        if tmux_found() {
+            "✓ tmux в PATH"
+        } else {
+            "✗ tmux не установлен (brew install tmux)"
+        }
+    );
+    out += &format!(
+        "  {} шим claude ({})\n",
+        mark(shim_dst().exists()),
+        shim_dst().display()
+    );
+    out += &format!(
+        "  {} конфиг ({})\n",
+        mark(tmux_conf_dst().exists()),
+        tmux_conf_dst().display()
+    );
     for rc in rc_files() {
         let ok = rc.exists() && has_block(&fs::read_to_string(&rc).unwrap_or_default());
         out += &format!("  {} PATH-блок в {}\n", mark(ok), rc.display());
@@ -1602,14 +1925,23 @@ pub fn status_report() -> String {
     out += "Голос:\n";
     out += &format!(
         "  silero: установлен={} (venv + server.py), активен={} (voice.engine={engine})\n",
-        yn(silero_installed), yn(engine == "silero"),
+        yn(silero_installed),
+        yn(engine == "silero"),
     );
     let stt_eng = stt_engine();
     let whisper_ok = whisper_model_path().exists();
     let qwen3_ok = qwen3_sidecar_ready();
     out += "STT (диктовка, инкр. 9):\n";
-    out += &format!("  whisper-turbo: модель={} ({})\n", yn(whisper_ok), whisper_model_path().display());
-    out += &format!("  qwen3-mlx-сайдкар: установлен={} ({})\n", yn(qwen3_ok), stt_mlx_dir().display());
+    out += &format!(
+        "  whisper-turbo: модель={} ({})\n",
+        yn(whisper_ok),
+        whisper_model_path().display()
+    );
+    out += &format!(
+        "  qwen3-mlx-сайдкар: установлен={} ({})\n",
+        yn(qwen3_ok),
+        stt_mlx_dir().display()
+    );
     out += &format!("  активный движок: stt.engine={stt_eng}\n");
     out += "Wake-word (инкр. 10):\n";
     out += &format!(
@@ -1624,10 +1956,19 @@ pub fn status_report() -> String {
                 out += &format!("  {} {event}\n", mark(event_installed(&json, event)));
             }
         }
-        Ok((false, _)) => out += &format!("Settings: ✗ {} не существует\n", settings_path().display()),
+        Ok((false, _)) => {
+            out += &format!("Settings: ✗ {} не существует\n", settings_path().display())
+        }
         Err(e) => out += &format!("Settings: ⚠ {e}\n"),
     }
-    out += &format!("Codex:    {}\n", if codex_found() { "✓ найден в PATH" } else { "✗ не найден" });
+    out += &format!(
+        "Codex:    {}\n",
+        if codex_found() {
+            "✓ найден в PATH"
+        } else {
+            "✗ не найден"
+        }
+    );
     if codex_found() {
         match read_hooks_file(&codex_hooks_path()) {
             Ok((true, json)) => {
@@ -1636,19 +1977,29 @@ pub fn status_report() -> String {
                     out += &format!("    {} {event}\n", mark(event_installed(&json, event)));
                 }
             }
-            Ok((false, _)) => out += &format!("  hooks.json: ✗ {} не существует\n", codex_hooks_path().display()),
+            Ok((false, _)) => {
+                out += &format!(
+                    "  hooks.json: ✗ {} не существует\n",
+                    codex_hooks_path().display()
+                )
+            }
             Err(e) => out += &format!("  hooks.json: ⚠ {e}\n"),
         }
-        out += &format!("  {} шим codex ({})\n", mark(codex_shim_dst().exists()), codex_shim_dst().display());
+        out += &format!(
+            "  {} шим codex ({})\n",
+            mark(codex_shim_dst().exists()),
+            codex_shim_dst().display()
+        );
     }
     out
 }
 
-/// Установить интеграцию. Шлёт шаги в `progress`. `proxy` (если задан) идёт в
-/// окружение pip/torch — чтобы скачивать модели из-под прокси. Каждая фаза
-/// fail-safe: сбой одной (например, голоса) не валит остальные и не паникует.
-pub fn install(progress: &Progress, proxy: Option<&str>) {
-    // --- Фаза «Хуки» ---
+/// Установить только быстрое локальное ядро интеграции. Модели и Python-sidecars
+/// сюда принципиально не входят: onboarding не должен начинать многогигабайтные
+/// загрузки без явного выбора пользователя. Возвращает фактический health после
+/// установки, а не «успех потока».
+pub fn install_core(progress: &Progress) -> IntegrationHealth {
+    debug_assert_eq!(core_install_phases(), &["Хуки", "Транспорт"]);
     progress(Step::start("Хуки"));
     write_executable(&hook_dst(), HOOK_SRC);
 
@@ -1661,19 +2012,27 @@ pub fn install(progress: &Progress, proxy: Option<&str>) {
             if src.exists() {
                 let _ = fs::create_dir_all(mcp_dst().parent().unwrap());
                 if fs::copy(&src, mcp_dst()).is_ok() {
-                    let _ = fs::set_permissions(&mcp_dst(), fs::Permissions::from_mode(0o755));
+                    let _ = fs::set_permissions(mcp_dst(), fs::Permissions::from_mode(0o755));
                 }
                 let token = ensure_agent_token();
                 let cfg = build_mcp_config(&mcp_dst().to_string_lossy(), &token);
-                atomic_write(&mcp_config_dst(), &(serde_json::to_string_pretty(&cfg).unwrap() + "\n"));
+                let body = serde_json::to_string_pretty(&cfg).unwrap() + "\n";
+                if let Err(err) = atomic_write_mode(&mcp_config_dst(), &body, 0o600) {
+                    progress(Step::warn("Хуки", format!("MCP-конфиг не записан: {err}")));
+                }
             } else {
-                eprintln!("[jarvis:install] jarvis-mcp рядом с exe не найден — агент будет недоступен");
+                eprintln!(
+                    "[jarvis:install] jarvis-mcp рядом с exe не найден — агент будет недоступен"
+                );
             }
         }
     }
 
     if !claude_found() {
-        progress(Step::info("Хуки", "claude не найден в PATH — хуки подхватятся, когда появится"));
+        progress(Step::info(
+            "Хуки",
+            "claude не найден в PATH — хуки подхватятся, когда появится",
+        ));
     }
     // Claude — всегда (хуки ждут появления claude). Codex — только если установлен
     // (иначе незачем создавать ~/.codex/hooks.json для несуществующего CLI).
@@ -1689,11 +2048,22 @@ pub fn install(progress: &Progress, proxy: Option<&str>) {
     // медиа-адаптер для паузы чужого звука (мгновенно, тихо)
     install_mediaremote();
 
+    integration_health()
+}
+
+/// Legacy full install для CLI: core плюс optional voice/STT setup. Новый
+/// onboarding вызывает `install_core`, а модели — только отдельным явным plan.
+pub fn install(progress: &Progress, proxy: Option<&str>) {
+    let _ = install_core(progress);
+
     // --- Фаза «Голос» (Silero) — не-фатально ---
     progress(Step::start("Голос"));
     match install_silero(progress, proxy) {
         Ok(()) => progress(Step::done("Голос", "Silero установлен (venv + модель)")),
-        Err(e) => progress(Step::warn("Голос", format!("Silero не установлен ({e}); демон не затронут"))),
+        Err(e) => progress(Step::warn(
+            "Голос",
+            format!("Silero не установлен ({e}); демон не затронут"),
+        )),
     }
 
     // --- Фаза «STT: Whisper» (инкр. 9) — не-фатально ---
@@ -1702,10 +2072,18 @@ pub fn install(progress: &Progress, proxy: Option<&str>) {
     // Здесь только логируем статус.
     progress(Step::info(
         "STT",
-        &format!(
+        format!(
             "Whisper-модель: {}; Qwen3-сайдкар: {} (запустить setup для установки)",
-            if whisper_model_path().exists() { "установлена" } else { "не установлена" },
-            if stt_python().exists() { "установлен" } else { "не установлен" },
+            if whisper_model_path().exists() {
+                "установлена"
+            } else {
+                "не установлена"
+            },
+            if stt_python().exists() {
+                "установлен"
+            } else {
+                "не установлен"
+            },
         ),
     ));
 
@@ -1713,31 +2091,29 @@ pub fn install(progress: &Progress, proxy: Option<&str>) {
     progress(Step::start("STT-MLX"));
     match install_stt_sidecar(progress, proxy) {
         Ok(()) => {} // Step::done уже послан внутри
-        Err(e) => progress(Step::warn("STT-MLX", format!("сайдкар не установлен ({e}); STT недоступен, остальное не затронуто"))),
+        Err(e) => progress(Step::warn(
+            "STT-MLX",
+            format!("сайдкар не установлен ({e}); STT недоступен, остальное не затронуто"),
+        )),
     }
 }
 
 fn install_tmux_transport(progress: &Progress) {
     if !tmux_found() {
-        progress(Step::warn("Транспорт", "tmux не найден (brew install tmux) — ввод-транспорт пропущен; уведомления работают"));
+        progress(Step::warn(
+            "Транспорт",
+            "tmux не найден (brew install tmux) — ввод-транспорт пропущен; уведомления работают",
+        ));
         return;
     }
     // Запекаем актуальный JARVIS_DIR в шим: в рантайме (обычный терминал) env
     // JARVIS_DIR не выставлен, а dev-сборка живёт в ~/.jarvis-dev. Без подмены
     // дефолта шим искал бы tmux.conf в ~/.jarvis и падал (No such file).
-    let mut shim = SHIM_SRC.replacen(
+    let shim = SHIM_SRC.replacen(
         "JARVIS_DIR=\"${JARVIS_DIR:-$HOME/.jarvis}\"",
         &format!("JARVIS_DIR=\"${{JARVIS_DIR:-{}}}\"", jarvis_dir().display()),
         1,
     );
-    // Codex: запекаем флаг bypass-hook-trust, если он поддерживается (feature-detect
-    // один раз при установке — чтобы шим не дёргал `codex --help` на каждый запуск).
-    let bypass = if codex_found() && codex_supports_bypass_hook_trust() {
-        "--dangerously-bypass-hook-trust"
-    } else {
-        ""
-    };
-    shim = shim.replacen("CODEX_BYPASS=''", &format!("CODEX_BYPASS='{bypass}'"), 1);
     write_executable(&shim_dst(), &shim); // ~/.jarvis/shims/claude
     if codex_found() {
         // тот же скрипт под именем codex — поведение выбирается по basename "$0".
@@ -1748,7 +2124,11 @@ fn install_tmux_transport(progress: &Progress) {
     let shims = shims_dir().display().to_string();
     for rc in rc_files() {
         let existed = rc.exists();
-        let content = if existed { fs::read_to_string(&rc).unwrap_or_default() } else { String::new() };
+        let content = if existed {
+            fs::read_to_string(&rc).unwrap_or_default()
+        } else {
+            String::new()
+        };
         let merged = merge_block(&content, &shims);
         if merged != content {
             if existed {
@@ -1759,7 +2139,11 @@ fn install_tmux_transport(progress: &Progress) {
     }
     progress(Step::done(
         "Транспорт",
-        if codex_found() { "шим claude+codex + tmux.conf + PATH-блок" } else { "шим claude + tmux.conf + PATH-блок" },
+        if codex_found() {
+            "шим claude+codex + tmux.conf + PATH-блок"
+        } else {
+            "шим claude + tmux.conf + PATH-блок"
+        },
     ));
 }
 
@@ -1771,7 +2155,13 @@ pub fn uninstall(progress: &Progress) {
     progress(Step::done("Хуки", "записи Jarvis сняты (claude + codex)"));
 
     progress(Step::start("Транспорт"));
-    for f in [hook_dst(), jarvis_dir().join("run.sock"), shim_dst(), codex_shim_dst(), tmux_conf_dst()] {
+    for f in [
+        hook_dst(),
+        jarvis_dir().join("run.sock"),
+        shim_dst(),
+        codex_shim_dst(),
+        tmux_conf_dst(),
+    ] {
         let _ = fs::remove_file(&f);
     }
     let _ = fs::remove_dir(shims_dir());
@@ -1790,7 +2180,10 @@ pub fn uninstall(progress: &Progress) {
 
     let live = live_tmux_sessions();
     if !live.is_empty() {
-        progress(Step::info("Транспорт", format!("живые tmux-сессии не тронуты: {}", live.join(", "))));
+        progress(Step::info(
+            "Транспорт",
+            format!("живые tmux-сессии не тронуты: {}", live.join(", ")),
+        ));
     }
 }
 
@@ -1896,9 +2289,33 @@ pub fn qwen_weights_dir(key: &str) -> PathBuf {
     stt_mlx_dir().join("models").join(key)
 }
 
-/// Веса Qwen на месте, если есть `config.json` (тот же признак, что у сайдкара).
+const QWEN_MIN_WEIGHT_BYTES: u64 = 1024 * 1024;
+
+fn qwen_weights_complete_at(dir: &Path) -> bool {
+    let non_empty = |name: &str| {
+        fs::metadata(dir.join(name))
+            .map(|m| m.is_file() && m.len() > 0)
+            .unwrap_or(false)
+    };
+    let weights_ok = fs::metadata(dir.join("model.safetensors"))
+        .map(|m| m.is_file() && m.len() >= QWEN_MIN_WEIGHT_BYTES)
+        .unwrap_or(false);
+    weights_ok
+        && [
+            "config.json",
+            "vocab.json",
+            "merges.txt",
+            "preprocessor_config.json",
+        ]
+        .iter()
+        .all(|name| non_empty(name))
+}
+
+/// Веса Qwen готовы только при наличии весового файла и минимального набора
+/// tokenizer/preprocessor metadata. Один ранний `config.json` больше не делает
+/// оборванную загрузку «готовой» навсегда.
 pub fn qwen_weights_present(key: &str) -> bool {
-    qwen_weights_dir(key).join("config.json").exists()
+    qwen_weights_complete_at(&qwen_weights_dir(key))
 }
 
 /// Готов ли STT-движок к активации — честный гейт для настроек (источник «правды
@@ -1970,7 +2387,11 @@ pub fn model_inventory() -> Vec<ModelInfo> {
     let sd = silero_dir();
     let tor = torch_hub_dir();
     let silero_bytes = (if sd.exists() { dir_size_cached(&sd) } else { 0 })
-        + (if tor.exists() { dir_size_cached(&tor) } else { 0 });
+        + (if tor.exists() {
+            dir_size_cached(&tor)
+        } else {
+            0
+        });
     v.push(ModelInfo {
         id: "silero".into(),
         kind: "voice".into(),
@@ -2039,11 +2460,17 @@ pub fn delete_model(id: &str) -> Result<(), String> {
 
 /// Сколько в ~/.claude/settings.json ЧУЖИХ хуков (не наших) — их откат сохранит.
 pub fn foreign_hook_count() -> usize {
-    let Ok((true, json)) = read_settings() else { return 0 };
-    let Some(hooks) = json.get("hooks").and_then(Value::as_object) else { return 0 };
+    let Ok((true, json)) = read_settings() else {
+        return 0;
+    };
+    let Some(hooks) = json.get("hooks").and_then(Value::as_object) else {
+        return 0;
+    };
     let mut n = 0;
     for arr in hooks.values() {
-        let Some(groups) = arr.as_array() else { continue };
+        let Some(groups) = arr.as_array() else {
+            continue;
+        };
         for g in groups {
             if let Some(gh) = g.get("hooks").and_then(Value::as_array) {
                 n += gh.iter().filter(|h| !is_ours(h)).count();
@@ -2071,15 +2498,25 @@ mod plan_tests {
 
     #[test]
     fn skips_already_installed() {
-        let inst =
-            Installed { whisper: true, runtime: true, qwen_0_6b: true, ..Default::default() };
+        let inst = Installed {
+            whisper: true,
+            runtime: true,
+            qwen_0_6b: true,
+            ..Default::default()
+        };
         let plan = plan_install(&ids(&["whisper-turbo", "qwen3-0.6b"]), &inst);
-        assert!(plan.is_empty(), "уже установленное не планируется: {plan:?}");
+        assert!(
+            plan.is_empty(),
+            "уже установленное не планируется: {plan:?}"
+        );
     }
 
     #[test]
     fn runtime_not_readded_when_present() {
-        let inst = Installed { runtime: true, ..Default::default() };
+        let inst = Installed {
+            runtime: true,
+            ..Default::default()
+        };
         let plan = plan_install(&ids(&["qwen3-1.7b"]), &inst);
         let order: Vec<&str> = plan.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(order, vec!["qwen3-1.7b"]); // venv уже есть → без runtime-шага
@@ -2088,12 +2525,20 @@ mod plan_tests {
     #[test]
     fn canonical_order_full_selection() {
         let inst = Installed::default();
-        let plan =
-            plan_install(&ids(&["hey_jarvis", "silero", "whisper-turbo", "qwen3-0.6b"]), &inst);
+        let plan = plan_install(
+            &ids(&["hey_jarvis", "silero", "whisper-turbo", "qwen3-0.6b"]),
+            &inst,
+        );
         let order: Vec<&str> = plan.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(
             order,
-            vec!["qwen3-runtime", "whisper-turbo", "qwen3-0.6b", "silero", "hey_jarvis"]
+            vec![
+                "qwen3-runtime",
+                "whisper-turbo",
+                "qwen3-0.6b",
+                "silero",
+                "hey_jarvis"
+            ]
         );
     }
 }
@@ -2103,6 +2548,70 @@ mod tests {
     use super::*;
 
     const DIR: &str = "/Users/test/.jarvis/shims";
+
+    #[test]
+    fn core_install_plan_contains_no_optional_downloads() {
+        assert_eq!(core_install_phases(), &["Хуки", "Транспорт"]);
+        assert!(!core_install_phases()
+            .iter()
+            .any(|phase| { matches!(*phase, "Голос" | "STT" | "STT-MLX" | "Модели") }));
+    }
+
+    #[test]
+    fn integration_health_needs_an_available_agent_and_its_hooks() {
+        let mut health = IntegrationHealth {
+            jarvis_dir: "/tmp/jarvis".into(),
+            hook_bin: true,
+            socket: false,
+            claude_present: false,
+            claude_hooks_ok: true,
+            codex_present: false,
+            codex_hooks_ok: true,
+            claude_shim: false,
+            codex_shim: false,
+        };
+        assert!(!health.ok(), "без Claude/Codex интеграция не готова");
+        health.claude_present = true;
+        assert!(
+            health.ok(),
+            "hook transport работает без optional tmux remote-control"
+        );
+        health.claude_hooks_ok = false;
+        assert!(!health.ok(), "hooks доступного агента обязательны");
+    }
+
+    #[test]
+    fn sensitive_atomic_write_is_owner_only() {
+        let dir = std::env::temp_dir().join(format!("jarvis-sensitive-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jarvis-mcp.json");
+        atomic_write_mode(&path, "{}\n", 0o600).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clean_start_lock_is_profile_scoped_and_non_destructive() {
+        let dir = std::env::temp_dir().join(format!("jarvis-profile-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("daemon.lock");
+        let first = acquire_profile_lock(&path).expect("first process owns this profile");
+        assert!(
+            acquire_profile_lock(&path).is_err(),
+            "second process cannot take same profile"
+        );
+        drop(first);
+        assert!(
+            acquire_profile_lock(&path).is_ok(),
+            "OS releases lock after owner exits"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // download_channels: сначала прямой, прокси — фолбэк (если задан); без прокси — только прямой.
     #[test]
@@ -2114,23 +2623,39 @@ mod tests {
     #[test]
     fn mcp_config_has_token_and_command() {
         let cfg = super::build_mcp_config("/x/.jarvis/bin/jarvis-mcp", "feedface");
-        assert_eq!(cfg["mcpServers"]["jarvis"]["command"], "/x/.jarvis/bin/jarvis-mcp");
-        assert_eq!(cfg["mcpServers"]["jarvis"]["env"]["JARVIS_TOKEN"], "feedface");
+        assert_eq!(
+            cfg["mcpServers"]["jarvis"]["command"],
+            "/x/.jarvis/bin/jarvis-mcp"
+        );
+        assert_eq!(
+            cfg["mcpServers"]["jarvis"]["env"]["JARVIS_TOKEN"],
+            "feedface"
+        );
     }
 
     #[test]
     fn merge_into_empty() {
         let merged = merge_block("", DIR);
         assert!(has_block(&merged), "вставка в пустой файл");
-        assert!(merged.contains(&format!("export PATH=\"{DIR}:$PATH\"")), "PATH правильный");
+        assert!(
+            merged.contains(&format!("export PATH=\"{DIR}:$PATH\"")),
+            "PATH правильный"
+        );
     }
 
     #[test]
     fn merge_preserves_existing_and_is_idempotent() {
         let existing = "# мой zshrc\nexport FOO=bar\n";
         let merged = merge_block(existing, DIR);
-        assert!(merged.starts_with(existing), "существующее содержимое не тронуто");
-        assert_eq!(merge_block(&merged, DIR), merged, "повторный merge идемпотентен");
+        assert!(
+            merged.starts_with(existing),
+            "существующее содержимое не тронуто"
+        );
+        assert_eq!(
+            merge_block(&merged, DIR),
+            merged,
+            "повторный merge идемпотентен"
+        );
     }
 
     #[test]
@@ -2138,7 +2663,10 @@ mod tests {
         let merged = merge_block("export FOO=bar\n", DIR);
         let stale = merged.replace(DIR, "/old/path");
         let refreshed = merge_block(&stale, DIR);
-        assert!(refreshed.contains(DIR) && !refreshed.contains("/old/path"), "устаревший блок заменяется");
+        assert!(
+            refreshed.contains(DIR) && !refreshed.contains("/old/path"),
+            "устаревший блок заменяется"
+        );
         assert_eq!(refreshed.matches(BEGIN).count(), 1, "блок ровно один");
     }
 
@@ -2148,7 +2676,11 @@ mod tests {
         let removed = remove_block(&merged);
         assert!(!has_block(&removed), "демёрж убирает блок");
         assert!(removed.contains("export FOO=bar"), "демёрж сохраняет чужое");
-        assert_eq!(remove_block(&removed), removed, "повторный демёрж идемпотентен");
+        assert_eq!(
+            remove_block(&removed),
+            removed,
+            "повторный демёрж идемпотентен"
+        );
     }
 
     #[test]
@@ -2163,6 +2695,10 @@ mod tests {
     fn embedded_assets_look_sane() {
         assert!(HOOK_SRC.starts_with("#!/bin/sh"));
         assert!(HOOK_SRC.contains("JARVIS_IGNORE"));
+        assert!(
+            HOOK_SRC.find("printf '{}\\n'") < HOOK_SRC.find("JARVIS_IGNORE"),
+            "neutral hook JSON must precede every early exit"
+        );
         assert!(SHIM_SRC.contains("tmux"));
         assert!(TMUX_CONF_SRC.contains("status off"));
         assert!(SILERO_SERVER_SRC.contains("skip_validation=True"));
@@ -2170,20 +2706,51 @@ mod tests {
 
     #[test]
     fn agent_shim_is_generalized() {
-        // SHIM_SRC теперь bin/agent-shim: basename-диспатч + bypass-слот.
-        assert!(SHIM_SRC.contains("BIN_NAME=$(basename"), "шим выбирает поведение по basename");
-        assert!(SHIM_SRC.contains("CODEX_BYPASS"), "есть слот для bypass-hook-trust");
-        assert!(SHIM_SRC.contains("command -v \"$BIN_NAME\""), "резолвит реальный бинарь по имени");
+        // SHIM_SRC: basename dispatch; hook trust stays an explicit Codex choice.
+        assert!(
+            SHIM_SRC.contains("BIN_NAME=$(basename"),
+            "шим выбирает поведение по basename"
+        );
+        assert!(
+            !SHIM_SRC.contains("CODEX_BYPASS"),
+            "глобальный bypass trust не запекается"
+        );
+        assert!(
+            SHIM_SRC.contains("command -v \"$BIN_NAME\""),
+            "резолвит реальный бинарь по имени"
+        );
+    }
+
+    #[test]
+    fn agent_shim_does_not_put_proxy_credentials_in_shell_command() {
+        assert!(
+            !SHIM_SRC.contains("PRE="),
+            "proxy is not interpolated into long-lived shell argv"
+        );
+        assert!(TMUX_CONF_SRC.contains("update-environment"));
+        assert!(TMUX_CONF_SRC.contains("HTTP_PROXY") && TMUX_CONF_SRC.contains("HTTPS_PROXY"));
     }
 
     #[test]
     fn codex_events_shape() {
         assert_eq!(CODEX_EVENTS.len(), 8);
-        assert!(CODEX_EVENTS.iter().any(|(e, a)| *e == "Stop" && *a == "stop"));
-        assert!(CODEX_EVENTS.iter().any(|(e, a)| *e == "PermissionRequest" && *a == "permission"));
+        assert!(CODEX_EVENTS
+            .iter()
+            .any(|(e, a)| *e == "Stop" && *a == "stop"));
+        assert!(CODEX_EVENTS
+            .iter()
+            .any(|(e, a)| *e == "PermissionRequest" && *a == "permission"));
         assert!(CODEX_EVENTS.iter().any(|(e, _)| *e == "SubagentStart"));
         // у Codex нет Notification/StopFailure/SessionEnd
         assert!(!CODEX_EVENTS.iter().any(|(e, _)| *e == "Notification"));
+    }
+
+    #[test]
+    fn claude_events_cover_subagent_lifecycle() {
+        assert_eq!(EVENTS.len(), 10);
+        assert!(EVENTS.iter().any(|(event, arg)| *event == "SubagentStart" && *arg == "subagent-start"));
+        assert!(EVENTS.iter().any(|(event, arg)| *event == "SubagentStop" && *arg == "subagent-stop"));
+        assert!(EVENTS.iter().any(|(event, _)| *event == "Notification"));
     }
 
     #[test]
@@ -2194,14 +2761,30 @@ mod tests {
         let noop = |_s: Step| {};
         install_hooks_into(&path, "codex", &CODEX_EVENTS, &noop);
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let stop = v["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap().to_string();
-        assert!(stop.contains(" codex stop"), "метка codex в команде: {stop}");
-        assert!(v["hooks"]["PermissionRequest"].is_array(), "есть PermissionRequest");
-        assert!(v["hooks"].get("Notification").is_none(), "у codex нет Notification");
+        let stop = v["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            stop.contains(" codex stop"),
+            "метка codex в команде: {stop}"
+        );
+        assert!(
+            v["hooks"]["PermissionRequest"].is_array(),
+            "есть PermissionRequest"
+        );
+        assert!(
+            v["hooks"].get("Notification").is_none(),
+            "у codex нет Notification"
+        );
         // идемпотентность: второй проход не дублирует
         install_hooks_into(&path, "codex", &CODEX_EVENTS, &noop);
         let v2: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v2["hooks"]["Stop"].as_array().unwrap().len(), 1, "Stop не дублируется");
+        assert_eq!(
+            v2["hooks"]["Stop"].as_array().unwrap().len(),
+            1,
+            "Stop не дублируется"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2247,7 +2830,10 @@ mod tests {
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let want = format!("{} codex pre-tool", hook_dst().display());
         let cmds = event_commands(&v, "PreToolUse");
-        assert!(cmds.contains(&want), "вылечено на верный путь+метку codex: {cmds:?}");
+        assert!(
+            cmds.contains(&want),
+            "вылечено на верный путь+метку codex: {cmds:?}"
+        );
         assert!(
             !cmds.iter().any(|c| c.contains("claude pre-tool")),
             "старый claude-хук убран: {cmds:?}"
@@ -2284,9 +2870,18 @@ mod tests {
 
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let cmds = event_commands(&v, "PreToolUse");
-        assert!(cmds.iter().any(|c| c == "/opt/other/guard pre"), "чужой хук сохранён: {cmds:?}");
-        assert!(cmds.contains(&format!("{} codex pre-tool", hook_dst().display())), "наш вылечен: {cmds:?}");
-        assert!(!cmds.iter().any(|c| c.contains("claude pre-tool")), "старый снят: {cmds:?}");
+        assert!(
+            cmds.iter().any(|c| c == "/opt/other/guard pre"),
+            "чужой хук сохранён: {cmds:?}"
+        );
+        assert!(
+            cmds.contains(&format!("{} codex pre-tool", hook_dst().display())),
+            "наш вылечен: {cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| c.contains("claude pre-tool")),
+            "старый снят: {cmds:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2305,14 +2900,24 @@ mod tests {
             }]}]}
         });
         std::fs::write(&path, serde_json::to_string_pretty(&stale).unwrap()).unwrap();
-        assert!(!hooks_all_correct(&path, "codex", &CODEX_EVENTS), "стейл-файл не «ок»");
+        assert!(
+            !hooks_all_correct(&path, "codex", &CODEX_EVENTS),
+            "стейл-файл не «ок»"
+        );
 
         let noop = |_s: Step| {};
         install_hooks_into(&path, "codex", &CODEX_EVENTS, &noop);
-        assert!(hooks_all_correct(&path, "codex", &CODEX_EVENTS), "после лечения — все события ок");
+        assert!(
+            hooks_all_correct(&path, "codex", &CODEX_EVENTS),
+            "после лечения — все события ок"
+        );
 
         // отсутствующий файл — тоже не «ок»
-        assert!(!hooks_all_correct(&dir.join("nope.json"), "codex", &CODEX_EVENTS));
+        assert!(!hooks_all_correct(
+            &dir.join("nope.json"),
+            "codex",
+            &CODEX_EVENTS
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2335,7 +2940,10 @@ mod tests {
 
     #[test]
     fn shell_quote_escapes_spaces_and_single_quotes() {
-        assert_eq!(shell_quote("/tmp/Jarvis Venv/bin/python"), "'/tmp/Jarvis Venv/bin/python'");
+        assert_eq!(
+            shell_quote("/tmp/Jarvis Venv/bin/python"),
+            "'/tmp/Jarvis Venv/bin/python'"
+        );
         assert_eq!(shell_quote("a'b c"), "'a'\\''b c'");
     }
 
@@ -2358,25 +2966,48 @@ mod tests {
             cmd.starts_with("'/tmp/Jarvis Venv/bin/python' -m pip install --progress-bar raw"),
             "pip должен запускаться модулем venv-python: {cmd}"
         );
-        assert!(cmd.contains("--proxy 'http://127.0.0.1:8080'"), "proxy должен сохраняться: {cmd}");
-        assert!(cmd.contains("'torch'") && cmd.contains("'fastapi'"), "пакеты должны попасть в команду: {cmd}");
-        assert!(!cmd.contains("bin/pip"), "не должен зависеть от отсутствующего bin/pip: {cmd}");
+        assert!(
+            cmd.contains("--proxy 'http://127.0.0.1:8080'"),
+            "proxy должен сохраняться: {cmd}"
+        );
+        assert!(
+            cmd.contains("'torch'") && cmd.contains("'fastapi'"),
+            "пакеты должны попасть в команду: {cmd}"
+        );
+        assert!(
+            !cmd.contains("bin/pip"),
+            "не должен зависеть от отсутствующего bin/pip: {cmd}"
+        );
     }
 
     // Phase 8: STT-SERVER_SRC встроен и является валидным Python-скриптом (начало).
     #[test]
     fn stt_server_src_embedded() {
-        assert!(!STT_SERVER_SRC.is_empty(), "stt-server.py должен быть встроен");
-        assert!(STT_SERVER_SRC.contains("transcribe"), "stt-server.py содержит /transcribe");
-        assert!(STT_SERVER_SRC.contains("uvicorn") || STT_SERVER_SRC.contains("fastapi"),
-            "stt-server.py содержит uvicorn или fastapi");
+        assert!(
+            !STT_SERVER_SRC.is_empty(),
+            "stt-server.py должен быть встроен"
+        );
+        assert!(
+            STT_SERVER_SRC.contains("transcribe"),
+            "stt-server.py содержит /transcribe"
+        );
+        assert!(
+            STT_SERVER_SRC.contains("uvicorn") || STT_SERVER_SRC.contains("fastapi"),
+            "stt-server.py содержит uvicorn или fastapi"
+        );
     }
 
     // Phase 8: URL Whisper-модели соответствует ожидаемому.
     #[test]
     fn whisper_model_url_is_correct() {
-        assert!(WHISPER_MODEL_URL.contains("huggingface.co"), "URL на HuggingFace");
-        assert!(WHISPER_MODEL_URL.contains("ggml-large-v3-turbo-q5_0.bin"), "имя модели в URL");
+        assert!(
+            WHISPER_MODEL_URL.contains("huggingface.co"),
+            "URL на HuggingFace"
+        );
+        assert!(
+            WHISPER_MODEL_URL.contains("ggml-large-v3-turbo-q5_0.bin"),
+            "имя модели в URL"
+        );
     }
 
     // Phase 8: пути STT изолированы от silero (не пересекаются).
@@ -2388,7 +3019,10 @@ mod tests {
         let silero = silero_dir();
         assert_ne!(stt, silero, "stt и silero — разные каталоги");
         assert!(stt.ends_with("stt"), "stt_dir заканчивается на 'stt'");
-        assert!(silero.ends_with("silero"), "silero_dir заканчивается на 'silero'");
+        assert!(
+            silero.ends_with("silero"),
+            "silero_dir заканчивается на 'silero'"
+        );
     }
 
     // Phase 8: whisper_model_path() = stt_dir() / ggml-large-v3-turbo-q5_0.bin
@@ -2406,8 +3040,14 @@ mod tests {
     #[test]
     fn stt_server_py_path_is_inside_stt_mlx_dir() {
         let server = stt_server_py();
-        assert!(server.starts_with(stt_mlx_dir()), "stt-server.py внутри stt_mlx_dir()");
-        assert_eq!(server.file_name().unwrap().to_str().unwrap(), "stt-server.py");
+        assert!(
+            server.starts_with(stt_mlx_dir()),
+            "stt-server.py внутри stt_mlx_dir()"
+        );
+        assert_eq!(
+            server.file_name().unwrap().to_str().unwrap(),
+            "stt-server.py"
+        );
     }
 
     // Phase 8: status() возвращает корректные дефолты когда ничего не установлено.
@@ -2419,7 +3059,10 @@ mod tests {
         let s = Status::default();
         assert!(!s.whisper_model, "по умолчанию whisper_model=false");
         assert!(!s.qwen3_sidecar, "по умолчанию qwen3_sidecar=false");
-        assert_eq!(s.stt_engine_active, "", "по умолчанию stt_engine_active=empty");
+        assert_eq!(
+            s.stt_engine_active, "",
+            "по умолчанию stt_engine_active=empty"
+        );
     }
 
     // Phase 8: idempotency — install_stt_sidecar записывает stt-server.py атомарно
@@ -2431,7 +3074,10 @@ mod tests {
         let tmp = std::env::temp_dir().join("jarvis-test-stt-server.py");
         atomic_write(&tmp, STT_SERVER_SRC);
         let content = fs::read_to_string(&tmp).unwrap();
-        assert_eq!(content, STT_SERVER_SRC, "атомарная запись не изменяет содержимое");
+        assert_eq!(
+            content, STT_SERVER_SRC,
+            "атомарная запись не изменяет содержимое"
+        );
         let _ = fs::remove_file(&tmp);
     }
 
@@ -2441,7 +3087,13 @@ mod tests {
     fn model_inventory_has_core_models() {
         let inv = model_inventory();
         let ids: Vec<&str> = inv.iter().map(|m| m.id.as_str()).collect();
-        for id in ["whisper-turbo", "qwen3-0.6b", "qwen3-1.7b", "silero", "hey_jarvis"] {
+        for id in [
+            "whisper-turbo",
+            "qwen3-0.6b",
+            "qwen3-1.7b",
+            "silero",
+            "hey_jarvis",
+        ] {
             assert!(ids.contains(&id), "инвентарь должен содержать {id}");
         }
     }
@@ -2461,15 +3113,53 @@ mod tests {
     fn model_inventory_at_most_one_active_stt() {
         let inv = model_inventory();
         let active = inv.iter().filter(|m| m.kind == "stt" && m.active).count();
-        assert!(active <= 1, "активным может быть не более одного STT-движка, найдено {active}");
+        assert!(
+            active <= 1,
+            "активным может быть не более одного STT-движка, найдено {active}"
+        );
     }
 
     #[test]
     fn qwen_weights_dir_layout() {
         let d = qwen_weights_dir("qwen3-0.6b");
-        assert!(d.ends_with("qwen3-0.6b"), "каталог заканчивается на ключ модели");
+        assert!(
+            d.ends_with("qwen3-0.6b"),
+            "каталог заканчивается на ключ модели"
+        );
         let s = d.to_string_lossy();
-        assert!(s.contains("stt-mlx") && s.contains("models"), "путь внутри stt-mlx/models: {s}");
+        assert!(
+            s.contains("stt-mlx") && s.contains("models"),
+            "путь внутри stt-mlx/models: {s}"
+        );
+    }
+
+    #[test]
+    fn qwen_readiness_rejects_config_only_partial_download() {
+        let dir = std::env::temp_dir().join(format!("jarvis-qwen-partial-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.json"), "{}").unwrap();
+        assert!(
+            !qwen_weights_complete_at(&dir),
+            "config alone is not a usable model"
+        );
+        fs::write(
+            dir.join("model.safetensors"),
+            vec![0_u8; QWEN_MIN_WEIGHT_BYTES as usize],
+        )
+        .unwrap();
+        for (name, body) in [
+            ("vocab.json", b"{}".as_slice()),
+            ("merges.txt", b"x y".as_slice()),
+            ("preprocessor_config.json", b"{}".as_slice()),
+        ] {
+            fs::write(dir.join(name), body).unwrap();
+        }
+        assert!(
+            qwen_weights_complete_at(&dir),
+            "minimum legacy model set is accepted"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // --- Инкр.2: гибридная загрузка (теперь: прокси-на-всё + фолбэк, см.
@@ -2477,8 +3167,14 @@ mod tests {
 
     #[test]
     fn qwen_repo_mapping() {
-        assert_eq!(qwen_repo("qwen3-0.6b"), Some("mlx-community/Qwen3-ASR-0.6B-8bit"));
-        assert_eq!(qwen_repo("qwen3-1.7b"), Some("mlx-community/Qwen3-ASR-1.7B-4bit"));
+        assert_eq!(
+            qwen_repo("qwen3-0.6b"),
+            Some("mlx-community/Qwen3-ASR-0.6B-8bit")
+        );
+        assert_eq!(
+            qwen_repo("qwen3-1.7b"),
+            Some("mlx-community/Qwen3-ASR-1.7B-4bit")
+        );
         assert_eq!(qwen_repo("whisper-turbo"), None);
         assert_eq!(qwen_repo("nonsense"), None);
     }
@@ -2492,8 +3188,14 @@ mod tests {
         let proxy = std::env::var("HTTP_PROXY").ok();
         let files = hf_tree("mlx-community/Qwen3-ASR-0.6B-8bit", proxy.as_deref())
             .expect("hf_tree должен вернуть список файлов");
-        assert!(files.iter().any(|(p, _)| p == "config.json"), "в дереве есть config.json");
-        assert!(files.iter().any(|(p, _)| p == "model.safetensors"), "в дереве есть веса");
+        assert!(
+            files.iter().any(|(p, _)| p == "config.json"),
+            "в дереве есть config.json"
+        );
+        assert!(
+            files.iter().any(|(p, _)| p == "model.safetensors"),
+            "в дереве есть веса"
+        );
         let tmp = std::env::temp_dir().join("jarvis-smoke-config.json");
         let _ = fs::remove_file(&tmp);
         fetch_to_file(
@@ -2505,7 +3207,10 @@ mod tests {
             None,
         )
         .expect("fetch config.json через прокси");
-        assert!(fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0) > 1000, "config.json скачан");
+        assert!(
+            fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0) > 1000,
+            "config.json скачан"
+        );
         let _ = fs::remove_file(&tmp);
     }
 
@@ -2543,7 +3248,10 @@ mod tests {
         let s = Step::progress("Модель", "qwen3-1.7b — 42%", 42);
         assert_eq!(s.pct, Some(42));
         let j = serde_json::to_value(&s).unwrap();
-        assert_eq!(j["pct"], 42, "pct сериализуется числом — иначе прогрессбар не появится");
+        assert_eq!(
+            j["pct"], 42,
+            "pct сериализуется числом — иначе прогрессбар не появится"
+        );
     }
 
     #[test]
@@ -2551,7 +3259,10 @@ mod tests {
         let s = Step::info("X", "msg");
         assert_eq!(s.pct, None);
         let j = serde_json::to_value(&s).unwrap();
-        assert!(j.get("pct").is_none(), "без прогресса поле pct не сериализуется");
+        assert!(
+            j.get("pct").is_none(),
+            "без прогресса поле pct не сериализуется"
+        );
     }
 
     // --- stt_engine_ready: честный гейт. Главный баг «правды по модели»: whisper
@@ -2559,18 +3270,36 @@ mod tests {
     #[test]
     fn whisper_ready_requires_native_build_and_model() {
         // модель есть, но фича не вкомпилирована → НЕ готов (иначе стаб = ошибка распознавания)
-        assert!(!stt_engine_ready("whisper-turbo", true, false, false, false));
+        assert!(!stt_engine_ready(
+            "whisper-turbo",
+            true,
+            false,
+            false,
+            false
+        ));
         // модель есть и фича вкомпилирована → готов
         assert!(stt_engine_ready("whisper-turbo", true, true, false, false));
         // фича есть, но модель не скачана → не готов
-        assert!(!stt_engine_ready("whisper-turbo", false, true, false, false));
+        assert!(!stt_engine_ready(
+            "whisper-turbo",
+            false,
+            true,
+            false,
+            false
+        ));
     }
 
     #[test]
     fn qwen_ready_requires_weights_and_sidecar() {
         assert!(stt_engine_ready("qwen3-1.7b", false, false, true, true));
-        assert!(!stt_engine_ready("qwen3-1.7b", false, false, false, true), "нет весов → не готов");
-        assert!(!stt_engine_ready("qwen3-0.6b", false, false, true, false), "нет сайдкара → не готов");
+        assert!(
+            !stt_engine_ready("qwen3-1.7b", false, false, false, true),
+            "нет весов → не готов"
+        );
+        assert!(
+            !stt_engine_ready("qwen3-0.6b", false, false, true, false),
+            "нет сайдкара → не готов"
+        );
     }
 
     #[test]

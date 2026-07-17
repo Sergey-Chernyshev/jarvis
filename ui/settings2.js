@@ -1286,7 +1286,10 @@
       return;
     }
     const st = info.status || {};
-    const integrated = st.hooks && st.shim;
+    const readiness = info.readiness || {};
+    const integrated = typeof readiness.coreReady === 'boolean'
+      ? readiness.coreReady
+      : (st.hooks && st.shim);
 
     pane.appendChild(el('div.dsection', { text: 'Claude Code · ' + (integrated ? 'подключено' : 'не подключено') }));
     const statusGroup = el('div.dgroup');

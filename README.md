@@ -153,7 +153,7 @@ If `codex` is found during setup, Jarvis wires it up too: hooks in `~/.codex/hoo
 <details>
 <summary>Codex specifics</summary>
 
-Model and reasoning are changed via Codex's own `/model` picker (there is no separate `/effort`). **Headless `codex exec` does not fire hooks** — such runs aren't monitored (by design, same as `claude -p`). On a fresh machine Codex hooks require trust (`~/.codex/config.toml [hooks.state]`); the Codex shim adds `--dangerously-bypass-hook-trust` when the installed `codex` supports it — this **disables trust verification for all Codex hooks** on interactive launches, so keep that trade-off in mind. Codex usage/cost numbers are estimates.
+Model and reasoning are changed via Codex's own `/model` picker (there is no separate `/effort`). **Headless `codex exec` does not fire hooks** — such runs aren't monitored (by design, same as `claude -p`). On a fresh machine Codex may ask you to trust `~/.codex/hooks.json`; Jarvis never injects the global `--dangerously-bypass-hook-trust` flag. Codex usage/cost numbers are estimates.
 
 </details>
 

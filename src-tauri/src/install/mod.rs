@@ -237,8 +237,19 @@ pub fn plan_install(ids: &[String], inst: &Installed) -> Vec<InstallTask> {
 
 /* ================= пути ================= */
 
+fn home_from_env(raw: Option<String>) -> PathBuf {
+    match raw {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => PathBuf::from("/"),
+    }
+}
+
+fn home_is_available(raw: Option<&str>) -> bool {
+    raw.is_some_and(|path| !path.is_empty())
+}
+
 fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").expect("нет $HOME"))
+    home_from_env(std::env::var("HOME").ok())
 }
 /// $JARVIS_DIR или ~/.jarvis (изоляция dev-сборки — как и в util::jarvis_dir).
 fn jarvis_dir() -> PathBuf {
@@ -1724,6 +1735,14 @@ pub fn integration_health() -> IntegrationHealth {
 /// верно, файлы не переписываются. Лечит главный баг: stale prod-путь/метка после
 /// смены dev↔prod профиля, из-за которого codex дёргал несуществующий бинарь.
 pub fn reconcile_hooks(progress: &Progress) {
+    let home_env = std::env::var("HOME").ok();
+    if !home_is_available(home_env.as_deref()) {
+        progress(Step::warn(
+            "Интеграция",
+            "HOME недоступен; самовосстановление хуков пропущено",
+        ));
+        return;
+    }
     install_hooks_into(&settings_path(), "claude", &EVENTS, progress);
     if codex_found() {
         install_hooks_into(&codex_hooks_path(), "codex", &CODEX_EVENTS, progress);
@@ -2000,6 +2019,14 @@ pub fn status_report() -> String {
 /// установки, а не «успех потока».
 pub fn install_core(progress: &Progress) -> IntegrationHealth {
     debug_assert_eq!(core_install_phases(), &["Хуки", "Транспорт"]);
+    let home_env = std::env::var("HOME").ok();
+    if !home_is_available(home_env.as_deref()) {
+        progress(Step::warn(
+            "Интеграция",
+            "HOME недоступен; установка интеграции пропущена",
+        ));
+        return integration_health();
+    }
     progress(Step::start("Хуки"));
     write_executable(&hook_dst(), HOOK_SRC);
 
@@ -2548,6 +2575,14 @@ mod tests {
     use super::*;
 
     const DIR: &str = "/Users/test/.jarvis/shims";
+
+    #[test]
+    fn missing_home_falls_back_to_root() {
+        assert_eq!(home_from_env(None), PathBuf::from("/"));
+        assert!(!home_is_available(None));
+        assert!(!home_is_available(Some("")));
+        assert!(home_is_available(Some("/Users/test")));
+    }
 
     #[test]
     fn core_install_plan_contains_no_optional_downloads() {

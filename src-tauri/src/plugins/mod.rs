@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 pub mod manifest;
+pub mod protocol;
+pub mod supervisor;
 
 fn roots_from_sources(
     settings: &Value,

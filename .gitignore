@@ -24,3 +24,4 @@ __pycache__/
 .agent-vm-local/
 plugins/**/.runtime/
 plugins/**/.secrets/
+src-tauri/binaries/jarvis-agent-vm-plugin-*

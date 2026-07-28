@@ -233,6 +233,10 @@ fn main() {
             // их читает). Сейчас no-op v0→v1; задел под ломающие изменения формата.
             settings::Store::new().migrate_on_startup();
 
+            if let Err(err) = plugins::install::install_bundled() {
+                crate::log::line(&format!("[plugins] Agent VM install skipped: {err}"));
+            }
+
             // чистое меню-бар приложение: без иконки в доке
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 

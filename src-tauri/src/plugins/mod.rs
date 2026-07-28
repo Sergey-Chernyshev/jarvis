@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
+pub mod install;
 pub mod manifest;
 pub mod protocol;
 pub mod supervisor;
@@ -128,12 +129,7 @@ impl PluginHost {
         let settings = d.settings.load();
         let effects = self.tick_with(
             crate::util::now_ms(),
-            &|id| {
-                settings
-                    .pointer(&format!("/plugins/{id}/enabled"))
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-            },
+            &|id| enabled_from_settings(&settings, id),
             &d.tokens,
             &crate::util::sock_path(),
         );
@@ -515,6 +511,13 @@ impl PluginHost {
     }
 }
 
+fn enabled_from_settings(settings: &Value, id: &str) -> bool {
+    settings
+        .pointer(&format!("/plugins/{id}/enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(id == "agent-vm")
+}
+
 fn roots_from_sources(
     settings: &Value,
     env_override: Option<&str>,
@@ -593,6 +596,20 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn first_party_agent_vm_is_enabled_by_default_but_explicit_false_wins() {
+        assert!(enabled_from_settings(&json!({}), "agent-vm"));
+        assert!(!enabled_from_settings(&json!({}), "third-party"));
+        assert!(!enabled_from_settings(
+            &json!({"plugins": {"agent-vm": {"enabled": false}}}),
+            "agent-vm"
+        ));
+        assert!(enabled_from_settings(
+            &json!({"plugins": {"third-party": {"enabled": true}}}),
+            "third-party"
+        ));
+    }
 
     #[test]
     fn roots_prefer_env_then_settings_then_installed_and_dedupe() {

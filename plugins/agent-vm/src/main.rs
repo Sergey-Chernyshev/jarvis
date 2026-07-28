@@ -1,0 +1,38 @@
+use jarvis_agent_vm_plugin::host::{HostApi, HostClient, UnixSocketTransport};
+use jarvis_agent_vm_plugin::plugin::{public_error, Dispatcher, PluginEnvironment};
+use jarvis_agent_vm_plugin::runner::SystemRunner;
+use jarvis_agent_vm_plugin::runtime_paths::RuntimePaths;
+use jarvis_agent_vm_plugin::service::{AgentVmService, Toolchain};
+
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("[agent-vm] {}", public_error(&error));
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
+    let environment = PluginEnvironment::from_current()?;
+    let paths = RuntimePaths::from_socket(&environment.socket)?;
+    paths.create_private_dirs()?;
+
+    let host = HostClient::new(
+        UnixSocketTransport::new(environment.socket),
+        environment.token,
+        environment.protocol_version,
+    );
+    host.register(std::process::id())?;
+
+    let service = AgentVmService::new(SystemRunner, paths, Toolchain::discover()?);
+    let mut dispatcher = Dispatcher::new(service, host.clone());
+    dispatcher.refresh_inventory()?;
+
+    let mut after = 0;
+    loop {
+        let batch = host.poll(after)?;
+        for event in batch.events {
+            dispatcher.process(event)?;
+        }
+        after = after.max(batch.next_seq);
+    }
+}

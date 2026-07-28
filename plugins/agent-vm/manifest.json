@@ -1,0 +1,22 @@
+{
+  "id": "agent-vm",
+  "name": "Agent VM",
+  "version": "0.1.0",
+  "protocolVersion": 1,
+  "entry": {
+    "type": "binary",
+    "path": "bin/agent-vm-plugin",
+    "args": []
+  },
+  "capabilities": ["read", "control"],
+  "projectRuntimes": [
+    {
+      "id": "vm",
+      "title": "Agent VM",
+      "agents": ["claude", "codex"],
+      "workspace": "host-mount-rw",
+      "supports": ["chat", "resume", "cancel", "files", "shell-command"]
+    }
+  ]
+}
+

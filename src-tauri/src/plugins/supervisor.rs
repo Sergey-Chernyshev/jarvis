@@ -86,6 +86,9 @@ impl ProcessSpawner for SystemSpawner {
         let mut child = Command::new(&spec.executable)
             .args(&spec.args)
             .current_dir(&spec.cwd)
+            // Плагин получает только identity-контракт ниже. В частности, host
+            // proxy, LLM proxy, API keys и credential helpers не наследуются.
+            .env_clear()
             .env("JARVIS_SOCKET", &spec.socket)
             .env("JARVIS_PLUGIN_ID", &spec.plugin_id)
             .env("JARVIS_PLUGIN_TOKEN", &spec.token)
@@ -300,6 +303,70 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
+
+    fn temp_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "jarvis-plugin-supervisor-{tag}-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn system_spawner_does_not_inherit_host_secret_or_proxy_environment() {
+        let root = temp_path("clean-env");
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("capture-env.sh");
+        let capture = root.join("env.txt");
+        fs::write(
+            &executable,
+            "#!/bin/sh\n/usr/bin/env > \"$1\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        std::env::set_var(
+            "JARVIS_TEST_PROXY_CREDENTIAL_SENTINEL",
+            "synthetic-must-not-reach-plugin",
+        );
+        let spec = SpawnSpec {
+            plugin_id: "synthetic-plugin".into(),
+            executable,
+            args: vec![capture.to_string_lossy().into_owned()],
+            cwd: root.clone(),
+            socket: root.join("run.sock"),
+            token: "synthetic-token".into(),
+            protocol_version: PROTOCOL_VERSION,
+        };
+
+        let mut child = SystemSpawner.spawn(&spec).unwrap();
+        for _ in 0..100 {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::env::remove_var("JARVIS_TEST_PROXY_CREDENTIAL_SENTINEL");
+        let captured = fs::read_to_string(&capture).unwrap();
+
+        assert!(
+            !captured.contains("JARVIS_TEST_PROXY_CREDENTIAL_SENTINEL"),
+            "plugin child inherited a host-only environment key"
+        );
+        for required in [
+            "JARVIS_SOCKET=",
+            "JARVIS_PLUGIN_ID=synthetic-plugin",
+            "JARVIS_PLUGIN_TOKEN=synthetic-token",
+            "JARVIS_PLUGIN_PROTOCOL=1",
+        ] {
+            assert!(captured.contains(required), "missing identity env {required}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn register_accepts_matching_plugin_pid_and_protocol() {

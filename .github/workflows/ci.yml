@@ -45,6 +45,12 @@ jobs:
       - name: Webview contract tests
         run: npm run test:ui
 
+      - name: Public repository boundary
+        run: npm run check:public
+
+      - name: Agent VM sidecar tests
+        run: cargo test --manifest-path plugins/agent-vm/Cargo.toml
+
       # Информационно: проект использует компактный авторский стиль, не совпадающий
       # с дефолтным rustfmt. Показываем расхождения, но не блокируем мерж.
       - name: Format check (informational)

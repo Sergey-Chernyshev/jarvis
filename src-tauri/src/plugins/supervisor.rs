@@ -275,6 +275,16 @@ impl Runtime {
             && self.retry_at_ms.is_some_and(|retry_at| now_ms >= retry_at)
     }
 
+    pub fn on_error(&mut self, error: impl Into<String>) {
+        self.lifecycle = Lifecycle::Error;
+        self.pid = None;
+        self.started_at_ms = None;
+        self.registered_at_ms = None;
+        self.handshake_deadline_ms = None;
+        self.retry_at_ms = None;
+        self.last_error = Some(error.into());
+    }
+
     pub fn disable(&mut self) {
         self.lifecycle = Lifecycle::Stopped;
         self.pid = None;

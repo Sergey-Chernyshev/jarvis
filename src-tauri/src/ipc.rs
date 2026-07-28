@@ -1108,13 +1108,18 @@ pub fn app_relaunch(app: AppHandle) {
 #[tauri::command]
 pub fn plugins_status(app: AppHandle) -> Value {
     let d = Daemon::get(&app);
-    d.power.statuses(&d)
+    crate::plugins::combined_statuses(&d)
 }
 
 #[tauri::command]
 pub async fn plugins_cmd(app: AppHandle, id: String, cmd: String, args: Option<Value>) -> Value {
     let d = Daemon::get(&app);
-    crate::power::Power::cmd(&d, &id, &cmd, &args.unwrap_or(json!({}))).await
+    let args = args.unwrap_or(json!({}));
+    if d.plugins.contains(&id) {
+        d.plugins.command(&d, &id, &cmd, args)
+    } else {
+        crate::power::Power::cmd(&d, &id, &cmd, &args).await
+    }
 }
 
 #[tauri::command]

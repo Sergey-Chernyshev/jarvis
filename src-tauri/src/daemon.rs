@@ -159,6 +159,8 @@ pub struct Daemon {
     pub caps: crate::capability::DaemonRegistry,
     /// Реестр сущностей плагинов (спека plugin-system §6.4): vm.*, agent.* …
     pub entities: crate::entities::EntityStore,
+    /// Внешние плагины: discovery, process supervision и wire-очереди.
+    pub plugins: crate::plugins::PluginHost,
     /// Токены потребителей сокета (R2): резолв token → Consumer (panel недостижим).
     pub tokens: crate::capability::tokens::TokenStore,
     /// Реестр ожидающих подтверждений агента (R4) — вне локов Daemon.
@@ -260,6 +262,7 @@ impl Daemon {
         }
         // STT-сервис + общий аудио-вход + PTT-диктовка + wake-word (инкр. 9–10)
         let root = settings.load();
+        let plugin_roots = crate::plugins::roots_from_settings(&root);
         let stt_cfg = crate::stt::config::SttConfig::from_settings(&root);
         let audio_device = stt_cfg.audio_device.clone();
         let stt = crate::stt::SttService::new(stt_cfg);
@@ -326,6 +329,7 @@ impl Daemon {
             voice,
             caps: crate::capability::build_registry(),
             entities: crate::entities::EntityStore::new(),
+            plugins: crate::plugins::PluginHost::new(plugin_roots),
             tokens: crate::capability::tokens::TokenStore::new(),
             pending: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
             stt,
@@ -374,7 +378,7 @@ impl Daemon {
         crate::ipc::set_select_hotkeys(self, list.iter().any(|s| s.question.is_some()));
         self.power.on_sessions(self, &list); // плагины первыми — бейджи к трею уже свежие
         windows::emit_to_panel(&self.app, "state", &list);
-        windows::emit_to_panel(&self.app, "plugins", &self.power.statuses(self));
+        crate::plugins::emit_statuses(self);
         crate::tray::update(self, &list);
         self.persist();
     }

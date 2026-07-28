@@ -260,6 +260,7 @@ fn main() {
 
             // unix-сокет — канал событий от хуков
             tauri::async_runtime::spawn(server::serve(d.clone()));
+            d.plugins.init(&d);
 
             // плагины питания (Не спать, Крышка) — после трея:
             // их changed() обновляет title
@@ -359,6 +360,7 @@ fn main() {
             if let tauri::RunEvent::Exit = event {
                 let d = Daemon::get(app);
                 d.write_state_now(); // реестр переживает перезапуск
+                d.plugins.dispose(&d); // погасить внешние plugin-процессы
                 power::Power::dispose(&d); // снять assertion, вернуть disablesleep
                 d.voice.dispose(); // погасить Silero-сайдкар, если был поднят
                 d.stt.dispose(); // погасить Qwen3-MLX-сайдкар, если был поднят
@@ -407,6 +409,15 @@ fn spawn_timers(d: &Arc<Daemon>) {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             power::Power::tick(&dd).await;
+        }
+    });
+
+    // секундный supervisor внешних плагинов; первый tick после bind UDS.
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            dd.plugins.tick(&dd);
         }
     });
 

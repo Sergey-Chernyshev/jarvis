@@ -636,7 +636,7 @@ fn working_count(list: &[Session]) -> usize {
 /// крышки мгновенно ре-армился бы peer_sync'ом).
 fn changed(d: &Arc<Daemon>) {
     crate::tray::update(d, &d.snapshot());
-    crate::windows::emit_to_panel(&d.app, "plugins", &d.power.statuses(d));
+    crate::plugins::emit_statuses(d);
 }
 
 fn handle_engine_events(d: &Arc<Daemon>, events: Vec<Event>) {

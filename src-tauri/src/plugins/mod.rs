@@ -109,7 +109,39 @@ impl PluginHost {
                 },
             );
         }
+        for error in &found.errors {
+            crate::log::line(&format!(
+                "[plugins] invalid package {}: {}",
+                error.path.display(),
+                error.message
+            ));
+        }
         *self.discovery_errors.lock().unwrap() = found.errors;
+    }
+
+    pub fn init(&self, d: &Arc<crate::daemon::Daemon>) {
+        self.discover();
+        emit_statuses(d);
+    }
+
+    pub fn tick(&self, d: &Arc<crate::daemon::Daemon>) {
+        let settings = d.settings.load();
+        let effects = self.tick_with(
+            crate::util::now_ms(),
+            &|id| {
+                settings
+                    .pointer(&format!("/plugins/{id}/enabled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            },
+            &d.tokens,
+            &crate::util::sock_path(),
+        );
+        apply_host_effects(d, effects, true);
+    }
+
+    pub fn dispose(&self, d: &Arc<crate::daemon::Daemon>) {
+        apply_host_effects(d, self.dispose_with(), false);
     }
 
     pub fn contains(&self, id: &str) -> bool {
@@ -174,6 +206,34 @@ impl PluginHost {
         Ok(slot.events.read_after(after, limit))
     }
 
+    pub async fn poll_events(
+        &self,
+        id: &str,
+        after: u64,
+        limit: usize,
+        wait_ms: u64,
+    ) -> Result<Vec<PluginEvent>, String> {
+        let limit = limit.clamp(1, protocol::MAX_POLL_EVENTS);
+        let wait_ms = wait_ms.min(protocol::MAX_WAIT_MS);
+        let mut notified = {
+            let slots = self.slots.lock().unwrap();
+            let slot = slots
+                .get(id)
+                .ok_or_else(|| "плагин не найден".to_string())?;
+            let mut notified = Box::pin(slot.events.notifier().notified_owned());
+            notified.as_mut().enable();
+            let events = slot.events.read_after(after, limit);
+            if !events.is_empty() || wait_ms == 0 {
+                return Ok(events);
+            }
+            notified
+        };
+
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(wait_ms), &mut notified).await;
+        self.events_after(id, after, limit)
+    }
+
     pub fn restart(&self, id: &str) -> Result<Vec<HostEffect>, String> {
         let mut slots = self.slots.lock().unwrap();
         let slot = slots
@@ -189,6 +249,40 @@ impl PluginHost {
             HostEffect::MarkOwnerStale(format!("plugin:{id}")),
             HostEffect::Changed,
         ])
+    }
+
+    pub fn command(
+        &self,
+        d: &Arc<crate::daemon::Daemon>,
+        id: &str,
+        name: &str,
+        args: Value,
+    ) -> Value {
+        if !self.contains(id) {
+            return json!({ "ok": false, "error": "плагин не найден" });
+        }
+        if name == "_enable" {
+            let on = args.get("on").and_then(Value::as_bool).unwrap_or(false);
+            let mut patch = serde_json::Map::new();
+            patch.insert("enabled".into(), Value::Bool(on));
+            d.settings.set_plugin(id, patch);
+            self.tick(d);
+            return json!({ "ok": true });
+        }
+        if name == "_restart" {
+            return match self.restart(id) {
+                Ok(effects) => {
+                    apply_host_effects(d, effects, true);
+                    self.tick(d);
+                    json!({ "ok": true })
+                }
+                Err(error) => json!({ "ok": false, "error": error }),
+            };
+        }
+        match self.enqueue_command(id, name, args) {
+            Ok(value) => value,
+            Err(error) => json!({ "ok": false, "error": error }),
+        }
     }
 
     fn dispose_with(&self) -> Vec<HostEffect> {
@@ -390,8 +484,7 @@ impl PluginHost {
             let token = match tokens.ensure_plugin_token(id, &slot.package.manifest.capabilities) {
                 Ok(token) => token,
                 Err(err) => {
-                    slot.runtime
-                        .on_failure(now_ms, format!("token issue failed: {err}"));
+                    slot.runtime.on_error(format!("token issue failed: {err}"));
                     effects.push(HostEffect::Changed);
                     continue;
                 }
@@ -459,6 +552,38 @@ pub fn roots_from_settings(settings: &Value) -> Vec<PathBuf> {
     )
 }
 
+pub fn combine_status_values(builtins: Value, external: Value) -> Value {
+    let mut combined = builtins.as_array().cloned().unwrap_or_default();
+    combined.extend(external.as_array().cloned().unwrap_or_default());
+    Value::Array(combined)
+}
+
+pub fn combined_statuses(d: &Arc<crate::daemon::Daemon>) -> Value {
+    combine_status_values(
+        d.power.statuses(d),
+        d.plugins.statuses(crate::util::now_ms()),
+    )
+}
+
+pub fn emit_statuses(d: &Arc<crate::daemon::Daemon>) {
+    crate::windows::emit_to_panel(&d.app, "plugins", &combined_statuses(d));
+}
+
+fn apply_host_effects(d: &Arc<crate::daemon::Daemon>, effects: Vec<HostEffect>, emit: bool) {
+    let mut changed = false;
+    for effect in effects {
+        match effect {
+            HostEffect::MarkOwnerStale(owner) => {
+                d.entities.mark_stale(&owner);
+            }
+            HostEffect::Changed => changed = true,
+        }
+    }
+    if changed && emit {
+        emit_statuses(d);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,6 +636,27 @@ mod tests {
                 [PathBuf::from("/installed/plugins")]
             );
         }
+    }
+
+    #[test]
+    fn combined_statuses_keep_builtins_and_append_external_plugins() {
+        let combined = combine_status_values(
+            json!([
+                { "id": "keep-awake", "enabled": true },
+                { "id": "clamshell", "enabled": false }
+            ]),
+            json!([
+                { "id": "agent-vm", "external": true }
+            ]),
+        );
+
+        let ids = combined
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["keep-awake", "clamshell", "agent-vm"]);
     }
 
     #[derive(Default)]
@@ -742,6 +888,27 @@ mod tests {
     }
 
     #[test]
+    fn token_issue_failure_is_visible_as_error_and_never_spawns() {
+        let root = temp_plugin_root("token-error");
+        let fake = FakeSpawner::new(4242);
+        let host = PluginHost::with_spawner(vec![root.clone()], Arc::new(fake.clone()));
+        host.discover();
+        let invalid_token_path = TokenStore::at(root.clone());
+        let socket = root.join("run.sock");
+
+        host.tick_with(1_000, &|_| true, &invalid_token_path, &socket);
+
+        assert!(fake.specs.lock().unwrap().is_empty());
+        let status = host.statuses(1_000);
+        assert_eq!(status[0]["status"]["state"], "error");
+        assert!(status[0]["status"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("token issue failed"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn register_and_command_event_use_live_runtime_and_replayable_queue() {
         let root = temp_plugin_root("register-command");
         let fake = FakeSpawner::new(4242);
@@ -776,6 +943,43 @@ mod tests {
         assert_eq!(events[0].payload["name"], "runtime.ensure");
         assert_eq!(events[0].payload["args"]["projectId"], "sup");
         assert!(host.events_after("agent-vm", 1, 64).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn poll_events_wakes_when_a_command_arrives_after_waiting_starts() {
+        let root = temp_plugin_root("poll-wake");
+        let fake = FakeSpawner::new(4242);
+        let host = Arc::new(PluginHost::with_spawner(vec![root.clone()], Arc::new(fake)));
+        host.discover();
+        let tokens = token_store(&root);
+        let socket = root.join("run.sock");
+        host.tick_with(1_000, &|_| true, &tokens, &socket);
+        host.register(
+            "agent-vm",
+            &protocol::RegisterRequest {
+                protocol_version: manifest::PROTOCOL_VERSION,
+                pid: 4242,
+            },
+            1_100,
+        )
+        .unwrap();
+        let waiter = {
+            let host = host.clone();
+            tokio::spawn(async move { host.poll_events("agent-vm", 0, 64, 1_000).await })
+        };
+        tokio::task::yield_now().await;
+
+        host.enqueue_command("agent-vm", "runtime.ensure", json!({"projectId": "sup"}))
+            .unwrap();
+        let events = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("long-poll разбужен")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["name"], "runtime.ensure");
         fs::remove_dir_all(root).unwrap();
     }
 

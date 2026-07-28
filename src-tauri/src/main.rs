@@ -29,6 +29,7 @@ mod macos;
 mod metrics;
 mod model;
 mod onboarding;
+mod plugins;
 mod power;
 mod route; // голосовая маршрутизация: скоринг → tie-break → пикер → stage-then-send
 mod ru;

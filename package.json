@@ -9,6 +9,7 @@
     "start:prod": "JARVIS_DEV_SIGN=1 cargo build --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort,whisper-native,stt-vad --bin jarvis && codesign --force --sign - --entitlements src-tauri/entitlements.plist src-tauri/target/release/jarvis && src-tauri/target/release/jarvis",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test:ui": "node --test ui/*.test.mjs",
+    "check:public": "bash scripts/check-public-repo-secrets.sh",
     "setup": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- install",
     "teardown": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- uninstall",
     "status": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- status",

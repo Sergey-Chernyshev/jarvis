@@ -19,3 +19,8 @@ __pycache__/
 
 # Ворктри параллельных сессий Claude
 .claude/worktrees/
+
+# Agent VM local runtime/private data (public repository boundary)
+.agent-vm-local/
+plugins/**/.runtime/
+plugins/**/.secrets/

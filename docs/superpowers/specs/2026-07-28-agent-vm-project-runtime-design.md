@@ -688,6 +688,14 @@ coalescing voice queue.
 - Runtime secrets хранятся на host в macOS Keychain; legacy plaintext
   мигрируется до первого VM bootstrap.
 - Guest credential files — `0600`; guest config directories — `0700`.
+- Публичный репозиторий содержит только синтетические fixtures. Рабочие
+  настройки, employer-specific данные, credential-файлы и LLM proxy values
+  никогда не записываются в checkout, commit, patch или smoke-артефакт.
+- Host-side Agent VM state хранится только под `<jarvis-dir>/agent-vm`; файлы
+  bootstrap создаются внутри private guest home, вне RW project mount.
+- Перед каждым коммитом Agent VM выполняется `npm run check:public`; любое
+  совпадение блокирует коммит, а диагностика выводит только категорию и путь,
+  не найденное значение.
 - Удаление/recreate VM всегда отдельное подтверждение.
 - VM — изоляция процессов, но RW project mount означает реальную возможность
   менять host-код; UI говорит об этом до первого запуска.

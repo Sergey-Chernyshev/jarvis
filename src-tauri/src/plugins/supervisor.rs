@@ -1,9 +1,116 @@
+use std::io::{BufRead, BufReader, Read};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+
 use serde::Serialize;
 
 use crate::plugins::manifest::PROTOCOL_VERSION;
 use crate::plugins::protocol::RegisterRequest;
 
 pub const HANDSHAKE_TIMEOUT_MS: i64 = 10_000;
+
+#[derive(Clone, Debug)]
+pub struct SpawnSpec {
+    pub plugin_id: String,
+    pub executable: PathBuf,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    pub socket: PathBuf,
+    pub token: String,
+    pub protocol_version: u32,
+}
+
+pub trait ProcessSpawner: Send + Sync {
+    fn spawn(&self, spec: &SpawnSpec) -> Result<Box<dyn ManagedChild>, String>;
+}
+
+pub trait ManagedChild: Send {
+    fn id(&self) -> u32;
+    fn try_wait(&mut self) -> Result<Option<i32>, String>;
+    fn kill(&mut self) -> Result<(), String>;
+}
+
+pub struct SystemSpawner;
+
+struct SystemChild {
+    child: Child,
+}
+
+impl ManagedChild for SystemChild {
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn try_wait(&mut self) -> Result<Option<i32>, String> {
+        self.child
+            .try_wait()
+            .map(|status| status.map(|status| status.code().unwrap_or(-1)))
+            .map_err(|err| format!("не проверить plugin process: {err}"))
+    }
+
+    fn kill(&mut self) -> Result<(), String> {
+        if self
+            .child
+            .try_wait()
+            .map_err(|err| format!("не проверить plugin process перед stop: {err}"))?
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.child
+            .kill()
+            .map_err(|err| format!("не остановить plugin process: {err}"))?;
+        let _ = self.child.wait();
+        Ok(())
+    }
+}
+
+fn pipe_to_log(
+    reader: impl Read + Send + 'static,
+    plugin_id: String,
+    channel: &'static str,
+    token: String,
+) {
+    std::thread::spawn(move || {
+        for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            let line = line.replace(&token, "[REDACTED]");
+            if !line.trim().is_empty() {
+                crate::log::line(&format!("[plugin:{plugin_id}] {channel}: {line}"));
+            }
+        }
+    });
+}
+
+impl ProcessSpawner for SystemSpawner {
+    fn spawn(&self, spec: &SpawnSpec) -> Result<Box<dyn ManagedChild>, String> {
+        let mut child = Command::new(&spec.executable)
+            .args(&spec.args)
+            .current_dir(&spec.cwd)
+            .env("JARVIS_SOCKET", &spec.socket)
+            .env("JARVIS_PLUGIN_ID", &spec.plugin_id)
+            .env("JARVIS_PLUGIN_TOKEN", &spec.token)
+            .env("JARVIS_PLUGIN_PROTOCOL", spec.protocol_version.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| {
+                format!(
+                    "не запустить plugin '{}' ({}): {err}",
+                    spec.plugin_id,
+                    spec.executable.display()
+                )
+            })?;
+
+        if let Some(stdout) = child.stdout.take() {
+            pipe_to_log(stdout, spec.plugin_id.clone(), "stdout", spec.token.clone());
+        }
+        if let Some(stderr) = child.stderr.take() {
+            pipe_to_log(stderr, spec.plugin_id.clone(), "stderr", spec.token.clone());
+        }
+        Ok(Box::new(SystemChild { child }))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]

@@ -122,6 +122,10 @@ impl EntityStore {
         out
     }
 
+    pub fn get(&self, id: &str) -> Option<Entity> {
+        self.items.lock().unwrap().get(id).cloned()
+    }
+
     /// Пометить все сущности владельца как stale (плагин остановлен).
     /// Возвращает число помеченных. Живой upsert снимает пометку.
     pub fn mark_stale(&self, owner: &str) -> usize {
@@ -261,6 +265,25 @@ mod tests {
         assert_eq!(s.query(Some("vm"), None).len(), 2);
         assert_eq!(s.query(None, Some("plugin:other")).len(), 1);
         assert_eq!(s.query(Some("vm"), Some("plugin:other")).len(), 0);
+    }
+
+    #[test]
+    fn get_returns_one_cloned_entity_without_exposing_the_store_lock() {
+        let s = EntityStore::new();
+        s.upsert(
+            "plugin:agent-vm",
+            "agent_run",
+            "run-1",
+            "completed",
+            json!({"cwd":"/synthetic/project"}),
+        )
+        .unwrap();
+
+        let found = s.get("agent_run.run-1").unwrap();
+
+        assert_eq!(found.owner, "plugin:agent-vm");
+        assert_eq!(found.attrs["cwd"], json!("/synthetic/project"));
+        assert!(s.get("agent_run.missing").is_none());
     }
 
     #[test]

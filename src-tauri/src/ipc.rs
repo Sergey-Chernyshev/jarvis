@@ -1036,6 +1036,116 @@ fn file_diff_impl(
     })
 }
 
+fn agent_vm_run_file_context(
+    store: &crate::entities::EntityStore,
+    run_id: &str,
+    path: &str,
+) -> Result<(String, std::path::PathBuf), String> {
+    if run_id.is_empty()
+        || run_id.len() > 128
+        || !run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("Некорректный Agent VM run".into());
+    }
+    let entity = store
+        .get(&format!("agent_run.{run_id}"))
+        .ok_or_else(|| "Agent VM run не найден".to_string())?;
+    if entity.owner != "plugin:agent-vm" || entity.kind != "agent_run" {
+        return Err("Agent VM run имеет неверный источник".into());
+    }
+    let cwd = entity
+        .attrs
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Agent VM run без project root".to_string())?;
+    let root = std::path::Path::new(cwd)
+        .canonicalize()
+        .map_err(|_| "Project root недоступен".to_string())?;
+    if !root.is_dir() {
+        return Err("Project root недоступен".into());
+    }
+    let raw = std::path::Path::new(path);
+    let candidate = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        root.join(raw)
+    };
+    let candidate = candidate
+        .canonicalize()
+        .map_err(|_| "Файл Agent VM не найден".to_string())?;
+    if !candidate.is_file() || !candidate.starts_with(&root) {
+        return Err("Файл находится вне project workspace".into());
+    }
+    let allowed = entity
+        .attrs
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("path").and_then(Value::as_str))
+        .filter_map(|item| std::path::Path::new(item).canonicalize().ok())
+        .any(|item| item == candidate && item.starts_with(&root));
+    if !allowed {
+        return Err("Файл не опубликован этим Agent VM run".into());
+    }
+    Ok((root.to_string_lossy().into_owned(), candidate))
+}
+
+#[tauri::command]
+pub fn agent_vm_file_read(app: AppHandle, run_id: String, path: String) -> Value {
+    let d = Daemon::get(&app);
+    let (_, file) = match agent_vm_run_file_context(&d.entities, &run_id, &path) {
+        Ok(value) => value,
+        Err(error) => return err(error),
+    };
+    match read_head_tail(&file) {
+        Ok((content, truncated)) => json!({
+            "ok":true,
+            "name":file.file_name().and_then(|name| name.to_str()).unwrap_or("file"),
+            "content":content,
+            "truncated":truncated
+        }),
+        Err(error) => err(format!("чтение: {error}")),
+    }
+}
+
+#[tauri::command]
+pub fn agent_vm_file_diff(app: AppHandle, run_id: String, path: String) -> Value {
+    let d = Daemon::get(&app);
+    let (cwd, file) = match agent_vm_run_file_context(&d.entities, &run_id, &path) {
+        Ok(value) => value,
+        Err(error) => return err(error),
+    };
+    let diff = crate::gitdiff::diff_for_file(&cwd, &file);
+    json!({
+        "ok":true,
+        "mode":diff.mode,
+        "label":diff.label,
+        "hunks":diff.hunks
+    })
+}
+
+#[tauri::command]
+pub fn agent_vm_file_open(app: AppHandle, run_id: String, path: String, reveal: bool) -> Value {
+    let d = Daemon::get(&app);
+    let (_, file) = match agent_vm_run_file_context(&d.entities, &run_id, &path) {
+        Ok(value) => value,
+        Err(error) => return err(error),
+    };
+    let reveal = reveal || force_reveal(&file);
+    let mut command = std::process::Command::new("open");
+    if reveal {
+        command.arg("-R");
+    }
+    match command.arg(file).spawn() {
+        Ok(_) => ok(),
+        Err(error) => err(format!("open: {error}")),
+    }
+}
+
 /// Открыть внешнюю ссылку из отрендеренного документа в браузере по клику.
 /// markdown.js уже режет не-http(s) схемы, но UI-слою не доверяем — схема
 /// валидируется и здесь; url уходит одним аргументом (без шелла).
@@ -1111,6 +1221,48 @@ pub fn app_relaunch(app: AppHandle) {
 pub fn plugins_status(app: AppHandle) -> Value {
     let d = Daemon::get(&app);
     crate::plugins::combined_statuses(&d)
+}
+
+#[tauri::command]
+pub fn entities_get(app: AppHandle) -> Value {
+    serde_json::to_value(Daemon::get(&app).entities.snapshot()).unwrap_or_else(|_| json!([]))
+}
+
+fn ack_agent_vm_operation(
+    store: &crate::entities::EntityStore,
+    request_id: &str,
+) -> Result<bool, String> {
+    if !request_id.starts_with("agent-vm-")
+        || request_id.len() > 128
+        || !request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("Некорректный Agent VM request".into());
+    }
+    let entity_id = format!("operation.{request_id}");
+    let Some(entity) = store.get(&entity_id) else {
+        return Ok(false);
+    };
+    if entity.owner != "plugin:agent-vm"
+        || entity.kind != "operation"
+        || !matches!(entity.state.as_str(), "done" | "error")
+    {
+        return Err("Agent VM operation ещё не завершена или имеет неверный источник".into());
+    }
+    store.remove("plugin:agent-vm", &entity_id)
+}
+
+#[tauri::command]
+pub fn agent_vm_operation_ack(app: AppHandle, request_id: String) -> Value {
+    let d = Daemon::get(&app);
+    match ack_agent_vm_operation(&d.entities, &request_id) {
+        Ok(removed) => {
+            crate::windows::emit_to_panel(&d.app, "entities", &d.entities.snapshot());
+            json!({"ok":true,"removed":removed})
+        }
+        Err(error) => err(error),
+    }
 }
 
 #[tauri::command]
@@ -2626,6 +2778,97 @@ mod tests {
         assert_eq!(res["ok"], json!(true), "{res}");
         assert_eq!(res["mode"], json!("worktree"), "{res}");
         assert!(res["hunks"].as_array().unwrap().len() >= 1, "{res}");
+    }
+
+    #[test]
+    fn agent_vm_run_file_gate_accepts_only_published_project_files() {
+        let d = tmp_dir("agent-vm-file-gate").canonicalize().unwrap();
+        std::fs::write(d.join("changed.md"), "# changed").unwrap();
+        std::fs::write(d.join("other.md"), "private").unwrap();
+        let store = crate::entities::EntityStore::new();
+        store
+            .upsert(
+                "plugin:agent-vm",
+                "agent_run",
+                "run-safe",
+                "completed",
+                json!({
+                    "cwd":d,
+                    "files":[{"path":d.join("changed.md"),"change":"modified"}]
+                }),
+            )
+            .unwrap();
+
+        let (_, allowed) =
+            agent_vm_run_file_context(&store, "run-safe", d.join("changed.md").to_str().unwrap())
+                .unwrap();
+        assert_eq!(allowed, d.join("changed.md").canonicalize().unwrap());
+        assert!(
+            agent_vm_run_file_context(
+                &store,
+                "run-safe",
+                d.join("other.md").to_str().unwrap()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn agent_vm_run_file_gate_rejects_foreign_owner_and_path_escape() {
+        let d = tmp_dir("agent-vm-file-escape").canonicalize().unwrap();
+        let outside = tmp_dir("agent-vm-file-outside").canonicalize().unwrap();
+        std::fs::write(outside.join("outside.md"), "outside").unwrap();
+        let store = crate::entities::EntityStore::new();
+        store
+            .upsert(
+                "plugin:other",
+                "agent_run",
+                "run-foreign",
+                "completed",
+                json!({
+                    "cwd":d,
+                    "files":[{"path":outside.join("outside.md"),"change":"modified"}]
+                }),
+            )
+            .unwrap();
+
+        assert!(
+            agent_vm_run_file_context(
+                &store,
+                "run-foreign",
+                outside.join("outside.md").to_str().unwrap()
+            )
+            .is_err()
+        );
+        assert!(agent_vm_run_file_context(&store, "../escape", "anything").is_err());
+    }
+
+    #[test]
+    fn agent_vm_operation_ack_removes_only_terminal_owned_operations() {
+        let store = crate::entities::EntityStore::new();
+        store
+            .upsert(
+                "plugin:agent-vm",
+                "operation",
+                "agent-vm-42",
+                "done",
+                json!({"requestId":"agent-vm-42"}),
+            )
+            .unwrap();
+        store
+            .upsert(
+                "plugin:agent-vm",
+                "operation",
+                "agent-vm-43",
+                "started",
+                json!({"requestId":"agent-vm-43"}),
+            )
+            .unwrap();
+
+        assert!(ack_agent_vm_operation(&store, "agent-vm-42").unwrap());
+        assert!(store.get("operation.agent-vm-42").is_none());
+        assert!(ack_agent_vm_operation(&store, "agent-vm-43").is_err());
+        assert!(ack_agent_vm_operation(&store, "../escape").is_err());
     }
 
     // --- шаблон хоткеев выбора варианта (selectHotkeyTemplate) ---

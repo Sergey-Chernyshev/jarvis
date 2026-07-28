@@ -58,6 +58,13 @@
     onPlugins: (cb) => on('plugins', cb),
     getPlugins: () => invoke('plugins_status'),
     pluginCmd: (id, cmd, args) => invoke('plugins_cmd', { id, cmd, args: args ?? null }),
+    onEntities: (cb) => on('entities', cb),
+    getEntities: () => invoke('entities_get'),
+    agentVmOperationAck: (requestId) => invoke('agent_vm_operation_ack', { requestId }),
+    agentVmFileRead: (runId, path) => invoke('agent_vm_file_read', { runId, path }),
+    agentVmFileDiff: (runId, path) => invoke('agent_vm_file_diff', { runId, path }),
+    agentVmFileOpen: (runId, path, reveal) =>
+      invoke('agent_vm_file_open', { runId, path, reveal: !!reveal }),
     getUsage: (period) => invoke('usage_summary', { period }),
     getLimit: () => invoke('limit_get'),
     onLimitState: (cb) => on('limit-state', cb),

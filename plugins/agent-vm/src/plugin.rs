@@ -148,28 +148,39 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
             return Err("Jarvis прислал некорректный requestId".into());
         }
         let name = event.payload.name;
-        self.publish_operation(&request_id, &name, "started", json!({}))?;
+        let context = operation_context(&event.payload.args);
+        self.publish_operation(&request_id, &name, "started", context.clone())?;
 
         if name == "runtime.inventory" {
             return match self.refresh_inventory() {
-                Ok(()) => self.publish_operation(&request_id, &name, "done", json!({})),
+                Ok(()) => self.publish_operation(
+                    &request_id,
+                    &name,
+                    "done",
+                    operation_attrs(&context, json!({})),
+                ),
                 Err(error) => self.publish_operation(
                     &request_id,
                     &name,
                     "error",
-                    json!({"error": public_error(&error)}),
+                    operation_attrs(&context, json!({"error": public_error(&error)})),
                 ),
             };
         }
 
         if let Some(result) = self.dispatch_supervisor_command(&name, &event.payload.args) {
             return match result {
-                Ok(attrs) => self.publish_operation(&request_id, &name, "done", attrs),
+                Ok(attrs) => self.publish_operation(
+                    &request_id,
+                    &name,
+                    "done",
+                    operation_attrs(&context, attrs),
+                ),
                 Err(error) => self.publish_operation(
                     &request_id,
                     &name,
                     "error",
-                    json!({"error": public_error(&error)}),
+                    operation_attrs(&context, json!({"error": public_error(&error)})),
                 ),
             };
         }
@@ -182,21 +193,21 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
                     &request_id,
                     &name,
                     "done",
-                    json!({
+                    operation_attrs(&context, json!({
                         "projectId": snapshot.project_id,
                         "vmName": snapshot.vm_name,
                         "state": snapshot.vm.as_ref().map(|vm| vm.state.as_str()).unwrap_or("absent"),
                         "shellCommand": snapshot.shell_command,
                         "createdSpec": snapshot.created_spec,
                         "environment": snapshot.environment
-                    }),
+                    })),
                 )
             }
             Err(error) => self.publish_operation(
                 &request_id,
                 &name,
                 "error",
-                json!({"error": public_error(&error)}),
+                operation_attrs(&context, json!({"error": public_error(&error)})),
             ),
         }
     }
@@ -409,6 +420,39 @@ fn optional_string(args: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn operation_context(args: &Value) -> Value {
+    let Some(cwd) = args.get("cwd").and_then(Value::as_str) else {
+        return json!({});
+    };
+    let Ok(identity) = ProjectIdentity::from_path(Path::new(cwd)) else {
+        return json!({});
+    };
+    let mut context = serde_json::Map::from_iter([
+        ("projectId".into(), Value::String(identity.project_id)),
+        ("project".into(), Value::String(identity.display_name)),
+        (
+            "cwd".into(),
+            Value::String(identity.canonical_path.to_string_lossy().into_owned()),
+        ),
+    ]);
+    if let Some(run_id) = args
+        .get("runId")
+        .and_then(Value::as_str)
+        .filter(|value| valid_request_id(value))
+    {
+        context.insert("runId".into(), Value::String(run_id.into()));
+    }
+    Value::Object(context)
+}
+
+fn operation_attrs(context: &Value, attrs: Value) -> Value {
+    let mut merged = context.as_object().cloned().unwrap_or_default();
+    if let Value::Object(extra) = attrs {
+        merged.extend(extra);
+    }
+    Value::Object(merged)
 }
 
 fn fit_replay_events(
@@ -710,6 +754,26 @@ mod tests {
         assert_eq!(
             publications.last().unwrap().attrs["error"],
             "Agent VM operation failed; sensitive details withheld"
+        );
+        assert_eq!(
+            publications.last().unwrap().attrs["project"],
+            root.file_name().unwrap().to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            publications.last().unwrap().attrs["cwd"],
+            root.canonicalize().unwrap().to_string_lossy().as_ref()
+        );
+        assert!(publications.last().unwrap().attrs["projectId"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("project-")));
+        assert!(
+            !publications
+                .last()
+                .unwrap()
+                .attrs
+                .to_string()
+                .contains("proxy"),
+            "operation context не копирует чувствительные args/error"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

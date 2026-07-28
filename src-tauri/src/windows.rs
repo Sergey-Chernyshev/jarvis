@@ -201,6 +201,23 @@ pub fn toast_add(
     question: Option<&serde_json::Value>,
     meta: &serde_json::Value,
 ) {
+    toast_add_target(
+        d, id, title, body, session_id, kind, question, meta, None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn toast_add_target(
+    d: &Daemon,
+    id: &str,
+    title: &str,
+    body: &str,
+    session_id: Option<&str>,
+    kind: &str,
+    question: Option<&serde_json::Value>,
+    meta: &serde_json::Value,
+    target: Option<&serde_json::Value>,
+) {
     let payload = toast_payload(
         &d.settings.load(),
         id,
@@ -210,6 +227,7 @@ pub fn toast_add(
         kind,
         question,
         meta,
+        target,
     );
     toast_emit(d, "toast-add", payload);
 }
@@ -224,6 +242,7 @@ fn toast_payload(
     kind: &str,
     question: Option<&serde_json::Value>,
     meta: &serde_json::Value,
+    target: Option<&serde_json::Value>,
 ) -> serde_json::Value {
     let ttl_ms = settings
         .pointer("/notify/ttlSec")
@@ -234,7 +253,7 @@ fn toast_payload(
     json!({
         "id": id, "title": title, "body": body,
         "sessionId": session_id, "kind": kind, "question": question,
-        "meta": meta, "ttlMs": ttl_ms,
+        "meta": meta, "ttlMs": ttl_ms, "target": target,
     })
 }
 
@@ -294,6 +313,7 @@ pub fn panel_visible(d: &Arc<Daemon>) -> bool {
 pub fn hide_panel(d: &Arc<Daemon>) {
     // запись сочетания не должна пережить панель — вернуть хоткеи
     crate::ipc::hotkeys_set_suspended(d, false);
+    d.agent_vm.clear_focus();
     if let Some(panel) = d.app.get_webview_window("main") {
         let _ = panel.hide();
     }
@@ -351,6 +371,7 @@ mod tests {
                 "done",
                 None,
                 &json!([]),
+                None,
             );
 
             assert_eq!(payload["ttlMs"], milliseconds);
@@ -373,6 +394,7 @@ mod tests {
                 "done",
                 None,
                 &json!([]),
+                None,
             );
 
             assert_eq!(payload["ttlMs"], 8_000);

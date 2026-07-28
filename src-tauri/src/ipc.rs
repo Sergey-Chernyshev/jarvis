@@ -1228,6 +1228,60 @@ pub fn entities_get(app: AppHandle) -> Value {
     serde_json::to_value(Daemon::get(&app).entities.snapshot()).unwrap_or_else(|_| json!([]))
 }
 
+#[tauri::command]
+pub fn agent_vm_profiles_get(app: AppHandle) -> Value {
+    serde_json::to_value(crate::agent_vm::profiles_from_settings(
+        &Daemon::get(&app).settings.load(),
+    ))
+    .unwrap_or_else(|_| json!([]))
+}
+
+#[tauri::command]
+pub fn agent_vm_profile_set(
+    app: AppHandle,
+    cwd: String,
+    start_with_jarvis: bool,
+) -> Value {
+    let d = Daemon::get(&app);
+    let (block, profile) = match crate::agent_vm::update_profile_block(
+        &d.settings.load(),
+        std::path::Path::new(&cwd),
+        start_with_jarvis,
+    ) {
+        Ok(value) => value,
+        Err(error) => return err(error),
+    };
+    d.settings.set_top("agentVm", block);
+    json!({
+        "ok":true,
+        "profile":profile,
+        "profiles":crate::agent_vm::profiles_from_settings(&d.settings.load())
+    })
+}
+
+#[tauri::command]
+pub fn agent_vm_focus(
+    app: AppHandle,
+    project_id: Option<String>,
+    run_id: Option<String>,
+) -> Value {
+    let d = Daemon::get(&app);
+    let Some(project_id) = project_id else {
+        d.agent_vm.clear_focus();
+        return ok();
+    };
+    if !crate::agent_vm::valid_object_id(&project_id)
+        || run_id
+            .as_deref()
+            .is_some_and(|value| !crate::agent_vm::valid_object_id(value))
+    {
+        return err("Некорректная Agent VM focus target");
+    }
+    d.agent_vm
+        .set_focus(Some(crate::agent_vm::AgentVmFocus { project_id, run_id }));
+    ok()
+}
+
 fn ack_agent_vm_operation(
     store: &crate::entities::EntityStore,
     request_id: &str,
@@ -1918,12 +1972,17 @@ pub fn toast_ready(app: AppHandle) {
     windows::toast_flush(&Daemon::get(&app));
 }
 
-/// Клик по тосту: панель с фокусом + открыть чат сессии.
+/// Клик по тосту: панель с фокусом + открыть локальную сессию либо Agent VM run.
 #[tauri::command]
-pub fn toast_click(app: AppHandle, session_id: Option<String>) {
+pub fn toast_click(app: AppHandle, session_id: Option<String>, target: Option<Value>) {
     let d = Daemon::get(&app);
     windows::show_panel_focused(&d);
-    if let Some(sid) = session_id {
+    if let Some(link) = target
+        .as_ref()
+        .and_then(crate::agent_vm::parse_deep_link)
+    {
+        windows::emit_to_panel(&d.app, "open-agent-vm", &link);
+    } else if let Some(sid) = session_id {
         windows::emit_to_panel(&d.app, "open-session", &sid);
     }
 }

@@ -14,6 +14,7 @@
     onState: (cb) => on('state', cb),
     onShown: (cb) => on('panel-shown', () => cb()),
     onOpenSession: (cb) => on('open-session', cb),
+    onOpenAgentVm: (cb) => on('open-agent-vm', cb),
     getState: () => invoke('state_get'),
     clearFinished: () => invoke('state_clear'),
     hidePanel: () => invoke('panel_hide'),
@@ -60,6 +61,11 @@
     pluginCmd: (id, cmd, args) => invoke('plugins_cmd', { id, cmd, args: args ?? null }),
     onEntities: (cb) => on('entities', cb),
     getEntities: () => invoke('entities_get'),
+    getAgentVmProfiles: () => invoke('agent_vm_profiles_get'),
+    setAgentVmProfile: (cwd, startWithJarvis) =>
+      invoke('agent_vm_profile_set', { cwd, startWithJarvis: !!startWithJarvis }),
+    setAgentVmFocus: (projectId, runId) =>
+      invoke('agent_vm_focus', { projectId: projectId || null, runId: runId || null }),
     agentVmOperationAck: (requestId) => invoke('agent_vm_operation_ack', { requestId }),
     agentVmFileRead: (runId, path) => invoke('agent_vm_file_read', { runId, path }),
     agentVmFileDiff: (runId, path) => invoke('agent_vm_file_diff', { runId, path }),

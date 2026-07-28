@@ -65,6 +65,10 @@ impl PluginSlot {
         }
         Ok(())
     }
+
+    fn reset_events(&mut self) {
+        self.events = EventQueue::default();
+    }
 }
 
 pub struct PluginHost {
@@ -239,6 +243,7 @@ impl PluginHost {
             return Err("плагин выключен".into());
         }
         slot.stop_child()?;
+        slot.reset_events();
         slot.runtime.disable();
         slot.enabled = true;
         Ok(vec![
@@ -287,7 +292,10 @@ impl PluginHost {
         for (id, slot) in slots.iter_mut() {
             let was_active = slot.child.is_some() || slot.runtime.lifecycle != Lifecycle::Stopped;
             match slot.stop_child() {
-                Ok(()) => slot.runtime.disable(),
+                Ok(()) => {
+                    slot.reset_events();
+                    slot.runtime.disable();
+                }
                 Err(err) => {
                     crate::log::line(&format!("[plugin:{id}] dispose stop failed: {err}"));
                     slot.runtime.last_error = Some(format!("dispose stop failed: {err}"));
@@ -380,7 +388,10 @@ impl PluginHost {
                 }
                 slot.enabled = false;
                 match stop_result {
-                    Ok(()) => slot.runtime.disable(),
+                    Ok(()) => {
+                        slot.reset_events();
+                        slot.runtime.disable();
+                    }
                     Err(err) => {
                         crate::log::line(&format!("[plugin:{id}] stop failed: {err}"));
                         slot.runtime.last_error = Some(format!("stop failed: {err}"));
@@ -401,6 +412,7 @@ impl PluginHost {
             if slot.runtime.lifecycle == Lifecycle::Incompatible && slot.child.is_some() {
                 match slot.stop_child() {
                     Ok(()) => {
+                        slot.reset_events();
                         slot.runtime.pid = None;
                         slot.runtime.started_at_ms = None;
                         slot.runtime.handshake_deadline_ms = None;
@@ -420,6 +432,7 @@ impl PluginHost {
             match observation {
                 Some(Ok(Some(code))) => {
                     slot.child.take();
+                    slot.reset_events();
                     slot.runtime
                         .on_failure(now_ms, format!("plugin process exited with code {code}"));
                     effects.push(HostEffect::MarkOwnerStale(format!("plugin:{id}")));
@@ -429,6 +442,7 @@ impl PluginHost {
                 Some(Err(err)) => {
                     match slot.stop_child() {
                         Ok(()) => {
+                            slot.reset_events();
                             slot.runtime.on_failure(now_ms, err);
                         }
                         Err(stop_err) => {
@@ -443,6 +457,7 @@ impl PluginHost {
                 Some(Ok(None)) if slot.runtime.handshake_timed_out(now_ms) => {
                     match slot.stop_child() {
                         Ok(()) => {
+                            slot.reset_events();
                             slot.runtime.on_failure(now_ms, "handshake timeout");
                         }
                         Err(err) => {
@@ -465,6 +480,7 @@ impl PluginHost {
                 Lifecycle::Stopped | Lifecycle::Error => true,
                 Lifecycle::Backoff => slot.runtime.retry_due(now_ms),
                 Lifecycle::Starting | Lifecycle::Running => {
+                    slot.reset_events();
                     slot.runtime
                         .on_failure(now_ms, "plugin process handle lost");
                     effects.push(HostEffect::MarkOwnerStale(format!("plugin:{id}")));
@@ -826,6 +842,42 @@ mod tests {
         let statuses = host.statuses(2_000);
         assert_eq!(statuses[0]["status"]["state"], "backoff");
         assert_eq!(statuses[0]["status"]["retryInMs"], 1_000);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn child_exit_discards_commands_before_a_fresh_sidecar_can_poll_from_zero() {
+        let root = temp_plugin_root("crash-command-queue");
+        let fake = FakeSpawner::new(4242);
+        let host = PluginHost::with_spawner(vec![root.clone()], Arc::new(fake.clone()));
+        host.discover();
+        let tokens = token_store(&root);
+        let socket = root.join("run.sock");
+        host.tick_with(1_000, &|_| true, &tokens, &socket);
+        host.register(
+            "agent-vm",
+            &protocol::RegisterRequest {
+                protocol_version: manifest::PROTOCOL_VERSION,
+                pid: 4242,
+            },
+            1_100,
+        )
+        .unwrap();
+        host.enqueue_command(
+            "agent-vm",
+            "runtime.send",
+            json!({"message":"synthetic prompt"}),
+        )
+        .unwrap();
+        assert_eq!(host.events_after("agent-vm", 0, 64).unwrap().len(), 1);
+        fake.state.lock().unwrap().exit = Some(1);
+
+        host.tick_with(2_000, &|_| true, &tokens, &socket);
+
+        assert!(
+            host.events_after("agent-vm", 0, 64).unwrap().is_empty(),
+            "новый sidecar не должен повторно получить команду старого процесса"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

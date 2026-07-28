@@ -1542,6 +1542,11 @@
   .vm-pill.ready, .vm-pill.working { color: #b9adff; border-color: rgba(155, 138, 251, .24); }
   .vm-pill.waiting { color: var(--waiting); border-color: rgba(242, 163, 60, .25); }
   .vm-pill.error { color: var(--danger); border-color: rgba(230, 106, 114, .25); }
+  .vm-pill.autostart {
+    color: rgba(185, 173, 255, .82);
+    border-color: rgba(155, 138, 251, .16);
+    background: rgba(155, 138, 251, .055);
+  }
   .vm-button:hover { color: var(--text); background: rgba(255, 255, 255, .08); }
   .vm-button.primary {
     color: #ddd8ff;
@@ -1934,6 +1939,31 @@
   }
   .vm-env-key { color: var(--faint); }
   .vm-env-value { color: var(--muted); text-align: right; font-family: var(--mono); }
+  .vm-env-autostart {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: -2px 0 11px;
+    padding: 9px 10px;
+    border: 1px solid rgba(155, 138, 251, .12);
+    border-radius: 9px;
+    background: rgba(155, 138, 251, .045);
+    cursor: default;
+  }
+  .vm-env-autostart-copy { min-width: 0; flex: 1; }
+  .vm-env-autostart strong {
+    display: block;
+    color: var(--text);
+    font-size: 10.5px;
+    font-weight: 570;
+  }
+  .vm-env-autostart small {
+    display: block;
+    margin-top: 2px;
+    color: var(--faint);
+    font-size: 9px;
+  }
+  .vm-env-autostart .toggle:checked { background: rgba(155, 138, 251, .88); }
   .vm-env-actions { display: flex; flex-wrap: wrap; gap: 6px; }
   .vm-env-note { margin-top: 10px; color: var(--faint); font-size: 9.5px; line-height: 1.45; }
 
@@ -2226,6 +2256,13 @@
             <span class="vm-env-key">Ресурсы</span><span class="vm-env-value" id="agentVmResources">по умолчанию</span>
             <span class="vm-env-key">Агенты</span><span class="vm-env-value" id="agentVmModules">Claude · Codex</span>
           </div>
+          <label class="vm-env-autostart">
+            <span class="vm-env-autostart-copy">
+              <strong>Запускать вместе с Jarvis</strong>
+              <small>Поднимается только VM, без запуска агента</small>
+            </span>
+            <input class="toggle" id="agentVmAutostart" type="checkbox">
+          </label>
           <div class="vm-env-actions">
             <button class="vm-button primary" id="agentVmEnsure">Запустить VM</button>
             <button class="vm-button" id="agentVmCopyShell" disabled>Копировать вход</button>

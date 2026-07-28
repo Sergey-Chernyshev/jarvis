@@ -160,12 +160,18 @@ test('main panel exposes Agent VM workspace, bridge and keyboard contract', () =
   assert.match(html, /id="agentVmWorkspace"/);
   assert.match(html, /id="agentVmFeed"/);
   assert.match(html, /id="agentVmPrompt"/);
+  assert.match(html, /id="agentVmAutostart"/);
   assert.match(html, /agent-vm\.js/);
   assert.match(bridge, /getEntities/);
   assert.match(bridge, /onEntities/);
   assert.match(bridge, /agentVmOperationAck/);
   assert.match(bridge, /agentVmFileRead/);
+  assert.match(bridge, /getAgentVmProfiles/);
+  assert.match(bridge, /setAgentVmProfile/);
+  assert.match(bridge, /setAgentVmFocus/);
   assert.match(renderer, /renderAgentVmWorkspace/);
   assert.match(renderer, /runtime\.send/);
   assert.match(renderer, /runtime\.replay/);
+  assert.match(renderer, /onOpenAgentVm/);
+  assert.match(renderer, /requestedRunId/);
 });

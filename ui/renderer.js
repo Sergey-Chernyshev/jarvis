@@ -128,6 +128,7 @@ function setView(next) {
     window.jarvis.closeChat();
     chatSessionId = null;
   }
+  if (view === 'agentvm' && next !== 'agentvm') syncAgentVmFocus(null, null);
   if (view === 'question' && next !== 'question') qSessionId = null;
   if (next === 'history' && view !== 'history') histProject = null; // вкладка всегда открывается со списка проектов
   view = next;
@@ -2309,6 +2310,8 @@ window.jarvis.onShown(() => {
     rebuildOrder();
     setView('list');
     render();
+  } else if (view === 'agentvm') {
+    syncAgentVmFocus();
   }
 });
 
@@ -2761,6 +2764,7 @@ const agentVmNameEl = document.getElementById('agentVmName');
 const agentVmStateValueEl = document.getElementById('agentVmStateValue');
 const agentVmResourcesEl = document.getElementById('agentVmResources');
 const agentVmModulesEl = document.getElementById('agentVmModules');
+const agentVmAutostartEl = document.getElementById('agentVmAutostart');
 const agentVmEnsureEl = document.getElementById('agentVmEnsure');
 const agentVmRestartEl = document.getElementById('agentVmRestart');
 const agentVmStopEl = document.getElementById('agentVmStop');
@@ -2780,6 +2784,7 @@ const agentVmFileDiffTabEl = document.getElementById('agentVmFileDiffTab');
 const agentVmFileContentTabEl = document.getElementById('agentVmFileContentTab');
 
 let agentVmEntities = [];
+let agentVmProfiles = [];
 let agentVmCurrent = null;
 let agentVmRunId = null;
 let agentVmBackend = 'claude';
@@ -2789,6 +2794,7 @@ let agentVmStage = null;
 let agentVmStageStartedAt = 0;
 let agentVmFile = null;
 let agentVmFileMode = 'diff';
+let agentVmProfileSaving = false;
 const agentVmOperationWaiters = new Map();
 
 function agentVmPluginReady() {
@@ -2797,11 +2803,46 @@ function agentVmPluginReady() {
 }
 
 function agentVmProjects() {
-  return AgentVmModel.deriveProjects(historyData, agentVmEntities);
+  const projects = AgentVmModel.deriveProjects(historyData, agentVmEntities);
+  for (const profile of agentVmProfiles) {
+    let project = projects.find((item) =>
+      (item.projectId && item.projectId === profile.projectId) || item.cwd === profile.cwd);
+    if (project) {
+      project.projectId ||= profile.projectId;
+      project.agentVmProfile = profile;
+      continue;
+    }
+    project = {
+      key: profile.cwd,
+      cwd: profile.cwd,
+      name: profile.project,
+      projectId: profile.projectId,
+      history: null,
+      vm: null,
+      run: null,
+      summary: 'Agent VM запускается вместе с Jarvis',
+      updatedAt: 0,
+      agentVmProfile: profile,
+    };
+    projects.push(project);
+  }
+  return projects.sort((left, right) =>
+    right.updatedAt - left.updatedAt || left.name.localeCompare(right.name));
 }
 
 function agentVmProjectByCwd(cwd) {
   return agentVmProjects().find((project) => project.cwd === cwd) || null;
+}
+
+function agentVmProfileFor(project) {
+  if (!project) return null;
+  return agentVmProfiles.find((profile) =>
+    (project.projectId && profile.projectId === project.projectId) || profile.cwd === project.cwd) || null;
+}
+
+function syncAgentVmFocus(project = agentVmCurrent, runId = agentVmRunId) {
+  const projectId = project?.projectId || null;
+  return window.jarvis.setAgentVmFocus(projectId, projectId ? runId : null).catch(() => {});
 }
 
 function agentVmElapsed(ts) {
@@ -2894,6 +2935,7 @@ function ingestAgentVmEntities(list) {
     const run = agentVmCurrent?.run;
     const runId = run?.attrs?.runId || null;
     if (!agentVmRunId && runId) agentVmRunId = runId;
+    if (view === 'agentvm') syncAgentVmFocus();
     if (runId === agentVmRunId && run?.attrs?.latestEvent) {
       const previousSeq = latestAgentVmSeq();
       const latest = run.attrs.latestEvent;
@@ -3026,7 +3068,9 @@ async function sendAgentVmMessage() {
   );
   try {
     const result = await agentVmCommand('runtime.send', args, 60_000);
+    if (result.projectId) agentVmCurrent.projectId = result.projectId;
     agentVmRunId = result.runId || agentVmRunId;
+    syncAgentVmFocus();
     agentVmQueueHintEl.hidden = !result.queued;
     await replayAgentVmRun(agentVmRunId);
   } catch (error) {
@@ -3049,16 +3093,17 @@ async function cancelAgentVmRun() {
   }
 }
 
-function openAgentVmProject(project, backend = null) {
+function openAgentVmProject(project, backend = null, requestedRunId = null) {
   if (!project?.cwd) return;
   agentVmCurrent = project;
   agentVmBackend = backend || project.run?.attrs?.backend || 'claude';
-  agentVmRunId = project.run?.attrs?.runId || null;
+  agentVmRunId = requestedRunId || project.run?.attrs?.runId || null;
   agentVmEvents = [];
   agentVmQueueHintEl.hidden = true;
   agentVmEnvironmentEl.hidden = true;
   closeAgentVmFile();
   setView('agentvm');
+  syncAgentVmFocus();
   renderAgentVmWorkspace();
   refreshAgentVmStatus();
   if (agentVmRunId) replayAgentVmRun(agentVmRunId);
@@ -3187,6 +3232,8 @@ function renderAgentVmEnvironment(project, vm, run, uiState) {
   agentVmModulesEl.textContent = Array.isArray(attrs.modules) && attrs.modules.length
     ? attrs.modules.filter((module) => ['claude', 'codex'].includes(module)).join(' · ') || 'Claude · Codex'
     : 'Claude · Codex';
+  agentVmAutostartEl.checked = !!agentVmProfileFor(project)?.startWithJarvis;
+  agentVmAutostartEl.disabled = agentVmProfileSaving;
   const running = ['running', 'ready', 'working'].includes(vm?.state);
   agentVmEnsureEl.hidden = running;
   agentVmEnsureEl.textContent = vm?.state === 'stopped' ? 'Запустить VM' : 'Создать VM';
@@ -3356,6 +3403,26 @@ agentVmCancelEl.addEventListener('click', cancelAgentVmRun);
 agentVmEnsureEl.addEventListener('click', () => runAgentVmLifecycle('runtime.ensure', 'Подготавливаю среду'));
 agentVmRestartEl.addEventListener('click', () => runAgentVmLifecycle('runtime.restart', 'Перезапускаю VM'));
 agentVmStopEl.addEventListener('click', () => runAgentVmLifecycle('runtime.stop', 'Останавливаю VM'));
+agentVmAutostartEl.addEventListener('change', async () => {
+  if (!agentVmCurrent || agentVmProfileSaving) return;
+  const desired = agentVmAutostartEl.checked;
+  agentVmProfileSaving = true;
+  renderAgentVmWorkspace();
+  try {
+    const result = await window.jarvis.setAgentVmProfile(agentVmCurrent.cwd, desired);
+    if (!result?.ok) throw new Error(result?.error || 'Не удалось сохранить профиль');
+    agentVmProfiles = Array.isArray(result.profiles) ? result.profiles : [];
+    if (result.profile?.projectId) agentVmCurrent.projectId = result.profile.projectId;
+    showToast(desired ? 'VM будет запускаться вместе с Jarvis' : 'Автозапуск VM выключен');
+    if (view === 'history') renderHistProjects(queryEl.value.trim().toLowerCase());
+  } catch (error) {
+    agentVmAutostartEl.checked = !desired;
+    showToast(error.message || 'Не удалось сохранить автозапуск');
+  } finally {
+    agentVmProfileSaving = false;
+    renderAgentVmWorkspace();
+  }
+});
 agentVmCopyShellEl.addEventListener('click', async () => {
   const command = agentVmCopyShellEl.dataset.command;
   if (!command) return;
@@ -3385,6 +3452,34 @@ agentVmFileContentTabEl.addEventListener('click', () => {
 
 window.jarvis.onEntities(ingestAgentVmEntities);
 window.jarvis.getEntities().then(ingestAgentVmEntities).catch(() => {});
+window.jarvis.getAgentVmProfiles().then((profiles) => {
+  agentVmProfiles = Array.isArray(profiles) ? profiles : [];
+  if (view === 'history') renderHistProjects(queryEl.value.trim().toLowerCase());
+  if (view === 'agentvm') renderAgentVmWorkspace();
+}).catch(() => {});
+window.jarvis.onOpenAgentVm(async (target) => {
+  if (!target?.cwd || !target?.projectId) return;
+  if (!historyData.length) {
+    try { historyData = await window.jarvis.getHistory(); } catch {}
+  }
+  if (!agentVmEntities.length) {
+    try { ingestAgentVmEntities(await window.jarvis.getEntities()); } catch {}
+  }
+  const project = agentVmProjects().find((item) =>
+    item.projectId === target.projectId || item.cwd === target.cwd) || {
+    key: target.cwd,
+    cwd: target.cwd,
+    name: target.project || target.cwd.split('/').filter(Boolean).at(-1) || 'Project',
+    projectId: target.projectId,
+    history: null,
+    vm: null,
+    run: null,
+    summary: '',
+    updatedAt: 0,
+  };
+  project.projectId ||= target.projectId;
+  openAgentVmProject(project, null, target.runId || null);
+});
 setInterval(() => {
   if (view === 'list') renderActiveEnvironments();
   if (view === 'agentvm' && !agentVmStageEl.hidden) renderAgentVmWorkspace();
@@ -3520,6 +3615,13 @@ function renderHistProjects(q) {
       className: `vm-pill ${uiState}`,
       textContent: AgentVmModel.stateLabel(uiState),
     }));
+    if (project.agentVmProfile?.startWithJarvis) {
+      actions.appendChild(Object.assign(document.createElement('span'), {
+        className: 'vm-pill autostart',
+        textContent: '↻ с Jarvis',
+        title: 'VM запускается автоматически вместе с Jarvis',
+      }));
+    }
     if (historyCount) {
       const history = Object.assign(document.createElement('button'), {
         className: 'vm-button',

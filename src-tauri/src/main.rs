@@ -7,6 +7,7 @@
 
 #[allow(dead_code)] // UI-потребитель подключается в фазе 7 (chat UI)
 mod agent;
+mod agent_vm;
 #[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
 mod backend;
 #[allow(dead_code)] // проекции/фасады подключаются по фазам (инкр. 8)
@@ -141,6 +142,9 @@ fn main() {
             ipc::plugins_status,
             ipc::plugins_cmd,
             ipc::entities_get,
+            ipc::agent_vm_profiles_get,
+            ipc::agent_vm_profile_set,
+            ipc::agent_vm_focus,
             ipc::agent_vm_operation_ack,
             ipc::usage_summary,
             ipc::limit_get,
@@ -358,7 +362,7 @@ fn main() {
                 // ⌘W и крестик — просто прячем, демон живёт
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
-                    let _ = window.hide();
+                    windows::hide_panel(&Daemon::get(window.app_handle()));
                 }
                 // клик вне панели — спрятать. Но с задержкой и перепроверкой:
                 // навигация стрелками перерисовывает DOM (render() пересоздаёт и
@@ -367,10 +371,11 @@ fn main() {
                 // не вернулся за 120 мс — иначе панель моргала бы на каждой стрелке.
                 tauri::WindowEvent::Focused(false) => {
                     let w = window.clone();
+                    let app = window.app_handle().clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(120));
                         if !w.is_focused().unwrap_or(false) && w.is_visible().unwrap_or(false) {
-                            let _ = w.hide();
+                            windows::hide_panel(&Daemon::get(&app));
                         }
                     });
                 }
@@ -442,6 +447,14 @@ fn spawn_timers(d: &Arc<Daemon>) {
             tokio::time::sleep(Duration::from_secs(1)).await;
             dd.plugins.tick(&dd);
         }
+    });
+
+    // Закреплённые project VM стартуют после PluginHost строго по одной.
+    // Новые agent turns без пользовательского prompt здесь не создаются.
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        crate::agent_vm::autostart_profiles(dd).await;
     });
 
     // супервизор Silero-сайдкара: раз в 5с перезапускаем, если упал

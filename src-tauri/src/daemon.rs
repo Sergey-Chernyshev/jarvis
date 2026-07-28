@@ -115,6 +115,7 @@ struct LastToast {
     kind: String,
     speak: String,
     question: Option<Value>,
+    target: Option<Value>,
 }
 
 pub struct Daemon {
@@ -159,6 +160,8 @@ pub struct Daemon {
     pub caps: crate::capability::DaemonRegistry,
     /// Реестр сущностей плагинов (спека plugin-system §6.4): vm.*, agent.* …
     pub entities: crate::entities::EntityStore,
+    /// UI-фокус и lifecycle routing project runtime Agent VM.
+    pub agent_vm: crate::agent_vm::Coordinator,
     /// Внешние плагины: discovery, process supervision и wire-очереди.
     pub plugins: crate::plugins::PluginHost,
     /// Токены потребителей сокета (R2): резолв token → Consumer (panel недостижим).
@@ -329,6 +332,7 @@ impl Daemon {
             voice,
             caps: crate::capability::build_registry(),
             entities: crate::entities::EntityStore::new(),
+            agent_vm: crate::agent_vm::Coordinator::default(),
             plugins: crate::plugins::PluginHost::new(plugin_roots),
             tokens: crate::capability::tokens::TokenStore::new(),
             pending: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
@@ -558,6 +562,20 @@ impl Daemon {
         kind: &str,
         speak: Option<&str>,
     ) {
+        self.notify_id_voiced_target(id, title, body, session_id, kind, speak, None);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn notify_id_voiced_target(
+        &self,
+        id: &str,
+        title: &str,
+        body: &str,
+        session_id: Option<&str>,
+        kind: &str,
+        speak: Option<&str>,
+        target: Option<&Value>,
+    ) {
         crate::log::line(&format!(
             "[toast:{kind}] id={id} sid={} «{}» / {}",
             session_id.unwrap_or("-"),
@@ -626,6 +644,7 @@ impl Daemon {
             kind: kind.to_string(),
             speak: speak_text.clone(),
             question: question.clone(),
+            target: target.cloned(),
         });
 
         // мета-сегменты карточки (ветка, модель, effort, время) из настроек notify.content
@@ -646,7 +665,7 @@ impl Daemon {
         if self.is_quiet() {
             return;
         }
-        windows::toast_add(
+        windows::toast_add_target(
             self,
             id,
             title,
@@ -655,6 +674,7 @@ impl Daemon {
             kind,
             question.as_ref(),
             &meta_val,
+            target,
         );
 
         // голос (инкремент 7): озвучиваем уведомление. Одна точка на все события;
@@ -665,6 +685,7 @@ impl Daemon {
             "done" => vcfg.ev_stop,
             "waiting" => vcfg.ev_notification,
             "limit" => vcfg.ev_stop_failure,
+            "error" => vcfg.ev_stop_failure,
             _ => false,
         };
         if on {
@@ -757,7 +778,7 @@ impl Daemon {
     /// last_toast (повторять смену режима незачем).
     pub fn mode_toast(self: &std::sync::Arc<Self>, icon: &str, label: &str) {
         let id = format!("mode-{}", self.toast_seq.fetch_add(1, Ordering::SeqCst) + 1);
-        windows::toast_add(
+        windows::toast_add_target(
             self,
             &id,
             &format!("{icon}  {label}"),
@@ -766,6 +787,7 @@ impl Daemon {
             "mode",
             None,
             &serde_json::Value::Array(vec![]),
+            None,
         );
     }
 
@@ -793,7 +815,7 @@ impl Daemon {
             "repeat-{}",
             self.toast_seq.fetch_add(1, Ordering::SeqCst) + 1
         );
-        windows::toast_add(
+        windows::toast_add_target(
             self,
             &id,
             &lt.title,
@@ -802,6 +824,7 @@ impl Daemon {
             &lt.kind,
             lt.question.as_ref(),
             &serde_json::Value::Array(vec![]),
+            lt.target.as_ref(),
         );
         // переозвучка по явному запросу (mute внутри speak_text всё равно уважается)
         self.voice

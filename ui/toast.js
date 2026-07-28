@@ -244,7 +244,7 @@ window.toast.onAdd((d) => {
     }
 
     card.addEventListener('click', () => {
-      window.toast.click(d.sessionId || null);
+      window.toast.click(d.sessionId || null, d.target || null);
       removeCard(d.id);
     });
   }

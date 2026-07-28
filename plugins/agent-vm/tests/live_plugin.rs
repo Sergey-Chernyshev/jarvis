@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -19,21 +19,34 @@ fn temp_root() -> PathBuf {
     ))
 }
 
-fn read_request(mut stream: &UnixStream) -> (String, Value) {
+fn read_request(stream: &UnixStream) -> (String, Value) {
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(30)))
         .unwrap();
-    let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).unwrap();
-    let split = bytes
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .unwrap();
-    let headers = String::from_utf8(bytes[..split].to_vec()).unwrap();
-    let body = if bytes.len() > split + 4 {
-        serde_json::from_slice(&bytes[split + 4..]).unwrap()
-    } else {
+    let mut reader = BufReader::new(stream);
+    let mut headers = String::new();
+    let mut content_length = 0;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line
+            .to_ascii_lowercase()
+            .strip_prefix("content-length:")
+            .and_then(|value| value.trim().parse::<usize>().ok())
+        {
+            content_length = value;
+        }
+        headers.push_str(&line);
+    }
+    let mut bytes = vec![0; content_length];
+    reader.read_exact(&mut bytes).unwrap();
+    let body = if bytes.is_empty() {
         Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
     };
     (headers, body)
 }

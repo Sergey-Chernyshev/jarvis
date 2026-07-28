@@ -1,5 +1,4 @@
 use std::io::{Read, Write};
-use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -54,9 +53,6 @@ impl Transport for UnixSocketTransport {
         stream
             .write_all(&bytes)
             .map_err(|_| "не отправить plugin socket request".to_string())?;
-        stream
-            .shutdown(Shutdown::Write)
-            .map_err(|_| "не завершить plugin socket request".to_string())?;
         let mut response = Vec::new();
         stream
             .take((MAX_HTTP_RESPONSE_BYTES + 1) as u64)
@@ -255,6 +251,9 @@ impl<T: Transport> HostApi for HostClient<T> {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::fs;
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::net::UnixListener;
     use std::sync::{Arc, Mutex};
 
     use serde_json::json;
@@ -319,6 +318,74 @@ mod tests {
         let huge = vec![b'x'; MAX_HTTP_RESPONSE_BYTES + 1];
         let err = parse_http_response(&huge).unwrap_err();
         assert!(err.contains("limit"));
+    }
+
+    #[test]
+    fn unix_transport_keeps_write_side_open_until_the_server_responds() {
+        let socket = PathBuf::from("/tmp").join(format!(
+            "javm-http-{}-{}.sock",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line
+                    .to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                {
+                    content_length = value;
+                }
+            }
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).unwrap();
+            drop(reader);
+
+            stream
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .unwrap();
+            let mut probe = [0_u8; 1];
+            match stream.read(&mut probe) {
+                Ok(0) => return,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                other => panic!("unexpected client state before response: {other:?}"),
+            }
+            let payload = br#"{"ok":true}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                payload.len()
+            )
+            .unwrap();
+            stream.write_all(payload).unwrap();
+        });
+
+        let response = UnixSocketTransport::new(socket.clone())
+            .send(HttpRequest {
+                method: "POST".into(),
+                path: "/plugin/register".into(),
+                token: "synthetic-token".into(),
+                body: br#"{"protocolVersion":1,"pid":42}"#.to_vec(),
+            })
+            .unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, br#"{"ok":true}"#);
+        server.join().unwrap();
+        fs::remove_file(socket).unwrap();
     }
 
     #[test]

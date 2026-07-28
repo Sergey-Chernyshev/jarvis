@@ -11,6 +11,7 @@ default-run = "jarvis"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+jarvis-secret-store = { path = "../crates/jarvis-secret-store" }
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
@@ -43,6 +44,7 @@ cpal = "0.17.1"
 rubato = "0.16.2"
 # вставка текста (инкр. 9, фаза 5): clipboard snapshot/restore для ⌘V-вставки
 arboard = "3"
+zeroize = "1"
 
 [[bin]]
 name = "jarvis"

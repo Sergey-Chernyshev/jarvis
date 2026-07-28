@@ -1,3 +1,5 @@
+pub mod config_mirror;
+pub mod guest_bootstrap;
 pub mod host;
 pub mod inventory;
 pub mod plugin;

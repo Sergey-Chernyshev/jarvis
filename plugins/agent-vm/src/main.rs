@@ -23,7 +23,8 @@ fn run() -> Result<(), String> {
     );
     host.register(std::process::id())?;
 
-    let service = AgentVmService::new(SystemRunner, paths, Toolchain::discover()?);
+    let service =
+        AgentVmService::with_system_bootstrap(SystemRunner, paths, Toolchain::discover()?)?;
     let mut dispatcher = Dispatcher::new(service, host.clone());
     dispatcher.refresh_inventory()?;
 

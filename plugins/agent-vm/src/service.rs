@@ -4,9 +4,16 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use jarvis_secret_store::{migrate_legacy_claude_secret, MacKeychainStore, SecretStore};
 use serde::Serialize;
+use zeroize::Zeroize;
 
+use crate::config_mirror::{build_snapshot, MirrorRoots};
+use crate::guest_bootstrap::{
+    bootstrap_spec, build_bundle, load_codex_credential, run_bootstrap, BootstrapCredentialStatus,
+};
 use crate::inventory::{load_records, parse_lima_instances, reconcile, InventoryVm};
 use crate::project::{ensure_project_link, is_valid_vm_name, ProjectIdentity};
 use crate::runner::{CommandRunner, CommandSpec};
@@ -64,6 +71,139 @@ fn account_home() -> Option<PathBuf> {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapStatus {
+    pub fingerprint: String,
+    pub files: usize,
+    pub skipped: usize,
+    pub credentials: BootstrapCredentialStatus,
+    pub proxy_configured: bool,
+}
+
+pub trait ConfigBootstrap: Send + Sync {
+    fn apply(&self, record: &crate::inventory::VmRecord) -> Result<BootstrapStatus, String>;
+}
+
+#[derive(Clone)]
+pub struct SystemConfigBootstrap<R: CommandRunner, S: SecretStore> {
+    runner: R,
+    paths: RuntimePaths,
+    limactl: PathBuf,
+    account_home: PathBuf,
+    secrets: S,
+}
+
+impl<R: CommandRunner, S: SecretStore> SystemConfigBootstrap<R, S> {
+    pub fn new(
+        runner: R,
+        paths: RuntimePaths,
+        limactl: PathBuf,
+        account_home: PathBuf,
+        secrets: S,
+    ) -> Self {
+        Self {
+            runner,
+            paths,
+            limactl,
+            account_home,
+            secrets,
+        }
+    }
+
+    pub fn apply(&self, record: &crate::inventory::VmRecord) -> Result<BootstrapStatus, String> {
+        self.apply_inner(record)
+    }
+
+    fn apply_inner(&self, record: &crate::inventory::VmRecord) -> Result<BootstrapStatus, String> {
+        let migration = migrate_legacy_claude_secret(
+            &self.paths.jarvis_dir.join("settings.json"),
+            &self.secrets,
+        )?;
+        let snapshot = build_snapshot(&MirrorRoots {
+            claude: self.account_home.join(".claude"),
+            codex: self.account_home.join(".codex"),
+        })?;
+        let codex_credential = load_codex_credential(&snapshot, &self.account_home.join(".codex"))?;
+        let mut private_env =
+            read_private_runtime_env(&self.paths.jarvis_dir.join("settings.json"))?;
+        let proxy_configured = private_env.contains_key("HTTPS_PROXY");
+        let bundle = build_bundle(
+            &snapshot,
+            &self.secrets,
+            migration.kind,
+            &codex_credential,
+            &private_env,
+        );
+        for value in private_env.values_mut() {
+            value.zeroize();
+        }
+        let bundle = bundle?;
+        let credentials = bundle.credential_status.clone();
+        let spec = bootstrap_spec(&self.limactl, &self.paths.command_env(), record, bundle)?;
+        run_bootstrap(&self.runner, &spec)?;
+        Ok(BootstrapStatus {
+            fingerprint: snapshot.fingerprint,
+            files: snapshot.files.len(),
+            skipped: snapshot.diagnostics.skipped_symlinks
+                + snapshot.diagnostics.skipped_non_regular
+                + snapshot.diagnostics.skipped_oversize,
+            credentials,
+            proxy_configured,
+        })
+    }
+}
+
+impl<R: CommandRunner, S: SecretStore> ConfigBootstrap for SystemConfigBootstrap<R, S> {
+    fn apply(&self, record: &crate::inventory::VmRecord) -> Result<BootstrapStatus, String> {
+        self.apply_inner(record)
+    }
+}
+
+fn read_private_runtime_env(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BTreeMap::new());
+        }
+        Err(_) => return Err("не проверить private Jarvis settings".into()),
+    };
+    if !metadata.file_type().is_file() || metadata.len() > 4 * 1024 * 1024 {
+        return Err("private Jarvis settings имеют unsafe type или размер".into());
+    }
+    let mut bytes =
+        fs::read(path).map_err(|_| "не прочитать private Jarvis settings".to_string())?;
+    let parsed = serde_json::from_slice(&bytes)
+        .map_err(|_| "private Jarvis settings содержат invalid JSON".to_string());
+    bytes.zeroize();
+    let mut value: serde_json::Value = parsed?;
+    let proxy = value
+        .get_mut("service")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|service| service.remove("proxy"))
+        .or_else(|| value.as_object_mut().and_then(|root| root.remove("proxy")))
+        .and_then(|value| value.as_str().map(str::to_string));
+    let Some(mut proxy) = proxy else {
+        return Ok(BTreeMap::new());
+    };
+    let trimmed = proxy.trim().to_string();
+    proxy.zeroize();
+    if trimmed.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    if trimmed.len() > 64 * 1024
+        || trimmed
+            .bytes()
+            .any(|byte| matches!(byte, 0 | b'\n' | b'\r'))
+    {
+        return Err("private proxy setting имеет unsafe format".into());
+    }
+    Ok(BTreeMap::from([
+        ("HTTP_PROXY".into(), trimmed.clone()),
+        ("HTTPS_PROXY".into(), trimmed),
+    ]))
+}
+
 fn first_executable(candidates: &[PathBuf], name: &str) -> Result<PathBuf, String> {
     candidates
         .iter()
@@ -105,6 +245,7 @@ pub struct RuntimeSnapshot {
     pub vm: Option<InventoryVm>,
     pub created_spec: bool,
     pub shell_command: String,
+    pub environment: Option<BootstrapStatus>,
 }
 
 #[derive(Clone)]
@@ -112,6 +253,7 @@ pub struct AgentVmService<R: CommandRunner> {
     runner: R,
     pub paths: RuntimePaths,
     tools: Toolchain,
+    config_bootstrap: Option<Arc<dyn ConfigBootstrap>>,
 }
 
 impl<R: CommandRunner> AgentVmService<R> {
@@ -120,7 +262,30 @@ impl<R: CommandRunner> AgentVmService<R> {
             runner,
             paths,
             tools,
+            config_bootstrap: None,
         }
+    }
+
+    pub fn with_system_bootstrap(
+        runner: R,
+        paths: RuntimePaths,
+        tools: Toolchain,
+    ) -> Result<Self, String> {
+        let home = account_home()
+            .ok_or_else(|| "не определить account home для config mirror".to_string())?;
+        let bootstrap = SystemConfigBootstrap::new(
+            runner.clone(),
+            paths.clone(),
+            tools.limactl.clone(),
+            home,
+            MacKeychainStore,
+        );
+        Ok(Self {
+            runner,
+            paths,
+            tools,
+            config_bootstrap: Some(Arc::new(bootstrap)),
+        })
     }
 
     pub fn inventory(&self) -> Result<Vec<InventoryVm>, String> {
@@ -156,31 +321,33 @@ impl<R: CommandRunner> AgentVmService<R> {
         let current = find_project_vm(&before, &project);
         let action = plan_ensure(current.map(|vm| (vm.management.as_str(), vm.state.as_str())));
         let mut created_spec = false;
-        match action {
+        let inventory = match action {
             EnsureAction::Create => {
                 created_spec = ensure_project_spec(&project.canonical_path)?;
                 self.run_avm(
                     "create",
                     vec!["create".into(), binding.to_string_lossy().into_owned()],
                 )?;
+                self.inventory()?
             }
             EnsureAction::Recreate => {
                 let name = current
                     .map(|vm| vm.name.as_str())
                     .unwrap_or(&project.vm_name);
                 self.run_lifecycle("recreate", name)?;
+                self.inventory()?
             }
             EnsureAction::Start => {
                 let name = current
                     .map(|vm| vm.name.as_str())
                     .unwrap_or(&project.vm_name);
                 self.run_lifecycle("start", name)?;
+                self.inventory()?
             }
-            EnsureAction::Ready | EnsureAction::Wait => {
-                return self.snapshot(&project, before, false);
-            }
-        }
-        self.snapshot(&project, self.inventory()?, created_spec)
+            EnsureAction::Ready | EnsureAction::Wait => before,
+        };
+        let snapshot = self.snapshot(&project, inventory, created_spec)?;
+        self.bootstrap_if_ready(snapshot)
     }
 
     pub fn stop(&self, cwd: &Path) -> Result<RuntimeSnapshot, String> {
@@ -200,7 +367,12 @@ impl<R: CommandRunner> AgentVmService<R> {
             return Err(format!("VM {} имеет состояние {}", vm.name, vm.management));
         }
         self.run_lifecycle(action, &vm.name)?;
-        self.snapshot(&project, self.inventory()?, false)
+        let snapshot = self.snapshot(&project, self.inventory()?, false)?;
+        if action == "restart" {
+            self.bootstrap_if_ready(snapshot)
+        } else {
+            Ok(snapshot)
+        }
     }
 
     fn run_lifecycle(&self, action: &str, name: &str) -> Result<(), String> {
@@ -243,7 +415,23 @@ impl<R: CommandRunner> AgentVmService<R> {
             vm,
             created_spec,
             shell_command: format!("avm shell {vm_name}"),
+            environment: None,
         })
+    }
+
+    fn bootstrap_if_ready(&self, mut snapshot: RuntimeSnapshot) -> Result<RuntimeSnapshot, String> {
+        let Some(bootstrap) = &self.config_bootstrap else {
+            return Ok(snapshot);
+        };
+        let record = snapshot
+            .vm
+            .as_ref()
+            .filter(|vm| vm.management == "managed" && vm.state == "running")
+            .and_then(|vm| vm.record.as_ref());
+        if let Some(record) = record {
+            snapshot.environment = Some(bootstrap.apply(record)?);
+        }
+        Ok(snapshot)
     }
 }
 
@@ -529,5 +717,78 @@ mod tests {
             "unsafe;rm"
         )
         .is_err());
+    }
+
+    #[test]
+    fn system_config_bootstrap_migrates_and_delivers_without_visible_secret_bytes() {
+        use jarvis_secret_store::MemorySecretStore;
+
+        let (root, project, paths) = fixture("config-bootstrap");
+        let account_home = root.join("account-home");
+        fs::create_dir_all(account_home.join(".claude")).unwrap();
+        fs::create_dir_all(account_home.join(".codex")).unwrap();
+        fs::write(
+            account_home.join(".claude/settings.json"),
+            br#"{"model":"synthetic"}"#,
+        )
+        .unwrap();
+        fs::write(
+            account_home.join(".codex/config.toml"),
+            "model = \"synthetic\"\n",
+        )
+        .unwrap();
+        let codex_auth = account_home.join(".codex/auth.json");
+        fs::write(&codex_auth, br#"{"auth_mode":"synthetic"}"#).unwrap();
+        fs::set_permissions(&codex_auth, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(
+            paths.jarvis_dir.join("settings.json"),
+            br#"{"service":{"claudeAuthMode":"subscription","claudeSecret":"SYNTHETIC_PRIVATE_VALUE"}}"#,
+        )
+        .unwrap();
+        let identity = ProjectIdentity::from_path(&project).unwrap();
+        let record = crate::inventory::VmRecord {
+            name: identity.vm_name,
+            source: "project".into(),
+            modules: vec!["claude".into(), "codex".into()],
+            resources: crate::inventory::VmResources::default(),
+            user: "dev".into(),
+            workspace: crate::inventory::VmWorkspace {
+                mode_name: "mount".into(),
+                guest_path: "/home/dev/synthetic-project".into(),
+                host_path: Some(project.to_string_lossy().into_owned()),
+                repo: None,
+                git_ref: None,
+            },
+        };
+        let runner = FakeRunner::with_outputs(vec![ok("")]);
+        let bootstrap = SystemConfigBootstrap::new(
+            runner.clone(),
+            paths.clone(),
+            PathBuf::from("/synthetic/bin/limactl"),
+            account_home,
+            MemorySecretStore::default(),
+        );
+
+        let status = bootstrap.apply(&record).unwrap();
+
+        assert_eq!(status.credentials.claude, "ready");
+        assert_eq!(status.credentials.codex, "ready");
+        assert_eq!(status.files, 2);
+        assert_eq!(status.fingerprint.len(), 64);
+        let settings = fs::read(paths.jarvis_dir.join("settings.json")).unwrap();
+        assert!(!settings
+            .windows(b"SYNTHETIC_PRIVATE_VALUE".len())
+            .any(|part| part == b"SYNTHETIC_PRIVATE_VALUE"));
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let visible = format!("{:?}{:?}", calls[0].args, calls[0].env);
+        assert!(!visible.contains("SYNTHETIC_PRIVATE_VALUE"));
+        assert!(calls[0]
+            .stdin
+            .as_ref()
+            .unwrap()
+            .windows(b"SYNTHETIC_PRIVATE_VALUE".len())
+            .any(|part| part == b"SYNTHETIC_PRIVATE_VALUE"));
+        fs::remove_dir_all(root).unwrap();
     }
 }

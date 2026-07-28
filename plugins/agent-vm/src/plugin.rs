@@ -161,7 +161,8 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
                         "vmName": snapshot.vm_name,
                         "state": snapshot.vm.as_ref().map(|vm| vm.state.as_str()).unwrap_or("absent"),
                         "shellCommand": snapshot.shell_command,
-                        "createdSpec": snapshot.created_spec
+                        "createdSpec": snapshot.created_spec,
+                        "environment": snapshot.environment
                     }),
                 )
             }
@@ -229,7 +230,8 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
                 "modules": modules,
                 "resources": resources,
                 "shellCommand": snapshot.shell_command,
-                "createdSpec": snapshot.created_spec
+                "createdSpec": snapshot.created_spec,
+                "environment": snapshot.environment
             }),
         )?;
         self.published_vms.insert(snapshot.vm_name.clone());
@@ -408,6 +410,7 @@ mod tests {
             }),
             created_spec: false,
             shell_command: format!("avm shell {vm_name}"),
+            environment: None,
         }
     }
 

@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use zeroize::Zeroize;
+
 pub const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CommandSpec {
     pub program: PathBuf,
     pub args: Vec<String>,
@@ -14,11 +17,50 @@ pub struct CommandSpec {
     pub stdin: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl fmt::Debug for CommandSpec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommandSpec")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
+            .field("stdin_bytes", &self.stdin.as_ref().map(Vec::len))
+            .finish()
+    }
+}
+
+impl Drop for CommandSpec {
+    fn drop(&mut self) {
+        if let Some(stdin) = &mut self.stdin {
+            stdin.zeroize();
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct CommandResult {
     pub status: i32,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+}
+
+impl fmt::Debug for CommandResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommandResult")
+            .field("status", &self.status)
+            .field("stdout_bytes", &self.stdout.len())
+            .field("stderr_bytes", &self.stderr.len())
+            .finish()
+    }
+}
+
+impl Drop for CommandResult {
+    fn drop(&mut self) {
+        self.stdout.zeroize();
+        self.stderr.zeroize();
+    }
 }
 
 impl CommandResult {
@@ -92,6 +134,7 @@ impl CommandRunner for SystemRunner {
 
 fn bounded(mut bytes: Vec<u8>) -> Vec<u8> {
     if bytes.len() > MAX_COMMAND_OUTPUT_BYTES {
+        bytes[MAX_COMMAND_OUTPUT_BYTES..].zeroize();
         bytes.truncate(MAX_COMMAND_OUTPUT_BYTES);
     }
     bytes
@@ -135,5 +178,23 @@ mod tests {
         assert!(err.contains("кодом 7"));
         assert!(!err.contains("credential"));
         assert!(!err.contains("payload"));
+    }
+
+    #[test]
+    fn command_debug_redacts_stdin_and_environment_values() {
+        let spec = CommandSpec {
+            program: PathBuf::from("/synthetic/bin/tool"),
+            args: vec!["run".into()],
+            cwd: None,
+            env: BTreeMap::from([("SYNTHETIC_ENV".into(), "SYNTHETIC_PRIVATE_VALUE".into())]),
+            stdin: Some(b"SYNTHETIC_STDIN_VALUE".to_vec()),
+        };
+
+        let debug = format!("{spec:?}");
+
+        assert!(debug.contains("stdin_bytes"));
+        assert!(debug.contains("SYNTHETIC_ENV"));
+        assert!(!debug.contains("SYNTHETIC_PRIVATE_VALUE"));
+        assert!(!debug.contains("SYNTHETIC_STDIN_VALUE"));
     }
 }

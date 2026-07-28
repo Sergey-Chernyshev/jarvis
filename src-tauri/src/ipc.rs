@@ -4,6 +4,7 @@
 //! рендерер не знает, что под мостом сменился рантайм. Формы ошибок — тоже:
 //! { ok:false, error } / { ok:false, needsTmux, resumeCmd }.
 
+use jarvis_secret_store::{MacKeychainStore, SecretKind, SecretStore, SecretValue};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tauri::AppHandle;
@@ -14,6 +15,7 @@ use crate::daemon::Daemon;
 use crate::model::Status;
 use crate::util::*;
 use crate::{claude_bin, limits, tmux, windows};
+use zeroize::Zeroize;
 
 fn ok() -> Value {
     json!({ "ok": true })
@@ -2183,8 +2185,8 @@ pub fn service_get(app: AppHandle) -> Value {
     };
     json!({
         "backend": backend,
-        "codexModel": cfg.codex_model,
-        "codexEffort": cfg.codex_effort,
+        "codexModel": cfg.codex_model.clone(),
+        "codexEffort": cfg.codex_effort.clone(),
         // Реальные модели из ~/.codex/models_cache.json (включая spark/mini).
         "codexModels": codex_models_list(),
         // minimal убран: часть моделей (spark) его не поддерживают (400).
@@ -2193,7 +2195,7 @@ pub fn service_get(app: AppHandle) -> Value {
         "claudeBin": crate::claude_bin::resolve_claude_bin().is_some(),
         "codexBin": crate::backend::codex::resolve_codex_bin().is_some(),
         // egress-прокси служебных вызовов (пусто → наследуется из env процесса)
-        "proxy": cfg.proxy,
+        "proxy": cfg.proxy.clone(),
     })
 }
 
@@ -2318,50 +2320,68 @@ pub async fn service_test() -> Value {
 #[tauri::command]
 pub fn claude_auth_get(app: AppHandle) -> Value {
     let d = Daemon::get(&app);
-    let cfg = crate::claude_bin::ServiceConfig::from_settings(&d.settings.load());
+    let mut cfg = crate::claude_bin::ServiceConfig::from_settings(&d.settings.load());
     let connected = !cfg.claude_auth_mode.is_empty() && !cfg.claude_secret.is_empty();
-    // маска секрета: префикс…суффикс (ASCII — sk-ant-…/токены), без утечки
-    let s = &cfg.claude_secret;
-    let hint = if s.len() > 18 {
-        format!("{}…{}", &s[..10], &s[s.len() - 4..])
-    } else if connected {
-        "••••".to_string()
+    let hint = if connected {
+        "••••••••".to_string()
     } else {
         String::new()
     };
+    let mode = cfg.claude_auth_mode.clone();
+    cfg.claude_secret.zeroize();
     json!({
         "connected": connected,
-        "mode": cfg.claude_auth_mode, // "key" | "subscription" | ""
+        "mode": mode, // "key" | "subscription" | ""
         "hint": hint,
         "claudeBin": crate::claude_bin::resolve_claude_bin().is_some(),
     })
 }
 
 /// Подключить аккаунт Claude: валидируем крошечным `claude -p`, при успехе пишем
-/// в settings.json (0600) и обновляем процесс-конфиг. mode ∈ key|subscription.
+/// credential в macOS Keychain, а в settings.json оставляем только несекретный
+/// mode. mode ∈ key|subscription.
 #[tauri::command]
 pub async fn claude_auth_connect(app: AppHandle, mode: String, value: String) -> Value {
-    let value = value.trim().to_string();
+    let mut value = value.trim().to_string();
     if value.is_empty() {
         return err("пустой ключ/токен");
     }
     if mode != "key" && mode != "subscription" {
+        value.zeroize();
         return err(format!("неизвестный режим: {mode}"));
     }
     if crate::claude_bin::resolve_claude_bin().is_none() {
+        value.zeroize();
         return err("claude не найден в PATH — установи Claude Code");
     }
     let valid =
         crate::claude_bin::validate_claude_auth(&mode, &value, std::time::Duration::from_secs(40))
             .await;
     if !valid {
+        value.zeroize();
         return err("не сработало: проверь ключ/токен (или claude недоступен)");
+    }
+    let Some(kind) = SecretKind::from_claude_mode(&mode) else {
+        value.zeroize();
+        return err("неизвестный режим авторизации");
+    };
+    let secret = match SecretValue::new(value.as_bytes().to_vec()) {
+        Ok(secret) => secret,
+        Err(error) => {
+            value.zeroize();
+            return err(error);
+        }
+    };
+    let stored = MacKeychainStore.set(kind, &secret);
+    value.zeroize();
+    if stored.is_err() {
+        return err("не удалось сохранить credential в macOS Keychain");
     }
     let d = Daemon::get(&app);
     let mut p = serde_json::Map::new();
     p.insert("claudeAuthMode".into(), Value::String(mode));
-    p.insert("claudeSecret".into(), Value::String(value));
-    d.settings.set_block("service", p);
+    d.settings
+        .set_block_with_removals("service", p, &["claudeSecret"]);
     apply_service_config(&d);
     ok()
 }
@@ -2369,11 +2389,16 @@ pub async fn claude_auth_connect(app: AppHandle, mode: String, value: String) ->
 /// Отключить аккаунт Claude — снова используется собственный логин `claude` CLI.
 #[tauri::command]
 pub fn claude_auth_disconnect(app: AppHandle) -> Value {
+    for kind in [SecretKind::ClaudeApiKey, SecretKind::ClaudeOauthToken] {
+        if MacKeychainStore.delete(kind).is_err() {
+            return err("не удалось удалить credential из macOS Keychain");
+        }
+    }
     let d = Daemon::get(&app);
     let mut p = serde_json::Map::new();
     p.insert("claudeAuthMode".into(), Value::String(String::new()));
-    p.insert("claudeSecret".into(), Value::String(String::new()));
-    d.settings.set_block("service", p);
+    d.settings
+        .set_block_with_removals("service", p, &["claudeSecret"]);
     apply_service_config(&d);
     ok()
 }

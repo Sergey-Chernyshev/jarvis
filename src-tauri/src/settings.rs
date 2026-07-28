@@ -306,6 +306,30 @@ impl Store {
         });
     }
 
+    /// Deep-set полей и одновременное удаление legacy-ключей в одном atomic
+    /// settings transaction. Используется при переносе credential в Keychain:
+    /// на диске никогда не появляется новая версия с обновлённым mode, но старым
+    /// plaintext secret.
+    pub fn set_block_with_removals(
+        &self,
+        block: &str,
+        patch: Map<String, Value>,
+        removals: &[&str],
+    ) {
+        self.update(|root| {
+            let block = root.entry(block).or_insert_with(|| json!({}));
+            let Some(obj) = block.as_object_mut() else {
+                return;
+            };
+            for (key, value) in patch {
+                obj.insert(key, value);
+            }
+            for key in removals {
+                obj.remove(*key);
+            }
+        });
+    }
+
     pub fn set_plugin(&self, id: &str, patch: Map<String, Value>) {
         self.update(|root| {
             let plugins = root.entry("plugins").or_insert_with(|| json!({}));

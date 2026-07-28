@@ -232,6 +232,20 @@ fn main() {
             // миграция схемы settings.json ДО первого чтения настроек (Daemon::new
             // их читает). Сейчас no-op v0→v1; задел под ломающие изменения формата.
             settings::Store::new().migrate_on_startup();
+            match jarvis_secret_store::migrate_legacy_claude_secret(
+                &crate::util::jarvis_dir().join("settings.json"),
+                &jarvis_secret_store::MacKeychainStore,
+            ) {
+                Ok(report) if report.migrated => {
+                    crate::log::line("[security] Claude credential migrated to Keychain");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    crate::log::line(&format!(
+                        "[security] Claude credential migration deferred: {error}"
+                    ));
+                }
+            }
 
             if let Err(err) = plugins::install::install_bundled() {
                 crate::log::line(&format!("[plugins] Agent VM install skipped: {err}"));

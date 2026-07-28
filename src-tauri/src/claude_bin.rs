@@ -10,6 +10,9 @@ use std::process::Stdio;
 use std::sync::RwLock;
 use std::time::Duration;
 
+use jarvis_secret_store::{MacKeychainStore, SecretKind, SecretStore};
+use zeroize::Zeroize;
+
 use crate::util::jarvis_dir;
 
 /// Настоящий claude в PATH (плюс типовые каталоги), минуя наш tmux-шим.
@@ -321,7 +324,7 @@ fn ensure_codex_clean_home() -> PathBuf {
 /// Текущий выбор бэкенда служебного LLM + параметры Codex. Демон обновляет его из
 /// настроек на старте и при изменении (через `set_service_config`), чтобы свободные
 /// функции `run_service_llm` не таскали настройки через все места вызова.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServiceConfig {
     pub backend: ServiceBackend,
     /// Модель Codex для служебных вызовов (пусто → дефолт SDK/конфига).
@@ -339,6 +342,27 @@ pub struct ServiceConfig {
     /// HTTPS_PROXY на этой сети его запрос висит в таймаут — поэтому прокси можно
     /// задать отдельно в настройках («Под капотом»).
     pub proxy: String,
+}
+
+impl std::fmt::Debug for ServiceConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServiceConfig")
+            .field("backend", &self.backend)
+            .field("codex_model_configured", &!self.codex_model.is_empty())
+            .field("codex_effort", &self.codex_effort)
+            .field("claude_auth_mode", &self.claude_auth_mode)
+            .field("claude_secret_configured", &!self.claude_secret.is_empty())
+            .field("proxy_configured", &!self.proxy.is_empty())
+            .finish()
+    }
+}
+
+impl Drop for ServiceConfig {
+    fn drop(&mut self) {
+        self.claude_secret.zeroize();
+        self.proxy.zeroize();
+    }
 }
 
 impl Default for ServiceConfig {
@@ -362,6 +386,13 @@ impl ServiceConfig {
 
     /// Собрать из блока `service` настроек (~/.jarvis/settings.json).
     pub fn from_settings(all: &serde_json::Value) -> ServiceConfig {
+        Self::from_settings_with_store(all, &MacKeychainStore)
+    }
+
+    fn from_settings_with_store<S: SecretStore>(
+        all: &serde_json::Value,
+        store: &S,
+    ) -> ServiceConfig {
         let s = all.get("service");
         let g = |k: &str| {
             s.and_then(|s| s.get(k))
@@ -369,6 +400,11 @@ impl ServiceConfig {
                 .unwrap_or("")
         };
         let effort = g("codexEffort");
+        let claude_auth_mode = g("claudeAuthMode").to_string();
+        let legacy_secret = g("claudeSecret");
+        let keychain_secret = SecretKind::from_claude_mode(&claude_auth_mode)
+            .and_then(|kind| store.get(kind).ok().flatten())
+            .and_then(|secret| String::from_utf8(secret.expose().to_vec()).ok());
         ServiceConfig {
             backend: ServiceBackend::from_str(g("backend")),
             codex_model: g("codexModel").to_string(),
@@ -377,8 +413,8 @@ impl ServiceConfig {
             } else {
                 effort.into()
             },
-            claude_auth_mode: g("claudeAuthMode").to_string(),
-            claude_secret: g("claudeSecret").to_string(),
+            claude_auth_mode,
+            claude_secret: keychain_secret.unwrap_or_else(|| legacy_secret.to_string()),
             proxy: g("proxy").to_string(),
         }
     }
@@ -653,6 +689,26 @@ mod tests {
         assert_eq!(d.codex_effort, "low");
         assert_eq!(d.codex_model, "");
         assert_eq!(d.proxy, "");
+    }
+
+    #[test]
+    fn service_config_reads_migrated_secret_from_store_and_redacts_debug() {
+        use jarvis_secret_store::{MemorySecretStore, SecretKind, SecretStore, SecretValue};
+
+        let store = MemorySecretStore::default();
+        let value = SecretValue::new(b"SYNTHETIC_PRIVATE_VALUE".to_vec()).unwrap();
+        store.set(SecretKind::ClaudeOauthToken, &value).unwrap();
+        let settings = serde_json::json!({
+            "service": {
+                "backend": "claude",
+                "claudeAuthMode": "subscription"
+            }
+        });
+
+        let config = ServiceConfig::from_settings_with_store(&settings, &store);
+
+        assert_eq!(config.claude_secret, "SYNTHETIC_PRIVATE_VALUE");
+        assert!(!format!("{config:?}").contains("SYNTHETIC_PRIVATE_VALUE"));
     }
 
     #[test]

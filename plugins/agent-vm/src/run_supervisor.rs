@@ -15,7 +15,7 @@ use crate::run_event::{map_guest_path, Backend, BackendEvent, RunEvent};
 use crate::run_executor::{
     validate_backend_session_id, BackendEventSink, ExecutionOutcome, TurnExecution, TurnExecutor,
 };
-use crate::run_store::{validate_run_id, RunStore};
+use crate::run_store::{validate_run_id, RunStore, RunSummary};
 use crate::service::{RuntimeService, RuntimeSnapshot};
 
 const DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(60);
@@ -270,12 +270,99 @@ impl<H: HostApi> RunSupervisor<H> {
         }))
     }
 
+    pub fn recover(&self) -> Result<usize, String> {
+        let mut latest_by_project = HashMap::<String, RunSummary>::new();
+        for summary in self.store.summaries()? {
+            latest_by_project
+                .entry(summary.project_id.clone())
+                .or_insert(summary);
+        }
+        let mut summaries = latest_by_project.into_values().collect::<Vec<_>>();
+        summaries.sort_by(|left, right| left.project_id.cmp(&right.project_id));
+
+        for summary in &mut summaries {
+            if summary.state == "working" {
+                let event = RunEvent {
+                    run_id: summary.run_id.clone(),
+                    turn_id: summary.last_turn_id.clone(),
+                    seq: summary
+                        .last_seq
+                        .checked_add(1)
+                        .ok_or_else(|| "run event seq overflow".to_string())?,
+                    at: now_ms(),
+                    event_type: "run.interrupted".into(),
+                    payload: json!({
+                        "projectId":summary.project_id,
+                        "project":summary.project,
+                        "cwd":summary.cwd,
+                        "backendSessionId":summary.backend_session_id,
+                        "reason":"host-restarted"
+                    }),
+                    backend: summary.backend,
+                    vm: summary.vm.clone(),
+                };
+                self.store.append(&event)?;
+                summary.last_seq = event.seq;
+                summary.last_at = event.at;
+                summary.state = "interrupted".into();
+                summary.latest_event = event;
+            }
+            self.publish_recovered(summary)?;
+        }
+        Ok(summaries.len())
+    }
+
     pub fn host(&self) -> &H {
         &self.host
     }
 
     pub fn store(&self) -> &RunStore {
         &self.store
+    }
+
+    fn publish_recovered(&self, summary: &RunSummary) -> Result<(), String> {
+        let project = if summary.project.is_empty() {
+            Path::new(&summary.cwd)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("project")
+                .to_string()
+        } else {
+            summary.project.clone()
+        };
+        let files = summary
+            .files
+            .iter()
+            .map(|(path, change)| json!({"path":path,"change":change}))
+            .collect::<Vec<_>>();
+        let mut attrs = json!({
+            "runId":summary.run_id,
+            "projectId":summary.project_id,
+            "project":project,
+            "cwd":summary.cwd,
+            "vmName":summary.vm,
+            "backend":summary.backend,
+            "backendSessionId":summary.backend_session_id,
+            "shellCommand":format!("avm shell {}", summary.vm),
+            "resumeCommand":summary
+                .backend_session_id
+                .as_deref()
+                .and_then(|id| terminal_resume_command(summary.backend, id)),
+            "queued":false,
+            "turnId":summary.last_turn_id,
+            "seq":summary.last_seq,
+            "latestEvent":summary.latest_event,
+            "files":files,
+            "recovered":true
+        });
+        trim_attrs(&mut attrs)?;
+        self.host.publish_entity(
+            "upsert",
+            "agent_run",
+            &summary.run_id,
+            &summary.state,
+            attrs,
+        )
     }
 
     fn resolve_run(
@@ -1334,6 +1421,12 @@ mod tests {
             Some("018f0000-0000-7000-8000-000000000090")
         );
         assert_eq!(state.calls[1].2, "второй");
+        drop(state);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while supervisor.is_active(&first.run_id) {
+            assert!(Instant::now() < deadline, "run worker не завершил cleanup");
+            std::thread::yield_now();
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1360,6 +1453,67 @@ mod tests {
         supervisor.host().wait_for_state("cancelled");
         assert!(!supervisor.is_active(&receipt.run_id));
         assert!(executor.state.0.lock().unwrap().cancel_called);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_marks_only_unfinished_latest_run_interrupted_and_is_idempotent() {
+        let (root, supervisor, _service) = fixture("recovery", FakeExecutor::default());
+        let project = ProjectIdentity::from_path(&root.join("synthetic-project")).unwrap();
+        let run_id = "run-018f000000000077";
+        for event in [
+            RunEvent {
+                run_id: run_id.into(),
+                turn_id: "turn-018f000000000078".into(),
+                seq: 1,
+                at: 1_785_250_000_001,
+                event_type: "run.started".into(),
+                payload: json!({
+                    "projectId":project.project_id,
+                    "project":project.display_name,
+                    "cwd":project.canonical_path,
+                    "backendSessionId":"valid-recovery-session"
+                }),
+                backend: Backend::Claude,
+                vm: "synthetic-project-a1b2c3d4e5f6".into(),
+            },
+            RunEvent {
+                run_id: run_id.into(),
+                turn_id: "turn-018f000000000078".into(),
+                seq: 2,
+                at: 1_785_250_000_002,
+                event_type: "assistant.delta".into(),
+                payload: json!({"text":"working"}),
+                backend: Backend::Claude,
+                vm: "synthetic-project-a1b2c3d4e5f6".into(),
+            },
+        ] {
+            supervisor.store().append(&event).unwrap();
+        }
+
+        assert_eq!(supervisor.recover().unwrap(), 1);
+        let summary = supervisor.store().summary(run_id).unwrap().unwrap();
+        assert_eq!(summary.state, "interrupted");
+        assert_eq!(summary.last_seq, 3);
+        let attrs = supervisor.host().wait_for_state("interrupted");
+        assert_eq!(attrs["runId"], run_id);
+        assert_eq!(attrs["recovered"], true);
+        assert_eq!(
+            attrs["resumeCommand"],
+            "claude --resume valid-recovery-session"
+        );
+
+        assert_eq!(supervisor.recover().unwrap(), 1);
+        assert_eq!(
+            supervisor
+                .store()
+                .summary(run_id)
+                .unwrap()
+                .unwrap()
+                .last_seq,
+            3,
+            "повторный recovery не дописывает второй interrupted"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

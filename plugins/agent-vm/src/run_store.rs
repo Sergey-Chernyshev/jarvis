@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -12,17 +12,21 @@ use crate::run_event::{Backend, RunEvent};
 pub const MAX_JOURNAL_LINE_BYTES: usize = 1024 * 1024;
 pub const MAX_REPLAY_EVENTS: usize = 256;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RunSummary {
     pub run_id: String,
     pub project_id: String,
+    pub project: String,
     pub cwd: String,
     pub backend: Backend,
     pub vm: String,
     pub backend_session_id: Option<String>,
     pub last_turn_id: String,
     pub last_seq: u64,
+    pub last_at: i64,
     pub state: String,
+    pub files: BTreeMap<String, String>,
+    pub latest_event: RunEvent,
 }
 
 #[derive(Clone)]
@@ -144,13 +148,17 @@ impl RunStore {
             let summary = summary.get_or_insert_with(|| RunSummary {
                 run_id: run_id.into(),
                 project_id: String::new(),
+                project: String::new(),
                 cwd: String::new(),
                 backend: event.backend,
                 vm: event.vm.clone(),
                 backend_session_id: None,
                 last_turn_id: String::new(),
                 last_seq: 0,
+                last_at: event.at,
                 state: "interrupted".into(),
+                files: BTreeMap::new(),
+                latest_event: event.clone(),
             });
             if event.seq <= summary.last_seq {
                 return Err("private run journal содержит non-monotonic seq".into());
@@ -159,12 +167,21 @@ impl RunStore {
             summary.vm = event.vm.clone();
             summary.last_turn_id = event.turn_id.clone();
             summary.last_seq = event.seq;
+            summary.last_at = event.at;
+            summary.latest_event = event.clone();
             if let Some(project_id) = event
                 .payload
                 .get("projectId")
                 .and_then(serde_json::Value::as_str)
             {
                 summary.project_id = project_id.into();
+            }
+            if let Some(project) = event
+                .payload
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+            {
+                summary.project = project.into();
             }
             if let Some(cwd) = event.payload.get("cwd").and_then(serde_json::Value::as_str) {
                 summary.cwd = cwd.into();
@@ -177,6 +194,7 @@ impl RunStore {
             {
                 summary.backend_session_id = Some(session_id.into());
             }
+            collect_changed_files(&mut summary.files, &event);
             summary.state = match event.event_type.as_str() {
                 "question.opened" => "waiting",
                 "result.completed" => "completed",
@@ -196,6 +214,42 @@ impl RunStore {
         Ok(Some(summary))
     }
 
+    pub fn summaries(&self) -> Result<Vec<RunSummary>, String> {
+        self.ensure_root()?;
+        let entries = fs::read_dir(&self.root)
+            .map_err(|_| "не прочитать private runs directory".to_string())?;
+        let mut summaries = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|_| "не прочитать private run entry".to_string())?;
+            let file_type = entry
+                .file_type()
+                .map_err(|_| "не проверить private run entry".to_string())?;
+            if !file_type.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(run_id) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if validate_run_id(run_id).is_err() {
+                continue;
+            }
+            if let Some(summary) = self.summary(run_id)? {
+                summaries.push(summary);
+            }
+        }
+        summaries.sort_by(|left, right| {
+            right
+                .last_at
+                .cmp(&left.last_at)
+                .then_with(|| left.run_id.cmp(&right.run_id))
+        });
+        Ok(summaries)
+    }
+
     fn ensure_root(&self) -> Result<(), String> {
         fs::create_dir_all(&self.root)
             .map_err(|_| "не создать private runs directory".to_string())?;
@@ -211,6 +265,41 @@ impl RunStore {
     fn path(&self, run_id: &str) -> Result<PathBuf, String> {
         validate_run_id(run_id)?;
         Ok(self.root.join(format!("{run_id}.jsonl")))
+    }
+}
+
+fn collect_changed_files(files: &mut BTreeMap<String, String>, event: &RunEvent) {
+    if event.event_type == "file.changed" {
+        if let Some(path) = event
+            .payload
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+        {
+            let change = event
+                .payload
+                .get("change")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("modified");
+            files.insert(path.into(), change.into());
+        }
+    }
+    if event.event_type == "result.completed" {
+        for file in event
+            .payload
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(path) = file.get("path").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let change = file
+                .get("change")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("modified");
+            files.insert(path.into(), change.into());
+        }
     }
 }
 
@@ -447,6 +536,41 @@ mod tests {
         assert_eq!(
             summary.backend_session_id.as_deref(),
             Some("latest-session-300")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn summaries_list_latest_metadata_and_changed_files_for_recovery() {
+        let (root, store) = fixture();
+        for value in [
+            event(
+                1,
+                "run.started",
+                json!({"projectId":"project-a","cwd":"/synthetic/project"}),
+            ),
+            event(
+                2,
+                "file.changed",
+                json!({
+                    "path":"/synthetic/project/smoke.txt",
+                    "relativePath":"smoke.txt",
+                    "change":"created"
+                }),
+            ),
+            event(3, "assistant.delta", json!({"text":"working"})),
+        ] {
+            store.append(&value).unwrap();
+        }
+
+        let summaries = store.summaries().unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].last_at, 1_785_250_000_003);
+        assert_eq!(summaries[0].latest_event.seq, 3);
+        assert_eq!(
+            summaries[0].files.get("/synthetic/project/smoke.txt"),
+            Some(&"created".to_string())
         );
         fs::remove_dir_all(root).unwrap();
     }

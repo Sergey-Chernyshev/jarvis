@@ -3,8 +3,11 @@
 //! Панель (in-process) токена не требует и здесь не резолвится: Consumer::panel()
 //! не выдаётся ни по какому токену (INV-PANEL).
 
-use std::io::Read;
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Value};
 
@@ -19,7 +22,9 @@ pub struct TokenStore {
 
 impl TokenStore {
     pub fn new() -> Self {
-        Self { path: jarvis_dir().join("tokens.json") }
+        Self {
+            path: jarvis_dir().join("tokens.json"),
+        }
     }
 
     #[cfg(test)]
@@ -34,16 +39,43 @@ impl TokenStore {
             .unwrap_or_else(|| json!({}))
     }
 
-    fn write(&self, v: &Value) {
-        use std::os::unix::fs::PermissionsExt;
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+    fn write(&self, v: &Value) -> Result<(), String> {
+        static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent).map_err(|err| format!("не создать каталог токенов: {err}"))?;
+        let file_name = self.path.file_name().unwrap_or_default().to_string_lossy();
+        let temp_path = parent.join(format!(
+            ".{file_name}.tmp-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let bytes = serde_json::to_string_pretty(v)
+            .map_err(|err| format!("не сериализовать токены: {err}"))?
+            + "\n";
+
+        let result = (|| -> Result<(), String> {
+            let mut temp = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp_path)
+                .map_err(|err| format!("не создать временный файл токенов: {err}"))?;
+            temp.write_all(bytes.as_bytes())
+                .map_err(|err| format!("не записать токены: {err}"))?;
+            temp.sync_all()
+                .map_err(|err| format!("не синхронизировать токены: {err}"))?;
+            drop(temp);
+            fs::rename(&temp_path, &self.path)
+                .map_err(|err| format!("не заменить файл токенов: {err}"))?;
+            let _ = File::open(parent).and_then(|dir| dir.sync_all());
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
         }
-        if std::fs::write(&self.path, serde_json::to_string_pretty(v).unwrap_or_default() + "\n")
-            .is_ok()
-        {
-            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
-        }
+        result
     }
 
     /// Сгенерировать/прочитать токен агента (идемпотентно).
@@ -53,9 +85,74 @@ impl TokenStore {
             return t.to_string();
         }
         let tok = gen_token();
-        v.as_object_mut().unwrap().insert("agent".into(), json!(tok));
-        self.write(&v);
+        v.as_object_mut()
+            .unwrap()
+            .insert("agent".into(), json!(tok));
+        if let Err(err) = self.write(&v) {
+            crate::log::line(&format!("[tokens] agent token persist failed: {err}"));
+        }
         tok
+    }
+
+    /// Выпустить или обновить токен внешнего плагина. Identity стабильна между
+    /// рестартами, классы всегда заменяются текущим least-privilege manifest.
+    pub fn ensure_plugin_token(&self, id: &str, classes: &[RiskClass]) -> Result<String, String> {
+        if id.is_empty() {
+            return Err("plugin id обязателен".into());
+        }
+        let mut v = self.read();
+        if !v.is_object() {
+            v = json!({});
+        }
+        let existing = v
+            .get("plugins")
+            .and_then(Value::as_object)
+            .and_then(|plugins| plugins.get(id))
+            .and_then(|entry| entry.get("token"))
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string);
+        let token = existing.unwrap_or_else(gen_token);
+
+        let mut class_names = Vec::new();
+        for class in classes {
+            let allowed = match class {
+                RiskClass::Read => Some("read"),
+                RiskClass::Control => Some("control"),
+                RiskClass::Settings => Some("settings"),
+                RiskClass::Admin => None,
+            };
+            if let Some(name) = allowed {
+                if !class_names.contains(&name) {
+                    class_names.push(name);
+                }
+            }
+        }
+
+        let root = v.as_object_mut().unwrap();
+        let plugins = root.entry("plugins").or_insert_with(|| json!({}));
+        if !plugins.is_object() {
+            *plugins = json!({});
+        }
+        plugins.as_object_mut().unwrap().insert(
+            id.to_string(),
+            json!({ "token": token, "classes": class_names }),
+        );
+        self.write(&v)?;
+        Ok(token)
+    }
+
+    /// Отозвать plugin identity. Повторный revoke безопасен и не трогает agent.
+    pub fn revoke_plugin(&self, id: &str) -> Result<bool, String> {
+        let mut v = self.read();
+        let Some(plugins) = v.get_mut("plugins").and_then(Value::as_object_mut) else {
+            return Ok(false);
+        };
+        let removed = plugins.remove(id).is_some();
+        if removed {
+            self.write(&v)?;
+        }
+        Ok(removed)
     }
 
     /// Резолв токена в потребителя. Неизвестный/пустой → None. panel НИКОГДА.
@@ -153,6 +250,56 @@ mod tests {
         let c = s.resolve("bbbb").expect("плагин резолвится");
         assert_eq!(c.id, "plugin:weather");
         assert!(c.grant.allows(RiskClass::Read));
-        assert!(!c.grant.allows(RiskClass::Control), "least-privilege: только read");
+        assert!(
+            !c.grant.allows(RiskClass::Control),
+            "least-privilege: только read"
+        );
+    }
+
+    #[test]
+    fn plugin_token_is_stable_updates_classes_and_uses_private_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let p = tmp();
+        let s = TokenStore::at(p.clone());
+        let t1 = s
+            .ensure_plugin_token("agent-vm", &[RiskClass::Read])
+            .unwrap();
+        let t2 = s
+            .ensure_plugin_token("agent-vm", &[RiskClass::Read, RiskClass::Control])
+            .unwrap();
+
+        assert_eq!(t1, t2, "повторный выпуск сохраняет identity");
+        let c = s.resolve(&t2).unwrap();
+        assert!(c.grant.allows(RiskClass::Control));
+        assert_eq!(
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn revoke_plugin_invalidates_token_without_touching_agent() {
+        let s = TokenStore::at(tmp());
+        let agent = s.ensure_agent_token();
+        let plugin = s
+            .ensure_plugin_token("agent-vm", &[RiskClass::Read])
+            .unwrap();
+
+        assert!(s.revoke_plugin("agent-vm").unwrap());
+        assert!(s.resolve(&plugin).is_none());
+        assert_eq!(s.resolve(&agent).unwrap().id, "agent");
+        assert!(!s.revoke_plugin("agent-vm").unwrap());
+    }
+
+    #[test]
+    fn plugin_token_never_persists_admin_class() {
+        let s = TokenStore::at(tmp());
+        let token = s
+            .ensure_plugin_token("agent-vm", &[RiskClass::Read, RiskClass::Admin])
+            .unwrap();
+
+        let c = s.resolve(&token).unwrap();
+        assert!(!c.grant.allows(RiskClass::Admin));
     }
 }

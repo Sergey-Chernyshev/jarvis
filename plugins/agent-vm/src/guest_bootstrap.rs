@@ -348,10 +348,13 @@ pub fn bootstrap_spec(
     if record.workspace.mode_name != "mount" {
         return Err("GuestBootstrap поддерживает только project mount".into());
     }
-    let expected_home = PathBuf::from("/home").join(&record.user);
     if !is_safe_guest_workspace(&record.user, &record.workspace.guest_path) {
         return Err("VM record содержит unsafe guest workspace".into());
     }
+    let expected_home = Path::new(&record.workspace.guest_path)
+        .parent()
+        .ok_or_else(|| "VM record не содержит guest home".to_string())?
+        .to_path_buf();
     validate_archive(&bundle.archive)?;
     Ok(CommandSpec {
         program: limactl.to_path_buf(),
@@ -879,7 +882,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(spec.args.iter().any(|value| value == "/home/dev"));
+        assert!(spec.args.iter().any(|value| value == "/home/dev.guest"));
     }
 
     #[test]

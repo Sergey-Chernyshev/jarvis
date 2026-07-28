@@ -7,6 +7,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use jarvis_agent_vm_plugin::runner::{CommandRunner, CommandSpec, SystemRunner};
+use jarvis_agent_vm_plugin::runtime_paths::RuntimePaths;
+use jarvis_agent_vm_plugin::service::{AgentVmService, Toolchain};
 use serde_json::{json, Value};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -148,4 +151,66 @@ fn real_sidecar_handshakes_polls_and_publishes_inventory_operation() {
         "healthy sidecar stays silent"
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+/// Local-only credential smoke against an already managed project VM. The
+/// assertions inspect only status, type, mode and forbidden key names; secret
+/// values never leave the private bootstrap pipe or guest credential file.
+#[test]
+#[ignore = "requires JARVIS_AGENT_VM_LIVE_SOCKET, JARVIS_AGENT_VM_LIVE_CWD and a running managed VM"]
+fn real_existing_vm_bootstraps_standard_claude_login_privately() {
+    let socket = std::env::var_os("JARVIS_AGENT_VM_LIVE_SOCKET")
+        .map(PathBuf::from)
+        .expect("JARVIS_AGENT_VM_LIVE_SOCKET is required");
+    let cwd = std::env::var_os("JARVIS_AGENT_VM_LIVE_CWD")
+        .map(PathBuf::from)
+        .expect("JARVIS_AGENT_VM_LIVE_CWD is required");
+    let paths = RuntimePaths::from_socket(&socket).unwrap();
+    let tools = Toolchain::discover().unwrap();
+    let service =
+        AgentVmService::with_system_bootstrap(SystemRunner, paths.clone(), tools.clone()).unwrap();
+
+    let snapshot = service.ensure(&cwd).unwrap();
+    let environment = snapshot.environment.as_ref().expect("bootstrap status");
+    assert_eq!(environment.credentials.claude, "ready");
+    let record = snapshot
+        .vm
+        .as_ref()
+        .and_then(|vm| vm.record.as_ref())
+        .expect("managed VM record");
+    let guest_home = PathBuf::from(&record.workspace.guest_path)
+        .parent()
+        .expect("guest workspace parent")
+        .to_path_buf();
+    let result = SystemRunner
+        .run(&CommandSpec {
+            program: tools.limactl,
+            args: vec![
+                "shell".into(),
+                "--tty=false".into(),
+                "--workdir".into(),
+                "/".into(),
+                record.name.clone(),
+                "--".into(),
+                "/bin/bash".into(),
+                "-ceu".into(),
+                r#"
+credential="$1/.claude/.credentials.json"
+test -f "$credential"
+test ! -L "$credential"
+test "$(stat -c '%a' "$credential")" = "600"
+! grep -q '"mcpOAuth"' "$credential"
+"#
+                .into(),
+                "jarvis-live-smoke".into(),
+                guest_home.to_string_lossy().into_owned(),
+            ],
+            cwd: None,
+            env: paths.command_env(),
+            stdin: None,
+        })
+        .unwrap()
+        .success_or_error("private Claude credential validation")
+        .unwrap();
+    assert_eq!(result.status, 0);
 }

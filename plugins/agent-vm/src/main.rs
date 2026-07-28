@@ -32,7 +32,12 @@ fn run() -> Result<(), String> {
     let service =
         AgentVmService::with_system_bootstrap(SystemRunner, paths.clone(), tools.clone())?;
     let executor = Arc::new(SystemTurnExecutor::new(tools.limactl, paths.command_env()));
-    let supervisor = RunSupervisor::new(host.clone(), RunStore::new(paths.runs_root), executor);
+    let supervisor = RunSupervisor::new(
+        host.clone(),
+        RunStore::new(paths.runs_root.clone()),
+        executor,
+    )
+    .with_runtime_paths(paths);
     let mut dispatcher = Dispatcher::with_supervisor(service, host.clone(), supervisor.clone());
     dispatcher.refresh_inventory()?;
     supervisor.recover()?;

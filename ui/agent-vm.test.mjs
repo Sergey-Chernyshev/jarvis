@@ -88,6 +88,95 @@ test('active environments rank waiting and working ahead of ready VMs', () => {
   assert.deepEqual(active.map((item) => item.uiState), ['waiting', 'working', 'ready']);
 });
 
+test('a run cannot report working before its project VM exists', () => {
+  const startingRun = run('cold-start', 'starting', {
+    projectId: 'p-cold',
+    cwd: '/p/cold',
+    backend: 'claude',
+  });
+  const workingRun = run('warm-run', 'working', {
+    projectId: 'p-warm',
+    cwd: '/p/warm',
+    backend: 'codex',
+  });
+
+  assert.equal(AgentVm.environmentState(null, startingRun), 'starting');
+  assert.equal(AgentVm.environmentState(null, workingRun), 'starting');
+  assert.equal(
+    AgentVm.environmentState(
+      vm('warm', 'running', { projectId: 'p-warm', cwd: '/p/warm' }),
+      workingRun,
+    ),
+    'working',
+  );
+});
+
+test('a failed pre-session run is not reused but an active or resumable run is', () => {
+  assert.equal(
+    AgentVm.continuationRunId(
+      run('failed-before-start', 'failed', { backend: 'claude' }),
+      'claude',
+      'failed-before-start',
+    ),
+    '',
+  );
+  assert.equal(
+    AgentVm.continuationRunId(
+      run('active', 'working', { backend: 'claude' }),
+      'claude',
+      'active',
+    ),
+    'active',
+  );
+  assert.equal(
+    AgentVm.continuationRunId(
+      run('completed', 'completed', {
+        backend: 'claude',
+        backendSessionId: 'session-safe-1',
+      }),
+      'claude',
+      'completed',
+    ),
+    'completed',
+  );
+  assert.equal(
+    AgentVm.continuationRunId(
+      run('other-backend', 'working', { backend: 'codex' }),
+      'claude',
+      'other-backend',
+    ),
+    '',
+  );
+});
+
+test('configured backends follow VM modules and default only before a record exists', () => {
+  assert.deepEqual(AgentVm.configuredBackends(null), ['claude', 'codex']);
+  assert.deepEqual(
+    AgentVm.configuredBackends(vm('not-created', 'absent', {
+      management: 'missing',
+      modules: [],
+    })),
+    ['claude', 'codex'],
+  );
+  assert.deepEqual(
+    AgentVm.configuredBackends(vm('claude-only', 'running', {
+      modules: ['node', 'go', 'claude'],
+    })),
+    ['claude'],
+  );
+  assert.deepEqual(
+    AgentVm.configuredBackends(vm('no-agents', 'running', { modules: ['node', 'go'] })),
+    [],
+  );
+  assert.equal(
+    AgentVm.backendAvailable(
+      vm('claude-only', 'running', { modules: ['node', 'claude'] }),
+      'codex',
+    ),
+    false,
+  );
+});
+
 test('run reducer deduplicates replay/live events and builds turns, tools, files and result', () => {
   const event = (seq, turnId, type, payload = {}) => ({
     runId: 'run-1',
@@ -151,6 +240,63 @@ test('operation lookup returns only terminal responses for the matching request'
   });
 });
 
+test('plugin runtime status exposes handshake, retry countdown and connected phases', () => {
+  const now = 100_000;
+
+  assert.deepEqual(
+    AgentVm.pluginRuntimeStatus({
+      enabled: true,
+      status: {
+        state: 'starting',
+        startedAt: 95_000,
+        handshakeDeadline: 105_000,
+        restartAttempt: 0,
+      },
+    }, now),
+    {
+      state: 'starting',
+      tone: 'starting',
+      step: 1,
+      label: 'Handshake с Jarvis',
+      detail: '5с · таймаут через 5с',
+      retryable: false,
+    },
+  );
+  assert.deepEqual(
+    AgentVm.pluginRuntimeStatus({
+      enabled: true,
+      status: {
+        state: 'backoff',
+        retryAt: 104_200,
+        restartAttempt: 3,
+        error: 'plugin process exited with code 1',
+      },
+    }, now),
+    {
+      state: 'backoff',
+      tone: 'waiting',
+      step: 0,
+      label: 'Повтор через 5с',
+      detail: 'Попытка 3 · plugin process exited with code 1',
+      retryable: true,
+    },
+  );
+  assert.deepEqual(
+    AgentVm.pluginRuntimeStatus({
+      enabled: true,
+      status: { state: 'running', registeredAt: 99_900, restartAttempt: 0 },
+    }, now),
+    {
+      state: 'running',
+      tone: 'ready',
+      step: 2,
+      label: 'Agent VM подключена',
+      detail: 'Sidecar online',
+      retryable: false,
+    },
+  );
+});
+
 test('main panel exposes Agent VM workspace, bridge and keyboard contract', () => {
   const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
   const bridge = readFileSync(new URL('./bridge.js', import.meta.url), 'utf8');
@@ -174,4 +320,6 @@ test('main panel exposes Agent VM workspace, bridge and keyboard contract', () =
   assert.match(renderer, /runtime\.replay/);
   assert.match(renderer, /onOpenAgentVm/);
   assert.match(renderer, /requestedRunId/);
+  assert.match(renderer, /renderAgentVmRuntimeStatus/);
+  assert.match(renderer, /const busy = \['starting', 'working', 'waiting'\]/);
 });

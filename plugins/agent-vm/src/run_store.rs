@@ -11,6 +11,7 @@ use crate::run_event::{Backend, RunEvent};
 
 pub const MAX_JOURNAL_LINE_BYTES: usize = 1024 * 1024;
 pub const MAX_REPLAY_EVENTS: usize = 256;
+const MISSING_PROJECT_METADATA: &str = "private run journal не содержит project metadata";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunSummary {
@@ -209,7 +210,7 @@ impl RunStore {
             return Ok(None);
         };
         if summary.project_id.is_empty() || summary.cwd.is_empty() {
-            return Err("private run journal не содержит project metadata".into());
+            return Err(MISSING_PROJECT_METADATA.into());
         }
         Ok(Some(summary))
     }
@@ -237,8 +238,11 @@ impl RunStore {
             if validate_run_id(run_id).is_err() {
                 continue;
             }
-            if let Some(summary) = self.summary(run_id)? {
-                summaries.push(summary);
+            match self.summary(run_id) {
+                Ok(Some(summary)) => summaries.push(summary),
+                Ok(None) => {}
+                Err(error) if error == MISSING_PROJECT_METADATA => {}
+                Err(error) => return Err(error),
             }
         }
         summaries.sort_by(|left, right| {
@@ -504,6 +508,25 @@ mod tests {
         );
         assert_eq!(summary.state, "completed");
         assert_eq!(summary.last_seq, 3);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_skips_legacy_terminal_journal_without_project_metadata() {
+        let (root, store) = fixture();
+        store
+            .append(&event(
+                1,
+                "run.failed",
+                json!({"error":"synthetic setup failure"}),
+            ))
+            .unwrap();
+
+        assert!(store.summaries().unwrap().is_empty());
+        assert!(store
+            .summary("run-018f000000000001")
+            .unwrap_err()
+            .contains("project metadata"));
         fs::remove_dir_all(root).unwrap();
     }
 

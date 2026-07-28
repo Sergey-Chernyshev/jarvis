@@ -1462,6 +1462,101 @@
     color: var(--text);
   }
   .pm-subtitle { margin-left: 9px; font-size: 11px; color: var(--faint); }
+  .pm-runtime {
+    display: grid;
+    grid-template-columns: 8px minmax(132px, 1fr) auto auto;
+    align-items: center;
+    gap: 10px;
+    min-height: 42px;
+    margin: 0 7px 9px;
+    padding: 9px 10px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, .075);
+    border-radius: 11px;
+    background:
+      linear-gradient(110deg, rgba(155, 138, 251, .08), rgba(255, 255, 255, .025) 52%),
+      rgba(12, 12, 17, .5);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+  }
+  .pm-runtime.ready {
+    border-color: rgba(113, 202, 158, .16);
+    background:
+      linear-gradient(110deg, rgba(113, 202, 158, .075), rgba(255, 255, 255, .02) 52%),
+      rgba(12, 12, 17, .5);
+  }
+  .pm-runtime.waiting { border-color: rgba(242, 163, 60, .18); }
+  .pm-runtime.error { border-color: rgba(230, 106, 114, .2); }
+  .pm-runtime-signal {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--faint);
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, .025);
+  }
+  .pm-runtime.ready .pm-runtime-signal {
+    background: #71ca9e;
+    box-shadow: 0 0 0 3px rgba(113, 202, 158, .09), 0 0 12px rgba(113, 202, 158, .22);
+  }
+  .pm-runtime.starting .pm-runtime-signal {
+    background: var(--vm);
+    box-shadow: 0 0 0 3px rgba(155, 138, 251, .1), 0 0 12px rgba(155, 138, 251, .2);
+    animation: vmPulse 1.15s ease-in-out infinite;
+  }
+  .pm-runtime.waiting .pm-runtime-signal {
+    background: var(--waiting);
+    animation: vmPulse 1.5s ease-in-out infinite;
+  }
+  .pm-runtime.error .pm-runtime-signal { background: var(--danger); }
+  .pm-runtime-copy {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .pm-runtime-copy strong {
+    overflow: hidden;
+    color: var(--text);
+    font-size: 11.5px;
+    font-weight: 610;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pm-runtime-copy small {
+    overflow: hidden;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pm-runtime-steps {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+  }
+  .pm-runtime-step {
+    position: relative;
+    color: rgba(255, 255, 255, .24);
+    font-family: var(--mono);
+    font-size: 8.5px;
+    white-space: nowrap;
+  }
+  .pm-runtime-step + .pm-runtime-step::before {
+    position: absolute;
+    top: 50%;
+    right: calc(100% + 3px);
+    width: 5px;
+    height: 1px;
+    background: rgba(255, 255, 255, .13);
+    content: "";
+  }
+  .pm-runtime-step.done { color: rgba(185, 173, 255, .82); }
+  .pm-runtime.ready .pm-runtime-step.done { color: rgba(154, 222, 188, .88); }
+  .pm-runtime-step.active {
+    color: var(--text);
+    text-shadow: 0 0 9px rgba(155, 138, 251, .35);
+  }
+  .pm-runtime > .vm-button { justify-self: end; white-space: nowrap; }
   .pm-card {
     position: relative;
     display: grid;
@@ -1871,6 +1966,10 @@
   .vm-agent-option.active {
     background: rgba(155, 138, 251, .14);
     color: #d4ceff;
+  }
+  .vm-agent-option:disabled {
+    cursor: not-allowed;
+    opacity: .34;
   }
   .vmws-prompt {
     width: 100%;

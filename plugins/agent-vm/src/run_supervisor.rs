@@ -16,6 +16,7 @@ use crate::run_executor::{
     validate_backend_session_id, BackendEventSink, ExecutionOutcome, TurnExecution, TurnExecutor,
 };
 use crate::run_store::{validate_run_id, RunStore, RunSummary};
+use crate::runtime_paths::RuntimePaths;
 use crate::service::{RuntimeService, RuntimeSnapshot};
 
 const DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(60);
@@ -70,6 +71,7 @@ pub struct RunSupervisor<H: HostApi> {
     store: RunStore,
     executor: Arc<dyn TurnExecutor>,
     active: Arc<Mutex<HashMap<String, ActiveRun>>>,
+    runtime_paths: Option<RuntimePaths>,
 }
 
 impl<H: HostApi> Clone for RunSupervisor<H> {
@@ -79,6 +81,7 @@ impl<H: HostApi> Clone for RunSupervisor<H> {
             store: self.store.clone(),
             executor: self.executor.clone(),
             active: self.active.clone(),
+            runtime_paths: self.runtime_paths.clone(),
         }
     }
 }
@@ -90,7 +93,20 @@ impl<H: HostApi> RunSupervisor<H> {
             store,
             executor,
             active: Arc::new(Mutex::new(HashMap::new())),
+            runtime_paths: None,
         }
+    }
+
+    pub fn with_runtime_paths(mut self, paths: RuntimePaths) -> Self {
+        self.runtime_paths = Some(paths);
+        self
+    }
+
+    fn shell_command(&self, vm_name: &str) -> String {
+        self.runtime_paths
+            .as_ref()
+            .map(|paths| paths.shell_command(vm_name, true))
+            .unwrap_or_else(|| format!("avm shell {vm_name}"))
     }
 
     pub fn submit<S: RuntimeService>(
@@ -203,7 +219,16 @@ impl<H: HostApi> RunSupervisor<H> {
             .is_err()
         {
             self.active.lock().unwrap().remove(&project.project_id);
-            let mut attrs = base_attrs(&project, &run_id, backend, &project.vm_name, None, false);
+            let shell_command = self.shell_command(&project.vm_name);
+            let mut attrs = base_attrs(
+                &project,
+                &run_id,
+                backend,
+                &project.vm_name,
+                &shell_command,
+                None,
+                false,
+            );
             if let Some(fields) = attrs.as_object_mut() {
                 fields.insert(
                     "error".into(),
@@ -262,7 +287,7 @@ impl<H: HostApi> RunSupervisor<H> {
         Ok(json!({
             "runId":run_id,
             "backend":summary.backend,
-            "shellCommand":format!("avm shell {}", summary.vm),
+            "shellCommand":self.shell_command(&summary.vm),
             "resumeCommand":summary
                 .backend_session_id
                 .as_deref()
@@ -343,7 +368,7 @@ impl<H: HostApi> RunSupervisor<H> {
             "vmName":summary.vm,
             "backend":summary.backend,
             "backendSessionId":summary.backend_session_id,
-            "shellCommand":format!("avm shell {}", summary.vm),
+            "shellCommand":self.shell_command(&summary.vm),
             "resumeCommand":summary
                 .backend_session_id
                 .as_deref()
@@ -407,6 +432,7 @@ impl<H: HostApi> RunSupervisor<H> {
             project.clone(),
             backend,
             project.vm_name.clone(),
+            self.shell_command(&project.vm_name),
             initial_seq,
             backend_session_id.clone(),
         );
@@ -435,6 +461,29 @@ impl<H: HostApi> RunSupervisor<H> {
             return;
         };
         publisher.vm_name = record.name.clone();
+        publisher.shell_command = self.shell_command(&record.name);
+        if !record
+            .modules
+            .iter()
+            .any(|module| module == backend.as_str())
+        {
+            let backend_name = match backend {
+                Backend::Claude => "Claude",
+                Backend::Codex => "Codex",
+            };
+            let _ = publisher.emit(
+                &turn.turn_id,
+                "run.failed",
+                json!({
+                    "error":format!(
+                        "{backend_name} не установлен в этой VM. Добавьте модуль в .agent-vm.yaml и пересоздайте VM"
+                    )
+                }),
+                "failed",
+            );
+            self.active.lock().unwrap().remove(&project.project_id);
+            return;
+        }
         {
             if let Some(active) = self.active.lock().unwrap().get_mut(&project.project_id) {
                 active.vm_name = Some(record.name.clone());
@@ -595,6 +644,7 @@ impl<H: HostApi> RunSupervisor<H> {
                 run_id,
                 backend,
                 vm_name,
+                &self.shell_command(vm_name),
                 backend_session_id,
                 queued,
             ),
@@ -793,6 +843,7 @@ struct RunPublisher<H: HostApi> {
     project: ProjectIdentity,
     backend: Backend,
     vm_name: String,
+    shell_command: String,
     seq: u64,
     turn_id: String,
     backend_session_id: Option<String>,
@@ -808,6 +859,7 @@ impl<H: HostApi> RunPublisher<H> {
         project: ProjectIdentity,
         backend: Backend,
         vm_name: String,
+        shell_command: String,
         seq: u64,
         backend_session_id: Option<String>,
     ) -> Self {
@@ -818,6 +870,7 @@ impl<H: HostApi> RunPublisher<H> {
             project,
             backend,
             vm_name,
+            shell_command,
             seq,
             turn_id: String::new(),
             backend_session_id,
@@ -839,9 +892,24 @@ impl<H: HostApi> RunPublisher<H> {
     fn emit_current(
         &mut self,
         event_type: &str,
-        payload: Value,
+        mut payload: Value,
         state: &str,
     ) -> Result<(), String> {
+        let payload_fields = payload
+            .as_object_mut()
+            .ok_or_else(|| "run event payload должен быть object".to_string())?;
+        payload_fields.insert(
+            "projectId".into(),
+            Value::String(self.project.project_id.clone()),
+        );
+        payload_fields.insert(
+            "project".into(),
+            Value::String(self.project.display_name.clone()),
+        );
+        payload_fields.insert(
+            "cwd".into(),
+            Value::String(self.project.canonical_path.to_string_lossy().into_owned()),
+        );
         let next_seq = self
             .seq
             .checked_add(1)
@@ -863,6 +931,7 @@ impl<H: HostApi> RunPublisher<H> {
             &self.run_id,
             self.backend,
             &self.vm_name,
+            &self.shell_command,
             self.backend_session_id.as_deref(),
             false,
         );
@@ -903,6 +972,7 @@ fn base_attrs(
     run_id: &str,
     backend: Backend,
     vm_name: &str,
+    shell_command: &str,
     backend_session_id: Option<&str>,
     queued: bool,
 ) -> Value {
@@ -914,7 +984,7 @@ fn base_attrs(
         "vmName":vm_name,
         "backend":backend,
         "backendSessionId":backend_session_id,
-        "shellCommand":format!("avm shell {vm_name}"),
+        "shellCommand":shell_command,
         "resumeCommand":backend_session_id.and_then(|id| terminal_resume_command(backend, id)),
         "queued":queued
     })
@@ -926,6 +996,7 @@ fn publish_vm_snapshot<H: HostApi>(host: &H, snapshot: &RuntimeSnapshot) -> Resu
         .as_ref()
         .map(|vm| vm.state.as_str())
         .unwrap_or("absent");
+    let record = snapshot.vm.as_ref().and_then(|vm| vm.record.as_ref());
     host.publish_entity(
         "upsert",
         "vm",
@@ -937,7 +1008,11 @@ fn publish_vm_snapshot<H: HostApi>(host: &H, snapshot: &RuntimeSnapshot) -> Resu
             "cwd":snapshot.cwd,
             "shellCommand":snapshot.shell_command,
             "environment":snapshot.environment,
-            "management":snapshot.vm.as_ref().map(|vm| vm.management.as_str()).unwrap_or("missing")
+            "management":snapshot.vm.as_ref().map(|vm| vm.management.as_str()).unwrap_or("missing"),
+            "guestWorkspace":record.map(|record| record.workspace.guest_path.as_str()).unwrap_or(""),
+            "modules":record.map(|record| record.modules.as_slice()).unwrap_or(&[]),
+            "resources":record.map(|record| &record.resources),
+            "createdSpec":snapshot.created_spec
         }),
     )
 }
@@ -1241,6 +1316,7 @@ mod tests {
     #[derive(Clone)]
     struct FakeService {
         project: PathBuf,
+        modules: Vec<String>,
     }
 
     impl FakeService {
@@ -1258,7 +1334,7 @@ mod tests {
                     record: Some(VmRecord {
                         name: "synthetic-project-a1b2c3d4e5f6".into(),
                         source: "project".into(),
-                        modules: vec!["claude".into(), "codex".into()],
+                        modules: self.modules.clone(),
                         resources: VmResources::default(),
                         user: "dev".into(),
                         workspace: VmWorkspace {
@@ -1315,8 +1391,30 @@ mod tests {
         let supervisor = RunSupervisor::new(host, store, Arc::new(executor));
         let service = FakeService {
             project: project.clone(),
+            modules: vec!["claude".into(), "codex".into()],
         };
         (root, supervisor, service)
+    }
+
+    #[test]
+    fn run_snapshot_keeps_modules_and_resources_for_the_ui() {
+        let (root, supervisor, service) = fixture("snapshot-attrs", FakeExecutor::default());
+        let snapshot = service.snapshot();
+
+        publish_vm_snapshot(supervisor.host(), &snapshot).unwrap();
+
+        let publications = supervisor.host().publications.0.lock().unwrap();
+        let (_, state, attrs) = publications
+            .iter()
+            .rev()
+            .find(|(kind, _, _)| kind == "vm")
+            .unwrap();
+        assert_eq!(state, "running");
+        assert_eq!(attrs["modules"], json!(["claude", "codex"]));
+        assert!(attrs["resources"].is_object());
+        assert_eq!(attrs["guestWorkspace"], "/home/dev/synthetic-project");
+        drop(publications);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1365,6 +1463,68 @@ mod tests {
                 .join("smoke.txt")
                 .to_string_lossy())
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn earliest_failure_event_is_recoverable_with_project_metadata() {
+        let executor = FakeExecutor::default();
+        let (root, supervisor, _) = fixture("early-failure", executor);
+        let project = ProjectIdentity::from_path(&root.join("synthetic-project")).unwrap();
+        let run_id = "run-018f000000000091";
+        let turn_id = "turn-018f000000000092";
+        let mut publisher = RunPublisher::new(
+            supervisor.host().clone(),
+            supervisor.store().clone(),
+            run_id.into(),
+            project.clone(),
+            Backend::Claude,
+            project.vm_name.clone(),
+            "avm shell synthetic".into(),
+            0,
+            None,
+        );
+
+        publisher
+            .emit(
+                turn_id,
+                "run.failed",
+                json!({"error":"synthetic environment failure"}),
+                "failed",
+            )
+            .unwrap();
+
+        let summary = supervisor.store().summary(run_id).unwrap().unwrap();
+        assert_eq!(summary.project_id, project.project_id);
+        assert_eq!(Path::new(&summary.cwd), project.canonical_path.as_path());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn absent_backend_module_fails_before_agent_execution() {
+        let executor = FakeExecutor::default();
+        let (root, supervisor, mut service) = fixture("missing-module", executor.clone());
+        service.modules = vec!["claude".into()];
+
+        supervisor
+            .submit(
+                service,
+                SendRequest {
+                    cwd: root.join("synthetic-project"),
+                    project_id: None,
+                    backend: Backend::Codex,
+                    run_id: None,
+                    message: "не запускать".into(),
+                },
+            )
+            .unwrap();
+
+        let attrs = supervisor.host().wait_for_state("failed");
+        assert!(attrs["latestEvent"]["payload"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Codex"));
+        assert!(executor.state.0.lock().unwrap().calls.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 

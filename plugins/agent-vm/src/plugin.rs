@@ -371,12 +371,12 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
                     "guestWorkspace": record.workspace.guest_path,
                     "modules": record.modules,
                     "resources": record.resources,
-                    "shellCommand": format!("avm shell {}", vm.name)
+                    "shellCommand": self.service.shell_command(&vm.name, true)
                 })
             }
             None => json!({
                 "management": vm.management,
-                "shellCommand": format!("limactl shell {}", vm.name)
+                "shellCommand": self.service.shell_command(&vm.name, false)
             }),
         };
         self.host

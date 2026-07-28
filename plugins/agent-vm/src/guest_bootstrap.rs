@@ -10,7 +10,7 @@ use tar::{Builder, EntryType, Header};
 use zeroize::Zeroize;
 
 use crate::config_mirror::ConfigSnapshot;
-use crate::inventory::VmRecord;
+use crate::inventory::{is_safe_guest_workspace, VmRecord};
 use crate::project::is_valid_vm_name;
 use crate::runner::{CommandRunner, CommandSpec};
 
@@ -294,14 +294,8 @@ pub fn bootstrap_spec(
     if record.workspace.mode_name != "mount" {
         return Err("GuestBootstrap поддерживает только project mount".into());
     }
-    let workspace = Path::new(&record.workspace.guest_path);
     let expected_home = PathBuf::from("/home").join(&record.user);
-    if !workspace.is_absolute()
-        || workspace.parent() != Some(expected_home.as_path())
-        || workspace
-            .components()
-            .any(|part| matches!(part, Component::ParentDir))
-    {
+    if !is_safe_guest_workspace(&record.user, &record.workspace.guest_path) {
         return Err("VM record содержит unsafe guest workspace".into());
     }
     validate_archive(&bundle.archive)?;
@@ -699,6 +693,30 @@ mod tests {
             .windows(b"SYNTHETIC_PRIVATE_VALUE".len())
             .any(|part| part == b"SYNTHETIC_PRIVATE_VALUE"));
         assert_eq!(spec.cwd, None);
+    }
+
+    #[test]
+    fn bootstrap_accepts_agent_vm_guest_mount_home() {
+        let mut guest_mount = record();
+        guest_mount.workspace.guest_path = "/home/dev.guest/synthetic-project-a1b2c3d4e5f6".into();
+        let bundle = build_bundle(
+            &snapshot(),
+            &MemorySecretStore::default(),
+            None,
+            &LoadedCodexCredential::file(None),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        let spec = bootstrap_spec(
+            Path::new("/synthetic/bin/limactl"),
+            &BTreeMap::new(),
+            &guest_mount,
+            bundle,
+        )
+        .unwrap();
+
+        assert!(spec.args.iter().any(|value| value == "/home/dev"));
     }
 
     #[test]

@@ -73,6 +73,36 @@
     );
   }
 
+  function continuationRunId(run, backend, selectedRunId) {
+    if (!run || !['starting', 'working', 'waiting'].includes(run.state)
+      && !asString(asObject(run.attrs).backendSessionId)) {
+      return '';
+    }
+    const attrs = asObject(run.attrs);
+    const runId = asString(selectedRunId);
+    if (!runId || asString(attrs.runId) !== runId || asString(attrs.backend) !== backend) {
+      return '';
+    }
+    return runId;
+  }
+
+  function configuredBackends(vm) {
+    if (!vm) return ['claude', 'codex'];
+    const attrs = asObject(vm.attrs);
+    if (asString(attrs.management) === 'missing') {
+      return ['claude', 'codex'];
+    }
+    if (!Object.prototype.hasOwnProperty.call(attrs, 'modules')) {
+      return ['claude', 'codex'];
+    }
+    const modules = Array.isArray(attrs.modules) ? attrs.modules : [];
+    return ['claude', 'codex'].filter((backend) => modules.includes(backend));
+  }
+
+  function backendAvailable(vm, backend) {
+    return configuredBackends(vm).includes(backend);
+  }
+
   function deriveProjects(history, entities) {
     const byCwd = new Map();
     for (const group of Array.isArray(history) ? history : []) {
@@ -139,17 +169,121 @@
   }
 
   function environmentState(vmEntity, runEntity) {
-    if (runEntity && !runEntity.stale) {
-      if (runEntity.state === 'waiting') return 'waiting';
-      if (['starting', 'working'].includes(runEntity.state)) return 'working';
-      if (['failed', 'error', 'interrupted'].includes(runEntity.state)) return 'error';
-    }
+    if (runEntity && !runEntity.stale
+      && ['failed', 'error', 'interrupted'].includes(runEntity.state)) return 'error';
     if (vmEntity && vmEntity.stale) return 'reconnecting';
     const state = vmEntity ? vmEntity.state : 'absent';
     if (['provisioning', 'creating', 'starting'].includes(state)) return 'starting';
     if (state === 'error') return 'error';
-    if (['running', 'ready', 'working'].includes(state)) return 'ready';
-    return 'off';
+    if (!['running', 'ready', 'working'].includes(state)) {
+      return runEntity && !runEntity.stale
+        && ['starting', 'working', 'waiting'].includes(runEntity.state)
+        ? 'starting'
+        : 'off';
+    }
+    if (runEntity && !runEntity.stale) {
+      if (runEntity.state === 'waiting') return 'waiting';
+      if (['starting', 'working'].includes(runEntity.state)) return 'working';
+    }
+    return 'ready';
+  }
+
+  function pluginRuntimeStatus(plugin, now = Date.now()) {
+    if (!plugin) {
+      return {
+        state: 'missing',
+        tone: 'error',
+        step: 0,
+        label: 'Agent VM не найдена',
+        detail: 'Пакет sidecar недоступен',
+        retryable: false,
+      };
+    }
+    if (!plugin.enabled) {
+      return {
+        state: 'stopped',
+        tone: 'off',
+        step: 0,
+        label: 'Agent VM выключена',
+        detail: 'Включите плагин в настройках',
+        retryable: false,
+      };
+    }
+
+    const status = asObject(plugin.status);
+    const state = asString(status.state) || 'stopped';
+    const error = asString(status.error).replace(/\s+/g, ' ').trim().slice(0, 180);
+    if (state === 'running') {
+      return {
+        state,
+        tone: 'ready',
+        step: 2,
+        label: 'Agent VM подключена',
+        detail: 'Sidecar online',
+        retryable: false,
+      };
+    }
+    if (state === 'starting') {
+      const startedAt = Number(status.startedAt);
+      const deadline = Number(status.handshakeDeadline);
+      const elapsed = startedAt > 0
+        ? `${Math.max(0, Math.ceil((now - startedAt) / 1000))}с`
+        : 'Sidecar запущен';
+      const timeout = deadline > 0
+        ? `таймаут через ${Math.max(0, Math.ceil((deadline - now) / 1000))}с`
+        : 'ожидаю регистрацию';
+      return {
+        state,
+        tone: 'starting',
+        step: 1,
+        label: 'Handshake с Jarvis',
+        detail: `${elapsed} · ${timeout}`,
+        retryable: false,
+      };
+    }
+    if (state === 'backoff') {
+      const retryAt = Number(status.retryAt);
+      const retryIn = retryAt > 0
+        ? Math.max(0, Math.ceil((retryAt - now) / 1000))
+        : Math.max(0, Math.ceil(Number(status.retryInMs) / 1000));
+      const attempt = Math.max(1, Number(status.restartAttempt) || 1);
+      return {
+        state,
+        tone: 'waiting',
+        step: 0,
+        label: `Повтор через ${retryIn}с`,
+        detail: `Попытка ${attempt}${error ? ` · ${error}` : ''}`,
+        retryable: true,
+      };
+    }
+    if (state === 'incompatible') {
+      return {
+        state,
+        tone: 'error',
+        step: 1,
+        label: 'Несовместимая версия',
+        detail: error || 'Обновите Jarvis и Agent VM sidecar',
+        retryable: false,
+      };
+    }
+    if (state === 'error') {
+      return {
+        state,
+        tone: 'error',
+        step: 0,
+        label: 'Ошибка запуска',
+        detail: error || 'Sidecar не удалось запустить',
+        retryable: true,
+      };
+    }
+    return {
+      state,
+      tone: 'starting',
+      step: 0,
+      label: 'Запускаю sidecar',
+      detail: 'Ожидание supervisor',
+      retryable: false,
+    };
   }
 
   function activeEnvironments(entities) {
@@ -367,10 +501,14 @@
   return {
     OWNER,
     activeEnvironments,
+    backendAvailable,
+    configuredBackends,
+    continuationRunId,
     deriveProjects,
     environmentState,
     mergeEvents,
     operationResult,
+    pluginRuntimeStatus,
     reduceRun,
     runSummary,
     stateLabel,

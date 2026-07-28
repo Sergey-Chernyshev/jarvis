@@ -330,6 +330,11 @@ impl PluginHost {
                         "pid": slot.runtime.pid,
                         "protocolVersion": slot.package.manifest.protocol_version,
                         "retryInMs": retry_in_ms,
+                        "startedAt": slot.runtime.started_at_ms,
+                        "registeredAt": slot.runtime.registered_at_ms,
+                        "handshakeDeadline": slot.runtime.handshake_deadline_ms,
+                        "retryAt": slot.runtime.retry_at_ms,
+                        "restartAttempt": slot.runtime.restart_attempt,
                         "error": slot.runtime.last_error,
                     }
                 })
@@ -359,6 +364,11 @@ impl PluginHost {
                     "pid": Value::Null,
                     "protocolVersion": manifest::PROTOCOL_VERSION,
                     "retryInMs": Value::Null,
+                    "startedAt": Value::Null,
+                    "registeredAt": Value::Null,
+                    "handshakeDeadline": Value::Null,
+                    "retryAt": Value::Null,
+                    "restartAttempt": 0,
                     "error": err.message,
                 }
             }));
@@ -818,6 +828,9 @@ mod tests {
         let statuses = host.statuses(1_000);
         assert_eq!(statuses[0]["status"]["state"], "starting");
         assert_eq!(statuses[0]["status"]["pid"], 4242);
+        assert_eq!(statuses[0]["status"]["startedAt"], 1_000);
+        assert_eq!(statuses[0]["status"]["handshakeDeadline"], 11_000);
+        assert_eq!(statuses[0]["status"]["restartAttempt"], 0);
         assert!(
             !statuses.to_string().contains(&spec.token),
             "token не попадает в status"
@@ -842,6 +855,8 @@ mod tests {
         let statuses = host.statuses(2_000);
         assert_eq!(statuses[0]["status"]["state"], "backoff");
         assert_eq!(statuses[0]["status"]["retryInMs"], 1_000);
+        assert_eq!(statuses[0]["status"]["retryAt"], 3_000);
+        assert_eq!(statuses[0]["status"]["restartAttempt"], 1);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1002,6 +1017,7 @@ mod tests {
         let events = host.events_after("agent-vm", 0, 64).unwrap();
 
         assert_eq!(host.statuses(1_100)[0]["status"]["state"], "running");
+        assert_eq!(host.statuses(1_100)[0]["status"]["registeredAt"], 1_100);
         assert_eq!(accepted["ok"], true);
         assert_eq!(accepted["accepted"], true);
         assert_eq!(accepted["requestId"], "agent-vm-1");

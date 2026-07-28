@@ -2110,6 +2110,7 @@ async function pluginCmd(id, cmd, args) {
   plugins = await window.jarvis.getPlugins();
   renderPluginRows();
   footerLeftEl.textContent = footerText();
+  if (view === 'history' && histProject == null) renderAgentVmRuntimeStatus();
 }
 
 // маленькие глифы для карточки бодрости (через DOM — без innerHTML)
@@ -2795,11 +2796,60 @@ let agentVmStageStartedAt = 0;
 let agentVmFile = null;
 let agentVmFileMode = 'diff';
 let agentVmProfileSaving = false;
+let agentVmRuntimeStatusEl = null;
 const agentVmOperationWaiters = new Map();
 
 function agentVmPluginReady() {
   const plugin = pluginById('agent-vm');
   return !!plugin?.enabled && plugin?.status?.state === 'running';
+}
+
+function renderAgentVmRuntimeStatus(root = agentVmRuntimeStatusEl) {
+  const runtime = AgentVmModel.pluginRuntimeStatus(pluginById('agent-vm'));
+  if (!root) return runtime;
+
+  root.className = `pm-runtime ${runtime.tone}`;
+  root.setAttribute('role', 'status');
+  root.setAttribute('aria-live', 'polite');
+  root.textContent = '';
+  root.appendChild(Object.assign(document.createElement('span'), {
+    className: 'pm-runtime-signal',
+  }));
+
+  const copy = document.createElement('span');
+  copy.className = 'pm-runtime-copy';
+  copy.appendChild(Object.assign(document.createElement('strong'), {
+    textContent: runtime.label,
+  }));
+  copy.appendChild(Object.assign(document.createElement('small'), {
+    textContent: runtime.detail,
+  }));
+  root.appendChild(copy);
+
+  const steps = document.createElement('span');
+  steps.className = 'pm-runtime-steps';
+  for (const [index, label] of ['Sidecar', 'Handshake', 'Готово'].entries()) {
+    const step = document.createElement('span');
+    const done = runtime.state === 'running' ? index <= runtime.step : index < runtime.step;
+    step.className = `pm-runtime-step${done ? ' done' : index === runtime.step ? ' active' : ''}`;
+    step.textContent = label;
+    steps.appendChild(step);
+  }
+  root.appendChild(steps);
+
+  if (runtime.retryable) {
+    const retry = Object.assign(document.createElement('button'), {
+      className: 'vm-button',
+      textContent: 'Повторить сейчас',
+    });
+    retry.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      retry.disabled = true;
+      await pluginCmd('agent-vm', '_restart');
+    });
+    root.appendChild(retry);
+  }
+  return runtime;
 }
 
 function agentVmProjects() {
@@ -3049,6 +3099,11 @@ async function sendAgentVmMessage() {
     showToast('Agent VM plugin ещё запускается');
     return;
   }
+  if (!AgentVmModel.backendAvailable(agentVmCurrent.vm, agentVmBackend)) {
+    const name = agentVmBackend === 'codex' ? 'Codex' : 'Claude';
+    showToast(`${name} не установлен в этой VM`);
+    return;
+  }
   const active = agentVmCurrent.run
     && ['starting', 'working', 'waiting'].includes(agentVmCurrent.run.state);
   const args = {
@@ -3056,9 +3111,12 @@ async function sendAgentVmMessage() {
     agent: agentVmBackend,
     message,
   };
-  if (agentVmRunId && agentVmCurrent.run?.attrs?.backend === agentVmBackend) {
-    args.runId = agentVmRunId;
-  }
+  const continuationRunId = AgentVmModel.continuationRunId(
+    agentVmCurrent.run,
+    agentVmBackend,
+    agentVmRunId,
+  );
+  if (continuationRunId) args.runId = continuationRunId;
   agentVmPromptEl.value = '';
   agentVmPromptEl.style.height = '';
   agentVmQueueHintEl.hidden = !active;
@@ -3219,9 +3277,9 @@ function renderAgentVmEnvironment(project, vm, run, uiState) {
   agentVmEnvironmentButtonEl.classList.toggle('open', !agentVmEnvironmentEl.hidden);
   agentVmEnvironmentLabelEl.textContent = `${stateText}${runAttrs.backend ? ` · ${runAttrs.backend}` : ''}`;
   agentVmEnvironmentTitleEl.textContent = stateText;
-  agentVmNameEl.textContent = attrs.shellCommand
-    ? attrs.shellCommand.replace(/^avm shell\s+/, '')
-    : (runAttrs.vmName || 'VM ещё не создана');
+  agentVmNameEl.textContent = runAttrs.vmName
+    || vm?.id?.replace(/^vm\./, '')
+    || 'VM ещё не создана';
   agentVmStateValueEl.textContent = stateText;
   const resources = attrs.resources || {};
   agentVmResourcesEl.textContent = [
@@ -3229,17 +3287,21 @@ function renderAgentVmEnvironment(project, vm, run, uiState) {
     resources.memory || '',
     resources.disk || '',
   ].filter(Boolean).join(' · ') || 'по умолчанию';
-  agentVmModulesEl.textContent = Array.isArray(attrs.modules) && attrs.modules.length
-    ? attrs.modules.filter((module) => ['claude', 'codex'].includes(module)).join(' · ') || 'Claude · Codex'
-    : 'Claude · Codex';
+  const configuredBackends = AgentVmModel.configuredBackends(vm);
+  agentVmModulesEl.textContent = configuredBackends.length
+    ? configuredBackends.map((backend) => (backend === 'codex' ? 'Codex' : 'Claude')).join(' · ')
+    : 'Не установлены';
   agentVmAutostartEl.checked = !!agentVmProfileFor(project)?.startWithJarvis;
   agentVmAutostartEl.disabled = agentVmProfileSaving;
   const running = ['running', 'ready', 'working'].includes(vm?.state);
   agentVmEnsureEl.hidden = running;
-  agentVmEnsureEl.textContent = vm?.state === 'stopped' ? 'Запустить VM' : 'Создать VM';
+  agentVmEnsureEl.disabled = run?.state === 'starting';
+  agentVmEnsureEl.textContent = run?.state === 'starting'
+    ? 'VM создаётся…'
+    : vm?.state === 'stopped' ? 'Запустить VM' : 'Создать VM';
   agentVmRestartEl.hidden = !running;
   agentVmStopEl.hidden = !running;
-  const shell = attrs.shellCommand || runAttrs.shellCommand || '';
+  const shell = running ? attrs.shellCommand || '' : '';
   agentVmCopyShellEl.disabled = !shell;
   agentVmCopyShellEl.dataset.command = shell;
   const resume = runAttrs.resumeCommand || '';
@@ -3257,31 +3319,59 @@ function renderAgentVmWorkspace() {
   const uiState = AgentVmModel.environmentState(vm, run);
   const runView = AgentVmModel.reduceRun(agentVmEvents);
   const runBackend = runView.backend || run?.attrs?.backend || agentVmBackend;
-  const busy = ['starting', 'working'].includes(run?.state);
+  const busy = ['starting', 'working', 'waiting'].includes(run?.state);
+  const pluginRuntime = AgentVmModel.pluginRuntimeStatus(pluginById('agent-vm'));
+  const pluginPending = pluginRuntime.state !== 'running';
+  const vmReady = ['running', 'ready', 'working'].includes(vm?.state);
+  const configuredBackends = AgentVmModel.configuredBackends(vm);
+  if (!busy && configuredBackends.length && !configuredBackends.includes(agentVmBackend)) {
+    [agentVmBackend] = configuredBackends;
+  }
+  const selectedBackendAvailable = configuredBackends.includes(agentVmBackend);
 
   agentVmProjectTitleEl.textContent = project.name;
   agentVmProjectPathEl.textContent = project.cwd;
   renderAgentVmEnvironment(project, vm, run, uiState);
   agentVmCancelEl.hidden = !busy || !agentVmRunId;
   agentVmQueueHintEl.hidden = !run?.attrs?.queued;
-  agentVmSendEl.disabled = !agentVmPluginReady();
+  agentVmSendEl.disabled = !agentVmPluginReady() || !selectedBackendAvailable;
 
   for (const button of document.querySelectorAll('[data-agent-vm-backend]')) {
-    const active = button.dataset.agentVmBackend === agentVmBackend;
+    const backend = button.dataset.agentVmBackend;
+    const active = backend === agentVmBackend;
+    const available = configuredBackends.includes(backend);
     button.classList.toggle('active', active);
-    button.disabled = busy && !active;
+    button.disabled = !available || (busy && !active);
+    button.title = available
+      ? ''
+      : `Добавьте ${backend} в .agent-vm.yaml и пересоздайте VM`;
   }
 
-  const implicitStage = ['starting', 'provisioning', 'creating'].includes(vm?.state)
+  const implicitStage = pluginPending
+    || ['starting', 'provisioning', 'creating'].includes(vm?.state)
     || run?.state === 'starting';
   agentVmStageEl.hidden = !agentVmStage && !implicitStage;
   if (!agentVmStageEl.hidden) {
     agentVmStageTitleEl.textContent = agentVmStage?.title
-      || (run?.state === 'starting' ? 'Запускаю агента' : 'Подготавливаю среду');
+      || (pluginPending
+        ? pluginRuntime.label
+        : run?.state === 'starting'
+          ? vmReady ? 'Запускаю агента' : 'Создаю и запускаю VM'
+          : 'Подготавливаю среду');
     agentVmStageDetailEl.textContent = agentVmStage?.detail
-      || 'Project config → VM → настройки → агент';
-    const started = agentVmStageStartedAt || run?.updatedAt || vm?.updatedAt || Date.now();
-    agentVmStageTimeEl.textContent = agentVmElapsed(started);
+      || (pluginPending
+        ? pluginRuntime.detail
+        : vmReady
+          ? 'VM готова → запускаю агент'
+          : 'Образ → запуск VM → настройки → агент');
+    const started = agentVmStageStartedAt
+      || (pluginPending ? pluginById('agent-vm')?.status?.startedAt : 0)
+      || run?.updatedAt
+      || vm?.updatedAt
+      || Date.now();
+    agentVmStageTimeEl.textContent = pluginPending && pluginRuntime.state !== 'starting'
+      ? ''
+      : agentVmElapsed(started);
   }
 
   agentVmFeedEl.textContent = '';
@@ -3295,7 +3385,9 @@ function renderAgentVmWorkspace() {
     }));
     empty.appendChild(Object.assign(document.createElement('div'), {
       className: 'vmws-empty-copy',
-      textContent: 'Выбери Claude или Codex и опиши задачу. Jarvis сам подготовит VM, перенесёт разрешённые настройки и покажет работу здесь.',
+      textContent: configuredBackends.length
+        ? `Выбери ${configuredBackends.map((backend) => (backend === 'codex' ? 'Codex' : 'Claude')).join(' или ')} и опиши задачу. Jarvis сам подготовит VM, перенесёт разрешённые настройки и покажет работу здесь.`
+        : 'Добавь claude или codex в .agent-vm.yaml и пересоздай VM, чтобы запустить агента.',
     }));
     const warning = document.createElement('div');
     warning.className = 'vmws-warning';
@@ -3483,6 +3575,7 @@ window.jarvis.onOpenAgentVm(async (target) => {
 setInterval(() => {
   if (view === 'list') renderActiveEnvironments();
   if (view === 'agentvm' && !agentVmStageEl.hidden) renderAgentVmWorkspace();
+  if (view === 'history' && histProject == null) renderAgentVmRuntimeStatus();
 }, 1000);
 
 /* ---------- вкладка «Проекты» (история чатов по проектам) ---------- */
@@ -3530,6 +3623,7 @@ async function renderHistory() {
   try { historyData = await window.jarvis.getHistory(); } catch { historyData = []; }
   if (view !== 'history') return;
   historyEl.textContent = '';
+  agentVmRuntimeStatusEl = null;
   histRows = [];
   histSel = 0;
 
@@ -3559,15 +3653,7 @@ function renderHistProjects(q) {
       || project.history?.sessions?.some((session) => session.title.toLowerCase().includes(q)))
     : allProjects;
 
-  if (!groups.length) {
-    historyEl.appendChild(Object.assign(document.createElement('div'), {
-      className: 'empty',
-      textContent: q
-        ? 'Ничего не найдено'
-        : 'Проекты появятся здесь из истории чатов и Agent VM inventory.',
-    }));
-    return;
-  }
+  const runtime = AgentVmModel.pluginRuntimeStatus(pluginById('agent-vm'));
 
   const head = document.createElement('div');
   head.className = 'pm-head';
@@ -3577,11 +3663,23 @@ function renderHistProjects(q) {
   }));
   head.appendChild(Object.assign(document.createElement('span'), {
     className: 'pm-subtitle',
-    textContent: agentVmPluginReady()
-      ? `${groups.length} · Agent VM готов`
-      : `${groups.length} · Agent VM подключается`,
+    textContent: `${groups.length} · ${runtime.label}`,
   }));
   historyEl.appendChild(head);
+
+  agentVmRuntimeStatusEl = document.createElement('div');
+  renderAgentVmRuntimeStatus(agentVmRuntimeStatusEl);
+  historyEl.appendChild(agentVmRuntimeStatusEl);
+
+  if (!groups.length) {
+    historyEl.appendChild(Object.assign(document.createElement('div'), {
+      className: 'empty',
+      textContent: q
+        ? 'Ничего не найдено'
+        : 'Проекты появятся здесь из истории чатов и Agent VM inventory.',
+    }));
+    return;
+  }
 
   for (const project of groups) {
     const idx = histRows.length;

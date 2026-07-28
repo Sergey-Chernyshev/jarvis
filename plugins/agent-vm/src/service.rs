@@ -254,6 +254,7 @@ pub struct AgentVmService<R: CommandRunner> {
     pub paths: RuntimePaths,
     tools: Toolchain,
     config_bootstrap: Option<Arc<dyn ConfigBootstrap>>,
+    trust_source: Option<PathBuf>,
 }
 
 impl<R: CommandRunner> AgentVmService<R> {
@@ -263,6 +264,7 @@ impl<R: CommandRunner> AgentVmService<R> {
             paths,
             tools,
             config_bootstrap: None,
+            trust_source: None,
         }
     }
 
@@ -273,6 +275,8 @@ impl<R: CommandRunner> AgentVmService<R> {
     ) -> Result<Self, String> {
         let home = account_home()
             .ok_or_else(|| "не определить account home для config mirror".to_string())?;
+        let trust_source = home.join(".config/agent-vm");
+        paths.sync_trust_from(&trust_source)?;
         let bootstrap = SystemConfigBootstrap::new(
             runner.clone(),
             paths.clone(),
@@ -285,6 +289,7 @@ impl<R: CommandRunner> AgentVmService<R> {
             paths,
             tools,
             config_bootstrap: Some(Arc::new(bootstrap)),
+            trust_source: Some(trust_source),
         })
     }
 
@@ -315,6 +320,9 @@ impl<R: CommandRunner> AgentVmService<R> {
 
     pub fn ensure(&self, cwd: &Path) -> Result<RuntimeSnapshot, String> {
         self.paths.create_private_dirs()?;
+        if let Some(source) = &self.trust_source {
+            self.paths.sync_trust_from(source)?;
+        }
         let project = ProjectIdentity::from_path(cwd)?;
         let binding = ensure_project_link(&self.paths.project_links, &project)?;
         let before = self.inventory()?;
@@ -414,7 +422,7 @@ impl<R: CommandRunner> AgentVmService<R> {
             vm_name: vm_name.clone(),
             vm,
             created_spec,
-            shell_command: format!("avm shell {vm_name}"),
+            shell_command: self.paths.shell_command(&vm_name, true),
             environment: None,
         })
     }
@@ -441,6 +449,10 @@ pub trait RuntimeService: Clone + Send + Sync + 'static {
     fn ensure(&self, cwd: &Path) -> Result<RuntimeSnapshot, String>;
     fn stop(&self, cwd: &Path) -> Result<RuntimeSnapshot, String>;
     fn restart(&self, cwd: &Path) -> Result<RuntimeSnapshot, String>;
+    fn shell_command(&self, vm_name: &str, managed: bool) -> String {
+        let executable = if managed { "avm" } else { "limactl" };
+        format!("{executable} shell {vm_name}")
+    }
 }
 
 impl<R: CommandRunner> RuntimeService for AgentVmService<R> {
@@ -462,6 +474,10 @@ impl<R: CommandRunner> RuntimeService for AgentVmService<R> {
 
     fn restart(&self, cwd: &Path) -> Result<RuntimeSnapshot, String> {
         AgentVmService::restart(self, cwd)
+    }
+
+    fn shell_command(&self, vm_name: &str, managed: bool) -> String {
+        self.paths.shell_command(vm_name, managed)
     }
 }
 
@@ -646,15 +662,13 @@ mod tests {
             ok("start: synthetic\n"),
             ok(&format!("{}\tRunning\n", identity.vm_name)),
         ]);
+        let expected_shell = paths.shell_command(&identity.vm_name, true);
         let api = service(runner.clone(), paths);
 
         let snapshot = api.ensure(&project).unwrap();
 
         assert_eq!(snapshot.vm.unwrap().state, "running");
-        assert_eq!(
-            snapshot.shell_command,
-            format!("avm shell {}", identity.vm_name)
-        );
+        assert_eq!(snapshot.shell_command, expected_shell);
         let calls = runner.calls.lock().unwrap();
         assert_eq!(calls.len(), 3);
         assert_eq!(calls[1].program, Path::new("/synthetic/bin/avm"));

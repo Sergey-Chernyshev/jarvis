@@ -83,6 +83,23 @@ pub struct InventoryVm {
     pub record: Option<VmRecord>,
 }
 
+pub fn is_safe_guest_workspace(user: &str, guest_path: &str) -> bool {
+    let workspace = Path::new(guest_path);
+    if !workspace.is_absolute()
+        || workspace
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    let expected_home = PathBuf::from("/home").join(user);
+    let expected_mount_home = PathBuf::from("/home").join(format!("{user}.guest"));
+    matches!(
+        workspace.parent(),
+        Some(parent) if parent == expected_home || parent == expected_mount_home
+    )
+}
+
 pub fn load_records(registry_root: &Path) -> Result<Vec<VmRecord>, String> {
     let vms_dir = registry_root.join("vms");
     let entries = match fs::read_dir(&vms_dir) {

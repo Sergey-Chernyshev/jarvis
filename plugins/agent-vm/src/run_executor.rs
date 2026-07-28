@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use zeroize::Zeroize;
 
-use crate::inventory::VmRecord;
+use crate::inventory::{is_safe_guest_workspace, VmRecord};
 use crate::project::is_valid_vm_name;
 use crate::run_event::{parse_backend_line, Backend, BackendEvent};
 use crate::run_store::validate_run_id;
@@ -471,14 +471,7 @@ fn validate_execution(limactl: &Path, request: &TurnExecution) -> Result<(), Str
     {
         return Err("run record содержит unsafe VM identity".into());
     }
-    let expected_home = PathBuf::from("/home").join(&request.record.user);
-    let workspace = Path::new(&request.record.workspace.guest_path);
-    if !workspace.is_absolute()
-        || workspace.parent() != Some(expected_home.as_path())
-        || workspace
-            .components()
-            .any(|part| matches!(part, Component::ParentDir))
-    {
+    if !is_safe_guest_workspace(&request.record.user, &request.record.workspace.guest_path) {
         return Err("run record содержит unsafe guest workspace".into());
     }
     if !request
@@ -734,5 +727,24 @@ mod tests {
             &unsafe_request,
         )
         .is_err());
+    }
+
+    #[test]
+    fn execution_accepts_agent_vm_guest_mount_home() {
+        let mut mounted = request(Backend::Claude, None);
+        mounted.record.workspace.guest_path =
+            "/home/dev.guest/synthetic-project-a1b2c3d4e5f6".into();
+
+        let spec = build_turn_spec(
+            Path::new("/synthetic/bin/limactl"),
+            &BTreeMap::new(),
+            &mounted,
+        )
+        .unwrap();
+
+        assert!(spec
+            .args
+            .iter()
+            .any(|value| value == "/home/dev.guest/synthetic-project-a1b2c3d4e5f6"));
     }
 }

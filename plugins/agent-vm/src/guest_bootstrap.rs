@@ -4,7 +4,7 @@ use std::io::{Cursor, Read};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
-use jarvis_secret_store::{SecretKind, SecretStore};
+use jarvis_secret_store::{SecretKind, SecretStore, SecretValue};
 use serde::Serialize;
 use tar::{Builder, EntryType, Header};
 use zeroize::Zeroize;
@@ -204,6 +204,7 @@ pub fn build_bundle<S: SecretStore>(
     snapshot: &ConfigSnapshot,
     store: &S,
     claude_kind: Option<SecretKind>,
+    host_claude_login: Option<&SecretValue>,
     codex_credential: &LoadedCodexCredential,
     private_env: &BTreeMap<String, String>,
 ) -> Result<BootstrapBundle, String> {
@@ -222,23 +223,34 @@ pub fn build_bundle<S: SecretStore>(
     }
 
     let mut agent_env = String::new();
-    let claude = if let Some(kind) = claude_kind {
-        match store.get(kind)? {
-            Some(value) => {
-                let secret = std::str::from_utf8(value.expose())
-                    .map_err(|_| "Claude secret должен быть UTF-8".to_string())?;
-                if secret.bytes().any(|byte| matches!(byte, 0 | b'\n' | b'\r')) {
-                    return Err("Claude secret содержит недопустимые control bytes".into());
-                }
-                let variable = match kind {
-                    SecretKind::ClaudeApiKey => "ANTHROPIC_API_KEY",
-                    SecretKind::ClaudeOauthToken => "CLAUDE_CODE_OAUTH_TOKEN",
-                };
-                agent_env.push_str(&format!("export {variable}={}\n", shell_quote(secret)));
-                "ready".into()
-            }
-            None => "missing".into(),
+    let configured_claude = match claude_kind {
+        Some(kind) => store.get(kind)?.map(|value| (kind, value)),
+        None => None,
+    };
+    let claude = if let Some((kind, value)) = configured_claude {
+        let secret = std::str::from_utf8(value.expose())
+            .map_err(|_| "Claude secret должен быть UTF-8".to_string())?;
+        if secret.bytes().any(|byte| matches!(byte, 0 | b'\n' | b'\r')) {
+            return Err("Claude secret содержит недопустимые control bytes".into());
         }
+        let variable = match kind {
+            SecretKind::ClaudeApiKey => "ANTHROPIC_API_KEY",
+            SecretKind::ClaudeOauthToken => "CLAUDE_CODE_OAUTH_TOKEN",
+        };
+        agent_env.push_str(&format!("export {variable}={}\n", shell_quote(secret)));
+        "ready".into()
+    } else if let Some(login) = host_claude_login {
+        let credentials = normalize_claude_login(login)?;
+        if files
+            .insert(
+                PathBuf::from(".claude/.credentials.json"),
+                (0o600, credentials),
+            )
+            .is_some()
+        {
+            return Err("Claude credential конфликтует с config snapshot".into());
+        }
+        "ready".into()
     } else {
         "missing".into()
     };
@@ -277,6 +289,48 @@ pub fn build_bundle<S: SecretStore>(
         archive,
         credential_status: BootstrapCredentialStatus { claude, codex },
     })
+}
+
+struct SensitiveJson(serde_json::Value);
+
+impl Drop for SensitiveJson {
+    fn drop(&mut self) {
+        zeroize_json(&mut self.0);
+    }
+}
+
+fn normalize_claude_login(login: &SecretValue) -> Result<Vec<u8>, String> {
+    let mut parsed = SensitiveJson(
+        serde_json::from_slice(login.expose())
+            .map_err(|_| "Claude Code Keychain credential содержит invalid JSON".to_string())?,
+    );
+    let oauth = parsed
+        .0
+        .as_object_mut()
+        .and_then(|root| root.remove("claudeAiOauth"))
+        .ok_or_else(|| "Claude Code Keychain credential не содержит claudeAiOauth".to_string())?;
+    let oauth_fields = oauth
+        .as_object()
+        .ok_or_else(|| "Claude Code claudeAiOauth должен быть object".to_string())?;
+    for field in ["accessToken", "refreshToken"] {
+        let valid = oauth_fields
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| {
+                !value.is_empty()
+                    && value.len() <= jarvis_secret_store::MAX_SECRET_BYTES
+                    && !value.contains('\0')
+            });
+        if !valid {
+            let _oauth = SensitiveJson(oauth);
+            return Err(format!(
+                "Claude Code claudeAiOauth.{field} имеет unsafe format"
+            ));
+        }
+    }
+    let normalized = SensitiveJson(serde_json::json!({"claudeAiOauth":oauth}));
+    serde_json::to_vec(&normalized.0)
+        .map_err(|_| "не сериализовать Claude Code Linux credential".to_string())
 }
 
 pub fn bootstrap_spec(
@@ -633,6 +687,7 @@ mod tests {
             &snapshot(),
             &store,
             Some(SecretKind::ClaudeOauthToken),
+            None,
             &LoadedCodexCredential::file(Some(br#"{"auth_mode":"synthetic"}"#.to_vec())),
             &BTreeMap::new(),
         )
@@ -663,6 +718,112 @@ mod tests {
     }
 
     #[test]
+    fn host_claude_login_copies_only_claude_oauth_as_owner_private_linux_credential() {
+        let store = MemorySecretStore::default();
+        let login = SecretValue::new(
+            br#"{
+                "claudeAiOauth":{
+                    "accessToken":"SYNTHETIC_ACCESS",
+                    "refreshToken":"SYNTHETIC_REFRESH",
+                    "expiresAt":1785267208000,
+                    "scopes":["user:inference"],
+                    "subscriptionType":"max",
+                    "rateLimitTier":"default"
+                },
+                "mcpOAuth":{"corporate":{"accessToken":"MUST_NOT_COPY"}}
+            }"#
+            .to_vec(),
+        )
+        .unwrap();
+
+        let bundle = build_bundle(
+            &snapshot(),
+            &store,
+            None,
+            Some(&login),
+            &LoadedCodexCredential::file(None),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(bundle.credential_status.claude, "ready");
+        let entries = archive_entries(&bundle.archive);
+        let credential = entries
+            .iter()
+            .find(|entry| entry.0 == ".claude/.credentials.json")
+            .unwrap();
+        assert_eq!(credential.1, 0o600);
+        assert!(credential
+            .2
+            .windows(b"SYNTHETIC_ACCESS".len())
+            .any(|part| part == b"SYNTHETIC_ACCESS"));
+        assert!(credential
+            .2
+            .windows(b"SYNTHETIC_REFRESH".len())
+            .any(|part| part == b"SYNTHETIC_REFRESH"));
+        assert!(!bundle
+            .archive
+            .windows(b"MUST_NOT_COPY".len())
+            .any(|part| part == b"MUST_NOT_COPY"));
+        assert!(!String::from_utf8_lossy(&credential.2).contains("mcpOAuth"));
+    }
+
+    #[test]
+    fn explicit_jarvis_claude_secret_wins_over_host_login() {
+        let store = MemorySecretStore::default();
+        let explicit = SecretValue::new(b"SYNTHETIC_EXPLICIT".to_vec()).unwrap();
+        store.set(SecretKind::ClaudeOauthToken, &explicit).unwrap();
+        let login = SecretValue::new(
+            br#"{"claudeAiOauth":{"accessToken":"HOST_ACCESS","refreshToken":"HOST_REFRESH"}}"#
+                .to_vec(),
+        )
+        .unwrap();
+
+        let bundle = build_bundle(
+            &snapshot(),
+            &store,
+            Some(SecretKind::ClaudeOauthToken),
+            Some(&login),
+            &LoadedCodexCredential::file(None),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        let entries = archive_entries(&bundle.archive);
+        assert!(entries
+            .iter()
+            .any(|entry| entry.0 == ".jarvis-vm/agent.env"));
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.0 == ".claude/.credentials.json"));
+        assert!(!bundle
+            .archive
+            .windows(b"HOST_ACCESS".len())
+            .any(|part| part == b"HOST_ACCESS"));
+    }
+
+    #[test]
+    fn host_claude_login_rejects_incomplete_oauth_credentials() {
+        let store = MemorySecretStore::default();
+        let login =
+            SecretValue::new(br#"{"claudeAiOauth":{"accessToken":"SYNTHETIC_ACCESS"}}"#.to_vec())
+                .unwrap();
+
+        let error = build_bundle(
+            &snapshot(),
+            &store,
+            None,
+            Some(&login),
+            &LoadedCodexCredential::file(None),
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("refreshToken"));
+        assert!(!error.contains("SYNTHETIC_ACCESS"));
+    }
+
+    #[test]
     fn bootstrap_command_keeps_every_secret_byte_out_of_argv_and_env() {
         let store = MemorySecretStore::default();
         let secret = SecretValue::new(b"SYNTHETIC_PRIVATE_VALUE".to_vec()).unwrap();
@@ -671,6 +832,7 @@ mod tests {
             &snapshot(),
             &store,
             Some(SecretKind::ClaudeApiKey),
+            None,
             &LoadedCodexCredential::file(Some(br#"{"private":"SYNTHETIC_CODEX_VALUE"}"#.to_vec())),
             &BTreeMap::new(),
         )
@@ -702,6 +864,7 @@ mod tests {
         let bundle = build_bundle(
             &snapshot(),
             &MemorySecretStore::default(),
+            None,
             None,
             &LoadedCodexCredential::file(None),
             &BTreeMap::new(),

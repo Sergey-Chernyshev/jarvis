@@ -6,7 +6,9 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use jarvis_secret_store::{migrate_legacy_claude_secret, MacKeychainStore, SecretStore};
+use jarvis_secret_store::{
+    migrate_legacy_claude_secret, read_claude_code_credentials, MacKeychainStore, SecretStore,
+};
 use serde::Serialize;
 use zeroize::Zeroize;
 
@@ -125,6 +127,13 @@ impl<R: CommandRunner, S: SecretStore> SystemConfigBootstrap<R, S> {
             codex: self.account_home.join(".codex"),
         })?;
         let codex_credential = load_codex_credential(&snapshot, &self.account_home.join(".codex"))?;
+        let host_claude_login = if account_home().as_deref() == Some(self.account_home.as_path())
+            && migration.kind.is_none()
+        {
+            read_claude_code_credentials()?
+        } else {
+            None
+        };
         let mut private_env =
             read_private_runtime_env(&self.paths.jarvis_dir.join("settings.json"))?;
         let proxy_configured = private_env.contains_key("HTTPS_PROXY");
@@ -132,6 +141,7 @@ impl<R: CommandRunner, S: SecretStore> SystemConfigBootstrap<R, S> {
             &snapshot,
             &self.secrets,
             migration.kind,
+            host_claude_login.as_ref(),
             &codex_credential,
             &private_env,
         );

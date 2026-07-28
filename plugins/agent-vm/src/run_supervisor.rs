@@ -484,6 +484,20 @@ impl<H: HostApi> RunSupervisor<H> {
             self.active.lock().unwrap().remove(&project.project_id);
             return;
         }
+        if let Some((code, error)) = backend_credential_failure(&snapshot, backend) {
+            let _ = publisher.emit(
+                &turn.turn_id,
+                "run.failed",
+                json!({
+                    "code":code,
+                    "error":error,
+                    "action":"open_agent_settings"
+                }),
+                "failed",
+            );
+            self.active.lock().unwrap().remove(&project.project_id);
+            return;
+        }
         {
             if let Some(active) = self.active.lock().unwrap().get_mut(&project.project_id) {
                 active.vm_name = Some(record.name.clone());
@@ -1025,6 +1039,34 @@ fn runnable_record(snapshot: &RuntimeSnapshot) -> Option<&VmRecord> {
         .and_then(|vm| vm.record.as_ref())
 }
 
+fn backend_credential_failure(
+    snapshot: &RuntimeSnapshot,
+    backend: Backend,
+) -> Option<(&'static str, &'static str)> {
+    let credentials = &snapshot.environment.as_ref()?.credentials;
+    let status = match backend {
+        Backend::Claude => credentials.claude.as_str(),
+        Backend::Codex => credentials.codex.as_str(),
+    };
+    if status == "ready" {
+        return None;
+    }
+    Some(match (backend, status) {
+        (Backend::Claude, _) => (
+            "backend_auth_missing",
+            "Claude не авторизован для Agent VM. Подключите Claude в настройках Jarvis и повторите запуск",
+        ),
+        (Backend::Codex, "host-keyring") => (
+            "backend_auth_unavailable",
+            "Codex авторизован только в Keychain хоста и недоступен Agent VM. Подключите Codex для Agent VM и повторите запуск",
+        ),
+        (Backend::Codex, _) => (
+            "backend_auth_missing",
+            "Codex не авторизован для Agent VM. Подключите Codex в настройках Jarvis и повторите запуск",
+        ),
+    })
+}
+
 pub fn terminal_resume_command(backend: Backend, session_id: &str) -> Option<String> {
     validate_backend_session_id(session_id).ok()?;
     Some(match backend {
@@ -1118,11 +1160,12 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
+    use crate::guest_bootstrap::BootstrapCredentialStatus;
     use crate::host::{HostApi, PollResponse};
     use crate::inventory::{InventoryVm, VmRecord, VmResources, VmWorkspace};
     use crate::run_event::{BackendEvent, RunEvent};
     use crate::run_executor::{BackendEventSink, ExecutionOutcome, TurnExecution, TurnExecutor};
-    use crate::service::{RuntimeService, RuntimeSnapshot};
+    use crate::service::{BootstrapStatus, RuntimeService, RuntimeSnapshot};
 
     type Publications = Arc<(Mutex<Vec<(String, String, Value)>>, Condvar)>;
 
@@ -1317,6 +1360,7 @@ mod tests {
     struct FakeService {
         project: PathBuf,
         modules: Vec<String>,
+        environment: Option<BootstrapStatus>,
     }
 
     impl FakeService {
@@ -1348,7 +1392,7 @@ mod tests {
                 }),
                 created_spec: false,
                 shell_command: "avm shell synthetic-project-a1b2c3d4e5f6".into(),
-                environment: None,
+                environment: self.environment.clone(),
             }
         }
     }
@@ -1392,6 +1436,7 @@ mod tests {
         let service = FakeService {
             project: project.clone(),
             modules: vec!["claude".into(), "codex".into()],
+            environment: None,
         };
         (root, supervisor, service)
     }
@@ -1524,6 +1569,42 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Codex"));
+        assert!(executor.state.0.lock().unwrap().calls.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_backend_credential_fails_before_agent_execution() {
+        let executor = FakeExecutor::default();
+        let (root, supervisor, mut service) = fixture("missing-credential", executor.clone());
+        service.environment = Some(BootstrapStatus {
+            fingerprint: "fixture".into(),
+            files: 0,
+            skipped: 0,
+            credentials: BootstrapCredentialStatus {
+                claude: "missing".into(),
+                codex: "ready".into(),
+            },
+            proxy_configured: false,
+        });
+
+        supervisor
+            .submit(
+                service,
+                SendRequest {
+                    cwd: root.join("synthetic-project"),
+                    project_id: None,
+                    backend: Backend::Claude,
+                    run_id: None,
+                    message: "не запускать без авторизации".into(),
+                },
+            )
+            .unwrap();
+
+        let attrs = supervisor.host().wait_for_state("failed");
+        let error = attrs["latestEvent"]["payload"]["error"].as_str().unwrap();
+        assert!(error.contains("Claude"), "{error}");
+        assert!(error.contains("авториз"), "{error}");
         assert!(executor.state.0.lock().unwrap().calls.is_empty());
         fs::remove_dir_all(root).unwrap();
     }

@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 pub const KEYCHAIN_SERVICE: &str = "app.jarvis.monitor.agent-vm";
+pub const CLAUDE_CODE_KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 pub const MAX_SECRET_BYTES: usize = 256 * 1024;
 const MAX_SETTINGS_BYTES: u64 = 4 * 1024 * 1024;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -41,8 +42,9 @@ impl SecretKind {
 pub struct SecretValue(Vec<u8>);
 
 impl SecretValue {
-    pub fn new(bytes: Vec<u8>) -> Result<Self, String> {
+    pub fn new(mut bytes: Vec<u8>) -> Result<Self, String> {
         if bytes.is_empty() || bytes.len() > MAX_SECRET_BYTES {
+            bytes.zeroize();
             return Err("secret имеет недопустимый размер".into());
         }
         Ok(Self(bytes))
@@ -74,6 +76,48 @@ pub trait SecretStore: Clone + Send + Sync + 'static {
     fn get(&self, kind: SecretKind) -> Result<Option<SecretValue>, String>;
     fn set(&self, kind: SecretKind, value: &SecretValue) -> Result<(), String>;
     fn delete(&self, kind: SecretKind) -> Result<(), String>;
+}
+
+#[cfg(target_os = "macos")]
+pub fn read_claude_code_credentials() -> Result<Option<SecretValue>, String> {
+    use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
+
+    const ITEM_NOT_FOUND: i32 = -25_300;
+    let results = ItemSearchOptions::new()
+        .class(ItemClass::generic_password())
+        .service(CLAUDE_CODE_KEYCHAIN_SERVICE)
+        .load_data(true)
+        .limit(2_i64)
+        .search();
+    let results = match results {
+        Ok(results) => results,
+        Err(error) if error.code() == ITEM_NOT_FOUND => return Ok(None),
+        Err(_) => return Err("Claude Code macOS Keychain read failed".into()),
+    };
+    let mut values = Vec::new();
+    for result in results {
+        match result {
+            SearchResult::Data(bytes) => values.push(bytes),
+            _ => {
+                for bytes in &mut values {
+                    bytes.zeroize();
+                }
+                return Err("Claude Code macOS Keychain returned unsafe item".into());
+            }
+        }
+    }
+    if values.len() != 1 {
+        for bytes in &mut values {
+            bytes.zeroize();
+        }
+        return Err("Claude Code macOS Keychain item is ambiguous".into());
+    }
+    SecretValue::new(values.pop().unwrap()).map(Some)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn read_claude_code_credentials() -> Result<Option<SecretValue>, String> {
+    Ok(None)
 }
 
 #[derive(Clone, Copy, Debug, Default)]

@@ -234,14 +234,20 @@ pub fn discover(roots: &[PathBuf]) -> Discovery {
             match load_package(&manifest_path) {
                 Ok(package) => {
                     let id = package.manifest.id.clone();
-                    if packages.contains_key(&id) {
-                        errors.push(error(
-                            &manifest_path,
-                            &id,
-                            format!("дубликат plugin id '{id}', используется первый root"),
-                        ));
-                    } else {
-                        packages.insert(id, package);
+                    match packages.entry(id) {
+                        std::collections::btree_map::Entry::Occupied(entry) => {
+                            errors.push(error(
+                                &manifest_path,
+                                entry.key(),
+                                format!(
+                                    "дубликат plugin id '{}', используется первый root",
+                                    entry.key()
+                                ),
+                            ));
+                        }
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(package);
+                        }
                     }
                 }
                 Err(err) => errors.push(err),

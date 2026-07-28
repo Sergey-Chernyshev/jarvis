@@ -1137,6 +1137,105 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test]
+    async fn fake_plugin_sends_authenticated_versioned_registration_over_unix_socket() {
+        use std::process::Stdio;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        static NEXT_SOCKET: AtomicU64 = AtomicU64::new(0);
+        let socket = PathBuf::from("/tmp").join(format!(
+            "jarvis-fake-plugin-{}-{}.sock",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_file(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/plugin-host/fake-plugin/fake-plugin.sh");
+        let token = "fixture-plugin-token";
+        let mut command = tokio::process::Command::new(&script);
+        command
+            .env("JARVIS_SOCKET", &socket)
+            .env("JARVIS_PLUGIN_ID", "fake-plugin")
+            .env("JARVIS_PLUGIN_TOKEN", token)
+            .env(
+                "JARVIS_PLUGIN_PROTOCOL",
+                manifest::PROTOCOL_VERSION.to_string(),
+            )
+            .env("JARVIS_FAKE_ONESHOT", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let child = command.spawn().unwrap();
+        let child_pid = child.id().unwrap();
+
+        let (mut stream, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                .await
+                .expect("fake plugin подключился к UDS")
+                .unwrap();
+        let mut request = Vec::new();
+        let (header_end, content_length) = loop {
+            let mut chunk = [0_u8; 4096];
+            let read =
+                tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut chunk))
+                    .await
+                    .expect("HTTP request прочитан")
+                    .unwrap();
+            assert!(read > 0, "curl не закрыл request до полного body");
+            request.extend_from_slice(&chunk[..read]);
+            let Some(header_end) = request.windows(4).position(|it| it == b"\r\n\r\n") else {
+                continue;
+            };
+            let header_end = header_end + 4;
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + content_length {
+                break (header_end, content_length);
+            }
+        };
+
+        let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+        assert!(headers.starts_with("POST /plugin/register HTTP/1.1\r\n"));
+        assert!(headers.lines().any(|line| {
+            line.split_once(':').is_some_and(|(name, value)| {
+                name.eq_ignore_ascii_case("x-jarvis-token") && value.trim() == token
+            })
+        }));
+        let body: Value =
+            serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap();
+        assert_eq!(body["protocolVersion"], manifest::PROTOCOL_VERSION);
+        assert_eq!(body["pid"], child_pid);
+
+        let response_body = "{\"ok\":true}";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
+            response_body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        drop(stream);
+        drop(listener);
+
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
+                .await
+                .expect("fake plugin завершился после oneshot")
+                .unwrap();
+        assert!(
+            output.status.success(),
+            "fake plugin stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::remove_file(socket).unwrap();
+    }
+
     #[test]
     fn incompatible_manifest_is_visible_but_never_spawnable() {
         let root = temp_plugin_root("incompatible");

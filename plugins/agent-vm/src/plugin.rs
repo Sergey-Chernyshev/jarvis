@@ -2,10 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
+use zeroize::Zeroize;
 
 use crate::host::{HostApi, HostEvent};
 use crate::inventory::InventoryVm;
 use crate::project::ProjectIdentity;
+use crate::run_event::Backend;
+use crate::run_supervisor::{RunSupervisor, SendRequest};
 use crate::service::{validate_project_id, RuntimeService, RuntimeSnapshot};
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -97,6 +100,7 @@ pub struct Dispatcher<S: RuntimeService, H: HostApi> {
     service: S,
     host: H,
     published_vms: BTreeSet<String>,
+    supervisor: Option<RunSupervisor<H>>,
 }
 
 impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
@@ -105,6 +109,16 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
             service,
             host,
             published_vms: BTreeSet::new(),
+            supervisor: None,
+        }
+    }
+
+    pub fn with_supervisor(service: S, host: H, supervisor: RunSupervisor<H>) -> Self {
+        Self {
+            service,
+            host,
+            published_vms: BTreeSet::new(),
+            supervisor: Some(supervisor),
         }
     }
 
@@ -148,6 +162,18 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
             };
         }
 
+        if let Some(result) = self.dispatch_supervisor_command(&name, &event.payload.args) {
+            return match result {
+                Ok(attrs) => self.publish_operation(&request_id, &name, "done", attrs),
+                Err(error) => self.publish_operation(
+                    &request_id,
+                    &name,
+                    "error",
+                    json!({"error": public_error(&error)}),
+                ),
+            };
+        }
+
         let result = self.dispatch_project_command(&name, &event.payload.args);
         match result {
             Ok(snapshot) => {
@@ -173,6 +199,86 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
                 json!({"error": public_error(&error)}),
             ),
         }
+    }
+
+    fn dispatch_supervisor_command(
+        &self,
+        name: &str,
+        args: &Value,
+    ) -> Option<Result<Value, String>> {
+        if name == "runtime.commands" && args.get("runId").and_then(Value::as_str).is_none() {
+            return None;
+        }
+        if !matches!(
+            name,
+            "runtime.send" | "runtime.cancel" | "runtime.replay" | "runtime.commands"
+        ) {
+            return None;
+        }
+        let Some(supervisor) = &self.supervisor else {
+            return Some(Err("headless Agent VM supervisor недоступен".into()));
+        };
+        Some(match name {
+            "runtime.send" => {
+                let cwd = required_string(args, "cwd").map(PathBuf::from);
+                let backend = required_string(args, "agent")
+                    .or_else(|_| required_string(args, "backend"))
+                    .and_then(|value| Backend::parse(&value));
+                let message = required_string(args, "message");
+                match (cwd, backend, message) {
+                    (Ok(cwd), Ok(backend), Ok(message)) => supervisor
+                        .submit(
+                            self.service.clone(),
+                            SendRequest {
+                                cwd,
+                                project_id: optional_string(args, "projectId"),
+                                backend,
+                                run_id: optional_string(args, "runId"),
+                                message,
+                            },
+                        )
+                        .map(|receipt| {
+                            json!({
+                                "runId":receipt.run_id,
+                                "turnId":receipt.turn_id,
+                                "queued":receipt.queued
+                            })
+                        }),
+                    (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+                }
+            }
+            "runtime.cancel" => required_string(args, "runId")
+                .and_then(|run_id| supervisor.cancel(&run_id))
+                .map(|cancelled| json!({"cancelled":cancelled})),
+            "runtime.replay" => required_string(args, "runId").and_then(|run_id| {
+                let after_seq = args.get("afterSeq").and_then(Value::as_u64).unwrap_or(0);
+                let limit: usize = args
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(64)
+                    .try_into()
+                    .map_err(|_| "replay limit имеет invalid type".to_string())?;
+                if limit == 0 || limit >= crate::run_store::MAX_REPLAY_EVENTS {
+                    return Err("replay limit должен быть от 1 до 255".into());
+                }
+                let mut events = supervisor.replay(&run_id, after_seq, limit + 1)?;
+                let store_has_more = events.len() > limit;
+                events.truncate(limit);
+                let (events, payload_has_more) = fit_replay_events(events)?;
+                let has_more = store_has_more || payload_has_more;
+                let next_seq = events.last().map(|event| event.seq).unwrap_or(after_seq);
+                Ok(json!({
+                    "runId":run_id,
+                    "events":events,
+                    "nextSeq":next_seq,
+                    "hasMore":has_more
+                }))
+            }),
+            "runtime.commands" => {
+                required_string(args, "runId").and_then(|run_id| supervisor.commands(&run_id))
+            }
+            _ => unreachable!(),
+        })
     }
 
     fn dispatch_project_command(
@@ -290,6 +396,44 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
     }
 }
 
+fn required_string(args: &Value, key: &str) -> Result<String, String> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("{key} обязателен"))
+}
+
+fn optional_string(args: &Value, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn fit_replay_events(
+    events: Vec<crate::run_event::RunEvent>,
+) -> Result<(Vec<crate::run_event::RunEvent>, bool), String> {
+    let original_len = events.len();
+    let mut fitted = Vec::new();
+    for event in events {
+        fitted.push(event);
+        let mut bytes = serde_json::to_vec(&fitted)
+            .map_err(|_| "не сериализовать replay events".to_string())?;
+        if bytes.len() > 48 * 1024 {
+            bytes.zeroize();
+            fitted.pop();
+            break;
+        }
+        bytes.zeroize();
+    }
+    if fitted.is_empty() && original_len > 0 {
+        return Err("один replay event превышает entity payload limit".into());
+    }
+    let has_more = fitted.len() < original_len;
+    Ok((fitted, has_more))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -301,6 +445,10 @@ mod tests {
     use super::*;
     use crate::host::{HostApi, PollResponse};
     use crate::inventory::{InventoryVm, VmRecord, VmResources, VmWorkspace};
+    use crate::run_event::{Backend, BackendEvent, RunEvent};
+    use crate::run_executor::{BackendEventSink, ExecutionOutcome, TurnExecution, TurnExecutor};
+    use crate::run_store::RunStore;
+    use crate::run_supervisor::RunSupervisor;
     use crate::service::{RuntimeService, RuntimeSnapshot};
 
     struct Publication {
@@ -430,6 +578,35 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct NoopExecutor;
+
+    impl TurnExecutor for NoopExecutor {
+        fn execute(
+            &self,
+            _request: TurnExecution,
+            sink: &mut dyn BackendEventSink,
+        ) -> Result<ExecutionOutcome, String> {
+            sink.emit(BackendEvent::Session {
+                id: "018f0000-0000-7000-8000-000000000099".into(),
+                model: None,
+            })?;
+            sink.emit(BackendEvent::AssistantMessage {
+                text: "готово".into(),
+            })?;
+            Ok(ExecutionOutcome {
+                exit_code: 0,
+                backend_session_id: Some("018f0000-0000-7000-8000-000000000099".into()),
+                turn_completed: true,
+                ..ExecutionOutcome::default()
+            })
+        }
+
+        fn cancel(&self, _run_id: &str, _vm_name: Option<&str>) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
     #[test]
     fn public_error_redacts_sensitive_categories_and_bounds_text() {
         assert_eq!(
@@ -533,6 +710,102 @@ mod tests {
         assert_eq!(
             publications.last().unwrap().attrs["error"],
             "Agent VM operation failed; sensitive details withheld"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dispatcher_routes_headless_send_and_replay_without_requiring_cwd_for_replay() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-dispatch-run-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let service = FakeService {
+            result: Arc::new(Mutex::new(Ok(snapshot(&root)))),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let host = FakeHost::default();
+        let store = RunStore::new(root.join("private/runs"));
+        let supervisor = RunSupervisor::new(host.clone(), store.clone(), Arc::new(NoopExecutor));
+        let mut dispatcher = Dispatcher::with_supervisor(service, host.clone(), supervisor);
+        let identity = ProjectIdentity::from_path(&root).unwrap();
+        let mut send = command("runtime.send", &root);
+        send.payload.args = json!({
+            "cwd":root,
+            "projectId":identity.project_id,
+            "agent":"claude",
+            "message":"сделай"
+        });
+
+        dispatcher.process(send).unwrap();
+
+        let run_id = {
+            let publications = host.publications.lock().unwrap();
+            let operation = publications
+                .iter()
+                .rev()
+                .find(|item| item.kind == "operation" && item.state == "done")
+                .unwrap();
+            assert_eq!(operation.attrs["queued"], json!(false));
+            operation.attrs["runId"].as_str().unwrap().to_string()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while store.replay(&run_id, 0, 64).unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let mut replay = command("runtime.replay", &root);
+        replay.payload.args = json!({"runId":run_id,"afterSeq":0,"limit":64});
+
+        dispatcher.process(replay).unwrap();
+
+        let publications = host.publications.lock().unwrap();
+        let operation = publications
+            .iter()
+            .rev()
+            .find(|item| {
+                item.kind == "operation"
+                    && item.state == "done"
+                    && item.attrs["command"] == "runtime.replay"
+            })
+            .unwrap();
+        let events: Vec<RunEvent> =
+            serde_json::from_value(operation.attrs["events"].clone()).unwrap();
+        assert!(!events.is_empty());
+        assert!(events.iter().all(|event| event.backend == Backend::Claude));
+        drop(publications);
+        while store
+            .summary(&run_id)
+            .unwrap()
+            .map(|summary| summary.state != "completed")
+            .unwrap_or(true)
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+
+        let mut commands = command("runtime.commands", &root);
+        commands.payload.args = json!({"runId":run_id});
+        dispatcher.process(commands).unwrap();
+
+        let publications = host.publications.lock().unwrap();
+        let operation = publications
+            .iter()
+            .rev()
+            .find(|item| {
+                item.kind == "operation"
+                    && item.state == "done"
+                    && item.attrs["command"] == "runtime.commands"
+            })
+            .unwrap();
+        assert_eq!(
+            operation.attrs["shellCommand"],
+            "avm shell synthetic-project-a1b2c3d4e5f6"
+        );
+        assert_eq!(
+            operation.attrs["resumeCommand"],
+            "claude --resume 018f0000-0000-7000-8000-000000000099"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -11,6 +11,7 @@ pub struct RuntimePaths {
     pub lima_home: PathBuf,
     pub registry_root: PathBuf,
     pub project_links: PathBuf,
+    pub runs_root: PathBuf,
 }
 
 impl RuntimePaths {
@@ -30,6 +31,7 @@ impl RuntimePaths {
             registry_root: host_home.join(".config/agent-vm"),
             lima_home: state_root.join("lima"),
             project_links: state_root.join("projects"),
+            runs_root: state_root.join("runs"),
             jarvis_dir,
             state_root,
             host_home,
@@ -43,6 +45,7 @@ impl RuntimePaths {
             &self.lima_home,
             &self.registry_root,
             &self.project_links,
+            &self.runs_root,
         ] {
             fs::create_dir_all(path)
                 .map_err(|err| format!("не создать private runtime {}: {err}", path.display()))?;
@@ -91,6 +94,7 @@ mod tests {
         assert!(paths.lima_home.starts_with(&paths.jarvis_dir));
         assert!(paths.registry_root.starts_with(&paths.jarvis_dir));
         assert!(paths.project_links.starts_with(&paths.jarvis_dir));
+        assert!(paths.runs_root.starts_with(&paths.jarvis_dir));
     }
 
     #[test]

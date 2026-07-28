@@ -1,0 +1,1377 @@
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde_json::{json, Value};
+use zeroize::Zeroize;
+
+use crate::host::HostApi;
+use crate::inventory::VmRecord;
+use crate::project::ProjectIdentity;
+use crate::run_event::{map_guest_path, Backend, BackendEvent, RunEvent};
+use crate::run_executor::{
+    validate_backend_session_id, BackendEventSink, ExecutionOutcome, TurnExecution, TurnExecutor,
+};
+use crate::run_store::{validate_run_id, RunStore};
+use crate::service::{RuntimeService, RuntimeSnapshot};
+
+const DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(60);
+const MAX_DELTA_CHARS: usize = 8 * 1024;
+const MAX_RESULT_FILES: usize = 64;
+const MAX_DISPLAY_PATH_CHARS: usize = 1024;
+const MAX_ENTITY_ATTRS_BYTES: usize = 60 * 1024;
+
+pub struct SendRequest {
+    pub cwd: PathBuf,
+    pub project_id: Option<String>,
+    pub backend: Backend,
+    pub run_id: Option<String>,
+    pub message: String,
+}
+
+impl Drop for SendRequest {
+    fn drop(&mut self) {
+        self.message.zeroize();
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubmitReceipt {
+    pub run_id: String,
+    pub turn_id: String,
+    pub queued: bool,
+}
+
+struct QueuedTurn {
+    turn_id: String,
+    message: String,
+}
+
+impl Drop for QueuedTurn {
+    fn drop(&mut self) {
+        self.message.zeroize();
+    }
+}
+
+struct ActiveRun {
+    run_id: String,
+    backend: Backend,
+    vm_name: Option<String>,
+    backend_session_id: Option<String>,
+    cancel_requested: Arc<AtomicBool>,
+    queued: Option<QueuedTurn>,
+}
+
+pub struct RunSupervisor<H: HostApi> {
+    host: H,
+    store: RunStore,
+    executor: Arc<dyn TurnExecutor>,
+    active: Arc<Mutex<HashMap<String, ActiveRun>>>,
+}
+
+impl<H: HostApi> Clone for RunSupervisor<H> {
+    fn clone(&self) -> Self {
+        Self {
+            host: self.host.clone(),
+            store: self.store.clone(),
+            executor: self.executor.clone(),
+            active: self.active.clone(),
+        }
+    }
+}
+
+impl<H: HostApi> RunSupervisor<H> {
+    pub fn new(host: H, store: RunStore, executor: Arc<dyn TurnExecutor>) -> Self {
+        Self {
+            host,
+            store,
+            executor,
+            active: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn submit<S: RuntimeService>(
+        &self,
+        service: S,
+        mut request: SendRequest,
+    ) -> Result<SubmitReceipt, String> {
+        validate_message(&request.message)?;
+        let project = ProjectIdentity::from_path(&request.cwd)?;
+        if request
+            .project_id
+            .as_deref()
+            .is_some_and(|id| id != project.project_id)
+        {
+            return Err("projectId не соответствует canonical cwd".into());
+        }
+        let turn_id = new_id("turn");
+        let queued = {
+            let mut active = self.active.lock().unwrap();
+            if let Some(run) = active.get_mut(&project.project_id) {
+                if run.backend != request.backend {
+                    return Err("active project run использует другой backend".into());
+                }
+                if request
+                    .run_id
+                    .as_deref()
+                    .is_some_and(|run_id| run_id != run.run_id)
+                {
+                    return Err("runId не соответствует active project run".into());
+                }
+                run.queued = Some(QueuedTurn {
+                    turn_id: turn_id.clone(),
+                    message: std::mem::take(&mut request.message),
+                });
+                Some((
+                    run.run_id.clone(),
+                    run.backend,
+                    run.vm_name
+                        .clone()
+                        .unwrap_or_else(|| project.vm_name.clone()),
+                    run.backend_session_id.clone(),
+                ))
+            } else {
+                None
+            }
+        };
+        if let Some((run_id, backend, vm_name, backend_session_id)) = queued {
+            self.publish_queue_state(
+                &project,
+                &run_id,
+                backend,
+                &vm_name,
+                backend_session_id.as_deref(),
+                true,
+            )?;
+            return Ok(SubmitReceipt {
+                run_id,
+                turn_id,
+                queued: true,
+            });
+        }
+
+        let backend = request.backend;
+        let (run_id, initial_seq, backend_session_id) =
+            self.resolve_run(&project, backend, request.run_id.as_deref())?;
+        let cancel_requested = Arc::new(AtomicBool::new(false));
+        self.active.lock().unwrap().insert(
+            project.project_id.clone(),
+            ActiveRun {
+                run_id: run_id.clone(),
+                backend,
+                vm_name: Some(project.vm_name.clone()),
+                backend_session_id: backend_session_id.clone(),
+                cancel_requested: cancel_requested.clone(),
+                queued: None,
+            },
+        );
+        if let Err(error) = self.publish_queue_state(
+            &project,
+            &run_id,
+            backend,
+            &project.vm_name,
+            backend_session_id.as_deref(),
+            false,
+        ) {
+            self.active.lock().unwrap().remove(&project.project_id);
+            return Err(error);
+        }
+        let first = QueuedTurn {
+            turn_id: turn_id.clone(),
+            message: std::mem::take(&mut request.message),
+        };
+        let supervisor = self.clone();
+        let project_for_worker = project.clone();
+        let run_for_worker = run_id.clone();
+        if thread::Builder::new()
+            .name(format!("agent-vm-{}", short_id(&run_id)))
+            .spawn(move || {
+                supervisor.run_worker(
+                    service,
+                    project_for_worker,
+                    run_for_worker,
+                    backend,
+                    initial_seq,
+                    backend_session_id,
+                    cancel_requested,
+                    first,
+                );
+            })
+            .is_err()
+        {
+            self.active.lock().unwrap().remove(&project.project_id);
+            let mut attrs = base_attrs(&project, &run_id, backend, &project.vm_name, None, false);
+            if let Some(fields) = attrs.as_object_mut() {
+                fields.insert(
+                    "error".into(),
+                    Value::String("Agent VM run worker failed to start".into()),
+                );
+            }
+            let _ = self
+                .host
+                .publish_entity("upsert", "agent_run", &run_id, "failed", attrs);
+            return Err("не запустить Agent VM run worker".into());
+        }
+        Ok(SubmitReceipt {
+            run_id,
+            turn_id,
+            queued: false,
+        })
+    }
+
+    pub fn cancel(&self, run_id: &str) -> Result<bool, String> {
+        validate_run_id(run_id)?;
+        let (vm_name, found) = {
+            let mut active = self.active.lock().unwrap();
+            let Some(run) = active.values_mut().find(|run| run.run_id == run_id) else {
+                return Ok(false);
+            };
+            run.cancel_requested.store(true, Ordering::Release);
+            run.queued = None;
+            (run.vm_name.clone(), true)
+        };
+        let _ = self.executor.cancel(run_id, vm_name.as_deref())?;
+        Ok(found)
+    }
+
+    pub fn replay(
+        &self,
+        run_id: &str,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>, String> {
+        self.store.replay(run_id, after_seq, limit)
+    }
+
+    pub fn is_active(&self, run_id: &str) -> bool {
+        self.active
+            .lock()
+            .unwrap()
+            .values()
+            .any(|run| run.run_id == run_id)
+    }
+
+    pub fn commands(&self, run_id: &str) -> Result<Value, String> {
+        let summary = self
+            .store
+            .summary(run_id)?
+            .ok_or_else(|| "runId не найден в private RunStore".to_string())?;
+        Ok(json!({
+            "runId":run_id,
+            "backend":summary.backend,
+            "shellCommand":format!("avm shell {}", summary.vm),
+            "resumeCommand":summary
+                .backend_session_id
+                .as_deref()
+                .and_then(|id| terminal_resume_command(summary.backend, id))
+        }))
+    }
+
+    pub fn host(&self) -> &H {
+        &self.host
+    }
+
+    pub fn store(&self) -> &RunStore {
+        &self.store
+    }
+
+    fn resolve_run(
+        &self,
+        project: &ProjectIdentity,
+        backend: Backend,
+        supplied: Option<&str>,
+    ) -> Result<(String, u64, Option<String>), String> {
+        let Some(run_id) = supplied else {
+            return Ok((new_id("run"), 0, None));
+        };
+        validate_run_id(run_id)?;
+        let summary = self
+            .store
+            .summary(run_id)?
+            .ok_or_else(|| "runId не найден в private RunStore".to_string())?;
+        if summary.project_id != project.project_id
+            || Path::new(&summary.cwd) != project.canonical_path
+            || summary.backend != backend
+        {
+            return Err("runId не соответствует project/backend".into());
+        }
+        Ok((run_id.into(), summary.last_seq, summary.backend_session_id))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_worker<S: RuntimeService>(
+        &self,
+        service: S,
+        project: ProjectIdentity,
+        run_id: String,
+        backend: Backend,
+        initial_seq: u64,
+        mut backend_session_id: Option<String>,
+        cancel_requested: Arc<AtomicBool>,
+        mut turn: QueuedTurn,
+    ) {
+        let mut publisher = RunPublisher::new(
+            self.host.clone(),
+            self.store.clone(),
+            run_id.clone(),
+            project.clone(),
+            backend,
+            project.vm_name.clone(),
+            initial_seq,
+            backend_session_id.clone(),
+        );
+        let snapshot = match service.ensure(&project.canonical_path) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                let _ = publisher.emit(
+                    &turn.turn_id,
+                    "run.failed",
+                    json!({"error":"Agent VM environment setup failed"}),
+                    "failed",
+                );
+                self.active.lock().unwrap().remove(&project.project_id);
+                return;
+            }
+        };
+        let _ = publish_vm_snapshot(&self.host, &snapshot);
+        let Some(record) = runnable_record(&snapshot).cloned() else {
+            let _ = publisher.emit(
+                &turn.turn_id,
+                "run.failed",
+                json!({"error":"Agent VM is not ready for a headless run"}),
+                "failed",
+            );
+            self.active.lock().unwrap().remove(&project.project_id);
+            return;
+        };
+        publisher.vm_name = record.name.clone();
+        {
+            if let Some(active) = self.active.lock().unwrap().get_mut(&project.project_id) {
+                active.vm_name = Some(record.name.clone());
+            }
+        }
+        if cancel_requested.load(Ordering::Acquire) {
+            let _ = publisher.emit(
+                &turn.turn_id,
+                "run.cancelled",
+                json!({"beforeAgentStart":true}),
+                "cancelled",
+            );
+            self.active.lock().unwrap().remove(&project.project_id);
+            return;
+        }
+
+        loop {
+            let resumed = backend_session_id.is_some();
+            let lifecycle_type = if resumed {
+                "run.resumed"
+            } else {
+                "run.started"
+            };
+            if publisher
+                .emit(
+                    &turn.turn_id,
+                    lifecycle_type,
+                    json!({
+                        "projectId": project.project_id,
+                        "project": project.display_name,
+                        "cwd": project.canonical_path,
+                        "backendSessionId": backend_session_id,
+                    }),
+                    "working",
+                )
+                .is_err()
+            {
+                break;
+            }
+            if publisher
+                .emit(
+                    &turn.turn_id,
+                    "user.message",
+                    json!({"text": turn.message}),
+                    "working",
+                )
+                .is_err()
+            {
+                break;
+            }
+            let execution = TurnExecution {
+                run_id: run_id.clone(),
+                turn_id: turn.turn_id.clone(),
+                backend,
+                backend_session_id: backend_session_id.clone(),
+                new_claude_session_id: uuid::Uuid::new_v4().to_string(),
+                prompt: std::mem::take(&mut turn.message),
+                record: record.clone(),
+            };
+            let mut sink = PublishingSink::new(&mut publisher, &record, resumed);
+            let outcome = self.executor.execute(execution, &mut sink);
+            let sink_state = sink.finish();
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(_) => ExecutionOutcome {
+                    exit_code: -1,
+                    backend_reported_error: true,
+                    ..ExecutionOutcome::default()
+                },
+            };
+            if let Some(session_id) = outcome.backend_session_id.clone() {
+                publisher.backend_session_id = Some(session_id.clone());
+                backend_session_id = Some(session_id.clone());
+                if let Some(active) = self.active.lock().unwrap().get_mut(&project.project_id) {
+                    active.backend_session_id = Some(session_id);
+                }
+            } else if publisher.backend_session_id.is_some() {
+                backend_session_id = publisher.backend_session_id.clone();
+            }
+
+            let cancelled = cancel_requested.load(Ordering::Acquire);
+            let failed = outcome.exit_code != 0
+                || outcome.backend_reported_error
+                || sink_state.backend_failure;
+            let terminal = if cancelled {
+                publisher.emit(&turn.turn_id, "run.cancelled", json!({}), "cancelled")
+            } else if sink_state.waiting {
+                Ok(())
+            } else if failed {
+                publisher.emit(
+                    &turn.turn_id,
+                    "run.failed",
+                    json!({
+                        "error":"Agent backend failed",
+                        "exitCode":outcome.exit_code,
+                        "stderrBytes":outcome.stderr_bytes
+                    }),
+                    "failed",
+                )
+            } else {
+                let result = outcome
+                    .result
+                    .or(sink_state.result)
+                    .or(sink_state.last_assistant)
+                    .unwrap_or_default();
+                publisher.emit(
+                    &turn.turn_id,
+                    "result.completed",
+                    json!({"text":result,"files":publisher.files_payload()}),
+                    "completed",
+                )
+            };
+            if terminal.is_err() {
+                break;
+            }
+
+            let next = {
+                let mut active = self.active.lock().unwrap();
+                let Some(run) = active.get_mut(&project.project_id) else {
+                    break;
+                };
+                if cancelled || failed {
+                    active.remove(&project.project_id);
+                    None
+                } else if run.queued.is_some() {
+                    run.queued.take()
+                } else {
+                    active.remove(&project.project_id);
+                    None
+                }
+            };
+            let Some(next) = next else {
+                break;
+            };
+            cancel_requested.store(false, Ordering::Release);
+            turn = next;
+        }
+        self.active.lock().unwrap().remove(&project.project_id);
+    }
+
+    fn publish_queue_state(
+        &self,
+        project: &ProjectIdentity,
+        run_id: &str,
+        backend: Backend,
+        vm_name: &str,
+        backend_session_id: Option<&str>,
+        queued: bool,
+    ) -> Result<(), String> {
+        let state = if queued { "working" } else { "starting" };
+        self.host.publish_entity(
+            "upsert",
+            "agent_run",
+            run_id,
+            state,
+            base_attrs(
+                project,
+                run_id,
+                backend,
+                vm_name,
+                backend_session_id,
+                queued,
+            ),
+        )
+    }
+}
+
+struct SinkState {
+    waiting: bool,
+    backend_failure: bool,
+    result: Option<String>,
+    last_assistant: Option<String>,
+}
+
+struct PublishingSink<'a, H: HostApi> {
+    publisher: &'a mut RunPublisher<H>,
+    record: &'a VmRecord,
+    resumed: bool,
+    pending_delta: String,
+    last_delta_flush: Instant,
+    waiting: bool,
+    backend_failure: bool,
+    result: Option<String>,
+    last_assistant: Option<String>,
+}
+
+impl<'a, H: HostApi> PublishingSink<'a, H> {
+    fn new(publisher: &'a mut RunPublisher<H>, record: &'a VmRecord, resumed: bool) -> Self {
+        Self {
+            publisher,
+            record,
+            resumed,
+            pending_delta: String::new(),
+            last_delta_flush: Instant::now(),
+            waiting: false,
+            backend_failure: false,
+            result: None,
+            last_assistant: None,
+        }
+    }
+
+    fn flush_delta(&mut self) -> Result<(), String> {
+        if self.pending_delta.is_empty() {
+            return Ok(());
+        }
+        let text = std::mem::take(&mut self.pending_delta);
+        self.last_delta_flush = Instant::now();
+        self.publisher
+            .emit_current("assistant.delta", json!({"text":text}), "working")
+    }
+
+    fn finish(mut self) -> SinkState {
+        if self.flush_delta().is_err() {
+            self.backend_failure = true;
+        }
+        SinkState {
+            waiting: self.waiting,
+            backend_failure: self.backend_failure,
+            result: self.result,
+            last_assistant: self.last_assistant,
+        }
+    }
+}
+
+impl<H: HostApi> BackendEventSink for PublishingSink<'_, H> {
+    fn emit(&mut self, event: BackendEvent) -> Result<(), String> {
+        if let BackendEvent::AssistantDelta { text } = event {
+            self.pending_delta.push_str(&text);
+            if self.pending_delta.chars().count() >= MAX_DELTA_CHARS
+                || self.last_delta_flush.elapsed() >= DELTA_FLUSH_INTERVAL
+            {
+                self.flush_delta()?;
+            }
+            return Ok(());
+        }
+        self.flush_delta()?;
+        match event {
+            BackendEvent::Session { id, model } => {
+                self.publisher.backend_session_id = Some(id.clone());
+                self.publisher.emit_current(
+                    if self.resumed {
+                        "run.resumed"
+                    } else {
+                        "run.started"
+                    },
+                    json!({"backendSessionId":id,"model":model}),
+                    "working",
+                )
+            }
+            BackendEvent::AssistantMessage { text } => {
+                self.last_assistant = Some(text.clone());
+                self.publisher
+                    .emit_current("assistant.message", json!({"text":text}), "working")
+            }
+            BackendEvent::ToolStarted { id, name, detail } => self.publisher.emit_current(
+                "tool.started",
+                json!({"id":id,"name":name,"detail":detail.map(|value| safe_detail(&value))}),
+                "working",
+            ),
+            BackendEvent::ToolCompleted {
+                id,
+                is_error,
+                detail,
+            } => self.publisher.emit_current(
+                if is_error {
+                    "tool.failed"
+                } else {
+                    "tool.completed"
+                },
+                json!({"id":id,"detail":detail.map(|value| safe_detail(&value))}),
+                "working",
+            ),
+            BackendEvent::FileChanged { guest_path, change } => {
+                let Some(host_root) = self.record.workspace.host_path.as_deref() else {
+                    return self.publisher.emit_current(
+                        "backend.unmapped",
+                        json!({"upstreamType":"file.path","reason":"host mount unavailable"}),
+                        "working",
+                    );
+                };
+                match map_guest_path(
+                    Path::new(&self.record.workspace.guest_path),
+                    Path::new(host_root),
+                    Path::new(&guest_path),
+                ) {
+                    Ok(path) => {
+                        let relative = path
+                            .strip_prefix(host_root)
+                            .ok()
+                            .map(display_path)
+                            .unwrap_or_default();
+                        self.publisher.remember_file(&path, &change);
+                        self.publisher.emit_current(
+                            "file.changed",
+                            json!({
+                                "path":path.to_string_lossy(),
+                                "relativePath":relative,
+                                "change":change
+                            }),
+                            "working",
+                        )
+                    }
+                    Err(_) => self.publisher.emit_current(
+                        "backend.unmapped",
+                        json!({"upstreamType":"file.path","reason":"outside project mount"}),
+                        "working",
+                    ),
+                }
+            }
+            BackendEvent::Question { id, payload } => {
+                self.waiting = true;
+                self.publisher.emit_current(
+                    "question.opened",
+                    json!({"id":id,"question":payload}),
+                    "waiting",
+                )
+            }
+            BackendEvent::Usage { payload } => {
+                self.publisher
+                    .emit_current("usage.updated", payload, "working")
+            }
+            BackendEvent::Result {
+                text,
+                is_error,
+                session_id,
+            } => {
+                self.result = Some(text);
+                self.backend_failure |= is_error;
+                if let Some(session_id) = session_id {
+                    self.publisher.backend_session_id = Some(session_id);
+                }
+                Ok(())
+            }
+            BackendEvent::TurnCompleted => Ok(()),
+            BackendEvent::Failure { .. } => {
+                self.backend_failure = true;
+                Ok(())
+            }
+            BackendEvent::Unmapped {
+                upstream_type,
+                keys,
+            } => self.publisher.emit_current(
+                "backend.unmapped",
+                json!({"upstreamType":upstream_type,"keys":keys}),
+                "working",
+            ),
+            BackendEvent::AssistantDelta { .. } => unreachable!(),
+        }
+    }
+}
+
+struct RunPublisher<H: HostApi> {
+    host: H,
+    store: RunStore,
+    run_id: String,
+    project: ProjectIdentity,
+    backend: Backend,
+    vm_name: String,
+    seq: u64,
+    turn_id: String,
+    backend_session_id: Option<String>,
+    files: BTreeMap<String, String>,
+}
+
+impl<H: HostApi> RunPublisher<H> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        host: H,
+        store: RunStore,
+        run_id: String,
+        project: ProjectIdentity,
+        backend: Backend,
+        vm_name: String,
+        seq: u64,
+        backend_session_id: Option<String>,
+    ) -> Self {
+        Self {
+            host,
+            store,
+            run_id,
+            project,
+            backend,
+            vm_name,
+            seq,
+            turn_id: String::new(),
+            backend_session_id,
+            files: BTreeMap::new(),
+        }
+    }
+
+    fn emit(
+        &mut self,
+        turn_id: &str,
+        event_type: &str,
+        payload: Value,
+        state: &str,
+    ) -> Result<(), String> {
+        self.turn_id = turn_id.into();
+        self.emit_current(event_type, payload, state)
+    }
+
+    fn emit_current(
+        &mut self,
+        event_type: &str,
+        payload: Value,
+        state: &str,
+    ) -> Result<(), String> {
+        let next_seq = self
+            .seq
+            .checked_add(1)
+            .ok_or_else(|| "run event seq overflow".to_string())?;
+        let event = RunEvent {
+            run_id: self.run_id.clone(),
+            turn_id: self.turn_id.clone(),
+            seq: next_seq,
+            at: now_ms(),
+            event_type: event_type.into(),
+            payload,
+            backend: self.backend,
+            vm: self.vm_name.clone(),
+        };
+        self.store.append(&event)?;
+        self.seq = next_seq;
+        let mut attrs = base_attrs(
+            &self.project,
+            &self.run_id,
+            self.backend,
+            &self.vm_name,
+            self.backend_session_id.as_deref(),
+            false,
+        );
+        if let Value::Object(fields) = &mut attrs {
+            fields.insert("turnId".into(), Value::String(self.turn_id.clone()));
+            fields.insert("seq".into(), Value::from(self.seq));
+            fields.insert(
+                "latestEvent".into(),
+                serde_json::to_value(&event)
+                    .map_err(|_| "не сериализовать latest run event".to_string())?,
+            );
+            fields.insert("files".into(), self.files_payload());
+        }
+        trim_attrs(&mut attrs)?;
+        self.host
+            .publish_entity("upsert", "agent_run", &self.run_id, state, attrs)
+    }
+
+    fn remember_file(&mut self, path: &Path, change: &str) {
+        if self.files.len() >= MAX_RESULT_FILES {
+            return;
+        }
+        self.files.insert(display_path(path), change.to_string());
+    }
+
+    fn files_payload(&self) -> Value {
+        Value::Array(
+            self.files
+                .iter()
+                .map(|(path, change)| json!({"path":path,"change":change}))
+                .collect(),
+        )
+    }
+}
+
+fn base_attrs(
+    project: &ProjectIdentity,
+    run_id: &str,
+    backend: Backend,
+    vm_name: &str,
+    backend_session_id: Option<&str>,
+    queued: bool,
+) -> Value {
+    json!({
+        "runId":run_id,
+        "projectId":project.project_id,
+        "project":project.display_name,
+        "cwd":project.canonical_path,
+        "vmName":vm_name,
+        "backend":backend,
+        "backendSessionId":backend_session_id,
+        "shellCommand":format!("avm shell {vm_name}"),
+        "resumeCommand":backend_session_id.and_then(|id| terminal_resume_command(backend, id)),
+        "queued":queued
+    })
+}
+
+fn publish_vm_snapshot<H: HostApi>(host: &H, snapshot: &RuntimeSnapshot) -> Result<(), String> {
+    let state = snapshot
+        .vm
+        .as_ref()
+        .map(|vm| vm.state.as_str())
+        .unwrap_or("absent");
+    host.publish_entity(
+        "upsert",
+        "vm",
+        &snapshot.vm_name,
+        state,
+        json!({
+            "projectId":snapshot.project_id,
+            "project":snapshot.display_name,
+            "cwd":snapshot.cwd,
+            "shellCommand":snapshot.shell_command,
+            "environment":snapshot.environment,
+            "management":snapshot.vm.as_ref().map(|vm| vm.management.as_str()).unwrap_or("missing")
+        }),
+    )
+}
+
+fn runnable_record(snapshot: &RuntimeSnapshot) -> Option<&VmRecord> {
+    snapshot
+        .vm
+        .as_ref()
+        .filter(|vm| vm.management == "managed" && vm.state == "running")
+        .and_then(|vm| vm.record.as_ref())
+}
+
+pub fn terminal_resume_command(backend: Backend, session_id: &str) -> Option<String> {
+    validate_backend_session_id(session_id).ok()?;
+    Some(match backend {
+        Backend::Claude => format!("claude --resume {session_id}"),
+        Backend::Codex => format!("codex resume {session_id}"),
+    })
+}
+
+fn validate_message(message: &str) -> Result<(), String> {
+    if message.trim().is_empty()
+        || message.len() > crate::run_executor::MAX_PROMPT_BYTES
+        || message.contains('\0')
+    {
+        return Err("message имеет недопустимый размер или bytes".into());
+    }
+    Ok(())
+}
+
+fn new_id(prefix: &str) -> String {
+    format!("{prefix}-{}", uuid::Uuid::new_v4().simple())
+}
+
+fn short_id(value: &str) -> &str {
+    value.get(..value.len().min(20)).unwrap_or(value)
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
+
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .take(MAX_DISPLAY_PATH_CHARS)
+        .collect()
+}
+
+fn safe_detail(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    if [
+        "authorization",
+        "api_key",
+        "api-key",
+        "credential",
+        "password",
+        "secret",
+        "token=",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+        || (lower.contains("://") && lower.contains('@'))
+    {
+        return "[private detail hidden]".into();
+    }
+    value.chars().take(2_000).collect()
+}
+
+fn trim_attrs(attrs: &mut Value) -> Result<(), String> {
+    let mut encoded =
+        serde_json::to_vec(attrs).map_err(|_| "не сериализовать agent run attrs".to_string())?;
+    if encoded.len() <= MAX_ENTITY_ATTRS_BYTES {
+        encoded.zeroize();
+        return Ok(());
+    }
+    encoded.zeroize();
+    if let Some(fields) = attrs.as_object_mut() {
+        fields.insert("files".into(), json!([]));
+    }
+    let mut encoded = serde_json::to_vec(attrs)
+        .map_err(|_| "не сериализовать trimmed agent run attrs".to_string())?;
+    if encoded.len() > MAX_ENTITY_ATTRS_BYTES {
+        encoded.zeroize();
+        return Err("agent run attrs превышают entity limit".into());
+    }
+    encoded.zeroize();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    use serde_json::{json, Value};
+
+    use super::*;
+    use crate::host::{HostApi, PollResponse};
+    use crate::inventory::{InventoryVm, VmRecord, VmResources, VmWorkspace};
+    use crate::run_event::{BackendEvent, RunEvent};
+    use crate::run_executor::{BackendEventSink, ExecutionOutcome, TurnExecution, TurnExecutor};
+    use crate::service::{RuntimeService, RuntimeSnapshot};
+
+    type Publications = Arc<(Mutex<Vec<(String, String, Value)>>, Condvar)>;
+
+    #[derive(Clone)]
+    struct FakeHost {
+        publications: Publications,
+        store: RunStore,
+    }
+
+    impl FakeHost {
+        fn new(store: RunStore) -> Self {
+            Self {
+                publications: Arc::new((Mutex::new(Vec::new()), Condvar::new())),
+                store,
+            }
+        }
+
+        fn wait_for_state(&self, state: &str) -> Value {
+            let (lock, changed) = &*self.publications;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut values = lock.lock().unwrap();
+            loop {
+                if let Some((_, _, attrs)) = values
+                    .iter()
+                    .rev()
+                    .find(|(kind, item_state, _)| kind == "agent_run" && item_state == state)
+                {
+                    return attrs.clone();
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "state {state} not published: {values:?}"
+                );
+                let (next, _) = changed.wait_timeout(values, remaining).unwrap();
+                values = next;
+            }
+        }
+    }
+
+    impl HostApi for FakeHost {
+        fn register(&self, _pid: u32) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn poll(&self, _after: u64) -> Result<PollResponse, String> {
+            Err("not used".into())
+        }
+
+        fn publish_entity(
+            &self,
+            _op: &str,
+            kind: &str,
+            _object_id: &str,
+            state: &str,
+            attrs: Value,
+        ) -> Result<(), String> {
+            if kind == "agent_run" {
+                if let Some(event) = attrs.get("latestEvent") {
+                    let event: RunEvent = serde_json::from_value(event.clone()).unwrap();
+                    let persisted = self.store.replay(&event.run_id, event.seq - 1, 1).unwrap();
+                    assert_eq!(persisted, vec![event], "journal must win before emit");
+                }
+            }
+            let (lock, changed) = &*self.publications;
+            lock.lock()
+                .unwrap()
+                .push((kind.into(), state.into(), attrs));
+            changed.notify_all();
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeExecutorState {
+        calls: Vec<(String, Option<String>, String)>,
+        block_first: bool,
+        first_started: bool,
+        release_first: bool,
+        cancel_called: bool,
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeExecutor {
+        state: Arc<(Mutex<FakeExecutorState>, Condvar)>,
+    }
+
+    impl FakeExecutor {
+        fn blocking_first() -> Self {
+            let executor = Self::default();
+            executor.state.0.lock().unwrap().block_first = true;
+            executor
+        }
+
+        fn wait_first_started(&self) {
+            let (lock, changed) = &*self.state;
+            let mut state = lock.lock().unwrap();
+            while !state.first_started {
+                state = changed.wait(state).unwrap();
+            }
+        }
+
+        fn release_first(&self) {
+            let (lock, changed) = &*self.state;
+            lock.lock().unwrap().release_first = true;
+            changed.notify_all();
+        }
+
+        fn wait_calls(&self, count: usize) {
+            let (lock, changed) = &*self.state;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut state = lock.lock().unwrap();
+            while state.calls.len() < count {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "expected {count} calls: {:?}",
+                    state.calls
+                );
+                let (next, _) = changed.wait_timeout(state, remaining).unwrap();
+                state = next;
+            }
+        }
+    }
+
+    impl TurnExecutor for FakeExecutor {
+        fn execute(
+            &self,
+            request: TurnExecution,
+            sink: &mut dyn BackendEventSink,
+        ) -> Result<ExecutionOutcome, String> {
+            let (lock, changed) = &*self.state;
+            let mut state = lock.lock().unwrap();
+            state.calls.push((
+                request.run_id.clone(),
+                request.backend_session_id.clone(),
+                request.prompt.clone(),
+            ));
+            changed.notify_all();
+            let number = state.calls.len();
+            if number == 1 {
+                state.first_started = true;
+                changed.notify_all();
+                while state.block_first && !state.release_first && !state.cancel_called {
+                    state = changed.wait(state).unwrap();
+                }
+            }
+            let cancelled = state.cancel_called;
+            drop(state);
+            if cancelled {
+                return Ok(ExecutionOutcome {
+                    exit_code: -1,
+                    ..ExecutionOutcome::default()
+                });
+            }
+            let session = "018f0000-0000-7000-8000-000000000090";
+            sink.emit(BackendEvent::Session {
+                id: session.into(),
+                model: Some("synthetic".into()),
+            })?;
+            sink.emit(BackendEvent::AssistantDelta {
+                text: "Делаю".into(),
+            })?;
+            sink.emit(BackendEvent::FileChanged {
+                guest_path: "/home/dev/synthetic-project/smoke.txt".into(),
+                change: "created".into(),
+            })?;
+            sink.emit(BackendEvent::AssistantMessage {
+                text: format!("Готово {number}"),
+            })?;
+            sink.emit(BackendEvent::TurnCompleted)?;
+            Ok(ExecutionOutcome {
+                exit_code: 0,
+                backend_session_id: Some(session.into()),
+                result: None,
+                backend_reported_error: false,
+                turn_completed: true,
+                stderr_bytes: 0,
+            })
+        }
+
+        fn cancel(&self, _run_id: &str, _vm_name: Option<&str>) -> Result<bool, String> {
+            let (lock, changed) = &*self.state;
+            let mut state = lock.lock().unwrap();
+            state.cancel_called = true;
+            changed.notify_all();
+            Ok(true)
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeService {
+        project: PathBuf,
+    }
+
+    impl FakeService {
+        fn snapshot(&self) -> RuntimeSnapshot {
+            let canonical = fs::canonicalize(&self.project).unwrap();
+            RuntimeSnapshot {
+                project_id: ProjectIdentity::from_path(&canonical).unwrap().project_id,
+                display_name: "synthetic-project".into(),
+                cwd: canonical.to_string_lossy().into_owned(),
+                vm_name: "synthetic-project-a1b2c3d4e5f6".into(),
+                vm: Some(InventoryVm {
+                    name: "synthetic-project-a1b2c3d4e5f6".into(),
+                    state: "running".into(),
+                    management: "managed".into(),
+                    record: Some(VmRecord {
+                        name: "synthetic-project-a1b2c3d4e5f6".into(),
+                        source: "project".into(),
+                        modules: vec!["claude".into(), "codex".into()],
+                        resources: VmResources::default(),
+                        user: "dev".into(),
+                        workspace: VmWorkspace {
+                            mode_name: "mount".into(),
+                            guest_path: "/home/dev/synthetic-project".into(),
+                            host_path: Some(canonical.to_string_lossy().into_owned()),
+                            repo: None,
+                            git_ref: None,
+                        },
+                    }),
+                }),
+                created_spec: false,
+                shell_command: "avm shell synthetic-project-a1b2c3d4e5f6".into(),
+                environment: None,
+            }
+        }
+    }
+
+    impl RuntimeService for FakeService {
+        fn inventory(&self) -> Result<Vec<InventoryVm>, String> {
+            Ok(self.snapshot().vm.into_iter().collect())
+        }
+
+        fn status(&self, _cwd: &Path) -> Result<RuntimeSnapshot, String> {
+            Ok(self.snapshot())
+        }
+
+        fn ensure(&self, _cwd: &Path) -> Result<RuntimeSnapshot, String> {
+            Ok(self.snapshot())
+        }
+
+        fn stop(&self, _cwd: &Path) -> Result<RuntimeSnapshot, String> {
+            Ok(self.snapshot())
+        }
+
+        fn restart(&self, _cwd: &Path) -> Result<RuntimeSnapshot, String> {
+            Ok(self.snapshot())
+        }
+    }
+
+    fn fixture(
+        tag: &str,
+        executor: FakeExecutor,
+    ) -> (PathBuf, RunSupervisor<FakeHost>, FakeService) {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-supervisor-{tag}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let project = root.join("synthetic-project");
+        fs::create_dir_all(&project).unwrap();
+        let store = RunStore::new(root.join("private/runs"));
+        let host = FakeHost::new(store.clone());
+        let supervisor = RunSupervisor::new(host, store, Arc::new(executor));
+        let service = FakeService {
+            project: project.clone(),
+        };
+        (root, supervisor, service)
+    }
+
+    #[test]
+    fn run_events_are_persisted_before_publish_and_resume_command_is_exposed() {
+        let executor = FakeExecutor::default();
+        let (root, supervisor, service) = fixture("stream", executor);
+        let receipt = supervisor
+            .submit(
+                service,
+                SendRequest {
+                    cwd: root.join("synthetic-project"),
+                    project_id: None,
+                    backend: Backend::Claude,
+                    run_id: None,
+                    message: "сделай smoke".into(),
+                },
+            )
+            .unwrap();
+
+        let attrs = supervisor.host().wait_for_state("completed");
+        assert_eq!(attrs["runId"], json!(receipt.run_id));
+        assert_eq!(
+            attrs["resumeCommand"],
+            json!("claude --resume 018f0000-0000-7000-8000-000000000090")
+        );
+        let events = supervisor.store().replay(&receipt.run_id, 0, 64).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "run.started",
+                "user.message",
+                "run.started",
+                "assistant.delta",
+                "file.changed",
+                "assistant.message",
+                "result.completed",
+            ]
+        );
+        assert_eq!(
+            events[4].payload["path"],
+            json!(fs::canonicalize(root.join("synthetic-project"))
+                .unwrap()
+                .join("smoke.txt")
+                .to_string_lossy())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_follow_up_is_queued_replaced_and_runs_with_backend_resume() {
+        let executor = FakeExecutor::blocking_first();
+        let (root, supervisor, service) = fixture("queue", executor.clone());
+        let first = supervisor
+            .submit(
+                service.clone(),
+                SendRequest {
+                    cwd: root.join("synthetic-project"),
+                    project_id: None,
+                    backend: Backend::Codex,
+                    run_id: None,
+                    message: "первый".into(),
+                },
+            )
+            .unwrap();
+        executor.wait_first_started();
+        let queued = supervisor
+            .submit(
+                service.clone(),
+                SendRequest {
+                    cwd: root.join("synthetic-project"),
+                    project_id: None,
+                    backend: Backend::Codex,
+                    run_id: Some(first.run_id.clone()),
+                    message: "заменить меня".into(),
+                },
+            )
+            .unwrap();
+        assert!(queued.queued);
+        let replacement = supervisor
+            .submit(
+                service,
+                SendRequest {
+                    cwd: root.join("synthetic-project"),
+                    project_id: None,
+                    backend: Backend::Codex,
+                    run_id: Some(first.run_id.clone()),
+                    message: "второй".into(),
+                },
+            )
+            .unwrap();
+        assert!(replacement.queued);
+        executor.release_first();
+        executor.wait_calls(2);
+        supervisor.host().wait_for_state("completed");
+        let state = executor.state.0.lock().unwrap();
+        assert_eq!(state.calls.len(), 2);
+        assert_eq!(
+            state.calls[1].1.as_deref(),
+            Some("018f0000-0000-7000-8000-000000000090")
+        );
+        assert_eq!(state.calls[1].2, "второй");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancel_unblocks_the_worker_clears_queue_and_publishes_cancelled() {
+        let executor = FakeExecutor::blocking_first();
+        let (root, supervisor, service) = fixture("cancel", executor.clone());
+        let receipt = supervisor
+            .submit(
+                service,
+                SendRequest {
+                    cwd: root.join("synthetic-project"),
+                    project_id: None,
+                    backend: Backend::Claude,
+                    run_id: None,
+                    message: "долго".into(),
+                },
+            )
+            .unwrap();
+        executor.wait_first_started();
+
+        assert!(supervisor.cancel(&receipt.run_id).unwrap());
+
+        supervisor.host().wait_for_state("cancelled");
+        assert!(!supervisor.is_active(&receipt.run_id));
+        assert!(executor.state.0.lock().unwrap().cancel_called);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn terminal_resume_command_rejects_unsafe_backend_session_identity() {
+        assert_eq!(
+            terminal_resume_command(Backend::Claude, "valid-session_42"),
+            Some("claude --resume valid-session_42".into())
+        );
+        assert_eq!(
+            terminal_resume_command(Backend::Codex, "session;open /tmp/leak"),
+            None
+        );
+    }
+}

@@ -1,6 +1,6 @@
 # Jarvis config health and onboarding polish
 
-**Date:** 2026-07-28  
+**Date:** 2026-07-28
 **Status:** Approved design
 
 ## Context

@@ -15,4 +15,3 @@ done
 
 echo "[agent-vm] sidecar binary is not built" >&2
 exit 127
-

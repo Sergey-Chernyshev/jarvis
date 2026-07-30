@@ -25,4 +25,3 @@ destination_binary="$destination_dir/jarvis-agent-vm-plugin-$target_triple"
 /bin/mkdir -p "$destination_dir"
 /bin/cp "$source_binary" "$destination_binary"
 /bin/chmod 755 "$destination_binary"
-

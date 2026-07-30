@@ -344,13 +344,16 @@ mod tests {
         };
 
         let mut child = SystemSpawner.spawn(&spec).unwrap();
-        for _ in 0..100 {
-            if child.try_wait().unwrap().is_some() {
+        let mut exit_code = None;
+        for _ in 0..2_000 {
+            if let Some(code) = child.try_wait().unwrap() {
+                exit_code = Some(code);
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         std::env::remove_var("JARVIS_TEST_PROXY_CREDENTIAL_SENTINEL");
+        assert_eq!(exit_code, Some(0), "synthetic plugin process failed");
         let captured = fs::read_to_string(&capture).unwrap();
 
         assert!(

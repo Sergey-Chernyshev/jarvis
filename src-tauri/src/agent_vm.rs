@@ -455,8 +455,7 @@ pub fn notification_for(
 
     let (scope, transition, title, body, kind, speak) = match current.kind.as_str() {
         "vm" if matches!(current.state.as_str(), "running" | "ready")
-            && previous.is_some()
-            && previous.is_none_or(|before| {
+            && previous.is_some_and(|before| {
                 !matches!(before.state.as_str(), "running" | "ready" | "working")
             })
             && !is_focused(focus, current) =>

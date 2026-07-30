@@ -753,6 +753,16 @@ fn run(spec: &TerminalCommandSpec) -> Result<TerminalCommandResult, String> {
     let mut child = command
         .spawn()
         .map_err(|_| "не запустить Agent VM terminal transport".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Agent VM terminal stdout недоступен".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Agent VM terminal stderr недоступен".to_string())?;
+    let stdout_thread = thread::spawn(move || read_bounded_and_drain(stdout, MAX_SCREEN_BYTES + 1));
+    let stderr_thread = thread::spawn(move || read_bounded_and_drain(stderr, 64 * 1024));
     if let Some(input) = &spec.stdin {
         child
             .stdin
@@ -761,30 +771,36 @@ fn run(spec: &TerminalCommandSpec) -> Result<TerminalCommandResult, String> {
             .write_all(input)
             .map_err(|_| "не записать Agent VM terminal stdin".to_string())?;
     }
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    child
-        .stdout
-        .take()
-        .ok_or_else(|| "Agent VM terminal stdout недоступен".to_string())?
-        .take((MAX_SCREEN_BYTES + 1) as u64)
-        .read_to_end(&mut stdout)
-        .map_err(|_| "не прочитать Agent VM terminal stdout".to_string())?;
-    child
-        .stderr
-        .take()
-        .ok_or_else(|| "Agent VM terminal stderr недоступен".to_string())?
-        .take((64 * 1024) as u64)
-        .read_to_end(&mut stderr)
-        .map_err(|_| "не прочитать Agent VM terminal stderr".to_string())?;
     let status = child
         .wait()
         .map_err(|_| "не дождаться Agent VM terminal transport".to_string())?;
+    let stdout = stdout_thread
+        .join()
+        .map_err(|_| "Agent VM terminal stdout reader завершился аварийно".to_string())?
+        .map_err(|_| "не прочитать Agent VM terminal stdout".to_string())?;
+    let stderr = stderr_thread
+        .join()
+        .map_err(|_| "Agent VM terminal stderr reader завершился аварийно".to_string())?
+        .map_err(|_| "не прочитать Agent VM terminal stderr".to_string())?;
     Ok(TerminalCommandResult {
         status: status.code().unwrap_or(-1),
         stdout,
         stderr,
     })
+}
+
+fn read_bounded_and_drain<R: Read>(mut reader: R, limit: usize) -> std::io::Result<Vec<u8>> {
+    let mut bounded = Vec::with_capacity(limit.min(64 * 1024));
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(bounded.len());
+        bounded.extend_from_slice(&chunk[..read.min(remaining)]);
+    }
+    Ok(bounded)
 }
 
 fn require_success(result: TerminalCommandResult, operation: &str) -> Result<(), String> {
@@ -846,6 +862,8 @@ fn first_executable(candidates: &[PathBuf], name: &str) -> Result<PathBuf, Strin
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use serde_json::json;
 
     use super::*;
@@ -977,6 +995,17 @@ mod tests {
         assert!(validate_size(120, 36).is_ok());
         assert!(validate_size(39, 36).is_err());
         assert!(validate_size(120, 101).is_err());
+    }
+
+    #[test]
+    fn bounded_reader_keeps_prefix_and_drains_remaining_output() {
+        let bytes = (0_u8..=255).cycle().take(32 * 1024).collect::<Vec<_>>();
+        let mut reader = Cursor::new(bytes.clone());
+
+        let bounded = read_bounded_and_drain(&mut reader, 1024).unwrap();
+
+        assert_eq!(bounded, bytes[..1024]);
+        assert_eq!(reader.position(), bytes.len() as u64);
     }
 
     #[test]

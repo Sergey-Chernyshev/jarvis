@@ -1,12 +1,21 @@
 #![cfg(unix)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
+use jarvis_agent_vm_plugin::host::{HostApi, PollResponse};
+use jarvis_agent_vm_plugin::run_event::Backend;
+use jarvis_agent_vm_plugin::run_executor::SystemTurnExecutor;
+use jarvis_agent_vm_plugin::run_store::RunStore;
+use jarvis_agent_vm_plugin::run_supervisor::{RunSupervisor, SendRequest};
 use jarvis_agent_vm_plugin::runner::{CommandRunner, CommandSpec, SystemRunner};
 use jarvis_agent_vm_plugin::runtime_paths::RuntimePaths;
 use jarvis_agent_vm_plugin::service::{AgentVmService, Toolchain};
@@ -20,6 +29,93 @@ fn temp_root() -> PathBuf {
         std::process::id(),
         NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
     ))
+}
+
+#[derive(Clone, Debug, Default)]
+struct LiveRunObservation {
+    states: BTreeSet<String>,
+    event_types: BTreeSet<String>,
+    terminal: Option<String>,
+    vm_running: bool,
+    has_backend_session: bool,
+    has_resume_command: bool,
+}
+
+#[derive(Clone, Default)]
+struct CapturingHost {
+    shared: Arc<(Mutex<LiveRunObservation>, Condvar)>,
+}
+
+impl CapturingHost {
+    fn wait_for_terminal(&self, timeout: Duration) -> Result<LiveRunObservation, String> {
+        let deadline = Instant::now() + timeout;
+        let (lock, changed) = &*self.shared;
+        let mut observation = lock.lock().unwrap();
+        while observation.terminal.is_none() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("live Agent VM run did not reach a terminal state".into());
+            }
+            let (next, timeout) = changed.wait_timeout(observation, remaining).unwrap();
+            observation = next;
+            if timeout.timed_out() && observation.terminal.is_none() {
+                return Err("live Agent VM run timed out".into());
+            }
+        }
+        Ok(observation.clone())
+    }
+}
+
+impl HostApi for CapturingHost {
+    fn register(&self, _pid: u32) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn poll(&self, after: u64) -> Result<PollResponse, String> {
+        Ok(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: after,
+        })
+    }
+
+    fn publish_entity(
+        &self,
+        _op: &str,
+        kind: &str,
+        _object_id: &str,
+        state: &str,
+        attrs: Value,
+    ) -> Result<(), String> {
+        let (lock, changed) = &*self.shared;
+        let mut observation = lock.lock().unwrap();
+        if kind == "vm" && state == "running" {
+            observation.vm_running = true;
+        }
+        if kind == "agent_run" {
+            observation.states.insert(state.to_string());
+            if let Some(event_type) = attrs
+                .get("latestEvent")
+                .and_then(|event| event.get("type"))
+                .and_then(Value::as_str)
+            {
+                observation.event_types.insert(event_type.to_string());
+            }
+            if matches!(state, "completed" | "failed" | "cancelled") {
+                observation.terminal = Some(state.to_string());
+                observation.has_backend_session = attrs
+                    .get("backendSessionId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.is_empty());
+                observation.has_resume_command = attrs
+                    .get("resumeCommand")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.starts_with("claude --resume "));
+            }
+        }
+        changed.notify_all();
+        Ok(())
+    }
 }
 
 fn read_request(stream: &UnixStream) -> (String, Value) {
@@ -213,4 +309,69 @@ test "$(stat -c '%a' "$credential")" = "600"
         .success_or_error("private Claude credential validation")
         .unwrap();
     assert_eq!(result.status, 0);
+}
+
+/// Local-only full run smoke. It exercises the real setup, Claude JSONL
+/// parser, run journal and entity projection while retaining only event types
+/// and booleans in the test observer.
+#[test]
+#[ignore = "requires JARVIS_AGENT_VM_LIVE_SOCKET, JARVIS_AGENT_VM_LIVE_CWD and a running Claude VM"]
+fn real_run_supervisor_streams_claude_to_terminal_entity() {
+    let socket = std::env::var_os("JARVIS_AGENT_VM_LIVE_SOCKET")
+        .map(PathBuf::from)
+        .expect("JARVIS_AGENT_VM_LIVE_SOCKET is required");
+    let cwd = std::env::var_os("JARVIS_AGENT_VM_LIVE_CWD")
+        .map(PathBuf::from)
+        .expect("JARVIS_AGENT_VM_LIVE_CWD is required");
+    let paths = RuntimePaths::from_socket(&socket).unwrap();
+    let tools = Toolchain::discover().unwrap();
+    let service =
+        AgentVmService::with_system_bootstrap(SystemRunner, paths.clone(), tools.clone()).unwrap();
+    let journal_root = temp_root().join("runs");
+    let store = RunStore::new(journal_root.clone());
+    let host = CapturingHost::default();
+    let supervisor = RunSupervisor::new(
+        host.clone(),
+        store.clone(),
+        Arc::new(SystemTurnExecutor::new(tools.limactl, paths.command_env())),
+    )
+    .with_runtime_paths(paths);
+
+    let receipt = supervisor
+        .submit(
+            service,
+            SendRequest {
+                cwd,
+                project_id: None,
+                backend: Backend::Claude,
+                run_id: None,
+                message: "Reply with exactly JARVIS_SUPERVISOR_OK. Do not inspect or modify files."
+                    .into(),
+            },
+        )
+        .unwrap();
+    let observation = host.wait_for_terminal(Duration::from_secs(180)).unwrap();
+
+    assert_eq!(observation.terminal.as_deref(), Some("completed"));
+    assert!(observation.vm_running);
+    assert!(observation.states.contains("starting"));
+    assert!(observation.states.contains("working"));
+    assert!(observation.event_types.contains("run.started"));
+    assert!(observation.event_types.contains("assistant.message"));
+    assert!(observation.event_types.contains("usage.updated"));
+    assert!(observation.event_types.contains("result.completed"));
+    assert!(observation.has_backend_session);
+    assert!(observation.has_resume_command);
+    let summary = store
+        .summary(&receipt.run_id)
+        .unwrap()
+        .expect("run summary");
+    assert_eq!(summary.state, "completed");
+    assert_eq!(summary.backend, Backend::Claude);
+    let journal = journal_root.join(format!("{}.jsonl", receipt.run_id));
+    assert_eq!(
+        fs::metadata(&journal).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    fs::remove_dir_all(journal_root.parent().unwrap()).unwrap();
 }

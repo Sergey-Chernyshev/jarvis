@@ -4,7 +4,8 @@
 
 Основа: [`2026-07-03-plugin-system-agent-vm-design.md`](2026-07-03-plugin-system-agent-vm-design.md)
 
-Статус: v2, письменное ревью перед implementation plan
+Статус: v4, runtime и Project Manager скорректированы после live-проверки
+2026-07-28
 
 ## 1. Решение
 
@@ -14,13 +15,15 @@ Jarvis получает первый полноценный **project runtime**:
 1. находит либо создаёт project VM через существующий `agent-vm`;
 2. запускает VM при необходимости;
 3. переносит разрешённые настройки Claude/Codex и адресно доставляет авторизацию;
-4. запускает coding agent без внешнего Terminal;
-5. показывает живой чат, инструменты, изменённые файлы и итог;
+4. создаёт или переиспользует постоянную интерактивную terminal-сессию агента;
+5. транслирует реальный экран этой сессии и ввод прямо в Project Manager;
 6. уведомляет о готовности VM, вопросах, завершении и ошибках;
 7. даёт готовую команду входа в VM, если пользователю всё-таки нужен терминал.
 
-Встроенный терминальный эмулятор не строим. Основной интерфейс — Project Manager
-и чат Jarvis; Terminal остаётся диагностическим escape hatch.
+Основной интерфейс — Project Manager со встроенным terminal viewport. Это не
+реконструированный чат: источником истины остаётся реальная интерактивная
+PTY/tmux-сессия Claude/Codex. Внешний Terminal остаётся диагностическим escape
+hatch, но для обычной работы не нужен.
 
 ### 1.1 Зафиксированные продуктовые решения
 
@@ -31,13 +34,18 @@ Jarvis получает первый полноценный **project runtime**:
 | Изменения в `agent-vm` | Не требуются |
 | Запуск | Ленивый: VM поднимается при первом сообщении или явном «Запустить» |
 | Запуск вместе с Jarvis | Только для проектов, которые пользователь закрепил для автозапуска |
-| Агент | Headless Claude/Codex со структурированным event-stream |
-| Терминал | Не отображаем; показываем и копируем `avm shell <vm>` и команду resume |
+| Агент | Один постоянный интерактивный Claude/Codex process на project + backend |
+| Терминал | Реальный terminal viewport в Jarvis с reconnect; также даём `avm shell <vm>` |
 | Конфиги | Claude и Codex зеркалируются автоматически по явному allowlist |
 | Секреты | Не синхронизируются как обычные файлы; доставляются адресно, без аргументов команд и логов |
 | Главная страница | Активные VM видны отдельной компактной полосой и на карточках сессий |
 | Уведомления | Готовность/ошибка VM, ожидание ответа, завершение агента, аварийная остановка |
 | UI | Полноценный project workspace, а не набор технических кнопок плагина |
+| Каталог проектов | Любую существующую папку можно добавить системным folder picker |
+| Поиск | По имени проекта и каноническому пути, без transcript/chat metadata |
+| Избранное | Звезда закрепляет проект; порядок меняется вручную вверх/вниз |
+| Представление | Переключаемые компактный список и почти квадратные карточки |
+| Runtime status | Большая плашка видна только во время запуска/retry/ошибки |
 
 ## 2. Почему старая спека меняется
 
@@ -50,7 +58,7 @@ transcript.
 
 - Terminal не нужен для нормальной работы;
 - запуск, остановка и продолжение агента принадлежат UI Jarvis;
-- чат и результаты должны приходить в реальном времени;
+- реальный терминальный экран и результаты должны приходить в реальном времени;
 - project VM становится состоянием проекта, видимым на главной;
 - конфигурация агента и авторизация готовятся автоматически.
 
@@ -78,9 +86,9 @@ transcript.
 - Настройки уже имеют `plugins.<id>`, а capability-платформа —
   `Consumer::plugin`.
 
-Это означает, что новая работа — не второй чат с нуля. Нужны remote runtime,
-нормализованный transport и новый project-oriented view поверх существующих
-рендереров.
+Это означает, что новая работа — не второй чат с нуля. Нужны persistent
+terminal runtime, безопасный двусторонний transport и project-oriented view
+поверх реальной сессии.
 
 ### 3.2 Что фактически умеет `agent-vm` v0.1
 
@@ -106,44 +114,49 @@ transcript.
 
 ### 4.1 Цели
 
-1. Из Project Manager можно создать, запустить и использовать VM-агента, не
-   открывая Terminal.
+1. Из Project Manager можно создать, запустить и использовать постоянного
+   VM-агента, не открывая внешнее окно Terminal.
 2. После первого provisioning повторный запуск проекта не требует ручной
    настройки VM или повторного логина.
-3. Chat delta, tool activity, file changes, questions и result появляются в UI
-   не позднее секунды после получения соответствующей JSONL-строки плагином.
+3. Изменения terminal screen появляются в UI не позднее секунды, а ввод
+   отправляется в тот же живой process без relaunch.
 4. Состояние VM и агента видно на главной и в Project Manager.
 5. Значимые переходы состояния дают кликабельное уведомление без дублирующего
    шума.
-6. Перезапуск Jarvis не теряет уже записанную историю; незавершённый ход честно
-   становится `interrupted` и может быть продолжен через session ID.
+6. Закрытие project view не останавливает агента. После повторного открытия
+   Jarvis подключается к той же tmux-сессии; если процесс действительно умер,
+   UI честно показывает `exited` и предлагает новый запуск.
+7. Пользователь может добавить произвольную папку, найти её по имени/пути,
+   закрепить в избранном, изменить порядок и выбрать list/cards view.
 
 ### 4.2 Не входит в v1
 
 - read-only mount и выбор access mode;
-- встроенный terminal emulator;
 - clone-mode как путь автоматического создания проекта;
 - синхронизация всего `$HOME`;
 - копирование `.env`, private SSH keys, cloud credentials и macOS Keychain;
 - обратная синхронизация гостевых user-конфигов на host;
 - несколько одновременно работающих агентов в одной project VM;
 - marketplace сторонних runtime-плагинов;
-- гарантированное продолжение работающего turn после завершения процесса
-  Jarvis: VM выживает, текущий turn помечается `interrupted`.
+- хранение полного terminal output в EntityStore, project mount или run journal;
+- несколько одновременных terminal-сессий одного backend в одном проекте.
 
 ## 5. Рассмотренные runtime-подходы
 
-### A. Интерактивный TTY/tmux и разбор экрана
+### A. Постоянный TTY/tmux и трансляция экрана — выбран
 
-Jarvis запускает обычный TUI внутри guest tmux, читает pane capture и отправляет
-клавиши.
+Jarvis создаёт detached tmux-сессию на отдельном host tmux-server. В её PTY
+работает `limactl shell` и обычный интерактивный Claude/Codex внутри VM.
+Project Manager читает `capture-pane` и отправляет ввод через tmux buffer.
 
-- Плюс: терминальная сессия естественно attachable.
-- Минусы: ANSI, resize, полноэкранный TUI, вопросы и tool activity невозможно
-  надёжно превратить в продуктовые события; UI неизбежно становится логом.
+- Плюсы: один реальный process, нативные вопросы/подтверждения/slash-команды,
+  reconnect без relaunch, никакой реконструкции чата.
+- Ограничение v1: viewport показывает отрендеренный экран tmux без обещания
+  структурированных tool/file-событий. Файлы и diff остаются отдельными
+  project actions, а не извлекаются из screen scraping.
 
-Отклонён как основной transport. tmux может остаться ручным диагностическим
-режимом, но не источником данных.
+Выбран как основной transport. Screen scraping не используется для построения
+семантического чата: экран показывается пользователю как экран.
 
 ### B. Только hooks и tail transcript
 
@@ -157,7 +170,7 @@ Jarvis запускает обычный TUI внутри guest tmux, читае
 
 Отклонён как единственный transport. Transcript остаётся recovery-источником.
 
-### C. Структурированный headless runtime — выбран
+### C. Структурированный headless runtime — отклонён для project UI
 
 Плагин выполняет agent CLI в VM через `limactl shell`, читает JSONL и переводит
 его в единый `RunEvent`. Каждый ход — отдельный headless invocation с resume:
@@ -173,26 +186,36 @@ Jarvis запускает обычный TUI внутри guest tmux, читае
 - процесс можно отменять, ошибки и exit status наблюдаемы;
 - transcript/session ID сохраняют историю между ходами.
 
-Минус: текущий turn привязан к supervisor Jarvis. При падении host-процесса он
-не считается живым; следующий turn использует resume.
+Минусы, подтверждённые live-проверкой:
+
+- новый CLI process и повторный bootstrap на каждый prompt выглядят как
+  перезапуск агента, даже если backend session продолжается;
+- интерактивные TUI-состояния приходится искусственно переводить в чат;
+- жизненный цикл process привязан к одному headless turn.
+
+Поэтому headless transport остаётся пригодным для фоновых одноразовых задач,
+но не является transport Project Manager.
 
 ## 6. Архитектура
 
 ```text
 ┌──────────────────────────── Jarvis core ──────────────────────────────┐
-│ ProjectRuntimeRegistry  RunStore(JSONL)  NotificationRouter           │
-│ SecretStore(Keychain)       ▲                 ▲                       │
-│         │ RPC/events         │ normalized     │ lifecycle             │
+│ ProjectRuntimeRegistry  TerminalBridge       NotificationRouter       │
+│ SecretStore(Keychain)       ▲ transient screen        ▲               │
+│         │ RPC/events         │ + input                 │ lifecycle     │
 │ PluginHost ─────────────── EntityStore ───── UI bridge                │
 └─────────┼────────────────────┼─────────────────┼───────────────────────┘
           │ UDS + plugin token │                 │ Tauri events
 ┌─────────▼────────────────────┴──── agent-vm plugin ────────────────────┐
-│ inventory · lifecycle · ConfigMirror · GuestBootstrap · RunSupervisor │
-│     avm list/start/stop/create          limactl shell + JSONL parser   │
-└─────────┬───────────────────────────────────────────┬──────────────────┘
-          │ avm                                       │ limactl shell
-┌─────────▼──────────────── Linux project VM ─────────▼──────────────────┐
-│ RW virtiofs project · ~/.claude · ~/.codex · claude/codex headless    │
+│ inventory · lifecycle · ConfigMirror · GuestBootstrap                 │
+│              avm list/start/stop/create                               │
+└─────────┬──────────────────────────────────────────────────────────────┘
+          │ avm
+┌─────────▼────────── dedicated host tmux ───────────────────────────────┐
+│ one detached session per project/backend · limactl shell PTY          │
+└─────────┬──────────────────────────────────────────────────────────────┘
+┌─────────▼──────────────── Linux project VM ────────────────────────────┐
+│ RW virtiofs project · ~/.claude · ~/.codex · interactive claude/codex │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -234,38 +257,39 @@ runtime-secrets. Текущий `service.claudeSecret`, если он запол
 после успешной записи и контрольного чтения. Plugin получает secret bytes
 только на время адресного bootstrap конкретной VM.
 
-#### `RunSupervisor`
+#### `TerminalSessionManager`
 
-На один активный project run:
+На пару `projectId + backend`:
 
-- запускает remote agent process;
-- читает stdout JSONL и отдельно stderr;
-- нормализует события;
-- ведёт монотонный `seq`;
-- пишет event journal;
-- поддерживает cancel и один queued follow-up;
-- завершает run по process exit/result/error.
+- вычисляет детерминированное безопасное имя tmux-session;
+- переиспользует живую detached session и никогда не создаёт process на Enter;
+- запускает `limactl shell` в guest workspace и обычный interactive CLI;
+- отдаёт terminal snapshot транзитно через Tauri IPC;
+- отправляет текст через именованный tmux buffer, без shell interpolation;
+- разделяет bracketed paste и `Enter` коротким settle-window, чтобы TUI не
+  оставлял вставленный prompt в строке ввода;
+- поддерживает resize, Enter/Escape/стрелки и interrupt;
+- отличает `starting`, `ready`, `working`, `exited` и `disconnected`.
 
-#### `RunStore`
+#### `TerminalBridge`
 
-Пишет append-only journal
-`<jarvis-dir>/agent-vm/runs/<run-id>.jsonl` с правами `0600` и компактный index.
-Run сначала сохраняется, затем событие emit-ится UI: перезапуск окна не теряет
-историю.
+Terminal output не публикуется в EntityStore и не пишется в project mount или
+общий journal: экран может содержать секретный ввод. UI получает ограниченный
+snapshot напрямую по Tauri IPC. Reconnect перечитывает scrollback живой pane.
 
 ## 7. Модель данных и состояния
 
 ### 7.1 Идентичности
 
 ```text
-ProjectProfile 1 ── 1 ProjectRuntime/VM 1 ── N AgentRun 1 ── N RunEvent
+ProjectProfile 1 ── 1 ProjectRuntime/VM 1 ── N TerminalSession
 ```
 
 - `projectId`: hash канонического host `cwd`, не basename;
 - `vmName`: имя из agent-vm Record;
-- `runId`: UUID Jarvis, одна непрерывная лента чата;
-- `backendSessionId`: Claude/Codex session/thread ID для resume;
-- `turnId`: UUID одного сообщения пользователя и ответа агента.
+- `terminalId`: детерминированный ID `projectId + backend`;
+- `tmuxSession`: безопасное имя detached session;
+- `backend`: `claude` или `codex`.
 
 Одинаковые basename в разных каталогах не конфликтуют. VM-name collision
 показывается как setup error с явным выбором существующей VM или переименованием.
@@ -281,50 +305,63 @@ ready ↔ working
 `working` — композиционное UI-состояние: VM `ready`, внутри есть активный run.
 Backend entity хранит отдельно `runtimeState` и `agentState`.
 
-### 7.3 Agent state
+### 7.3 Agent terminal state
 
 ```text
-idle → starting → working → waiting → working → completed
-                    ↘ failed
-                    ↘ cancelled
-                    ↘ interrupted
+absent → starting → ready ↔ working
+             ↘ exited
+ready/working → disconnected → ready/working
 ```
 
-`waiting` означает структурированный вопрос/разрешение, а не отсутствие stdout.
-`interrupted` используется при потере supervisor или рестарте Jarvis во время
-turn.
+`working` означает, что terminal process жив; точное внутреннее состояние TUI
+не угадывается по тексту. Вопрос или permission prompt виден непосредственно
+на экране. `disconnected` означает потерю attachment, а не смерть agent process.
 
-### 7.4 Нормализованный `RunEvent`
+### 7.4 Terminal snapshot
 
-Обязательный envelope:
+Транзитный ответ UI:
 
 ```json
 {
-  "runId": "uuid",
-  "turnId": "uuid",
-  "seq": 42,
-  "at": 1785250000000,
-  "type": "assistant.delta",
-  "payload": {},
+  "terminalId": "project-…-claude",
   "backend": "claude",
-  "vm": "jarvis"
+  "vm": "sup-ac82ab61d14d",
+  "state": "working",
+  "screen": "…bounded rendered terminal screen…"
 }
 ```
 
-Типы v1:
+`screen` имеет жёсткий byte/line limit, не логируется и не сохраняется core.
 
-- `run.started`, `run.resumed`;
-- `user.message`;
-- `assistant.delta`, `assistant.message`;
-- `tool.started`, `tool.completed`, `tool.failed`;
-- `file.changed`;
-- `question.opened`, `question.answered`;
-- `usage.updated`;
-- `result.completed`;
-- `run.cancelled`, `run.failed`, `run.interrupted`.
+### 7.5 Project Manager state
 
-Неизвестный upstream event сохраняется как диагностический
-`backend.unmapped`, но не ломает поток.
+Каталог не смешивается с Agent VM autostart profiles:
+
+```json
+{
+  "projectManager": {
+    "folders": [{
+      "projectId": "project-…",
+      "project": "jarvis",
+      "cwd": "/canonical/path/jarvis"
+    }],
+    "favoriteProjectIds": ["project-…"],
+    "view": "list"
+  }
+}
+```
+
+- `agentVm.projects` по-прежнему означает только проекты с включённым
+  `startWithJarvis`;
+- `projectManager.folders` — пользовательский каталог, который дополняет
+  проекты из chat history и VM inventory;
+- путь канонизируется backend-ом и должен указывать на существующую директорию;
+- звезда проекта из history/inventory сначала закрепляет его в `folders`;
+- порядок `favoriteProjectIds` является источником истины и не меняется от
+  `updatedAt`, новых чатов или состояния VM;
+- неизвестные поля блока сохраняются при точечной мутации;
+- это private settings Jarvis: содержимое папки, agent configs, credentials,
+  proxy и terminal output сюда не попадают.
 
 ## 8. Основные пользовательские сценарии
 
@@ -348,8 +385,8 @@ turn.
 4. Jarvis вызывает `avm create <cwd>`.
 5. Project view остаётся доступным и показывает живые этапы provisioning.
 6. После `VM ready` выполняются ConfigMirror и GuestBootstrap.
-7. Исходное сообщение автоматически отправляется агенту; повторно нажимать
-   «Запустить» не требуется.
+7. Jarvis создаёт persistent terminal session, подключает viewport и отправляет
+   исходное сообщение в неё; повторно нажимать «Запустить» не требуется.
 8. На готовность приходит toast; если пользователь уже смотрит этот project
    chat, toast подавляется и остаётся inline-status.
 
@@ -358,6 +395,8 @@ turn.
 1. `stopped` VM автоматически получает `avm start <name>`.
 2. ConfigMirror сравнивает fingerprint и переносит только изменившиеся
    разрешённые файлы.
+3. Если terminal session уже жива, Jarvis подключается к ней без bootstrap и
+   без запуска нового Claude/Codex.
 3. Новый run создаётся либо существующий продолжается по backend session ID.
 4. VM уже `ready` — сообщение уходит без отдельного подтверждения.
 
@@ -420,7 +459,7 @@ User-scoped snapshot:
 
 | Backend | Переносим | Не переносим |
 |---|---|---|
-| Claude | `~/.claude/settings.json`, `~/.claude/CLAUDE.md`, `agents/`, `commands/`, `skills/`, декларативный список plugins | transcripts, history, debug, cache, file-history, весь `~/.claude.json` |
+| Claude | `~/.claude/settings.json`, `~/.claude/CLAUDE.md`, `agents/`, `commands/`, `skills/`, project-scoped `projects/<host-cwd>/memory/`, декларативный список plugins | session JSONL, tool-results, transcripts, history, debug, cache, file-history, весь `~/.claude.json` |
 | Codex | `~/.codex/config.toml`, `~/.codex/AGENTS.md`, `skills/` | sessions/rollouts, logs, cache, временные файлы |
 | Git | `.gitconfig` через штатную sanitization agent-vm | credential helpers, stored credentials, private SSH keys |
 
@@ -445,6 +484,9 @@ User-scoped snapshot:
 - Пользовательские model/provider/MCP/skills сохраняются.
 - Host-specific Jarvis hooks не копируются буквально; они заменяются
   guest-safe runtime bridge либо удаляются с диагностикой.
+- Project memory re-key-ится с canonical host `cwd` на guest workspace key и
+  синхронизируется owner-private при каждом `runtime.ensure`; работающая VM
+  при этом не перезапускается.
 - Guest edits user-config не возвращаются на host и будут заменены следующим
   snapshot. Project-scoped config в RW mount остаётся двусторонним.
 
@@ -559,16 +601,24 @@ UI использует текущий визуальный язык Jarvis: к�
 
 ### 11.2 Список проектов
 
-Карточка проекта содержит:
+Project Manager объединяет chat history, VM inventory, autostart profiles и
+папки, добавленные пользователем:
 
-- имя, путь и branch;
-- environment badge: `Нет VM / Создаётся / Готова / Работает / Ошибка`;
-- backend/model активного или последнего run;
-- краткую текущую задачу либо последний result;
-- primary action `Открыть` или `Продолжить`;
-- quick action `+ Claude`, `+ Codex`.
+- верхний поиск фильтрует только имя и путь проекта;
+- `Добавить папку` открывает системный macOS folder picker;
+- избранные идут отдельной первой секцией и не пересортировываются
+  автоматически;
+- звезда добавляет/убирает проект, стрелки двигают избранное выше/ниже;
+- переключатель сохраняет `list` либо `cards`; карточки почти квадратные;
+- строка/карточка показывает имя, путь, состояние VM и быстрый вход в
+  Claude/Codex;
+- история остаётся доступна компактной иконкой без числа чатов;
+- tags, chat count, transcript summary, model и прочая метрика на этом уровне
+  не показываются;
+- online sidecar не дублируется большой зелёной карточкой. Status banner
+  появляется только для запуска, retry, несовместимости или ошибки.
 
-Карточки не превращаются в dashboard метрик. CPU/RAM/disk живут в detail.
+CPU/RAM/disk и autostart живут в environment detail, а не в каталоге.
 
 ### 11.3 Project workspace
 
@@ -715,47 +765,63 @@ coalescing voice queue.
     "title": "Agent VM",
     "agents": ["claude", "codex"],
     "workspace": "host-mount-rw",
-    "supports": ["chat", "resume", "cancel", "files", "shell-command"]
+    "supports": ["terminal", "reconnect", "input", "files", "shell-command"]
   }]
 }
 ```
 
-`launchTargets` старой спеки заменяется более точным `projectRuntimes`: новый
-контракт возвращает не terminal launch-spec, а управляемый run.
+`launchTargets` старой спеки заменяется более точным `projectRuntimes`.
+Lifecycle VM остаётся в плагине, а terminal transport работает через
+ограниченные in-process Tauri commands и известную entity выбранной VM.
 
 ### 16.2 RPC
 
 - `runtime.ensure {projectId,cwd,agent}` → operation ID;
 - `runtime.status {projectId}`;
-- `runtime.send {runId?,message,agent}` → run/turn IDs;
-- `runtime.cancel {runId}`;
 - `runtime.stop {projectId}`;
 - `runtime.restart {projectId}`;
-- `runtime.commands {projectId,runId?}`;
-- `runtime.replay {runId,afterSeq}`.
+- `runtime.commands {projectId}`.
 
 Long operations не держат IPC request открытым. Ответ возвращает operation ID,
 дальше идут события.
 
-### 16.3 Core → UI
+### 16.3 Terminal Tauri IPC
 
-- `runtime:state`;
-- `runtime:operation`;
-- `run:event`;
-- `run:recovered`;
-- `config:mirror-status`.
+- `agent_vm_terminal_ensure {projectId,backend}` → terminal identity/state;
+- `agent_vm_terminal_snapshot {terminalId}` → bounded transient screen;
+- `agent_vm_terminal_input {terminalId,text,submit}` → accepted;
+- `agent_vm_terminal_key {terminalId,key}` → accepted;
+- `agent_vm_terminal_resize {terminalId,cols,rows}` → applied;
+- `agent_vm_terminal_stop {terminalId}` → stopped.
+- `agent_vm_commands_get {projectId,cwd,backend}` → каталог встроенных,
+  пользовательских, проектных и plugin slash-команд для подсказок composer.
 
-UI после mount/reopen сначала получает snapshot, потом подписывается на events;
-гонка закрывается `seq`/replay.
+Каждая команда повторно проверяет, что terminal ID соответствует живой
+`plugin:agent-vm` VM entity и выбранному backend. Произвольные tmux session,
+VM name, shell fragment или host path UI передать не может.
+Каталог команд отдельно сверяет `projectId` с canonical `cwd`; выбор подсказки
+только дополняет поле и не отправляет команду без подтверждения пользователя.
+
+### 16.4 Project Manager Tauri IPC
+
+- `project_manager_state_get` → private catalog/favorites/view;
+- `project_manager_folder_pick` → system picker, canonical folder и новый state;
+- `project_manager_favorite_set {cwd,favorite}` → canonical upsert и новый state;
+- `project_manager_favorite_move {projectId,direction}` → порядок избранного;
+- `project_manager_view_set {view}` → `list | cards`.
+
+Folder picker запускается фиксированным скриптом без пользовательских
+подстановок. Отмена возвращается как `{ok:true,cancelled:true}`. Все остальные
+команды повторно валидируют идентификатор либо канонизируют путь на backend.
 
 ## 17. Тестирование
 
 ### 17.1 Pure/unit
 
 - projectId/path mapping и VM-name collision;
-- VM/agent state reducers;
-- Claude/Codex JSONL → `RunEvent`;
-- monotonic seq, replay и delta coalescing;
+- VM/terminal state reducers;
+- deterministic terminal/session identity;
+- tmux argv/shell quoting и allowlist клавиш;
 - config allowlist, path rewrite, merge и fingerprint;
 - secret redaction и запрет попадания secret bytes в argv/log;
 - notification transition/dedupe;
@@ -763,14 +829,14 @@ UI после mount/reopen сначала получает snapshot, потом 
 
 ### 17.2 Plugin integration с fake runner
 
-- отсутствующая VM → init/create/start/bootstrap/send;
+- отсутствующая VM → init/create/start/bootstrap;
 - stopped VM → start без recreate;
 - provisioning progress и failure;
 - config snapshot применяется атомарно;
 - auth missing/expired;
-- cancel убивает remote invocation;
-- plugin crash → stale/restart/replay;
-- malformed/upgraded backend events.
+- plugin crash → stale/restart;
+- повторный ensure с совпавшим fingerprint не читает Keychain и не копирует
+  bundle повторно.
 
 Реальный `limactl` в автоматических тестах не запускается.
 
@@ -778,25 +844,32 @@ UI после mount/reopen сначала получает snapshot, потом 
 
 - active VM rail показывается только при активных/error VM;
 - project card состояния и быстрые actions;
+- каталог произвольных папок и системный picker contract;
+- поиск только по имени/пути;
+- favorite toggle, ручной порядок и persistence;
+- list/cards view и отсутствие chat count/transcript summary;
+- отсутствие online-status banner при штатно подключённом sidecar;
 - provisioning stepper;
-- live chat, queued follow-up, cancel;
-- result/files/diff drawer;
-- shell/resume command copy;
+- реальный terminal viewport, reconnect, input и special keys;
+- project files/diff drawer;
+- shell command copy;
 - notification deep link;
 - keyboard navigation, focus, reduced motion и empty/error states.
 
 ### 17.4 Ручной macOS smoke
 
 1. Чистый project без `.agent-vm.yaml`.
-2. Первый prompt → config → VM → bootstrap → live Claude result.
-3. Файл изменился в VM и сразу виден host/diff viewer.
-4. Stop/start и resume.
-5. Codex run с тем же UX.
-6. Перезапуск Jarvis и восстановление history.
-7. VM подсвечена на главной.
-8. Waiting/done/error дают ровно одно кликабельное уведомление.
-9. `avm shell <vm>` открывает workspace.
-10. Проверка, что secrets отсутствуют в log/journal/process argv.
+2. Первый prompt → config → VM → bootstrap → persistent Claude terminal.
+3. Второй prompt → тот же tmux pane и тот же Claude PID, без bootstrap.
+4. Файл изменился в VM и сразу виден host/diff viewer.
+5. Закрытие/reopen project view подключается к той же pane.
+6. Stop/start terminal и VM.
+7. Codex terminal с тем же UX.
+8. VM подсвечена на главной.
+9. Ready/exited/error дают ровно одно кликабельное уведомление.
+10. `avm shell <vm>` открывает workspace.
+11. Проверка, что secrets и terminal output отсутствуют в
+    log/journal/process argv.
 
 ## 18. Инкременты реализации
 
@@ -818,15 +891,15 @@ UI после mount/reopen сначала получает snapshot, потом 
    SecretStore/Keychain и legacy migration, allowlist, fingerprint, path
    rewrite, безопасная адресная доставка auth, readiness diagnostics.
 
-4. **Headless RunSupervisor**
+4. **Persistent Terminal Runtime**
 
-   Claude/Codex adapters, normalized events, journal/replay, resume, cancel,
-   one-follow-up queue, `agent_run.*`.
+   Dedicated tmux server, deterministic project/backend session, interactive
+   `limactl shell`, transient capture/input/reconnect and terminal status.
 
 5. **Project Manager UI**
 
    active VM rail, project cards, project workspace, provisioning stepper,
-   live chat, result/files/diff drawer, environment popover. Обязательная
+   terminal viewport, project files/diff drawer, environment popover. Обязательная
    проверка живого UI и скриншотами, не только DOM-тестами.
 
 6. **Notifications, autostart и recovery**
@@ -841,8 +914,8 @@ UI после mount/reopen сначала получает snapshot, потом 
 
 ## 19. Acceptance criteria v1
 
-- [ ] Из существующего проекта можно одним действием отправить задачу Claude
-      или Codex; Jarvis сам доводит среду до запуска.
+- [ ] Из существующего проекта можно одним действием открыть постоянного Claude
+      или Codex; Jarvis сам доводит среду до запуска и отправляет первый ввод.
 - [ ] Весь project root доступен VM read-write через штатный `agent-vm`.
 - [ ] Исходники `agent-vm` не менялись.
 - [ ] Разрешённые user-конфиги Claude/Codex автоматически применяются.
@@ -850,15 +923,17 @@ UI после mount/reopen сначала получает snapshot, потом 
       argv/log/journal.
 - [ ] Claude runtime secret хранится в macOS Keychain, legacy plaintext после
       проверенной миграции очищен.
-- [ ] Chat, tools, files, questions и result транслируются в UI.
+- [ ] Реальный terminal screen и ввод транслируются в UI без реконструкции чата.
+- [ ] Два последовательных prompt используют ту же tmux pane и тот же agent PID.
+- [ ] Закрытие и повторное открытие project view не останавливает агента.
 - [ ] Active/starting/error VM видны на главной и в Project Manager.
-- [ ] Есть copy actions для `avm shell` и backend resume.
+- [ ] Есть copy action для корректного private-profile `avm shell`.
 - [ ] Waiting/done/ready/error уведомления дедуплицированы и открывают нужный
       project/run.
 - [ ] UI имеет законченные loading/empty/error/focus/reduced-motion states и
       проверен на запущенном приложении.
-- [ ] После рестарта Jarvis история сохранена, незавершённый turn помечен
-      `interrupted` и продолжается через Resume.
+- [ ] После рестарта окна Jarvis viewport reconnect-ится к живой detached
+      terminal session; реально умершая session не показывается работающей.
 
 ## 20. Отложенные расширения
 
@@ -866,6 +941,6 @@ UI после mount/reopen сначала получает snapshot, потом 
 - clone-mode project runtime;
 - per-project allowlist дополнительных secrets/config folders;
 - несколько параллельных runs и worktrees;
-- guest runner daemon, переживающий quit Jarvis без interruption;
-- встроенный terminal view, только если copy/attach окажется недостаточно;
+- semantic extraction tools/files/results поверх terminal, только если она
+  не меняет terminal как source of truth;
 - сторонние runtime providers поверх стабилизированного PluginHost protocol.

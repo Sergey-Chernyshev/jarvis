@@ -6,6 +6,7 @@
 
 use jarvis_secret_store::{MacKeychainStore, SecretKind, SecretStore, SecretValue};
 use serde_json::{json, Value};
+use std::path::Path;
 use std::sync::Arc;
 use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt;
@@ -204,7 +205,9 @@ pub fn action_accel(d: &Arc<Daemon>, a: HkAction) -> Option<String> {
         HkAction::Dictation => {
             crate::stt::config::SttConfig::from_settings(&d.settings.load()).hotkey
         }
-        _ => d.settings.string(a.settings_key().expect("не-dictation имеет ключ")),
+        _ => d
+            .settings
+            .string(a.settings_key().expect("не-dictation имеет ключ")),
     };
     accel_from_raw(&raw, a)
 }
@@ -241,7 +244,9 @@ pub fn find_conflict(
 
 /// Снять регистрацию текущего сочетания действия (select — весь набор).
 fn unregister_action(d: &Arc<Daemon>, a: HkAction) {
-    let Some(accel) = action_accel(d, a) else { return };
+    let Some(accel) = action_accel(d, a) else {
+        return;
+    };
     let gs = d.app.global_shortcut();
     match a {
         HkAction::Select => {
@@ -339,7 +344,9 @@ pub async fn hotkey_assign(
     }
     if a == HkAction::Select {
         if normalize_select_template(&accel) != accel {
-            return err(format!("Битый шаблон «{accel}» — нужен вид Command+Alt+{{n}}"));
+            return err(format!(
+                "Битый шаблон «{accel}» — нужен вид Command+Alt+{{n}}"
+            ));
         }
     } else if accel.parse::<Shortcut>().is_err() {
         return err(format!("Не разобрал сочетание: {accel}"));
@@ -358,7 +365,9 @@ pub async fn hotkey_assign(
             .iter()
             .filter_map(|o| action_accel(&d, *o).map(|acc| (*o, acc)))
             .collect();
-        let Some(other) = find_conflict(&bindings, a, &accel) else { break };
+        let Some(other) = find_conflict(&bindings, a, &accel) else {
+            break;
+        };
         if !steal {
             return json!({ "ok": false, "conflict": { "action": other.id(), "label": other.label() } });
         }
@@ -591,7 +600,6 @@ pub fn normalize_select_template(raw: &str) -> String {
         SELECT_TEMPLATE_DEFAULT.to_string()
     }
 }
-
 
 /// Если shortcut — экземпляр шаблона с цифрой, вернуть номер варианта (1..9).
 pub fn match_select_template(template: &str, shortcut: &Shortcut) -> Option<u32> {
@@ -829,7 +837,9 @@ pub fn chat_summarize(app: AppHandle, session_id: String, turn_key: String) -> V
         return err("Сессия не найдена");
     }
     tauri::async_runtime::spawn(async move {
-        let Some((be, entries)) = d.turn_entries(&session_id) else { return };
+        let Some((be, entries)) = d.turn_entries(&session_id) else {
+            return;
+        };
         let (_items, turns) = crate::turns::segment(be, &entries);
         if let Some(t) = turns.iter().find(|t| t.span.key == turn_key) {
             d.turn_generate(&session_id, t).await;
@@ -865,7 +875,14 @@ pub fn file_open(app: AppHandle, session_id: String, path: String, reveal: bool)
 /// AppleScript и т.п.) — такие принудительно уводим в reveal.
 fn force_reveal(p: &std::path::Path) -> bool {
     const EXECUTABLE_DOCS: [&str; 8] = [
-        "command", "terminal", "workflow", "webloc", "tool", "applescript", "scpt", "app",
+        "command",
+        "terminal",
+        "workflow",
+        "webloc",
+        "tool",
+        "applescript",
+        "scpt",
+        "app",
     ];
     p.extension()
         .and_then(|e| e.to_str())
@@ -899,7 +916,10 @@ fn resolve_user_file(cwd: Option<&str>, path: &str) -> Result<std::path::PathBuf
 pub fn file_read(app: AppHandle, session_id: String, path: String) -> Value {
     let d = Daemon::get(&app);
     let cwd = d.session(&session_id).and_then(|s| s.cwd);
-    file_read_dispatch(d.turn_entries(&session_id).map(|(be, e)| (cwd, be, e)), &path)
+    file_read_dispatch(
+        d.turn_entries(&session_id).map(|(be, e)| (cwd, be, e)),
+        &path,
+    )
 }
 
 /// Диспетчер file_read, отделён от команды ради тестов: None — сессии нет
@@ -987,7 +1007,10 @@ fn read_head_tail(p: &std::path::Path) -> std::io::Result<(String, bool)> {
 pub fn file_diff(app: AppHandle, session_id: String, path: String) -> Value {
     let d = Daemon::get(&app);
     let cwd = d.session(&session_id).and_then(|s| s.cwd);
-    file_diff_dispatch(d.turn_entries(&session_id).map(|(be, e)| (cwd, be, e)), &path)
+    file_diff_dispatch(
+        d.turn_entries(&session_id).map(|(be, e)| (cwd, be, e)),
+        &path,
+    )
 }
 
 /// Диспетчер file_diff, отделён от команды ради тестов (как file_read_dispatch).
@@ -1237,11 +1260,7 @@ pub fn agent_vm_profiles_get(app: AppHandle) -> Value {
 }
 
 #[tauri::command]
-pub fn agent_vm_profile_set(
-    app: AppHandle,
-    cwd: String,
-    start_with_jarvis: bool,
-) -> Value {
+pub fn agent_vm_profile_set(app: AppHandle, cwd: String, start_with_jarvis: bool) -> Value {
     let d = Daemon::get(&app);
     let (block, profile) = match crate::agent_vm::update_profile_block(
         &d.settings.load(),
@@ -1260,11 +1279,105 @@ pub fn agent_vm_profile_set(
 }
 
 #[tauri::command]
-pub fn agent_vm_focus(
+pub fn project_manager_state_get(app: AppHandle) -> Value {
+    serde_json::to_value(crate::agent_vm::project_manager_state_from_settings(
+        &Daemon::get(&app).settings.load(),
+    ))
+    .unwrap_or_else(|_| {
+        json!({
+            "folders": [],
+            "favoriteProjectIds": [],
+            "view": "list"
+        })
+    })
+}
+
+#[tauri::command]
+pub async fn project_manager_folder_pick(app: AppHandle) -> Value {
+    let cwd = match crate::project_folder_picker::pick(&app).await {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            return json!({
+                "ok": true,
+                "cancelled": true,
+                "state": project_manager_state_get(app)
+            })
+        }
+        Err(error) => return err(error),
+    };
+    let d = Daemon::get(&app);
+    let (block, state, folder) =
+        match crate::agent_vm::update_project_manager_folder(&d.settings.load(), &cwd) {
+            Ok(value) => value,
+            Err(error) => return err(error),
+        };
+    d.settings.set_top("projectManager", block);
+    json!({
+        "ok": true,
+        "cancelled": false,
+        "project": folder,
+        "state": state
+    })
+}
+
+#[tauri::command]
+pub fn project_manager_favorite_set(app: AppHandle, cwd: String, favorite: bool) -> Value {
+    let d = Daemon::get(&app);
+    let (block, state, project) = match crate::agent_vm::update_project_manager_favorite(
+        &d.settings.load(),
+        Path::new(&cwd),
+        favorite,
+    ) {
+        Ok(value) => value,
+        Err(error) => return err(error),
+    };
+    d.settings.set_top("projectManager", block);
+    json!({"ok":true, "project":project, "state":state})
+}
+
+#[tauri::command]
+pub fn project_manager_favorite_move(
     app: AppHandle,
-    project_id: Option<String>,
-    run_id: Option<String>,
+    project_id: String,
+    direction: String,
 ) -> Value {
+    let direction = match direction.as_str() {
+        "up" => crate::agent_vm::FavoriteMove::Up,
+        "down" => crate::agent_vm::FavoriteMove::Down,
+        _ => return err("Некорректное направление перемещения"),
+    };
+    let d = Daemon::get(&app);
+    let (block, state) = match crate::agent_vm::move_project_manager_favorite(
+        &d.settings.load(),
+        &project_id,
+        direction,
+    ) {
+        Ok(value) => value,
+        Err(error) => return err(error),
+    };
+    d.settings.set_top("projectManager", block);
+    json!({"ok":true, "state":state})
+}
+
+#[tauri::command]
+pub fn project_manager_view_set(app: AppHandle, view: String) -> Value {
+    let view = match view.as_str() {
+        "list" => crate::agent_vm::ProjectManagerView::List,
+        "cards" => crate::agent_vm::ProjectManagerView::Cards,
+        _ => return err("Некорректный вид проектов"),
+    };
+    let d = Daemon::get(&app);
+    let (block, state) =
+        match crate::agent_vm::update_project_manager_view(&d.settings.load(), view) {
+            Ok(value) => value,
+            Err(error) => return err(error),
+        };
+    d.settings.set_top("projectManager", block);
+    json!({"ok":true, "state":state})
+}
+
+#[tauri::command]
+pub fn agent_vm_focus(app: AppHandle, project_id: Option<String>, run_id: Option<String>) -> Value {
     let d = Daemon::get(&app);
     let Some(project_id) = project_id else {
         d.agent_vm.clear_focus();
@@ -1280,6 +1393,221 @@ pub fn agent_vm_focus(
     d.agent_vm
         .set_focus(Some(crate::agent_vm::AgentVmFocus { project_id, run_id }));
     ok()
+}
+
+fn agent_vm_terminal_target(
+    app: &AppHandle,
+    project_id: &str,
+    backend: &str,
+) -> Result<crate::agent_vm_terminal::TerminalTarget, String> {
+    crate::agent_vm_terminal::resolve_target(
+        &Daemon::get(app).entities.snapshot(),
+        project_id,
+        backend,
+    )
+}
+
+#[tauri::command]
+pub fn agent_vm_commands_get(
+    app: AppHandle,
+    project_id: String,
+    cwd: String,
+    backend: String,
+) -> Value {
+    if !matches!(backend.as_str(), "claude" | "codex") {
+        return err("Agent VM command backend должен быть claude или codex");
+    }
+    let identity = match crate::agent_vm::identity_for_path(std::path::Path::new(&cwd)) {
+        Ok(identity) => identity,
+        Err(error) => return err(error),
+    };
+    if !project_id.is_empty() && identity.project_id != project_id {
+        return err("Agent VM project ID не соответствует canonical cwd");
+    }
+    let commands = if backend == "codex" {
+        crate::commands_catalog::codex_commands()
+    } else {
+        Daemon::get(&app)
+            .commands
+            .get_for_cwd(identity.canonical_path.to_str())
+    };
+    json!({"ok":true,"projectId":identity.project_id,"commands":commands})
+}
+
+#[tauri::command]
+pub async fn agent_vm_terminal_ensure(
+    app: AppHandle,
+    project_id: String,
+    backend: String,
+    cols: u16,
+    rows: u16,
+) -> Value {
+    let target = match agent_vm_terminal_target(&app, &project_id, &backend) {
+        Ok(target) => target,
+        Err(error) => return err(error),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let tools = crate::agent_vm_terminal::TerminalTools::discover()?;
+        crate::agent_vm_terminal::ensure_terminal(&tools, &target, cols, rows)
+    })
+    .await;
+    match result {
+        Ok(Ok(terminal)) => json!({"ok":true,"terminal":terminal}),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("Agent VM terminal worker аварийно завершился"),
+    }
+}
+
+#[tauri::command]
+pub async fn agent_vm_terminal_snapshot(
+    app: AppHandle,
+    project_id: String,
+    backend: String,
+) -> Value {
+    let target = match agent_vm_terminal_target(&app, &project_id, &backend) {
+        Ok(target) => target,
+        Err(error) => return err(error),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let tools = crate::agent_vm_terminal::TerminalTools::discover()?;
+        crate::agent_vm_terminal::snapshot_terminal(&tools, &target)
+    })
+    .await;
+    match result {
+        Ok(Ok(terminal)) => json!({"ok":true,"terminal":terminal}),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("Agent VM terminal snapshot worker аварийно завершился"),
+    }
+}
+
+#[tauri::command]
+pub async fn agent_vm_terminal_input(
+    app: AppHandle,
+    project_id: String,
+    backend: String,
+    text: String,
+    submit: bool,
+) -> Value {
+    let target = match agent_vm_terminal_target(&app, &project_id, &backend) {
+        Ok(target) => target,
+        Err(error) => return err(error),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let tools = crate::agent_vm_terminal::TerminalTools::discover()?;
+        crate::agent_vm_terminal::input_terminal(&tools, &target, text, submit)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => ok(),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("Agent VM terminal input worker аварийно завершился"),
+    }
+}
+
+#[tauri::command]
+pub async fn agent_vm_terminal_key(
+    app: AppHandle,
+    project_id: String,
+    backend: String,
+    key: String,
+) -> Value {
+    let target = match agent_vm_terminal_target(&app, &project_id, &backend) {
+        Ok(target) => target,
+        Err(error) => return err(error),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let tools = crate::agent_vm_terminal::TerminalTools::discover()?;
+        crate::agent_vm_terminal::send_key(&tools, &target, &key)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => ok(),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("Agent VM terminal key worker аварийно завершился"),
+    }
+}
+
+#[tauri::command]
+pub async fn agent_vm_terminal_upload(
+    app: AppHandle,
+    project_id: String,
+    backend: String,
+    mut data_base64: String,
+    extension: String,
+) -> Value {
+    use base64::Engine as _;
+
+    let target = match agent_vm_terminal_target(&app, &project_id, &backend) {
+        Ok(target) => target,
+        Err(error) => {
+            data_base64.zeroize();
+            return err(error);
+        }
+    };
+    if data_base64.len() > 36 * 1024 * 1024 {
+        data_base64.zeroize();
+        return err("Agent VM image больше 25 МБ");
+    }
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(data_base64.trim()) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            data_base64.zeroize();
+            return err("Agent VM image содержит некорректный base64");
+        }
+    };
+    data_base64.zeroize();
+    let result = tokio::task::spawn_blocking(move || {
+        let tools = crate::agent_vm_terminal::TerminalTools::discover()?;
+        crate::agent_vm_terminal::upload_image(&tools, &target, bytes, &extension)
+    })
+    .await;
+    match result {
+        Ok(Ok(path)) => json!({"ok":true,"path":path}),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("Agent VM image upload worker аварийно завершился"),
+    }
+}
+
+#[tauri::command]
+pub async fn agent_vm_terminal_resize(
+    app: AppHandle,
+    project_id: String,
+    backend: String,
+    cols: u16,
+    rows: u16,
+) -> Value {
+    let target = match agent_vm_terminal_target(&app, &project_id, &backend) {
+        Ok(target) => target,
+        Err(error) => return err(error),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let tools = crate::agent_vm_terminal::TerminalTools::discover()?;
+        crate::agent_vm_terminal::resize_terminal(&tools, &target, cols, rows)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => ok(),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("Agent VM terminal resize worker аварийно завершился"),
+    }
+}
+
+#[tauri::command]
+pub async fn agent_vm_terminal_stop(app: AppHandle, project_id: String, backend: String) -> Value {
+    let target = match agent_vm_terminal_target(&app, &project_id, &backend) {
+        Ok(target) => target,
+        Err(error) => return err(error),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let tools = crate::agent_vm_terminal::TerminalTools::discover()?;
+        crate::agent_vm_terminal::stop_terminal(&tools, &target)
+    })
+    .await;
+    match result {
+        Ok(Ok(stopped)) => json!({"ok":true,"stopped":stopped}),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("Agent VM terminal stop worker аварийно завершился"),
+    }
 }
 
 fn ack_agent_vm_operation(
@@ -1738,7 +2066,12 @@ pub async fn session_save_image(data_base64: String, ext: String) -> Value {
         return err("Картинка больше 25 МБ");
     }
     // Разрешаем только безопасное короткое расширение из белого списка.
-    let ext = match ext.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+    let ext = match ext
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "png" => "png",
         "jpg" | "jpeg" => "jpg",
         "gif" => "gif",
@@ -1757,7 +2090,11 @@ pub async fn session_save_image(data_base64: String, ext: String) -> Value {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 24 * 3600);
         for e in entries.flatten() {
-            let old = e.metadata().and_then(|m| m.modified()).map(|t| t < cutoff).unwrap_or(false);
+            let old = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|t| t < cutoff)
+                .unwrap_or(false);
             if old {
                 let _ = std::fs::remove_file(e.path());
             }
@@ -1977,10 +2314,7 @@ pub fn toast_ready(app: AppHandle) {
 pub fn toast_click(app: AppHandle, session_id: Option<String>, target: Option<Value>) {
     let d = Daemon::get(&app);
     windows::show_panel_focused(&d);
-    if let Some(link) = target
-        .as_ref()
-        .and_then(crate::agent_vm::parse_deep_link)
-    {
+    if let Some(link) = target.as_ref().and_then(crate::agent_vm::parse_deep_link) {
         windows::emit_to_panel(&d.app, "open-agent-vm", &link);
     } else if let Some(sid) = session_id {
         windows::emit_to_panel(&d.app, "open-session", &sid);
@@ -2739,7 +3073,10 @@ mod tests {
         let cwd = d.to_str().unwrap();
         let res = file_read_impl(Some(cwd), claude_be(), &entries_touching("a.md"), "b.md");
         assert_eq!(res["ok"], json!(false));
-        assert!(res["error"].as_str().unwrap().contains("не из фактов"), "{res}");
+        assert!(
+            res["error"].as_str().unwrap().contains("не из фактов"),
+            "{res}"
+        );
     }
 
     #[test]
@@ -2770,7 +3107,12 @@ mod tests {
         big.extend(std::iter::repeat(b'T').take(FILE_READ_TAIL));
         std::fs::write(d.join("big.log"), &big).unwrap();
         let cwd = d.to_str().unwrap();
-        let res = file_read_impl(Some(cwd), claude_be(), &entries_touching("big.log"), "big.log");
+        let res = file_read_impl(
+            Some(cwd),
+            claude_be(),
+            &entries_touching("big.log"),
+            "big.log",
+        );
         assert_eq!(res["ok"], json!(true), "{res}");
         assert_eq!(res["truncated"], json!(true));
         let content = res["content"].as_str().unwrap();
@@ -2783,7 +3125,12 @@ mod tests {
     fn file_read_rejects_missing_file() {
         let d = tmp_dir("missing");
         let cwd = d.to_str().unwrap();
-        let res = file_read_impl(Some(cwd), claude_be(), &entries_touching("нет.md"), "нет.md");
+        let res = file_read_impl(
+            Some(cwd),
+            claude_be(),
+            &entries_touching("нет.md"),
+            "нет.md",
+        );
         assert_eq!(res["ok"], json!(false));
     }
 
@@ -2793,7 +3140,14 @@ mod tests {
         let st = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
-            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
             .args(args)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -2815,7 +3169,10 @@ mod tests {
             "b.md",
         );
         assert_eq!(res["ok"], json!(false));
-        assert!(res["error"].as_str().unwrap().contains("не из фактов"), "{res}");
+        assert!(
+            res["error"].as_str().unwrap().contains("не из фактов"),
+            "{res}"
+        );
     }
 
     #[test]
@@ -2862,14 +3219,12 @@ mod tests {
             agent_vm_run_file_context(&store, "run-safe", d.join("changed.md").to_str().unwrap())
                 .unwrap();
         assert_eq!(allowed, d.join("changed.md").canonicalize().unwrap());
-        assert!(
-            agent_vm_run_file_context(
-                &store,
-                "run-safe",
-                d.join("other.md").to_str().unwrap()
-            )
-            .is_err()
-        );
+        assert!(agent_vm_run_file_context(
+            &store,
+            "run-safe",
+            d.join("other.md").to_str().unwrap()
+        )
+        .is_err());
     }
 
     #[test]
@@ -2891,14 +3246,12 @@ mod tests {
             )
             .unwrap();
 
-        assert!(
-            agent_vm_run_file_context(
-                &store,
-                "run-foreign",
-                outside.join("outside.md").to_str().unwrap()
-            )
-            .is_err()
-        );
+        assert!(agent_vm_run_file_context(
+            &store,
+            "run-foreign",
+            outside.join("outside.md").to_str().unwrap()
+        )
+        .is_err());
         assert!(agent_vm_run_file_context(&store, "../escape", "anything").is_err());
     }
 
@@ -2949,9 +3302,15 @@ mod tests {
     #[test]
     fn normalize_falls_back_on_broken_template() {
         // без {n}, пусто, непарсибельный экземпляр → дефолт ⌘⌥{n}
-        assert_eq!(normalize_select_template("Command+Alt+5"), SELECT_TEMPLATE_DEFAULT);
+        assert_eq!(
+            normalize_select_template("Command+Alt+5"),
+            SELECT_TEMPLATE_DEFAULT
+        );
         assert_eq!(normalize_select_template(""), SELECT_TEMPLATE_DEFAULT);
-        assert_eq!(normalize_select_template("Bogus+{n}"), SELECT_TEMPLATE_DEFAULT);
+        assert_eq!(
+            normalize_select_template("Bogus+{n}"),
+            SELECT_TEMPLATE_DEFAULT
+        );
     }
 
     #[test]
@@ -2984,7 +3343,10 @@ mod tests {
             accel_from_raw("", HkAction::Quiet),
             Some("Command+Alt+J".to_string())
         );
-        assert_eq!(accel_from_raw("", HkAction::Dictation), Some("F8".to_string()));
+        assert_eq!(
+            accel_from_raw("", HkAction::Dictation),
+            Some("F8".to_string())
+        );
     }
 
     #[test]
@@ -3023,9 +3385,15 @@ mod tests {
             b(HkAction::Mute, "Command+Alt+M"),
         ];
         // то же действие — не конфликт (перезапись самого себя)
-        assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+J"), None);
+        assert_eq!(
+            find_conflict(&bindings, HkAction::Quiet, "Command+Alt+J"),
+            None
+        );
         // свободное сочетание — не конфликт
-        assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+X"), None);
+        assert_eq!(
+            find_conflict(&bindings, HkAction::Quiet, "Command+Alt+X"),
+            None
+        );
     }
 
     #[test]
@@ -3051,7 +3419,10 @@ mod tests {
     #[test]
     fn conflict_skips_broken_bindings() {
         let bindings = vec![b(HkAction::Mute, "Bogus+Nope")];
-        assert_eq!(find_conflict(&bindings, HkAction::Quiet, "Command+Alt+M"), None);
+        assert_eq!(
+            find_conflict(&bindings, HkAction::Quiet, "Command+Alt+M"),
+            None
+        );
     }
 
     // --- контракт question_answer (parse_question_choice) ---
@@ -3118,7 +3489,10 @@ mod turn_ipc_tests {
 
         assert!(resolve_user_file(Some(&cwd), "нет/такого.rs").is_err());
         assert!(resolve_user_file(None, "relative/without/cwd.rs").is_err());
-        assert!(resolve_user_file(Some(&cwd), "sub").is_err(), "каталог — не файл");
+        assert!(
+            resolve_user_file(Some(&cwd), "sub").is_err(),
+            "каталог — не файл"
+        );
     }
 
     #[test]
@@ -3128,6 +3502,9 @@ mod turn_ipc_tests {
         assert!(force_reveal(Path::new("A.COMMAND")), "регистр не важен");
         assert!(force_reveal(Path::new("/tmp/x/run.scpt")));
         assert!(!force_reveal(Path::new("a.rs")), "обычный файл открываем");
-        assert!(!force_reveal(Path::new("Makefile")), "без расширения — не блок");
+        assert!(
+            !force_reveal(Path::new("Makefile")),
+            "без расширения — не блок"
+        );
     }
 }

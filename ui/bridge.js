@@ -64,9 +64,37 @@
     getAgentVmProfiles: () => invoke('agent_vm_profiles_get'),
     setAgentVmProfile: (cwd, startWithJarvis) =>
       invoke('agent_vm_profile_set', { cwd, startWithJarvis: !!startWithJarvis }),
+    getProjectManagerState: () => invoke('project_manager_state_get'),
+    pickProjectManagerFolder: () => invoke('project_manager_folder_pick'),
+    setProjectManagerFavorite: (cwd, favorite) =>
+      invoke('project_manager_favorite_set', { cwd, favorite: !!favorite }),
+    moveProjectManagerFavorite: (projectId, direction) =>
+      invoke('project_manager_favorite_move', { projectId, direction }),
+    setProjectManagerView: (view) => invoke('project_manager_view_set', { view }),
     setAgentVmFocus: (projectId, runId) =>
       invoke('agent_vm_focus', { projectId: projectId || null, runId: runId || null }),
     agentVmOperationAck: (requestId) => invoke('agent_vm_operation_ack', { requestId }),
+    getAgentVmCommands: (projectId, cwd, backend) =>
+      invoke('agent_vm_commands_get', { projectId, cwd, backend }),
+    agentVmTerminalEnsure: (projectId, backend, cols, rows) =>
+      invoke('agent_vm_terminal_ensure', { projectId, backend, cols, rows }),
+    agentVmTerminalSnapshot: (projectId, backend) =>
+      invoke('agent_vm_terminal_snapshot', { projectId, backend }),
+    agentVmTerminalInput: (projectId, backend, text, submit = true) =>
+      invoke('agent_vm_terminal_input', { projectId, backend, text, submit: !!submit }),
+    agentVmTerminalKey: (projectId, backend, key) =>
+      invoke('agent_vm_terminal_key', { projectId, backend, key }),
+    agentVmTerminalUpload: (projectId, backend, dataBase64, extension) =>
+      invoke('agent_vm_terminal_upload', {
+        projectId,
+        backend,
+        dataBase64,
+        extension,
+      }),
+    agentVmTerminalResize: (projectId, backend, cols, rows) =>
+      invoke('agent_vm_terminal_resize', { projectId, backend, cols, rows }),
+    agentVmTerminalStop: (projectId, backend) =>
+      invoke('agent_vm_terminal_stop', { projectId, backend }),
     agentVmFileRead: (runId, path) => invoke('agent_vm_file_read', { runId, path }),
     agentVmFileDiff: (runId, path) => invoke('agent_vm_file_diff', { runId, path }),
     agentVmFileOpen: (runId, path, reveal) =>

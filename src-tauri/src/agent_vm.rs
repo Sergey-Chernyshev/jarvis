@@ -7,11 +7,12 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::entities::Entity;
 
 const MAX_PROJECT_PROFILES: usize = 128;
+const MAX_PROJECT_FOLDERS: usize = 512;
 const MAX_PATH_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -28,6 +29,36 @@ pub struct ProjectIdentity {
     pub project_id: String,
     pub project: String,
     pub canonical_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFolder {
+    pub project_id: String,
+    pub project: String,
+    pub cwd: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectManagerView {
+    #[default]
+    List,
+    Cards,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectManagerState {
+    pub folders: Vec<ProjectFolder>,
+    pub favorite_project_ids: Vec<String>,
+    pub view: ProjectManagerView,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FavoriteMove {
+    Up,
+    Down,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,6 +194,181 @@ pub fn update_profile_block(
     Ok((Value::Object(block), profile))
 }
 
+pub fn project_manager_state_from_settings(settings: &Value) -> ProjectManagerState {
+    let mut seen_ids = HashSet::new();
+    let mut seen_paths = HashSet::new();
+    let folders = settings
+        .pointer("/projectManager/folders")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| serde_json::from_value::<ProjectFolder>(value.clone()).ok())
+        .filter(|folder| {
+            valid_object_id(&folder.project_id)
+                && !folder.project.trim().is_empty()
+                && folder.project.len() <= 512
+                && Path::new(&folder.cwd).is_absolute()
+                && folder.cwd.len() <= MAX_PATH_BYTES
+                && seen_ids.insert(folder.project_id.clone())
+                && seen_paths.insert(folder.cwd.clone())
+        })
+        .take(MAX_PROJECT_FOLDERS)
+        .collect::<Vec<_>>();
+    let folder_ids = folders
+        .iter()
+        .map(|folder| folder.project_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut seen_favorites = HashSet::new();
+    let favorite_project_ids = settings
+        .pointer("/projectManager/favoriteProjectIds")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|project_id| {
+            folder_ids.contains(*project_id)
+                && valid_object_id(project_id)
+                && seen_favorites.insert((*project_id).to_string())
+        })
+        .map(str::to_string)
+        .take(MAX_PROJECT_FOLDERS)
+        .collect();
+    let view = settings
+        .pointer("/projectManager/view")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+
+    ProjectManagerState {
+        folders,
+        favorite_project_ids,
+        view,
+    }
+}
+
+fn project_manager_block(settings: &Value) -> Map<String, Value> {
+    settings
+        .get("projectManager")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn serialize_project_manager_block(
+    settings: &Value,
+    state: &ProjectManagerState,
+) -> Result<Value, String> {
+    let mut block = project_manager_block(settings);
+    block.insert(
+        "folders".into(),
+        serde_json::to_value(&state.folders)
+            .map_err(|_| "не сериализовать каталог проектов".to_string())?,
+    );
+    block.insert(
+        "favoriteProjectIds".into(),
+        serde_json::to_value(&state.favorite_project_ids)
+            .map_err(|_| "не сериализовать избранные проекты".to_string())?,
+    );
+    block.insert(
+        "view".into(),
+        serde_json::to_value(state.view)
+            .map_err(|_| "не сериализовать вид проектов".to_string())?,
+    );
+    Ok(Value::Object(block))
+}
+
+fn canonical_project_folder(path: &Path) -> Result<ProjectFolder, String> {
+    let identity = identity_for_path(path)?;
+    Ok(ProjectFolder {
+        project_id: identity.project_id,
+        project: identity.project,
+        cwd: identity.canonical_path.to_string_lossy().into_owned(),
+    })
+}
+
+fn upsert_project_folder(
+    state: &mut ProjectManagerState,
+    path: &Path,
+) -> Result<ProjectFolder, String> {
+    let folder = canonical_project_folder(path)?;
+    state
+        .folders
+        .retain(|item| item.project_id != folder.project_id && item.cwd != folder.cwd);
+    if state.folders.len() >= MAX_PROJECT_FOLDERS {
+        return Err("слишком много папок в менеджере проектов".into());
+    }
+    state.folders.push(folder.clone());
+    state.folders.sort_by(|left, right| {
+        left.project
+            .to_lowercase()
+            .cmp(&right.project.to_lowercase())
+            .then_with(|| left.cwd.cmp(&right.cwd))
+    });
+    Ok(folder)
+}
+
+pub fn update_project_manager_folder(
+    settings: &Value,
+    cwd: &Path,
+) -> Result<(Value, ProjectManagerState, ProjectFolder), String> {
+    let mut state = project_manager_state_from_settings(settings);
+    let folder = upsert_project_folder(&mut state, cwd)?;
+    let block = serialize_project_manager_block(settings, &state)?;
+    Ok((block, state, folder))
+}
+
+pub fn update_project_manager_favorite(
+    settings: &Value,
+    cwd: &Path,
+    favorite: bool,
+) -> Result<(Value, ProjectManagerState, ProjectFolder), String> {
+    let mut state = project_manager_state_from_settings(settings);
+    let folder = upsert_project_folder(&mut state, cwd)?;
+    state
+        .favorite_project_ids
+        .retain(|project_id| project_id != &folder.project_id);
+    if favorite {
+        state.favorite_project_ids.push(folder.project_id.clone());
+    }
+    let block = serialize_project_manager_block(settings, &state)?;
+    Ok((block, state, folder))
+}
+
+pub fn move_project_manager_favorite(
+    settings: &Value,
+    project_id: &str,
+    direction: FavoriteMove,
+) -> Result<(Value, ProjectManagerState), String> {
+    if !valid_object_id(project_id) {
+        return Err("Некорректный идентификатор проекта".into());
+    }
+    let mut state = project_manager_state_from_settings(settings);
+    let Some(index) = state
+        .favorite_project_ids
+        .iter()
+        .position(|value| value == project_id)
+    else {
+        return Err("Проект не находится в избранном".into());
+    };
+    let destination = match direction {
+        FavoriteMove::Up => index.saturating_sub(1),
+        FavoriteMove::Down => (index + 1).min(state.favorite_project_ids.len() - 1),
+    };
+    state.favorite_project_ids.swap(index, destination);
+    let block = serialize_project_manager_block(settings, &state)?;
+    Ok((block, state))
+}
+
+pub fn update_project_manager_view(
+    settings: &Value,
+    view: ProjectManagerView,
+) -> Result<(Value, ProjectManagerState), String> {
+    let mut state = project_manager_state_from_settings(settings);
+    state.view = view;
+    let block = serialize_project_manager_block(settings, &state)?;
+    Ok((block, state))
+}
+
 pub fn valid_object_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -248,13 +454,12 @@ pub fn notification_for(
         .unwrap_or(false);
 
     let (scope, transition, title, body, kind, speak) = match current.kind.as_str() {
-        "vm"
-            if matches!(current.state.as_str(), "running" | "ready")
-                && previous.is_some()
-                && previous.is_none_or(|before| {
-                    !matches!(before.state.as_str(), "running" | "ready" | "working")
-                })
-                && !is_focused(focus, current) =>
+        "vm" if matches!(current.state.as_str(), "running" | "ready")
+            && previous.is_some()
+            && previous.is_none_or(|before| {
+                !matches!(before.state.as_str(), "running" | "ready" | "working")
+            })
+            && !is_focused(focus, current) =>
         {
             (
                 "runtime",
@@ -405,19 +610,11 @@ pub async fn autostart_profiles(daemon: Arc<crate::daemon::Daemon>) {
                 .as_ref()
                 .filter(|entity| matches!(entity.state.as_str(), "done" | "error"));
             if terminal.is_some() {
-                let _ = daemon
-                    .entities
-                    .remove("plugin:agent-vm", &operation_id);
-                crate::windows::emit_to_panel(
-                    &daemon.app,
-                    "entities",
-                    &daemon.entities.snapshot(),
-                );
+                let _ = daemon.entities.remove("plugin:agent-vm", &operation_id);
+                crate::windows::emit_to_panel(&daemon.app, "entities", &daemon.entities.snapshot());
                 break;
             }
-            if operation.as_ref().is_some_and(|entity| entity.stale)
-                || Instant::now() >= deadline
-            {
+            if operation.as_ref().is_some_and(|entity| entity.stale) || Instant::now() >= deadline {
                 notify_autostart_error(&daemon, &profile);
                 break;
             }
@@ -494,15 +691,11 @@ mod tests {
         assert_eq!(block["projects"][0]["projectId"], profile.project_id);
         assert_eq!(
             block["projects"][0]["cwd"],
-            fs::canonicalize(&root)
-                .unwrap()
-                .to_string_lossy()
-                .as_ref()
+            fs::canonicalize(&root).unwrap().to_string_lossy().as_ref()
         );
         assert!(profile.start_with_jarvis);
 
-        let (block, _) =
-            update_profile_block(&json!({"agentVm":block}), &root, false).unwrap();
+        let (block, _) = update_profile_block(&json!({"agentVm":block}), &root, false).unwrap();
         assert_eq!(block["projects"], json!([]));
         fs::remove_dir_all(root).unwrap();
     }
@@ -524,6 +717,147 @@ mod tests {
 
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].project_id, "project-a");
+    }
+
+    #[test]
+    fn project_manager_state_sanitizes_folders_favorites_and_view() {
+        let settings = json!({
+            "projectManager": {
+                "folders": [
+                    {"projectId":"project-a","project":"alpha","cwd":"/tmp/alpha"},
+                    {"projectId":"project-a","project":"duplicate","cwd":"/tmp/duplicate"},
+                    {"projectId":"../bad","project":"bad","cwd":"relative"},
+                    {"projectId":"project-b","project":"beta","cwd":"/tmp/beta"}
+                ],
+                "favoriteProjectIds": ["project-b", "missing", "project-b", "project-a"],
+                "view": "cards"
+            }
+        });
+
+        let state = project_manager_state_from_settings(&settings);
+
+        assert_eq!(
+            state
+                .folders
+                .iter()
+                .map(|folder| folder.project_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["project-a", "project-b"]
+        );
+        assert_eq!(
+            state.favorite_project_ids,
+            vec!["project-b".to_string(), "project-a".to_string()]
+        );
+        assert_eq!(state.view, ProjectManagerView::Cards);
+    }
+
+    #[test]
+    fn project_manager_adds_canonical_folder_without_clobbering_future_settings() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-project-manager-folder-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let settings = json!({
+            "projectManager": {
+                "futureFlag": true,
+                "folders": []
+            }
+        });
+
+        let (block, state, folder) = update_project_manager_folder(&settings, &root).unwrap();
+
+        assert_eq!(block["futureFlag"], true);
+        assert_eq!(state.folders, vec![folder.clone()]);
+        assert_eq!(
+            folder.cwd,
+            fs::canonicalize(&root).unwrap().to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            folder.project_id,
+            identity_for_path(&root).unwrap().project_id
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_manager_favorites_move_only_inside_explicit_order() {
+        let alpha = std::env::temp_dir().join(format!(
+            "jarvis-project-manager-alpha-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let beta = std::env::temp_dir().join(format!(
+            "jarvis-project-manager-beta-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&alpha).unwrap();
+        fs::create_dir_all(&beta).unwrap();
+
+        let (block, _, alpha_folder) =
+            update_project_manager_favorite(&json!({}), &alpha, true).unwrap();
+        let (block, state, beta_folder) =
+            update_project_manager_favorite(&json!({"projectManager":block}), &beta, true).unwrap();
+        assert_eq!(
+            state.favorite_project_ids,
+            vec![
+                alpha_folder.project_id.clone(),
+                beta_folder.project_id.clone()
+            ]
+        );
+
+        let (block, moved) = move_project_manager_favorite(
+            &json!({"projectManager":block}),
+            &beta_folder.project_id,
+            FavoriteMove::Up,
+        )
+        .unwrap();
+        assert_eq!(
+            moved.favorite_project_ids,
+            vec![
+                beta_folder.project_id.clone(),
+                alpha_folder.project_id.clone()
+            ]
+        );
+
+        let (_, unstarred, _) =
+            update_project_manager_favorite(&json!({"projectManager":block}), &beta, false)
+                .unwrap();
+        assert_eq!(
+            unstarred.favorite_project_ids,
+            vec![alpha_folder.project_id]
+        );
+        assert!(unstarred
+            .folders
+            .iter()
+            .any(|folder| folder.project_id == beta_folder.project_id));
+
+        fs::remove_dir_all(alpha).unwrap();
+        fs::remove_dir_all(beta).unwrap();
+    }
+
+    #[test]
+    fn project_manager_view_update_is_typed_and_preserves_catalog() {
+        let settings = json!({
+            "projectManager": {
+                "folders": [
+                    {"projectId":"project-a","project":"alpha","cwd":"/tmp/alpha"}
+                ],
+                "favoriteProjectIds": ["project-a"],
+                "view": "list",
+                "futureFlag": 42
+            }
+        });
+
+        let (block, state) =
+            update_project_manager_view(&settings, ProjectManagerView::Cards).unwrap();
+
+        assert_eq!(block["futureFlag"], 42);
+        assert_eq!(state.view, ProjectManagerView::Cards);
+        assert_eq!(state.favorite_project_ids, vec!["project-a"]);
+        assert_eq!(state.folders.len(), 1);
     }
 
     #[test]

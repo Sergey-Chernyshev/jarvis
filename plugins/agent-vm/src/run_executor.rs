@@ -32,7 +32,7 @@ export CI=1
 export NO_COLOR=1
 export TERM=dumb
 export DISABLE_NON_ESSENTIAL_MODEL_CALLS=1
-setsid "$@" &
+setsid "$@" <&0 &
 agent_pid="$!"
 pid_file="$run_dir/$run_id.pid"
 printf '%s\n' "$agent_pid" > "$pid_file"
@@ -631,6 +631,10 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair == ["--permission-mode", "bypassPermissions"]));
+        assert!(fresh
+            .args
+            .iter()
+            .any(|arg| arg.contains(r#"setsid "$@" <&0 &"#)));
 
         let resumed = build_turn_spec(
             Path::new("/synthetic/bin/limactl"),

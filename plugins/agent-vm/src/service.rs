@@ -12,9 +12,10 @@ use jarvis_secret_store::{
 use serde::Serialize;
 use zeroize::Zeroize;
 
-use crate::config_mirror::{build_snapshot, MirrorRoots};
+use crate::config_mirror::{build_snapshot, build_snapshot_for_project, MirrorRoots};
 use crate::guest_bootstrap::{
-    bootstrap_spec, build_bundle, load_codex_credential, run_bootstrap, BootstrapCredentialStatus,
+    bootstrap_spec, build_bundle, guest_credential_probe_spec, load_codex_credential,
+    run_bootstrap, run_guest_credential_probe, BootstrapCredentialStatus, LoadedCodexCredential,
 };
 use crate::inventory::{load_records, parse_lima_instances, reconcile, InventoryVm};
 use crate::project::{ensure_project_link, is_valid_vm_name, ProjectIdentity};
@@ -118,16 +119,34 @@ impl<R: CommandRunner, S: SecretStore> SystemConfigBootstrap<R, S> {
     }
 
     fn apply_inner(&self, record: &crate::inventory::VmRecord) -> Result<BootstrapStatus, String> {
+        let probe_spec =
+            guest_credential_probe_spec(&self.limactl, &self.paths.command_env(), record)?;
+        let guest_credentials = run_guest_credential_probe(&self.runner, &probe_spec)?;
         let migration = migrate_legacy_claude_secret(
             &self.paths.jarvis_dir.join("settings.json"),
             &self.secrets,
         )?;
-        let snapshot = build_snapshot(&MirrorRoots {
+        let roots = MirrorRoots {
             claude: self.account_home.join(".claude"),
             codex: self.account_home.join(".codex"),
-        })?;
-        let codex_credential = load_codex_credential(&snapshot, &self.account_home.join(".codex"))?;
-        let host_claude_login = if account_home().as_deref() == Some(self.account_home.as_path())
+        };
+        let snapshot = match record.workspace.host_path.as_deref() {
+            Some(host_path) => {
+                let canonical_host = fs::canonicalize(host_path).map_err(|_| {
+                    "не canonicalize project workspace для Claude memory".to_string()
+                })?;
+                build_snapshot_for_project(&roots, &canonical_host, &record.workspace.guest_path)?
+            }
+            None => build_snapshot(&roots)?,
+        };
+        let codex_credential = if guest_credentials.codex == "ready" {
+            LoadedCodexCredential::ready_without_copy()
+        } else {
+            load_codex_credential(&snapshot, &self.account_home.join(".codex"))?
+        };
+        let preserve_guest_claude = guest_credentials.claude == "ready" && migration.kind.is_none();
+        let host_claude_login = if !preserve_guest_claude
+            && account_home().as_deref() == Some(self.account_home.as_path())
             && migration.kind.is_none()
         {
             read_claude_code_credentials()?
@@ -148,7 +167,10 @@ impl<R: CommandRunner, S: SecretStore> SystemConfigBootstrap<R, S> {
         for value in private_env.values_mut() {
             value.zeroize();
         }
-        let bundle = bundle?;
+        let mut bundle = bundle?;
+        if preserve_guest_claude {
+            bundle.credential_status.claude = "ready".into();
+        }
         let credentials = bundle.credential_status.clone();
         let spec = bootstrap_spec(&self.limactl, &self.paths.command_env(), record, bundle)?;
         run_bootstrap(&self.runner, &spec)?;
@@ -157,7 +179,8 @@ impl<R: CommandRunner, S: SecretStore> SystemConfigBootstrap<R, S> {
             files: snapshot.files.len(),
             skipped: snapshot.diagnostics.skipped_symlinks
                 + snapshot.diagnostics.skipped_non_regular
-                + snapshot.diagnostics.skipped_oversize,
+                + snapshot.diagnostics.skipped_oversize
+                + snapshot.diagnostics.removed_host_commands,
             credentials,
             proxy_configured,
         })
@@ -784,7 +807,7 @@ mod tests {
                 git_ref: None,
             },
         };
-        let runner = FakeRunner::with_outputs(vec![ok("")]);
+        let runner = FakeRunner::with_outputs(vec![ok("claude=missing\ncodex=missing\n"), ok("")]);
         let bootstrap = SystemConfigBootstrap::new(
             runner.clone(),
             paths.clone(),
@@ -804,15 +827,105 @@ mod tests {
             .windows(b"SYNTHETIC_PRIVATE_VALUE".len())
             .any(|part| part == b"SYNTHETIC_PRIVATE_VALUE"));
         let calls = runner.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        let visible = format!("{:?}{:?}", calls[0].args, calls[0].env);
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].stdin.is_none());
+        let visible = format!("{:?}{:?}", calls[1].args, calls[1].env);
         assert!(!visible.contains("SYNTHETIC_PRIVATE_VALUE"));
-        assert!(calls[0]
+        assert!(calls[1]
             .stdin
             .as_ref()
             .unwrap()
             .windows(b"SYNTHETIC_PRIVATE_VALUE".len())
             .any(|part| part == b"SYNTHETIC_PRIVATE_VALUE"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn system_config_bootstrap_preserves_ready_guest_credentials_without_recopying_auth() {
+        use jarvis_secret_store::MemorySecretStore;
+
+        let (root, project, paths) = fixture("config-bootstrap-preserve");
+        let account_home = root.join("account-home");
+        fs::create_dir_all(account_home.join(".claude")).unwrap();
+        fs::create_dir_all(account_home.join(".codex")).unwrap();
+        fs::write(
+            account_home.join(".claude/settings.json"),
+            br#"{"model":"synthetic"}"#,
+        )
+        .unwrap();
+        fs::write(
+            account_home.join(".codex/config.toml"),
+            "model = \"synthetic\"\n",
+        )
+        .unwrap();
+        let codex_auth = account_home.join(".codex/auth.json");
+        fs::write(
+            &codex_auth,
+            br#"{"private":"SYNTHETIC_HOST_CODEX_CREDENTIAL"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&codex_auth, fs::Permissions::from_mode(0o600)).unwrap();
+        let identity = ProjectIdentity::from_path(&project).unwrap();
+        let record = crate::inventory::VmRecord {
+            name: identity.vm_name,
+            source: "project".into(),
+            modules: vec!["claude".into(), "codex".into()],
+            resources: crate::inventory::VmResources::default(),
+            user: "dev".into(),
+            workspace: crate::inventory::VmWorkspace {
+                mode_name: "mount".into(),
+                guest_path: "/home/dev/synthetic-project".into(),
+                host_path: Some(project.to_string_lossy().into_owned()),
+                repo: None,
+                git_ref: None,
+            },
+        };
+        let runner = FakeRunner::with_outputs(vec![ok("claude=ready\ncodex=ready\n"), ok("")]);
+        let bootstrap = SystemConfigBootstrap::new(
+            runner.clone(),
+            paths,
+            PathBuf::from("/synthetic/bin/limactl"),
+            account_home,
+            MemorySecretStore::default(),
+        );
+
+        let status = bootstrap.apply(&record).unwrap();
+
+        assert_eq!(
+            status.credentials,
+            BootstrapCredentialStatus {
+                claude: "ready".into(),
+                codex: "ready".into(),
+            }
+        );
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].stdin.is_none());
+        let archive = calls[1].stdin.as_ref().unwrap();
+        assert!(!archive
+            .windows(b"SYNTHETIC_HOST_CODEX_CREDENTIAL".len())
+            .any(|part| part == b"SYNTHETIC_HOST_CODEX_CREDENTIAL"));
+        let entries = {
+            let mut archive = tar::Archive::new(archive.as_slice());
+            archive
+                .entries()
+                .unwrap()
+                .map(|entry| {
+                    entry
+                        .unwrap()
+                        .path()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(!entries.iter().any(|path| {
+            matches!(
+                path.as_str(),
+                ".claude/.credentials.json" | ".codex/auth.json"
+            )
+        }));
         fs::remove_dir_all(root).unwrap();
     }
 }

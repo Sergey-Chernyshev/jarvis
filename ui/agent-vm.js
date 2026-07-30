@@ -103,11 +103,28 @@
     return configuredBackends(vm).includes(backend);
   }
 
+  function selectBackend(vm, requested = 'claude') {
+    const configured = configuredBackends(vm);
+    return configured.includes(requested) ? requested : configured[0] || requested;
+  }
+
+  function ephemeralHistoryCwd(cwd) {
+    const path = asString(cwd);
+    return /^(?:\/private)?\/tmp(?:\/|$)/.test(path)
+      || /^\/var\/folders(?:\/|$)/.test(path)
+      || /^\/Users\/[^/]+$/.test(path)
+      || /\/\.jarvis-dev(?:\/|$)/.test(path);
+  }
+
+  function displayProjectPath(cwd) {
+    return asString(cwd).replace(/^\/Users\/[^/]+(?=\/|$)/, '~');
+  }
+
   function deriveProjects(history, entities) {
     const byCwd = new Map();
     for (const group of Array.isArray(history) ? history : []) {
       const cwd = asString(group && group.cwd);
-      if (!cwd) continue;
+      if (!cwd || group.exists === false || ephemeralHistoryCwd(cwd)) continue;
       byCwd.set(cwd, {
         key: cwd,
         cwd,
@@ -166,6 +183,98 @@
 
     return [...byCwd.values()].sort((a, b) =>
       b.updatedAt - a.updatedAt || a.name.localeCompare(b.name));
+  }
+
+  function mergeProjectCatalog(projects, state) {
+    const manager = asObject(state);
+    const byCwd = new Map();
+    for (const project of Array.isArray(projects) ? projects : []) {
+      const cwd = asString(project && project.cwd);
+      if (!cwd) continue;
+      byCwd.set(cwd, { ...project });
+    }
+    for (const rawFolder of Array.isArray(manager.folders) ? manager.folders : []) {
+      const folder = asObject(rawFolder);
+      const cwd = asString(folder.cwd);
+      if (!cwd) continue;
+      const current = byCwd.get(cwd);
+      if (current) {
+        current.projectId ||= asString(folder.projectId);
+        current.catalogFolder = folder;
+      } else {
+        byCwd.set(cwd, {
+          key: cwd,
+          cwd,
+          name: asString(folder.project) || cwd.split('/').filter(Boolean).at(-1) || cwd,
+          projectId: asString(folder.projectId),
+          history: null,
+          vm: null,
+          run: null,
+          summary: '',
+          updatedAt: 0,
+          catalogFolder: folder,
+        });
+      }
+    }
+
+    const favorites = new Map();
+    for (const projectId of Array.isArray(manager.favoriteProjectIds)
+      ? manager.favoriteProjectIds : []) {
+      const id = asString(projectId);
+      if (id && !favorites.has(id)) favorites.set(id, favorites.size);
+    }
+    return [...byCwd.values()]
+      .map((project) => ({
+        ...project,
+        favoriteIndex: favorites.get(asString(project.projectId)) ?? -1,
+      }))
+      .sort((left, right) => {
+        const leftFavorite = left.favoriteIndex >= 0;
+        const rightFavorite = right.favoriteIndex >= 0;
+        if (leftFavorite !== rightFavorite) return leftFavorite ? -1 : 1;
+        if (leftFavorite) return left.favoriteIndex - right.favoriteIndex;
+        return Number(right.updatedAt) - Number(left.updatedAt)
+          || asString(left.name).localeCompare(asString(right.name));
+      });
+  }
+
+  function filterProjects(projects, query) {
+    const normalized = asString(query).trim().toLocaleLowerCase();
+    if (!normalized) return Array.isArray(projects) ? projects : [];
+    return (Array.isArray(projects) ? projects : []).filter((project) =>
+      `${asString(project && project.name)} ${asString(project && project.cwd)}`
+        .toLocaleLowerCase()
+        .includes(normalized));
+  }
+
+  function filterCommands(commands, input, limit = 12) {
+    const value = asString(input);
+    if (!value.startsWith('/') || /\s/.test(value.slice(1))) return [];
+    const query = value.slice(1).toLocaleLowerCase();
+    const boundedLimit = Math.max(1, Math.min(50, Number(limit) || 12));
+    return (Array.isArray(commands) ? commands : [])
+      .filter((command) => asString(command && command.name)
+        .toLocaleLowerCase()
+        .includes(query))
+      .sort((left, right) => {
+        const leftName = asString(left && left.name).toLocaleLowerCase();
+        const rightName = asString(right && right.name).toLocaleLowerCase();
+        const leftPrefix = leftName.startsWith(query) ? 0 : 1;
+        const rightPrefix = rightName.startsWith(query) ? 0 : 1;
+        return leftPrefix - rightPrefix || leftName.localeCompare(rightName);
+      })
+      .slice(0, boundedLimit);
+  }
+
+  function composePrompt(text, imagePaths) {
+    const parts = [];
+    const prompt = asString(text).trim();
+    if (prompt) parts.push(prompt);
+    for (const path of Array.isArray(imagePaths) ? imagePaths : []) {
+      const value = asString(path).trim();
+      if (value) parts.push(value);
+    }
+    return parts.join('\n');
   }
 
   function environmentState(vmEntity, runEntity) {
@@ -287,13 +396,10 @@
   }
 
   function activeEnvironments(entities) {
-    const runs = newestByProject(entities, 'agent_run');
     return owned(entities, 'vm')
       .filter((entity) => ACTIVE_VM_STATES.has(entity.state) || entity.stale)
       .map((entity) => {
         const attrs = asObject(entity.attrs);
-        const key = projectKey(entity);
-        const run = runs.get(key) || null;
         return {
           id: entity.id,
           projectId: asString(attrs.projectId) || asString(attrs.cwd),
@@ -302,9 +408,9 @@
             || asString(attrs.cwd).split('/').filter(Boolean).at(-1)
             || 'Project',
           vm: entity,
-          run,
-          uiState: environmentState(entity, run),
-          updatedAt: Math.max(entityTime(entity), entityTime(run)),
+          run: null,
+          uiState: environmentState(entity, null),
+          updatedAt: entityTime(entity),
         };
       })
       .filter((item) => item.uiState !== 'off')
@@ -502,15 +608,21 @@
     OWNER,
     activeEnvironments,
     backendAvailable,
+    composePrompt,
     configuredBackends,
     continuationRunId,
     deriveProjects,
+    displayProjectPath,
     environmentState,
+    filterCommands,
+    filterProjects,
+    mergeProjectCatalog,
     mergeEvents,
     operationResult,
     pluginRuntimeStatus,
     reduceRun,
     runSummary,
+    selectBackend,
     stateLabel,
   };
 });

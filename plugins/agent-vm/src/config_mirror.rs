@@ -46,6 +46,7 @@ pub struct MirrorDiagnostics {
     pub skipped_symlinks: usize,
     pub skipped_non_regular: usize,
     pub skipped_oversize: usize,
+    pub removed_host_commands: usize,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -67,6 +68,29 @@ impl std::fmt::Debug for ConfigSnapshot {
 }
 
 pub fn build_snapshot(roots: &MirrorRoots) -> Result<ConfigSnapshot, String> {
+    build_snapshot_inner(roots, None)
+}
+
+pub fn build_snapshot_for_project(
+    roots: &MirrorRoots,
+    host_project: &Path,
+    guest_workspace: &str,
+) -> Result<ConfigSnapshot, String> {
+    let host_key = claude_project_key(host_project)?;
+    let guest_workspace = Path::new(guest_workspace);
+    let guest_key = claude_project_key(guest_workspace)?;
+    let source = roots.claude.join("projects").join(host_key).join("memory");
+    let guest = PathBuf::from(".claude")
+        .join("projects")
+        .join(guest_key)
+        .join("memory");
+    build_snapshot_inner(roots, Some((&source, &guest)))
+}
+
+fn build_snapshot_inner(
+    roots: &MirrorRoots,
+    project_memory: Option<(&Path, &Path)>,
+) -> Result<ConfigSnapshot, String> {
     let mut snapshot = ConfigSnapshot {
         files: Vec::new(),
         fingerprint: String::new(),
@@ -95,11 +119,40 @@ pub fn build_snapshot(roots: &MirrorRoots) -> Result<ConfigSnapshot, String> {
             &mut total_bytes,
         )?;
     }
+    if let Some((source, guest)) = project_memory {
+        collect_tree(source, source, guest, &mut snapshot, &mut total_bytes)?;
+    }
     snapshot
         .files
         .sort_by(|left, right| left.guest_path.cmp(&right.guest_path));
     snapshot.fingerprint = fingerprint(&snapshot.files);
     Ok(snapshot)
+}
+
+fn claude_project_key(path: &Path) -> Result<String, String> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err("Claude project memory требует absolute normalized path".into());
+    }
+    let value = path
+        .to_str()
+        .ok_or_else(|| "Claude project memory path должен быть UTF-8".to_string())?;
+    if value.is_empty() || value.len() > 16 * 1024 {
+        return Err("Claude project memory path имеет unsafe размер".into());
+    }
+    Ok(value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect())
 }
 
 fn collect_single(
@@ -228,6 +281,7 @@ fn add_regular_file(
         snapshot.diagnostics.skipped_oversize += 1;
         return Ok(());
     }
+    let bytes = sanitize_mirrored_bytes(&guest_path, bytes, &mut snapshot.diagnostics)?;
     let next_total = total_bytes
         .checked_add(bytes.len() as u64)
         .ok_or_else(|| "config mirror size overflow".to_string())?;
@@ -246,6 +300,36 @@ fn add_regular_file(
         mode,
     });
     Ok(())
+}
+
+fn sanitize_mirrored_bytes(
+    guest_path: &Path,
+    bytes: Vec<u8>,
+    diagnostics: &mut MirrorDiagnostics,
+) -> Result<Vec<u8>, String> {
+    if guest_path != Path::new(".claude/settings.json") {
+        return Ok(bytes);
+    }
+    let mut settings = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|_| "Claude settings содержат invalid JSON".to_string())?;
+    let object = settings
+        .as_object_mut()
+        .ok_or_else(|| "Claude settings должны быть JSON object".to_string())?;
+    let removed = ["hooks", "statusLine"]
+        .into_iter()
+        .filter(|key| object.remove(*key).is_some())
+        .count();
+    if removed == 0 {
+        return Ok(bytes);
+    }
+    diagnostics.removed_host_commands += removed;
+    let mut sanitized = serde_json::to_vec(&settings)
+        .map_err(|_| "не подготовить guest-safe Claude settings".to_string())?;
+    sanitized.push(b'\n');
+    if sanitized.len() as u64 > MAX_MIRROR_FILE_BYTES {
+        return Err("guest-safe Claude settings превышают size limit".into());
+    }
+    Ok(sanitized)
 }
 
 fn no_follow_file(path: &Path) -> Result<File, String> {
@@ -318,7 +402,7 @@ fn is_denied_name(name: &std::ffi::OsStr) -> bool {
 
 fn fingerprint(files: &[MirroredFile]) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"jarvis-config-mirror-v1\0");
+    hash.update(b"jarvis-config-mirror-v2\0");
     for file in files {
         hash.update(file.guest_path.as_os_str().as_bytes());
         hash.update([0]);
@@ -422,6 +506,79 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!String::from_utf8_lossy(&all_bytes).contains("credential-only"));
         assert!(!String::from_utf8_lossy(&all_bytes).contains("host-only"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_memory_is_rekeyed_for_guest_cwd_without_copying_session_history() {
+        let (root, roots) = fixture("project-memory");
+        let host_project = root.join("host/work/sup");
+        fs::create_dir_all(&host_project).unwrap();
+        let host_key = claude_project_key(&host_project).unwrap();
+        let host_state = roots.claude.join("projects").join(host_key);
+        fs::create_dir_all(host_state.join("memory")).unwrap();
+        fs::write(
+            host_state.join("memory/MEMORY.md"),
+            "SYNTHETIC_PROJECT_MEMORY",
+        )
+        .unwrap();
+        fs::write(
+            host_state.join("session.jsonl"),
+            "SYNTHETIC_SESSION_HISTORY_MUST_STAY_HOST_ONLY",
+        )
+        .unwrap();
+
+        let snapshot =
+            build_snapshot_for_project(&roots, &host_project, "/home/dev.guest/sup-a1b2c3d4e5f6")
+                .unwrap();
+
+        assert_eq!(
+            claude_project_key(Path::new("/home/dev.guest/sup-a1b2c3d4e5f6")).unwrap(),
+            "-home-dev-guest-sup-a1b2c3d4e5f6"
+        );
+        assert!(guest_paths(&snapshot).contains(&Path::new(
+            ".claude/projects/-home-dev-guest-sup-a1b2c3d4e5f6/memory/MEMORY.md"
+        )));
+        let all_bytes = snapshot
+            .files
+            .iter()
+            .flat_map(|file| file.bytes.iter().copied())
+            .collect::<Vec<_>>();
+        assert!(String::from_utf8_lossy(&all_bytes).contains("SYNTHETIC_PROJECT_MEMORY"));
+        assert!(!String::from_utf8_lossy(&all_bytes).contains("SESSION_HISTORY"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_settings_drop_host_commands_but_keep_portable_preferences() {
+        let (root, roots) = fixture("claude-host-commands");
+        fs::write(
+            roots.claude.join("settings.json"),
+            br#"{
+                "model":"synthetic",
+                "permissions":{"defaultMode":"bypassPermissions"},
+                "hooks":{"Stop":[{"hooks":[{"type":"command","command":"/host/jarvis-hook"}]}]},
+                "statusLine":{"type":"command","command":"uv run /host/status.py"},
+                "futurePortableSetting":true
+            }"#,
+        )
+        .unwrap();
+
+        let snapshot = build_snapshot(&roots).unwrap();
+        let settings = snapshot
+            .files
+            .iter()
+            .find(|file| file.guest_path == Path::new(".claude/settings.json"))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&settings.bytes).unwrap();
+
+        assert_eq!(value["model"], "synthetic");
+        assert_eq!(value["permissions"]["defaultMode"], "bypassPermissions");
+        assert_eq!(value["futurePortableSetting"], true);
+        assert!(value.get("hooks").is_none());
+        assert!(value.get("statusLine").is_none());
+        assert_eq!(snapshot.diagnostics.removed_host_commands, 2);
+        assert!(!String::from_utf8_lossy(&settings.bytes).contains("/host/"));
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -1449,10 +1449,17 @@
     50% { opacity: .45; transform: scale(.76); }
   }
 
-  .pm-head {
+  .pm-toolbar {
     display: flex;
-    align-items: end;
-    padding: 11px 10px 8px;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 9px 9px;
+  }
+  .pm-toolbar-copy {
+    display: flex;
+    min-width: 0;
+    align-items: baseline;
+    gap: 9px;
   }
   .pm-title {
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
@@ -1461,7 +1468,68 @@
     letter-spacing: -.2px;
     color: var(--text);
   }
-  .pm-subtitle { margin-left: 9px; font-size: 11px; color: var(--faint); }
+  .pm-subtitle {
+    overflow: hidden;
+    font-size: 11px;
+    color: var(--faint);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pm-toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+  }
+  .pm-add,
+  .pm-view-button,
+  .pm-icon-button {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255, 255, 255, .09);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, .035);
+    color: var(--muted);
+    font: inherit;
+    cursor: default;
+  }
+  .pm-add {
+    min-height: 30px;
+    gap: 5px;
+    padding: 0 10px;
+    font-size: 11px;
+  }
+  .pm-add:hover,
+  .pm-view-button:hover,
+  .pm-icon-button:hover {
+    color: var(--text);
+    background: rgba(255, 255, 255, .075);
+  }
+  .pm-add:disabled,
+  .pm-view-button:disabled,
+  .pm-icon-button:disabled { opacity: .38; }
+  .pm-view-toggle {
+    display: flex;
+    padding: 2px;
+    border: 1px solid rgba(255, 255, 255, .075);
+    border-radius: 9px;
+    background: rgba(0, 0, 0, .18);
+  }
+  .pm-view-button {
+    width: 27px;
+    height: 25px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+  }
+  .pm-view-button.active {
+    color: #d9d3ff;
+    background: rgba(155, 138, 251, .15);
+    box-shadow: inset 0 0 0 1px rgba(155, 138, 251, .16);
+  }
   .pm-runtime {
     display: grid;
     grid-template-columns: 8px minmax(132px, 1fr) auto auto;
@@ -1557,35 +1625,47 @@
     text-shadow: 0 0 9px rgba(155, 138, 251, .35);
   }
   .pm-runtime > .vm-button { justify-self: end; white-space: nowrap; }
+  .pm-section { margin: 0 1px 11px; }
+  .pm-section-title {
+    padding: 6px 10px 5px;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: .055em;
+    text-transform: uppercase;
+  }
+  .pm-card-grid.cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(205px, 1fr));
+    gap: 9px;
+    padding: 0 6px;
+  }
   .pm-card {
     position: relative;
     display: grid;
-    grid-template-columns: 8px minmax(0, 1fr) auto;
-    column-gap: 12px;
-    row-gap: 4px;
-    min-height: 70px;
-    padding: 12px 12px 11px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    column-gap: 9px;
+    row-gap: 5px;
+    min-height: 58px;
+    padding: 10px 11px;
     margin-bottom: 4px;
     border: 1px solid transparent;
     border-radius: 11px;
+    background: rgba(255, 255, 255, .012);
     cursor: default;
   }
+  .pm-card:hover { background: rgba(255, 255, 255, .03); }
   .pm-card.selected {
     background: rgba(255, 255, 255, .045);
     border-color: rgba(155, 138, 251, .14);
   }
-  .pm-card-rail {
-    grid-row: 1 / span 3;
-    align-self: stretch;
-    width: 2px;
-    margin: 2px 0;
-    border-radius: 2px;
-    background: rgba(255, 255, 255, .1);
+  .pm-card-copy {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 3px;
   }
-  .pm-card.ready .pm-card-rail,
-  .pm-card.working .pm-card-rail { background: var(--vm); }
-  .pm-card.waiting .pm-card-rail { background: var(--waiting); }
-  .pm-card.error .pm-card-rail { background: var(--danger); }
   .pm-card-title {
     min-width: 0;
     overflow: hidden;
@@ -1605,22 +1685,99 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .pm-card-summary {
-    min-width: 0;
-    overflow: hidden;
-    font-size: 11.5px;
-    color: var(--muted);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .pm-card-actions {
-    grid-column: 3;
-    grid-row: 1 / span 3;
-    align-self: center;
+  .pm-card-controls {
+    grid-column: 2;
+    grid-row: 1;
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 2px;
   }
+  .pm-icon-button {
+    width: 25px;
+    height: 25px;
+    padding: 0;
+    border-color: transparent;
+    background: transparent;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .pm-icon-button.star {
+    color: rgba(255, 255, 255, .28);
+    font-size: 15px;
+  }
+  .pm-icon-button.star.active {
+    color: #f0c66b;
+    text-shadow: 0 0 12px rgba(240, 198, 107, .26);
+  }
+  .pm-icon-button.move { color: var(--faint); font-size: 11px; }
+  .pm-card-status {
+    grid-column: 1 / span 2;
+    grid-row: 2;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9px;
+  }
+  .pm-card-status-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--idle);
+  }
+  .pm-card-status.ready .pm-card-status-dot,
+  .pm-card-status.working .pm-card-status-dot { background: var(--vm); }
+  .pm-card-status.waiting .pm-card-status-dot { background: var(--waiting); }
+  .pm-card-status.error .pm-card-status-dot { background: var(--danger); }
+  .pm-card-status.working { color: rgba(185, 173, 255, .8); }
+  .pm-card-status.error { color: var(--danger); }
+  .pm-card-status.waiting { color: var(--waiting); }
+  .pm-card-status.working .pm-card-status-dot {
+    animation: vmPulse 1.8s ease-in-out infinite;
+  }
+  .pm-card-grid.cards .pm-card {
+    min-height: 108px;
+    margin: 0;
+    padding: 13px 14px 12px;
+    overflow: hidden;
+    border-color: rgba(255, 255, 255, .055);
+    background:
+      linear-gradient(145deg, rgba(255, 255, 255, .025), rgba(255, 255, 255, .008)),
+      rgba(10, 10, 14, .54);
+  }
+  .pm-card-grid.cards .pm-card:hover {
+    border-color: rgba(155, 138, 251, .13);
+    background:
+      linear-gradient(145deg, rgba(155, 138, 251, .055), rgba(255, 255, 255, .012)),
+      rgba(10, 10, 14, .62);
+  }
+  .pm-card-grid.cards .pm-card.selected {
+    border-color: rgba(155, 138, 251, .26);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .035);
+  }
+  .pm-card-grid.cards .pm-card-copy {
+    gap: 6px;
+    padding-right: 28px;
+  }
+  .pm-card-grid.cards .pm-card-title {
+    font-size: 15px;
+    white-space: normal;
+  }
+  .pm-card-grid.cards .pm-card-path {
+    display: -webkit-box;
+    overflow: hidden;
+    line-height: 1.45;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+  .pm-card-grid.cards .pm-card-controls {
+    position: absolute;
+    top: 9px;
+    right: 9px;
+  }
+  .pm-card-grid.cards .pm-card-status { align-self: end; }
   .vm-pill,
   .vm-button {
     appearance: none;
@@ -1785,6 +1942,127 @@
     width: 1px;
     background: linear-gradient(to bottom, rgba(155, 138, 251, .7), rgba(155, 138, 251, .06));
   }
+  .vmws-feed.terminal-mode {
+    display: flex;
+    padding: 14px;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 72% -20%, rgba(155, 138, 251, .09), transparent 42%),
+      rgba(5, 5, 7, .58);
+  }
+  .vmws-feed.terminal-mode::before { display: none; }
+  .vm-terminal {
+    min-width: 0;
+    min-height: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, .085);
+    border-radius: 12px;
+    background: rgba(8, 8, 11, .94);
+    box-shadow: 0 18px 45px rgba(0, 0, 0, .22);
+  }
+  .vm-terminal-head {
+    min-height: 34px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 11px;
+    border-bottom: 1px solid rgba(255, 255, 255, .065);
+    background: rgba(255, 255, 255, .025);
+    flex: none;
+  }
+  .vm-terminal-lights { display: flex; gap: 5px; }
+  .vm-terminal-light {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, .16);
+  }
+  .vm-terminal-light.live {
+    background: var(--vm);
+    box-shadow: 0 0 10px rgba(155, 138, 251, .42);
+  }
+  .vm-terminal-title {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 9.5px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .vm-terminal-head .vm-agent-switch {
+    margin-left: 5px;
+    padding: 1px;
+    background: rgba(255, 255, 255, .035);
+  }
+  .vm-terminal-head .vm-agent-option {
+    padding: 3px 6px;
+    font-size: 8.5px;
+  }
+  .vm-terminal-spacer { flex: 1; }
+  .vm-terminal-state {
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9px;
+  }
+  .vm-terminal-screen {
+    min-height: 0;
+    flex: 1;
+    margin: 0;
+    padding: 14px 15px 18px;
+    overflow: auto;
+    color: #d4d0df;
+    background: transparent;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.42;
+    tab-size: 4;
+    white-space: pre;
+    user-select: text;
+  }
+  .vm-terminal-screen::-webkit-scrollbar { width: 7px; height: 7px; }
+  .vm-terminal-screen::-webkit-scrollbar-thumb {
+    border-radius: 8px;
+    background: rgba(255, 255, 255, .12);
+  }
+  .vm-terminal-empty {
+    min-height: 0;
+    flex: 1;
+    display: grid;
+    place-items: center;
+    padding: 32px;
+    text-align: center;
+  }
+  .vm-terminal-empty-copy { max-width: 460px; }
+  .vm-terminal-empty-title {
+    color: var(--text);
+    font-size: 16px;
+    font-weight: 650;
+    letter-spacing: -.2px;
+  }
+  .vm-terminal-empty-detail {
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 11.5px;
+    line-height: 1.55;
+  }
+  .vm-terminal-key {
+    appearance: none;
+    min-width: 25px;
+    height: 21px;
+    padding: 0 6px;
+    border: 1px solid rgba(255, 255, 255, .09);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, .035);
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 8.5px;
+  }
+  .vm-terminal-key:hover { color: var(--text); background: rgba(255, 255, 255, .075); }
+  .vm-terminal-key:disabled { opacity: .28; }
   .vmws-empty {
     max-width: 470px;
     padding: 34px 10px 20px;
@@ -1928,22 +2206,149 @@
   }
 
   .vmws-compose {
+    position: relative;
     flex: none;
-    padding: 10px 14px 13px;
+    padding: 8px 14px 10px;
     border-top: 1px solid var(--hairline);
     background: rgba(10, 10, 12, .82);
   }
+  .vm-command-palette {
+    position: absolute;
+    z-index: 14;
+    left: 14px;
+    right: 14px;
+    bottom: calc(100% - 5px);
+    max-height: 262px;
+    overflow: auto;
+    padding: 5px;
+    border: 1px solid rgba(155, 138, 251, .24);
+    border-radius: 10px;
+    background: rgba(17, 16, 22, .97);
+    box-shadow: 0 16px 42px rgba(0, 0, 0, .42);
+    backdrop-filter: blur(18px);
+  }
+  .vm-command-option {
+    display: grid;
+    grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
+    align-items: baseline;
+    gap: 7px;
+    width: 100%;
+    padding: 7px 9px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--muted);
+    text-align: left;
+    font: inherit;
+  }
+  .vm-command-option.selected,
+  .vm-command-option:hover {
+    background: rgba(155, 138, 251, .12);
+    color: var(--text);
+  }
+  .vm-command-name {
+    color: #d7d1ff;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    white-space: nowrap;
+  }
+  .vm-command-description {
+    overflow: hidden;
+    color: inherit;
+    font-size: 10.5px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .vm-command-hint,
+  .vm-command-source {
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9px;
+    white-space: nowrap;
+  }
   .vmws-composebox {
     display: grid;
-    grid-template-columns: auto 1fr auto;
-    align-items: end;
-    gap: 9px;
-    min-height: 52px;
-    padding: 7px;
+    grid-template-columns: auto auto 1fr auto;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 5px 6px 5px 11px;
     border: 1px solid rgba(255, 255, 255, .09);
-    border-radius: 11px;
-    background: rgba(255, 255, 255, .035);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, .028);
+    transition: border-color 120ms ease, background 120ms ease;
   }
+  .vmws-composebox:focus-within {
+    border-color: rgba(155, 138, 251, .3);
+    background: rgba(155, 138, 251, .045);
+  }
+  .vmws-prompt-mark {
+    align-self: start;
+    padding-top: 6px;
+    color: var(--vm);
+    font-family: var(--mono);
+    font-size: 15px;
+    line-height: 1;
+  }
+  .vm-attach {
+    appearance: none;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--faint);
+  }
+  .vm-attach:hover {
+    color: #cec8ff;
+    background: rgba(155, 138, 251, .11);
+  }
+  .vm-attach:disabled { opacity: .32; }
+  .vmws-attachments {
+    display: flex;
+    gap: 7px;
+    min-height: 0;
+    padding: 0 2px 8px;
+    overflow-x: auto;
+  }
+  .vmws-attachments::-webkit-scrollbar { height: 0; }
+  .vmws-attachment {
+    position: relative;
+    width: 48px;
+    height: 48px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, .1);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, .035);
+    flex: none;
+  }
+  .vmws-attachment img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+  }
+  .vmws-attachment.uploading img { opacity: .48; }
+  .vmws-attachment-remove {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    display: grid;
+    place-items: center;
+    width: 17px;
+    height: 17px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(7, 7, 9, .78);
+    color: #fff;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1;
+  }
+  .vmws-attachment-remove:hover { background: rgba(7, 7, 9, .96); }
   .vm-agent-switch {
     display: flex;
     gap: 2px;
@@ -1973,7 +2378,7 @@
   }
   .vmws-prompt {
     width: 100%;
-    min-height: 36px;
+    min-height: 30px;
     max-height: 104px;
     resize: none;
     border: 0;
@@ -1981,9 +2386,9 @@
     background: transparent;
     color: var(--text);
     font: inherit;
-    font-size: 12.5px;
+    font-size: 13px;
     line-height: 1.45;
-    padding: 4px 2px;
+    padding: 5px 1px 3px;
     user-select: text;
   }
   .vmws-prompt::placeholder { color: var(--faint); }
@@ -1991,8 +2396,8 @@
     appearance: none;
     display: grid;
     place-items: center;
-    width: 32px;
-    height: 32px;
+    width: 30px;
+    height: 30px;
     border: 1px solid rgba(155, 138, 251, .3);
     border-radius: 8px;
     background: rgba(155, 138, 251, .16);
@@ -2011,6 +2416,35 @@
   }
   .vmws-composehint .spacer { flex: 1; }
   .vmws-queue { color: var(--waiting); }
+  .vm-key-menu {
+    position: relative;
+    flex: none;
+  }
+  .vm-key-menu summary {
+    list-style: none;
+    padding: 2px 5px;
+    border-radius: 5px;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9px;
+    cursor: default;
+  }
+  .vm-key-menu summary::-webkit-details-marker { display: none; }
+  .vm-key-menu summary:hover,
+  .vm-key-menu[open] summary { color: var(--muted); background: rgba(255, 255, 255, .05); }
+  .vm-key-menu-popover {
+    position: absolute;
+    z-index: 15;
+    right: 0;
+    bottom: calc(100% + 7px);
+    display: flex;
+    gap: 5px;
+    padding: 7px;
+    border: 1px solid rgba(255, 255, 255, .1);
+    border-radius: 8px;
+    background: rgba(20, 20, 25, .98);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .4);
+  }
 
   .vm-env-popover {
     position: absolute;
@@ -2124,7 +2558,7 @@
   .vm-file-body code { font-family: var(--mono); font-size: 11px; }
   .vm-file-diff { padding: 9px 0 24px; font-family: var(--mono); font-size: 10.5px; }
 
-  :is(.vm-button, .vmws-back, .vmws-iconbtn, .vmws-env, .vm-agent-option, .vm-send, .vm-file, .vm-file-tab):focus-visible {
+  :is(.vm-button, .vmws-back, .vmws-iconbtn, .vmws-env, .vm-agent-option, .vm-attach, .vm-send, .vm-file, .vm-file-tab):focus-visible {
     outline: 2px solid rgba(155, 138, 251, .7);
     outline-offset: 2px;
   }
@@ -2298,7 +2732,30 @@
         <div class="qvfoot" id="qFoot"></div>
       </div>
       <div class="stats" id="stats" hidden></div>
-      <div class="history" id="history" hidden></div>
+      <div class="history" id="history" hidden>
+        <header class="pm-toolbar" id="projectManagerToolbar">
+          <div class="pm-toolbar-copy">
+            <span class="pm-title">Проекты</span>
+            <span class="pm-subtitle" id="projectManagerSubtitle">Папки и Agent VM</span>
+          </div>
+          <div class="pm-toolbar-actions">
+            <button class="pm-add" id="projectManagerAdd" type="button">
+              <span aria-hidden="true">＋</span><span>Добавить папку</span>
+            </button>
+            <div class="pm-view-toggle" role="group" aria-label="Вид проектов">
+              <button class="pm-view-button active" id="projectManagerListView" type="button"
+                title="Список" aria-label="Показать списком" aria-pressed="true">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg>
+              </button>
+              <button class="pm-view-button" id="projectManagerCardsView" type="button"
+                title="Карточки" aria-label="Показать карточками" aria-pressed="false">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+              </button>
+            </div>
+          </div>
+        </header>
+        <div id="projectManagerContent"></div>
+      </div>
       <section class="vm-workspace" id="agentVmWorkspace" hidden>
         <header class="vmws-head">
           <button class="vmws-back" id="agentVmBack" title="К проектам · Esc" aria-label="К проектам">
@@ -2323,23 +2780,70 @@
           </div>
           <span class="vmws-stage-time" id="agentVmStageTime"></span>
         </div>
-        <div class="vmws-feed" id="agentVmFeed"></div>
-        <div class="vmws-compose">
-          <div class="vmws-composebox">
-            <div class="vm-agent-switch" aria-label="Агент">
-              <button class="vm-agent-option active" data-agent-vm-backend="claude">Claude</button>
-              <button class="vm-agent-option" data-agent-vm-backend="codex">Codex</button>
+        <div class="vmws-feed terminal-mode" id="agentVmFeed">
+          <section class="vm-terminal" aria-label="Терминал агента">
+            <header class="vm-terminal-head">
+              <span class="vm-terminal-lights">
+                <span class="vm-terminal-light"></span>
+                <span class="vm-terminal-light"></span>
+                <span class="vm-terminal-light" id="agentVmTerminalLight"></span>
+              </span>
+              <span class="vm-terminal-title" id="agentVmTerminalTitle">Agent VM terminal</span>
+              <div class="vm-agent-switch" aria-label="Агент">
+                <button class="vm-agent-option active" data-agent-vm-backend="claude">Claude</button>
+                <button class="vm-agent-option" data-agent-vm-backend="codex">Codex</button>
+              </div>
+              <span class="vm-terminal-spacer"></span>
+              <span class="vm-terminal-state" id="agentVmTerminalState">не запущен</span>
+            </header>
+            <pre class="vm-terminal-screen" id="agentVmTerminalScreen" hidden></pre>
+            <div class="vm-terminal-empty" id="agentVmTerminalEmpty">
+              <div class="vm-terminal-empty-copy">
+                <div class="vm-terminal-empty-title">Постоянная сессия агента</div>
+                <div class="vm-terminal-empty-detail" id="agentVmTerminalEmptyDetail">
+                  Первый ввод подготовит VM и запустит интерактивный Claude или Codex.
+                  Следующие сообщения попадут в тот же процесс.
+                </div>
+              </div>
             </div>
-            <textarea class="vmws-prompt" id="agentVmPrompt" rows="1" spellcheck="false"
-              placeholder="Что сделать в проекте?"></textarea>
+          </section>
+          </div>
+          <div class="vmws-compose">
+            <div class="vm-command-palette" id="agentVmCommandPalette"
+              role="listbox" aria-label="Команды агента" hidden></div>
+            <div class="vmws-attachments" id="agentVmAttachments"
+              aria-label="Прикреплённые изображения" hidden></div>
+            <div class="vmws-composebox">
+              <button class="vm-attach" id="agentVmAttach" type="button"
+                title="Прикрепить изображение" aria-label="Прикрепить изображение">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                  stroke-linejoin="round"><path d="m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.6-9.6a4 4 0 0 1 5.7 5.7l-9.6 9.6a2 2 0 1 1-2.8-2.8l8.9-8.9"/></svg>
+              </button>
+              <input id="agentVmImagePicker" type="file"
+                accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+              <span class="vmws-prompt-mark">›</span>
+              <textarea class="vmws-prompt" id="agentVmPrompt" rows="1" spellcheck="false"
+                placeholder="Задача для агента…  / — команды"></textarea>
             <button class="vm-send" id="agentVmSend" title="Отправить · Enter" aria-label="Отправить">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
             </button>
           </div>
-          <div class="vmws-composehint">
-            <span>↵ отправить</span><span>⇧↵ новая строка</span>
+              <div class="vmws-composehint">
+                <span>↵ отправить</span><span>⇧↵ новая строка</span><span>⌘V картинка</span>
             <span class="spacer"></span>
-            <span class="vmws-queue" id="agentVmQueueHint" hidden>Отправится следом</span>
+            <span class="vmws-queue" id="agentVmQueueHint" hidden>Ввод отправляется…</span>
+            <details class="vm-key-menu">
+              <summary title="Служебные клавиши терминала">⌨ клавиши</summary>
+              <div class="vm-key-menu-popover">
+                <button class="vm-terminal-key" data-agent-vm-key="Escape">esc</button>
+                <button class="vm-terminal-key" data-agent-vm-key="Up">↑</button>
+                <button class="vm-terminal-key" data-agent-vm-key="Down">↓</button>
+                <button class="vm-terminal-key" data-agent-vm-key="Tab">tab</button>
+                <button class="vm-terminal-key" data-agent-vm-key="Enter">enter</button>
+                <button class="vm-terminal-key" data-agent-vm-key="C-c">⌃c</button>
+              </div>
+            </details>
             <span>Весь проект · чтение и запись</span>
           </div>
         </div>

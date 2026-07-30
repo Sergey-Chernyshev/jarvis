@@ -72,7 +72,108 @@ test('project models merge chat history with VM-only projects and latest runs', 
   assert.equal(projects[1].history, null);
 });
 
-test('active environments rank waiting and working ahead of ready VMs', () => {
+test('project catalog adds folders, marks favorites and preserves manual favorite order', () => {
+  const projects = [
+    { cwd: '/work/beta', name: 'beta', projectId: 'project-b', updatedAt: 30 },
+    { cwd: '/work/alpha', name: 'alpha', projectId: 'project-a', updatedAt: 20 },
+  ];
+  const state = {
+    folders: [
+      { cwd: '/work/gamma', project: 'gamma', projectId: 'project-c' },
+      { cwd: '/work/alpha', project: 'alpha', projectId: 'project-a' },
+    ],
+    favoriteProjectIds: ['project-c', 'project-a'],
+    view: 'cards',
+  };
+
+  const merged = AgentVm.mergeProjectCatalog(projects, state);
+
+  assert.deepEqual(merged.map((project) => project.cwd), [
+    '/work/gamma',
+    '/work/alpha',
+    '/work/beta',
+  ]);
+  assert.deepEqual(merged.map((project) => project.favoriteIndex), [0, 1, -1]);
+  assert.equal(merged[0].catalogFolder.project, 'gamma');
+  assert.equal(merged[1].updatedAt, 20);
+});
+
+test('project search matches folder names and paths without chat metadata', () => {
+  const projects = [
+    {
+      cwd: '/work/alpha',
+      name: 'alpha',
+      summary: 'needle only in agent transcript',
+      history: { sessions: [{ title: 'needle only in chat' }] },
+    },
+    { cwd: '/work/needle-folder', name: 'beta' },
+  ];
+
+  assert.deepEqual(
+    AgentVm.filterProjects(projects, 'needle').map((project) => project.cwd),
+    ['/work/needle-folder'],
+  );
+  assert.equal(AgentVm.filterProjects(projects, '  ALPHA  ').length, 1);
+});
+
+test('project catalog hides ephemeral history unless the folder was explicitly added', () => {
+  const history = [
+    { project: 'real', cwd: '/Users/dev/work/real', exists: true, sessions: [] },
+    { project: 'gone', cwd: '/Users/dev/work/gone', exists: false, sessions: [] },
+    { project: 'scratch', cwd: '/private/tmp/scratch', exists: true, sessions: [] },
+    { project: 'home', cwd: '/Users/dev', exists: true, sessions: [] },
+  ];
+  const derived = AgentVm.deriveProjects(history, []);
+
+  assert.deepEqual(derived.map((project) => project.cwd), ['/Users/dev/work/real']);
+  assert.deepEqual(
+    AgentVm.mergeProjectCatalog(derived, {
+      folders: [{
+        projectId: 'project-scratch',
+        project: 'scratch',
+        cwd: '/private/tmp/scratch',
+      }],
+    }).map((project) => project.cwd),
+    ['/Users/dev/work/real', '/private/tmp/scratch'],
+  );
+  assert.equal(AgentVm.displayProjectPath('/Users/dev/work/real'), '~/work/real');
+});
+
+test('Agent VM slash suggestions rank prefix matches and ignore ordinary prompts', () => {
+  const commands = [
+    { name: 'security-review', description: 'Security review', source: 'builtin' },
+    { name: 'review', description: 'Review changes', source: 'project' },
+    { name: 'resume', description: 'Resume session', source: 'builtin' },
+    { name: 'model', description: 'Change model', source: 'builtin' },
+  ];
+
+  assert.deepEqual(
+    AgentVm.filterCommands(commands, '/re').map((command) => command.name),
+    ['resume', 'review', 'security-review'],
+  );
+  assert.deepEqual(
+    AgentVm.filterCommands(commands, '/review now'),
+    [],
+  );
+  assert.deepEqual(AgentVm.filterCommands(commands, 'review'), []);
+});
+
+test('Agent VM image paths are appended as editable terminal input', () => {
+  assert.equal(
+    AgentVm.composePrompt('Проверь интерфейс', [
+      '/home/dev.guest/.jarvis-vm/uploads/jarvis-1.png',
+      '/home/dev.guest/.jarvis-vm/uploads/jarvis-2.jpg',
+    ]),
+    'Проверь интерфейс\n/home/dev.guest/.jarvis-vm/uploads/jarvis-1.png\n'
+      + '/home/dev.guest/.jarvis-vm/uploads/jarvis-2.jpg',
+  );
+  assert.equal(
+    AgentVm.composePrompt('', ['/home/dev.guest/.jarvis-vm/uploads/jarvis-1.png']),
+    '/home/dev.guest/.jarvis-vm/uploads/jarvis-1.png',
+  );
+});
+
+test('active environments reflect VM truth and ignore legacy run state', () => {
   const entities = [
     vm('ready', 'running', { projectId: 'p-ready', project: 'ready', cwd: '/p/ready' }, 30),
     vm('work', 'running', { projectId: 'p-work', project: 'work', cwd: '/p/work' }, 20),
@@ -84,8 +185,9 @@ test('active environments rank waiting and working ahead of ready VMs', () => {
 
   const active = AgentVm.activeEnvironments(entities);
 
-  assert.deepEqual(active.map((item) => item.projectId), ['p-wait', 'p-work', 'p-ready']);
-  assert.deepEqual(active.map((item) => item.uiState), ['waiting', 'working', 'ready']);
+  assert.deepEqual(active.map((item) => item.projectId), ['p-ready', 'p-work', 'p-wait']);
+  assert.deepEqual(active.map((item) => item.uiState), ['ready', 'ready', 'ready']);
+  assert.ok(active.every((item) => item.run === null));
 });
 
 test('a run cannot report working before its project VM exists', () => {
@@ -174,6 +276,20 @@ test('configured backends follow VM modules and default only before a record exi
       'codex',
     ),
     false,
+  );
+  assert.equal(
+    AgentVm.selectBackend(
+      vm('claude-only', 'running', { modules: ['node', 'claude'] }),
+      'codex',
+    ),
+    'claude',
+  );
+  assert.equal(
+    AgentVm.selectBackend(
+      vm('both', 'running', { modules: ['node', 'claude', 'codex'] }),
+      'codex',
+    ),
+    'codex',
   );
 });
 
@@ -301,25 +417,64 @@ test('main panel exposes Agent VM workspace, bridge and keyboard contract', () =
   const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
   const bridge = readFileSync(new URL('./bridge.js', import.meta.url), 'utf8');
   const renderer = readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
+  const ipc = readFileSync(new URL('../src-tauri/src/ipc.rs', import.meta.url), 'utf8');
+  const folderPicker = readFileSync(
+    new URL('../src-tauri/src/project_folder_picker.rs', import.meta.url),
+    'utf8',
+  );
 
   assert.match(html, /id="activeEnvironments"/);
   assert.match(html, /id="agentVmWorkspace"/);
   assert.match(html, /id="agentVmFeed"/);
+  assert.match(html, /id="agentVmTerminalScreen"/);
+  assert.match(html, /data-agent-vm-key="C-c"/);
+  assert.match(html, /class="vm-key-menu"/);
+  assert.match(html, /class="vmws-prompt-mark"/);
+  assert.doesNotMatch(html, /class="vm-terminal-keys"/);
   assert.match(html, /id="agentVmPrompt"/);
+  assert.match(html, /id="agentVmCommandPalette"/);
+  assert.match(html, /id="agentVmAttachments"/);
+  assert.match(html, /id="agentVmAttach"/);
+  assert.match(html, /id="agentVmImagePicker"/);
   assert.match(html, /id="agentVmAutostart"/);
   assert.match(html, /agent-vm\.js/);
   assert.match(bridge, /getEntities/);
   assert.match(bridge, /onEntities/);
   assert.match(bridge, /agentVmOperationAck/);
+  assert.match(bridge, /agentVmTerminalEnsure/);
+  assert.match(bridge, /agentVmTerminalSnapshot/);
+  assert.match(bridge, /agentVmTerminalInput/);
+  assert.match(bridge, /getAgentVmCommands/);
+  assert.match(bridge, /agentVmTerminalUpload/);
+  assert.match(bridge, /agentVmTerminalStop/);
   assert.match(bridge, /agentVmFileRead/);
   assert.match(bridge, /getAgentVmProfiles/);
   assert.match(bridge, /setAgentVmProfile/);
+  assert.match(bridge, /getProjectManagerState/);
+  assert.match(bridge, /pickProjectManagerFolder/);
+  assert.match(bridge, /setProjectManagerFavorite/);
+  assert.match(bridge, /moveProjectManagerFavorite/);
+  assert.match(bridge, /setProjectManagerView/);
   assert.match(bridge, /setAgentVmFocus/);
   assert.match(renderer, /renderAgentVmWorkspace/);
-  assert.match(renderer, /runtime\.send/);
-  assert.match(renderer, /runtime\.replay/);
+  assert.match(renderer, /ensureAgentVmTerminal/);
+  assert.match(renderer, /warmAgentVmTerminal/);
+  assert.match(renderer, /agentVmTerminalEnsurePromises/);
+  assert.match(renderer, /agentVmTerminalInput/);
+  assert.match(renderer, /ResizeObserver/);
+  assert.doesNotMatch(renderer, /runtime\.send/);
+  assert.doesNotMatch(renderer, /runtime\.replay/);
   assert.match(renderer, /onOpenAgentVm/);
   assert.match(renderer, /requestedRunId/);
   assert.match(renderer, /renderAgentVmRuntimeStatus/);
-  assert.match(renderer, /const busy = \['starting', 'working', 'waiting'\]/);
+  assert.match(renderer, /agentVmTerminalAlive/);
+  assert.match(renderer, /mergeProjectCatalog/);
+  assert.match(renderer, /filterProjects/);
+  assert.match(renderer, /pm-card-grid/);
+  assert.doesNotMatch(renderer, /className: 'pm-card-rail'/);
+  assert.doesNotMatch(html, /aspect-ratio:\s*1/);
+  assert.match(folderPicker, /NSOpenPanel/);
+  assert.doesNotMatch(ipc, /PICK_FOLDER_SCRIPT|osascript/);
+  assert.match(html, /Добавить папку/);
+  assert.match(html, /pm-card-grid\.cards/);
 });

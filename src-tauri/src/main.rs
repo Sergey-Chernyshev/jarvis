@@ -8,6 +8,7 @@
 #[allow(dead_code)] // UI-потребитель подключается в фазе 7 (chat UI)
 mod agent;
 mod agent_vm;
+mod agent_vm_terminal;
 #[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
 mod backend;
 #[allow(dead_code)] // проекции/фасады подключаются по фазам (инкр. 8)
@@ -32,6 +33,7 @@ mod model;
 mod onboarding;
 mod plugins;
 mod power;
+mod project_folder_picker;
 mod route; // голосовая маршрутизация: скоринг → tie-break → пикер → stage-then-send
 mod ru;
 mod screen_prompt;
@@ -144,8 +146,21 @@ fn main() {
             ipc::entities_get,
             ipc::agent_vm_profiles_get,
             ipc::agent_vm_profile_set,
+            ipc::project_manager_state_get,
+            ipc::project_manager_folder_pick,
+            ipc::project_manager_favorite_set,
+            ipc::project_manager_favorite_move,
+            ipc::project_manager_view_set,
             ipc::agent_vm_focus,
             ipc::agent_vm_operation_ack,
+            ipc::agent_vm_commands_get,
+            ipc::agent_vm_terminal_ensure,
+            ipc::agent_vm_terminal_snapshot,
+            ipc::agent_vm_terminal_input,
+            ipc::agent_vm_terminal_key,
+            ipc::agent_vm_terminal_upload,
+            ipc::agent_vm_terminal_resize,
+            ipc::agent_vm_terminal_stop,
             ipc::usage_summary,
             ipc::limit_get,
             ipc::history_get,

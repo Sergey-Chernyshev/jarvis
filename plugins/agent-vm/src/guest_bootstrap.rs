@@ -46,6 +46,27 @@ while IFS= read -r -d '' source; do
   mv -f -- "$temporary" "$target"
 done < <(find "$stage" -type f -print0 | sort -z)
 "#;
+const GUEST_CREDENTIAL_PROBE_SCRIPT: &str = r#"
+user_name="$1"
+guest_home="$2"
+credential_ready() {
+  path="$1"
+  [ -f "$path" ] &&
+    [ ! -L "$path" ] &&
+    [ -s "$path" ] &&
+    [ "$(stat -c '%U' -- "$path")" = "$user_name" ] &&
+    [ "$(stat -c '%a' -- "$path")" = "600" ]
+}
+claude="missing"
+codex="missing"
+if credential_ready "$guest_home/.claude/.credentials.json"; then
+  claude="ready"
+fi
+if credential_ready "$guest_home/.codex/auth.json"; then
+  codex="ready"
+fi
+printf 'claude=%s\ncodex=%s\n' "$claude" "$codex"
+"#;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +116,13 @@ impl LoadedCodexCredential {
         Self {
             file_bytes: None,
             status: "host-keyring",
+        }
+    }
+
+    pub fn ready_without_copy() -> Self {
+        Self {
+            file_bytes: None,
+            status: "ready",
         }
     }
 
@@ -339,22 +367,7 @@ pub fn bootstrap_spec(
     record: &VmRecord,
     mut bundle: BootstrapBundle,
 ) -> Result<CommandSpec, String> {
-    if !limactl.is_absolute() {
-        return Err("limactl path должен быть absolute".into());
-    }
-    if !is_valid_vm_name(&record.name) || !valid_guest_user(&record.user) {
-        return Err("VM record содержит unsafe guest identity".into());
-    }
-    if record.workspace.mode_name != "mount" {
-        return Err("GuestBootstrap поддерживает только project mount".into());
-    }
-    if !is_safe_guest_workspace(&record.user, &record.workspace.guest_path) {
-        return Err("VM record содержит unsafe guest workspace".into());
-    }
-    let expected_home = Path::new(&record.workspace.guest_path)
-        .parent()
-        .ok_or_else(|| "VM record не содержит guest home".to_string())?
-        .to_path_buf();
+    let expected_home = validated_guest_home(limactl, record)?;
     validate_archive(&bundle.archive)?;
     Ok(CommandSpec {
         program: limactl.to_path_buf(),
@@ -379,11 +392,93 @@ pub fn bootstrap_spec(
     })
 }
 
+pub fn guest_credential_probe_spec(
+    limactl: &Path,
+    env: &BTreeMap<String, String>,
+    record: &VmRecord,
+) -> Result<CommandSpec, String> {
+    let expected_home = validated_guest_home(limactl, record)?;
+    Ok(CommandSpec {
+        program: limactl.to_path_buf(),
+        args: vec![
+            "shell".into(),
+            "--tty=false".into(),
+            "--workdir".into(),
+            "/".into(),
+            record.name.clone(),
+            "--".into(),
+            "sudo".into(),
+            "/bin/bash".into(),
+            "-ceu".into(),
+            GUEST_CREDENTIAL_PROBE_SCRIPT.into(),
+            "jarvis-credential-probe".into(),
+            record.user.clone(),
+            expected_home.to_string_lossy().into_owned(),
+        ],
+        cwd: None,
+        env: env.clone(),
+        stdin: None,
+    })
+}
+
+pub fn run_guest_credential_probe<R: CommandRunner>(
+    runner: &R,
+    spec: &CommandSpec,
+) -> Result<BootstrapCredentialStatus, String> {
+    let result = runner
+        .run(spec)?
+        .success_or_error("Agent VM guest credential probe")?;
+    parse_guest_credential_probe(&result.stdout)
+}
+
+pub fn parse_guest_credential_probe(bytes: &[u8]) -> Result<BootstrapCredentialStatus, String> {
+    if bytes.len() > 64 {
+        return Err("Agent VM guest credential probe вернул лишние данные".into());
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| "Agent VM guest credential probe вернул non-UTF-8".to_string())?;
+    let mut lines = text.lines();
+    let claude = parse_probe_line(lines.next(), "claude")?;
+    let codex = parse_probe_line(lines.next(), "codex")?;
+    if lines.next().is_some() {
+        return Err("Agent VM guest credential probe вернул лишние поля".into());
+    }
+    Ok(BootstrapCredentialStatus { claude, codex })
+}
+
 pub fn run_bootstrap<R: CommandRunner>(runner: &R, spec: &CommandSpec) -> Result<(), String> {
     runner
         .run(spec)?
         .success_or_error("Agent VM guest bootstrap")?;
     Ok(())
+}
+
+fn validated_guest_home(limactl: &Path, record: &VmRecord) -> Result<PathBuf, String> {
+    if !limactl.is_absolute() {
+        return Err("limactl path должен быть absolute".into());
+    }
+    if !is_valid_vm_name(&record.name) || !valid_guest_user(&record.user) {
+        return Err("VM record содержит unsafe guest identity".into());
+    }
+    if record.workspace.mode_name != "mount" {
+        return Err("GuestBootstrap поддерживает только project mount".into());
+    }
+    if !is_safe_guest_workspace(&record.user, &record.workspace.guest_path) {
+        return Err("VM record содержит unsafe guest workspace".into());
+    }
+    Path::new(&record.workspace.guest_path)
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "VM record не содержит guest home".to_string())
+}
+
+fn parse_probe_line(line: Option<&str>, name: &str) -> Result<String, String> {
+    let value = line
+        .and_then(|line| line.strip_prefix(name))
+        .and_then(|line| line.strip_prefix('='))
+        .filter(|value| matches!(*value, "ready" | "missing"))
+        .ok_or_else(|| format!("Agent VM guest credential probe не вернул {name} status"))?;
+    Ok(value.to_string())
 }
 
 fn validate_codex_auth(bytes: &[u8]) -> Result<(), String> {
@@ -883,6 +978,40 @@ mod tests {
         .unwrap();
 
         assert!(spec.args.iter().any(|value| value == "/home/dev.guest"));
+    }
+
+    #[test]
+    fn credential_probe_exposes_only_bounded_readiness_status() {
+        let mut guest_mount = record();
+        guest_mount.workspace.guest_path = "/home/dev.guest/synthetic-project-a1b2c3d4e5f6".into();
+
+        let spec = guest_credential_probe_spec(
+            Path::new("/synthetic/bin/limactl"),
+            &BTreeMap::from([("HOME".into(), "/private/runtime".into())]),
+            &guest_mount,
+        )
+        .unwrap();
+
+        assert_eq!(spec.program, Path::new("/synthetic/bin/limactl"));
+        assert!(spec.args.iter().any(|value| value == "/home/dev.guest"));
+        assert!(spec.stdin.is_none());
+        let visible = format!("{spec:?}");
+        assert!(!visible.contains("SYNTHETIC_PRIVATE_VALUE"));
+
+        assert_eq!(
+            parse_guest_credential_probe(b"claude=ready\ncodex=missing\n").unwrap(),
+            BootstrapCredentialStatus {
+                claude: "ready".into(),
+                codex: "missing".into(),
+            }
+        );
+        for invalid in [
+            b"claude=ready\n".as_slice(),
+            b"claude=ready\ncodex=unknown\n".as_slice(),
+            b"claude=ready\ncodex=ready\nextra=value\n".as_slice(),
+        ] {
+            assert!(parse_guest_credential_probe(invalid).is_err());
+        }
     }
 
     #[test]

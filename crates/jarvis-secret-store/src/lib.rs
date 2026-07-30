@@ -80,39 +80,49 @@ pub trait SecretStore: Clone + Send + Sync + 'static {
 
 #[cfg(target_os = "macos")]
 pub fn read_claude_code_credentials() -> Result<Option<SecretValue>, String> {
-    use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
 
-    const ITEM_NOT_FOUND: i32 = -25_300;
-    let results = ItemSearchOptions::new()
-        .class(ItemClass::generic_password())
-        .service(CLAUDE_CODE_KEYCHAIN_SERVICE)
-        .load_data(true)
-        .limit(2_i64)
-        .search();
-    let results = match results {
-        Ok(results) => results,
-        Err(error) if error.code() == ITEM_NOT_FOUND => return Ok(None),
-        Err(_) => return Err("Claude Code macOS Keychain read failed".into()),
-    };
-    let mut values = Vec::new();
-    for result in results {
-        match result {
-            SearchResult::Data(bytes) => values.push(bytes),
-            _ => {
-                for bytes in &mut values {
-                    bytes.zeroize();
-                }
-                return Err("Claude Code macOS Keychain returned unsafe item".into());
-            }
-        }
+    const ITEM_NOT_FOUND_EXIT: i32 = 44;
+    let mut child = Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-s",
+            CLAUDE_CODE_KEYCHAIN_SERVICE,
+            "-w",
+        ])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "не запустить системное чтение Claude Code Keychain".to_string())?;
+    let mut bytes = Vec::new();
+    child
+        .stdout
+        .take()
+        .ok_or_else(|| "Claude Code Keychain stdout недоступен".to_string())?
+        .take((MAX_SECRET_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "не прочитать Claude Code Keychain".to_string())?;
+    if bytes.len() > MAX_SECRET_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        bytes.zeroize();
+        return Err("Claude Code Keychain credential превышает лимит".into());
     }
-    if values.len() != 1 {
-        for bytes in &mut values {
-            bytes.zeroize();
-        }
-        return Err("Claude Code macOS Keychain item is ambiguous".into());
+    let status = child
+        .wait()
+        .map_err(|_| "не дождаться системного чтения Claude Code Keychain".to_string())?;
+    if !status.success() {
+        bytes.zeroize();
+        return if status.code() == Some(ITEM_NOT_FOUND_EXIT) {
+            Ok(None)
+        } else {
+            Err("Claude Code macOS Keychain read failed".into())
+        };
     }
-    SecretValue::new(values.pop().unwrap()).map(Some)
+    SecretValue::new(bytes).map(Some)
 }
 
 #[cfg(not(target_os = "macos"))]

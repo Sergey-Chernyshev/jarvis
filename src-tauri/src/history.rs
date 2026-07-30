@@ -75,8 +75,14 @@ fn parse_codex_meta(file: &Path, mtime: i64) -> Option<Meta> {
     let mut first_at = 0i64;
     let mut last_at = 0i64;
     for line in raw.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        if let Some(t) = v.get("timestamp").and_then(Value::as_str).and_then(crate::transcript::parse_ts) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(t) = v
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(crate::transcript::parse_ts)
+        {
             if first_at == 0 {
                 first_at = t;
             }
@@ -85,12 +91,20 @@ fn parse_codex_meta(file: &Path, mtime: i64) -> Option<Meta> {
         match v.get("type").and_then(Value::as_str) {
             Some("session_meta") => {
                 if let Some(p) = v.get("payload") {
-                    session_id = p.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                    session_id = p
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
                     cwd = p.get("cwd").and_then(Value::as_str).map(String::from);
                 }
             }
             Some("turn_context") => {
-                if let Some(m) = v.get("payload").and_then(|p| p.get("model")).and_then(Value::as_str) {
+                if let Some(m) = v
+                    .get("payload")
+                    .and_then(|p| p.get("model"))
+                    .and_then(Value::as_str)
+                {
                     model = m.to_string();
                 }
             }
@@ -113,7 +127,11 @@ fn parse_codex_meta(file: &Path, mtime: i64) -> Option<Meta> {
         session_id,
         cwd: cwd.clone(),
         project: cwd.as_deref().map(crate::util::basename),
-        title: if title.is_empty() { "Codex-сессия".into() } else { title },
+        title: if title.is_empty() {
+            "Codex-сессия".into()
+        } else {
+            title
+        },
         model: crate::backend::backend(crate::backend::Agent::Codex).friendly_model(&model),
         first_at,
         last_at,
@@ -151,7 +169,10 @@ fn parse_meta(file: &Path, mtime: i64) -> Option<Meta> {
 
     let mut meta = Meta {
         mtime,
-        session_id: file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+        session_id: file
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         last_at: mtime,
         agent: crate::backend::Agent::Claude.label().to_string(),
         ..Default::default()
@@ -162,7 +183,9 @@ fn parse_meta(file: &Path, mtime: i64) -> Option<Meta> {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(d) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(d) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if meta.cwd.is_none() {
             meta.cwd = d.get("cwd").and_then(Value::as_str).map(String::from);
         }
@@ -193,8 +216,14 @@ fn parse_meta(file: &Path, mtime: i64) -> Option<Meta> {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(d) = serde_json::from_str::<Value>(line) else { continue };
-        if let Some(ts) = d.get("timestamp").and_then(Value::as_str).and_then(crate::transcript::parse_ts) {
+        let Ok(d) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(ts) = d
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(crate::transcript::parse_ts)
+        {
             meta.last_at = meta.last_at.max(ts);
         }
         match d.get("type").and_then(Value::as_str) {
@@ -223,8 +252,17 @@ fn parse_meta(file: &Path, mtime: i64) -> Option<Meta> {
     let single_slash = regex::Regex::new(r"^/[0-9A-Za-z_]+$").unwrap();
     meta.service = SERVICE_PREFIXES.iter().any(|p| first_prompt.starts_with(p))
         || single_slash.is_match(&first_prompt); // одиночная слэш-команда
-    meta.project = Some(meta.cwd.as_deref().map(basename).unwrap_or_else(|| "другое".into()));
-    let title_src = if ai_title.is_empty() { &first_prompt } else { &ai_title };
+    meta.project = Some(
+        meta.cwd
+            .as_deref()
+            .map(basename)
+            .unwrap_or_else(|| "другое".into()),
+    );
+    let title_src = if ai_title.is_empty() {
+        &first_prompt
+    } else {
+        &ai_title
+    };
     meta.title = ellipsize(title_src, 100);
     if meta.first_at == 0 {
         meta.first_at = mtime;
@@ -272,12 +310,16 @@ impl History {
 
     fn list_files() -> Vec<PathBuf> {
         let mut out = Vec::new();
-        let Ok(dirs) = fs::read_dir(projects_dir()) else { return out };
+        let Ok(dirs) = fs::read_dir(projects_dir()) else {
+            return out;
+        };
         for d in dirs.filter_map(|e| e.ok()) {
             if !d.path().is_dir() {
                 continue;
             }
-            let Ok(files) = fs::read_dir(d.path()) else { continue };
+            let Ok(files) = fs::read_dir(d.path()) else {
+                continue;
+            };
             for f in files.filter_map(|e| e.ok()) {
                 let p = f.path();
                 if p.extension().is_some_and(|x| x == "jsonl") {
@@ -313,7 +355,9 @@ impl History {
         for file in Self::list_files() {
             let key = file.to_string_lossy().into_owned();
             seen.insert(key.clone());
-            let Ok(st) = fs::metadata(&file) else { continue };
+            let Ok(st) = fs::metadata(&file) else {
+                continue;
+            };
             if st.len() < 200 {
                 continue; // пустые/обрывки
             }
@@ -342,7 +386,9 @@ impl History {
         for file in Self::list_codex_files() {
             let key = file.to_string_lossy().into_owned();
             seen.insert(key.clone());
-            let Ok(st) = fs::metadata(&file) else { continue };
+            let Ok(st) = fs::metadata(&file) else {
+                continue;
+            };
             if st.len() < 200 {
                 continue;
             }
@@ -393,7 +439,10 @@ impl History {
             });
             let u = usage.for_session(&meta.session_id).unwrap_or(Value::Null);
             let model = if meta.model.is_empty() {
-                u.get("model").and_then(Value::as_str).unwrap_or("").to_string()
+                u.get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
             } else {
                 meta.model.clone()
             };
@@ -412,12 +461,14 @@ impl History {
         let mut out: Vec<Value> = by_project
             .into_values()
             .map(|mut g| {
-                g.sessions.sort_by_key(|s| -s.get("lastAt").and_then(Value::as_i64).unwrap_or(0));
+                g.sessions
+                    .sort_by_key(|s| -s.get("lastAt").and_then(Value::as_i64).unwrap_or(0));
                 let count = g.sessions.len();
                 g.sessions.truncate(40); // на проект — последние 40
                 serde_json::json!({
                     "project": g.project,
                     "cwd": g.cwd,
+                    "exists": g.cwd.as_deref().is_some_and(|cwd| Path::new(cwd).is_dir()),
                     "count": count,
                     "lastAt": g.last_at,
                     "sessions": g.sessions,

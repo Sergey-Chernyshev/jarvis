@@ -98,7 +98,7 @@ pub fn parse_http_response(bytes: &[u8]) -> Result<HttpResponse, String> {
     let header_end = bytes
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| "некорректный plugin HTTP response".to_string())?;
+        .ok_or_else(|| format!("некорректный plugin HTTP response ({} bytes)", bytes.len()))?;
     let header = std::str::from_utf8(&bytes[..header_end])
         .map_err(|_| "некорректный plugin HTTP header".to_string())?;
     let status = header
@@ -314,6 +314,11 @@ mod tests {
     fn parser_rejects_non_success_and_oversized_responses() {
         let denied = b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\n\r\n{}";
         assert!(parse_http_response(denied).unwrap().status == 401);
+
+        assert_eq!(
+            parse_http_response(&[]).unwrap_err(),
+            "некорректный plugin HTTP response (0 bytes)"
+        );
 
         let huge = vec![b'x'; MAX_HTTP_RESPONSE_BYTES + 1];
         let err = parse_http_response(&huge).unwrap_err();

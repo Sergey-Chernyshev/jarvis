@@ -1974,6 +1974,77 @@ window.jarvis.onLimitState((l) => { limitInfo = l; paintLimitBanner(); });
 window.jarvis.getLimit().then((l) => { limitInfo = l; paintLimitBanner(); }).catch(() => {});
 setInterval(paintLimitBanner, 30000); // тикаем обратный отсчёт
 
+/* ---------- постоянная проверка settings.json ---------- */
+
+const configBannerEl = document.getElementById('configBanner');
+const configBannerTextEl = document.getElementById('configBannerText');
+const configDetailsEl = document.getElementById('configDetails');
+const configRepairEl = document.getElementById('configRepair');
+let configHealthInfo = null;
+let configRestartRequired = false;
+let configRepairBusy = false;
+let configRepairError = '';
+
+function paintConfigBanner() {
+  const issues = configHealthInfo && Array.isArray(configHealthInfo.issues)
+    ? configHealthInfo.issues : [];
+  const broken = configHealthInfo && configHealthInfo.status === 'error';
+  if (!broken && !configRestartRequired && !configRepairError) {
+    configBannerEl.hidden = true;
+    return;
+  }
+  configBannerEl.hidden = false;
+  if (configRepairError) {
+    configBannerTextEl.textContent = configRepairError;
+  } else if (configRestartRequired) {
+    configBannerTextEl.textContent = 'Конфигурация исправлена · нужен перезапуск Jarvis';
+  } else {
+    configBannerTextEl.textContent =
+      `Конфигурация Jarvis требует внимания · ${issues.length} ${plural(issues.length, 'проблема', 'проблемы', 'проблем')}`;
+  }
+  configDetailsEl.hidden = configRestartRequired;
+  configRepairEl.disabled = configRepairBusy || (!configRestartRequired && !configHealthInfo?.repairable);
+  configRepairEl.textContent = configRepairBusy
+    ? 'Исправляю…'
+    : (configRestartRequired ? 'Перезапустить' : 'Исправить');
+}
+
+async function refreshConfigHealth() {
+  try {
+    configHealthInfo = await window.jarvis.settingsHealth();
+    if (configHealthInfo && configHealthInfo.status === 'healthy' && !configRestartRequired) {
+      configRepairError = '';
+    }
+  } catch {
+    // Ошибка IPC не означает, что файл битый: не показываем ложную тревогу.
+  }
+  paintConfigBanner();
+}
+
+configDetailsEl.addEventListener('click', () => window.jarvis.onboardingOpen());
+configRepairEl.addEventListener('click', async () => {
+  if (configRestartRequired) {
+    window.jarvis.relaunch();
+    return;
+  }
+  configRepairBusy = true;
+  configRepairError = '';
+  paintConfigBanner();
+  try {
+    const outcome = await window.jarvis.settingsRepair();
+    configHealthInfo = outcome.health;
+    configRestartRequired = true;
+  } catch (error) {
+    configRepairError = String(error || 'Не удалось исправить конфиг');
+    await refreshConfigHealth();
+  } finally {
+    configRepairBusy = false;
+    paintConfigBanner();
+  }
+});
+
+refreshConfigHealth();
+
 /* ---------- плагины: Не спать (☕) и Крышка (⌒) ---------- */
 
 let plugins = [];
@@ -2305,6 +2376,7 @@ window.jarvis.onShown(() => {
   panelEl.classList.remove('entering');
   void panelEl.offsetWidth;
   panelEl.classList.add('entering');
+  refreshConfigHealth();
   // Окно при скрытии не уничтожается — view и открытый чат живы. Возвращаем
   // на то же место (клик мимо / Cmd+J прячут панель как есть). Чат или вопрос
   // уже закрытой сессии (могла завершиться, пока панель была спрятана) —

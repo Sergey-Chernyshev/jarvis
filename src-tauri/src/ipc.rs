@@ -71,6 +71,16 @@ pub fn settings_get(app: AppHandle) -> Value {
     s
 }
 
+#[tauri::command]
+pub fn settings_health(app: AppHandle) -> crate::config_health::ConfigHealth {
+    Daemon::get(&app).settings.health()
+}
+
+#[tauri::command]
+pub fn settings_repair(app: AppHandle) -> Result<crate::settings::RepairOutcome, String> {
+    Daemon::get(&app).settings.repair()
+}
+
 /// Регистрация глобального хоткея с откатом на прежний при провале.
 pub fn register_hotkey(d: &Arc<Daemon>, accelerator: &str) -> Result<(), String> {
     let gs = d.app.global_shortcut();

@@ -3,7 +3,6 @@
 //! по инкрементам (см. план); здесь то, что известно статически.
 
 use serde_json::Value;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::{Agent, Backend};
@@ -16,34 +15,7 @@ pub static CODEX: CodexBackend = CodexBackend;
 
 /// Настоящий `codex` в PATH (+типовые каталоги), минуя наш шим `~/.jarvis/shims`.
 pub fn resolve_codex_bin() -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .collect();
-    for extra in [
-        crate::util::home_dir().join(".local/bin"),
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-    ] {
-        if !dirs.contains(&extra) {
-            dirs.push(extra);
-        }
-    }
-    let shims = crate::util::jarvis_dir().join("shims");
-    for d in dirs {
-        if d == shims {
-            continue;
-        }
-        let p = d.join("codex");
-        if let Ok(meta) = std::fs::metadata(&p) {
-            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
-                return Some(p);
-            }
-        }
-    }
-    None
+    crate::install::resolve_agent_bin("codex")
 }
 
 /// Найти rollout-файл codex по `session_id` (хвост имени файла = uuid сессии):

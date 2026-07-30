@@ -15,6 +15,7 @@ mod backend;
 mod capability;
 mod claude_bin;
 mod commands_catalog;
+mod config_health;
 mod convo; // голосовой разговор: снапшот → Haiku-план → скилы → голосовой ответ (п/п-2)
 mod coord; // координация голоса: пока юзер диктует/говорит — уведомления ждут, wake подавлен
 mod daemon;
@@ -61,12 +62,22 @@ use tauri::Manager;
 
 use daemon::Daemon;
 
+fn headless_from(value: Option<&std::ffi::OsStr>) -> bool {
+    value
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn is_headless() -> bool {
+    headless_from(std::env::var_os("JARVIS_HEADLESS").as_deref())
+}
+
 fn main() {
     let mut builder = tauri::Builder::default();
 
     // single-instance — только в проде; в dev-сборке (JARVIS_DEV=1) НЕ ставим,
     // чтобы dev и установленный прод крутились рядом, не гася друг друга.
-    if std::env::var("JARVIS_DEV").is_err() {
+    if std::env::var("JARVIS_DEV").is_err() && !is_headless() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             windows::show_panel(&Daemon::get(app));
         }));
@@ -127,6 +138,8 @@ fn main() {
             ipc::panel_hide,
             ipc::settings_get,
             ipc::settings_set,
+            ipc::settings_health,
+            ipc::settings_repair,
             ipc::chat_open,
             ipc::chat_summarize,
             ipc::file_open,
@@ -288,13 +301,23 @@ fn main() {
             );
 
             d.restore_state(); // реестр переживает перезапуск
+
+            // Smoke/plugin-host процессы могут использовать daemon/socket, но не
+            // имеют права открывать пользовательские окна или регистрировать
+            // глобальные интерактивные ресурсы.
+            if is_headless() {
+                tauri::async_runtime::spawn(server::serve(d.clone()));
+                crate::log::line("[startup] JARVIS_HEADLESS=1 — UI и tray отключены");
+                return Ok(());
+            }
+
             windows::create_panel(app.handle())?;
             windows::create_toast(app.handle())?;
             tray::init(&d)?;
 
             // первый запуск без интеграции — онбординг; иначе показываем панель,
             // чтобы запуск приложения был видимым (а не «ничего не открылось»).
-            if !install::integration_health().ok() {
+            if d.settings.health().has_errors() || !install::integration_health().ok() {
                 let _ = windows::create_onboarding(app.handle());
             } else {
                 windows::show_panel(&d);
@@ -404,7 +427,9 @@ fn main() {
                 let d = Daemon::get(app);
                 d.write_state_now(); // реестр переживает перезапуск
                 d.plugins.dispose(&d); // погасить внешние plugin-процессы
-                power::Power::dispose(&d); // снять assertion, вернуть disablesleep
+                if !is_headless() {
+                    power::Power::dispose(&d); // снять assertion, вернуть disablesleep
+                }
                 d.voice.dispose(); // погасить Silero-сайдкар, если был поднят
                 d.stt.dispose(); // погасить Qwen3-MLX-сайдкар, если был поднят
                 d.wake.dispose(); // остановить wake-word consumer-поток
@@ -589,4 +614,18 @@ fn spawn_timers(d: &Arc<Daemon>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn headless_flag_accepts_only_explicit_truthy_values() {
+        assert!(headless_from(Some(OsStr::new("1"))));
+        assert!(headless_from(Some(OsStr::new("true"))));
+        assert!(!headless_from(Some(OsStr::new("0"))));
+        assert!(!headless_from(None));
+    }
 }

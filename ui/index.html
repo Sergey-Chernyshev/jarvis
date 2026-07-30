@@ -155,6 +155,54 @@
     flex: none;
   }
 
+  .configbanner {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-height: 42px;
+    padding: 7px 10px 7px 16px;
+    border-bottom: 1px solid rgba(231, 164, 101, 0.22);
+    background: rgba(231, 164, 101, 0.085);
+    color: #dfc2aa;
+    font-size: 12px;
+  }
+  .configbanner::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #e3a465;
+    flex: none;
+  }
+  .configbanner-text {
+    flex: 1;
+    min-width: 0;
+    line-height: 1.35;
+  }
+  .configbanner button {
+    appearance: none;
+    border: 1px solid rgba(231, 164, 101, 0.24);
+    border-radius: 6px;
+    min-height: 27px;
+    padding: 0 9px;
+    background: rgba(255,255,255,.035);
+    color: #e9d3c1;
+    font: inherit;
+    font-size: 11px;
+    cursor: default;
+  }
+  .configbanner button:hover:not(:disabled) {
+    border-color: rgba(231, 164, 101, 0.42);
+    background: rgba(231, 164, 101, 0.12);
+    color: #fff2e7;
+  }
+  .configbanner button:disabled {
+    border-color: rgba(255,255,255,.06);
+    background: rgba(255,255,255,.025);
+    color: var(--faint);
+  }
+
   /* ---------- content ---------- */
   .content { flex: 1; overflow-y: auto; min-height: 0; }
   .content::-webkit-scrollbar { width: 0; }
@@ -2594,6 +2642,11 @@
     </div>
 
     <div class="limitbanner" id="limitBanner" hidden></div>
+    <div class="configbanner" id="configBanner" hidden>
+      <span class="configbanner-text" id="configBannerText"></span>
+      <button id="configDetails" type="button">Подробнее</button>
+      <button id="configRepair" type="button">Исправить</button>
+    </div>
     <div class="content">
       <section class="vm-active" id="activeEnvironments" hidden aria-label="Активные среды">
         <div class="vm-active-head">

@@ -20,6 +20,8 @@
     hidePanel: () => invoke('panel_hide'),
     getSettings: () => invoke('settings_get'),
     setSettings: (patch) => invoke('settings_set', { patch }),
+    settingsHealth: () => invoke('settings_health'),
+    settingsRepair: () => invoke('settings_repair'),
     openChat: (sessionId) => invoke('chat_open', { sessionId }),
     closeChat: () => invoke('chat_close'),
     summarizeTurn: (sessionId, turnKey) => invoke('chat_summarize', { sessionId, turnKey }),

@@ -10,6 +10,7 @@
     if (/network|proxy|timeout|timed out|http|dns|соедин|сеть/.test(text)) return 'network';
     if (/no space|disk|device full|readonly|read-only|места на диске/.test(text)) return 'disk';
     if (/permission|denied|trust|access|доступ|прав/.test(text)) return 'permission';
+    if (/\bhome\b|\bpath\b|environment|окружен/.test(text)) return 'environment';
     if (/hook/.test(text)) return 'hooks';
     return 'unknown';
   }
@@ -31,6 +32,7 @@
     const job = data.job || { state: 'idle', failures: [] };
     const capabilities = Array.isArray(data.capabilities) ? data.capabilities : [];
     const agents = Array.isArray(data.agents) ? data.agents : [];
+    const configHealth = data.configHealth || { status: 'healthy', issues: [] };
     const socket = (Array.isArray(data.transport) ? data.transport : [])
       .find((item) => item && item.id === 'socket');
     const readyCapabilities = capabilities.filter((item) => item && item.ready).length;
@@ -43,8 +45,13 @@
       runtimeState: data.coreReady ? (socket && socket.ready ? 'online' : 'warming') : 'offline',
       readyAgents: agents.filter((item) => item && item.ready).length,
       totalAgents: agents.filter((item) => item && item.available !== false).length,
+      configHealth,
+      configIssues: Array.isArray(configHealth.issues) ? configHealth.issues.slice() : [],
     };
 
+    if (configHealth.status === 'error') {
+      return { ...base, screen: 'config', primaryAction: 'repair-config' };
+    }
     if (job.state === 'running') {
       return { ...base, screen: 'installing', primaryAction: 'wait' };
     }

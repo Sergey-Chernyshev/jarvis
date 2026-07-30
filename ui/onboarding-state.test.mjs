@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
 const State = require('./onboarding-state.js');
@@ -13,6 +14,13 @@ function snapshot(overrides = {}) {
     capabilities: [],
     warnings: [],
     proxyConfigured: false,
+    configHealth: {
+      status: 'healthy',
+      path: '/tmp/settings.json',
+      issues: [],
+      repairable: false,
+      restartRequired: false,
+    },
     job: { state: 'idle', kind: '', tasks: [], steps: [], failures: [] },
     ...overrides,
   };
@@ -22,6 +30,23 @@ test('missing core resolves to agents repair state', () => {
   const view = State.derive(snapshot());
   assert.equal(view.screen, 'agents');
   assert.equal(view.primaryAction, 'repair');
+});
+
+test('broken Jarvis config takes precedence over agent and install states', () => {
+  const view = State.derive(snapshot({
+    coreReady: false,
+    configHealth: {
+      status: 'error',
+      path: '/Users/me/.jarvis/settings.json',
+      issues: [{ path: '$.notify.ttlSec', code: 'out_of_range', message: 'Неверный диапазон' }],
+      repairable: true,
+      restartRequired: true,
+    },
+    job: { state: 'running', kind: 'core', tasks: [], steps: [], failures: [] },
+  }));
+  assert.equal(view.screen, 'config');
+  assert.equal(view.primaryAction, 'repair-config');
+  assert.equal(view.configIssues.length, 1);
 });
 
 test('ready core opens optional capabilities without pretending models exist', () => {
@@ -81,4 +106,15 @@ test('ready core distinguishes a warming runtime socket from online', () => {
     transport: [{ id: 'socket', ready: false }],
   }));
   assert.equal(view.runtimeState, 'warming');
+});
+
+test('onboarding copy and button states keep the compact visual contract', () => {
+  const html = readFileSync(new URL('./onboarding.html', import.meta.url), 'utf8');
+  const js = readFileSync(new URL('./onboarding.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(js, /Нужен корпоративный прокси/);
+  assert.match(js, /Нужен прокси\?/);
+  assert.match(html, /\.btn\.primary:hover:not\(:disabled\)/);
+  assert.match(html, /\.btn\.primary:disabled/);
+  assert.match(html, /\.btn:disabled\s*\{[^}]*opacity:\s*1/s);
+  assert.match(html, /--window-radius:\s*18px/);
 });

@@ -66,7 +66,7 @@ pub fn create_onboarding(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             .effects(WindowEffectsConfig {
                 effects: vec![Effect::UnderWindowBackground],
                 state: Some(EffectState::Active),
-                radius: Some(16.0),
+                radius: Some(18.0),
                 color: None,
             })
             .resizable(false)

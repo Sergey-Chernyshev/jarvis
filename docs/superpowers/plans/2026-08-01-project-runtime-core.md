@@ -107,6 +107,9 @@ test -f crates/jarvis-plugin-protocol/src/broker.rs
 test -f crates/jarvis-plugin-protocol/src/contribution.rs
 test -f src-tauri/src/plugin_platform/broker/outbox_ingress.rs
 test -f src-tauri/src/plugin_platform/broker/projection_adapter.rs
+test -f src-tauri/src/plugin_platform/broker/host_receipt_registry.rs
+test -f src-tauri/src/plugin_platform/broker/trusted_core_projection.rs
+test -f src-tauri/tests/broker_trusted_projection_receipts.rs
 test -f src-tauri/src/plugin_platform/security/command_registry.rs
 test -f src-tauri/src/plugin_platform/operations/store.rs
 test -f src-tauri/src/plugin_platform/operations/dispatch.rs
@@ -116,6 +119,8 @@ test -f src-tauri/src/plugin_platform/coordinator/snapshot.rs
 test -f src-tauri/src/plugin_platform/core_projection.rs
 test -s docs/design/plugin-platform-v2-figma.md
 cargo test --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  --test broker_trusted_projection_receipts
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
   --test broker_projection_consistency \
   --test broker_projection_adapter \
@@ -144,10 +149,21 @@ Expected: every command exits `0`. The B tests must prove:
    at its allocated Broker revision, while none of those receipts are visible
    through plugin query/schema discovery.
 
+`broker_trusted_projection_receipts` is the exact B4 acceptance test for item
+7. Do not substitute C's Catalog tests, a provider outbox receipt test or the
+single-row EntityStore test: the dependency gate must execute that file by
+name and keep its two-row/same-revision, rollback and privacy cases green.
+
 If any file or behavior is absent, stop. Complete or correct B in its own
 increment first. Do not recreate a local Broker shortcut inside C.
 
-The B handoff must also expose a trusted-Core contract/projection writer and a
+The B handoff must expose B4's sealed crate-private
+`TrustedCoreProjectionAccess`,
+`register_host_projection_receipt_schema` and
+`apply_trusted_projection_batch`, plus the crate-private bounded
+`load_trusted_projection_receipts` lookup, backed by
+`broker_host_projection_receipts`; none may be minted or reached from a plugin
+receipt, provider principal, Bridge payload or public SDK. It must also expose a
 transactional projection-adapter hook for authenticated provider outbox
 batches. The hook must record the provider outbox receipt and apply
 Core-owned mutations in one Broker transaction without pretending that the

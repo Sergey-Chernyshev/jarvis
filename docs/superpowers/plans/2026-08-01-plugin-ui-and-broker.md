@@ -1087,11 +1087,14 @@ git commit -m "security(plugins): isolate pages in raw child webviews"
 - Create: `src-tauri/src/plugin_platform/broker/migrations.rs`
 - Create: `src-tauri/src/plugin_platform/broker/access.rs`
 - Create: `src-tauri/src/plugin_platform/broker/schema_registry.rs`
+- Create: `src-tauri/src/plugin_platform/broker/host_receipt_registry.rs`
+- Create: `src-tauri/src/plugin_platform/broker/trusted_core_projection.rs`
 - Create: `src-tauri/src/plugin_platform/broker/entity_store.rs`
 - Create: `src-tauri/src/plugin_platform/broker/quarantine.rs`
 - Create: `src-tauri/migrations/plugin-broker/0001_contracts_entities.sql`
 - Create: `src-tauri/tests/broker_schema_registry.rs`
 - Create: `src-tauri/tests/broker_entities.rs`
+- Create: `src-tauri/tests/broker_trusted_projection_receipts.rs`
 - Create: `src-tauri/tests/broker_recovery.rs`
 - Create: `src-tauri/tests/fixtures/broker/owner-a-v1.schema.json`
 - Create: `src-tauri/tests/fixtures/broker/owner-a-v1-mutated.schema.json`
@@ -1152,11 +1155,22 @@ PRAGMA busy_timeout = 5000;
 - `broker_entities(contract_id, contract_version, entity_id, owner_plugin_id, owner_package_digest, revision,
   broker_revision, state, data_json, updated_at_ms, stale)`;
 - `broker_entity_changes(broker_revision, contract_id, contract_version, entity_id, entity_revision, change_kind)`;
+- `broker_host_receipt_schemas(receipt_type, receipt_version, schema_digest, schema_json,
+  registered_by_core_component, created_at_ms)`;
+- `broker_host_projection_receipts(producer_namespace, batch_id, source_digest, write_set_digest, broker_revision,
+  receipt_ordinal, subject_kind, subject_id, contract_id, contract_version, entity_id, row_digest, receipt_type,
+  receipt_version, receipt_schema_digest, receipt_digest, receipt_blob, created_at_ms)`;
 - `broker_quarantine(owner_plugin_id, contract_id, record_kind, record_key, reason_code, payload_digest,
   payload_blob, quarantined_at_ms)`.
 
 All foreign keys include exact contract version and schema digest through a unique contract binding. Migration
 checksums are immutable. A changed historical migration is a startup error; forward migrations are one transaction.
+Host receipt schemas are immutable by `(receipt_type, receipt_version)` and their canonical bytes/digest. Projection
+receipts reference the exact registered schema and projected row, are append-only, and are unique by
+`(producer_namespace, batch_id, receipt_ordinal)`. Every row in one batch repeats the same `source_digest`,
+`write_set_digest` and `broker_revision`; a database constraint/commit-time invariant rejects a mixed batch. These two
+tables have no registration/authority path from plugin contracts, package receipts or provider principals; the target
+row foreign key is accepted only for a host-owned Core contract.
 Set `clean_shutdown = 0` before services start and back to `1` only after Broker queues are drained and WAL is
 checkpointed in `shutdown.rs`.
 
@@ -1177,7 +1191,7 @@ retrieval, recursive expansion above the configured depth and schema output
 that can exceed the entity/event size limits. Cache keys are `(contract ID,
 exact version, schema digest)`.
 
-- [ ] **Step 4: Add RED EntityStore tests**
+- [ ] **Step 4: Add RED EntityStore and trusted-Core receipt tests**
 
 `broker_entities.rs` covers:
 
@@ -1195,12 +1209,40 @@ exact version, schema digest)`.
 Run:
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test broker_entities
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  --test broker_entities --test broker_trusted_projection_receipts
 ```
 
-Expected RED: types compile after Steps 2–3, but tests fail because EntityStore methods are absent.
+`broker_trusted_projection_receipts.rs` registers a fake host-only receipt schema and proves:
 
-- [ ] **Step 5: Implement the minimal optimistic EntityStore**
+1. one batch with two host-owned entity rows and one receipt per row allocates exactly one `brokerRevision`; both
+   final rows, changes and receipts carry that same revision;
+2. the two receipt blobs validate against the registered host schema, bind the exact final canonical row digests and
+   remain independently addressable at that revision;
+3. a failpoint after the first row/receipt but before the second leaves no entity, change, receipt or revision
+   increment after reopen;
+4. replay of the same `(producer namespace, batch ID, source digest)` returns the original revision and writes
+   nothing; the same key with another digest returns `trusted_projection_idempotency_conflict`;
+5. zero writes, more than 4,096 writes, zero receipts for a row, more than four receipts for a row, a receipt above
+   64 KiB or more than 16 MiB aggregate receipt bytes fails before `BEGIN IMMEDIATE`;
+6. plugin `VerifiedBrokerAccess` and a provider-shaped caller payload cannot mint/convert to
+   `TrustedCoreProjectionAccess`, register a host receipt schema, call the writer, or read receipt rows;
+7. Broker query/watch/schema discovery, Bridge serializers, public protocol/SDK and logs contain neither receipt
+   blobs nor receipt-table existence canaries.
+
+The privacy case uses Rust visibility/negative API assertions plus the Broker public query/watch paths; extend
+`scripts/check-plugin-platform-boundaries.sh` in B12 to allow receipt SQL table/schema identifiers only in the
+migration, `host_receipt_registry.rs`, `trusted_core_projection.rs` and this test, and to allow access-type
+constructors/implementations only in `access.rs`/trusted Broker internals. Trusted C callers may import the narrow
+methods/type, but no public/Bridge/SDK/provider surface may serialize, construct or re-export them. A `cfg(test)`
+fixture authority may be used by the test, but no production plugin/provider fixture constructor exists.
+
+B5 must extend this same test file with its concrete authenticated provider-adapter access type and prove that it also
+has no conversion or direct writer/reader path; C's hard gate runs the extended file after B5 has landed.
+
+Expected RED: types compile after Steps 2–3, but tests fail because EntityStore and the trusted-Core writer are absent.
+
+- [ ] **Step 5: Implement the minimal optimistic EntityStore and trusted-Core writer**
 
 Every mutation takes `&VerifiedBrokerAccess` and a B1 mutation DTO without owner identity.
 `VerifiedBrokerAccess` is crate-private and can be minted only from A8's exact receipt/activation binding (plus a
@@ -1222,15 +1264,64 @@ explicit repair tooling, deletes it from active projection tables and never retu
 payloads have no normal query API. Deletion is a change event with a tombstone revision, not an immediate loss of
 cursor ordering.
 
+`access.rs` defines a sealed, crate-private `TrustedCoreProjectionAccess`. It is minted only from the host's
+non-serializable `HostCoreAuthority` during trusted Core bootstrap (plus a `cfg(test)` fixture authority), never from
+A8 package/plugin receipts, `VerifiedBrokerAccess`, B5 provider authentication or Bridge/process input. No `From`,
+`TryFrom`, serde or clone-to-payload path exists. `host_receipt_registry.rs` exposes only
+`register_host_projection_receipt_schema(&TrustedCoreProjectionAccess, ...)`; B registers generic fake schemas in
+tests, while C owns and registers the concrete Catalog receipt schema and DTO.
+
+`trusted_core_projection.rs` exposes the crate-private API:
+
+```rust
+pub(crate) fn apply_trusted_projection_batch<A: TrustedCoreProjectionAssembler>(
+    &self,
+    access: &TrustedCoreProjectionAccess,
+    key: TrustedProjectionBatchKey,
+    assembler: A,
+) -> Result<AppliedTrustedProjection, BrokerError>;
+```
+
+`TrustedProjectionBatchKey` contains a bounded host producer namespace, batch ID and caller-computed source digest;
+it contains no plugin/provider identity. The sealed assembler is preflighted, then receives one private
+`AllocatedBrokerRevision` and returns 1–4,096 final host-owned entity mutations. Each mutation carries one to four
+`HostProjectionReceiptDraft`s. A receipt identifies its subject and exact target contract/version/entity, selects an
+immutable host-registered receipt schema and supplies canonical JSON bytes. Limits are 64 KiB per receipt and 16 MiB
+aggregate receipt bytes. C may use the allocated revision to finalize revision-bearing View fields, but cannot choose
+or reuse a revision itself.
+
+The method first resolves idempotency, validates all bounds, and then uses one SQLite `IMMEDIATE` transaction. For a
+new batch it increments `broker_meta.broker_revision` exactly once; calls the pure assembler; schema-validates and
+canonicalizes every final entity and receipt; computes exact row, receipt and complete write-set digests; writes all
+entities, changes and immutable per-row receipts; and commits before publishing/returning the revision. Every
+mutation must have at least one matching receipt. Any assembler, schema, failpoint, write or commit failure rolls back
+the allocator and every row. An exact replay returns the stored revision; changed source bytes are a hard conflict.
+
+The public-to-Core wrapper above delegates to a broker-private
+`apply_trusted_projection_batch_in_tx(&mut BrokerWriteTransaction, ...)`.
+Only Broker internals can call the in-transaction form. B5 uses it after opening the transaction that also records the
+authenticated provider outbox receipt and adapter-private binding; it must not nest a second transaction or allocate
+a second revision. C's Catalog projector uses the wrapper and never receives a raw transaction/database handle.
+
+The receipt registry/table is deliberately absent from EntityStore query/watch/schema-discovery and from Bridge,
+protocol and SDK serializers. Only trusted host code can validate receipts through a narrow crate-private lookup by
+producer/batch/revision. `load_trusted_projection_receipts(&TrustedCoreProjectionAccess, producer, revision,
+bounded_subjects)` is that lookup; it returns only exact schema-validated immutable receipts from one Broker read
+transaction and is not re-exported. B5's authenticated projection adapter may invoke only the broker-private in-tx
+form after its own provider receipt/generation validation; a provider principal or provider receipt can never call or
+mint it directly.
+
 - [ ] **Step 6: Run B4 durability verification**
 
 Run:
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  --test broker_schema_registry --test broker_entities --test broker_recovery
+  --test broker_schema_registry --test broker_entities \
+  --test broker_trusted_projection_receipts --test broker_recovery
 cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
-  --test broker_schema_registry --test broker_entities
+  --test broker_schema_registry --test broker_entities \
+  --test broker_trusted_projection_receipts
 git diff --check
 ```
 
@@ -1252,6 +1343,7 @@ Expected: no request path trusts payload owner identity; any `expect` is limited
 git add src-tauri/src/plugin_platform src-tauri/migrations/plugin-broker \
   src-tauri/src/plugins/schema_validation.rs src-tauri/src/plugins/manifest_v2.rs \
   src-tauri/tests/broker_schema_registry.rs src-tauri/tests/broker_entities.rs \
+  src-tauri/tests/broker_trusted_projection_receipts.rs \
   src-tauri/tests/broker_recovery.rs src-tauri/tests/fixtures/broker \
   src-tauri/src/main.rs src-tauri/src/shutdown.rs src-tauri/Cargo.toml src-tauri/Cargo.lock
 git commit -m "feat(plugins): persist broker schemas and entities"
@@ -1284,6 +1376,7 @@ git commit -m "feat(plugins): persist broker schemas and entities"
 - Modify: `crates/jarvis-plugin-sdk/Cargo.toml`
 - Modify: `crates/jarvis-plugin-test-host/src/lib.rs`
 - Modify: `crates/jarvis-plugin-test-host/Cargo.toml`
+- Modify: `src-tauri/tests/broker_trusted_projection_receipts.rs`
 
 - [ ] **Step 1: Add RED event/cursor tests**
 
@@ -1344,6 +1437,9 @@ outbox table. They prove:
     revision/generation-bound, and has no Broker query/watch/Bridge/SDK path;
 12. public entity/event/snapshot bytes and logs contain none of the
     adapter-private canaries.
+13. authenticated provider-adapter access cannot convert into
+    `TrustedCoreProjectionAccess`, register host receipt schemas, call
+    `apply_trusted_projection_batch` directly or load host projection receipts.
 
 Run:
 
@@ -1352,7 +1448,8 @@ cargo test --manifest-path crates/jarvis-plugin-sdk/Cargo.toml --test outbox_rep
 cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml --test outbox_contract
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
   --test broker_outbox --test broker_projection_adapter \
-  --test broker_projection_adapter_privacy
+  --test broker_projection_adapter_privacy \
+  --test broker_trusted_projection_receipts
 ```
 
 Expected RED: SDK/test-host outbox APIs and host ingress are absent.
@@ -1382,6 +1479,13 @@ allowlisted digests/revisions. It is not an Entity, Event, plugin private value
 or queryable Broker projection and has no Bridge/SDK/CLI/UI serializer. Raw
 process, attach, resume, path or credential material remains in the provider's
 private domain store.
+
+Broker performs that composition through B4's private
+`apply_trusted_projection_batch_in_tx`; the public-to-Core
+`apply_trusted_projection_batch` transaction wrapper is not called from an
+already-open ingress transaction. The adapter gets no
+`TrustedCoreProjectionAccess` and cannot retain the internal transaction
+capability after the call.
 
 The adapter cannot allocate a revision, open a second transaction or bypass
 schema validation. Provider payloads can never select the host
@@ -1430,7 +1534,8 @@ Run:
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
   --test broker_events --test broker_outbox --test broker_projection_adapter \
-  --test broker_projection_adapter_privacy --test plugin_private_storage
+  --test broker_projection_adapter_privacy \
+  --test broker_trusted_projection_receipts --test plugin_private_storage
 cargo test --manifest-path crates/jarvis-plugin-sdk/Cargo.toml --test outbox_replay
 cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml --test outbox_contract
 cargo +1.77.2 test --locked --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
@@ -1444,6 +1549,7 @@ git add src-tauri/src/plugin_platform/broker src-tauri/migrations/plugin-broker 
   src-tauri/tests/broker_events.rs src-tauri/tests/broker_outbox.rs \
   src-tauri/tests/broker_projection_adapter.rs \
   src-tauri/tests/broker_projection_adapter_privacy.rs \
+  src-tauri/tests/broker_trusted_projection_receipts.rs \
   src-tauri/tests/plugin_private_storage.rs crates/jarvis-plugin-sdk \
   crates/jarvis-plugin-test-host
 git commit -m "feat(plugins): persist broker events and private storage"

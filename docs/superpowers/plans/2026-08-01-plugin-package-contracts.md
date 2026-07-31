@@ -1385,7 +1385,7 @@ package_signature_known_answer_rejects_one_bit_public_key_change
 Run:
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features plugins::trust
+cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features plugins::trust
 ```
 
 Expected: FAIL because trust modules and fixtures do not exist.
@@ -1567,7 +1567,7 @@ Developer Mode remain testable. Never promote the deterministic fixture key to p
 Run:
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features plugins::trust
+cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features plugins::trust
 npm run check:plugin-boundaries
 npm run check:public
 ```

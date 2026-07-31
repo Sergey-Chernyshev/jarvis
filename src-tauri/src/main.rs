@@ -40,6 +40,7 @@ mod ru;
 mod screen_prompt;
 mod server;
 mod settings;
+mod shutdown;
 #[allow(dead_code)] // STT-потребители подключаются в фазах 4-6 (инкр. 9)
 mod stt;
 mod tail;
@@ -293,6 +294,7 @@ fn main() {
 
             let d = Arc::new(Daemon::new(app.handle().clone()));
             app.manage(d.clone());
+            shutdown::install(app.handle().clone());
 
             // Конфиг служебного LLM («Под капотом»: Claude/Codex + модель) — из
             // настроек в процесс-глобал, чтобы run_service_llm сразу его видел.

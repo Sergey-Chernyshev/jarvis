@@ -1,7 +1,9 @@
-use jarvis_power_core::engine::{Effect, Engine, EngineConfig, EngineError, Plan, ProcessState};
+use jarvis_power_core::engine::{
+    AcquireOutcome, AcquireResult, Effect, Engine, EngineConfig, EngineError, Plan, ProcessState,
+};
 use jarvis_power_core::state::{
-    DarwinProcessIdentity, HelperState, LeaseId, MonotonicTime, MutationPhase, Principal,
-    StateError,
+    DarwinProcessIdentity, HelperState, Lease, LeaseId, MonotonicTime, MutationPhase, Principal,
+    StateError, MAX_ACTIVE_LEASES,
 };
 
 const BOOT_ID: &str = "boot-2026-07-31";
@@ -9,6 +11,7 @@ const SERVICE_VERSION: u64 = 2;
 const MINIMUM_CLIENT_BUILD: u64 = 100;
 const LEASE_A: &str = "0123456789abcdef0123456789abcdef";
 const LEASE_B: &str = "fedcba9876543210fedcba9876543210";
+const LEASE_C: &str = "00112233445566778899aabbccddeeff";
 
 fn config() -> EngineConfig {
     EngineConfig::new(SERVICE_VERSION, MINIMUM_CLIENT_BUILD, BOOT_ID).expect("valid engine config")
@@ -44,7 +47,7 @@ fn now(value: u64) -> MonotonicTime {
     MonotonicTime::from_millis(value)
 }
 
-fn first_acquire(baseline: bool) -> Plan {
+fn acquire_with_ttl(baseline: bool, ttl_ms: u64) -> AcquireResult {
     Engine::empty(config())
         .acquire(
             &owner(),
@@ -52,11 +55,20 @@ fn first_acquire(baseline: bool) -> Plan {
             "prod",
             "generation-a",
             now(0),
-            5_000,
+            ttl_ms,
             baseline,
             1,
         )
         .expect("first acquire")
+}
+
+fn first_acquire(baseline: bool) -> Plan {
+    acquire_with_ttl(baseline, 5_000).plan
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeEffectError {
+    DeadlineExpired,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +76,7 @@ struct World {
     persisted: Option<HelperState>,
     sleep_disabled: bool,
     verified: Vec<bool>,
+    monotonic_now: MonotonicTime,
 }
 
 impl World {
@@ -72,12 +85,22 @@ impl World {
             persisted: None,
             sleep_disabled,
             verified: Vec::new(),
+            monotonic_now: now(0),
         }
     }
 
     fn execute(&mut self, effect: &Effect) {
+        self.try_execute(effect).expect("runtime effect");
+    }
+
+    fn try_execute(&mut self, effect: &Effect) -> Result<(), RuntimeEffectError> {
         match effect {
             Effect::PersistState(state) => self.persisted = Some(state.clone()),
+            Effect::CheckDeadline(deadline) => {
+                if self.monotonic_now >= *deadline {
+                    return Err(RuntimeEffectError::DeadlineExpired);
+                }
+            }
             Effect::CompareAndSetDisabled(target) => self.sleep_disabled = *target,
             Effect::VerifyDisabled(expected) => {
                 assert_eq!(self.sleep_disabled, *expected);
@@ -92,6 +115,7 @@ impl World {
                 self.persisted = None;
             }
         }
+        Ok(())
     }
 
     fn execute_plan(&mut self, plan: &Plan) {
@@ -114,6 +138,7 @@ impl World {
     }
 
     fn converge(&mut self, at: u64) {
+        self.monotonic_now = now(at);
         for _ in 0..3 {
             let plan = self
                 .engine()
@@ -348,7 +373,7 @@ fn corrupt_state_fails_closed_without_effects() {
 #[test]
 fn multiple_profiles_restore_only_when_the_last_lease_leaves() {
     let mut world = applied_world(false);
-    let second = world
+    let second_result = world
         .engine()
         .acquire(
             &other_owner(),
@@ -361,8 +386,14 @@ fn multiple_profiles_restore_only_when_the_last_lease_leaves() {
             1,
         )
         .expect("second acquire");
-    assert_eq!(second.effects.len(), 1);
-    assert!(matches!(second.effects[0], Effect::PersistState(_)));
+    assert!(matches!(
+        second_result.outcome,
+        AcquireOutcome::Created { .. }
+    ));
+    let second = second_result.plan;
+    assert_eq!(second.effects.len(), 2);
+    assert_eq!(second.effects[0], Effect::CheckDeadline(now(5_010)));
+    assert!(matches!(second.effects[1], Effect::PersistState(_)));
     world.execute_plan(&second);
 
     let release_first = world
@@ -382,6 +413,244 @@ fn multiple_profiles_restore_only_when_the_last_lease_leaves() {
         .release(&other_owner(), &lease_id(LEASE_B), "generation-b", BOOT_ID)
         .expect("release last");
     assert_restore_order(&release_last, false, true);
+}
+
+#[test]
+fn active_lease_cap_accepts_the_operational_limit_and_rejects_abuse_sizes() {
+    let mut capped = applied_world(false).persisted.expect("applied state");
+    capped.leases = (0..MAX_ACTIVE_LEASES)
+        .map(|index| Lease {
+            lease_id: lease_id(&format!("{index:032x}")),
+            profile: format!("profile-{index}"),
+            owner_generation: format!("generation-{index}"),
+            principal: owner(),
+            deadline: now(5_000),
+        })
+        .collect();
+    assert_eq!(capped.validate(), Ok(()));
+
+    assert_eq!(
+        Engine::from_state(config(), capped.clone()).acquire(
+            &other_owner(),
+            lease_id(LEASE_B),
+            "overflow",
+            "generation-overflow",
+            now(1),
+            5_000,
+            true,
+            1,
+        ),
+        Err(EngineError::LeaseLimitReached)
+    );
+
+    let template = capped.leases[0].clone();
+    let mut over_cap = capped.clone();
+    over_cap.leases.push(template.clone());
+    assert_eq!(over_cap.validate(), Err(StateError::TooManyLeases));
+
+    for abusive_size in [2_048, 10_000] {
+        let mut abusive = capped.clone();
+        abusive.leases.resize(abusive_size, template.clone());
+        assert_eq!(abusive.validate(), Err(StateError::TooManyLeases));
+    }
+}
+
+#[test]
+fn policy_drift_blocks_admission_but_release_and_reconcile_restore() {
+    let mut stale = applied_world(false).persisted.expect("applied state");
+    stale.service_version = 1;
+    stale.minimum_client_build = 1;
+    assert_eq!(stale.validate(), Ok(()));
+    let engine = Engine::from_state(config(), stale.clone());
+
+    assert_eq!(
+        engine.acquire(
+            &other_owner(),
+            lease_id(LEASE_B),
+            "work",
+            "generation-b",
+            now(1),
+            5_000,
+            true,
+            1,
+        ),
+        Err(EngineError::PolicyMismatch)
+    );
+    assert_eq!(
+        engine.renew(
+            &owner(),
+            &lease_id(LEASE_A),
+            "generation-a",
+            BOOT_ID,
+            now(1),
+            45_000,
+        ),
+        Err(EngineError::PolicyMismatch)
+    );
+
+    let release = engine
+        .release(&owner(), &lease_id(LEASE_A), "generation-a", BOOT_ID)
+        .expect("release remains risk-reducing");
+    assert_restore_order(&release, false, true);
+
+    let reconcile = Engine::from_state(config(), stale)
+        .reconcile(BOOT_ID, now(1), |_| ProcessState::AliveExact)
+        .expect("stale policy restores instead of retaining");
+    assert_restore_order(&reconcile, false, true);
+}
+
+#[test]
+fn release_under_stale_policy_restores_even_when_another_lease_remains() {
+    let mut stale = applied_world(false).persisted.expect("applied state");
+    stale.leases.push(Lease {
+        lease_id: lease_id(LEASE_B),
+        profile: "work".to_owned(),
+        owner_generation: "generation-b".to_owned(),
+        principal: other_owner(),
+        deadline: now(5_000),
+    });
+    stale.service_version = 1;
+    stale.minimum_client_build = 1;
+    assert_eq!(stale.validate(), Ok(()));
+
+    let release = Engine::from_state(config(), stale)
+        .release(&owner(), &lease_id(LEASE_A), "generation-a", BOOT_ID)
+        .expect("exact release remains available under stale policy");
+
+    assert_restore_order(&release, false, true);
+}
+
+#[test]
+fn lost_acquire_response_returns_the_existing_authoritative_lease() {
+    let created = acquire_with_ttl(false, 45_000);
+    assert_eq!(
+        created.outcome,
+        AcquireOutcome::Created {
+            lease_id: lease_id(LEASE_A),
+            deadline: now(45_000),
+            granted_ttl_ms: 45_000,
+        }
+    );
+    let mut world = World::baseline(false);
+    world.execute_plan(&created.plan);
+
+    let retry = world
+        .engine()
+        .acquire(
+            &owner(),
+            lease_id(LEASE_B),
+            "prod",
+            "generation-a",
+            now(1_000),
+            45_000,
+            true,
+            1,
+        )
+        .expect("lost-response retry");
+    let AcquireResult { plan, outcome } = retry;
+    assert_eq!(plan.effects, vec![Effect::CheckDeadline(now(45_000))]);
+    assert_eq!(plan.state.as_ref().expect("state").leases.len(), 1);
+    let existing_id = match outcome {
+        AcquireOutcome::Existing {
+            lease_id,
+            deadline,
+            granted_ttl_ms,
+        } => {
+            assert_eq!(deadline, now(45_000));
+            assert_eq!(granted_ttl_ms, 44_000);
+            lease_id
+        }
+        outcome => panic!("expected existing lease, got {outcome:?}"),
+    };
+    assert_eq!(existing_id, lease_id(LEASE_A));
+    assert_ne!(existing_id, lease_id(LEASE_B));
+
+    let release = world
+        .engine()
+        .release(&owner(), &existing_id, "generation-a", BOOT_ID)
+        .expect("release authoritative lease");
+    assert_restore_order(&release, false, true);
+}
+
+#[test]
+fn idempotent_acquire_rejects_existing_lease_below_minimum_remaining_ttl() {
+    let mut world = applied_world(false);
+    let exact_boundary = world
+        .engine()
+        .acquire(
+            &owner(),
+            lease_id(LEASE_B),
+            "prod",
+            "generation-a",
+            now(0),
+            45_000,
+            true,
+            1,
+        )
+        .expect("minimum remaining TTL is reusable");
+    assert_eq!(
+        exact_boundary.outcome,
+        AcquireOutcome::Existing {
+            lease_id: lease_id(LEASE_A),
+            deadline: now(5_000),
+            granted_ttl_ms: 5_000,
+        }
+    );
+    assert_eq!(
+        exact_boundary.plan.effects,
+        vec![Effect::CheckDeadline(now(5_000))]
+    );
+
+    assert_eq!(
+        world.engine().acquire(
+            &owner(),
+            lease_id(LEASE_B),
+            "prod",
+            "generation-a",
+            now(1),
+            45_000,
+            true,
+            1,
+        ),
+        Err(EngineError::LeaseNearExpiry)
+    );
+
+    world.converge(5_000);
+    assert!(!world.sleep_disabled);
+    assert!(world.persisted.is_none());
+}
+
+#[test]
+fn idempotent_retry_cannot_mask_another_expired_lease() {
+    let mut world = applied_world(false);
+    let second = world
+        .engine()
+        .acquire(
+            &other_owner(),
+            lease_id(LEASE_B),
+            "work",
+            "generation-b",
+            now(0),
+            45_000,
+            true,
+            1,
+        )
+        .expect("second lease");
+    world.execute_plan(&second.plan);
+
+    assert_eq!(
+        world.engine().acquire(
+            &other_owner(),
+            lease_id(LEASE_C),
+            "work",
+            "generation-b",
+            now(5_000),
+            45_000,
+            true,
+            1,
+        ),
+        Err(EngineError::RecoveryRequired)
+    );
 }
 
 #[test]
@@ -433,10 +702,200 @@ fn renew_extends_only_the_existing_exact_lease_and_persists_it() {
         )
         .expect("renew exact lease");
 
-    assert_eq!(plan.effects.len(), 1);
+    assert_eq!(plan.effects.len(), 2);
     let state = plan.state.as_ref().expect("renewed state");
     assert_eq!(state.leases[0].deadline.as_millis(), 46_000);
-    assert_eq!(plan.effects, vec![Effect::PersistState(state.clone())]);
+    assert_eq!(
+        plan.effects,
+        vec![
+            Effect::CheckDeadline(now(5_000)),
+            Effect::PersistState(state.clone()),
+        ]
+    );
+}
+
+#[test]
+fn renew_rejects_shorter_or_equal_deadline() {
+    let mut world = World::baseline(false);
+    world.execute_plan(&acquire_with_ttl(false, 45_000).plan);
+
+    for (renew_at, ttl_ms) in [(1_000, 5_000), (40_000, 5_000)] {
+        assert_eq!(
+            world.engine().renew(
+                &owner(),
+                &lease_id(LEASE_A),
+                "generation-a",
+                BOOT_ID,
+                now(renew_at),
+                ttl_ms,
+            ),
+            Err(EngineError::NotExtended)
+        );
+    }
+}
+
+#[test]
+fn runtime_deadline_checks_guard_slow_first_acquire_additional_acquire_and_renew() {
+    let acquire = first_acquire(false);
+    assert!(matches!(acquire.effects[0], Effect::PersistState(_)));
+    assert_eq!(acquire.effects[1], Effect::CheckDeadline(now(5_000)));
+    assert_eq!(acquire.effects[2], Effect::CompareAndSetDisabled(true));
+    assert_eq!(acquire.effects[3], Effect::VerifyDisabled(true));
+    assert_eq!(acquire.effects[4], Effect::CheckDeadline(now(5_000)));
+    assert!(matches!(acquire.effects[5], Effect::PersistState(_)));
+
+    let mut delayed_before_mutation = World::baseline(false);
+    delayed_before_mutation.execute(&acquire.effects[0]);
+    delayed_before_mutation.monotonic_now = now(8_000);
+    assert_eq!(
+        delayed_before_mutation.try_execute(&acquire.effects[1]),
+        Err(RuntimeEffectError::DeadlineExpired)
+    );
+    assert!(!delayed_before_mutation.sleep_disabled);
+    assert_eq!(
+        delayed_before_mutation
+            .persisted
+            .as_ref()
+            .expect("prepared recovery evidence")
+            .phase,
+        MutationPhase::Prepared
+    );
+    delayed_before_mutation.converge(8_000);
+    assert!(delayed_before_mutation.persisted.is_none());
+
+    let mut delayed_before_applied_persist = World::baseline(false);
+    delayed_before_applied_persist.execute_prefix(&acquire, 4);
+    delayed_before_applied_persist.monotonic_now = now(8_000);
+    assert_eq!(
+        delayed_before_applied_persist.try_execute(&acquire.effects[4]),
+        Err(RuntimeEffectError::DeadlineExpired)
+    );
+    assert!(delayed_before_applied_persist.sleep_disabled);
+    assert_eq!(
+        delayed_before_applied_persist
+            .persisted
+            .as_ref()
+            .expect("prepared recovery evidence")
+            .phase,
+        MutationPhase::Prepared
+    );
+    delayed_before_applied_persist.converge(8_000);
+    assert!(!delayed_before_applied_persist.sleep_disabled);
+    assert!(delayed_before_applied_persist.persisted.is_none());
+
+    let mut additional_world = World::baseline(false);
+    additional_world.execute_plan(&acquire_with_ttl(false, 45_000).plan);
+    let additional = additional_world
+        .engine()
+        .acquire(
+            &other_owner(),
+            lease_id(LEASE_B),
+            "work",
+            "generation-b",
+            now(0),
+            5_000,
+            true,
+            1,
+        )
+        .expect("additional acquire");
+    assert_eq!(
+        additional.plan.effects[0],
+        Effect::CheckDeadline(now(5_000))
+    );
+    additional_world.monotonic_now = now(8_000);
+    assert_eq!(
+        additional_world.try_execute(&additional.plan.effects[0]),
+        Err(RuntimeEffectError::DeadlineExpired)
+    );
+    assert_eq!(
+        additional_world
+            .persisted
+            .as_ref()
+            .expect("old state retained")
+            .leases
+            .len(),
+        1
+    );
+
+    let mut renew_world = applied_world(false);
+    let renew = renew_world
+        .engine()
+        .renew(
+            &owner(),
+            &lease_id(LEASE_A),
+            "generation-a",
+            BOOT_ID,
+            now(1),
+            5_000,
+        )
+        .expect("one millisecond extension");
+    assert_eq!(renew.effects[0], Effect::CheckDeadline(now(5_000)));
+    renew_world.monotonic_now = now(8_000);
+    assert_eq!(
+        renew_world.try_execute(&renew.effects[0]),
+        Err(RuntimeEffectError::DeadlineExpired)
+    );
+    assert_eq!(
+        renew_world.persisted.as_ref().expect("old lease").leases[0].deadline,
+        now(5_000)
+    );
+    renew_world.converge(8_000);
+    assert!(!renew_world.sleep_disabled);
+    assert!(renew_world.persisted.is_none());
+
+    let existing = Engine::from_state(
+        config(),
+        acquire_with_ttl(false, 5_000)
+            .plan
+            .state
+            .expect("applied state"),
+    )
+    .acquire(
+        &owner(),
+        lease_id(LEASE_B),
+        "prod",
+        "generation-a",
+        now(0),
+        45_000,
+        true,
+        1,
+    )
+    .expect("idempotent retry");
+    assert_eq!(
+        existing.plan.effects,
+        vec![Effect::CheckDeadline(now(5_000))]
+    );
+    let mut delayed_reply = World::baseline(false);
+    delayed_reply.monotonic_now = now(8_000);
+    assert_eq!(
+        delayed_reply.try_execute(&existing.plan.effects[0]),
+        Err(RuntimeEffectError::DeadlineExpired)
+    );
+}
+
+#[test]
+fn created_outcome_uses_relative_ttl_at_nonzero_monotonic_time() {
+    let result = Engine::empty(config())
+        .acquire(
+            &owner(),
+            lease_id(LEASE_A),
+            "prod",
+            "generation-a",
+            now(10_000),
+            5_000,
+            false,
+            1,
+        )
+        .expect("nonzero monotonic acquire");
+
+    assert_eq!(
+        result.outcome,
+        AcquireOutcome::Created {
+            lease_id: lease_id(LEASE_A),
+            deadline: now(15_000),
+            granted_ttl_ms: 5_000,
+        }
+    );
 }
 
 #[test]

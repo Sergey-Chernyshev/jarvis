@@ -1,7 +1,7 @@
 use crate::protocol::{MAX_TTL_MS, MIN_TTL_MS};
 use crate::state::{
     valid_identifier, HelperState, Lease, LeaseId, MonotonicTime, MutationPhase, Principal,
-    StateError, STATE_SCHEMA_VERSION,
+    StateError, MAX_ACTIVE_LEASES, STATE_SCHEMA_VERSION,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +42,12 @@ impl EngineConfig {
 /// `ClearState` is emitted only after a matching `VerifyDisabled`.
 pub enum Effect {
     PersistState(HelperState),
+    /// Abort the remaining plan when the helper's current monotonic time is
+    /// greater than or equal to this deadline. For an idempotent
+    /// [`AcquireOutcome::Existing`] response, this is the only and final
+    /// permitted blocking action; the coordinator must reply immediately
+    /// after it succeeds.
+    CheckDeadline(MonotonicTime),
     CompareAndSetDisabled(bool),
     VerifyDisabled(bool),
     ClearState,
@@ -67,6 +73,30 @@ impl Plan {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AcquireOutcome {
+    Created {
+        lease_id: LeaseId,
+        deadline: MonotonicTime,
+        granted_ttl_ms: u64,
+    },
+    Existing {
+        /// The authoritative ID from persisted state, which can differ from
+        /// the retry's proposed ID after a lost response.
+        lease_id: LeaseId,
+        deadline: MonotonicTime,
+        granted_ttl_ms: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcquireResult {
+    pub plan: Plan,
+    /// The authoritative lease identity for the response. A coordinator must
+    /// never answer with its proposed lease id instead of this outcome.
+    pub outcome: AcquireOutcome,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcessState {
     AliveExact,
@@ -76,6 +106,14 @@ pub enum ProcessState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Finite protocol failures for the unprivileged coordinator.
+///
+/// The Task 3 adapter should map `LeaseNearExpiry` and `Expired` to its
+/// lease-expired response; `PolicyMismatch` and `RecoveryRequired` to its
+/// recovery-required response; and `LeaseLimitReached` and `NotExtended` to
+/// its conflict response. A failed runtime [`Effect::CheckDeadline`] must be
+/// surfaced as lease-expired or recovery-required, never as a successful
+/// acquire or renewal.
 pub enum EngineError {
     CorruptState(StateError),
     InvalidIdentifier,
@@ -84,9 +122,13 @@ pub enum EngineError {
     InvalidMutationGeneration,
     MutationGenerationMismatch,
     ClientBuildTooOld,
+    PolicyMismatch,
     DuplicateLease,
+    LeaseLimitReached,
+    LeaseNearExpiry,
     LeaseNotFound,
     Expired,
+    NotExtended,
     PrincipalMismatch,
     OwnerGenerationMismatch,
     BootMismatch,
@@ -127,7 +169,7 @@ impl Engine {
         ttl_ms: u64,
         observed_disabled: bool,
         mutation_generation: u64,
-    ) -> Result<Plan, EngineError> {
+    ) -> Result<AcquireResult, EngineError> {
         principal.validate().map_err(EngineError::CorruptState)?;
         if principal.signed_build() < self.config.minimum_client_build {
             return Err(EngineError::ClientBuildTooOld);
@@ -152,9 +194,10 @@ impl Engine {
         };
 
         match &self.state {
-            None => self.acquire_first(lease, observed_disabled, mutation_generation),
+            None => self.acquire_first(lease, observed_disabled, mutation_generation, ttl_ms),
             Some(_) => {
                 let mut state = self.checked_state_for_boot(&self.config.boot_id)?.clone();
+                self.ensure_current_policy(&state)?;
                 validate_deadline_horizon(&state, now)?;
                 if state.phase != MutationPhase::Applied {
                     return Err(EngineError::RecoveryRequired);
@@ -165,8 +208,40 @@ impl Engine {
                 if !observed_disabled {
                     return Err(EngineError::ObservedStateMismatch);
                 }
+
                 if state.leases.iter().any(|existing| existing.deadline <= now) {
                     return Err(EngineError::RecoveryRequired);
+                }
+
+                if let Some(existing) = state.leases.iter().find(|existing| {
+                    existing.principal == *principal
+                        && existing.profile == profile
+                        && existing.owner_generation == owner_generation
+                }) {
+                    let remaining_ttl_ms = existing
+                        .deadline
+                        .as_millis()
+                        .saturating_sub(now.as_millis());
+                    if remaining_ttl_ms < MIN_TTL_MS {
+                        return Err(EngineError::LeaseNearExpiry);
+                    }
+                    let existing_lease_id = existing.lease_id.clone();
+                    let existing_deadline = existing.deadline;
+                    return Ok(AcquireResult {
+                        plan: Plan {
+                            state: Some(state),
+                            effects: vec![Effect::CheckDeadline(existing_deadline)],
+                        },
+                        outcome: AcquireOutcome::Existing {
+                            lease_id: existing_lease_id,
+                            deadline: existing_deadline,
+                            granted_ttl_ms: remaining_ttl_ms,
+                        },
+                    });
+                }
+
+                if state.leases.len() >= MAX_ACTIVE_LEASES {
+                    return Err(EngineError::LeaseLimitReached);
                 }
                 if state
                     .leases
@@ -175,11 +250,19 @@ impl Engine {
                 {
                     return Err(EngineError::DuplicateLease);
                 }
+                let outcome = AcquireOutcome::Created {
+                    lease_id: lease.lease_id.clone(),
+                    deadline: lease.deadline,
+                    granted_ttl_ms: ttl_ms,
+                };
                 state.leases.push(lease);
                 state.validate().map_err(EngineError::CorruptState)?;
-                Ok(Plan {
-                    state: Some(state.clone()),
-                    effects: vec![Effect::PersistState(state)],
+                Ok(AcquireResult {
+                    plan: Plan {
+                        state: Some(state.clone()),
+                        effects: vec![Effect::CheckDeadline(deadline), Effect::PersistState(state)],
+                    },
+                    outcome,
                 })
             }
         }
@@ -194,11 +277,16 @@ impl Engine {
         now: MonotonicTime,
         ttl_ms: u64,
     ) -> Result<Plan, EngineError> {
+        principal.validate().map_err(EngineError::CorruptState)?;
+        if principal.signed_build() < self.config.minimum_client_build {
+            return Err(EngineError::ClientBuildTooOld);
+        }
         validate_ttl(ttl_ms)?;
         let deadline = now
             .checked_add_millis(ttl_ms)
             .ok_or(EngineError::DeadlineOverflow)?;
         let mut state = self.checked_state_for_boot(current_boot_id)?.clone();
+        self.ensure_current_policy(&state)?;
         validate_deadline_horizon(&state, now)?;
         if state.phase != MutationPhase::Applied {
             return Err(EngineError::RecoveryRequired);
@@ -212,11 +300,18 @@ impl Engine {
         if now >= lease.deadline {
             return Err(EngineError::Expired);
         }
+        if deadline <= lease.deadline {
+            return Err(EngineError::NotExtended);
+        }
+        let old_deadline = lease.deadline;
         lease.deadline = deadline;
         state.validate().map_err(EngineError::CorruptState)?;
         Ok(Plan {
             state: Some(state.clone()),
-            effects: vec![Effect::PersistState(state)],
+            effects: vec![
+                Effect::CheckDeadline(old_deadline),
+                Effect::PersistState(state),
+            ],
         })
     }
 
@@ -238,7 +333,7 @@ impl Engine {
             .ok_or(EngineError::LeaseNotFound)?;
         validate_binding(&state.leases[position], principal, owner_generation)?;
         state.leases.remove(position);
-        if state.leases.is_empty() {
+        if state.leases.is_empty() || !self.current_policy_matches(&state) {
             Ok(restore_plan(state, true))
         } else {
             state.validate().map_err(EngineError::CorruptState)?;
@@ -264,6 +359,12 @@ impl Engine {
         state.validate().map_err(EngineError::CorruptState)?;
         if state.boot_id != current_boot_id {
             return Err(EngineError::BootMismatch);
+        }
+        if !self.current_policy_matches(state) {
+            return Ok(restore_plan(
+                state.clone(),
+                state.phase != MutationPhase::RestorePending,
+            ));
         }
         validate_deadline_horizon(state, now)?;
 
@@ -309,7 +410,14 @@ impl Engine {
         lease: Lease,
         baseline: bool,
         mutation_generation: u64,
-    ) -> Result<Plan, EngineError> {
+        granted_ttl_ms: u64,
+    ) -> Result<AcquireResult, EngineError> {
+        let outcome = AcquireOutcome::Created {
+            lease_id: lease.lease_id.clone(),
+            deadline: lease.deadline,
+            granted_ttl_ms,
+        };
+        let deadline = lease.deadline;
         let prepared = HelperState {
             schema_version: STATE_SCHEMA_VERSION,
             service_version: self.config.service_version,
@@ -329,16 +437,23 @@ impl Engine {
         applied.phase = MutationPhase::Applied;
         applied.validate().map_err(EngineError::CorruptState)?;
 
-        let mut effects = vec![Effect::PersistState(prepared)];
+        let mut effects = vec![
+            Effect::PersistState(prepared),
+            Effect::CheckDeadline(deadline),
+        ];
         if !baseline {
             effects.push(Effect::CompareAndSetDisabled(true));
         }
         effects.push(Effect::VerifyDisabled(true));
+        effects.push(Effect::CheckDeadline(deadline));
         effects.push(Effect::PersistState(applied.clone()));
 
-        Ok(Plan {
-            state: Some(applied),
-            effects,
+        Ok(AcquireResult {
+            plan: Plan {
+                state: Some(applied),
+                effects,
+            },
+            outcome,
         })
     }
 
@@ -352,6 +467,19 @@ impl Engine {
             return Err(EngineError::BootMismatch);
         }
         Ok(state)
+    }
+
+    fn ensure_current_policy(&self, state: &HelperState) -> Result<(), EngineError> {
+        if self.current_policy_matches(state) {
+            Ok(())
+        } else {
+            Err(EngineError::PolicyMismatch)
+        }
+    }
+
+    fn current_policy_matches(&self, state: &HelperState) -> bool {
+        state.service_version == self.config.service_version
+            && state.minimum_client_build == self.config.minimum_client_build
     }
 }
 

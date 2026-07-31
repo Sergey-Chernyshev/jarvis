@@ -1,6 +1,7 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 pub const STATE_SCHEMA_VERSION: u32 = 2;
+pub const MAX_ACTIVE_LEASES: usize = 32;
 
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_ATTESTATION_TEXT_BYTES: usize = 255;
@@ -19,6 +20,8 @@ pub enum StateError {
     InvalidPhase,
     InvalidLease,
     DuplicateLease,
+    DuplicateLogicalLease,
+    TooManyLeases,
     InvalidIdentifier,
     InvalidPrincipal,
     InvalidProcessIdentity,
@@ -107,7 +110,9 @@ pub struct Principal {
 impl Principal {
     /// Builds a principal from evidence already verified by the privileged
     /// helper. This constructor is not a wire boundary: callers must never
-    /// populate it from client-provided protocol fields.
+    /// populate it from client-provided protocol fields. The type cannot prove
+    /// that attestation happened; a platform process-attestation adapter is a
+    /// mandatory precondition at every production call site.
     #[allow(clippy::too_many_arguments)]
     pub fn from_helper_attestation(
         uid: u32,
@@ -286,11 +291,24 @@ impl HelperState {
         if !phase_is_valid {
             return Err(StateError::InvalidPhase);
         }
+        if self.leases.len() > MAX_ACTIVE_LEASES {
+            return Err(StateError::TooManyLeases);
+        }
 
         let mut lease_ids = BTreeSet::new();
+        let mut logical_leases = HashSet::new();
         for lease in &self.leases {
-            if !lease_ids.insert(lease.lease_id.as_str())
-                || !valid_identifier(&lease.profile)
+            if !lease_ids.insert(lease.lease_id.as_str()) {
+                return Err(StateError::DuplicateLease);
+            }
+            if !logical_leases.insert((
+                &lease.principal,
+                lease.profile.as_str(),
+                lease.owner_generation.as_str(),
+            )) {
+                return Err(StateError::DuplicateLogicalLease);
+            }
+            if !valid_identifier(&lease.profile)
                 || !valid_identifier(&lease.owner_generation)
                 || lease.deadline.as_millis() == 0
                 || lease.principal.signed_build() < self.minimum_client_build

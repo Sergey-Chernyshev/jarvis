@@ -1,9 +1,17 @@
+#[cfg(target_os = "macos")]
+use std::ffi::CString;
 use std::fs::{self, File};
 use std::os::fd::OwnedFd;
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Barrier};
+#[cfg(target_os = "macos")]
+use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,6 +20,7 @@ use jarvis_power_core::state::{
     STATE_SCHEMA_VERSION,
 };
 use jarvis_power_helper::root_store::{
+    is_expected_creation_race_metadata_for_testing,
     validate_new_private_directory_metadata_for_testing,
     validate_trusted_anchor_metadata_for_testing, verify_entry_identity_for_testing, RootStore,
     StoreError, StoreFault, MAX_STATE_BYTES,
@@ -62,6 +71,31 @@ struct ProvisionFixture {
     anchor: std::path::PathBuf,
     uid: u32,
     gid: u32,
+}
+
+#[cfg(target_os = "macos")]
+fn supplementary_gid_other_than(primary_gid: u32) -> u32 {
+    // SAFETY: a null first call queries the required group count.
+    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    assert!(count > 0);
+    let mut groups = vec![0 as libc::gid_t; usize::try_from(count).unwrap()];
+    // SAFETY: groups has exactly `count` writable gid_t entries.
+    let read = unsafe { libc::getgroups(count, groups.as_mut_ptr()) };
+    assert_eq!(read, count);
+    groups
+        .into_iter()
+        .find(|gid| *gid != primary_gid)
+        .expect("macOS test user must have a supplementary group")
+}
+
+#[cfg(target_os = "macos")]
+fn set_group(path: &Path, gid: u32) {
+    let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: path is NUL terminated; uid_t::MAX preserves the current owner.
+    assert_eq!(
+        unsafe { libc::chown(path.as_ptr(), libc::uid_t::MAX, gid) },
+        0
+    );
 }
 
 impl ProvisionFixture {
@@ -170,16 +204,153 @@ fn clean_install_allows_anchor_gid_only_before_new_fd_owner_normalization() {
     inherited.st_uid = 0;
     inherited.st_gid = 80;
     assert_eq!(
-        validate_new_private_directory_metadata_for_testing(&inherited, 0, 0o700),
+        validate_new_private_directory_metadata_for_testing(&inherited, 0, 0, 80, 0o700),
         Ok(())
     );
+    assert!(is_expected_creation_race_metadata_for_testing(
+        &inherited, 0, 0, 80, 0o700
+    ));
 
     inherited.st_uid = 501;
     assert_eq!(
-        validate_new_private_directory_metadata_for_testing(&inherited, 0, 0o700),
+        validate_new_private_directory_metadata_for_testing(&inherited, 0, 0, 80, 0o700),
         Err(StoreError::UnsafeMetadata)
     );
-    assert!(include_str!("../../src/root_store.rs").contains("libc::fchown"));
+    assert!(!is_expected_creation_race_metadata_for_testing(
+        &inherited, 0, 0, 80, 0o700
+    ));
+    inherited.st_uid = 0;
+    inherited.st_gid = 81;
+    assert_eq!(
+        validate_new_private_directory_metadata_for_testing(&inherited, 0, 0, 80, 0o700),
+        Err(StoreError::UnsafeMetadata)
+    );
+    assert!(!is_expected_creation_race_metadata_for_testing(
+        &inherited, 0, 0, 80, 0o700
+    ));
+    inherited.st_gid = 80;
+    inherited.st_mode = libc::S_IFDIR | 0o755;
+    assert_eq!(
+        validate_new_private_directory_metadata_for_testing(&inherited, 0, 0, 80, 0o700),
+        Err(StoreError::UnsafeMetadata)
+    );
+    assert!(!is_expected_creation_race_metadata_for_testing(
+        &inherited, 0, 0, 80, 0o700
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn concurrent_clean_install_retries_inherited_anchor_gid_then_normalizes_created_fds() {
+    let fixture = ProvisionFixture::empty();
+    let inherited_gid = supplementary_gid_other_than(fixture.gid);
+    set_group(&fixture.anchor, inherited_gid);
+    assert_eq!(
+        fs::symlink_metadata(&fixture.anchor).unwrap().gid(),
+        inherited_gid
+    );
+
+    let first_library = fixture.library.clone();
+    let uid = fixture.uid;
+    let private_gid = fixture.gid;
+    let paused_once = Arc::new(AtomicBool::new(false));
+    let pause_gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let (created_tx, created_rx) = mpsc::sync_channel(0);
+    let first = {
+        let paused_once = paused_once.clone();
+        let pause_gate = pause_gate.clone();
+        thread::spawn(move || {
+            let parent: OwnedFd = File::open(first_library).unwrap().into();
+            RootStore::provision_from_parent_with_creation_hook_for_testing(
+                parent,
+                uid,
+                uid,
+                private_gid,
+                uid,
+                private_gid,
+                move || {
+                    if !paused_once.swap(true, Ordering::SeqCst) {
+                        created_tx.send(()).unwrap();
+                        let released = pause_gate.0.lock().unwrap();
+                        drop(
+                            pause_gate
+                                .1
+                                .wait_while(released, |released| !*released)
+                                .unwrap(),
+                        );
+                    }
+                },
+            )
+        })
+    };
+    let creator_paused = created_rx.recv_timeout(Duration::from_millis(500)).is_ok();
+    if !creator_paused {
+        let mut released = pause_gate.0.lock().unwrap();
+        *released = true;
+        pause_gate.1.notify_all();
+        drop(released);
+        let _ = first.join();
+        panic!("first provisioner did not pause after mkdirat");
+    }
+    assert_eq!(
+        fs::symlink_metadata(fixture.anchor.join("Jarvis"))
+            .unwrap()
+            .gid(),
+        inherited_gid
+    );
+
+    let second_library = fixture.library.clone();
+    let (eexist_tx, eexist_rx) = mpsc::channel();
+    let (second_tx, second_rx) = mpsc::sync_channel(1);
+    let second = thread::spawn(move || {
+        let parent: OwnedFd = File::open(second_library).unwrap().into();
+        let result = RootStore::provision_from_parent_with_eexist_hook_for_testing(
+            parent,
+            uid,
+            uid,
+            private_gid,
+            uid,
+            private_gid,
+            move || {
+                let _ = eexist_tx.send(());
+            },
+        );
+        second_tx.send(result).unwrap();
+    });
+    let second_observed_eexist = eexist_rx.recv_timeout(Duration::from_millis(500)).is_ok();
+    let before_normalization = if second_observed_eexist {
+        second_rx.recv_timeout(Duration::from_millis(30))
+    } else {
+        Err(mpsc::RecvTimeoutError::Timeout)
+    };
+    let second_waited_for_normalization =
+        matches!(&before_normalization, Err(mpsc::RecvTimeoutError::Timeout));
+
+    {
+        let mut released = pause_gate.0.lock().unwrap();
+        *released = true;
+        pause_gate.1.notify_all();
+    }
+    let first_result = first.join().unwrap();
+    let second_result = match before_normalization {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            second_rx.recv_timeout(Duration::from_millis(500)).unwrap()
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => panic!("second provisioner disconnected"),
+    };
+    second.join().unwrap();
+
+    assert!(second_observed_eexist);
+    assert!(second_waited_for_normalization);
+    assert!(first_result.is_ok());
+    assert!(second_result.is_ok());
+    for component in fixture.private_components() {
+        let metadata = fs::symlink_metadata(component).unwrap();
+        assert_eq!(metadata.uid(), fixture.uid);
+        assert_eq!(metadata.gid(), fixture.gid);
+        assert_eq!(metadata.mode() & 0o7777, 0o700);
+    }
 }
 
 #[test]

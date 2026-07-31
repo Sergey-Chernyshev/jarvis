@@ -12,12 +12,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p \
-  "$fixture_root/crates/jarvis-plugin-protocol/src" \
-  "$fixture_root/plugins/agent-vm/src" \
-  "$fixture_root/plugins/community/src"
-
 write_clean_fixture() {
+  rm -rf -- \
+    "$fixture_root/crates" \
+    "$fixture_root/plugins" \
+    "$fixture_root/src-tauri"
+  mkdir -p \
+    "$fixture_root/crates/jarvis-package/src" \
+    "$fixture_root/crates/jarvis-plugin-protocol/src" \
+    "$fixture_root/plugins/agent-vm/src" \
+    "$fixture_root/plugins/community/src" \
+    "$fixture_root/src-tauri"
   printf '%s\n' \
     '[package]' \
     'name = "jarvis-plugin-protocol"' \
@@ -37,6 +42,33 @@ write_clean_fixture() {
     'name = "community-plugin"' \
     'version = "0.1.0"' \
     > "$fixture_root/plugins/community/Cargo.toml"
+  printf '%s\n' \
+    '[package]' \
+    'name = "jarvis-package"' \
+    'version = "0.1.0"' \
+    'edition = "2021"' \
+    'rust-version = "1.77.2"' \
+    'publish = false' \
+    > "$fixture_root/crates/jarvis-package/Cargo.toml"
+  printf '%s\n' \
+    '#![deny(unsafe_code)]' \
+    '' \
+    '#[cfg(target_os = "macos")]' \
+    '#[allow(unsafe_code)]' \
+    'mod macos_dir;' \
+    > "$fixture_root/crates/jarvis-package/src/lib.rs"
+  printf '%s\n' \
+    'pub(crate) fn read() {' \
+    '    unsafe { std::ptr::read_volatile(&0_u8); }' \
+    '}' \
+    > "$fixture_root/crates/jarvis-package/src/macos_dir.rs"
+  printf '%s\n' \
+    '[package]' \
+    'name = "jarvis-host"' \
+    'version = "0.1.0"' \
+    '[dependencies]' \
+    'jarvis-package = { path = "../crates/jarvis-package" }' \
+    > "$fixture_root/src-tauri/Cargo.toml"
 }
 
 expect_rejected() {
@@ -95,5 +127,78 @@ printf '%s\n' \
   'core = { package = "jarvis", version = "0.1" }' \
   > "$fixture_root/crates/jarvis-plugin-protocol/Cargo.toml"
 expect_rejected "Jarvis Core"
+
+write_clean_fixture
+printf '%s\n' \
+  '[package]' \
+  'name = "jarvis-plugin-protocol"' \
+  'version = "0.1.0"' \
+  '[dependencies]' \
+  'package-engine = { package = "jarvis-package", path = "../jarvis-package" }' \
+  > "$fixture_root/crates/jarvis-plugin-protocol/Cargo.toml"
+expect_rejected "public or plugin crate depends on jarvis-package"
+
+write_clean_fixture
+printf '%s\n' \
+  '[package]' \
+  'name = "jarvis-plugin-protocol"' \
+  'version = "0.1.0"' \
+  '[dependencies]' \
+  '"jarvis-package" = "0.1.0"' \
+  > "$fixture_root/crates/jarvis-plugin-protocol/Cargo.toml"
+expect_rejected "public or plugin crate depends on jarvis-package"
+
+write_clean_fixture
+printf '%s\n' \
+  '[package]' \
+  'name = "community-plugin"' \
+  'version = "0.1.0"' \
+  '[dependencies.package-engine]' \
+  'package = "jarvis-package"' \
+  'path = "../../crates/jarvis-package"' \
+  > "$fixture_root/plugins/community/Cargo.toml"
+expect_rejected "public or plugin crate depends on jarvis-package"
+
+write_clean_fixture
+mkdir -p "$fixture_root/crates/internal-tool/src"
+printf '%s\n' \
+  '[package]' \
+  'name = "internal-tool"' \
+  'version = "0.1.0"' \
+  '[dependencies]' \
+  'engine = { path = "../jarvis-package", package = "jarvis-package" }' \
+  > "$fixture_root/crates/internal-tool/Cargo.toml"
+expect_rejected "only src-tauri may depend on jarvis-package"
+
+write_clean_fixture
+sed -i '' 's/publish = false/publish = true/' \
+  "$fixture_root/crates/jarvis-package/Cargo.toml"
+expect_rejected "jarvis-package must set publish = false"
+
+write_clean_fixture
+printf '%s\n' '#[allow(unsafe_code)]' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+expect_rejected "jarvis-package unsafe allow must be exactly scoped"
+
+write_clean_fixture
+printf '%s\n' \
+  '#![allow(unsafe_code)]' \
+  'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/src/escaped.rs"
+expect_rejected "jarvis-package unsafe syntax outside macos_dir.rs"
+
+write_clean_fixture
+mkdir -p "$fixture_root/crates/jarvis-package/tests"
+printf '%s\n' \
+  '#[test]' \
+  'fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/tests/escaped.rs"
+expect_rejected "jarvis-package unsafe syntax outside macos_dir.rs"
+
+write_clean_fixture
+printf '%s\n' \
+  'fn main() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/build.rs"
+expect_rejected "jarvis-package unsafe syntax outside macos_dir.rs"
 
 echo "plugin boundary negative fixtures passed"

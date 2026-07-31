@@ -59,6 +59,13 @@ jobs:
           cargo test --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
           cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
 
+      - name: Private package engine
+        run: |
+          npm run test:package-lock
+          npm run check:package-lock
+          cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml --all-targets
+          cargo clippy --locked --manifest-path crates/jarvis-package/Cargo.toml --all-targets -- -D warnings
+
       - name: Power helper core tests
         run: cargo test --locked --manifest-path crates/jarvis-power-core/Cargo.toml
 
@@ -91,6 +98,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.77.2
+          components: clippy
 
       - name: Public and core crates on declared MSRV
         run: |
@@ -98,3 +106,5 @@ jobs:
           cargo test --locked --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
           cargo test --locked --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
           cargo test --locked --manifest-path crates/jarvis-power-core/Cargo.toml
+          cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml --all-targets
+          cargo clippy --locked --manifest-path crates/jarvis-package/Cargo.toml --all-targets -- -D warnings

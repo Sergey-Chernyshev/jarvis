@@ -230,6 +230,14 @@ fn release_was_confirmed(outcome: clamshell::ReleaseOutcome) -> bool {
     !matches!(outcome, clamshell::ReleaseOutcome::NotOwned)
 }
 
+fn failed_acquire_needs_owner_retry(
+    primary: &clamshell::PowerError,
+    cleanup: &Result<clamshell::ReleaseOutcome, clamshell::PowerError>,
+) -> bool {
+    matches!(primary, clamshell::PowerError::RollbackFailed(_))
+        && !matches!(cleanup, Ok(outcome) if release_was_confirmed(*outcome))
+}
+
 #[derive(Default)]
 struct Clam {
     /// Плагин «Крышка» включён (runtime-аналог p.active у Electron-хоста).
@@ -1050,30 +1058,28 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
         let store = crate::power::ownership_store::OwnershipStore::global();
         let acquire_result = match clamshell::acquire_with(&clamshell::SystemPmset, &store, lease) {
             Ok(outcome) => Ok(outcome),
-            Err(primary) => match clamshell::release_with(
-                &clamshell::SystemPmset,
-                &store,
-                &profile,
-                &retry_generation,
-            ) {
-                Ok(release) if release_was_confirmed(release) => Err(primary.to_string()),
-                Ok(release) => {
+            Err(primary) => {
+                let cleanup = clamshell::release_with(
+                    &clamshell::SystemPmset,
+                    &store,
+                    &profile,
+                    &retry_generation,
+                );
+                if failed_acquire_needs_owner_retry(&primary, &cleanup) {
                     let mut clam = retry_daemon.power.clam.lock().unwrap();
                     clam.armed = true;
                     clam.armed_by = Some(by);
-                    clam.owner_generation = Some(retry_generation);
-                    Err(format!(
+                    clam.owner_generation = Some(retry_generation.clone());
+                }
+                let message = match cleanup {
+                    Ok(release) if release_was_confirmed(release) => primary.to_string(),
+                    Ok(release) => format!(
                         "{primary}; cleanup retry was not ownership-confirmed: {release:?}"
-                    ))
-                }
-                Err(cleanup) => {
-                    let mut clam = retry_daemon.power.clam.lock().unwrap();
-                    clam.armed = true;
-                    clam.armed_by = Some(by);
-                    clam.owner_generation = Some(retry_generation);
-                    Err(format!("{primary}; cleanup retry failed: {cleanup}"))
-                }
-            },
+                    ),
+                    Err(cleanup) => format!("{primary}; cleanup retry failed: {cleanup}"),
+                };
+                Err(message)
+            }
         };
         let rollback_daemon = worker_daemon.clone();
         let rollback_profile = profile.clone();
@@ -1160,17 +1166,27 @@ async fn disarm(d: &Arc<Daemon>) -> Value {
     };
     let profile = power_profile_id();
     let released = tauri::async_runtime::spawn_blocking(move || {
-        let _operation = operation;
-        clamshell::release_with(
+        let outcome = clamshell::release_with(
             &clamshell::SystemPmset,
             &crate::power::ownership_store::OwnershipStore::global(),
             &profile,
             &owner_generation,
-        )
+        );
+        (operation, outcome)
     })
     .await;
-    let result = match released {
-        Ok(Ok(outcome)) if release_was_confirmed(outcome) => {
+    let (returned_operation, release) = match released {
+        Ok(result) => result,
+        Err(error) => {
+            d.power.clam.lock().unwrap().busy = false;
+            return json!({
+                "ok": false,
+                "error": format!("power worker failed: {error}")
+            });
+        }
+    };
+    let result = match release {
+        Ok(outcome) if release_was_confirmed(outcome) => {
             let mut clam = d.power.clam.lock().unwrap();
             clam.armed = false;
             clam.armed_by = None;
@@ -1179,17 +1195,14 @@ async fn disarm(d: &Arc<Daemon>) -> Value {
             changed(d);
             json!({ "ok": true })
         }
-        Ok(Ok(outcome)) => json!({
+        Ok(outcome) => json!({
             "ok": false,
             "error": format!("release was not ownership-confirmed: {outcome:?}")
         }),
-        Ok(Err(error)) => json!({ "ok": false, "error": error.to_string() }),
-        Err(error) => json!({
-            "ok": false,
-            "error": format!("power worker failed: {error}")
-        }),
+        Err(error) => json!({ "ok": false, "error": error.to_string() }),
     };
     d.power.clam.lock().unwrap().busy = false;
+    drop(returned_operation);
     result
 }
 
@@ -1503,6 +1516,30 @@ mod tests {
     }
 
     #[test]
+    fn failed_acquire_retains_identity_only_for_unconfirmed_rollback_failure() {
+        assert!(!failed_acquire_needs_owner_retry(
+            &clamshell::PowerError::RollbackUnavailable,
+            &Ok(clamshell::ReleaseOutcome::NotOwned),
+        ));
+        assert!(!failed_acquire_needs_owner_retry(
+            &clamshell::PowerError::RollbackUnavailable,
+            &Err(clamshell::PowerError::Command("cleanup failed".into())),
+        ));
+        assert!(failed_acquire_needs_owner_retry(
+            &clamshell::PowerError::RollbackFailed("rollback unknown".into()),
+            &Ok(clamshell::ReleaseOutcome::NotOwned),
+        ));
+        assert!(failed_acquire_needs_owner_retry(
+            &clamshell::PowerError::RollbackFailed("rollback unknown".into()),
+            &Err(clamshell::PowerError::Command("cleanup failed".into())),
+        ));
+        assert!(!failed_acquire_needs_owner_retry(
+            &clamshell::PowerError::RollbackFailed("rollback unknown".into()),
+            &Ok(clamshell::ReleaseOutcome::Restored(false)),
+        ));
+    }
+
+    #[test]
     fn shutdown_gate_is_one_way_and_idempotent() {
         let gate = ShutdownGate::default();
         assert!(gate.accepting());
@@ -1616,6 +1653,34 @@ mod tests {
 
         assert!(operations.close());
         assert!(!operations.wait_for_idle(Duration::ZERO));
+        drop(returned_operation);
+        assert!(operations.wait_for_idle(Duration::ZERO));
+    }
+
+    #[test]
+    fn disarm_operation_stays_held_through_result_and_busy_bookkeeping() {
+        let operations = Arc::new(PowerOperations::default());
+        let operation = operations.begin().unwrap();
+        let worker = std::thread::spawn(move || {
+            (
+                operation,
+                Ok::<_, clamshell::PowerError>(clamshell::ReleaseOutcome::Restored(false)),
+            )
+        });
+        let (returned_operation, release) = worker.join().unwrap();
+
+        assert!(operations.close());
+        assert!(!operations.wait_for_idle(Duration::ZERO));
+        assert!(matches!(
+            release,
+            Ok(clamshell::ReleaseOutcome::Restored(false))
+        ));
+        let mut busy = true;
+        assert!(busy);
+        busy = false;
+        assert!(!busy);
+        assert!(!operations.wait_for_idle(Duration::ZERO));
+
         drop(returned_operation);
         assert!(operations.wait_for_idle(Duration::ZERO));
     }

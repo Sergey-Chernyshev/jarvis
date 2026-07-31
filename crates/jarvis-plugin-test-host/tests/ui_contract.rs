@@ -44,7 +44,11 @@ fn message_size_and_bound_generation_are_enforced() {
         host.request_fixture(&request_json("request/01", "entities.query", 8))
             .unwrap_err()
             .code(),
-        "bridge_stale_generation"
+        "page_generation_stale"
+    );
+    assert_eq!(
+        host.request_fixture("{").unwrap_err().code(),
+        "schema_invalid"
     );
 }
 

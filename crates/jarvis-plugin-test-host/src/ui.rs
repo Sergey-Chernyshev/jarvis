@@ -237,3 +237,32 @@ impl fmt::Display for UiContractError {
 }
 
 impl Error for UiContractError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn in_flight_limit_rejects_one_over_and_drop_releases_capacity() {
+        let counter = AtomicUsize::new(0);
+        let mut guards = Vec::new();
+
+        for _ in 0..MAX_BRIDGE_IN_FLIGHT {
+            guards.push(InFlightGuard::acquire(&counter).expect("permit within limit"));
+        }
+        assert_eq!(counter.load(Ordering::Acquire), MAX_BRIDGE_IN_FLIGHT);
+        assert_eq!(
+            InFlightGuard::acquire(&counter)
+                .err()
+                .expect("one-over must fail")
+                .code(),
+            "bridge_in_flight_limit"
+        );
+
+        guards.pop();
+        let replacement = InFlightGuard::acquire(&counter).expect("drop releases one permit");
+        drop(replacement);
+        drop(guards);
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+    }
+}

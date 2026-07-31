@@ -7,7 +7,7 @@ use jarvis_power_core::engine::{
 use jarvis_power_core::state::{HelperState, LeaseId, MonotonicTime, MutationPhase, Principal};
 
 use crate::pmset::{PmsetBackend, PmsetError};
-use crate::root_store::{LockedRootStore, RootStore, StoreError};
+use crate::root_store::{LockedState, RootStore, StateStore, StoreError};
 use crate::HelperEvent;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,14 +130,8 @@ pub struct CoordinatorStatus {
     pub phase: Option<MutationPhase>,
 }
 
-pub(crate) struct Coordinator<B, C, P, R>
-where
-    B: PmsetBackend,
-    C: MonotonicClock,
-    P: ProcessInspector,
-    R: RandomSource,
-{
-    store: RootStore,
+pub(crate) struct Coordinator<B, C, P, R, S = RootStore> {
+    store: S,
     backend: B,
     clock: C,
     processes: P,
@@ -146,16 +140,17 @@ where
     minimum_client_build: u64,
 }
 
-impl<B, C, P, R> Coordinator<B, C, P, R>
+impl<B, C, P, R, S> Coordinator<B, C, P, R, S>
 where
     B: PmsetBackend,
     C: MonotonicClock,
     P: ProcessInspector,
     R: RandomSource,
+    S: StateStore,
 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        store: RootStore,
+        store: S,
         backend: B,
         clock: C,
         processes: P,
@@ -174,7 +169,7 @@ where
         }
     }
 
-    pub(crate) fn store(&self) -> &RootStore {
+    pub(crate) fn store(&self) -> &S {
         &self.store
     }
 
@@ -200,14 +195,17 @@ where
         result
     }
 
-    fn acquire_locked(
+    fn acquire_locked<T>(
         &mut self,
-        transaction: &mut LockedRootStore<'_>,
+        transaction: &mut T,
         principal: &Principal,
         profile: &str,
         owner_generation: &str,
         ttl_ms: u64,
-    ) -> Result<LeaseGrant, CoordinatorError> {
+    ) -> Result<LeaseGrant, CoordinatorError>
+    where
+        T: LockedState,
+    {
         let state = transaction.load()?;
         let boot_id = self.backend.boot_id()?;
         let config = self.engine_config(&boot_id)?;
@@ -305,10 +303,10 @@ where
         self.reconcile_locked(&mut transaction)
     }
 
-    fn reconcile_locked(
-        &mut self,
-        transaction: &mut LockedRootStore<'_>,
-    ) -> Result<(), CoordinatorError> {
+    fn reconcile_locked<T>(&mut self, transaction: &mut T) -> Result<(), CoordinatorError>
+    where
+        T: LockedState,
+    {
         let state = transaction.load()?;
         let boot_id = self.backend.boot_id()?;
         let config = self.engine_config(&boot_id)?;
@@ -337,11 +335,14 @@ where
             .map_err(|failure| failure.error)
     }
 
-    fn execute_request_plan(
+    fn execute_request_plan<T>(
         &mut self,
-        transaction: &mut LockedRootStore<'_>,
+        transaction: &mut T,
         effects: Vec<Effect>,
-    ) -> Result<EffectExecution, CoordinatorError> {
+    ) -> Result<EffectExecution, CoordinatorError>
+    where
+        T: LockedState,
+    {
         match self.execute_effects(transaction, effects) {
             Ok(execution) => Ok(execution),
             Err(failure) => match failure.runtime_guard {
@@ -365,11 +366,14 @@ where
         }
     }
 
-    fn execute_effects(
+    fn execute_effects<T>(
         &mut self,
-        transaction: &mut LockedRootStore<'_>,
+        transaction: &mut T,
         effects: Vec<Effect>,
-    ) -> Result<EffectExecution, EffectFailure> {
+    ) -> Result<EffectExecution, EffectFailure>
+    where
+        T: LockedState,
+    {
         let mut granted_ttl_ms = None;
         let mut durable_state_exists = false;
         for effect in effects {

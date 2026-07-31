@@ -1,3 +1,5 @@
+#![cfg(feature = "dev-uds")]
+
 use std::fs;
 
 use jarvis_power_helper::coordinator::CoordinatorError;

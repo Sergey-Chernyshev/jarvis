@@ -3,6 +3,8 @@
 use jarvis_power_core::state::MutationPhase;
 
 pub mod coordinator;
+#[cfg(feature = "dev-uds")]
+pub(crate) mod dev_store;
 pub mod pmset;
 pub mod root_store;
 pub mod watchdog;

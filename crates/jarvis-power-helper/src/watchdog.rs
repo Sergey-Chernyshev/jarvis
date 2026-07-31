@@ -13,7 +13,7 @@ use crate::coordinator::{
     ProcessInspectionError, ProcessInspector, RandomSource, SystemRandom,
 };
 use crate::pmset::{PmsetBackend, SystemPmset};
-use crate::root_store::RootStore;
+use crate::root_store::{RootStore, StateStore};
 use crate::{HelperEvent, HelperEventSink};
 
 pub const HELPER_SERVICE_VERSION: u64 = 1;
@@ -25,25 +25,20 @@ pub const WATCHDOG_READY_TIMEOUT: Duration = Duration::from_secs(1);
 ///
 /// Its only transition to [`ReadyRuntime`] runs the same serialized recovery
 /// transaction as the later watchdog. No listener permit exists before then.
-pub struct StartupRuntime<B, C, P, R>
-where
-    B: PmsetBackend,
-    C: MonotonicClock,
-    P: ProcessInspector,
-    R: RandomSource,
-{
-    coordinator: Coordinator<B, C, P, R>,
+pub(crate) struct GenericStartupRuntime<B, C, P, R, S> {
+    coordinator: Coordinator<B, C, P, R, S>,
 }
 
-impl<B, C, P, R> StartupRuntime<B, C, P, R>
+impl<B, C, P, R, S> GenericStartupRuntime<B, C, P, R, S>
 where
     B: PmsetBackend,
     C: MonotonicClock,
     P: ProcessInspector,
     R: RandomSource,
+    S: StateStore,
 {
     fn from_parts(
-        store: RootStore,
+        store: S,
         backend: B,
         clock: C,
         processes: P,
@@ -66,10 +61,10 @@ where
 
     /// Dependency injection exists only in crate unit-test builds. The
     /// production entry point is [`ProductionStartup::open`].
-    #[cfg(test)]
+    #[cfg(all(test, feature = "dev-uds"))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        store: RootStore,
+        store: S,
         backend: B,
         clock: C,
         processes: P,
@@ -90,12 +85,12 @@ where
 
     pub fn reconcile_before_listener(
         mut self,
-    ) -> Result<ReadyRuntime<B, C, P, R>, CoordinatorError> {
+    ) -> Result<GenericReadyRuntime<B, C, P, R, S>, CoordinatorError> {
         let events = self.coordinator.store().events();
         events.record(HelperEvent::StartupRecovery);
         self.coordinator.reconcile_internal()?;
         events.record(HelperEvent::StartupReady);
-        Ok(ReadyRuntime {
+        Ok(GenericReadyRuntime {
             coordinator: self.coordinator,
         })
     }
@@ -209,14 +204,8 @@ where
 ///     let _ = ready.watchdog().tick();
 /// }
 /// ```
-pub struct ReadyRuntime<B, C, P, R>
-where
-    B: PmsetBackend,
-    C: MonotonicClock,
-    P: ProcessInspector,
-    R: RandomSource,
-{
-    coordinator: Coordinator<B, C, P, R>,
+pub(crate) struct GenericReadyRuntime<B, C, P, R, S> {
+    coordinator: Coordinator<B, C, P, R, S>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,23 +250,20 @@ pub(crate) trait SchedulerFactory {
     ) -> Result<Box<dyn WatchdogGuard>, SchedulerArmError>;
 }
 
-struct RuntimeCore<B, C, P, R>
-where
-    B: PmsetBackend,
-    C: MonotonicClock,
-    P: ProcessInspector,
-    R: RandomSource,
-{
-    coordinator: Coordinator<B, C, P, R>,
+struct RuntimeCore<B, C, P, R, S> {
+    coordinator: Coordinator<B, C, P, R, S>,
     health: RuntimeHealth,
 }
 
-impl<B, C, P, R> RuntimeCore<B, C, P, R>
+type SharedRuntimeCore<B, C, P, R, S> = Arc<Mutex<RuntimeCore<B, C, P, R, S>>>;
+
+impl<B, C, P, R, S> RuntimeCore<B, C, P, R, S>
 where
     B: PmsetBackend,
     C: MonotonicClock,
     P: ProcessInspector,
     R: RandomSource,
+    S: StateStore,
 {
     fn watchdog_tick(&mut self) {
         self.coordinator
@@ -311,32 +297,27 @@ where
     }
 }
 
-pub struct ServingRuntime<B, C, P, R>
-where
-    B: PmsetBackend,
-    C: MonotonicClock,
-    P: ProcessInspector,
-    R: RandomSource,
-{
-    core: Arc<Mutex<RuntimeCore<B, C, P, R>>>,
+pub(crate) struct GenericServingRuntime<B, C, P, R, S> {
+    core: SharedRuntimeCore<B, C, P, R, S>,
     scheduler: Option<Box<dyn WatchdogGuard>>,
 }
 
-impl<B, C, P, R> ReadyRuntime<B, C, P, R>
+impl<B, C, P, R, S> GenericReadyRuntime<B, C, P, R, S>
 where
     B: PmsetBackend + 'static,
     C: MonotonicClock + 'static,
     P: ProcessInspector + 'static,
     R: RandomSource + 'static,
+    S: StateStore,
 {
-    fn arm<S>(
+    fn arm<F>(
         self,
-        scheduler: S,
+        scheduler: F,
         interval: Duration,
         ready_timeout: Duration,
-    ) -> Result<ServingRuntime<B, C, P, R>, SchedulerArmError>
+    ) -> Result<GenericServingRuntime<B, C, P, R, S>, SchedulerArmError>
     where
-        S: SchedulerFactory,
+        F: SchedulerFactory,
     {
         let core = Arc::new(Mutex::new(RuntimeCore {
             coordinator: self.coordinator,
@@ -351,56 +332,39 @@ where
             lock_runtime_core(&termination_core).health = RuntimeHealth::SchedulerTerminated;
         });
         let scheduler = scheduler.start(interval, ready_timeout, task, termination)?;
-        Ok(ServingRuntime {
+        Ok(GenericServingRuntime {
             core,
             scheduler: Some(scheduler),
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn arm_with_scheduler<S>(
+    #[cfg(all(test, feature = "dev-uds"))]
+    pub(crate) fn arm_with_scheduler<F>(
         self,
-        scheduler: S,
-    ) -> Result<ServingRuntime<B, C, P, R>, SchedulerArmError>
+        scheduler: F,
+    ) -> Result<GenericServingRuntime<B, C, P, R, S>, SchedulerArmError>
     where
-        S: SchedulerFactory,
+        F: SchedulerFactory,
     {
         self.arm(scheduler, WATCHDOG_INTERVAL, WATCHDOG_READY_TIMEOUT)
     }
-
-    #[cfg(test)]
-    pub(crate) fn arm_system_for_testing(
-        self,
-        interval: Duration,
-        ready_timeout: Duration,
-        mode: SystemSchedulerTestMode,
-    ) -> Result<ServingRuntime<B, C, P, R>, SchedulerArmError> {
-        let events = self.coordinator.store().events();
-        self.arm(
-            SystemSchedulerFactory {
-                events,
-                mode: mode.into(),
-            },
-            interval,
-            ready_timeout,
-        )
-    }
 }
 
-impl<B, C, P, R> ServingRuntime<B, C, P, R>
+impl<B, C, P, R, S> GenericServingRuntime<B, C, P, R, S>
 where
     B: PmsetBackend,
     C: MonotonicClock,
     P: ProcessInspector,
     R: RandomSource,
+    S: StateStore,
 {
-    pub fn listener_permit(&self) -> ListenerPermit<'_> {
+    pub(crate) fn listener_permit(&self) -> ListenerPermit<'_> {
         ListenerPermit {
             _serving: PhantomData,
         }
     }
 
-    pub fn acquire(
+    pub(crate) fn acquire(
         &self,
         principal: &Principal,
         profile: &str,
@@ -413,7 +377,7 @@ where
             .acquire(principal, profile, owner_generation, ttl_ms)
     }
 
-    pub fn renew(
+    pub(crate) fn renew(
         &self,
         principal: &Principal,
         lease_id: &LeaseId,
@@ -426,7 +390,7 @@ where
             .renew(principal, lease_id, owner_generation, ttl_ms)
     }
 
-    pub fn release(
+    pub(crate) fn release(
         &self,
         principal: &Principal,
         lease_id: &LeaseId,
@@ -438,23 +402,17 @@ where
             .release(principal, lease_id, owner_generation)
     }
 
-    pub fn status(&self) -> Result<CoordinatorStatus, CoordinatorError> {
+    pub(crate) fn status(&self) -> Result<CoordinatorStatus, CoordinatorError> {
         let mut core = lock_runtime_core(&self.core);
         core.coordinator.status()
     }
 
-    pub fn health(&self) -> RuntimeHealth {
+    pub(crate) fn health(&self) -> RuntimeHealth {
         lock_runtime_core(&self.core).health
     }
 }
 
-impl<B, C, P, R> Drop for ServingRuntime<B, C, P, R>
-where
-    B: PmsetBackend,
-    C: MonotonicClock,
-    P: ProcessInspector,
-    R: RandomSource,
-{
+impl<B, C, P, R, S> Drop for GenericServingRuntime<B, C, P, R, S> {
     fn drop(&mut self) {
         // The guard's destructor signals and joins without holding `core`.
         // Dropping it explicitly keeps the coordinator alive until the worker
@@ -463,19 +421,192 @@ where
     }
 }
 
-/// Opaque proof that startup recovery and scheduler arming completed.
-pub struct ListenerPermit<'a> {
-    _serving: PhantomData<&'a ()>,
+pub struct StartupRuntime<B, C, P, R> {
+    inner: GenericStartupRuntime<B, C, P, R, RootStore>,
 }
 
-fn lock_runtime_core<B, C, P, R>(
-    core: &Arc<Mutex<RuntimeCore<B, C, P, R>>>,
-) -> MutexGuard<'_, RuntimeCore<B, C, P, R>>
+impl<B, C, P, R> StartupRuntime<B, C, P, R>
 where
     B: PmsetBackend,
     C: MonotonicClock,
     P: ProcessInspector,
     R: RandomSource,
+{
+    fn from_parts(
+        store: RootStore,
+        backend: B,
+        clock: C,
+        processes: P,
+        random: R,
+        service_version: u64,
+        minimum_client_build: u64,
+    ) -> Self {
+        Self {
+            inner: GenericStartupRuntime::from_parts(
+                store,
+                backend,
+                clock,
+                processes,
+                random,
+                service_version,
+                minimum_client_build,
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        store: RootStore,
+        backend: B,
+        clock: C,
+        processes: P,
+        random: R,
+        service_version: u64,
+        minimum_client_build: u64,
+    ) -> Self {
+        Self::from_parts(
+            store,
+            backend,
+            clock,
+            processes,
+            random,
+            service_version,
+            minimum_client_build,
+        )
+    }
+
+    pub fn reconcile_before_listener(self) -> Result<ReadyRuntime<B, C, P, R>, CoordinatorError> {
+        self.inner
+            .reconcile_before_listener()
+            .map(|inner| ReadyRuntime { inner })
+    }
+}
+
+pub struct ReadyRuntime<B, C, P, R> {
+    inner: GenericReadyRuntime<B, C, P, R, RootStore>,
+}
+
+impl<B, C, P, R> ReadyRuntime<B, C, P, R>
+where
+    B: PmsetBackend + 'static,
+    C: MonotonicClock + 'static,
+    P: ProcessInspector + 'static,
+    R: RandomSource + 'static,
+{
+    fn arm<F>(
+        self,
+        scheduler: F,
+        interval: Duration,
+        ready_timeout: Duration,
+    ) -> Result<ServingRuntime<B, C, P, R>, SchedulerArmError>
+    where
+        F: SchedulerFactory,
+    {
+        self.inner
+            .arm(scheduler, interval, ready_timeout)
+            .map(|inner| ServingRuntime { inner })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_with_scheduler<F>(
+        self,
+        scheduler: F,
+    ) -> Result<ServingRuntime<B, C, P, R>, SchedulerArmError>
+    where
+        F: SchedulerFactory,
+    {
+        self.arm(scheduler, WATCHDOG_INTERVAL, WATCHDOG_READY_TIMEOUT)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_system_for_testing(
+        self,
+        interval: Duration,
+        ready_timeout: Duration,
+        mode: SystemSchedulerTestMode,
+    ) -> Result<ServingRuntime<B, C, P, R>, SchedulerArmError> {
+        let events = self.inner.coordinator.store().events();
+        self.arm(
+            SystemSchedulerFactory {
+                events,
+                mode: mode.into(),
+            },
+            interval,
+            ready_timeout,
+        )
+    }
+}
+
+pub struct ServingRuntime<B, C, P, R> {
+    inner: GenericServingRuntime<B, C, P, R, RootStore>,
+}
+
+impl<B, C, P, R> ServingRuntime<B, C, P, R>
+where
+    B: PmsetBackend,
+    C: MonotonicClock,
+    P: ProcessInspector,
+    R: RandomSource,
+{
+    pub fn listener_permit(&self) -> ListenerPermit<'_> {
+        self.inner.listener_permit()
+    }
+
+    pub fn acquire(
+        &self,
+        principal: &Principal,
+        profile: &str,
+        owner_generation: &str,
+        ttl_ms: u64,
+    ) -> Result<LeaseGrant, CoordinatorError> {
+        self.inner
+            .acquire(principal, profile, owner_generation, ttl_ms)
+    }
+
+    pub fn renew(
+        &self,
+        principal: &Principal,
+        lease_id: &LeaseId,
+        owner_generation: &str,
+        ttl_ms: u64,
+    ) -> Result<LeaseGrant, CoordinatorError> {
+        self.inner
+            .renew(principal, lease_id, owner_generation, ttl_ms)
+    }
+
+    pub fn release(
+        &self,
+        principal: &Principal,
+        lease_id: &LeaseId,
+        owner_generation: &str,
+    ) -> Result<(), CoordinatorError> {
+        self.inner.release(principal, lease_id, owner_generation)
+    }
+
+    pub fn status(&self) -> Result<CoordinatorStatus, CoordinatorError> {
+        self.inner.status()
+    }
+
+    pub fn health(&self) -> RuntimeHealth {
+        self.inner.health()
+    }
+}
+
+/// Opaque proof that startup recovery and scheduler arming completed.
+pub struct ListenerPermit<'a> {
+    _serving: PhantomData<&'a ()>,
+}
+
+fn lock_runtime_core<B, C, P, R, S>(
+    core: &SharedRuntimeCore<B, C, P, R, S>,
+) -> MutexGuard<'_, RuntimeCore<B, C, P, R, S>>
+where
+    B: PmsetBackend,
+    C: MonotonicClock,
+    P: ProcessInspector,
+    R: RandomSource,
+    S: StateStore,
 {
     core.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -767,7 +898,7 @@ pub struct ProductionReadyRuntime {
 
 impl ProductionReadyRuntime {
     pub fn arm_watchdog(self) -> Result<ProductionRuntime, SchedulerArmError> {
-        let events = self.inner.coordinator.store().events();
+        let events = self.inner.inner.coordinator.store().events();
         self.inner
             .arm(
                 SystemSchedulerFactory::production(events),

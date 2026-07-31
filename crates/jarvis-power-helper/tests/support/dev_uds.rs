@@ -25,8 +25,8 @@ use jarvis_power_helper::dev_uds::{
 };
 use jarvis_power_helper::pmset::{PmsetBackend, PmsetError};
 use jarvis_power_helper::watchdog::{
-    SchedulerArmError, SchedulerFactory, ServingRuntime, StartupRuntime, WatchdogGuard,
-    WatchdogTask, WatchdogTermination,
+    GenericServingRuntime, GenericStartupRuntime, SchedulerArmError, SchedulerFactory,
+    WatchdogGuard, WatchdogTask, WatchdogTermination,
 };
 use jarvis_power_helper::{HelperEvent, HelperEventSink};
 use tempfile::TempDir;
@@ -156,7 +156,7 @@ impl SchedulerFactory for ReadyScheduler {
     }
 }
 
-type Runtime = ServingRuntime<FakeBackend, FakeClock, FakeProcesses, FixedRandom, DevStore>;
+type Runtime = GenericServingRuntime<FakeBackend, FakeClock, FakeProcesses, FixedRandom, DevStore>;
 
 struct DevHarness {
     _temp: TempDir,
@@ -186,7 +186,7 @@ impl DevHarness {
             task: Arc::new(Mutex::new(None)),
             sink: sink.clone(),
         };
-        let ready = StartupRuntime::new(
+        let ready = GenericStartupRuntime::new(
             store.clone(),
             FakeBackend {
                 disabled: disabled.clone(),

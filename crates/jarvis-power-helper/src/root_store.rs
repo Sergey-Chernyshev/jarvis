@@ -22,6 +22,8 @@ pub const MAX_STATE_BYTES: usize = 64 * 1024;
 
 const STATE_FILE: &CStr = c"state.json";
 const LOCK_FILE: &CStr = c"state.lock";
+#[cfg(feature = "dev-uds")]
+const POWER_DIRECTORY_DEV: &CStr = c"power";
 const LIBRARY_DIRECTORY: &CStr = c"Library";
 const APPLICATION_SUPPORT_DIRECTORY: &CStr = c"Application Support";
 const JARVIS_DIRECTORY: &CStr = c"Jarvis";
@@ -70,6 +72,18 @@ impl StorePolicy {
             directory_mode: DIRECTORY_MODE,
             file_uid,
             file_gid,
+            file_mode: FILE_MODE,
+        }
+    }
+
+    #[cfg(feature = "dev-uds")]
+    fn for_owner(uid: u32, gid: u32) -> Self {
+        Self {
+            directory_uid: uid,
+            directory_gid: gid,
+            directory_mode: DIRECTORY_MODE,
+            file_uid: uid,
+            file_gid: gid,
             file_mode: FILE_MODE,
         }
     }
@@ -126,10 +140,39 @@ impl std::error::Error for StoreError {}
 
 struct RootStoreInner {
     directory: OwnedFd,
+    files: StoreFiles,
     policy: StorePolicy,
     events: Arc<dyn HelperEventSink>,
     process_lock: Mutex<()>,
     test_fault: Mutex<Option<StoreFault>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct StoreFiles {
+    state: &'static CStr,
+    lock: &'static CStr,
+    temporary_prefix: &'static str,
+}
+
+impl StoreFiles {
+    const PRODUCTION: Self = Self {
+        state: STATE_FILE,
+        lock: LOCK_FILE,
+        temporary_prefix: ".state.tmp-",
+    };
+
+    #[cfg(feature = "dev-uds")]
+    pub(crate) const fn new(
+        state: &'static CStr,
+        lock: &'static CStr,
+        temporary_prefix: &'static str,
+    ) -> Self {
+        Self {
+            state,
+            lock,
+            temporary_prefix,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,7 +250,12 @@ impl RootStore {
         let directory =
             open_or_create_private_directory(power.as_raw_fd(), VERSION_DIRECTORY, policy, &hooks)?;
         validate_directory(directory.as_raw_fd(), policy)?;
-        Ok(Self::from_open_directory(directory, policy, events))
+        Ok(Self::from_open_directory(
+            directory,
+            policy,
+            StoreFiles::PRODUCTION,
+            events,
+        ))
     }
 
     /// Test-only fd-relative provisioning with an injected ownership policy.
@@ -313,17 +361,52 @@ impl RootStore {
         let policy = StorePolicy::for_testing(directory_uid, directory_gid, file_uid, file_gid);
         let directory = open_path(path, directory_open_flags())?;
         validate_directory(directory.as_raw_fd(), policy)?;
-        Ok(Self::from_open_directory(directory, policy, events))
+        Ok(Self::from_open_directory(
+            directory,
+            policy,
+            StoreFiles::PRODUCTION,
+            events,
+        ))
+    }
+
+    #[cfg(feature = "dev-uds")]
+    pub(crate) fn open_development(
+        jarvis_directory: &Path,
+        files: StoreFiles,
+        events: Arc<dyn HelperEventSink>,
+    ) -> Result<Self, StoreError> {
+        // SAFETY: these calls only inspect the effective identity of this
+        // process. Development helper state is deliberately unavailable to
+        // root so it cannot be confused with the production trust boundary.
+        let uid = unsafe { libc::geteuid() };
+        // SAFETY: see the identity-only note above.
+        let gid = unsafe { libc::getegid() };
+        if uid == 0 {
+            return Err(StoreError::UnsafeMetadata);
+        }
+        let policy = StorePolicy::for_owner(uid, gid);
+        let root = open_path(jarvis_directory, directory_open_flags())?;
+        validate_directory(root.as_raw_fd(), policy)?;
+        let power = open_or_create_private_directory(
+            root.as_raw_fd(),
+            POWER_DIRECTORY_DEV,
+            policy,
+            &ProvisionHooks::default(),
+        )?;
+        validate_directory(power.as_raw_fd(), policy)?;
+        Ok(Self::from_open_directory(power, policy, files, events))
     }
 
     fn from_open_directory(
         directory: OwnedFd,
         policy: StorePolicy,
+        files: StoreFiles,
         events: Arc<dyn HelperEventSink>,
     ) -> Self {
         Self {
             inner: Arc::new(RootStoreInner {
                 directory,
+                files,
                 policy,
                 events,
                 process_lock: Mutex::new(()),
@@ -344,11 +427,15 @@ impl RootStore {
             .process_lock
             .lock()
             .map_err(|_| StoreError::Unavailable)?;
-        let lock = open_lock_file(self.inner.directory.as_raw_fd(), self.inner.policy)?;
+        let lock = open_lock_file(
+            self.inner.directory.as_raw_fd(),
+            self.inner.files.lock,
+            self.inner.policy,
+        )?;
         acquire_bounded_flock(lock.as_raw_fd())?;
         validate_open_file(
             self.inner.directory.as_raw_fd(),
-            LOCK_FILE,
+            self.inner.files.lock,
             lock.as_raw_fd(),
             self.inner.policy,
         )?;
@@ -392,7 +479,7 @@ impl LockedRootStore<'_> {
     pub(crate) fn load(&self) -> Result<Option<HelperState>, StoreError> {
         let Some(file) = open_existing_validated(
             self.store.inner.directory.as_raw_fd(),
-            STATE_FILE,
+            self.store.inner.files.state,
             self.store.inner.policy,
         )?
         else {
@@ -431,6 +518,7 @@ impl LockedRootStore<'_> {
             .record(HelperEvent::StateWriteStarted(state.phase));
         let (temporary_name, temporary) = create_temporary(
             self.store.inner.directory.as_raw_fd(),
+            self.store.inner.files.temporary_prefix,
             self.store.inner.policy,
         )?;
         let mut cleanup = TemporaryCleanup {
@@ -460,7 +548,7 @@ impl LockedRootStore<'_> {
         // Refuse to replace a symlink or any other unsafe existing entry.
         let _ = open_existing_validated(
             self.store.inner.directory.as_raw_fd(),
-            STATE_FILE,
+            self.store.inner.files.state,
             self.store.inner.policy,
         )?;
         if self.store.take_fault(StoreFault::BeforeRename) {
@@ -475,7 +563,7 @@ impl LockedRootStore<'_> {
                 self.store.inner.directory.as_raw_fd(),
                 temporary_name.as_ptr(),
                 self.store.inner.directory.as_raw_fd(),
-                STATE_FILE.as_ptr(),
+                self.store.inner.files.state.as_ptr(),
             )
         };
         if renamed != 0 {
@@ -485,7 +573,7 @@ impl LockedRootStore<'_> {
         self.store.inner.events.record(HelperEvent::StateRenamed);
         let destination = inspect_entry(
             self.store.inner.directory.as_raw_fd(),
-            STATE_FILE,
+            self.store.inner.files.state,
             self.store.inner.policy,
         )
         .map_err(|_| StoreError::DurabilityUnknown)?
@@ -507,19 +595,19 @@ impl LockedRootStore<'_> {
     pub(crate) fn clear(&mut self) -> Result<(), StoreError> {
         if open_existing_validated(
             self.store.inner.directory.as_raw_fd(),
-            STATE_FILE,
+            self.store.inner.files.state,
             self.store.inner.policy,
         )?
         .is_none()
         {
             return Ok(());
         }
-        // SAFETY: STATE_FILE is a fixed single component resolved relative to
-        // the already-open private directory.
+        // SAFETY: the state name is a fixed single component resolved relative
+        // to the already-open private directory.
         if unsafe {
             libc::unlinkat(
                 self.store.inner.directory.as_raw_fd(),
-                STATE_FILE.as_ptr(),
+                self.store.inner.files.state.as_ptr(),
                 0,
             )
         } != 0
@@ -546,6 +634,53 @@ impl Drop for LockedRootStore<'_> {
         // also releases the lock if this best-effort explicit unlock fails.
         let _ = unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN) };
         self.store.inner.events.record(HelperEvent::LockReleased);
+    }
+}
+
+pub(crate) mod sealed {
+    pub trait Sealed {}
+}
+
+pub(crate) trait LockedState {
+    fn load(&self) -> Result<Option<HelperState>, StoreError>;
+    fn persist(&mut self, state: &HelperState) -> Result<(), StoreError>;
+    fn clear(&mut self) -> Result<(), StoreError>;
+}
+
+pub(crate) trait StateStore: sealed::Sealed + Clone + Send + Sync + 'static {
+    type Locked<'a>: LockedState
+    where
+        Self: 'a;
+
+    fn lock(&self) -> Result<Self::Locked<'_>, StoreError>;
+    fn events(&self) -> Arc<dyn HelperEventSink>;
+}
+
+impl sealed::Sealed for RootStore {}
+
+impl StateStore for RootStore {
+    type Locked<'a> = LockedRootStore<'a>;
+
+    fn lock(&self) -> Result<Self::Locked<'_>, StoreError> {
+        RootStore::lock(self)
+    }
+
+    fn events(&self) -> Arc<dyn HelperEventSink> {
+        RootStore::events(self)
+    }
+}
+
+impl LockedState for LockedRootStore<'_> {
+    fn load(&self) -> Result<Option<HelperState>, StoreError> {
+        LockedRootStore::load(self)
+    }
+
+    fn persist(&mut self, state: &HelperState) -> Result<(), StoreError> {
+        LockedRootStore::persist(self, state)
+    }
+
+    fn clear(&mut self) -> Result<(), StoreError> {
+        LockedRootStore::clear(self)
     }
 }
 
@@ -780,12 +915,16 @@ fn stat_entry(directory: RawFd, name: &CStr) -> Result<Option<libc::stat>, Store
     }
 }
 
-fn open_lock_file(directory: RawFd, policy: StorePolicy) -> Result<OwnedFd, StoreError> {
-    match inspect_entry(directory, LOCK_FILE, policy) {
+fn open_lock_file(
+    directory: RawFd,
+    lock_name: &CStr,
+    policy: StorePolicy,
+) -> Result<OwnedFd, StoreError> {
+    match inspect_entry(directory, lock_name, policy) {
         Ok(Some(expected)) => {
             let file = openat_owned(
                 directory,
-                LOCK_FILE,
+                lock_name,
                 libc::O_RDWR | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 0,
             )?;
@@ -796,7 +935,7 @@ fn open_lock_file(directory: RawFd, policy: StorePolicy) -> Result<OwnedFd, Stor
         Ok(None) => {
             let file = openat_owned(
                 directory,
-                LOCK_FILE,
+                lock_name,
                 libc::O_RDWR
                     | libc::O_NONBLOCK
                     | libc::O_NOFOLLOW
@@ -865,13 +1004,14 @@ fn inspect_entry(
 
 fn create_temporary(
     directory: RawFd,
+    prefix: &str,
     policy: StorePolicy,
 ) -> Result<(CString, OwnedFd), StoreError> {
     for _ in 0..8 {
         let mut random = [0_u8; 16];
         getrandom::getrandom(&mut random).map_err(|_| StoreError::Unavailable)?;
         let mut text = String::with_capacity(43);
-        text.push_str(".state.tmp-");
+        text.push_str(prefix);
         for byte in random {
             use std::fmt::Write as _;
             write!(&mut text, "{byte:02x}").map_err(|_| StoreError::Unavailable)?;

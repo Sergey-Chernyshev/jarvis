@@ -55,6 +55,8 @@ jobs:
 
       - name: Plugin public contract tests
         run: |
+          npm run check:plugin-contracts
+          npm run test:plugin-ui-sdk
           cargo test --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
           cargo test --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
           cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml

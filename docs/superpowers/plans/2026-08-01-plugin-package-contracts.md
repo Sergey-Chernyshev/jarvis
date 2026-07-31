@@ -87,7 +87,10 @@ Increment A must not create or mutate that lock file.
 - `src-tauri/src/plugins/manifest_v2.rs` — bounded schema validation and source-template target resolution.
 - `src-tauri/src/plugins/package/` — deterministic pack, safe archive inspection/extraction and file hashing.
 - `src-tauri/src/plugins/trust/` — catalog freshness, root/publisher signatures, rotations and revocations.
-- `src-tauri/src/plugins/package_manager/` — paths, receipts, operation journal, transactions and recovery.
+- `src-tauri/src/plugins/package_manager/{paths,receipt,operation,lock}.rs` — neutral durable storage primitives and
+  typed filesystem observations; these modules never decide a lifecycle result.
+- `src-tauri/src/plugins/package_manager/{manager,downloader,quarantine,consent,migration,health,recovery}.rs` —
+  lifecycle transactions, current-trust re-verification and terminal operation decisions.
 - `src-tauri/src/plugins/developer.rs` — immutable local snapshots and Developer Mode invalidation.
 - `src-tauri/src/plugins/resolver.rs` — receipt/legacy source precedence and activation decisions.
 - `src-tauri/src/plugins/verified_spawn.rs` — exact open-file execution for receipt-backed native runtimes.
@@ -507,8 +510,9 @@ public-secret guards.
 This task owns the package wire format, byte-for-byte archive profile, bounded parser and quarantine extraction. It
 does **not** decide whether a signer is trusted. A4 owns trust, catalog and revocation checks and is the only production
 implementation of the verification callback defined below. A3 supplies the low-level same-fd verified extraction
-primitive; A5 supplies durable path/receipt/journal/lock primitives only. A6 owns every lifecycle invocation of
-verification/extraction, the final version-directory rename, `current` activation and their crash/recovery semantics.
+primitive; A5 supplies durable path/receipt/journal/lock primitives and typed durability observations only, without
+translating them into lifecycle outcomes. A6 owns every lifecycle invocation of verification/extraction, the final
+version-directory rename, `current` activation and all crash/recovery verdicts.
 
 - [ ] **Step 1: Pin the dependency and MSRV surface before writing format code**
 
@@ -1337,6 +1341,11 @@ git commit -m "feat(plugins): verify signed plugin catalogs"
 - Modify: `src-tauri/src/plugins/mod.rs`
 - Modify: `src-tauri/Cargo.toml`
 
+A5 owns only storage layout, atomic write/rename mechanics, neutral visibility observations, journal persistence and
+locking. It never selects an A4 verifier, invokes A3 extraction, decides whether an install/update succeeded or failed,
+or transitions a journal operation to a terminal state as a consequence of filesystem visibility. A6 consumes A5's
+typed observations and owns every lifecycle interpretation.
+
 - [ ] **Step 1: Add RED private-path and receipt tests**
 
 In `paths.rs`:
@@ -1347,6 +1356,7 @@ fn profile_layout_matches_the_v2_contract() {
     let paths = PluginPaths::new(PathBuf::from("/profile"));
     assert_eq!(paths.versions("dev.example.echo"), Path::new("/profile/plugins/dev.example.echo/versions"));
     assert_eq!(paths.current("dev.example.echo"), Path::new("/profile/plugins/dev.example.echo/current"));
+    assert_eq!(paths.quarantine_root(), Path::new("/profile/plugins/.quarantine"));
     assert_eq!(paths.data("dev.example.echo"), Path::new("/profile/plugin-data/dev.example.echo"));
     assert_eq!(paths.cache("dev.example.echo"), Path::new("/profile/plugin-cache/dev.example.echo"));
     assert_eq!(paths.runtime("dev.example.echo"), Path::new("/profile/plugin-runtime/dev.example.echo"));
@@ -1429,18 +1439,60 @@ pub enum InstallSource {
 `LegacyBundledV1` may only be constructed by the bridge for canonical ID `agent-vm`; it never implies owner signature
 or native v2 trust.
 
-- [ ] **Step 4: Implement owner-only paths and atomic receipt files**
+- [ ] **Step 4: Implement owner-only paths and atomic version/receipt primitives**
 
 `PluginPaths::prepare` creates each root as a real directory with mode `0700` and rejects symlinks/non-directories at
 every existing component. Installed package directories are `versions/<version>/<archive-digest>/` with directory mode
-`0555`, executable mode `0555` and all other files `0444`. Runtime/cache/data remain `0700`.
+`0555`, executable mode `0555` and all other files `0444`. The fixed quarantine parent is
+`plugins/.quarantine`; quarantine/runtime/cache/data remain `0700`.
 
 `ReceiptStore` writes canonical JSON to a same-directory `current.next-<uuid>` file with `0600`, fsyncs, renames it to
 the regular file named `current`, then fsyncs the plugin directory. It reopens and verifies the receipt after rename.
-Directory-sync failure is an uncertain commit: recovery re-reads `current` and reports whether the exact generation is
-visible instead of blindly retrying a previous generation.
+`VersionStore::finalize_extracted` takes the already immutable extraction directory, refuses a same-version
+different-digest destination, atomically renames it to the fixed version destination and syncs that destination's
+parent. The version finalizer and receipt writer return separate storage-only observation types:
 
-- [ ] **Step 5: Add RED operation-recovery tests**
+```rust
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DurableObservation<T> {
+    Confirmed(T),
+    DurabilityUnknown(T),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VersionVisibility {
+    Exact {
+        plugin_id: PluginId,
+        version: Version,
+        package_digest: Digest,
+    },
+    Absent,
+    Conflict {
+        package_digest: Digest,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReceiptVisibility {
+    Exact {
+        plugin_id: PluginId,
+        generation: u64,
+        package_digest: Digest,
+    },
+    Absent,
+    Different {
+        generation: u64,
+        package_digest: Digest,
+    },
+}
+```
+
+Directory-sync failure is an uncertain commit: the primitive re-reads the fixed destination and returns
+`DurableObservation<VersionVisibility>` or `DurableObservation<ReceiptVisibility>` using the
+`DurabilityUnknown(...)` variant with the resulting exact/absent/different visibility. It does not retry a previous
+generation, write `succeeded`/`failed`, emit `install_interrupted`, or otherwise interpret that observation.
+
+- [ ] **Step 5: Add RED operation-journal tests**
 
 In `operation.rs`:
 
@@ -1504,16 +1556,23 @@ use a legal transition table and reject terminal rewrites. `ManagerLock` uses `f
 `~/.jarvis/plugins/.manager.lock`, records PID/process-start identity for diagnostics, waits at most five seconds and
 never deletes another process's lock file.
 
-- [ ] **Step 7: Add crash-point tests**
+- [ ] **Step 7: Add storage-observation failpoint tests**
 
-Inject failpoints after version-directory rename, after current-receipt rename and before terminal operation update.
-On reopen:
+Inject failpoints after version-directory rename, after current-receipt rename and during each destination-parent sync.
+Keep the tests at the primitive boundary:
 
-- a version without `current` is unreferenced cache and safe to retain;
-- a visible exact `current` generation is treated as committed even if the prior caller saw fsync failure;
-- a running operation is reconciled to `succeeded` when its target receipt is exact, otherwise to `failed` with
-  `install_interrupted`;
-- no recovery path deletes plugin data.
+```text
+version_rename_reports_exact_visibility_without_operation_transition
+version_rename_parent_sync_failure_reports_durability_unknown
+current_rename_reports_exact_generation_without_operation_transition
+current_parent_sync_failure_reports_durability_unknown_with_reobserved_visibility
+storage_observation_never_deletes_plugin_data
+```
+
+The storage methods accept no `OperationJournal`; the fixture snapshots the journal independently and asserts zero
+transition calls for every failpoint. A version without `current` is reported as `VersionVisibility::Exact`; an exact
+`current` generation is reported as `ReceiptVisibility::Exact`; absent or different state remains an explicit
+visibility variant. A5 does not label any case committed, succeeded, failed or `install_interrupted`.
 
 - [ ] **Step 8: Run the durable-store gate**
 
@@ -1524,12 +1583,16 @@ cargo test --manifest-path crates/jarvis-plugin-protocol/Cargo.toml receipt
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features plugins::package_manager
 ```
 
-Expected: all path, receipt, operation, lock and crash-recovery tests pass.
+Expected: all path, receipt, operation, lock and storage-observation failpoint tests pass; no A5 test assigns a
+lifecycle verdict.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add crates/jarvis-plugin-protocol src-tauri/src/plugins/package_manager \
+git add crates/jarvis-plugin-protocol/src/lib.rs crates/jarvis-plugin-protocol/src/receipt.rs \
+  src-tauri/src/plugins/package_manager/mod.rs src-tauri/src/plugins/package_manager/paths.rs \
+  src-tauri/src/plugins/package_manager/receipt.rs src-tauri/src/plugins/package_manager/operation.rs \
+  src-tauri/src/plugins/package_manager/lock.rs src-tauri/src/plugins/package_manager/schema.sql \
   src-tauri/src/plugins/mod.rs src-tauri/Cargo.toml
 git commit -m "feat(plugins): persist install receipts and operations"
 ```
@@ -1595,10 +1658,15 @@ Add these barrier/failpoint tests to the same file:
 
 ```text
 prepare_drop_manager_reopen_then_commit_reverifies_and_extracts_same_fd
+restart_rejects_quarantine_parent_path_swap_without_output
+held_parent_opens_only_the_recorded_inode_after_path_swap
 restart_rejects_quarantine_path_replacement_without_output
 restart_held_archive_inode_mutation_between_passes_is_rejected_without_output
 revocation_after_prepare_before_restart_commit_is_rejected_without_output
 recovery_of_approved_operation_uses_fresh_current_verifier
+crash_after_version_rename_reverifies_before_terminal_state
+crash_after_current_rename_reverifies_before_succeeded
+crash_without_exact_receipt_becomes_install_interrupted_only_in_a6
 ```
 
 The first test performs `prepare_install`, drops every manager/A3/A4 object, opens a new manager from the durable
@@ -1608,6 +1676,13 @@ regular file at the old name after reopening the manager. The mutation test also
 evidence is minted, modifies the already held inode, then resumes pass 2. Every failure case asserts no extraction
 directory, version directory, `current` receipt or health process was created; the input quarantine archive and failed
 journal record may remain for bounded recovery/diagnostics.
+
+The parent-swap tests put a barrier immediately before the final quarantine-parent component is opened. They rename
+the real parent and replace the old pathname first with a symlink and then with a real `0700` decoy directory that
+contains a valid-looking archive with the same name. The symlink must fail `NOFOLLOW`; the decoy must fail recorded
+device/inode comparison. Neither case may open the decoy archive or call A3 pass 1, extraction, health, version rename
+or receipt write. A separate held-parent test opens the real parent first, swaps the pathname, then proves archive
+lookup remains relative to the recorded held inode and never resolves through the replacement pathname.
 
 - [ ] **Step 2: Run integration tests and verify RED**
 
@@ -1653,24 +1728,91 @@ are never a serialized `VerifiedPackageEvidence`, verification boolean, trusted 
 Prepare drops any pass-1 evidence before returning and may close every fd and process immediately after writing the
 journal; correctness must survive that drop.
 
+`quarantine.rs` defines the exact persisted locator DTOs:
+
+```rust
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuarantineParentKey {
+    ProfilePluginsQuarantineV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuarantineParentIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub owner_uid: u32,
+    pub mode: u32,
+    pub link_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuarantineArchiveIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub owner_uid: u32,
+    pub mode: u32,
+    pub link_count: u64,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuarantineArchiveRef {
+    pub parent_key: QuarantineParentKey,
+    pub parent: QuarantineParentIdentity,
+    pub archive_name: String,
+    pub archive: QuarantineArchiveIdentity,
+}
+```
+
+Only `ProfilePluginsQuarantineV1` is accepted and maps internally to `PluginPaths::quarantine_root()`; no serialized
+path component can override that mapping.
+
 - [ ] **Step 4: Implement consent-bound commit and safe extraction**
 
 `commit_install` reloads the operation, revalidates current catalog freshness/revocation and matches the exact
 operation/digest/grant approval. It never calls extraction from the persisted plan/digest or from a prepare-time
 verification result. `quarantine.rs::reverify_for_extract` performs this sequence on every commit:
 
-1. open the fixed owner-only quarantine parent through A5's held-fd path primitive, without following any symlink;
-2. verify the parent's recorded device/inode, current effective-UID ownership, directory type, `0700` mode and valid
-   nonzero link count;
-3. validate the persisted archive name as one component, then `openat` it
+1. call A6's `quarantine.rs::open_fixed_parent`; starting at an opened `/`, it walks the fixed absolute
+   `PluginPaths::quarantine_root()` one component at a time with
+   `openat(RDONLY|DIRECTORY|NOFOLLOW|CLOEXEC)`, retaining each parent fd until the child has been opened and checked;
+2. `fstat` `/` and every opened component, requiring a directory, nonzero link count, owner equal to root or the
+   current effective UID, and no group/other write bits; require the final quarantine parent to match the persisted
+   device, inode, owner UID, mode and link count, and independently require owner UID equal to the current effective
+   UID, directory type, exact `0700` mode and nonzero link count;
+3. return this concrete non-serializable capability:
+
+   ```rust
+   pub struct HeldQuarantineParent {
+       fd: OwnedFd,
+       identity: QuarantineParentIdentity,
+   }
+
+   pub fn open_fixed_parent(
+       paths: &PluginPaths,
+       archive: &QuarantineArchiveRef,
+   ) -> Result<HeldQuarantineParent, ManagerError>;
+
+   impl HeldQuarantineParent {
+       pub fn open_archive(
+           &self,
+           archive: &QuarantineArchiveRef,
+       ) -> Result<File, ManagerError>;
+   }
+   ```
+
+   Its fields are private; it owns its fd and implements neither `Clone`, `Serialize` nor `Deserialize`. It never
+   enters `payload_json`, a protocol DTO or an async queue;
+4. validate the persisted archive name as one component, then `HeldQuarantineParent::open_archive` uses `openat` on
+   that held fd with
    `RDONLY|NOFOLLOW|CLOEXEC` from that held parent fd;
-4. `fstat` the open file and require the recorded device/inode, current effective-UID ownership, regular type,
+5. `fstat` the open file and require the recorded device/inode, current effective-UID ownership, regular type,
    `0600` mode, link count one and bounded size;
-5. select the exact package from the **current** A4 catalog/root/publisher/revocation state (or the current explicit
+6. select the exact package from the **current** A4 catalog/root/publisher/revocation state (or the current explicit
    Developer Mode verifier for a local source), then rerun the complete A3 pass 1 on that open `File`;
-6. invoke that current A4 verifier over the fresh observation; only the A3 package module may then mint a new
+7. invoke that current A4 verifier over the fresh observation; only the A3 package module may then mint a new
    non-serializable `VerifiedPackageEvidence` which owns this exact file descriptor;
-7. immediately move that evidence into A3 pass 2, which seeks/reparses the same held fd and extracts to a fresh
+8. immediately move that evidence into A3 pass 2, which seeks/reparses the same held fd and extracts to a fresh
    owner-only quarantine directory. There is no journal write, clone, path reopen, async handoff or boolean/digest
    substitute between mint and consume.
 
@@ -1684,11 +1826,15 @@ Only after pass 2 succeeds does `commit_install`:
 5. use A5's receipt primitive to write the exact `current` receipt disabled by default;
 6. mark the durable operation succeeded.
 
+Steps 4 and 5 consume A5's typed observations. `DurabilityUnknown(...)` leaves the operation non-terminal and enters
+Step 7 recovery; it is never treated as success directly.
+
 An existing same version with a different digest is `version_digest_conflict`, not an overwrite.
-Parent/archive identity mismatch is `quarantine_archive_replaced`; unsafe owner/type/mode/link count is
-`quarantine_archive_unsafe`; a held-inode change detected by pass 2 remains `archive_changed_after_verification`.
-All three fail before health/final rename/current activation and clean any partial extraction through A3's fd-only
-cleanup path.
+Parent device/inode mismatch is `quarantine_parent_replaced`; a parent symlink or unsafe owner/type/mode/link count is
+`quarantine_parent_unsafe`. Archive identity mismatch is `quarantine_archive_replaced`; unsafe archive metadata is
+`quarantine_archive_unsafe`; a held-inode change detected by pass 2 remains
+`archive_changed_after_verification`. All five fail before health/final rename/current activation and clean any
+partial extraction through A3's fd-only cleanup path.
 
 - [ ] **Step 5: Add migration refusal tests and host-interpreted subset**
 
@@ -1760,6 +1906,27 @@ Replaced/missing quarantine paths and held-inode mutation use the same errors an
 commit. A crash after A6 invokes A5's final-rename/current-write primitives is reconciled from their durable state;
 A6 decides the lifecycle result and never reruns native code merely because the journal phase is stale.
 
+Every approved/running recovery constructs a fresh A4 verification context from the **current**
+catalog/root/publisher/revocation state before interpreting any A5 observation. For an operation that still needs
+package work, it invokes the fresh `CatalogPackageVerifier` over a new A3 pass-1 observation. For an exact already
+visible activation, it reselects the current verified release and requires its digest and publisher lineage to match
+the exact receipt/version observation before any terminal transition. A5's `Confirmed`/`DurabilityUnknown` and
+exact/absent/different variants are evidence, never a verdict. A6 applies these terminal rules only after that fresh
+current-A4 verification:
+
+- exact immutable version plus exact `current` generation/digest and an accepted current A4 lineage becomes
+  `succeeded`;
+- a stale journal after version rename may continue from the saved durable phase only after the same current-A4
+  check; it never reruns native health merely because the terminal journal update was lost;
+- absent/different activation that cannot be resumed through fresh `reverify_for_extract` becomes `failed` with
+  `install_interrupted`;
+- current A4 revocation, removal, expiry or publisher-lineage change becomes its typed trust failure and can never be
+  translated to `succeeded` from an exact-looking receipt.
+
+Step 7 owns the failpoint before terminal operation update and all `succeeded`/`failed`/`install_interrupted`
+transitions. Tests assert the journal remains non-terminal until the fresh current-A4 result and A5 observations have
+both been evaluated.
+
 - [ ] **Step 8: Run package-manager lifecycle tests**
 
 Run:
@@ -1770,12 +1937,32 @@ cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
 ```
 
 Expected: install/update/rollback/uninstall, restart re-verification, quarantine path/inode races, revocation,
-migration and every injected crash point pass.
+migration and every injected crash point pass. In particular, the three terminal-recovery tests from Step 1 prove
+that A6 alone maps neutral A5 observations to `succeeded`, typed trust failure or `failed/install_interrupted`.
+
+Run the non-serialization/journal guard:
+
+```bash
+! rg -n 'HeldQuarantineParent|VerifiedPackageEvidence' \
+  src-tauri/src/plugins/package_manager/schema.sql \
+  src-tauri/src/plugins/package_manager/operation.rs \
+  crates/jarvis-plugin-protocol/src
+```
+
+Expected: exit `0`; neither held-fd capability can enter durable or public DTO storage.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src-tauri/src/plugins/package_manager src-tauri/Cargo.toml
+git add src-tauri/src/plugins/package_manager/manager.rs \
+  src-tauri/src/plugins/package_manager/downloader.rs \
+  src-tauri/src/plugins/package_manager/quarantine.rs \
+  src-tauri/src/plugins/package_manager/consent.rs \
+  src-tauri/src/plugins/package_manager/migration.rs \
+  src-tauri/src/plugins/package_manager/health.rs \
+  src-tauri/src/plugins/package_manager/recovery.rs \
+  src-tauri/src/plugins/package_manager/tests.rs \
+  src-tauri/src/plugins/package_manager/mod.rs src-tauri/Cargo.toml
 git commit -m "feat(plugins): transact plugin package lifecycle"
 ```
 

@@ -152,20 +152,26 @@ fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>, HelperClientError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::fs;
     use std::io::{Read, Write};
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
     use std::thread;
+    use std::time::{Duration, Instant};
 
     use jarvis_power_core::protocol::{
         decode_request, encode_response, Request, Response, ResponseEnvelope, PROTOCOL_VERSION,
     };
 
-    use super::{next_request_id, DevUdsClient, SOCKET_NAME};
-    use crate::power::helper::client::{HelperClient, HelperTrust};
+    use super::{
+        next_request_id, read_frame_with_timeout_for_testing, DevUdsClient,
+        ServerPeerIdentityProbe, ServerPeerSnapshot, SOCKET_NAME,
+    };
+    use crate::power::helper::client::{HelperClient, HelperClientError, HelperTrust};
 
     static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -174,11 +180,13 @@ mod tests {
     impl TestTempDirectory {
         fn new() -> Self {
             let sequence = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
+            let base = fs::canonicalize(std::env::temp_dir()).unwrap();
+            let path = base.join(format!(
                 "jarvis-power-client-{}-{sequence}",
                 std::process::id()
             ));
             fs::create_dir(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
             Self(path)
         }
 
@@ -200,6 +208,149 @@ mod tests {
             assert_eq!(request_id.as_str().as_bytes()[14], b'7');
             assert!(matches!(request_id.as_str().as_bytes()[19], b'8'..=b'b'));
         }
+    }
+
+    fn current_uid() -> u32 {
+        // SAFETY: reads only the current process identity.
+        unsafe { libc::geteuid() }
+    }
+
+    fn current_gid() -> u32 {
+        // SAFETY: reads only the current process identity.
+        unsafe { libc::getegid() }
+    }
+
+    fn stable_server_peer() -> ServerPeerSnapshot {
+        ServerPeerSnapshot {
+            socket_uid: Some(current_uid()),
+            socket_gid: Some(current_gid()),
+            socket_pid: Some(42),
+            process_uid: Some(current_uid()),
+            process_gid: Some(current_gid()),
+            process_pid: Some(42),
+            start_seconds: Some(1_700_000_000),
+            start_microseconds: Some(7),
+        }
+    }
+
+    struct ScriptedServerPeer {
+        snapshots: Mutex<VecDeque<ServerPeerSnapshot>>,
+    }
+
+    impl ScriptedServerPeer {
+        fn stable() -> Self {
+            let snapshot = stable_server_peer();
+            Self {
+                snapshots: Mutex::new(VecDeque::from([snapshot, snapshot])),
+            }
+        }
+    }
+
+    impl ServerPeerIdentityProbe for ScriptedServerPeer {
+        fn snapshot(
+            &self,
+            _stream: &std::os::unix::net::UnixStream,
+        ) -> Result<ServerPeerSnapshot, HelperClientError> {
+            self.snapshots
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or(HelperClientError::PeerRejected)
+        }
+    }
+
+    #[test]
+    fn client_rejects_nonexact_parent_socket_modes_and_hardlinks() {
+        let temp = TestTempDirectory::new();
+        let run = temp.path().join("run");
+        fs::create_dir(&run).unwrap();
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = run.join(SOCKET_NAME);
+
+        let special_mode = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o4600)).unwrap();
+        assert!(matches!(
+            DevUdsClient::new(temp.path())
+                .connect_with_peer_for_testing(&ScriptedServerPeer::stable()),
+            Err(HelperClientError::InvalidFrame)
+        ));
+        assert_eq!(
+            fs::symlink_metadata(&socket).unwrap().mode() & 0o7777,
+            0o4600
+        );
+        drop(special_mode);
+        fs::remove_file(&socket).unwrap();
+
+        let linked = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let sibling = run.join("hardlink");
+        fs::hard_link(&socket, &sibling).unwrap();
+        assert_eq!(fs::symlink_metadata(&socket).unwrap().nlink(), 2);
+        assert!(matches!(
+            DevUdsClient::new(temp.path())
+                .connect_with_peer_for_testing(&ScriptedServerPeer::stable()),
+            Err(HelperClientError::InvalidFrame)
+        ));
+        drop(linked);
+        fs::remove_file(&sibling).unwrap();
+        fs::remove_file(&socket).unwrap();
+
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o755)).unwrap();
+        let permissive_parent = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            DevUdsClient::new(temp.path())
+                .connect_with_peer_for_testing(&ScriptedServerPeer::stable()),
+            Err(HelperClientError::InvalidFrame)
+        ));
+        drop(permissive_parent);
+    }
+
+    #[test]
+    fn client_rejects_changed_or_inconsistent_connected_server_identity() {
+        let temp = TestTempDirectory::new();
+        let run = temp.path().join("run");
+        fs::create_dir(&run).unwrap();
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = run.join(SOCKET_NAME);
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let first = stable_server_peer();
+        let mut second = first;
+        second.start_microseconds = Some(8);
+        let peer = ScriptedServerPeer {
+            snapshots: Mutex::new(VecDeque::from([first, second])),
+        };
+        assert!(matches!(
+            DevUdsClient::new(temp.path()).connect_with_peer_for_testing(&peer),
+            Err(HelperClientError::PeerRejected)
+        ));
+        drop(listener);
+    }
+
+    #[test]
+    fn response_slow_drip_is_bounded_by_one_absolute_deadline() {
+        let (mut writer, mut reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut bytes = Vec::from(8_u32.to_be_bytes());
+        bytes.extend_from_slice(b"12345678");
+        let writer = thread::spawn(move || {
+            for byte in bytes {
+                if writer.write_all(&[byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(80));
+            }
+            let _ = writer.shutdown(std::net::Shutdown::Write);
+        });
+
+        let started = Instant::now();
+        assert!(matches!(
+            read_frame_with_timeout_for_testing(&mut reader, Duration::from_millis(250)),
+            Err(HelperClientError::Deadline)
+        ));
+        assert!(started.elapsed() < Duration::from_millis(700));
+        writer.join().unwrap();
     }
 
     #[test]

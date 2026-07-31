@@ -7,7 +7,9 @@ use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 
 use jarvis_power_core::engine::ProcessState;
 use jarvis_power_core::protocol::{
@@ -21,11 +23,13 @@ use jarvis_power_helper::coordinator::{
 };
 use jarvis_power_helper::dev_store::{DevStore, DEV_LOCK_FILE, DEV_STATE_FILE};
 use jarvis_power_helper::dev_uds::{
-    bind_listener, development_runtime_enabled, handle_connection_for_testing,
-    read_frame_for_testing, ConnectionEvent, ConnectionObserver, PeerIdentityProbe, PeerSnapshot,
+    bind_listener, bind_listener_with_hook_for_testing, development_runtime_enabled,
+    handle_connection_for_testing, read_frame_for_testing, read_frame_with_timeout_for_testing,
+    BindStage, ConnectionEvent, ConnectionObserver, PeerIdentityProbe, PeerSnapshot,
     RequestDispatcher, RuntimeDispatcher, TransportError, DEV_SOCKET_FILE,
 };
 use jarvis_power_helper::pmset::{DevSudoPmset, PmsetBackend, PmsetError};
+use jarvis_power_helper::root_store::DevRoot;
 use jarvis_power_helper::watchdog::{
     GenericServingRuntime, GenericStartupRuntime, SchedulerArmError, SchedulerFactory,
     WatchdogGuard, WatchdogTask, WatchdogTermination,
@@ -163,6 +167,7 @@ type Runtime = GenericServingRuntime<FakeBackend, FakeClock, FakeProcesses, Fixe
 struct DevHarness {
     _temp: TempDir,
     jarvis_dir: PathBuf,
+    root: DevRoot,
     store: DevStore,
     sink: Arc<RecordingSink>,
     disabled: Arc<Mutex<bool>>,
@@ -174,11 +179,13 @@ struct DevHarness {
 impl DevHarness {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let jarvis_dir = temp.path().join("jarvis");
+        let canonical_temp = fs::canonicalize(temp.path()).unwrap();
+        let jarvis_dir = canonical_temp.join("jarvis");
         fs::create_dir(&jarvis_dir).unwrap();
         fs::set_permissions(&jarvis_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = DevRoot::open(&jarvis_dir).unwrap();
         let sink = Arc::new(RecordingSink::default());
-        let store = DevStore::open_for_testing(&jarvis_dir, sink.clone()).unwrap();
+        let store = DevStore::open_for_testing(&root, sink.clone()).unwrap();
         let disabled = Arc::new(Mutex::new(false));
         let process = Arc::new(Mutex::new(ProcessState::AliveExact));
         let clock = FakeClock {
@@ -210,6 +217,7 @@ impl DevHarness {
         Self {
             _temp: temp,
             jarvis_dir,
+            root,
             store,
             sink,
             disabled,
@@ -503,7 +511,7 @@ fn socket_and_dev_state_are_private_without_following_or_overwriting() {
         .unwrap();
     let listener = bind_listener(
         &harness.runtime.listener_permit(),
-        &harness.jarvis_dir,
+        &harness.root,
         current_uid(),
         harness.sink.clone(),
     )
@@ -529,10 +537,65 @@ fn socket_and_dev_state_are_private_without_following_or_overwriting() {
     let stale_path = run.join(DEV_SOCKET_FILE);
     let stale = UnixListener::bind(&stale_path).unwrap();
     fs::set_permissions(&stale_path, fs::Permissions::from_mode(0o600)).unwrap();
-    drop(stale);
+    assert_eq!(
+        bind_listener(
+            &harness.runtime.listener_permit(),
+            &harness.root,
+            current_uid(),
+            harness.sink.clone(),
+        )
+        .err()
+        .unwrap(),
+        TransportError::UnsafeMetadata
+    );
+    let client = UnixStream::connect(&stale_path).unwrap();
+    let (accepted, _) = stale.accept().unwrap();
+    drop((accepted, client, stale));
+    fs::remove_file(&stale_path).unwrap();
+
+    let special_mode = UnixListener::bind(&stale_path).unwrap();
+    fs::set_permissions(&stale_path, fs::Permissions::from_mode(0o4600)).unwrap();
+    assert_eq!(
+        bind_listener(
+            &harness.runtime.listener_permit(),
+            &harness.root,
+            current_uid(),
+            harness.sink.clone(),
+        )
+        .err()
+        .unwrap(),
+        TransportError::UnsafeMetadata
+    );
+    assert_eq!(
+        fs::symlink_metadata(&stale_path).unwrap().mode() & 0o7777,
+        0o4600
+    );
+    drop(special_mode);
+    fs::remove_file(&stale_path).unwrap();
+
+    let linked = UnixListener::bind(&stale_path).unwrap();
+    fs::set_permissions(&stale_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let hardlink = run.join("socket-hardlink");
+    fs::hard_link(&stale_path, &hardlink).unwrap();
+    assert_eq!(
+        bind_listener(
+            &harness.runtime.listener_permit(),
+            &harness.root,
+            current_uid(),
+            harness.sink.clone(),
+        )
+        .err()
+        .unwrap(),
+        TransportError::UnsafeMetadata
+    );
+    assert_eq!(fs::symlink_metadata(&stale_path).unwrap().nlink(), 2);
+    drop(linked);
+    fs::remove_file(&hardlink).unwrap();
+    fs::remove_file(&stale_path).unwrap();
+
     let replacement = bind_listener(
         &harness.runtime.listener_permit(),
-        &harness.jarvis_dir,
+        &harness.root,
         current_uid(),
         harness.sink.clone(),
     )
@@ -544,7 +607,7 @@ fn socket_and_dev_state_are_private_without_following_or_overwriting() {
     symlink(&sentinel, run.join(DEV_SOCKET_FILE)).unwrap();
     assert!(bind_listener(
         &harness.runtime.listener_permit(),
-        &harness.jarvis_dir,
+        &harness.root,
         current_uid(),
         harness.sink.clone(),
     )
@@ -556,7 +619,7 @@ fn socket_and_dev_state_are_private_without_following_or_overwriting() {
     fs::set_permissions(run.join(DEV_SOCKET_FILE), fs::Permissions::from_mode(0o600)).unwrap();
     assert!(bind_listener(
         &harness.runtime.listener_permit(),
-        &harness.jarvis_dir,
+        &harness.root,
         current_uid(),
         harness.sink.clone(),
     )
@@ -570,11 +633,12 @@ fn socket_and_dev_state_are_private_without_following_or_overwriting() {
 #[test]
 fn unsafe_dev_state_entries_are_rejected_without_following_or_overwriting() {
     let temp = tempfile::tempdir().unwrap();
-    let jarvis_dir = temp.path().join("jarvis");
+    let jarvis_dir = fs::canonicalize(temp.path()).unwrap().join("jarvis");
     fs::create_dir(&jarvis_dir).unwrap();
     fs::set_permissions(&jarvis_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let root = DevRoot::open(&jarvis_dir).unwrap();
     let sink = Arc::new(RecordingSink::default());
-    let store = DevStore::open_for_testing(&jarvis_dir, sink).unwrap();
+    let store = DevStore::open_for_testing(&root, sink).unwrap();
     let outside = temp.path().join("outside");
     fs::write(&outside, b"sentinel").unwrap();
     let state = jarvis_dir.join("power").join(DEV_STATE_FILE);
@@ -715,7 +779,7 @@ fn listener_publication_follows_recovery_and_scheduler_acknowledgement() {
     let harness = DevHarness::new();
     let listener = bind_listener(
         &harness.runtime.listener_permit(),
-        &harness.jarvis_dir,
+        &harness.root,
         current_uid(),
         harness.sink.clone(),
     )
@@ -736,4 +800,92 @@ fn listener_publication_follows_recovery_and_scheduler_acknowledgement() {
     assert!(startup < armed);
     assert!(armed < published);
     drop(listener);
+}
+
+#[test]
+fn one_held_dev_root_prevents_state_and_socket_from_splitting_across_replacement() {
+    let harness = DevHarness::new();
+    let moved = harness.jarvis_dir.with_file_name("jarvis-original");
+    fs::rename(&harness.jarvis_dir, &moved).unwrap();
+    fs::create_dir(&harness.jarvis_dir).unwrap();
+    fs::set_permissions(&harness.jarvis_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    harness.sink.clear();
+
+    assert_eq!(
+        bind_listener(
+            &harness.runtime.listener_permit(),
+            &harness.root,
+            current_uid(),
+            harness.sink.clone(),
+        )
+        .err()
+        .unwrap(),
+        TransportError::UnsafeMetadata
+    );
+    assert!(!harness
+        .jarvis_dir
+        .join("run")
+        .join(DEV_SOCKET_FILE)
+        .exists());
+    assert!(!harness
+        .sink
+        .events()
+        .contains(&HelperEvent::DevListenerPublished));
+}
+
+#[test]
+fn socket_swap_after_bind_never_publishes_or_deletes_the_replacement_sentinel() {
+    let harness = DevHarness::new();
+    let sentinel = harness.jarvis_dir.join("sentinel");
+    let owned_socket = harness.jarvis_dir.join("owned-socket");
+    let sentinel_bytes = b"do-not-delete-or-chmod";
+
+    let result = bind_listener_with_hook_for_testing(
+        &harness.runtime.listener_permit(),
+        &harness.root,
+        current_uid(),
+        harness.sink.clone(),
+        |stage, socket| {
+            if stage == BindStage::AfterSocketPreparedBeforeProof {
+                fs::rename(socket, &owned_socket).unwrap();
+                fs::write(socket, sentinel_bytes).unwrap();
+                fs::set_permissions(socket, fs::Permissions::from_mode(0o640)).unwrap();
+            }
+        },
+    );
+
+    assert!(result.is_err());
+    let socket = harness.jarvis_dir.join("run").join(DEV_SOCKET_FILE);
+    assert_eq!(fs::read(&socket).unwrap(), sentinel_bytes);
+    assert_eq!(fs::metadata(&socket).unwrap().mode() & 0o7777, 0o640);
+    assert!(!harness
+        .sink
+        .events()
+        .contains(&HelperEvent::DevListenerPublished));
+    fs::rename(&socket, sentinel).unwrap();
+    fs::remove_file(owned_socket).unwrap();
+}
+
+#[test]
+fn slow_drip_frame_is_bounded_by_one_absolute_deadline() {
+    let (mut writer, mut reader) = UnixStream::pair().unwrap();
+    let mut bytes = Vec::from(8_u32.to_be_bytes());
+    bytes.extend_from_slice(b"12345678");
+    let writer = thread::spawn(move || {
+        for byte in bytes {
+            if writer.write_all(&[byte]).is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(80));
+        }
+        let _ = writer.shutdown(std::net::Shutdown::Write);
+    });
+
+    let started = Instant::now();
+    assert_eq!(
+        read_frame_with_timeout_for_testing(&mut reader, Duration::from_millis(250)),
+        Err(TransportError::Deadline)
+    );
+    assert!(started.elapsed() < Duration::from_millis(700));
+    writer.join().unwrap();
 }

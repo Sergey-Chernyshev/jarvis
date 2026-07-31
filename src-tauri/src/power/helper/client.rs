@@ -103,5 +103,6 @@ mod tests {
         }
         let non_unicode = OsString::from_vec(vec![b'1', 0xff]);
         assert!(select_for_runtime_value(Some(&non_unicode)).is_none());
+        assert!(!HelperTrust::DevelopmentOnly.authorizes_production());
     }
 }

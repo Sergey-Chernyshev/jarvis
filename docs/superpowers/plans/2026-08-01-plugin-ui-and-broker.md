@@ -14,9 +14,14 @@ request is rebound to server-side exact package identity, then passes Capability
 SQLite/WAL Broker. Core surfaces render declarative contributions; arbitrary plugin markup stays inside the isolated
 child webview.
 
-**Tech Stack:** Rust 2021/MSRV 1.77.2, Tauri `2.11.2`, `tauri-build` `2.6.2`, direct Wry `0.55.1`, `objc2` `0.6.4`,
-`objc2-foundation`/`objc2-web-kit` `0.3.2`, Tokio, SQLite/WAL, JSON Schema, TypeScript/ES modules, Node test runner,
-macOS WKWebView, Tauri official Figma workflow at the mandatory design checkpoint.
+**Tech Stack:** Rust 2021; Rust 1.77.2 is an MSRV claim only for the
+public/pure protocol, SDK and test-host crates whose complete locked graphs run
+in the dedicated `plugin-msrv` job. The Tauri host and its Wry/objc2/SQLite
+graph use the current stable toolchain from CI unless that complete graph is
+separately pinned and tested. Tauri `2.11.2`, `tauri-build` `2.6.2`, direct Wry
+`0.55.1`, `objc2` `0.6.4`, `objc2-foundation`/`objc2-web-kit` `0.3.2`, Tokio,
+SQLite/WAL, JSON Schema, TypeScript/ES modules, Node test runner, macOS
+WKWebView, Tauri official Figma workflow at the mandatory design checkpoint.
 
 **Approved design:** `docs/superpowers/specs/2026-07-31-plugin-platform-agent-vm-v2-design.md` §§3.2, 7.1, 8–11,
 13–14, 22, 25.2 and 26 Increment B.
@@ -52,7 +57,8 @@ writing host implementation. Do not add a second competing manifest model.
   required by Bridge v1 into B. Before implementation starts, update the integration roadmap so Increment C owns
   generic Project/Runtime/Session/Turn contracts and Core projections instead of reimplementing B's stores, Gate or
   cursors. Until that index correction lands, this file is authoritative for the Broker mechanics listed here.
-- B delivers the generic isolation, Broker, settings, bridge and contribution mechanisms.
+- B delivers the generic isolation, Broker, persist-before-dispatch runtime
+  Operation service, settings, bridge and contribution mechanisms.
 - B proves that a core reader and a plugin reader can observe projections from the same Broker transaction and
   revision.
 - B does **not** claim final Projects ↔ Agent VM state synchronization. Increment C must add stable Core Project
@@ -151,7 +157,9 @@ flowchart LR
     Process["Authenticated plugin process"] --> Gate
     CoreUI --> Gate
     Gate --> Broker["Durable Data Broker\nSQLite/WAL"]
-    Gate --> Commands["Typed command providers\nOperation result"]
+    Gate --> RuntimeOps["Durable runtime Operations\npersist before dispatch"]
+    RuntimeOps --> Commands["Exact typed command providers\nreconcile + terminal result"]
+    RuntimeOps --> Broker
     Broker --> CoreProjection["Core projection"]
     Broker --> PluginProjection["Granted plugin projection"]
     Manifest["Verified Manifest v2"] --> Contributions["Host-rendered contributions"]
@@ -309,8 +317,10 @@ fn spoofed_identity_is_rejected_as_unknown_input() {
 ```
 
 `broker_wire.rs` covers full contract SemVer, immutable schema digest, optimistic entity revision, event sequence,
-snapshot revision, cursor gap and field projection. `contribution_wire.rs` covers namespaced IDs, declared locations,
-host-computed risk floor and a context reference without raw path/text. `settings_wire.rs` covers user/project scopes,
+snapshot revision, cursor gap, field projection and the durable runtime
+Operation subject/query/watch/cancel wire shapes. `contribution_wire.rs` covers
+namespaced IDs, declared locations, host-computed risk floor and a context
+reference without raw path/text. `settings_wire.rs` covers user/project scopes,
 revision and secret-reference-only sensitivity.
 
 - [ ] **Step 3: Run the wire tests and verify RED**
@@ -374,6 +384,30 @@ Also define typed selectors, projections, compare-and-swap mutations, query snap
 command declarations/invocations, provider `OutboxBatch`/`OutboxAck` replay DTOs and
 `Completed | Accepted(OperationRef)` results. Owners/callers are absent from write payloads because authenticated
 channels supply them.
+
+The runtime Operation wire types are distinct from A's package-manager
+operation journal and reuse A1's opaque `OperationRef`:
+
+```text
+OperationSubjectRef { contract, subjectId }
+RuntimeOperationState =
+  queued | dispatching | running | waiting_for_provider |
+  succeeded | failed | cancelled | interrupted | timed_out
+RuntimeOperationView {
+  operationRef, subject, exactCommand, state, phase,
+  providerGeneration, createdAt, updatedAt, deadlineAt, error
+}
+RuntimeOperationQuery { subjects, includeTerminalSince, limit }
+RuntimeOperationWatch { cursor, subjects, limit }
+RuntimeOperationChange { cursor, operation }
+RuntimeOperationGap { requestedCursor, earliestCursor, latestCursor }
+RuntimeOperationCancel { operationRef, expectedStateRevision }
+```
+
+Subjects are exact canonical contract + ID pairs; callers cannot send provider
+identity, principal/grant data or risk. DTOs use strict unknown-field rejection
+and contain no raw args/results, path, resource handle or provider-private
+provenance.
 
 `contribution.rs` reuses A2 manifest contribution identifiers and exposes resolved host view models only. It never
 contains HTML. `settings.rs` defines `SettingScope::{User, Project}`, setting key/value/revision DTOs and change
@@ -1133,11 +1167,15 @@ declarations. It canonicalizes JSON once, hashes bytes with SHA-256, compiles va
 persists the canonical schema in the same transaction as the namespace binding. Caller-provided owner/signer fields
 do not exist in this method.
 
-Extract A2's already-proven bounded JSON Schema compiler into `plugins/schema_validation.rs` and reuse it from
-`manifest_v2.rs` and the Broker; do not add a second validator or divergent semantics. Keep every A2 malicious-input
-test green and prove the shared implementation with `cargo +1.77.2 check`. Reject remote `$ref`, network retrieval,
-recursive expansion above the configured depth and schema output that can exceed the entity/event size limits.
-Cache keys are `(contract ID, exact version, schema digest)`.
+Extract A2's already-proven bounded JSON Schema compiler into
+`plugins/schema_validation.rs` and reuse it from `manifest_v2.rs` and the
+Broker; do not add a second validator or divergent semantics. Keep every A2
+malicious-input test green and prove the shared host implementation with the
+current stable CI toolchain (`cargo check --locked --manifest-path
+src-tauri/Cargo.toml --no-default-features`). Reject remote `$ref`, network
+retrieval, recursive expansion above the configured depth and schema output
+that can exceed the entity/event size limits. Cache keys are `(contract ID,
+exact version, schema digest)`.
 
 - [ ] **Step 4: Add RED EntityStore tests**
 
@@ -1191,7 +1229,7 @@ Run:
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
   --test broker_schema_registry --test broker_entities --test broker_recovery
-cargo +1.77.2 test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
+cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
   --test broker_schema_registry --test broker_entities
 git diff --check
 ```
@@ -1229,11 +1267,13 @@ git commit -m "feat(plugins): persist broker schemas and entities"
 - Create: `src-tauri/src/plugin_platform/broker/cursor_store.rs`
 - Create: `src-tauri/src/plugin_platform/broker/outbox_ingress.rs`
 - Create: `src-tauri/src/plugin_platform/broker/projection_adapter.rs`
+- Create: `src-tauri/src/plugin_platform/broker/projection_adapter_state.rs`
 - Create: `src-tauri/src/plugin_platform/broker/private_storage.rs`
 - Create: `src-tauri/migrations/plugin-broker/0002_events_storage_outbox.sql`
 - Create: `src-tauri/tests/broker_events.rs`
 - Create: `src-tauri/tests/broker_outbox.rs`
 - Create: `src-tauri/tests/broker_projection_adapter.rs`
+- Create: `src-tauri/tests/broker_projection_adapter_privacy.rs`
 - Create: `src-tauri/tests/plugin_private_storage.rs`
 - Create: `crates/jarvis-plugin-sdk/src/outbox.rs`
 - Create: `crates/jarvis-plugin-sdk/tests/outbox_replay.rs`
@@ -1271,6 +1311,10 @@ Expected RED: `event_store` and `cursor_store` modules are missing.
   stream_id, next_seq, last_ack_ms, durable, grant_revision)`;
 - `broker_outbox_receipts(owner_plugin_id, owner_package_digest, source_instance_id, outbox_id,
   payload_digest, applied_broker_revision, applied_at_ms)`;
+- `broker_projection_adapter_state(adapter_id, owner_plugin_id,
+  owner_package_digest, source_instance_id, subject_key_digest,
+  binding_schema_digest, binding_json, binding_digest, provider_revision,
+  applied_broker_revision, updated_at_ms)`;
 - `plugin_private_storage(plugin_id, signer_lineage, key, value_json, revision, updated_at_ms)`;
 - `plugin_private_storage_usage(plugin_id, signer_lineage, total_bytes, revision)`.
 
@@ -1296,6 +1340,10 @@ outbox table. They prove:
    and atomically apply host-owned mutations with the outbox receipt;
 10. adapter validation/failure leaves the provider row unacknowledged and
     applies neither receipt nor partial projection.
+11. adapter-private binding state commits in that same transaction, is
+    revision/generation-bound, and has no Broker query/watch/Bridge/SDK path;
+12. public entity/event/snapshot bytes and logs contain none of the
+    adapter-private canaries.
 
 Run:
 
@@ -1303,7 +1351,8 @@ Run:
 cargo test --manifest-path crates/jarvis-plugin-sdk/Cargo.toml --test outbox_replay
 cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml --test outbox_contract
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  --test broker_outbox --test broker_projection_adapter
+  --test broker_outbox --test broker_projection_adapter \
+  --test broker_projection_adapter_privacy
 ```
 
 Expected RED: SDK/test-host outbox APIs and host ingress are absent.
@@ -1324,12 +1373,22 @@ crate-private registry of bounded adapters. The authenticated provider submits
 an adapter-specific observation batch, not a host-owned `EntityEnvelope`.
 Inside the same `IMMEDIATE` Broker transaction, the adapter validates the exact
 provider receipt/generation and observation and returns bounded host-owned
-mutations; Broker applies those mutations with a trusted host principal and
-records the provider outbox receipt atomically. The adapter cannot allocate a
-revision, open a second transaction or bypass schema validation. Provider
-payloads can never select the host principal/adapter owner. B ships only this
-generic mechanism and a fake adapter conformance test; C owns the concrete
-Project Runtime observation DTO, state validation and Core projection.
+mutations plus an optional strict adapter-private binding; Broker applies those
+mutations with a trusted host principal and records the provider outbox
+receipt, binding and applied Broker revision atomically. The private binding is
+validated against the host-registered adapter schema, keyed only by
+authenticated source + subject digests and can contain only the adapter's
+allowlisted digests/revisions. It is not an Entity, Event, plugin private value
+or queryable Broker projection and has no Bridge/SDK/CLI/UI serializer. Raw
+process, attach, resume, path or credential material remains in the provider's
+private domain store.
+
+The adapter cannot allocate a revision, open a second transaction or bypass
+schema validation. Provider payloads can never select the host
+principal/adapter owner or write the private binding directly. B ships only
+this generic mechanism and fake adapter conformance/privacy tests; C owns the
+concrete Project Runtime observation DTO, digest-only provenance-binding
+schema, state validation and Core projection.
 
 - [ ] **Step 5: Add RED private-storage tests**
 
@@ -1371,7 +1430,7 @@ Run:
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
   --test broker_events --test broker_outbox --test broker_projection_adapter \
-  --test plugin_private_storage
+  --test broker_projection_adapter_privacy --test plugin_private_storage
 cargo test --manifest-path crates/jarvis-plugin-sdk/Cargo.toml --test outbox_replay
 cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml --test outbox_contract
 cargo +1.77.2 test --locked --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
@@ -1384,6 +1443,7 @@ Expected: all commands exit `0`; replay is idempotent and a pruned cursor produc
 git add src-tauri/src/plugin_platform/broker src-tauri/migrations/plugin-broker \
   src-tauri/tests/broker_events.rs src-tauri/tests/broker_outbox.rs \
   src-tauri/tests/broker_projection_adapter.rs \
+  src-tauri/tests/broker_projection_adapter_privacy.rs \
   src-tauri/tests/plugin_private_storage.rs crates/jarvis-plugin-sdk \
   crates/jarvis-plugin-test-host
 git commit -m "feat(plugins): persist broker events and private storage"
@@ -1391,7 +1451,7 @@ git commit -m "feat(plugins): persist broker events and private storage"
 
 ---
 
-### Task B6: Add Capability Gate v2, exact grants, revocation and redacted audit
+### Task B6: Add Capability Gate v2, durable runtime Operations, revocation and redacted audit
 
 **Files:**
 
@@ -1403,11 +1463,20 @@ git commit -m "feat(plugins): persist broker events and private storage"
 - Create: `src-tauri/src/plugin_platform/security/risk.rs`
 - Create: `src-tauri/src/plugin_platform/security/revocation.rs`
 - Create: `src-tauri/src/plugin_platform/security/audit.rs`
-- Create: `src-tauri/migrations/plugin-broker/0003_grants_audit.sql`
+- Create: `src-tauri/src/plugin_platform/operations/mod.rs`
+- Create: `src-tauri/src/plugin_platform/operations/store.rs`
+- Create: `src-tauri/src/plugin_platform/operations/dispatch.rs`
+- Create: `src-tauri/src/plugin_platform/operations/watch.rs`
+- Create: `src-tauri/src/plugin_platform/operations/recovery.rs`
+- Create: `src-tauri/migrations/plugin-broker/0003_grants_audit_operations.sql`
 - Create: `src-tauri/tests/plugin_gate_v2.rs`
 - Create: `src-tauri/tests/plugin_grant_revocation.rs`
 - Create: `src-tauri/tests/plugin_audit_redaction.rs`
 - Create: `src-tauri/tests/plugin_command_registry.rs`
+- Create: `src-tauri/tests/runtime_operations.rs`
+- Create: `src-tauri/tests/runtime_operation_recovery.rs`
+- Create: `src-tauri/tests/runtime_operation_watch.rs`
+- Create: `src-tauri/tests/runtime_operation_cancel.rs`
 - Modify: `src-tauri/src/plugin_platform/mod.rs`
 - Modify: `src-tauri/src/plugin_platform/broker/cursor_store.rs`
 - Modify: `src-tauri/src/plugin_platform/broker/outbox_ingress.rs`
@@ -1462,7 +1531,7 @@ Gate v2 for a migrated command, but Gate v2 must not call legacy Gate in a way t
 
 - [ ] **Step 3: Persist exact grants and redacted audit metadata**
 
-`0003_grants_audit.sql` creates:
+`0003_grants_audit_operations.sql` creates:
 
 - `plugin_grants(grant_id, consumer_plugin_id, consumer_package_digest, provider_plugin_id,
   provider_signer_lineage, contract_id, contract_version, schema_digest, operations_json, projects_json,
@@ -1471,10 +1540,35 @@ Gate v2 for a migrated command, but Gate v2 must not call legacy Gate in a way t
 - `plugin_audit(seq, correlation_id, principal_kind, principal_digest, namespace, method, contract_id,
   contract_version, selected_fields_json, args_digest, result_class, risk, grant_id, grant_revision,
   started_at_ms, finished_at_ms)`.
+- `broker_runtime_operations(operation_id, exact_command_id,
+  command_contract_id, command_contract_version, command_schema_digest,
+  subject_contract_id, subject_contract_version, subject_schema_digest,
+  subject_id, provider_plugin_id, provider_package_digest,
+  provider_activation_generation, principal_digest, grant_id, grant_revision,
+  idempotency_key, args_digest, state, state_revision, phase, deadline_at_ms,
+  cancel_requested, error_code, created_at_ms, updated_at_ms,
+  terminal_at_ms)`;
+- `broker_runtime_operation_payloads(operation_id PRIMARY KEY,
+  canonical_args_json, payload_digest, created_at_ms)`, private to the
+  dispatcher and absent from Broker/Bridge/query/audit APIs;
+- `broker_runtime_operation_dispatch(operation_id PRIMARY KEY, attempt,
+  dispatch_state, lease_owner_digest, lease_until_ms,
+  provider_operation_receipt_digest, last_reconciled_at_ms)`;
+- `broker_runtime_operation_changes(cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+  operation_id, subject_contract_id, subject_contract_version, subject_id,
+  state_revision, state, phase, changed_at_ms)`.
+- `broker_runtime_operation_meta(singleton, earliest_cursor, latest_cursor,
+  retention_cutoff_ms)`.
 
 Never persist raw arguments, result payloads, handles, paths, chat text, secret references, plugin private values or a
 full principal identifier in audit. `principal_digest` uses an application-local keyed digest so log correlation
 does not become a stable cross-install identifier.
+
+The private dispatch payload is bounded canonical args validated by the exact
+command schema. Commands whose args can contain a credential value, raw path,
+chat/file bytes or volatile `ResourceHandle` are not eligible for durable
+redispatch and must use references or complete synchronously. The payload is
+deleted on terminal state/retention; it is never logged or returned.
 
 - [ ] **Step 4: Make registration and grant materialization fail explicitly**
 
@@ -1486,7 +1580,65 @@ Do not retain the current legacy `HashMap<&'static str, _>`/`debug_assert!` beha
 contract binding, not a floating range. Any install/update that changes the consumer digest fences the old grant
 until an explicit permission diff is accepted.
 
-- [ ] **Step 5: Add RED revocation race tests**
+- [ ] **Step 5: Add RED durable runtime Operation tests**
+
+`runtime_operations.rs`, `runtime_operation_recovery.rs`,
+`runtime_operation_watch.rs` and `runtime_operation_cancel.rs` prove:
+
+1. Gate authentication, exact schema/grant/risk/confirmation succeeds first;
+   then one `IMMEDIATE` transaction persists `queued`, private dispatch payload
+   and the first change cursor before any provider dispatch counter increments;
+2. `Accepted(OperationRef)` is returned only after that commit;
+3. a duplicate idempotency key with the same exact command, subject and args
+   digest returns the original Operation; changed binding is a conflict;
+4. query by exact subject recovers queued/running Operations after process/UI
+   restart, with deterministic bounded ordering;
+5. watch resumes from a durable cursor, duplicate delivery is idempotent and a
+   retained-gap returns earliest/latest plus a required query-by-subject
+   resync;
+6. crash injection before commit, after commit/before claim, after claim/before
+   dispatch, after dispatch/before provider receipt, after receipt/before Core
+   projection and after projection/before terminal never reports false success
+   or loses accepted work;
+7. cancellation reauthenticates current principal, current grant revision,
+   cancellation permission and exact subject; queued work cancels before
+   dispatch, running work uses only the typed provider cancellation receipt,
+   and cross-subject/revoked cancellation fails;
+8. terminal `succeeded | failed | cancelled | interrupted | timed_out` rows are
+   immutable under late provider replies, replay, retry, revoke and cancel.
+
+The tests must use the runtime Operation service, not A's plugin-package
+install/update journal or an in-memory UI pending map.
+
+- [ ] **Step 6: Implement persist-before-dispatch and crash recovery**
+
+`RuntimeOperationService::admit` receives only the server-derived principal,
+current exact grant/command/provider receipt, canonical subject, validated
+canonical args, host idempotency key, deadline and cancellation policy. It
+commits the Operation, payload, dispatch row and change row before publishing
+work to the bounded dispatcher. The service is the only way a new
+plugin-platform provider mutation returns `Accepted`.
+
+The post-commit worker claims with a lease and revalidates package activation,
+grant and subject before dispatch. Commands eligible for automatic retry must
+declare an exact idempotent dispatch key plus typed provider
+status/reconciliation contract. On restart:
+
+- unclaimed committed rows are claimed once;
+- expired claims reconcile by provider receipt/status before retry;
+- unknown non-idempotent external state becomes `interrupted` with explicit
+  repair, never blind duplicate dispatch or success;
+- provider acknowledgement is persisted before Core result projection;
+- terminal state is committed only after exact result validation and required
+  Core projection.
+
+`RuntimeOperationQuery` reads pending/recent rows by exact subject after
+restart. `RuntimeOperationWatch` uses the durable change cursor and gap
+protocol. Cancellation uses the same Gate reauthentication and creates a
+durable change. SQL constraints/triggers and service state checks both enforce
+terminal immutability.
+
+- [ ] **Step 7: Add RED revocation race tests**
 
 `plugin_grant_revocation.rs` pauses requests at each boundary:
 
@@ -1511,7 +1663,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
 
 Expected RED: paused requests currently return success after revoke.
 
-- [ ] **Step 6: Implement Gate v2 as the only new Broker/command entry**
+- [ ] **Step 8: Implement Gate v2 as the only new Broker/command entry**
 
 The fixed order is:
 
@@ -1521,15 +1673,19 @@ The fixed order is:
 4. validate size and args schema;
 5. compute risk floor and confirm when required;
 6. reserve quota/deadline and register revocation cancellation;
-7. invoke Broker/provider;
-8. revalidate package generation, grant revision and result schema;
-9. apply result projection;
-10. persist a redacted audit outcome and return.
+7. for an asynchronous provider mutation, commit a runtime Operation before
+   returning/dispatching; for documented synchronous Broker work, execute
+   inline;
+8. let the post-commit Operation worker dispatch/reconcile the exact provider
+   command;
+9. revalidate package generation, grant revision and result schema;
+10. apply result projection, then commit immutable terminal Operation state;
+11. persist a redacted audit outcome and return/notify.
 
 Every failure writes only a stable result class and correlation ID. Confirmation text is host-generated from the
 resolved command, subject summary and computed risk; plugin strings are escaped content, never markup.
 
-- [ ] **Step 7: Verify audit redaction and explicit duplicates**
+- [ ] **Step 9: Verify audit redaction, operations and explicit duplicates**
 
 `plugin_audit_redaction.rs` invokes with a canary path, chat text, token-like string, private value and opaque handle,
 then scans SQLite, logs and serialized audit output for each canary. `plugin_command_registry.rs` registers the same
@@ -1541,13 +1697,16 @@ Run:
 cargo test --release --manifest-path src-tauri/Cargo.toml --no-default-features \
   --test plugin_command_registry
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  --test plugin_gate_v2 --test plugin_grant_revocation --test plugin_audit_redaction
+  --test plugin_gate_v2 --test plugin_grant_revocation \
+  --test plugin_audit_redaction --test runtime_operations \
+  --test runtime_operation_recovery --test runtime_operation_watch \
+  --test runtime_operation_cancel
 ```
 
 Expected: all commands exit `0`; no canary appears in database/log output; duplicate registration is not silently
 overwritten.
 
-- [ ] **Step 8: Security review and commit B6**
+- [ ] **Step 10: Security review and commit B6**
 
 Run:
 
@@ -1566,9 +1725,14 @@ required bindings.
 
 ```bash
 git add src-tauri/src/plugin_platform/security src-tauri/src/plugin_platform/mod.rs \
+  src-tauri/src/plugin_platform/operations \
   src-tauri/src/plugin_platform/broker src-tauri/migrations/plugin-broker \
   src-tauri/tests/plugin_gate_v2.rs src-tauri/tests/plugin_grant_revocation.rs \
   src-tauri/tests/plugin_audit_redaction.rs src-tauri/tests/plugin_command_registry.rs \
+  src-tauri/tests/runtime_operations.rs \
+  src-tauri/tests/runtime_operation_recovery.rs \
+  src-tauri/tests/runtime_operation_watch.rs \
+  src-tauri/tests/runtime_operation_cancel.rs \
   src-tauri/src/capability/mod.rs
 git commit -m "security(plugins): enforce exact broker grants"
 ```
@@ -1655,11 +1819,16 @@ checkpoint has a dated approval. A prose-only mock or an image without editable 
 - opaque random data with no path, subject, plugin or method substring;
 - bound to exact plugin digest, authenticated page/process instance, invocation ID, method, subject, snapshot
   generation and grant revision;
+- minted only after an explicit invocation/click and current authorization;
+  entity/snapshot/query/render and route-open paths cannot pre-mint one;
 - unusable by another page/process or another method;
 - limited by TTL, read count and total bytes;
 - revalidated against current grant and underlying resource identity on every read;
 - revoked on navigation, page close, update, rollback, disable, uninstall, grant revoke and terminal Operation;
 - absent from entities, events, cursor rows, audit rows and logs after use/restart.
+- absent from Core ChangeSet/ChangedFile/Session projections and durable runtime
+  Operation args/results; changed-file content/diff/open/reveal and attach
+  descriptors each require a separate single-purpose handle.
 
 Run:
 
@@ -2064,7 +2233,8 @@ typed cross-page navigation, crash/reload, close and restore of a user-pinned ro
 
 `plugin_page_no_side_effects.rs` installs instrumented provider counters and asserts that opening Plugin Manager,
 opening a plugin page, restoring a sidebar route, laying it out or reconnecting Bridge does not call a plugin command,
-create an Operation, provision a runtime/VM, ensure a terminal or create a Session.
+create an Operation/resource handle, provision a runtime/VM, ensure a terminal
+or create a Session.
 
 Run:
 
@@ -2334,7 +2504,13 @@ Core principal plus minimized context to Gate v2.
 
 For `openPage`, call B9's read-only page controller. For a command, return B1
 `Completed(result) | Accepted(OperationRef)`. Accepted is never painted as success; the host watches the durable
-Operation until terminal state. A runtime command is looked up only by B10's generation-bound exact registration
+runtime Operation from B6 until terminal state. Any asynchronous/provider
+mutation enters `RuntimeOperationService::admit`; its row/change is committed
+before the post-commit worker dispatches and before `Accepted` returns.
+`plugin_operation_watch` is cursor-based and gap-aware, and a fresh/restarted
+surface can query pending Operations by exact subject. Cancellation routes
+back through current Gate authorization and exact subject binding. A runtime
+command is looked up only by B10's generation-bound exact registration
 receipt; no free handler string reaches dispatch.
 
 - [ ] **Step 7: Add RED host renderer, palette and schema-form tests**
@@ -2381,8 +2557,11 @@ small and independently testable; no full renderer rewrite is part of B.
 - control action uses host confirmation;
 - destructive action uses a distinct destructive confirmation and cannot be auto-approved by plugin metadata;
 - stale/expired context and revoked grant fail before provider dispatch;
-- accepted Operation remains pending until Broker terminal state;
-- cancel permission is independently checked;
+- accepted runtime Operation is durably visible before provider dispatch,
+  survives host/UI restart and remains pending until terminal state;
+- operation watch cursor gap forces query-by-subject resync;
+- cancel permission/current grant/exact subject are independently checked;
+- terminal success/failure/cancel cannot be rewritten by late provider reply;
 - opening a page invokes no provider command.
 
 Run:
@@ -2391,7 +2570,9 @@ Run:
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
   --test plugin_contribution_registry --test plugin_runtime_command_resolution \
   --test plugin_when_expression \
-  --test plugin_context_minimization --test plugin_contribution_invocation
+  --test plugin_context_minimization --test plugin_contribution_invocation \
+  --test runtime_operations --test runtime_operation_recovery \
+  --test runtime_operation_watch --test runtime_operation_cancel
 node --test ui/plugin-platform/contributions.test.mjs \
   ui/plugin-platform/command-palette.test.mjs \
   ui/plugin-platform/schema-form.test.mjs
@@ -2636,12 +2817,17 @@ grantRevision
 settingsRevision
 contributionRevision
 pageGenerations
+runtimeOperationCursor
+pendingRuntimeOperations
 reconciliationState
 ```
 
 Every enabled page, Bridge Welcome, contribution, hotkey, setting definition and grant in that snapshot must point
-to the same exact active package digest and activation generation. UI applies only a newer snapshot; it cannot merge
-manager state from one digest with contributions or grants from another.
+to the same exact active package digest and activation generation. Every
+pending runtime Operation is subject-bound and retains the provider generation
+under which it was admitted. UI applies only a newer snapshot/cursor; it cannot
+merge manager state from one digest with contributions, grants or pending
+Operations from another.
 
 `plugin_lifecycle_reconciliation.rs` drives install, enable, update, permission-pending, rollback, disable and
 uninstall. At every intermediate state new admission is either consistent or closed; there is no window where old
@@ -2671,7 +2857,8 @@ is idempotent; a changed payload is a hard conflict.
 The lifecycle order is:
 
 1. increment/fence activation generation and close new admission;
-2. cancel pages/Bridge/watches/handles/queued commands;
+2. cancel pages/Bridge/watches/handles and authorize durable cancellation of
+   queued runtime Operations; fence disclosure/reconcile running Operations;
 3. unregister contributions/hotkeys/provider routes;
 4. reconcile exact receipt, contracts, grants, setting definitions and private-state migrations;
 5. register the new exact generation;
@@ -2691,6 +2878,8 @@ rollback, disable and uninstall. On restart it asserts:
 - committed Broker data/private settings retain their documented policy;
 - handles are gone;
 - pending Operations remain durable but cannot disclose revoked results;
+- pending Operations remain queryable by subject after restart, their cursor
+  gaps resync, and terminal rows remain immutable;
 - the snapshot reports recovery until convergence;
 - replay is idempotent.
 
@@ -2750,7 +2939,9 @@ Add `check:plugin-platform-boundaries` to CI.
 `PluginPlatformCoordinator` owns no second copy of manager or Broker data. It subscribes to A manager receipts,
 orchestrates fences/adapters and builds a host snapshot from committed service revisions under one coordinator read
 guard. Each subsystem registers/unregisters with an activation-generation receipt; the snapshot rejects mixed
-generations.
+generations. It reads B6 runtime Operations and their high-water cursor from
+the same Broker read transaction; it does not reconstruct pending work from UI
+memory or A's package-manager journal.
 
 Startup runs A receipt reconciliation before reopening plugin admission. Shutdown stops new admission, fences page
 generations, drains Bridge/Broker bounded work, checkpoints lifecycle/Broker WAL and then closes raw views. This
@@ -2766,6 +2957,8 @@ bash scripts/check-plugin-platform-boundaries.sh
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
   --test plugin_platform_snapshot --test plugin_lifecycle_reconciliation \
   --test plugin_platform_crash_matrix --test broker_projection_consistency \
+  --test runtime_operation_recovery --test runtime_operation_watch \
+  --test runtime_operation_cancel \
   --test plugin_page_no_side_effects
 npm run test:ui
 git diff --check
@@ -2859,8 +3052,10 @@ not add a second fixture-only manifest parser.
 10. grant revoke during request/watch;
 11. update permission diff and old-generation fence;
 12. crash/restart reconciliation;
-13. disable/uninstall cleanup of pages, Bridge, contributions and hotkeys;
-14. page/route open produces no provider/VM/session side effect.
+13. runtime Operation persisted before dispatch, restart query-by-subject,
+    cursor gap/resync, authorized cancellation and immutable terminal state;
+14. disable/uninstall cleanup of pages, Bridge, contributions and hotkeys;
+15. page/route open produces no provider/VM/session side effect.
 
 Run:
 
@@ -2903,8 +3098,10 @@ B behavior.
 Assign separate reviewers; the implementation author cannot self-approve all four:
 
 1. **Security:** raw Wry boundary, macOS deny delegate, scheme/assets, Tauri ACL, principal/grant binding, revocation,
-   resource handles, audit redaction and dependency attestation.
+   resource handles, runtime Operation cancellation/subject authorization,
+   audit redaction and dependency attestation.
 2. **Storage/recovery:** migrations/WAL, CAS, schema immutability, cursor gap/resync, outbox idempotency, quotas,
+   persist-before-dispatch runtime Operations, terminal immutability,
    corruption quarantine and crash matrix.
 3. **Public API:** Manifest/A1 compatibility, Bridge wire stability, SDK/schema generation, Gate errors, SemVer and
    no provider-specific shortcuts.
@@ -3002,16 +3199,25 @@ git commit -m "test(plugins): certify ui host and data broker"
 - [ ] Broker contracts are immutable; entities use CAS and transaction-level Broker revisions.
 - [ ] Events are durable at-least-once with explicit cursor gap/resync; outbox replay is idempotent.
 - [ ] Gate v2 binds exact authenticated principal/digest/contract/grant and rechecks after provider work.
+- [ ] Runtime Operations are committed before provider dispatch, survive
+  restart/query by subject, expose durable cursor gap/resync, reauthorize
+  cancellation and keep terminal state immutable.
 - [ ] Audit is redacted; secrets, raw paths/text, private values and handles never persist in shared/audit payloads.
 - [ ] Handles are volatile, scoped, limited and revoked on every lifecycle fence.
 - [ ] Host/custom/process settings share one canonical value/revision; secrets are credential references only.
 - [ ] Core contributions are declarative, safely rendered, deterministic and independently authorized.
 - [ ] Dynamic hotkeys/pins/visibility are Core-owned and reconciled on every lifecycle transition.
-- [ ] Opening a manager/project/plugin route produces no provider, VM, terminal or Session side effect.
+- [ ] Opening a manager/project/plugin route produces no
+  provider/Operation/resource-handle/VM/terminal/Session side effect.
 - [ ] Generic B modules pass the provider-neutral boundary lint.
 - [ ] Core and plugin projections prove one Broker snapshot revision.
 - [ ] Provider outbox adapters atomically create host-owned projections without
   granting providers ownership of Core contracts.
+- [ ] Adapter-private provenance bindings are transactionally stored outside
+  Broker query/Bridge surfaces and public projections contain no private
+  canaries.
+- [ ] Rust 1.77.2 is tested only for public/pure locked graphs; host tests use
+  current stable unless the complete Tauri graph is pinned.
 - [ ] Figma evidence and four independent review reports have no unresolved high/critical finding.
 - [ ] Final documentation says Projects ↔ Agent VM synchronization remains contingent on C and E.
 

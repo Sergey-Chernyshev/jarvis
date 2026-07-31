@@ -1386,8 +1386,13 @@ Plugin Runtime Host отслеживает:
 - last durable cursor;
 - retry/backoff.
 
-Accepted command сначала сохраняется как Operation, затем отправляется runtime.
-Crash процесса не удаляет принятую команду.
+Accepted command сначала сохраняется generic Broker runtime Operation service
+вместе с exact subject, provider/grant generation и durable change cursor,
+commit-ится, и только затем post-commit worker отправляет exact typed command
+в runtime. Pending Operation после restart запрашивается по subject; gap cursor
+требует resync, cancel повторно авторизуется, terminal state immutable. A
+package-manager Operation journal не заменяет этот сервис. Crash процесса не
+удаляет принятую команду.
 
 ### 12.3 Graceful shutdown
 
@@ -1450,10 +1455,13 @@ Operation
 Attachment
 MemorySnapshot
 NotificationReceipt
+CatalogPreferences
+ChangeSet
 ```
 
 Core owns provider-neutral schemas
-`dev.jarvis.core/{project-runtime-provider,runtime,session,turn}@1.0.0`.
+`dev.jarvis.core/{project,catalog-preferences,project-runtime-provider,runtime,
+session,turn,change-set}@1.0.0`.
 Каждый provider projection обязан валидироваться core schema; специфичные поля
 живут только в extension envelope:
 
@@ -1487,6 +1495,24 @@ temporarily unavailable roots сохраняют Project identity; Runtime вс�
 ссылается на catalog ID. Existing folders, favorites и `agentVm.projects`
 import-ятся idempotently.
 
+Interactive registration не принимает raw path/cwd из IPC. Host picker
+открывает directory с no-follow semantics и выдаёт короткоживущий one-time
+fd-bound handle; commit повторно сверяет inode/device/path identity. Cancel,
+expiry, replay или symlink/inode swap не создаёт revision.
+
+Favorites и cards/list mode живут в одном `CatalogPreferencesView`. Каждый
+Catalog outbox change set несёт полную preferences view и затронутые Projects
+под одним `catalogSourceRevision`; Broker атомарно возвращает
+`acknowledgedBrokerRevision`, а Catalog сохраняет exact mapping. UI/headless
+сериализуют одинаковые полные bytes и обе revision.
+
+Outbox input не предсказывает Broker revision и не принимает acknowledgement
+от caller/provider: trusted writer аллоцирует revision и сам инжектит её в
+финальные Project/CatalogPreferences views. В той же Broker transaction
+пишется immutable host-only `CatalogProjectionReceipt` с exact source/ack
+pair и payload digest; snapshot reader валидирует старые/новые Project rows по
+этому Broker ledger без join к private Catalog DB.
+
 ### 13.2 Runtime
 
 ```text
@@ -1497,9 +1523,6 @@ desiredState
 observedState
 generation
 revision
-hostBootId
-lifecycleLease
-providerReceiptId
 reason
 resourceSummary
 lastActivityAt
@@ -1510,6 +1533,9 @@ lastActivityAt
 stopping | error | unmanaged | quarantined`. Уникальность:
 `(projectId, providerId, providerInstance)`.
 
+Host boot/lifecycle lease/provider receipt являются host-private provenance
+binding и не входят в Runtime view.
+
 ### 13.3 Session
 
 ```text
@@ -1517,23 +1543,29 @@ sessionId
 runtimeId
 backend
 mode
-transportId
-backendSessionId
 state
 desiredState
 revision
-guestBootId
-tmuxTarget
-processStartIdentity
 currentTurnId
 resumability
+displayTitle
+changeSetId
 createdAt
 lastActivityAt
 ```
 
 `state`: `creating | ready | working | waiting | draining | stopped | failed |
-interrupted | quarantined`. Один Session соответствует одной private
-guest-supervisor-owned PTY/tmux target и сохраняет backend resume identity.
+interrupted | quarantined`. Это публичный `SessionView`. Он не содержит
+transport/backend session ID, guest/host boot ID, tmux/PID/process identity,
+resume/attach command/environment или provider-local key.
+
+Один Session соответствует одной private guest-supervisor-owned PTY/tmux
+target и сохраняет backend resume identity, но raw значения остаются в
+provider/controller store. Projection adapter принимает strict allowlisted
+provider observation без canonical ID/desired state/revision, связывает её с
+host-owned IDs/Operation/receipt и сохраняет только digest/revision provenance
+в adapter-private state без Broker query/Bridge/UI/CLI path. Попытка provider
+передать host-owned или process/attach поле отклоняется до projection.
 
 ### 13.4 Turn
 
@@ -1561,7 +1593,20 @@ Session с configurable limit; default один active Turn и восемь queu
 старые deep links продолжают резолвиться через alias. Один Session может
 содержать много Turns.
 
-### 13.5 Generic Project UI
+### 13.5 ChangeSet and changed files
+
+`ChangeSetView` содержит canonical opaque `changeSetId`, Project/Session/Turn
+IDs, revision, totals и bounded `ChangedFileView` с opaque `changedFileId`,
+basename/display metadata, change kind и counts. В нём нет raw/relative path,
+provider file key, bytes, diff или durable handle.
+
+File content/diff/open/reveal и attach descriptor доступны только после
+explicit click: Core повторно авторизует subject/grant/revision и просит B
+выдать single-purpose volatile `ResourceHandle` с TTL/read/byte quota. Handle
+не попадает в entity/event/cursor/Operation/log/snapshot и инвалидируется
+после use/expiry/navigation/grant revoke/provider update.
+
+### 13.6 Generic Project UI
 
 Core Project Detail является provider-neutral и всегда показывает:
 
@@ -1570,11 +1615,12 @@ Core Project Detail является provider-neutral и всегда показ
 - unified sessions list с provider badge;
 - `New session` flow с выбором runtime/backend;
 - stable status/action slots из manifest;
-- files/favorites без runtime-specific rendering;
+- provider-neutral ChangeSet files/favorites без runtime-specific rendering;
 - link на полноэкранную plugin page.
 
 Card/query читают только Project Runtime projections. Открытие страницы не
-создаёт Runtime и не запускает Session. Если provider отсутствует, core
+создаёт Runtime, Operation или resource handle и не запускает Session. Если
+provider отсутствует, core
 показывает install/enable CTA; если Runtime drifted — Doctor/Repair.
 
 `contributes.projectRuntimes` связывает provider ID, supported project kinds,
@@ -2498,11 +2544,14 @@ Smoke covers:
 - UI SDK/tokens, command palette, extension actions and hotkeys;
 - typed settings and Developer Mode surfaces;
 - durable EntityStore, schema registry and provider outbox ingress;
-- events/cursors, typed commands, ACL/audit and opaque resources.
+- events/cursors, typed commands, ACL/audit and opaque resources;
+- persist-before-dispatch runtime Operation service с subject query,
+  cursor gap/resync, authorized cancel и immutable terminal state;
+- query-invisible adapter-private provenance binding.
 
 ### Increment C — Generic Project Runtime
 
-- Project/Runtime/Session/Turn model;
+- Project/CatalogPreferences/Runtime/Session/Turn/ChangeSet model;
 - generic project UI;
 - plugin runtime contributions;
 - remove Agent VM-specific rendering/IPC from generic Projects surfaces;

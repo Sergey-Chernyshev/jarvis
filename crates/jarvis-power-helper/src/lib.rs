@@ -49,3 +49,7 @@ mod root_store_contract_tests;
 #[cfg(test)]
 #[path = "../tests/support/watchdog.rs"]
 mod watchdog_contract_tests;
+
+#[cfg(all(test, feature = "dev-uds"))]
+#[path = "../tests/support/dev_uds.rs"]
+mod dev_uds_contract_tests;

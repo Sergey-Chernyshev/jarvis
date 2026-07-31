@@ -74,6 +74,7 @@ path = "src/bin/jarvis-mcp.rs"
 # ad-hoc сборках. cmake требуется всегда (есть локально + шаг в release.yml).
 # Отключить можно явно: `cargo build --no-default-features`.
 default = ["whisper-native"]
+power-helper-dev = []
 whisper-native = ["dep:whisper-rs"]
 # wake-word через openWakeWord/ort (инкр. 10). ВЫКЛ по умолчанию: дефолтная сборка
 # НЕ тянет onnxruntime и компилируется офлайн. Для работы нужны 3 ONNX-модели

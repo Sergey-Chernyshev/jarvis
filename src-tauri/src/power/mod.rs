@@ -9,6 +9,7 @@
 
 pub mod assertion;
 pub mod clamshell;
+pub(crate) mod helper;
 pub mod keep_awake;
 pub mod ownership;
 pub mod ownership_store;

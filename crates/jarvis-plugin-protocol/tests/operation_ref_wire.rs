@@ -22,3 +22,24 @@ fn operation_ref_is_an_opaque_bounded_string() {
     }))
     .is_err());
 }
+
+#[test]
+fn operation_ref_rejects_host_path_and_uri_shapes() {
+    for invalid in [
+        "/Users/alice/repo",
+        "~/repo",
+        "C:/repo",
+        "c:/repo",
+        "file:///Users/alice/repo",
+        "https://example.test/repo",
+        "project//01",
+        "project/./01",
+        "project/../01",
+        "project/",
+    ] {
+        assert!(
+            OperationRef::new(invalid).is_err(),
+            "path-like operation ref must be rejected: {invalid}"
+        );
+    }
+}

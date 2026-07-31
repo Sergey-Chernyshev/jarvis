@@ -38,6 +38,18 @@ fn spoofed_identity_is_rejected_as_unknown_input() {
 }
 
 #[test]
+fn request_ids_reject_host_path_and_uri_shapes() {
+    for invalid in path_like_ids() {
+        let mut request = golden("bridgeRequest");
+        request["id"] = json!(invalid);
+        assert!(
+            serde_json::from_value::<BridgeClientFrame>(request).is_err(),
+            "path-like request id must be rejected: {invalid}"
+        );
+    }
+}
+
+#[test]
 fn welcome_identity_is_informational_host_output_only() {
     let welcome: BridgeHostFrame = serde_json::from_value(golden("bridgeWelcome")).unwrap();
     let serialized = serde_json::to_value(welcome).unwrap();
@@ -55,4 +67,19 @@ fn bridge_error_has_stable_redacted_fields() {
     let mut unknown = golden("bridgeError");
     unknown["sql"] = json!("select * from broker_entities");
     assert!(serde_json::from_value::<BridgeHostFrame>(unknown).is_err());
+}
+
+fn path_like_ids() -> [&'static str; 10] {
+    [
+        "/Users/alice/repo",
+        "~/repo",
+        "C:/repo",
+        "c:/repo",
+        "file:///Users/alice/repo",
+        "https://example.test/repo",
+        "project//01",
+        "project/./01",
+        "project/../01",
+        "project/",
+    ]
 }

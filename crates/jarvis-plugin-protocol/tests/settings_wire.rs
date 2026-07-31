@@ -83,3 +83,44 @@ fn setting_key_is_namespaced_bounded_and_unknown_identity_is_rejected() {
     .unwrap_err();
     assert!(error.to_string().contains("unknown field"));
 }
+
+#[test]
+fn setting_references_reject_host_path_and_uri_shapes() {
+    for invalid in path_like_ids() {
+        let project_record = json!({
+            "key": "dev.example.owner.timeout",
+            "scope": "project",
+            "projectId": invalid,
+            "value": {"type": "integer", "value": 30},
+            "revision": 3
+        });
+        assert!(
+            serde_json::from_value::<SettingRecord>(project_record).is_err(),
+            "path-like project reference must be rejected: {invalid}"
+        );
+
+        let credential = json!({
+            "type": "credentialReference",
+            "reference": {"credentialId": invalid}
+        });
+        assert!(
+            serde_json::from_value::<SettingValue>(credential).is_err(),
+            "path-like credential reference must be rejected: {invalid}"
+        );
+    }
+}
+
+fn path_like_ids() -> [&'static str; 10] {
+    [
+        "/Users/alice/repo",
+        "~/repo",
+        "C:/repo",
+        "c:/repo",
+        "file:///Users/alice/repo",
+        "https://example.test/repo",
+        "project//01",
+        "project/./01",
+        "project/../01",
+        "project/",
+    ]
+}

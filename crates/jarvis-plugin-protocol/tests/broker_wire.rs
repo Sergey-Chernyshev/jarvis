@@ -75,6 +75,23 @@ fn entity_mutation_carries_revision_but_no_owner_identity() {
 }
 
 #[test]
+fn broker_ids_reject_host_path_and_uri_shapes() {
+    for invalid in path_like_ids() {
+        let mutation = json!({
+            "type": "put",
+            "contract": golden_contract(),
+            "id": invalid,
+            "expectedRevision": 4,
+            "data": {}
+        });
+        assert!(
+            serde_json::from_value::<EntityMutation>(mutation).is_err(),
+            "path-like broker id must be rejected: {invalid}"
+        );
+    }
+}
+
+#[test]
 fn entity_event_snapshot_gap_and_projection_fields_are_stable() {
     let entity: EntityEnvelope = serde_json::from_value(json!({
         "contract": golden_contract(),
@@ -309,4 +326,19 @@ fn public_envelopes_reject_unknown_identity_and_provenance_fields() {
         );
         value.as_object_mut().unwrap().remove(forbidden);
     }
+}
+
+fn path_like_ids() -> [&'static str; 10] {
+    [
+        "/Users/alice/repo",
+        "~/repo",
+        "C:/repo",
+        "c:/repo",
+        "file:///Users/alice/repo",
+        "https://example.test/repo",
+        "project//01",
+        "project/./01",
+        "project/../01",
+        "project/",
+    ]
 }

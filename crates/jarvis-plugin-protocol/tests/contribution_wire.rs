@@ -68,3 +68,32 @@ fn resolved_context_never_accepts_raw_path_text_or_html() {
         );
     }
 }
+
+#[test]
+fn context_ids_reject_host_path_and_uri_shapes() {
+    for invalid in path_like_ids() {
+        assert!(
+            serde_json::from_value::<ContextReference>(json!({
+                "type": "project",
+                "id": invalid
+            }))
+            .is_err(),
+            "path-like context id must be rejected: {invalid}"
+        );
+    }
+}
+
+fn path_like_ids() -> [&'static str; 10] {
+    [
+        "/Users/alice/repo",
+        "~/repo",
+        "C:/repo",
+        "c:/repo",
+        "file:///Users/alice/repo",
+        "https://example.test/repo",
+        "project//01",
+        "project/./01",
+        "project/../01",
+        "project/",
+    ]
+}

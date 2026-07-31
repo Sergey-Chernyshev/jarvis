@@ -11,6 +11,7 @@ pub mod assertion;
 pub mod clamshell;
 pub mod keep_awake;
 pub mod ownership;
+pub mod ownership_store;
 
 use serde_json::{json, Map, Value};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};

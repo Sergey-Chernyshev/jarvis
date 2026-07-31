@@ -420,11 +420,13 @@ then ensure `Jarvis`, `Power`, and `v2` one component at a time with fd-relative
 `fchmod`, and `fsync`:
 
 - `mkdirat` uses mode `0700`; after successful creation, open the exact child with
-  `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`, prove the fd still names that new directory entry, and apply exact `0700`
-  only to that newly created fd;
-- after `EEXIST`, open and validate the exact child but never change its metadata; only a root:wheel directory whose mode
-  is a stricter subset of `0700` may receive bounded 250 ms revalidation for an in-flight concurrent creator, while
-  wrong type/owner or any extra permission bit fails immediately;
+  `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`, prove the fd still names that new directory entry, allow only the fixed
+  private gid or the already-validated parent-inherited gid before normalization, then apply root:wheel ownership and
+  exact `0700` only to that newly created fd;
+- after `EEXIST`, open and validate the exact child but never change its metadata; only a root-owned directory whose gid
+  is either wheel or the already-validated parent-inherited gid and whose mode is a stricter subset of `0700` may
+  receive bounded 250 ms revalidation for an in-flight concurrent creator. Success still requires final exact
+  root:wheel ownership; wrong type/owner/gid or any extra permission bit fails immediately;
 - for each new private descendant, require root:wheel ownership, exact mode `0700`, directory type, and matching fd
   versus no-follow directory-entry device/inode identity before descending;
 - reject symlinks, regular files, unsafe owner/mode, substitution, and detectable unexpected link topology; state,

@@ -240,6 +240,10 @@ fn release_resolves_obligation(
     }
 }
 
+fn battery_release_confirms_normal_sleep(outcome: clamshell::ReleaseOutcome) -> bool {
+    outcome.sleep_disabled() == Some(false)
+}
+
 fn failed_acquire_needs_owner_retry(
     failure: &clamshell::AcquireFailure,
     cleanup: &Result<clamshell::ReleaseOutcome, clamshell::PowerError>,
@@ -1348,12 +1352,11 @@ async fn battery_guard(d: &Arc<Daemon>) {
             outcome
                 .ok()
                 .filter(|outcome| release_resolves_obligation(owner_obligation, *outcome))
-                .map(|outcome| (outcome, owner_obligation))
         })
     } else {
         None
     };
-    if let Some((outcome, obligation)) = release_outcome {
+    if let Some(outcome) = release_outcome {
         {
             let mut clam = d.power.clam.lock().unwrap();
             clam.armed = false;
@@ -1365,10 +1368,7 @@ async fn battery_guard(d: &Arc<Daemon>) {
         if !d.power.operations.accepting() {
             return;
         }
-        if outcome.sleep_disabled() == Some(false)
-            || (obligation == clamshell::AcquireObligation::LeaseMayExist
-                && outcome == clamshell::ReleaseOutcome::NotOwned)
-        {
+        if battery_release_confirms_normal_sleep(outcome) {
             d.notify(
                 "⌒ Крышка: батарея садится",
                 &format!("Осталось {pct}% — вернул нормальный сон"),
@@ -1623,6 +1623,23 @@ mod tests {
         assert!(!failed_acquire_needs_owner_retry(
             &mutation_may_remain,
             &Ok(clamshell::ReleaseOutcome::Restored(false)),
+        ));
+    }
+
+    #[test]
+    fn resolved_lease_uncertainty_does_not_claim_normal_sleep() {
+        let outcome = clamshell::ReleaseOutcome::NotOwned;
+
+        assert!(release_resolves_obligation(
+            clamshell::AcquireObligation::LeaseMayExist,
+            outcome,
+        ));
+        assert!(!battery_release_confirms_normal_sleep(outcome));
+        assert!(!battery_release_confirms_normal_sleep(
+            clamshell::ReleaseOutcome::BaselineUnchanged(true),
+        ));
+        assert!(battery_release_confirms_normal_sleep(
+            clamshell::ReleaseOutcome::Restored(false),
         ));
     }
 

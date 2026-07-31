@@ -1,0 +1,39 @@
+{
+  "bridgeError": {
+    "code": "grant_scope_denied",
+    "correlationId": "correlation/01",
+    "generation": 7,
+    "id": "request/01",
+    "message": "request denied",
+    "type": "error",
+    "v": 1
+  },
+  "bridgeRequest": {
+    "deadlineMs": 10000,
+    "generation": 7,
+    "id": "request/01",
+    "method": "entities.watch",
+    "namespace": "broker",
+    "params": {
+      "contract": "dev.example/runtime@1.0.0"
+    },
+    "type": "request",
+    "v": 1
+  },
+  "bridgeWelcome": {
+    "generation": 7,
+    "grants": [
+      "broker.entities.watch"
+    ],
+    "packageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "pageId": "home",
+    "pluginId": "dev.example.owner",
+    "type": "welcome",
+    "v": 1
+  },
+  "contractRef": {
+    "id": "dev.example/runtime",
+    "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "version": "1.2.3-alpha.1+build.7"
+  }
+}

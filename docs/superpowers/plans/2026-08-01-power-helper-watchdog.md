@@ -129,6 +129,7 @@ crates/jarvis-power-helper/
   src/{lib,coordinator,root_store,dev_store,pmset,watchdog,xpc_server,dev_uds}.rs
   src/bin/{jarvis-power-helper,jarvis-power-helper-dev}.rs
   tests/{root_store,watchdog,dev_uds}.rs
+  tests/support/{root_store,watchdog,dev_uds}.rs
 src-tauri/src/power/helper/
   mod.rs client.rs renewal.rs xpc.rs dev_uds.rs migration.rs lifecycle.rs
 src-tauri/native/{power_helper_client.h,power_helper_client.m}
@@ -136,6 +137,7 @@ src-tauri/PowerHelper/
   app.jarvis.monitor.power-helper.plist
   helper.entitlements.plist
 scripts/
+  check-power-helper-host-scope.sh
   build-power-helper.sh
   check-power-helper-bundle.sh
   test-power-helper-xpc.sh
@@ -336,6 +338,8 @@ warnings denied.
 - Create: `crates/jarvis-power-helper/src/watchdog.rs`
 - Create: `crates/jarvis-power-helper/tests/root_store.rs`
 - Create: `crates/jarvis-power-helper/tests/watchdog.rs`
+- Create: `crates/jarvis-power-helper/tests/support/root_store.rs`
+- Create: `crates/jarvis-power-helper/tests/support/watchdog.rs`
 
 - [ ] **Step 1: Write RED store/watchdog tests**
 
@@ -401,6 +405,111 @@ git add crates/jarvis-power-helper crates/jarvis-power-core src-tauri/Cargo.lock
 git commit -m "feat(power-helper): persist and recover root power state"
 ```
 
+### Task 3 integration gate: safe clean-install provisioning
+
+Task 3 is not integration-ready if `RootStore::open_production()` requires
+`/Library/Application Support/Jarvis/Power/v2` to exist already. A clean installation must provision only the missing
+private descendants without weakening the fixed production boundary.
+
+Keep `/Library/Application Support` as the pre-existing trusted anchor; never create or modify it. Open `/Library` and
+then its fixed `Application Support` child with `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`. For the anchor require directory
+type, uid `0`, no group/other write bits (`mode & 0o022 == 0`), and matching fd versus
+`fstatat(..., AT_SYMLINK_NOFOLLOW)` device/inode identity. Do not require gid `0` or exact `0700`: a normal macOS
+`root:admin 0755` anchor is valid. From the validated anchor fd, first require the helper's effective uid/gid `0:0`,
+then ensure `Jarvis`, `Power`, and `v2` one component at a time with fd-relative `mkdirat`, `openat`, `fstatat`, `fstat`,
+`fchmod`, and `fsync`:
+
+- `mkdirat` uses mode `0700`; after successful creation, open the exact child with
+  `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`, prove the fd still names that new directory entry, and apply exact `0700`
+  only to that newly created fd;
+- after `EEXIST`, open and validate the exact child but never change its metadata; only a root:wheel directory whose mode
+  is a stricter subset of `0700` may receive bounded 250 ms revalidation for an in-flight concurrent creator, while
+  wrong type/owner or any extra permission bit fails immediately;
+- for each new private descendant, require root:wheel ownership, exact mode `0700`, directory type, and matching fd
+  versus no-follow directory-entry device/inode identity before descending;
+- reject symlinks, regular files, unsafe owner/mode, substitution, and detectable unexpected link topology; state,
+  lock, and temporary regular files still require link count one;
+- after creating and validating a component, `fsync` the new directory and its parent before creating the next
+  component;
+- treat concurrent `EEXIST` as success only after the same full validation, so concurrent legitimate creators converge
+  safely;
+- never `chmod`, `chown`, unlink, rename, or otherwise repair an unsafe pre-existing entry.
+
+The reusable provisioning primitive stays crate-private. Tests may inject an already-open temporary trusted-root fd and
+an explicit test uid/gid policy; production callers may not. Public `ProductionStartup::open()` remains zero-argument,
+and `RootStore::open_production()` remains fixed to the production anchor and descendants.
+
+Add these RED tests to `crates/jarvis-power-helper/tests/support/root_store.rs` before integration:
+
+```rust
+#[test]
+fn trusted_anchor_accepts_nonwheel_0755_but_rejects_writable_or_substituted_entries() {
+    let valid = ProvisionFixture::system_style_anchor(0o755);
+    assert_ne!(valid.anchor_gid(), valid.private_descendant_gid());
+    assert!(valid.open_from_anchor().is_ok());
+
+    for case in [group_writable_anchor(), symlink_anchor(), substituted_anchor()] {
+        let blocked = ProvisionFixture::with_unsafe_anchor(case);
+        let before = blocked.snapshot();
+        assert!(matches!(
+            blocked.open_from_anchor(),
+            Err(StoreError::UnsafeMetadata)
+        ));
+        assert_eq!(blocked.snapshot(), before);
+    }
+}
+
+#[test]
+fn clean_install_provisions_private_descendants_fd_relative() {
+    let h = ProvisionFixture::empty_trusted_anchor();
+    let store = h.open_from_anchor().unwrap();
+    assert_eq!(h.descendant_modes(), [0o700, 0o700, 0o700]);
+    assert_eq!(h.descendant_owners(), [h.expected_owner(); 3]);
+    assert!(store.load().unwrap().is_none());
+}
+
+#[test]
+fn concurrent_clean_install_converges_without_replacing_components() {
+    let h = ProvisionFixture::empty_trusted_anchor();
+    let (first, second) = h.open_concurrently();
+    assert!(first.is_ok());
+    assert!(second.is_ok());
+    assert_eq!(h.created_inode_count_per_component(), [1, 1, 1]);
+}
+
+#[test]
+fn unsafe_existing_descendant_is_rejected_without_modification() {
+    for case in [
+        symlink_component(), regular_file_component(), wrong_owner_component(),
+        wrong_mode_component(), substituted_component(), hardlinked_state_file(),
+    ] {
+        let h = ProvisionFixture::with_unsafe_descendant(case);
+        let before = h.snapshot();
+        assert!(matches!(
+            h.open_from_anchor(),
+            Err(StoreError::UnsafeMetadata)
+        ));
+        assert_eq!(h.snapshot(), before);
+        assert_eq!(h.outside_bytes(), b"sentinel");
+    }
+}
+```
+
+Run only against injected temporary anchors:
+
+```bash
+cargo test --manifest-path crates/jarvis-power-helper/Cargo.toml \
+  root_store_contract_tests::trusted_anchor
+cargo test --manifest-path crates/jarvis-power-helper/Cargo.toml \
+  root_store_contract_tests::clean_install
+cargo test --manifest-path crates/jarvis-power-helper/Cargo.toml \
+  root_store_contract_tests::concurrent_clean_install
+cargo test --manifest-path crates/jarvis-power-helper/Cargo.toml \
+  root_store_contract_tests::unsafe_existing_descendant
+```
+
+These tests must never create, chmod, chown, or inspect the live `/Library/Application Support/Jarvis` hierarchy.
+
 ### Task 3 integration gate: autonomous scheduler ownership
 
 Task 3 is not integration-ready if it exposes only `Watchdog::tick()` plus `WATCHDOG_INTERVAL`. The helper runtime, not
@@ -464,6 +573,7 @@ It adds a development transport around the same coordinator; it does not switch 
 - Modify: `src-tauri/src/power/mod.rs`
 - Modify: `src-tauri/Cargo.toml`
 - Modify: `src-tauri/Cargo.lock`
+- Create: `scripts/check-power-helper-host-scope.sh`
 - Modify: `package.json`
 
 Do not modify `crates/jarvis-power-core/src/protocol.rs`, `src-tauri/src/power/clamshell.rs`,
@@ -642,32 +752,127 @@ Add RED-to-GREEN coverage for:
 - a feature-off app build cannot select or name the dev transport;
 - the existing app clamshell path is unchanged and no app module writes `dev-helper-v2.json`.
 
-- [ ] **Step 7: Run non-live verification and commit**
+- [ ] **Step 7: Add the executable changed-scope host warning gate**
+
+The existing `src-tauri` host is not globally warning-clean and is not currently MSRV-clean. In particular,
+`src-tauri/src/entities.rs` uses `Option::is_none_or`, which is newer than the declared Rust 1.77.2 baseline, and
+existing unrelated host modules emit warnings. Therefore:
+
+- do not run host app tests or clippy under Rust 1.77.2 and do not claim that Task 4 makes the full host MSRV-clean;
+- do not use global host `clippy -- -D warnings`, because it turns unrelated baseline warnings into false Task 4
+  failures;
+- keep all new helper-crate code strictly green under both current Rust and Rust 1.77.2 with warnings denied;
+- on current Rust, run the real host helper tests and reject every clippy warning whose primary span is in a Task 4
+  host Rust file, while allowing only pre-existing diagnostics outside that fixed changed scope.
+
+Create `scripts/check-power-helper-host-scope.sh`:
 
 ```bash
-cargo test --manifest-path crates/jarvis-power-helper/Cargo.toml --no-default-features
-cargo test --manifest-path crates/jarvis-power-helper/Cargo.toml --features dev-uds
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+diagnostics="$(mktemp "${TMPDIR:-/tmp}/jarvis-power-helper-clippy.XXXXXX")"
+trap 'rm -f "$diagnostics"' EXIT
+
+cargo clippy \
+  --manifest-path "$repo_root/src-tauri/Cargo.toml" \
+  --all-targets \
+  --locked \
+  --no-default-features \
+  --features power-helper-dev \
+  --message-format=json \
+  >"$diagnostics"
+
+node - "$diagnostics" <<'NODE'
+const fs = require("node:fs");
+
+const diagnosticsPath = process.argv[2];
+const exactFiles = new Set(["src/power/mod.rs"]);
+const directoryPrefixes = ["src/power/helper/"];
+
+function hostRelative(fileName) {
+  return fileName
+    .replaceAll("\\", "/")
+    .replace(/^.*\/src-tauri\//, "")
+    .replace(/^src-tauri\//, "");
+}
+
+function isTask4HostFile(fileName) {
+  const relative = hostRelative(fileName);
+  return exactFiles.has(relative)
+    || directoryPrefixes.some((prefix) => relative.startsWith(prefix));
+}
+
+const violations = [];
+for (const line of fs.readFileSync(diagnosticsPath, "utf8").split("\n")) {
+  if (!line) continue;
+  let event;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    continue;
+  }
+  if (event.reason !== "compiler-message" || event.message?.level !== "warning") continue;
+  const primary = (event.message.spans || []).filter((span) => span.is_primary);
+  if (!primary.some((span) => isTask4HostFile(span.file_name))) continue;
+  const first = primary.find((span) => isTask4HostFile(span.file_name));
+  const code = event.message.code?.code || "warning";
+  violations.push(
+    `${first.file_name}:${first.line_start}:${first.column_start}: ${code}: ${event.message.message}`,
+  );
+}
+
+if (violations.length > 0) {
+  console.error("Task 4 introduced host warnings in changed scope:");
+  for (const violation of violations) console.error(violation);
+  process.exit(1);
+}
+console.log("host power-helper changed-scope clippy: clean");
+NODE
+```
+
+Run `chmod +x scripts/check-power-helper-host-scope.sh` and retain executable mode in git.
+
+The script's fixed scope is exactly `src-tauri/src/power/helper/**/*.rs` plus the modified
+`src-tauri/src/power/mod.rs`. Cargo compilation errors remain fatal regardless of path. The script must print
+`host power-helper changed-scope clippy: clean`.
+
+- [ ] **Step 8: Run non-live verification and commit**
+
+```bash
+cargo test --locked --manifest-path crates/jarvis-power-helper/Cargo.toml --no-default-features
+cargo test --locked --manifest-path crates/jarvis-power-helper/Cargo.toml --features dev-uds
 cargo clippy --manifest-path crates/jarvis-power-helper/Cargo.toml --all-targets \
-  --no-default-features -- -D warnings
+  --locked --no-default-features -- -D warnings
 cargo clippy --manifest-path crates/jarvis-power-helper/Cargo.toml --all-targets \
-  --features dev-uds -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml power::helper:: --no-default-features
-cargo test --manifest-path src-tauri/Cargo.toml power:: --no-default-features \
+  --locked --features dev-uds -- -D warnings
+
+cargo +1.77.2 test --locked --manifest-path crates/jarvis-power-helper/Cargo.toml \
+  --no-default-features
+cargo +1.77.2 test --locked --manifest-path crates/jarvis-power-helper/Cargo.toml \
+  --features dev-uds
+cargo +1.77.2 clippy --locked --manifest-path crates/jarvis-power-helper/Cargo.toml \
+  --all-targets --no-default-features -- -D warnings
+cargo +1.77.2 clippy --locked --manifest-path crates/jarvis-power-helper/Cargo.toml \
+  --all-targets --features dev-uds -- -D warnings
+
+# Host gates intentionally use the current repository toolchain only.
+cargo test --locked --manifest-path src-tauri/Cargo.toml power::helper:: --no-default-features
+cargo test --locked --manifest-path src-tauri/Cargo.toml power:: --no-default-features \
   --features power-helper-dev
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features \
-  --features power-helper-dev -- -D warnings
-cargo build --release --manifest-path src-tauri/Cargo.toml --no-default-features --bin jarvis
+bash scripts/check-power-helper-host-scope.sh
+cargo build --locked --release --manifest-path src-tauri/Cargo.toml \
+  --no-default-features --bin jarvis
+
 cargo fmt --all --manifest-path crates/jarvis-power-helper/Cargo.toml -- --check
 cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check
-
-# Repeat helper tests/clippy, with and without dev-uds, and app helper tests
-# under the repository MSRV Rust 1.77.2 toolchain.
 
 bash scripts/check-public-repo-secrets.sh
 bash scripts/check-plugin-boundaries.sh
 git diff --check
 git add crates/jarvis-power-helper src-tauri/src/power src-tauri/Cargo.toml \
-  src-tauri/Cargo.lock package.json
+  src-tauri/Cargo.lock scripts/check-power-helper-host-scope.sh package.json
 git commit -m "feat(power): add development helper transport"
 ```
 
@@ -675,6 +880,10 @@ The review must also confirm that `StateStore`/`LockedState`, generic runtime co
 development principal construction are not public; `ProductionStartup::open()` still has no arguments; the helper
 binary has `required-features = ["dev-uds"]`; `power-helper-dev` is absent from production package/release commands;
 and `jarvis-power-core/src/protocol.rs` has no Task 4 diff.
+
+The host result is a changed-scope compatibility result, not a full-host MSRV certification. Record the known
+`Option::is_none_or` and unrelated-warning baseline separately; Task 4 must neither increase it nor hide it with new
+blanket `allow` attributes.
 
 **Forbidden during Task 4 implementation and verification:** do not run `jarvis-power-helper-dev`, `/usr/bin/pmset`,
 `sudo`, `npm start`, Jarvis setup/install/uninstall, or any VM/Lima/Colima command. Do not create or touch real

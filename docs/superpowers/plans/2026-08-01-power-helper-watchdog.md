@@ -401,67 +401,286 @@ git add crates/jarvis-power-helper crates/jarvis-power-core src-tauri/Cargo.lock
 git commit -m "feat(power-helper): persist and recover root power state"
 ```
 
+### Task 3 integration gate: autonomous scheduler ownership
+
+Task 3 is not integration-ready if it exposes only `Watchdog::tick()` plus `WATCHDOG_INTERVAL`. The helper runtime, not
+the UDS or XPC transport, owns one reusable autonomous scheduler so both transports inherit the same crash-safety
+contract.
+
+Before Task 3 integration, modify `crates/jarvis-power-helper/src/watchdog.rs`,
+`crates/jarvis-power-helper/tests/support/watchdog.rs`, and `crates/jarvis-power-helper/src/lib.rs` to make the
+lifecycle a sealed typestate transition:
+
+```text
+StartupRuntime
+  -- synchronous serialized reconcile succeeds -->
+ReadyRuntime
+  -- scheduler thread starts and acknowledges readiness -->
+ServingRuntime + WatchdogGuard
+  -- only here -->
+ListenerPermit
+```
+
+`ReadyRuntime` must not expose `listener_permit`. `ServingRuntime` owns the coordinator behind the single serialization
+lock and owns a non-detached `WatchdogGuard`; its thread calls the same internal reconciliation transaction every
+`WATCHDOG_INTERVAL`. Arming waits for a bounded thread-ready acknowledgement and fails closed if the thread cannot
+start. Dropping the serving runtime signals and joins the scheduler. A reconciliation error keeps recovery evidence,
+marks the serving runtime unhealthy, and keeps retrying; request dispatch checks that health and cannot mutate while it
+is unhealthy. The only constructor for `ListenerPermit` borrows an armed `ServingRuntime`. Transport bind/publish APIs
+must require that permit, which makes listener publication before both synchronous recovery and scheduler arming
+unrepresentable.
+
+Add RED coverage before integration for:
+
+- no permit at `StartupRuntime` or `ReadyRuntime` (compile-fail/private-surface guard);
+- scheduler-ready acknowledgement precedes the bind callback;
+- the scheduler autonomously reconciles after advancing the fake clock, without a request or manual `tick`;
+- failed arming publishes no listener;
+- dropping `ServingRuntime` stops and joins the thread;
+- scheduler recovery failure blocks mutation, retains the tombstone, and is retried.
+
 ## Task 4: Development-only UDS vertical
 
-**Files:**
+**Readiness amendment (2026-07-31):** Task 4 starts only after the Task 3 scheduler integration gate above is green.
+It adds a development transport around the same coordinator; it does not switch the existing app clamshell lifecycle.
+
+**Exact files:**
 
 - Create: `crates/jarvis-power-helper/src/dev_store.rs`
 - Create: `crates/jarvis-power-helper/src/dev_uds.rs`
 - Create: `crates/jarvis-power-helper/src/bin/jarvis-power-helper-dev.rs`
 - Create: `crates/jarvis-power-helper/tests/dev_uds.rs`
+- Create: `crates/jarvis-power-helper/tests/support/dev_uds.rs`
+- Modify: `crates/jarvis-power-helper/Cargo.toml`
+- Modify: `crates/jarvis-power-helper/src/lib.rs`
+- Modify: `crates/jarvis-power-helper/src/coordinator.rs`
+- Modify: `crates/jarvis-power-helper/src/root_store.rs`
+- Modify: `crates/jarvis-power-helper/src/pmset.rs`
+- Modify: `crates/jarvis-power-helper/src/watchdog.rs`
+- Modify: `crates/jarvis-power-helper/tests/support/watchdog.rs`
 - Create: `src-tauri/src/power/helper/mod.rs`
 - Create: `src-tauri/src/power/helper/client.rs`
 - Create: `src-tauri/src/power/helper/dev_uds.rs`
 - Modify: `src-tauri/src/power/mod.rs`
 - Modify: `src-tauri/Cargo.toml`
+- Modify: `src-tauri/Cargo.lock`
 - Modify: `package.json`
 
-- [ ] **Step 1: Write RED peer/framing/trust tests**
+Do not modify `crates/jarvis-power-core/src/protocol.rs`, `src-tauri/src/power/clamshell.rs`,
+`src-tauri/src/main.rs`, or `src-tauri/src/shutdown.rs` in this task. Task 6 owns the app lease lifecycle cutover.
+
+- [ ] **Step 1: Write RED shared-store and production-facade tests**
+
+`Coordinator`, `StartupRuntime`, `ReadyRuntime`, `ServingRuntime`, and `Watchdog` currently contain a concrete
+`RootStore`; a standalone `DevStore` would otherwise bypass the proven write-ahead transaction. Add sealed,
+crate-private `StateStore` and `LockedState` traits around only `lock`, `load`, `persist`, `clear`, and the finite event
+sink. Make the internal coordinator/runtime generic over that store. `RootStore` and `DevStore` are the only sealed
+implementations.
+
+Refactor the existing validated state codec and atomic locked transaction into shared crate-private implementation in
+`root_store.rs`; `DevStore` must not implement a second JSON codec or write state outside the coordinator transaction.
+Keep generic constructors and store/uid/path injection crate-private. The public `ProductionStartup::open()` facade
+remains zero-argument and fixed to `RootStore::open_production`, `SystemPmset`, system clock/process inspection, and
+system randomness.
+
+Write RED tests first:
 
 ```rust
 #[test]
-fn socket_is_private_and_wrong_peer_is_rejected_before_decode() {
-    let server = DevFixture::start();
-    assert_eq!(server.parent_mode(), 0o700);
-    assert_eq!(server.socket_mode(), 0o600);
-    assert_eq!(server.send_as_uid(502, valid_frame()), Err(TransportError::PeerRejected));
-    assert_eq!(server.dispatch_count(), 0);
+fn dev_store_uses_the_same_locked_decide_persist_mutate_readback_transaction() {
+    let h = DevHarness::baseline(false);
+    h.acquire().unwrap();
+    assert_eq!(h.events(), [
+        "lock", "read-0", "persist-prepared", "fsync-parent",
+        "pmset-1", "readback-1", "persist-applied", "reply", "unlock"
+    ]);
 }
 
 #[test]
-fn malformed_frames_and_release_trust_are_rejected() {
-    for frame in [oversized_frame(), truncated_frame(), concatenated_frames()] {
-        assert!(DevFixture::start().send_raw(frame).is_err());
-    }
-    assert_eq!(DevFixture::start().status().trust, HelperTrust::DevelopmentOnly);
+fn production_startup_surface_still_accepts_no_path_owner_or_backend() {
+    assert_production_factory_is_zero_config();
 }
 ```
 
-- [ ] **Step 2: Prove RED**
+The second guard is a public-surface/compile check, not a call to the real production factory.
+
+- [ ] **Step 2: Write RED peer identity tests**
+
+Authenticate every accepted macOS stream before reading the four-byte frame length. Derive peer effective uid/gid with
+`getpeereid`, pid with `getsockopt(SOL_LOCAL, LOCAL_PEERPID)`, and exact start identity with
+`proc_pidinfo(PROC_PIDTBSDINFO)`. Reject missing, partial, zero, changed, or inconsistent evidence; require the peer uid
+to equal the dev helper's non-root effective uid and require the `proc_bsdinfo` uid, gid, pid, and start fields to match
+the socket evidence. Construct `Principal` only from those derived values plus fixed development-only attestation
+markers compiled into the `dev-uds` feature. Never derive principal fields from JSON.
+
+```rust
+#[test]
+fn wrong_or_inconsistent_peer_is_rejected_before_frame_read_and_decode() {
+    for peer in [
+        wrong_uid(), wrong_gid(), missing_pid(), mismatched_pid(),
+        missing_start_identity(), mismatched_start_identity(),
+    ] {
+        let server = DevFixture::with_peer(peer);
+        assert_eq!(server.send_raw(malformed_frame()), Err(TransportError::PeerRejected));
+        assert_eq!(server.frame_read_count(), 0);
+        assert_eq!(server.decode_count(), 0);
+        assert_eq!(server.dispatch_count(), 0);
+    }
+}
+```
+
+Tests inject the credential/process probes. They must not call `setuid`, impersonate a real user, or depend on a live
+peer process. On non-macOS targets, production `dev-uds` startup returns `Unsupported`; no permissive credential
+fallback is allowed.
+
+- [ ] **Step 3: Write RED one-frame and private-filesystem tests**
+
+The protocol for each direction is exactly one `u32` big-endian length followed by exactly that many JSON bytes, where
+the length is `1..=MAX_FRAME_BYTES`. Configure fixed finite read and write deadlines before I/O. The client writes one
+request and calls `shutdown(Write)`. The server uses `read_exact` for prefix/body, then requires EOF before decoding;
+an extra byte, a second frame, missing EOF, truncation, zero length, oversize length, or deadline expiry rejects the
+connection. The response follows the same bounded one-frame rule and the client also requires EOF. Allocate only after
+the length bound passes.
+
+```rust
+#[test]
+fn malformed_or_ambiguous_frames_never_dispatch() {
+    for frame in [
+        zero_length(), oversized_length(), truncated_prefix(), truncated_body(),
+        trailing_byte(), concatenated_frames(), body_without_eof(),
+    ] {
+        let server = DevFixture::start();
+        assert!(server.send_raw(frame).is_err());
+        assert_eq!(server.dispatch_count(), 0);
+    }
+}
+```
+
+The socket parent is the fixed `$JARVIS_DIR/run` directory, owned by the current effective uid and mode `0700`; the
+socket is fixed at `power-helper-dev.sock`, owned by that uid and mode `0600`. Dev state and its sibling lock are the
+fixed `$JARVIS_DIR/power/dev-helper-v2.json` and `$JARVIS_DIR/power/dev-helper-v2.lock`, both owned by the current
+effective uid and mode `0600` under a `0700` parent. State replacement remains same-directory temp + `fsync(temp)` +
+rename + `fsync(parent)`. Open/validate components without following links. Refuse symlinks, hard links, wrong
+owners/modes, and unexpected file kinds. Stale-socket cleanup may remove only a validated socket at the exact path; it
+never overwrites or unlinks a sentinel of another kind.
+
+```rust
+#[test]
+fn socket_and_dev_state_are_private_without_following_or_overwriting() {
+    let h = DevFixture::start();
+    assert_eq!(h.socket_parent_mode(), 0o700);
+    assert_eq!(h.socket_mode(), 0o600);
+    assert_eq!(h.state_parent_mode(), 0o700);
+    assert_eq!(h.state_and_lock_modes(), [0o600, 0o600]);
+
+    for case in [symlink_socket(), symlink_state(), hardlinked_state(), regular_socket_sentinel()] {
+        let blocked = DevFixture::with_unsafe_entry(case);
+        assert!(blocked.try_start().is_err());
+        assert_eq!(blocked.outside_bytes(), b"sentinel");
+    }
+}
+```
+
+- [ ] **Step 4: Prove the RED groups**
 
 ```bash
-cargo test --manifest-path crates/jarvis-power-helper/Cargo.toml --features dev-uds --test dev_uds
+cargo test --manifest-path crates/jarvis-power-helper/Cargo.toml --features dev-uds dev_store
+cargo test --manifest-path crates/jarvis-power-helper/Cargo.toml --features dev-uds dev_uds
 cargo test --manifest-path src-tauri/Cargo.toml power::helper::dev_uds --no-default-features \
   --features power-helper-dev
 ```
 
-- [ ] **Step 3: Implement explicit dev selection**
+Expected: FAIL because the store seam, credential adapter, framed transport, and app client do not exist.
 
-Bind `$JARVIS_DIR/run/power-helper-dev.sock` under `0700`, socket `0600`, validate `getpeereid`, and accept one
-length-prefixed JSON frame up to `MAX_FRAME_BYTES`. Dev state is `$JARVIS_DIR/power/dev-helper-v2.json` mode `0600`.
-Selection requires compile-time `power-helper-dev` plus runtime `JARVIS_DEV=1`; environment alone is insufficient.
-The dev helper may use the historical exact-command sudoers rule but always reports `development_only`.
+- [ ] **Step 5: Implement the feature and trust boundaries**
 
-- [ ] **Step 4: Run and commit**
+In `crates/jarvis-power-helper/Cargo.toml`, define empty defaults, feature `dev-uds`, and
+`jarvis-power-helper-dev` with `required-features = ["dev-uds"]`. The helper needs no new third-party dependency:
+use existing `libc`, `getrandom`, `serde`, `serde_json`, and the standard library while preserving
+`rust-version = "1.77.2"`.
+
+Feature-gate `dev_store`, `dev_uds`, the development principal markers, and `DevSudoPmset`. The latter reuses the
+existing bounded kill/reap runner and permits only:
+
+```text
+/usr/bin/pmset -g
+/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0
+/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 1
+```
+
+There is no shell, caller executable/argv, environment inheritance, sudoers installation, or caller-selected path.
+Failure of `sudo -n` is a finite helper-unavailable error. All pmset tests use a fake backend.
+
+In `src-tauri/Cargo.toml`, add `getrandom = "0.2"` for locally generated UUIDv7 request ids and feature
+`power-helper-dev = []`. The dev client module exists only with that compile feature. Runtime selection additionally
+requires the environment value to be exactly `JARVIS_DEV=1`; `1 `, `true`, absent, and non-Unicode values do not
+select it.
+
+In `package.json`, add exactly `build:power-helper-dev` (Cargo build of the required-feature dev binary) and
+`start:power-helper-dev` (explicit `JARVIS_DIR="$HOME/.jarvis-dev" JARVIS_DEV=1` Cargo run of that binary), and add
+`power-helper-dev` only to the existing development `start` app feature list. Do not auto-spawn the helper from the
+app, and do not add the feature to `start:prod`, `bundle`, or release workflows.
+
+`HelperTrust::DevelopmentOnly` is client-side metadata returned by the selected transport wrapper. Do not add trust to
+`jarvis-power-core::protocol::Response`, do not add a recovery request/response, and do not change the closed wire
+schema. A development response can never satisfy production helper health or authorization.
+
+- [ ] **Step 6: Implement dispatch only from an armed runtime**
+
+The dev binary requires both its Cargo feature and exact runtime `JARVIS_DEV=1`. It builds `DevStore` and
+`DevSudoPmset`, runs synchronous startup reconciliation, arms the reusable Task 3 scheduler, and only then passes
+`ServingRuntime::listener_permit()` into the UDS bind function. The server shares the serving runtime's single
+coordinator serialization lock between requests and watchdog ticks. Peer authentication and complete frame validation
+both finish before decode/dispatch.
+
+Add RED-to-GREEN coverage for:
+
+- listener bind/publication is observed only after startup recovery and scheduler-ready acknowledgement;
+- fake-backend acquire, idempotent acquire, status, and release round-trip through the real frame codec;
+- watchdog expiry/dead-process recovery occurs without a UDS request;
+- app selection returns `DevelopmentOnly` only under compile feature plus exact runtime flag;
+- a feature-off app build cannot select or name the dev transport;
+- the existing app clamshell path is unchanged and no app module writes `dev-helper-v2.json`.
+
+- [ ] **Step 7: Run non-live verification and commit**
 
 ```bash
+cargo test --manifest-path crates/jarvis-power-helper/Cargo.toml --no-default-features
 cargo test --manifest-path crates/jarvis-power-helper/Cargo.toml --features dev-uds
+cargo clippy --manifest-path crates/jarvis-power-helper/Cargo.toml --all-targets \
+  --no-default-features -- -D warnings
+cargo clippy --manifest-path crates/jarvis-power-helper/Cargo.toml --all-targets \
+  --features dev-uds -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml power::helper:: --no-default-features
 cargo test --manifest-path src-tauri/Cargo.toml power:: --no-default-features \
   --features power-helper-dev
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features \
+  --features power-helper-dev -- -D warnings
+cargo build --release --manifest-path src-tauri/Cargo.toml --no-default-features --bin jarvis
+cargo fmt --all --manifest-path crates/jarvis-power-helper/Cargo.toml -- --check
+cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check
+
+# Repeat helper tests/clippy, with and without dev-uds, and app helper tests
+# under the repository MSRV Rust 1.77.2 toolchain.
+
+bash scripts/check-public-repo-secrets.sh
+bash scripts/check-plugin-boundaries.sh
+git diff --check
 git add crates/jarvis-power-helper src-tauri/src/power src-tauri/Cargo.toml \
   src-tauri/Cargo.lock package.json
 git commit -m "feat(power): add development helper transport"
 ```
+
+The review must also confirm that `StateStore`/`LockedState`, generic runtime constructors, dev owner/path policy, and
+development principal construction are not public; `ProductionStartup::open()` still has no arguments; the helper
+binary has `required-features = ["dev-uds"]`; `power-helper-dev` is absent from production package/release commands;
+and `jarvis-power-core/src/protocol.rs` has no Task 4 diff.
+
+**Forbidden during Task 4 implementation and verification:** do not run `jarvis-power-helper-dev`, `/usr/bin/pmset`,
+`sudo`, `npm start`, Jarvis setup/install/uninstall, or any VM/Lima/Colima command. Do not create or touch real
+`~/.jarvis*`, `$HOME/.jarvis*`, `/Library/Application Support/Jarvis`, `/etc/sudoers.d`, launchd/SMAppService/XPC,
+codesign, or notarization state. Do not kill existing processes or test peer rejection with live uid changes. All
+transport, process, clock, store, and power mutations use temp directories and injected fakes.
 
 ## Task 5: Production SMAppService/XPC attestation vertical
 

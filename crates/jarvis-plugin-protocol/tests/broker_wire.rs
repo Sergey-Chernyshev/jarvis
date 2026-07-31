@@ -1,8 +1,9 @@
 use jarvis_plugin_protocol::broker::{
     CommandResult, ContractRef, CursorGap, EntityEnvelope, EntityMutation, EntityQuerySnapshot,
-    EventEnvelope, FieldProjection, OperationSubjectRef, OutboxAck, OutboxBatch, OutboxItem,
-    RuntimeOperationCancel, RuntimeOperationChange, RuntimeOperationGap, RuntimeOperationQuery,
-    RuntimeOperationState, RuntimeOperationView, RuntimeOperationWatch, TypedCommandInvocation,
+    EventEnvelope, EventMutation, FieldProjection, OperationSubjectRef, OutboxAck, OutboxBatch,
+    OutboxMutation, RuntimeOperationCancel, RuntimeOperationChange, RuntimeOperationGap,
+    RuntimeOperationQuery, RuntimeOperationState, RuntimeOperationView, RuntimeOperationWatch,
+    TypedCommandInvocation,
 };
 use jarvis_plugin_protocol::operation::OperationRef;
 use serde_json::{json, Value};
@@ -196,7 +197,7 @@ fn runtime_operation_shapes_use_only_opaque_operation_ref_and_exact_subject() {
 }
 
 #[test]
-fn command_and_outbox_shapes_reject_caller_provider_and_risk_spoofing() {
+fn command_shape_rejects_caller_provider_and_risk_spoofing() {
     let invocation: TypedCommandInvocation = serde_json::from_value(json!({
         "command": golden_contract(),
         "subject": {
@@ -222,29 +223,61 @@ fn command_and_outbox_shapes_reject_caller_provider_and_risk_spoofing() {
         operation_ref: operation_ref.clone(),
     };
     assert_eq!(serde_json::to_value(result).unwrap()["type"], "accepted");
+}
 
+#[test]
+fn provider_outbox_replays_entity_and_event_mutations_with_stable_source_identity() {
     let batch = OutboxBatch {
-        batch_id: "batch/01".to_string(),
-        cursor: 12,
-        items: vec![OutboxItem {
-            operation_ref: operation_ref.clone(),
-            invocation,
-        }],
+        source_instance_id: "source-instance/01".to_string(),
+        outbox_id: "outbox/0001".to_string(),
+        mutations: vec![
+            OutboxMutation::Entity {
+                mutation: EntityMutation::Put {
+                    contract: contract(),
+                    id: "runtime/01".to_string(),
+                    expected_revision: 4,
+                    data: json!({"status":"running"}),
+                },
+            },
+            OutboxMutation::Event {
+                event: EventMutation {
+                    contract: contract(),
+                    stream_id: "runtime/01".to_string(),
+                    event_id: "event/09".to_string(),
+                    subject: "runtime/01".to_string(),
+                    kind: "status.changed".to_string(),
+                    correlation_id: Some("correlation/01".to_string()),
+                    data: json!({"status":"running"}),
+                    at_ms: 1700000000000_i64,
+                },
+            },
+        ],
     };
     assert_eq!(
-        serde_json::to_value(&batch).unwrap()["items"][0]["operationRef"],
-        operation_ref.as_str()
+        serde_json::to_value(&batch).unwrap()["sourceInstanceId"],
+        "source-instance/01"
     );
 
+    for forbidden in ["ownerPluginId", "providerId", "principal"] {
+        let mut value = serde_json::to_value(&batch).unwrap();
+        value[forbidden] = json!("forged");
+        assert!(
+            serde_json::from_value::<OutboxBatch>(value).is_err(),
+            "accepted forbidden field {forbidden}"
+        );
+    }
+
+    let operation_ref = OperationRef::new("runtime-operation/01").unwrap();
     let ack = OutboxAck {
-        batch_id: batch.batch_id,
-        cursor: batch.cursor,
-        accepted: vec![operation_ref],
+        source_instance_id: batch.source_instance_id,
+        outbox_id: batch.outbox_id,
+        payload_digest: DIGEST_A.to_string(),
+        applied_broker_revision: 12,
+        accepted_operation_refs: vec![operation_ref],
     };
-    assert_eq!(
-        serde_json::to_value(ack).unwrap()["accepted"][0],
-        "runtime-operation/01"
-    );
+    let ack = serde_json::to_value(ack).unwrap();
+    assert_eq!(ack["appliedBrokerRevision"], 12);
+    assert_eq!(ack["acceptedOperationRefs"][0], "runtime-operation/01");
 }
 
 #[test]

@@ -1,11 +1,12 @@
 use std::ffi::CStr;
-use std::path::Path;
 use std::sync::Arc;
 
 #[cfg(test)]
 use jarvis_power_core::state::HelperState;
 
-use crate::root_store::{sealed, LockedRootStore, RootStore, StateStore, StoreError, StoreFiles};
+use crate::root_store::{
+    sealed, DevRoot, LockedRootStore, RootStore, StateStore, StoreError, StoreFiles,
+};
 use crate::HelperEventSink;
 
 #[cfg(test)]
@@ -24,11 +25,11 @@ pub(crate) struct DevStore {
 
 impl DevStore {
     pub(crate) fn open(
-        jarvis_directory: &Path,
+        root: &DevRoot,
         events: Arc<dyn HelperEventSink>,
     ) -> Result<Self, StoreError> {
         RootStore::open_development(
-            jarvis_directory,
+            root,
             StoreFiles::new(
                 DEV_STATE_COMPONENT,
                 DEV_LOCK_COMPONENT,
@@ -41,10 +42,10 @@ impl DevStore {
 
     #[cfg(test)]
     pub(crate) fn open_for_testing(
-        jarvis_directory: &Path,
+        root: &DevRoot,
         events: Arc<dyn HelperEventSink>,
     ) -> Result<Self, StoreError> {
-        Self::open(jarvis_directory, events)
+        Self::open(root, events)
     }
 
     #[cfg(test)]

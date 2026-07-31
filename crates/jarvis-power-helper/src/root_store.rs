@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -145,6 +145,82 @@ struct RootStoreInner {
     events: Arc<dyn HelperEventSink>,
     process_lock: Mutex<()>,
     test_fault: Mutex<Option<StoreFault>>,
+}
+
+#[cfg(feature = "dev-uds")]
+struct DevRootInner {
+    directory: OwnedFd,
+    path: PathBuf,
+    identity: (libc::dev_t, libc::ino_t),
+    policy: StorePolicy,
+}
+
+/// One held, validated development root shared by state and transport.
+///
+/// The absolute path is retained only for Darwin's pathname-only Unix socket
+/// API. Every such use must revalidate it against `directory`.
+#[cfg(feature = "dev-uds")]
+#[derive(Clone)]
+pub(crate) struct DevRoot {
+    inner: Arc<DevRootInner>,
+}
+
+#[cfg(feature = "dev-uds")]
+impl DevRoot {
+    pub(crate) fn open(path: &Path) -> Result<Self, StoreError> {
+        let policy = development_policy()?;
+        let directory = open_absolute_directory_nofollow(path)?;
+        validate_directory(directory.as_raw_fd(), policy)?;
+        let metadata = stat_fd(directory.as_raw_fd())?;
+        Ok(Self {
+            inner: Arc::new(DevRootInner {
+                directory,
+                path: path.to_path_buf(),
+                identity: (metadata.st_dev, metadata.st_ino),
+                policy,
+            }),
+        })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.inner.path
+    }
+
+    pub(crate) fn policy(&self) -> StorePolicy {
+        self.inner.policy
+    }
+
+    pub(crate) fn open_private_child(&self, child: &CStr) -> Result<OwnedFd, StoreError> {
+        self.revalidate_path()?;
+        let directory = open_or_create_private_directory(
+            self.inner.directory.as_raw_fd(),
+            child,
+            self.inner.policy,
+            &ProvisionHooks::default(),
+        )?;
+        validate_directory(directory.as_raw_fd(), self.inner.policy)?;
+        self.revalidate_child_path(child, directory.as_raw_fd())?;
+        Ok(directory)
+    }
+
+    pub(crate) fn revalidate_path(&self) -> Result<(), StoreError> {
+        let reopened = open_absolute_directory_nofollow(&self.inner.path)?;
+        validate_directory(reopened.as_raw_fd(), self.inner.policy)?;
+        let actual = stat_fd(reopened.as_raw_fd())?;
+        verify_entry_identity(self.inner.identity, (actual.st_dev, actual.st_ino))
+    }
+
+    pub(crate) fn revalidate_child_path(
+        &self,
+        child: &CStr,
+        expected: RawFd,
+    ) -> Result<(), StoreError> {
+        self.revalidate_path()?;
+        let child = std::ffi::OsStr::from_bytes(child.to_bytes());
+        let reopened = open_absolute_directory_nofollow(&self.inner.path.join(child))?;
+        validate_directory(reopened.as_raw_fd(), self.inner.policy)?;
+        require_same_file(stat_fd(expected)?, stat_fd(reopened.as_raw_fd())?)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -371,13 +447,17 @@ impl RootStore {
 
     #[cfg(feature = "dev-uds")]
     pub(crate) fn open_development(
-        jarvis_directory: &Path,
+        root: &DevRoot,
         files: StoreFiles,
         events: Arc<dyn HelperEventSink>,
     ) -> Result<Self, StoreError> {
-        let policy = development_policy()?;
-        let power = open_development_directory(jarvis_directory, POWER_DIRECTORY_DEV)?;
-        Ok(Self::from_open_directory(power, policy, files, events))
+        let power = root.open_private_child(POWER_DIRECTORY_DEV)?;
+        Ok(Self::from_open_directory(
+            power,
+            root.policy(),
+            files,
+            events,
+        ))
     }
 
     fn from_open_directory(
@@ -464,24 +544,6 @@ fn development_policy() -> Result<StorePolicy, StoreError> {
         return Err(StoreError::UnsafeMetadata);
     }
     Ok(StorePolicy::for_owner(uid, gid))
-}
-
-#[cfg(feature = "dev-uds")]
-pub(crate) fn open_development_directory(
-    jarvis_directory: &Path,
-    child: &CStr,
-) -> Result<OwnedFd, StoreError> {
-    let policy = development_policy()?;
-    let root = open_path(jarvis_directory, directory_open_flags())?;
-    validate_directory(root.as_raw_fd(), policy)?;
-    let directory = open_or_create_private_directory(
-        root.as_raw_fd(),
-        child,
-        policy,
-        &ProvisionHooks::default(),
-    )?;
-    validate_directory(directory.as_raw_fd(), policy)?;
-    Ok(directory)
 }
 
 pub(crate) struct LockedRootStore<'a> {
@@ -1219,6 +1281,28 @@ fn open_path(path: &Path, flags: libc::c_int) -> Result<OwnedFd, StoreError> {
     // SAFETY: path is NUL-terminated and flags do not require a mode.
     let file = unsafe { libc::open(path.as_ptr(), flags) };
     owned_fd(file)
+}
+
+#[cfg(feature = "dev-uds")]
+fn open_absolute_directory_nofollow(path: &Path) -> Result<OwnedFd, StoreError> {
+    if !path.is_absolute() {
+        return Err(StoreError::UnsafeMetadata);
+    }
+    let mut directory = open_path(Path::new("/"), directory_open_flags())?;
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(component) => {
+                let component =
+                    CString::new(component.as_bytes()).map_err(|_| StoreError::UnsafeMetadata)?;
+                directory = open_directory_component(directory.as_raw_fd(), &component)?;
+            }
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                return Err(StoreError::UnsafeMetadata)
+            }
+        }
+    }
+    Ok(directory)
 }
 
 fn open_directory_component(parent: RawFd, name: &CStr) -> Result<OwnedFd, StoreError> {

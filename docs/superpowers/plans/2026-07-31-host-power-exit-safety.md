@@ -286,8 +286,11 @@ cleared only after confirmed restore. `release_with` removes only the calling
 lease and restores baseline only for the last mutating lease.
 
 Delete the old profile-local write-after-mutation `write_marker` path. Keep a
-legacy reader for `<jarvis_dir>/clamshell.json`; legacy recovery may restore
-`false` once, then removes that old marker after read-back.
+legacy reader for `<jarvis_dir>/clamshell.json`, but treat that marker as
+ambiguous: it has no recorded baseline and cannot prove a Jarvis-owned
+`0 → 1` mutation. Legacy recovery must therefore never write `false`
+automatically. It reports blocked/manual repair and keeps the marker until an
+explicit repair can establish ownership or the user confirms the restore.
 
 - [ ] **Step 4: Run clamshell and ownership tests**
 
@@ -324,6 +327,16 @@ fn shutdown_gate_is_one_way_and_idempotent() {
     assert!(!gate.accepting());
     assert!(!gate.close());
 }
+
+#[test]
+fn acquire_that_finishes_after_close_is_rolled_back() {
+    let harness = PausedAcquire::new();
+    let epoch = harness.begin();
+    harness.close_shutdown();
+    harness.finish_backend_acquire(epoch);
+    assert!(!harness.lease_present());
+    assert_eq!(harness.current_sleep_disabled(), harness.baseline());
+}
 ```
 
 - [ ] **Step 2: Run and verify failure**
@@ -355,10 +368,20 @@ impl ShutdownGate {
 }
 ```
 
-Store it on `Power`. `arm`, `peer_sync`, keep-awake commands and async callbacks
-must reject/no-op after `close`. `Power::dispose` closes the gate first,
-disposes the IOKit engine, then calls registry-backed clamshell release even
-when in-memory `clam.active` or `clam.armed` is false.
+Store it on `Power` together with an operation epoch. `arm`, `peer_sync`,
+keep-awake commands and async callbacks must reject/no-op after `close`.
+Every async acquire captures the current epoch before `spawn_blocking` and
+checks it again after completion. If shutdown closed or advanced the epoch
+while the backend was running, the just-acquired exact lease is synchronously
+released and read-back must confirm the baseline before the callback returns.
+Serialize acquire/release with a bounded operation barrier so cleanup cannot
+race a late mutation indefinitely.
+
+`Power::dispose` closes the gate and advances the epoch first, disposes the
+IOKit engine, waits only for the bounded power-operation barrier, then calls
+registry-backed clamshell release even when in-memory `clam.active` or
+`clam.armed` is false. The barrier test must deterministically pause an acquire
+between admission and completion; it may not use sleeps.
 
 - [ ] **Step 4: Run all power tests**
 
@@ -383,26 +406,37 @@ git commit -m "fix(power): block rearm during shutdown"
 
 - Modify: `src-tauri/src/shutdown.rs`
 - Modify: `src-tauri/src/main.rs`
+- Modify: `src-tauri/src/tray.rs`
+- Modify: `src-tauri/src/ipc.rs`
 - Test: `src-tauri/src/shutdown.rs`
 
 - [ ] **Step 1: Write a failing order/idempotency test**
 
 ```rust
 #[test]
-fn cleanup_runs_power_before_blocking_subsystems_once() {
+fn cleanup_runs_power_before_blocking_subsystems_and_retries_failed_phase() {
     let trace = RefCell::new(Vec::new());
-    let gate = CleanupGate::default();
-    run_ordered_once(
-        &gate,
-        || trace.borrow_mut().push("power"),
+    let state = CleanupState::default();
+    run_ordered(
+        &state,
+        || {
+            trace.borrow_mut().push("power-failed");
+            Err("blocked")
+        },
         || trace.borrow_mut().push("rest"),
     );
-    run_ordered_once(
-        &gate,
-        || trace.borrow_mut().push("power"),
+    run_ordered(
+        &state,
+        || {
+            trace.borrow_mut().push("power-retry");
+            Ok(())
+        },
         || trace.borrow_mut().push("rest"),
     );
-    assert_eq!(trace.into_inner(), ["power", "rest"]);
+    assert_eq!(
+        trace.into_inner(),
+        ["power-failed", "rest", "power-retry"]
+    );
 }
 ```
 
@@ -419,14 +453,15 @@ exist.
 
 - [ ] **Step 3: Centralize production cleanup**
 
-Implement:
+Implement a structured, per-phase cleanup state rather than one whole-cleanup
+boolean. Admission closure and IOKit disposal are once-only; an unsuccessful
+clamshell restore remains retryable on a later fallback hook. Every phase has
+its own bounded deadline and failure logging, and failure in one subsystem
+does not skip the rest:
 
 ```rust
-pub fn cleanup(d: &Arc<Daemon>) {
-    if !CLEANUP_GATE.close() {
-        return;
-    }
-    Power::dispose(d);
+pub fn cleanup(d: &Arc<Daemon>) -> CleanupReport {
+    let power = Power::dispose(d);
     d.write_state_now();
     d.plugins.dispose(d);
     d.voice.dispose();
@@ -434,12 +469,18 @@ pub fn cleanup(d: &Arc<Daemon>) {
     d.wake.dispose();
     d.audio.dispose();
     let _ = std::fs::remove_file(crate::util::sock_path());
+    CleanupReport { power, /* per-phase outcomes */ }
 }
 ```
 
-Call only `shutdown::cleanup(&Daemon::get(app))` from `RunEvent::Exit`. Remove
-the `!is_headless()` power condition. Keep the merged SIGTERM handler calling
-`app.exit(0)`, so service-manager/logout termination reaches the same cleanup.
+Add Jarvis-owned `shutdown::request_exit` and `shutdown::request_restart`
+wrappers which call cleanup before asking Tauri to terminate/relaunch. Use
+them from the tray, SIGTERM and updater IPC. Replace `app.restart()` with
+event-preserving `request_restart()` only after cleanup. Keep
+`RunEvent::Exit` as an idempotent fallback, not the sole owner of cleanup;
+Tauri restart on the main thread may skip normal exit events. Remove the
+`!is_headless()` power condition. Window close remains hide-only and is tested
+separately from application quit.
 
 - [ ] **Step 4: Run shutdown and power tests**
 
@@ -455,7 +496,7 @@ Expected: tests pass and the order trace starts with `power`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src-tauri/src/shutdown.rs src-tauri/src/main.rs
+git add src-tauri/src/shutdown.rs src-tauri/src/main.rs src-tauri/src/tray.rs src-tauri/src/ipc.rs
 git commit -m "fix(shutdown): restore power before subsystem teardown"
 ```
 
@@ -469,8 +510,8 @@ git commit -m "fix(shutdown): restore power before subsystem teardown"
 
 - [ ] **Step 1: Write failing recovery tests**
 
-Cover a stale mutating lease, another live profile lease, a corrupt registry
-and the old profile-local marker:
+Cover a stale mutating lease, another live profile lease, PID reuse,
+cross-boot state, expiry, a corrupt registry and the old profile-local marker:
 
 ```rust
 #[test]
@@ -491,6 +532,21 @@ fn corrupt_registry_refuses_new_arm() {
         Err(PowerError::CorruptOwnership(_))
     ));
 }
+
+#[test]
+fn reused_pid_with_different_start_identity_is_not_live() {
+    let lease = lease_for_process(123, "start-a");
+    let inspector = FakeProcesses::alive(123, "start-b");
+    assert!(!inspector.matches(&lease));
+}
+
+#[test]
+fn ambiguous_legacy_marker_never_restores_external_baseline() {
+    let backend = FakePmset::new(true);
+    recover_legacy_with(&backend, legacy_marker()).unwrap();
+    assert!(backend.current());
+    assert_eq!(backend.set_calls(), vec![]);
+}
 ```
 
 - [ ] **Step 2: Run and verify failure**
@@ -505,7 +561,13 @@ Expected: recovery tests fail because `recover_with` is missing.
 
 - [ ] **Step 3: Run recovery at the start of Tauri setup**
 
-Implement `recover_with` using `OwnershipState::recover`. Add
+Implement `recover_with` using `OwnershipState::recover`. A lease is live only
+when its boot-session identity matches, its TTL is not expired, and both PID
+and process start identity match an injected process inspector. PID existence
+or profile equality alone are never sufficient. Cross-boot state cannot retain
+leases. Corrupt/ambiguous state remains fail-closed.
+
+Add
 `clamshell::recover_on_startup()` immediately after
 `install::prepare_clean_start()` and before settings, bundled-plugin install,
 Daemon creation and the `is_headless()` early return. Log each explicit
@@ -530,16 +592,21 @@ git add src-tauri/src/power/clamshell.rs src-tauri/src/main.rs
 git commit -m "fix(power): recover before headless startup"
 ```
 
-### Task 7: Renewable watchdog/helper lease
+### Task 7: Renewable watchdog/helper lease and production release gate
 
 **Files:**
 
+- Create: `src-tauri/power-core/Cargo.toml`
+- Create: `src-tauri/power-core/src/lib.rs`
 - Create: `src-tauri/src/power/helper_protocol.rs`
 - Create: `src-tauri/src/bin/jarvis-power-helper.rs`
+- Create: `src-tauri/PowerHelper/` signed XPC/SMAppService service sources
+- Create: `src-tauri/Resources/com.sergey-chernyshev.jarvis.power-helper.plist`
 - Modify: `src-tauri/src/power/mod.rs`
 - Modify: `src-tauri/src/power/clamshell.rs`
 - Modify: `src-tauri/Cargo.toml`
 - Modify: `src-tauri/tauri.conf.json`
+- Modify: release/signing workflow
 - Test: `src-tauri/src/power/helper_protocol.rs`
 
 - [ ] **Step 1: Write failing protocol and expiry tests**
@@ -593,15 +660,27 @@ pub enum Request {
 ```
 
 Responses contain no command/path fields. Enforce protocol version, bounded
-IDs, `1s..120s` TTL and monotonic deadlines. The helper binary owns the global
-registry lock, validates peer UID and the packaged caller identity, executes
-only fixed `pmset disablesleep 0|1`, and restores baseline on last release or
-TTL expiry. Add a 30-second app renewal task and make loss of renewal visible
-in power status.
+unpredictable lease IDs, `1s..120s` TTL, boot identity and monotonic deadlines.
+Renew may update only a still-live matching lease and can never recreate a
+released lease. The helper runs an autonomous expiry loop, owns the only
+post-migration global registry writer, and restores baseline without waiting
+for another request. Add a 30-second app renewal task and make loss of renewal
+visible in power status.
 
-For the initial development build, the helper uses the existing exact-command
-sudoers rule and private `0600` UDS; release packaging must use the signed
-privileged-service path from the design spec before AC22 is marked complete.
+Put serialization/state-machine primitives in the minimal shared
+`power-core` crate so the app and helper cannot drift. The development
+`jarvis-power-helper` may use the existing exact-command sudoers rule and a
+private `0600` UDS, but it is explicitly non-release and proves only UID/GID.
+
+The production path is a signed XPC service installed and managed through
+`SMAppService`, packaged under `Contents/Library/LaunchDaemons`, and validates
+the caller's designated requirement/audit token on every connection. Add
+install/status/update/uninstall and fenced handoff tests; update/uninstall
+must restore and verify baseline or refuse to proceed. Record and enforce the
+minimum-macOS decision (raise to macOS 13 for `SMAppService`, or implement and
+test an older-system fallback). Persistent clamshell mutation remains disabled
+in release builds until the signed service and its code-signing verification
+are present; the development UDS helper never satisfies AC22.
 
 - [ ] **Step 4: Run helper and power tests**
 
@@ -612,12 +691,14 @@ cargo test --manifest-path src-tauri/Cargo.toml power:: --no-default-features
 cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin jarvis-power-helper
 ```
 
-Expected: tests pass and helper binary builds.
+Expected: tests pass, the development helper binary builds, helper package
+layout/signing checks pass, and release configuration fails closed when the
+signed service is absent.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src-tauri/src/power/helper_protocol.rs src-tauri/src/bin/jarvis-power-helper.rs src-tauri/src/power/mod.rs src-tauri/src/power/clamshell.rs src-tauri/Cargo.toml src-tauri/tauri.conf.json
+git add src-tauri/power-core src-tauri/src/power/helper_protocol.rs src-tauri/src/bin/jarvis-power-helper.rs src-tauri/PowerHelper src-tauri/Resources src-tauri/src/power/mod.rs src-tauri/src/power/clamshell.rs src-tauri/Cargo.toml src-tauri/tauri.conf.json .github/workflows
 git commit -m "feat(power): recover expired clamshell leases"
 ```
 
@@ -629,6 +710,7 @@ git commit -m "feat(power): recover expired clamshell leases"
 - Create: `ui/power-state.test.mjs`
 - Modify: `src-tauri/src/power/mod.rs`
 - Modify: `ui/index.html`
+- Modify: `ui/settings2.js`
 - Modify: `ui/renderer.js`
 - Modify: `README.md`
 
@@ -668,10 +750,18 @@ Expected: the new test fails because the repair state is not rendered.
 - [ ] **Step 3: Expose and render actionable health**
 
 Add `health`, `healthMessage` and `repairAction` to the clamshell status DTO.
-Render `blocked_restore`, `helper_unavailable` and `corrupt_ownership` with a
-host action; do not label the mode off while `SleepDisabled=1`. Document that
-safe clamshell requires the exact-command helper/sudoers rule and that Jarvis
-never kills external Amphetamine/caffeinate processes.
+Distinguish `jarvis_owned`, `held_by_other_profile`, `external_baseline_on`,
+`blocked_restore`, `helper_unavailable` and `corrupt_ownership`. Render unsafe
+health through the active `settings2.js` page as well as the compact renderer;
+do not label the mode off while `SleepDisabled=1`.
+
+Implement an allowlisted `clamshell/repair` backend command; the JS action
+cannot dispatch an arbitrary command. Repair may mutate only when the durable
+registry proves Jarvis ownership or after a separate explicit user-confirmed
+legacy flow. `SleepDisabled=1` by itself never enables a destructive action.
+Document that safe clamshell requires the signed helper (the exact-command
+sudoers path is development-only) and that Jarvis never kills external
+Amphetamine/caffeinate processes.
 
 Implement the pure browser/Node helper:
 
@@ -708,7 +798,7 @@ Expected: both commands pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src-tauri/src/power/mod.rs ui/index.html ui/renderer.js ui/power-state.js ui/power-state.test.mjs README.md
+git add src-tauri/src/power/mod.rs ui/index.html ui/settings2.js ui/renderer.js ui/power-state.js ui/power-state.test.mjs README.md
 git commit -m "feat(power): expose safe restore health"
 ```
 
@@ -722,10 +812,10 @@ git commit -m "feat(power): expose safe restore health"
 
 - [ ] **Step 1: Add a non-destructive smoke harness**
 
-The script must record the initial `SleepDisabled` and Jarvis IOKit assertion
-count, launch an isolated `JARVIS_DIR`, exercise normal exit, headless exit and
-SIGTERM, and restore the recorded baseline in an EXIT trap. It refuses to run
-the clamshell mutation portion unless noninteractive restore preflight passes.
+The script records an exactly parsed initial `SleepDisabled` and Jarvis IOKit
+assertion count, launches an isolated `JARVIS_DIR`, and exercises normal exit,
+headless exit, SIGTERM and updater-restart cleanup. Unknown baseline aborts
+before launch. The default smoke never mutates persistent power state.
 
 Start with this fail-safe shell:
 
@@ -734,7 +824,10 @@ Start with this fail-safe shell:
 set -euo pipefail
 
 initial_sleep_disabled="$(pmset -g | awk '/SleepDisabled/{print $2; exit}')"
-initial_sleep_disabled="${initial_sleep_disabled:-0}"
+case "${initial_sleep_disabled}" in
+  0|1) ;;
+  *) echo "cannot parse SleepDisabled baseline; refusing smoke" >&2; exit 2 ;;
+esac
 smoke_dir="$(mktemp -d "${TMPDIR:-/tmp}/jarvis-power-smoke.XXXXXX")"
 jarvis_pid=""
 
@@ -743,19 +836,27 @@ cleanup() {
     kill -TERM "${jarvis_pid}" 2>/dev/null || true
     wait "${jarvis_pid}" 2>/dev/null || true
   fi
-  if sudo -n /usr/bin/pmset -a disablesleep "${initial_sleep_disabled}" 2>/dev/null; then
-    :
-  elif [[ "$(pmset -g | awk '/SleepDisabled/{print $2; exit}')" != "${initial_sleep_disabled}" ]]; then
-    echo "manual recovery required: SleepDisabled baseline was ${initial_sleep_disabled}" >&2
+  current="$(pmset -g | awk '/SleepDisabled/{print $2; exit}')"
+  if [[ "${current}" != "${initial_sleep_disabled}" ]]; then
+    echo "power state drifted; recover through Jarvis helper lease, never raw pmset" >&2
   fi
-  rm -rf "${smoke_dir}"
+  rm -rf -- "${smoke_dir}"
 }
 trap cleanup EXIT INT TERM
 ```
 
 Use only the explicit `smoke_dir` for cleanup. Never signal a PID unless it is
-the direct process started by the script. Compare `pmset -g assertions` lines
-containing `Jarvis: не спать` before/after each exit.
+the still-tracked direct shell job started by the script; do not trust a
+detached/reused numeric PID. Compare the count of `pmset -g assertions` lines
+containing `Jarvis: не спать` with the captured baseline rather than assuming
+zero.
+
+The live clamshell mutation portion is a separate explicit opt-in
+(`JARVIS_POWER_LIVE_SMOKE=1`) and acquires/releases only through the installed
+production helper protocol. It never invokes raw `sudo pmset`, including from
+an EXIT trap, and is never enabled in CI. A controlled fixture must acquire a
+real helper lease/assertion before testing headless exit; a plain headless
+launch may otherwise hold nothing.
 
 - [ ] **Step 2: Validate shell syntax before execution**
 
@@ -772,21 +873,23 @@ Expected: exit `0`.
 Run:
 
 ```bash
-cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+rustfmt --edition 2021 --check src-tauri/src/power/*.rs src-tauri/src/shutdown.rs
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
 node --test ui/*.test.mjs
 git diff --check
 ```
 
-Expected: every command exits `0`.
+Expected: focused formatting for changed Rust files, clippy/tests/UI tests and
+diff checks pass. Repository-wide formatting remains informational if existing
+untouched files are not rustfmt-clean; do not churn unrelated code.
 
 - [ ] **Step 4: Run live smoke on this Mac**
 
 Run:
 
 ```bash
-bash scripts/smoke-power-exit.sh
+JARVIS_POWER_LIVE_SMOKE=1 bash scripts/smoke-power-exit.sh
 ```
 
 Expected: each tested exit reports no Jarvis IOKit assertion and

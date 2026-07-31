@@ -19,6 +19,7 @@
 use std::fmt;
 use std::io;
 use std::process::{Command, Output, Stdio};
+use std::collections::HashSet;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -226,9 +227,34 @@ pub enum AcquireOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseOutcome {
+    NotOwned,
+    KeptApplied,
+    BaselineUnchanged(bool),
+    Restored(bool),
+}
+
+impl ReleaseOutcome {
+    pub fn sleep_disabled(self) -> Option<bool> {
+        match self {
+            Self::NotOwned => None,
+            Self::KeptApplied => Some(true),
+            Self::BaselineUnchanged(value) | Self::Restored(value) => Some(value),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LegacyMarkerDecision {
     ClearMarker,
     BlockedRepair,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum LegacyMarkerState {
+    Missing,
+    Present(serde_json::Value),
+    Corrupt,
 }
 
 pub fn decide_legacy_marker(current: Option<bool>) -> LegacyMarkerDecision {
@@ -343,17 +369,18 @@ pub fn acquire_with<B: PmsetBackend>(
 ) -> Result<AcquireOutcome, PowerError> {
     let guard = store.lock()?;
     if let Some(mut state) = guard.read()? {
+        validate_ownership_state(&state)?;
+        if state.leases.is_empty() {
+            return Err(PowerError::InvalidState(
+                "a pending restore must complete before another acquire".into(),
+            ));
+        }
         let current_boot = backend.boot_id()?;
         if state.boot_id != current_boot {
             return Err(PowerError::InvalidState(format!(
                 "registry boot {} does not match current boot {}",
                 state.boot_id, current_boot
             )));
-        }
-        if !state.applied {
-            return Err(PowerError::InvalidState(
-                "registry does not describe an applied state".into(),
-            ));
         }
         let current = backend.read_disabled()?;
         if current != state.applied {
@@ -403,42 +430,71 @@ pub fn release_with<B: PmsetBackend>(
     store: &OwnershipStore,
     profile: &str,
     owner_generation: &str,
-) -> Result<(), PowerError> {
+) -> Result<ReleaseOutcome, PowerError> {
     let guard = store.lock()?;
     let Some(mut state) = guard.read()? else {
-        return Ok(());
+        return Ok(ReleaseOutcome::NotOwned);
     };
-    if !state
-        .leases
-        .iter()
-        .any(|lease| lease.profile == profile && lease.owner_generation == owner_generation)
-    {
-        return Ok(());
-    }
+    validate_ownership_state(&state)?;
     if state.boot_id != backend.boot_id()? {
         return Err(PowerError::InvalidState(
             "refusing to release a lease from another boot".into(),
         ));
     }
 
-    match state.release(profile, owner_generation) {
-        ReleaseDecision::KeepApplied => guard.write(&state)?,
-        ReleaseDecision::ClearWithoutMutation => guard.clear()?,
+    // A previous last-owner release may have durably removed the lease and
+    // then failed during read/preflight/set/read-back. That zero-lease record
+    // is a restore obligation, not "not owned"; every retry must resume it.
+    if state.leases.is_empty() {
+        return if state.did_mutate {
+            restore_and_clear(backend, &guard, state.baseline)
+        } else {
+            guard.clear()?;
+            Ok(ReleaseOutcome::BaselineUnchanged(state.baseline))
+        };
+    }
+
+    if !state
+        .leases
+        .iter()
+        .any(|lease| lease.profile == profile && lease.owner_generation == owner_generation)
+    {
+        return Ok(ReleaseOutcome::NotOwned);
+    }
+
+    let outcome = match state.release(profile, owner_generation) {
+        ReleaseDecision::KeepApplied => {
+            guard.write(&state)?;
+            ReleaseOutcome::KeptApplied
+        }
+        ReleaseDecision::ClearWithoutMutation => {
+            guard.clear()?;
+            ReleaseOutcome::BaselineUnchanged(state.baseline)
+        }
         ReleaseDecision::Restore(baseline) => {
             // Persist the zero-lease restore obligation before touching pmset.
             guard.write(&state)?;
-            let current = backend.read_disabled()?;
-            if current != baseline {
-                if !backend.can_restore_noninteractive() {
-                    return Err(PowerError::RollbackUnavailable);
-                }
-                backend.set_disabled(baseline)?;
-                verify_state(backend, baseline)?;
-            }
-            guard.clear()?;
+            return restore_and_clear(backend, &guard, baseline);
         }
+    };
+    Ok(outcome)
+}
+
+fn restore_and_clear<B: PmsetBackend>(
+    backend: &B,
+    guard: &crate::power::ownership_store::OwnershipStoreGuard<'_>,
+    baseline: bool,
+) -> Result<ReleaseOutcome, PowerError> {
+    let current = backend.read_disabled()?;
+    if current != baseline {
+        if !backend.can_restore_noninteractive() {
+            return Err(PowerError::RollbackUnavailable);
+        }
+        backend.set_disabled(baseline)?;
+        verify_state(backend, baseline)?;
     }
-    Ok(())
+    guard.clear()?;
+    Ok(ReleaseOutcome::Restored(baseline))
 }
 
 fn verify_state<B: PmsetBackend>(backend: &B, expected: bool) -> Result<(), PowerError> {
@@ -448,6 +504,44 @@ fn verify_state<B: PmsetBackend>(backend: &B, expected: bool) -> Result<(), Powe
     } else {
         Err(PowerError::VerificationFailed { expected, actual })
     }
+}
+
+fn validate_ownership_state(state: &OwnershipState) -> Result<(), PowerError> {
+    if state.boot_id.trim().is_empty() {
+        return Err(PowerError::InvalidState(
+            "registry boot identity is empty".into(),
+        ));
+    }
+    if !state.applied {
+        return Err(PowerError::InvalidState(
+            "registry does not describe an applied state".into(),
+        ));
+    }
+    if state.did_mutate != !state.baseline {
+        return Err(PowerError::InvalidState(format!(
+            "baseline={} conflicts with didMutate={}",
+            state.baseline, state.did_mutate
+        )));
+    }
+    let mut owners = HashSet::new();
+    for lease in &state.leases {
+        if lease.profile.trim().is_empty()
+            || lease.process_identity.trim().is_empty()
+            || lease.owner_generation.trim().is_empty()
+            || lease.pid == 0
+            || lease.expires_at_ms <= lease.acquired_at_ms
+        {
+            return Err(PowerError::InvalidState(
+                "registry contains a malformed lease".into(),
+            ));
+        }
+        if !owners.insert((&lease.profile, &lease.owner_generation)) {
+            return Err(PowerError::InvalidState(
+                "registry contains duplicate lease owners".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn rollback_acquire<B: PmsetBackend>(
@@ -550,8 +644,22 @@ fn marker_file() -> std::path::PathBuf {
     jarvis_dir().join("clamshell.json")
 }
 
-pub fn read_marker() -> Option<serde_json::Value> {
-    serde_json::from_str(&std::fs::read_to_string(marker_file()).ok()?).ok()
+pub fn legacy_marker_state() -> LegacyMarkerState {
+    let bytes = match std::fs::read(marker_file()) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return LegacyMarkerState::Missing
+        }
+        Err(_) => return LegacyMarkerState::Corrupt,
+    };
+    parse_legacy_marker(&bytes)
+}
+
+fn parse_legacy_marker(bytes: &[u8]) -> LegacyMarkerState {
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => LegacyMarkerState::Present(value),
+        Err(_) => LegacyMarkerState::Corrupt,
+    }
 }
 
 pub fn clear_marker() {
@@ -632,6 +740,10 @@ mod tests {
 
         fn current(&self) -> bool {
             *self.current.lock().unwrap()
+        }
+
+        fn fail_next_set(&self) {
+            *self.fail_first_set.lock().unwrap() = true;
         }
     }
 
@@ -722,7 +834,10 @@ mod tests {
             acquire_with(&backend, &store, test_lease("prod", "generation")).unwrap(),
             AcquireOutcome::BaselineAlreadyOn
         );
-        release_with(&backend, &store, "prod", "generation").unwrap();
+        assert_eq!(
+            release_with(&backend, &store, "prod", "generation").unwrap(),
+            ReleaseOutcome::BaselineUnchanged(true)
+        );
 
         assert!(backend.current());
         assert!(!backend
@@ -742,11 +857,17 @@ mod tests {
         acquire_with(&backend, &store, test_lease("prod", "one")).unwrap();
         acquire_with(&backend, &store, test_lease("dev", "two")).unwrap();
 
-        release_with(&backend, &store, "prod", "one").unwrap();
+        assert_eq!(
+            release_with(&backend, &store, "prod", "one").unwrap(),
+            ReleaseOutcome::KeptApplied
+        );
         assert!(backend.current());
         assert!(store.read().unwrap().is_some());
 
-        release_with(&backend, &store, "dev", "two").unwrap();
+        assert_eq!(
+            release_with(&backend, &store, "dev", "two").unwrap(),
+            ReleaseOutcome::Restored(false)
+        );
         assert!(!backend.current());
         assert!(store.read().unwrap().is_none());
         std::fs::remove_dir_all(dir).unwrap();
@@ -773,6 +894,31 @@ mod tests {
     }
 
     #[test]
+    fn failed_last_release_is_resumed_from_zero_lease_tombstone() {
+        let (dir, store) = test_store("release-retry");
+        let backend = FakePmset::new(false);
+        acquire_with(&backend, &store, test_lease("prod", "generation")).unwrap();
+        backend.fail_next_set();
+
+        assert!(matches!(
+            release_with(&backend, &store, "prod", "generation"),
+            Err(PowerError::Command(_))
+        ));
+        let pending = store.read().unwrap().unwrap();
+        assert!(pending.leases.is_empty());
+        assert!(pending.did_mutate);
+        assert!(backend.current());
+
+        assert_eq!(
+            release_with(&backend, &store, "prod", "generation").unwrap(),
+            ReleaseOutcome::Restored(false)
+        );
+        assert!(!backend.current());
+        assert!(store.read().unwrap().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn corrupt_registry_blocks_mutation() {
         let (dir, store) = test_store("corrupt");
         std::fs::create_dir_all(&dir).unwrap();
@@ -787,6 +933,48 @@ mod tests {
         assert!(std::fs::read(dir.join("ownership.json"))
             .unwrap()
             .starts_with(b"{"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn semantically_invalid_registry_blocks_join_and_release() {
+        let (dir, store) = test_store("invalid-semantics");
+        let backend = FakePmset::new(true);
+        let mut invalid =
+            crate::power::ownership::OwnershipState::new(false, "boot-test", 1);
+        invalid.did_mutate = false;
+        invalid.acquire(test_lease("prod", "generation"));
+        store.write(&invalid).unwrap();
+
+        assert!(matches!(
+            acquire_with(&backend, &store, test_lease("dev", "other")),
+            Err(PowerError::InvalidState(_))
+        ));
+        assert!(matches!(
+            release_with(&backend, &store, "prod", "generation"),
+            Err(PowerError::InvalidState(_))
+        ));
+        assert!(!backend
+            .trace
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|step| step.starts_with("set:")));
+        assert!(store.read().unwrap().is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_legacy_marker_is_not_the_same_as_missing() {
+        let (dir, _) = test_store("legacy-corrupt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clamshell.json");
+        std::fs::write(&path, b"{").unwrap();
+
+        assert_eq!(
+            parse_legacy_marker(&std::fs::read(&path).unwrap()),
+            LegacyMarkerState::Corrupt
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

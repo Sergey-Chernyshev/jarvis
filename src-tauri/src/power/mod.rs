@@ -34,17 +34,12 @@ const POWER_REPAIR_ACTION: &str = "Открой раздел Power и запус
 static NEXT_OWNER_GENERATION: AtomicU64 = AtomicU64::new(0);
 static STARTUP_RECOVERY_HEALTH: OnceLock<RwLock<StartupRecoveryHealth>> = OnceLock::new();
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum StartupRecoveryHealth {
+    #[default]
     NotChecked,
     Ready(clamshell::RecoveryOutcome),
     Blocked { message: String },
-}
-
-impl Default for StartupRecoveryHealth {
-    fn default() -> Self {
-        Self::NotChecked
-    }
 }
 
 impl StartupRecoveryHealth {
@@ -1880,7 +1875,7 @@ mod tests {
         ));
         let lease_may_exist = clamshell::AcquireFailure {
             error: clamshell::PowerError::Store(crate::power::ownership_store::StoreError::Io(
-                std::io::Error::new(std::io::ErrorKind::Other, "post-rename fsync failed"),
+                std::io::Error::other("post-rename fsync failed"),
             )),
             obligation: clamshell::AcquireObligation::LeaseMayExist,
         };

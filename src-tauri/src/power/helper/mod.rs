@@ -1,7 +1,26 @@
+#[cfg(feature = "power-helper-dev")]
 pub(crate) mod client;
 
 #[cfg(feature = "power-helper-dev")]
 pub(crate) mod dev_uds;
+
+// Keep the feature-gated client seam type-checked in normal host builds before
+// the lifecycle integration consumes it. These are compile-time API contracts;
+// they do not open the socket or select the development helper at runtime.
+#[cfg(feature = "power-helper-dev")]
+const _: fn(Option<&std::ffi::OsStr>) -> Option<dev_uds::DevUdsClient> =
+    client::select_for_runtime_value;
+
+#[cfg(feature = "power-helper-dev")]
+const _: fn(
+    &dev_uds::DevUdsClient,
+    jarvis_power_core::protocol::Request,
+) -> Result<client::HelperReply, client::HelperClientError> =
+    <dev_uds::DevUdsClient as client::HelperClient>::send;
+
+#[cfg(feature = "power-helper-dev")]
+const _: fn(&dev_uds::DevUdsClient) -> client::HelperTrust =
+    <dev_uds::DevUdsClient as client::HelperClient>::trust;
 
 #[cfg(all(test, not(feature = "power-helper-dev")))]
 mod feature_off_tests {

@@ -5,9 +5,11 @@
   "description": "macOS menu-bar mission control for Claude Code and Codex sessions: status panel, notifications, voice (Rust + Tauri)",
   "license": "MIT",
   "scripts": {
+    "build:power-helper-dev": "cargo build --release --locked --manifest-path crates/jarvis-power-helper/Cargo.toml --features dev-uds --bin jarvis-power-helper-dev",
+    "start:power-helper-dev": "JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 cargo run --locked --manifest-path crates/jarvis-power-helper/Cargo.toml --features dev-uds --bin jarvis-power-helper-dev",
     "build:agent-vm-plugin": "cargo build --release --manifest-path plugins/agent-vm/Cargo.toml --target-dir src-tauri/target",
     "prepare:agent-vm-sidecar": "bash scripts/prepare-agent-vm-sidecar.sh",
-    "start": "npm run build:agent-vm-plugin && JARVIS_DEV_SIGN=1 cargo build --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort,whisper-native,stt-vad --bin jarvis && codesign --force --sign - --entitlements src-tauri/entitlements.plist src-tauri/target/release/jarvis && JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 JARVIS_PLUGIN_DEV_DIR=\"$PWD/plugins\" src-tauri/target/release/jarvis",
+    "start": "npm run build:agent-vm-plugin && JARVIS_DEV_SIGN=1 cargo build --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort,whisper-native,stt-vad,power-helper-dev --bin jarvis && codesign --force --sign - --entitlements src-tauri/entitlements.plist src-tauri/target/release/jarvis && JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 JARVIS_PLUGIN_DEV_DIR=\"$PWD/plugins\" src-tauri/target/release/jarvis",
     "start:prod": "npm run build:agent-vm-plugin && JARVIS_DEV_SIGN=1 cargo build --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort,whisper-native,stt-vad --bin jarvis && codesign --force --sign - --entitlements src-tauri/entitlements.plist src-tauri/target/release/jarvis && src-tauri/target/release/jarvis",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml && cargo test --manifest-path plugins/agent-vm/Cargo.toml",
     "test:ui": "node --test ui/*.test.mjs",

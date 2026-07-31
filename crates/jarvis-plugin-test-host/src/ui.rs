@@ -101,21 +101,21 @@ impl UiTestHost {
         }
 
         let value: Value =
-            serde_json::from_str(payload).map_err(|_| UiContractError::InvalidFrame)?;
+            serde_json::from_str(payload).map_err(|_| UiContractError::SchemaInvalid)?;
         reject_caller_identity(&value)?;
         let frame: BridgeClientFrame = serde_json::from_value(value).map_err(map_frame_error)?;
         let BridgeClientFrame::Request(request) = frame else {
-            return Err(UiContractError::RequestFrameRequired);
+            return Err(UiContractError::SchemaInvalid);
         };
         if request.generation != self.bound_page.generation {
-            return Err(UiContractError::StaleGeneration);
+            return Err(UiContractError::PageGenerationStale);
         }
 
         let _in_flight = InFlightGuard::acquire(&self.in_flight)?;
         let mut state = self
             .state
             .lock()
-            .map_err(|_| UiContractError::HostUnavailable)?;
+            .map_err(|_| UiContractError::ProviderUnavailable)?;
 
         let response = if request.method.ends_with(".watch") {
             let subscription_id = format!("subscription/{}", request.id);
@@ -155,7 +155,7 @@ fn deterministic_result(request: &BridgeRequest) -> Value {
 }
 
 fn reject_caller_identity(value: &Value) -> Result<(), UiContractError> {
-    let object = value.as_object().ok_or(UiContractError::InvalidFrame)?;
+    let object = value.as_object().ok_or(UiContractError::SchemaInvalid)?;
     if CALLER_IDENTITY_FIELDS
         .iter()
         .any(|field| object.contains_key(*field))
@@ -166,10 +166,15 @@ fn reject_caller_identity(value: &Value) -> Result<(), UiContractError> {
 }
 
 fn map_frame_error(error: serde_json::Error) -> UiContractError {
-    if error.to_string().contains("unknown field") {
+    let message = error.to_string();
+    if message.contains("unknown field") {
         UiContractError::UnknownField
+    } else if message.contains("bridge protocol incompatible") {
+        UiContractError::ProtocolIncompatible
+    } else if message.contains("invalid bridge deadline") {
+        UiContractError::Deadline
     } else {
-        UiContractError::InvalidFrame
+        UiContractError::SchemaInvalid
     }
 }
 
@@ -207,12 +212,13 @@ impl Drop for InFlightGuard<'_> {
 pub enum UiContractError {
     MessageTooLarge,
     UnknownField,
-    InvalidFrame,
-    RequestFrameRequired,
-    StaleGeneration,
+    SchemaInvalid,
+    ProtocolIncompatible,
+    Deadline,
+    PageGenerationStale,
     InFlightLimit,
     SubscriptionLimit,
-    HostUnavailable,
+    ProviderUnavailable,
 }
 
 impl UiContractError {
@@ -220,12 +226,13 @@ impl UiContractError {
         match self {
             Self::MessageTooLarge => "bridge_message_too_large",
             Self::UnknownField => "bridge_unknown_field",
-            Self::InvalidFrame => "bridge_invalid_frame",
-            Self::RequestFrameRequired => "bridge_request_required",
-            Self::StaleGeneration => "bridge_stale_generation",
+            Self::SchemaInvalid => "schema_invalid",
+            Self::ProtocolIncompatible => "bridge_protocol_incompatible",
+            Self::Deadline => "bridge_deadline",
+            Self::PageGenerationStale => "page_generation_stale",
             Self::InFlightLimit => "bridge_in_flight_limit",
             Self::SubscriptionLimit => "bridge_subscription_limit",
-            Self::HostUnavailable => "bridge_host_unavailable",
+            Self::ProviderUnavailable => "provider_unavailable",
         }
     }
 }

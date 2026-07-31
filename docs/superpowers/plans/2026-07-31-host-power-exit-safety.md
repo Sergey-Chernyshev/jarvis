@@ -505,8 +505,10 @@ git commit -m "fix(shutdown): restore power before subsystem teardown"
 **Files:**
 
 - Modify: `src-tauri/src/power/clamshell.rs`
+- Modify: `src-tauri/src/power/mod.rs`
 - Modify: `src-tauri/src/main.rs`
 - Test: `src-tauri/src/power/clamshell.rs`
+- Test: `src-tauri/src/power/mod.rs`
 
 - [ ] **Step 1: Write failing recovery tests**
 
@@ -541,11 +543,22 @@ fn reused_pid_with_different_start_identity_is_not_live() {
 }
 
 #[test]
-fn ambiguous_legacy_marker_never_restores_external_baseline() {
+fn expired_but_identity_matching_lease_blocks_until_helper_renewal_exists() {
+    let lease = lease_for_process(123, "start-a").expired_at(100);
+    let inspector = FakeProcesses::alive(123, "start-a");
+    assert_eq!(
+        classify_lease(&inspector, &lease, 101),
+        LeaseLiveness::ExpiredButLive
+    );
+}
+
+#[test]
+fn ambiguous_legacy_marker_is_never_mutated_or_cleared_automatically() {
     let backend = FakePmset::new(true);
     recover_legacy_with(&backend, legacy_marker()).unwrap();
     assert!(backend.current());
     assert_eq!(backend.set_calls(), vec![]);
+    assert!(legacy_marker_still_exists());
 }
 ```
 
@@ -561,11 +574,26 @@ Expected: recovery tests fail because `recover_with` is missing.
 
 - [ ] **Step 3: Run recovery at the start of Tauri setup**
 
-Implement `recover_with` using `OwnershipState::recover`. A lease is live only
-when its boot-session identity matches, its TTL is not expired, and both PID
-and process start identity match an injected process inspector. PID existence
-or profile equality alone are never sufficient. Cross-boot state cannot retain
-leases. Corrupt/ambiguous state remains fail-closed.
+Implement `recover_with` using `OwnershipState::recover` and an injected
+`ProcessInspector`. On Darwin, process identity is derived from
+`proc_pidinfo(PROC_PIDTBSDINFO)` start time plus UID in a versioned string; PID
+existence, profile equality or the provisional `pid:acquiredAt` string are
+never sufficient. Zombies are stale. Permission errors, partial reads and
+unknown identity formats are ambiguous and fail closed. Cross-boot state cannot
+retain leases.
+
+The current five-minute TTL is not authoritative until Task 7 adds autonomous
+helper renewal. Before that helper exists, `expired + exact live PID/start
+identity` is a blocked health state, not permission to restore under a live
+profile. `expired + proven dead/mismatched identity` is stale and recoverable.
+Task 7 moves expiry authority to the renewable helper.
+
+`power_lease()` must record the real process start identity. A blocking startup
+recovery result is stored in process-global power health and makes `arm`
+fail-closed until a later explicit repair. The old legacy-marker callback must
+not clear a marker merely because `SleepDisabled=0`: a legacy marker has no
+baseline proof, so present/corrupt markers are observation-only blocked repair
+states and are never automatically mutated or deleted.
 
 Add
 `clamshell::recover_on_startup()` immediately after
@@ -588,7 +616,7 @@ Expected: all focused tests pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src-tauri/src/power/clamshell.rs src-tauri/src/main.rs
+git add src-tauri/src/power/clamshell.rs src-tauri/src/power/mod.rs src-tauri/src/main.rs
 git commit -m "fix(power): recover before headless startup"
 ```
 

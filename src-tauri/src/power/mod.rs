@@ -14,7 +14,7 @@ pub mod ownership;
 pub mod ownership_store;
 
 use serde_json::{json, Map, Value};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::daemon::Daemon;
@@ -26,13 +26,28 @@ use keep_awake::{Engine, Event};
 const SUGGEST_GAP_MS: i64 = 60 * 60 * 1000; // подсказка не чаще раза в час
 const GUARD_EVERY_MS: i64 = 60 * 1000;
 const WAKE_GAP_MS: i64 = 90 * 1000;
+const CLAMSHELL_LEASE_TTL_MS: i64 = 5 * 60 * 1000;
+static NEXT_OWNER_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Декларативный пункт меню трея от плагина.
 pub enum TrayItem {
-    Label { text: String },
-    Action { id: String, text: String },
-    Check { id: String, text: String, checked: bool, enabled: bool },
-    Submenu { text: String, items: Vec<TrayItem> },
+    Label {
+        text: String,
+    },
+    Action {
+        id: String,
+        text: String,
+    },
+    Check {
+        id: String,
+        text: String,
+        checked: bool,
+        enabled: bool,
+    },
+    Submenu {
+        text: String,
+        items: Vec<TrayItem>,
+    },
     Separator,
 }
 
@@ -42,7 +57,8 @@ struct Clam {
     active: bool,
     armed: bool,
     armed_by: Option<&'static str>, // 'manual' | 'auto'
-    busy: bool,                     // arm/disarm в полёте — не наслаиваем
+    owner_generation: Option<String>,
+    busy: bool, // arm/disarm в полёте — не наслаиваем
     last_guard_at: i64,
     lid_causes_sleep: Option<bool>, // кэш для статусной строки меню
 }
@@ -148,26 +164,31 @@ impl Power {
     }
 
     fn deactivate_clamshell(d: &Arc<Daemon>) {
-        let armed = {
+        let owner_generation = {
             let mut clam = d.power.clam.lock().unwrap();
             if !clam.active {
                 return;
             }
             clam.active = false;
-            let was = clam.armed;
             clam.armed = false;
             clam.armed_by = None;
-            was
+            clam.owner_generation.take()
         };
-        if armed && clamshell::pmset_quiet_sync(false) {
-            clamshell::clear_marker();
+        if let Some(owner_generation) = owner_generation {
+            if let Err(error) = clamshell::release_with(
+                &clamshell::SystemPmset,
+                &crate::power::ownership_store::OwnershipStore::global(),
+                &power_profile_id(),
+                &owner_generation,
+            ) {
+                eprintln!("[jarvis:clamshell] release on deactivate failed: {error}");
+            }
         }
         println!("[jarvis:clamshell] выключен");
     }
 
-    /// Выход из приложения: снять assertion, вернуть disablesleep.
-    /// Квит не ждёт промисов — восстанавливаем синхронно и только тихо;
-    /// без sudoers ручной armed переживёт квит, его поднимет restoreAfterRestart.
+    /// Выход из приложения: снять assertion и синхронно освободить только
+    /// доказанную Jarvis-owned clamshell lease через non-interactive backend.
     pub fn dispose(d: &Arc<Daemon>) {
         Self::deactivate_keep_awake(d);
         Self::deactivate_clamshell(d);
@@ -197,12 +218,22 @@ impl Power {
 
     /// Удерживается ли ассерт «не спать» прямо сейчас (для снапшота планировщика).
     pub fn keep_awake_active(&self) -> bool {
-        self.engine.lock().unwrap().as_ref().is_some_and(|e| e.active())
+        self.engine
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|e| e.active())
     }
 
     pub fn badges(&self) -> String {
         let mut s = String::new();
-        if self.engine.lock().unwrap().as_ref().is_some_and(|e| e.active()) {
+        if self
+            .engine
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|e| e.active())
+        {
             s.push('☕');
         }
         if self.clam.lock().unwrap().armed {
@@ -299,7 +330,11 @@ impl Power {
             match name {
                 "start-manual" => engine.start_manual(None),
                 "start-timer" => {
-                    let minutes = args.get("minutes").and_then(Value::as_i64).unwrap_or(0).max(1);
+                    let minutes = args
+                        .get("minutes")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0)
+                        .max(1);
                     engine.start_timer(minutes * 60_000, format!("{minutes}м"), now)
                 }
                 "start-process" => {
@@ -372,7 +407,10 @@ impl Power {
                     patch.insert("suggest".into(), Value::Bool(v));
                 }
                 if let Some(v) = args.get("batteryFloor").and_then(Value::as_f64) {
-                    patch.insert("batteryFloor".into(), json!((v.floor() as i64).clamp(5, 80)));
+                    patch.insert(
+                        "batteryFloor".into(),
+                        json!((v.floor() as i64).clamp(5, 80)),
+                    );
                 }
                 if patch.is_empty() {
                     return json!({ "ok": false, "error": "пустой set" });
@@ -404,7 +442,10 @@ impl Power {
                     None => "☕ Не спать: выкл".into(),
                 },
             });
-            out.push(TrayItem::Action { id: "ka:start-manual".into(), text: "Бессрочно".into() });
+            out.push(TrayItem::Action {
+                id: "ka:start-manual".into(),
+                text: "Бессрочно".into(),
+            });
             out.push(TrayItem::Submenu {
                 text: "На время".into(),
                 items: keep_awake::PRESETS_MIN
@@ -419,7 +460,9 @@ impl Power {
             out.push(TrayItem::Submenu {
                 text: "Пока жив процесс".into(),
                 items: if procs.is_empty() {
-                    vec![TrayItem::Label { text: "процессы не нашлись".into() }]
+                    vec![TrayItem::Label {
+                        text: "процессы не нашлись".into(),
+                    }]
                 } else {
                     procs
                         .iter()
@@ -433,7 +476,10 @@ impl Power {
                 },
             });
             if !st["manual"].is_null() {
-                out.push(TrayItem::Action { id: "ka:stop".into(), text: "Выключить ручной режим".into() });
+                out.push(TrayItem::Action {
+                    id: "ka:stop".into(),
+                    text: "Выключить ручной режим".into(),
+                });
             }
             out.push(TrayItem::Separator);
             out.push(TrayItem::Check {
@@ -518,31 +564,44 @@ impl Power {
                 "ka:start-manual" => ("keep-awake", "start-manual", json!({})),
                 "ka:stop" => ("keep-awake", "stop", json!({})),
                 "ka:set-auto" => (
-                    "keep-awake", "set",
+                    "keep-awake",
+                    "set",
                     json!({ "auto": !ka["auto"].as_bool().unwrap_or(false) }),
                 ),
                 "ka:set-display" => (
-                    "keep-awake", "set",
+                    "keep-awake",
+                    "set",
                     json!({ "keepDisplayOn": !ka["keepDisplayOn"].as_bool().unwrap_or(false) }),
                 ),
                 "cs:toggle" => ("clamshell", if armed { "disarm" } else { "arm" }, json!({})),
                 "cs:set-autoarm" => (
-                    "clamshell", "set",
+                    "clamshell",
+                    "set",
                     json!({ "autoArm": !cs["autoArm"].as_bool().unwrap_or(false) }),
                 ),
                 "cs:set-suggest" => (
-                    "clamshell", "set",
+                    "clamshell",
+                    "set",
                     json!({ "suggest": !cs["suggest"].as_bool().unwrap_or(false) }),
                 ),
                 "cs:install-sudoers" => ("clamshell", "install-sudoers", json!({})),
                 other => {
                     if let Some(min) = other.strip_prefix("ka:timer:") {
-                        ("keep-awake", "start-timer", json!({ "minutes": min.parse::<i64>().unwrap_or(15) }))
+                        (
+                            "keep-awake",
+                            "start-timer",
+                            json!({ "minutes": min.parse::<i64>().unwrap_or(15) }),
+                        )
                     } else if let Some(idx) = other.strip_prefix("ka:proc:") {
                         let procs = d.power.processes.lock().unwrap().clone();
-                        match idx.parse::<usize>().ok().and_then(|i| procs.get(i).cloned()) {
+                        match idx
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|i| procs.get(i).cloned())
+                        {
                             Some((pid, label)) => (
-                                "keep-awake", "start-process",
+                                "keep-awake",
+                                "start-process",
                                 json!({ "pid": pid, "label": label }),
                             ),
                             None => return,
@@ -633,6 +692,35 @@ fn working_count(list: &[Session]) -> usize {
     list.iter().filter(|s| s.status == Status::Working).count()
 }
 
+fn power_profile_id() -> String {
+    let path = jarvis_dir();
+    std::fs::canonicalize(&path)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn new_owner_generation() -> String {
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        now_ms(),
+        NEXT_OWNER_GENERATION.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn power_lease(owner_generation: &str) -> ownership::Lease {
+    let acquired_at_ms = now_ms();
+    ownership::Lease {
+        profile: power_profile_id(),
+        pid: std::process::id(),
+        process_identity: format!("{}:{acquired_at_ms}", std::process::id()),
+        owner_generation: owner_generation.into(),
+        acquired_at_ms,
+        expires_at_ms: acquired_at_ms.saturating_add(CLAMSHELL_LEASE_TTL_MS),
+    }
+}
+
 /// Трей/панель обновить (аналог ctx.changed() БЕЗ broadcast: связка с
 /// «Крышкой» дёргается только из событий keep-awake, иначе ручной disarm
 /// крышки мгновенно ре-армился бы peer_sync'ом).
@@ -645,10 +733,20 @@ fn handle_engine_events(d: &Arc<Daemon>, events: Vec<Event>) {
     for e in &events {
         match e {
             Event::TimerEnd => {
-                d.notify("☕ Таймер вышел", "Мак снова может спать как обычно", None, "done");
+                d.notify(
+                    "☕ Таймер вышел",
+                    "Мак снова может спать как обычно",
+                    None,
+                    "done",
+                );
             }
             Event::ProcessDied { label } => {
-                d.notify("☕ Снимаю запрет сна", &format!("{label} завершился"), None, "done");
+                d.notify(
+                    "☕ Снимаю запрет сна",
+                    &format!("{label} завершился"),
+                    None,
+                    "done",
+                );
             }
             Event::Changed => {}
         }
@@ -670,7 +768,13 @@ fn peer_sync(d: &Arc<Daemon>) {
     if !active || busy || s["autoArm"].as_bool() != Some(true) || !clamshell::sudoers_installed() {
         return;
     }
-    let ka_active = d.power.engine.lock().unwrap().as_ref().is_some_and(|e| e.active());
+    let ka_active = d
+        .power
+        .engine
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|e| e.active());
     let d = d.clone();
     tauri::async_runtime::spawn(async move {
         if ka_active && !armed {
@@ -692,31 +796,33 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
         }
         clam.busy = true;
     }
-    let ok = if by == "auto" {
-        clamshell::pmset_quiet(true).await
-    } else {
-        clamshell::pmset_ask(true).await
-    };
-    let result = if ok {
+    let owner_generation = new_owner_generation();
+    let lease = power_lease(&owner_generation);
+    let acquired = tauri::async_runtime::spawn_blocking(move || {
+        clamshell::acquire_with(
+            &clamshell::SystemPmset,
+            &crate::power::ownership_store::OwnershipStore::global(),
+            lease,
+        )
+    })
+    .await;
+    let result = if matches!(&acquired, Ok(Ok(_))) {
         {
             let mut clam = d.power.clam.lock().unwrap();
             clam.armed = true;
             clam.armed_by = Some(by);
+            clam.owner_generation = Some(owner_generation);
             clam.last_guard_at = 0;
-        }
-        clamshell::write_marker(by);
-        if by == "manual" && !clamshell::sudoers_installed() {
-            d.notify(
-                "⌒ Closed-display включён",
-                "Не забудь выключить: без тихого режима я не смогу снять его сам",
-                None,
-                "done",
-            );
         }
         changed(d);
         json!({ "ok": true })
     } else {
-        json!({ "ok": false, "error": "не получилось включить (пароль отменён?)" })
+        let error = match acquired {
+            Ok(Err(error)) => error.to_string(),
+            Err(error) => format!("power worker failed: {error}"),
+            Ok(Ok(_)) => unreachable!(),
+        };
+        json!({ "ok": false, "error": error })
     };
     d.power.clam.lock().unwrap().busy = false;
     result
@@ -733,18 +839,40 @@ async fn disarm(d: &Arc<Daemon>) -> Value {
         }
         clam.busy = true;
     }
-    let ok = clamshell::pmset_ask(false).await;
-    let result = if ok {
+    let owner_generation = d.power.clam.lock().unwrap().owner_generation.clone();
+    let Some(owner_generation) = owner_generation else {
+        d.power.clam.lock().unwrap().busy = false;
+        return json!({
+            "ok": false,
+            "error": "старый marker не доказывает владение; нужен явный repair"
+        });
+    };
+    let profile = power_profile_id();
+    let released = tauri::async_runtime::spawn_blocking(move || {
+        clamshell::release_with(
+            &clamshell::SystemPmset,
+            &crate::power::ownership_store::OwnershipStore::global(),
+            &profile,
+            &owner_generation,
+        )
+    })
+    .await;
+    let result = if matches!(&released, Ok(Ok(()))) {
         {
             let mut clam = d.power.clam.lock().unwrap();
             clam.armed = false;
             clam.armed_by = None;
+            clam.owner_generation = None;
         }
-        clamshell::clear_marker();
         changed(d);
         json!({ "ok": true })
     } else {
-        json!({ "ok": false, "error": "не получилось выключить" })
+        let error = match released {
+            Ok(Err(error)) => error.to_string(),
+            Err(error) => format!("power worker failed: {error}"),
+            Ok(Ok(())) => unreachable!(),
+        };
+        json!({ "ok": false, "error": error })
     };
     d.power.clam.lock().unwrap().busy = false;
     result
@@ -755,29 +883,26 @@ async fn restore_after_restart(d: &Arc<Daemon>) {
     if clamshell::read_marker().is_none() {
         return;
     }
-    if clamshell::read_sleep_disabled().await != Some(true) {
+    if clamshell::decide_legacy_marker(clamshell::read_sleep_disabled().await)
+        == clamshell::LegacyMarkerDecision::ClearMarker
+    {
         clamshell::clear_marker();
         return;
     }
-    if clamshell::pmset_quiet(false).await {
-        clamshell::clear_marker();
-        println!("[jarvis:clamshell] демон перезапустился с поднятым disablesleep — восстановил нормальный сон");
-        return;
-    }
-    // Тихо снять нельзя (нет sudoers). Усыновляем повисший флаг как armed —
-    // тогда панель и трей честно покажут «не уснёт закрытым» и дадут кнопку
-    // «Выключить» (спросит пароль). Иначе UI врал бы «норм. сон», а мак не спал
-    // и снять его было бы нечем — ровно тот тупик, из-за которого «не отключается».
+    // Старый marker не записывал baseline и не доказывает, что именно Jarvis
+    // сделал 0 → 1. Автоматический pmset 0 здесь мог бы выключить чужой
+    // Amphetamine/manager, поэтому только показываем blocked repair.
     {
         let mut clam = d.power.clam.lock().unwrap();
         clam.armed = true;
         clam.armed_by = Some("manual");
+        clam.owner_generation = None;
         clam.last_guard_at = 0;
     }
     changed(d);
     d.notify(
-        "⌒ Мак не спит с прошлого запуска",
-        "Остался запрет сна под крышкой — нажми «Выключить» в ◇ → Крышка (спросит пароль)",
+        "⌒ Найден старый режим «Крышка»",
+        "Его marker не хранит исходное состояние, поэтому Jarvis не выключает чужой запрет сна автоматически; открой repair",
         None,
         "done",
     );
@@ -792,18 +917,37 @@ async fn refresh_lid(d: &Arc<Daemon>) {
 async fn battery_guard(d: &Arc<Daemon>) {
     let floor = Power::cs_settings(d)["batteryFloor"].as_i64().unwrap_or(15) as u32;
     let batt = clamshell::read_battery().await;
-    let (Some(pct), Some(true)) = (batt.pct, batt.on_battery) else { return };
+    let (Some(pct), Some(true)) = (batt.pct, batt.on_battery) else {
+        return;
+    };
     if pct > floor {
         return;
     }
-    println!("[jarvis:clamshell] батарея {pct}% ≤ {floor}% — снимаю disablesleep");
-    if clamshell::pmset_quiet(false).await {
+    println!("[jarvis:clamshell] батарея {pct}% ≤ {floor}% — освобождаю ownership lease");
+    let owner_generation = d.power.clam.lock().unwrap().owner_generation.clone();
+    let released = if let Some(owner_generation) = owner_generation {
+        let profile = power_profile_id();
+        tauri::async_runtime::spawn_blocking(move || {
+            clamshell::release_with(
+                &clamshell::SystemPmset,
+                &crate::power::ownership_store::OwnershipStore::global(),
+                &profile,
+                &owner_generation,
+            )
+        })
+        .await
+        .map(|result| result.is_ok())
+        .unwrap_or(false)
+    } else {
+        false
+    };
+    if released {
         {
             let mut clam = d.power.clam.lock().unwrap();
             clam.armed = false;
             clam.armed_by = None;
+            clam.owner_generation = None;
         }
-        clamshell::clear_marker();
         d.notify(
             "⌒ Крышка: батарея садится",
             &format!("Осталось {pct}% — вернул нормальный сон"),
@@ -850,7 +994,11 @@ async fn on_resume(d: &Arc<Daemon>, working_at_sleep: usize) {
     let n = working_at_sleep;
     let head = format!(
         "Сон прервал {n} {}",
-        if n == 1 { "работающую сессию" } else { "работающие сессии" }
+        if n == 1 {
+            "работающую сессию"
+        } else {
+            "работающие сессии"
+        }
     );
     match decision {
         clamshell::Suggest::Native => d.notify(
@@ -895,7 +1043,9 @@ async fn install_sudoers(d: &Arc<Daemon>) -> Value {
     );
     let ok = tokio::time::timeout(
         std::time::Duration::from_secs(120),
-        tokio::process::Command::new("osascript").args(["-e", &script]).output(),
+        tokio::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output(),
     )
     .await
     .ok()
@@ -905,7 +1055,12 @@ async fn install_sudoers(d: &Arc<Daemon>) -> Value {
     if !ok {
         return json!({ "ok": false, "error": "установка отменена" });
     }
-    d.notify("⌒ Тихий режим настроен", "Теперь closed-display переключается без пароля", None, "done");
+    d.notify(
+        "⌒ Тихий режим настроен",
+        "Теперь closed-display переключается без пароля",
+        None,
+        "done",
+    );
     changed(d);
     json!({ "ok": true })
 }
@@ -929,7 +1084,9 @@ async fn list_processes(d: &Arc<Daemon>) -> Vec<(i64, String)> {
     let osa = |line: &'static str| async move {
         let out = tokio::time::timeout(
             std::time::Duration::from_millis(1500),
-            tokio::process::Command::new("osascript").args(["-e", line]).output(),
+            tokio::process::Command::new("osascript")
+                .args(["-e", line])
+                .output(),
         )
         .await
         .ok()?
@@ -944,7 +1101,10 @@ async fn list_processes(d: &Arc<Daemon>) -> Vec<(i64, String)> {
     );
     // нет пермишена Automation — покажем хотя бы claude-сессии
     if let (Some(ids_line), Some(names_line)) = (ids_line, names_line) {
-        let ids: Vec<i64> = ids_line.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        let ids: Vec<i64> = ids_line
+            .split(',')
+            .filter_map(|x| x.trim().parse().ok())
+            .collect();
         let names: Vec<&str> = names_line.split(',').map(str::trim).collect();
         let me = std::process::id() as i64;
         let mut apps: Vec<(i64, String)> = ids

@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use semver::Version;
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -16,7 +17,7 @@ const MAX_ID_BYTES: usize = 256;
 const MAX_PHASE_BYTES: usize = 128;
 const MAX_ERROR_MESSAGE_BYTES: usize = 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContractRef {
     #[serde(deserialize_with = "deserialize_contract_id")]
@@ -26,7 +27,7 @@ pub struct ContractRef {
     pub schema_digest: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EntityEnvelope {
     pub contract: ContractRef,
@@ -42,7 +43,7 @@ pub struct EntityEnvelope {
     pub stale: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EventEnvelope {
     pub contract: ContractRef,
@@ -62,7 +63,7 @@ pub struct EventEnvelope {
     pub at_ms: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EntitySelector {
     pub contract: ContractRef,
@@ -72,14 +73,14 @@ pub struct EntitySelector {
     pub states: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FieldProjection {
     #[serde(deserialize_with = "deserialize_projection_fields")]
     pub fields: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -103,7 +104,7 @@ pub enum EntityMutation {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EntityQuery {
     #[serde(deserialize_with = "deserialize_selectors")]
@@ -113,7 +114,7 @@ pub struct EntityQuery {
     pub limit: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EntityQuerySnapshot {
     pub snapshot_revision: u64,
@@ -121,7 +122,7 @@ pub struct EntityQuerySnapshot {
     pub entities: Vec<EntityEnvelope>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EntityWatchRequest {
     pub cursor: u64,
@@ -132,14 +133,14 @@ pub struct EntityWatchRequest {
     pub limit: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EntityChange {
     pub cursor: u64,
     pub entity: EntityEnvelope,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CursorGap {
     pub requested_cursor: u64,
@@ -147,7 +148,7 @@ pub struct CursorGap {
     pub latest_cursor: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EventWatchRequest {
     pub cursor: u64,
@@ -158,14 +159,14 @@ pub struct EventWatchRequest {
     pub limit: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EventChange {
     pub cursor: u64,
     pub event: EventEnvelope,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OperationSubjectRef {
     pub contract: ContractRef,
@@ -173,7 +174,7 @@ pub struct OperationSubjectRef {
     pub subject_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeOperationState {
     Queued,
@@ -187,7 +188,7 @@ pub enum RuntimeOperationState {
     TimedOut,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeOperationError {
     #[serde(deserialize_with = "deserialize_state")]
@@ -196,7 +197,7 @@ pub struct RuntimeOperationError {
     pub message: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeOperationView {
     pub operation_ref: OperationRef,
@@ -212,7 +213,7 @@ pub struct RuntimeOperationView {
     pub error: Option<RuntimeOperationError>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeOperationQuery {
     #[serde(deserialize_with = "deserialize_subjects")]
@@ -222,7 +223,7 @@ pub struct RuntimeOperationQuery {
     pub limit: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeOperationWatch {
     pub cursor: u64,
@@ -232,14 +233,14 @@ pub struct RuntimeOperationWatch {
     pub limit: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeOperationChange {
     pub cursor: u64,
     pub operation: RuntimeOperationView,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeOperationGap {
     pub requested_cursor: u64,
@@ -247,21 +248,21 @@ pub struct RuntimeOperationGap {
     pub latest_cursor: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeOperationCancel {
     pub operation_ref: OperationRef,
     pub expected_state_revision: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TypedCommandDeclaration {
     pub command: ContractRef,
     pub risk_floor: Risk,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TypedCommandInvocation {
     pub command: ContractRef,
@@ -272,7 +273,7 @@ pub struct TypedCommandInvocation {
     pub deadline_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -289,7 +290,7 @@ pub enum CommandResult {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EventMutation {
     pub contract: ContractRef,
@@ -308,7 +309,7 @@ pub struct EventMutation {
     pub at_ms: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -320,7 +321,7 @@ pub enum OutboxMutation {
     Event { event: EventMutation },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OutboxBatch {
     #[serde(deserialize_with = "deserialize_id")]
@@ -331,7 +332,7 @@ pub struct OutboxBatch {
     pub mutations: Vec<OutboxMutation>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OutboxAck {
     #[serde(deserialize_with = "deserialize_id")]

@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -10,7 +11,7 @@ const MAX_TITLE_BYTES: usize = 256;
 const MAX_CONTEXT_REFERENCES: usize = 16;
 const MAX_PLACEMENTS: usize = 16;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, JsonSchema, Serialize)]
 #[serde(transparent)]
 pub struct ContributionId(String);
 
@@ -42,7 +43,7 @@ impl<'de> Deserialize<'de> for ContributionId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -68,7 +69,7 @@ pub enum ContextReference {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResolvedPageContribution {
     pub id: ContributionId,
@@ -79,7 +80,7 @@ pub struct ResolvedPageContribution {
     pub instance_policy: InstancePolicy,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResolvedCommandContribution {
     pub id: ContributionId,
@@ -92,7 +93,7 @@ pub struct ResolvedCommandContribution {
     pub context: Vec<ContextReference>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResolvedActionContribution {
     pub id: ContributionId,
@@ -106,7 +107,7 @@ pub struct ResolvedActionContribution {
     pub context: Vec<ContextReference>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResolvedHotkeyContribution {
     pub command: ContributionId,
@@ -115,7 +116,7 @@ pub struct ResolvedHotkeyContribution {
     pub scope: HotkeyScope,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResolvedContributions {
     #[serde(default)]

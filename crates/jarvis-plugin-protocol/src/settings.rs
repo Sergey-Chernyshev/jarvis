@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -5,7 +6,7 @@ const MAX_SETTING_KEY_BYTES: usize = 128;
 const MAX_SETTING_VALUE_BYTES: usize = 64 * 1024;
 const MAX_REFERENCE_BYTES: usize = 128;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, JsonSchema, Serialize)]
 #[serde(transparent)]
 pub struct SettingKey(String);
 
@@ -37,7 +38,7 @@ impl<'de> Deserialize<'de> for SettingKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CredentialReference {
     pub credential_id: String,
@@ -76,14 +77,14 @@ impl<'de> Deserialize<'de> for CredentialReference {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SettingScope {
     User,
     Project,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -109,7 +110,7 @@ pub enum SettingValue {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SettingRecord {
     pub key: SettingKey,
@@ -146,7 +147,7 @@ impl<'de> Deserialize<'de> for SettingRecord {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SettingWrite {
     pub key: SettingKey,
@@ -183,7 +184,7 @@ impl<'de> Deserialize<'de> for SettingWrite {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SettingChange {
     pub cursor: u64,

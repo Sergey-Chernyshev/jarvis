@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -15,7 +16,7 @@ const MAX_CODE_BYTES: usize = 128;
 const MAX_MESSAGE_BYTES: usize = 1024;
 const MAX_GRANTS: usize = 256;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Hello {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
@@ -23,7 +24,7 @@ pub struct Hello {
     pub generation: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Welcome {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
@@ -39,7 +40,7 @@ pub struct Welcome {
     pub grants: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BridgeRequest {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
@@ -56,7 +57,7 @@ pub struct BridgeRequest {
     pub deadline_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BridgeResponse {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
@@ -67,7 +68,7 @@ pub struct BridgeResponse {
     pub result: Value,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SubscribeResult {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
@@ -80,7 +81,7 @@ pub struct SubscribeResult {
     pub cursor: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BridgeEvent {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
@@ -92,7 +93,7 @@ pub struct BridgeEvent {
     pub event: Value,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Poll {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
@@ -101,7 +102,7 @@ pub struct Poll {
     pub cursor: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Cancel {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
@@ -111,7 +112,7 @@ pub struct Cancel {
     pub generation: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Unsubscribe {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
@@ -121,7 +122,7 @@ pub struct Unsubscribe {
     pub subscription_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Gap {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
@@ -134,7 +135,7 @@ pub struct Gap {
     pub latest_cursor: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Close {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
@@ -144,7 +145,7 @@ pub struct Close {
     pub code: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BridgeError {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
@@ -160,7 +161,7 @@ pub struct BridgeError {
     pub correlation_id: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BridgeClientFrame {
     Hello(Hello),
@@ -170,7 +171,7 @@ pub enum BridgeClientFrame {
     Unsubscribe(Unsubscribe),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BridgeHostFrame {
     Welcome(Welcome),

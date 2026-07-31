@@ -1,0 +1,972 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "CommandResult": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "result": true,
+            "type": {
+              "enum": [
+                "completed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_ref": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "accepted"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation_ref",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ContractRef": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "schemaDigest": {
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "schemaDigest",
+        "version"
+      ],
+      "type": "object"
+    },
+    "CursorGap": {
+      "additionalProperties": false,
+      "properties": {
+        "earliestCursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "latestCursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "requestedCursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "earliestCursor",
+        "latestCursor",
+        "requestedCursor"
+      ],
+      "type": "object"
+    },
+    "EntityChange": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "entity": {
+          "$ref": "#/definitions/EntityEnvelope"
+        }
+      },
+      "required": [
+        "cursor",
+        "entity"
+      ],
+      "type": "object"
+    },
+    "EntityEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "brokerRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "contract": {
+          "$ref": "#/definitions/ContractRef"
+        },
+        "data": true,
+        "id": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "state": {
+          "type": "string"
+        },
+        "updatedAtMs": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "brokerRevision",
+        "contract",
+        "data",
+        "id",
+        "revision",
+        "stale",
+        "state",
+        "updatedAtMs"
+      ],
+      "type": "object"
+    },
+    "EntityMutation": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "contract": {
+              "$ref": "#/definitions/ContractRef"
+            },
+            "data": true,
+            "expected_revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "put"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "contract",
+            "data",
+            "expected_revision",
+            "id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "contract": {
+              "$ref": "#/definitions/ContractRef"
+            },
+            "expected_revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "delete"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "contract",
+            "expected_revision",
+            "id",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EntityQuery": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "projection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FieldProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "selectors": {
+          "items": {
+            "$ref": "#/definitions/EntitySelector"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "limit",
+        "selectors"
+      ],
+      "type": "object"
+    },
+    "EntityQuerySnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "entities": {
+          "items": {
+            "$ref": "#/definitions/EntityEnvelope"
+          },
+          "type": "array"
+        },
+        "snapshotRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entities",
+        "snapshotRevision"
+      ],
+      "type": "object"
+    },
+    "EntitySelector": {
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "$ref": "#/definitions/ContractRef"
+        },
+        "ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "states": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "contract"
+      ],
+      "type": "object"
+    },
+    "EntityWatchRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "projection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FieldProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "selectors": {
+          "items": {
+            "$ref": "#/definitions/EntitySelector"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "cursor",
+        "limit",
+        "selectors"
+      ],
+      "type": "object"
+    },
+    "EventChange": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "event": {
+          "$ref": "#/definitions/EventEnvelope"
+        }
+      },
+      "required": [
+        "cursor",
+        "event"
+      ],
+      "type": "object"
+    },
+    "EventEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "atMs": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "contract": {
+          "$ref": "#/definitions/ContractRef"
+        },
+        "correlationId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "data": true,
+        "eventId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "streamId": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "atMs",
+        "contract",
+        "data",
+        "eventId",
+        "kind",
+        "seq",
+        "streamId",
+        "subject"
+      ],
+      "type": "object"
+    },
+    "EventMutation": {
+      "additionalProperties": false,
+      "properties": {
+        "atMs": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "contract": {
+          "$ref": "#/definitions/ContractRef"
+        },
+        "correlationId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "data": true,
+        "eventId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "streamId": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "atMs",
+        "contract",
+        "data",
+        "eventId",
+        "kind",
+        "streamId",
+        "subject"
+      ],
+      "type": "object"
+    },
+    "EventWatchRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "$ref": "#/definitions/ContractRef"
+        },
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "subjects": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "contract",
+        "cursor",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "FieldProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "fields": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "fields"
+      ],
+      "type": "object"
+    },
+    "OperationSubjectRef": {
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "$ref": "#/definitions/ContractRef"
+        },
+        "subjectId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "subjectId"
+      ],
+      "type": "object"
+    },
+    "OutboxAck": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptedOperationRefs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "appliedBrokerRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "outboxId": {
+          "type": "string"
+        },
+        "payloadDigest": {
+          "type": "string"
+        },
+        "sourceInstanceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "acceptedOperationRefs",
+        "appliedBrokerRevision",
+        "outboxId",
+        "payloadDigest",
+        "sourceInstanceId"
+      ],
+      "type": "object"
+    },
+    "OutboxBatch": {
+      "additionalProperties": false,
+      "properties": {
+        "mutations": {
+          "items": {
+            "$ref": "#/definitions/OutboxMutation"
+          },
+          "type": "array"
+        },
+        "outboxId": {
+          "type": "string"
+        },
+        "sourceInstanceId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mutations",
+        "outboxId",
+        "sourceInstanceId"
+      ],
+      "type": "object"
+    },
+    "OutboxMutation": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "entity"
+              ],
+              "type": "string"
+            },
+            "mutation": {
+              "$ref": "#/definitions/EntityMutation"
+            }
+          },
+          "required": [
+            "kind",
+            "mutation"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "event": {
+              "$ref": "#/definitions/EventMutation"
+            },
+            "kind": {
+              "enum": [
+                "event"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "event",
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Risk": {
+      "enum": [
+        "read",
+        "control",
+        "destructive"
+      ],
+      "type": "string"
+    },
+    "RuntimeOperationCancel": {
+      "additionalProperties": false,
+      "properties": {
+        "expectedStateRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "operationRef": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectedStateRevision",
+        "operationRef"
+      ],
+      "type": "object"
+    },
+    "RuntimeOperationChange": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "operation": {
+          "$ref": "#/definitions/RuntimeOperationView"
+        }
+      },
+      "required": [
+        "cursor",
+        "operation"
+      ],
+      "type": "object"
+    },
+    "RuntimeOperationError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "type": "object"
+    },
+    "RuntimeOperationGap": {
+      "additionalProperties": false,
+      "properties": {
+        "earliestCursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "latestCursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "requestedCursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "earliestCursor",
+        "latestCursor",
+        "requestedCursor"
+      ],
+      "type": "object"
+    },
+    "RuntimeOperationQuery": {
+      "additionalProperties": false,
+      "properties": {
+        "includeTerminalSince": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "subjects": {
+          "items": {
+            "$ref": "#/definitions/OperationSubjectRef"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "limit",
+        "subjects"
+      ],
+      "type": "object"
+    },
+    "RuntimeOperationState": {
+      "enum": [
+        "queued",
+        "dispatching",
+        "running",
+        "waiting_for_provider",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "interrupted",
+        "timed_out"
+      ],
+      "type": "string"
+    },
+    "RuntimeOperationView": {
+      "additionalProperties": false,
+      "properties": {
+        "createdAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "deadlineAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RuntimeOperationError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exactCommand": {
+          "$ref": "#/definitions/ContractRef"
+        },
+        "operationRef": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "providerGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/definitions/RuntimeOperationState"
+        },
+        "subject": {
+          "$ref": "#/definitions/OperationSubjectRef"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "createdAt",
+        "deadlineAt",
+        "exactCommand",
+        "operationRef",
+        "phase",
+        "providerGeneration",
+        "state",
+        "subject",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "RuntimeOperationWatch": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "subjects": {
+          "items": {
+            "$ref": "#/definitions/OperationSubjectRef"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "cursor",
+        "limit",
+        "subjects"
+      ],
+      "type": "object"
+    },
+    "TypedCommandDeclaration": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "$ref": "#/definitions/ContractRef"
+        },
+        "riskFloor": {
+          "$ref": "#/definitions/Risk"
+        }
+      },
+      "required": [
+        "command",
+        "riskFloor"
+      ],
+      "type": "object"
+    },
+    "TypedCommandInvocation": {
+      "additionalProperties": false,
+      "properties": {
+        "args": true,
+        "command": {
+          "$ref": "#/definitions/ContractRef"
+        },
+        "deadlineMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "subject": {
+          "$ref": "#/definitions/OperationSubjectRef"
+        }
+      },
+      "required": [
+        "args",
+        "command",
+        "deadlineMs",
+        "subject"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "commandResult": {
+      "$ref": "#/definitions/CommandResult"
+    },
+    "contractRef": {
+      "$ref": "#/definitions/ContractRef"
+    },
+    "cursorGap": {
+      "$ref": "#/definitions/CursorGap"
+    },
+    "entityChange": {
+      "$ref": "#/definitions/EntityChange"
+    },
+    "entityEnvelope": {
+      "$ref": "#/definitions/EntityEnvelope"
+    },
+    "entityMutation": {
+      "$ref": "#/definitions/EntityMutation"
+    },
+    "entityQuery": {
+      "$ref": "#/definitions/EntityQuery"
+    },
+    "entityQuerySnapshot": {
+      "$ref": "#/definitions/EntityQuerySnapshot"
+    },
+    "entitySelector": {
+      "$ref": "#/definitions/EntitySelector"
+    },
+    "entityWatchRequest": {
+      "$ref": "#/definitions/EntityWatchRequest"
+    },
+    "eventChange": {
+      "$ref": "#/definitions/EventChange"
+    },
+    "eventEnvelope": {
+      "$ref": "#/definitions/EventEnvelope"
+    },
+    "eventMutation": {
+      "$ref": "#/definitions/EventMutation"
+    },
+    "eventWatchRequest": {
+      "$ref": "#/definitions/EventWatchRequest"
+    },
+    "fieldProjection": {
+      "$ref": "#/definitions/FieldProjection"
+    },
+    "operationSubjectRef": {
+      "$ref": "#/definitions/OperationSubjectRef"
+    },
+    "outboxAck": {
+      "$ref": "#/definitions/OutboxAck"
+    },
+    "outboxBatch": {
+      "$ref": "#/definitions/OutboxBatch"
+    },
+    "outboxMutation": {
+      "$ref": "#/definitions/OutboxMutation"
+    },
+    "runtimeOperationCancel": {
+      "$ref": "#/definitions/RuntimeOperationCancel"
+    },
+    "runtimeOperationChange": {
+      "$ref": "#/definitions/RuntimeOperationChange"
+    },
+    "runtimeOperationGap": {
+      "$ref": "#/definitions/RuntimeOperationGap"
+    },
+    "runtimeOperationQuery": {
+      "$ref": "#/definitions/RuntimeOperationQuery"
+    },
+    "runtimeOperationView": {
+      "$ref": "#/definitions/RuntimeOperationView"
+    },
+    "runtimeOperationWatch": {
+      "$ref": "#/definitions/RuntimeOperationWatch"
+    },
+    "typedCommandDeclaration": {
+      "$ref": "#/definitions/TypedCommandDeclaration"
+    },
+    "typedCommandInvocation": {
+      "$ref": "#/definitions/TypedCommandInvocation"
+    }
+  },
+  "required": [
+    "commandResult",
+    "contractRef",
+    "cursorGap",
+    "entityChange",
+    "entityEnvelope",
+    "entityMutation",
+    "entityQuery",
+    "entityQuerySnapshot",
+    "entitySelector",
+    "entityWatchRequest",
+    "eventChange",
+    "eventEnvelope",
+    "eventMutation",
+    "eventWatchRequest",
+    "fieldProjection",
+    "operationSubjectRef",
+    "outboxAck",
+    "outboxBatch",
+    "outboxMutation",
+    "runtimeOperationCancel",
+    "runtimeOperationChange",
+    "runtimeOperationGap",
+    "runtimeOperationQuery",
+    "runtimeOperationView",
+    "runtimeOperationWatch",
+    "typedCommandDeclaration",
+    "typedCommandInvocation"
+  ],
+  "title": "BrokerContractV1",
+  "type": "object"
+}

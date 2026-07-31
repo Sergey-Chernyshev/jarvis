@@ -1,9 +1,10 @@
+use schemars::JsonSchema;
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 
 const MAX_OPERATION_REF_BYTES: usize = 128;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, JsonSchema, Serialize)]
 #[serde(transparent)]
 pub struct OperationRef(String);
 

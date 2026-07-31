@@ -1,0 +1,488 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "BridgeClientFrame": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "hello"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "generation",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deadlineMs": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "params": true,
+            "type": {
+              "enum": [
+                "request"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "deadlineMs",
+            "generation",
+            "id",
+            "method",
+            "namespace",
+            "params",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "poll"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "cursor",
+            "generation",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "cancel"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "generation",
+            "id",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "subscriptionId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "unsubscribe"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "generation",
+            "subscriptionId",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BridgeHostFrame": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "grants": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "packageDigest": {
+              "type": "string"
+            },
+            "pageId": {
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "welcome"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "generation",
+            "grants",
+            "packageDigest",
+            "pageId",
+            "pluginId",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "result": true,
+            "type": {
+              "enum": [
+                "response"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "generation",
+            "id",
+            "result",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "type": "string"
+            },
+            "subscriptionId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "subscribeResult"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "cursor",
+            "generation",
+            "id",
+            "subscriptionId",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "event": true,
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "subscriptionId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "event"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "cursor",
+            "event",
+            "generation",
+            "subscriptionId",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "earliestCursor": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "latestCursor": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "requestedCursor": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "subscriptionId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "gap"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "earliestCursor",
+            "generation",
+            "latestCursor",
+            "requestedCursor",
+            "subscriptionId",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "close"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "code",
+            "generation",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "correlationId": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "error"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "code",
+            "generation",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "clientFrame": {
+      "$ref": "#/definitions/BridgeClientFrame"
+    },
+    "hostFrame": {
+      "$ref": "#/definitions/BridgeHostFrame"
+    }
+  },
+  "required": [
+    "clientFrame",
+    "hostFrame"
+  ],
+  "title": "BridgeContractV1",
+  "type": "object"
+}

@@ -1,0 +1,230 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "CredentialReference": {
+      "additionalProperties": false,
+      "properties": {
+        "credentialId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "credentialId"
+      ],
+      "type": "object"
+    },
+    "SettingChange": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "setting": {
+          "$ref": "#/definitions/SettingRecord"
+        }
+      },
+      "required": [
+        "cursor",
+        "setting"
+      ],
+      "type": "object"
+    },
+    "SettingRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/definitions/SettingScope"
+        },
+        "value": {
+          "$ref": "#/definitions/SettingValue"
+        }
+      },
+      "required": [
+        "key",
+        "revision",
+        "scope",
+        "value"
+      ],
+      "type": "object"
+    },
+    "SettingScope": {
+      "enum": [
+        "user",
+        "project"
+      ],
+      "type": "string"
+    },
+    "SettingValue": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": [
+                "integer"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": [
+                "number"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": [
+                "boolean"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": [
+                "string"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reference": {
+              "$ref": "#/definitions/CredentialReference"
+            },
+            "type": {
+              "enum": [
+                "credentialReference"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "reference",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SettingWrite": {
+      "additionalProperties": false,
+      "properties": {
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "key": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "$ref": "#/definitions/SettingScope"
+        },
+        "value": {
+          "$ref": "#/definitions/SettingValue"
+        }
+      },
+      "required": [
+        "expectedRevision",
+        "key",
+        "scope",
+        "value"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "change": {
+      "$ref": "#/definitions/SettingChange"
+    },
+    "record": {
+      "$ref": "#/definitions/SettingRecord"
+    },
+    "value": {
+      "$ref": "#/definitions/SettingValue"
+    },
+    "write": {
+      "$ref": "#/definitions/SettingWrite"
+    }
+  },
+  "required": [
+    "change",
+    "record",
+    "value",
+    "write"
+  ],
+  "title": "SettingsContractV1",
+  "type": "object"
+}

@@ -1,0 +1,282 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "ActionLocation": {
+      "enum": [
+        "chat.composer.actions",
+        "project.actions",
+        "project.session.context"
+      ],
+      "type": "string"
+    },
+    "CommandPlacement": {
+      "enum": [
+        "globalPalette"
+      ],
+      "type": "string"
+    },
+    "ContextReference": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "project"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "chat"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "runtime"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "session"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HotkeyScope": {
+      "enum": [
+        "global"
+      ],
+      "type": "string"
+    },
+    "InstancePolicy": {
+      "enum": [
+        "singleton",
+        "per-project",
+        "per-session"
+      ],
+      "type": "string"
+    },
+    "PagePlacement": {
+      "enum": [
+        "sidebar",
+        "commandPalette",
+        "deepLink",
+        "pluginSettings"
+      ],
+      "type": "string"
+    },
+    "ResolvedActionContribution": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "context": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ContextReference"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "locations": {
+          "items": {
+            "$ref": "#/definitions/ActionLocation"
+          },
+          "type": "array"
+        },
+        "riskFloor": {
+          "$ref": "#/definitions/Risk"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "id",
+        "locations",
+        "riskFloor",
+        "title"
+      ],
+      "type": "object"
+    },
+    "ResolvedCommandContribution": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ContextReference"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "placements": {
+          "items": {
+            "$ref": "#/definitions/CommandPlacement"
+          },
+          "type": "array"
+        },
+        "riskFloor": {
+          "$ref": "#/definitions/Risk"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "placements",
+        "riskFloor",
+        "title"
+      ],
+      "type": "object"
+    },
+    "ResolvedHotkeyContribution": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/definitions/HotkeyScope"
+        },
+        "shortcut": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "scope",
+        "shortcut"
+      ],
+      "type": "object"
+    },
+    "ResolvedPageContribution": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "instancePolicy": {
+          "$ref": "#/definitions/InstancePolicy"
+        },
+        "placements": {
+          "items": {
+            "$ref": "#/definitions/PagePlacement"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "instancePolicy",
+        "placements",
+        "title"
+      ],
+      "type": "object"
+    },
+    "Risk": {
+      "enum": [
+        "read",
+        "control",
+        "destructive"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "actions": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/ResolvedActionContribution"
+      },
+      "type": "array"
+    },
+    "commands": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/ResolvedCommandContribution"
+      },
+      "type": "array"
+    },
+    "hotkeys": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/ResolvedHotkeyContribution"
+      },
+      "type": "array"
+    },
+    "pages": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/ResolvedPageContribution"
+      },
+      "type": "array"
+    }
+  },
+  "title": "ResolvedContributions",
+  "type": "object"
+}

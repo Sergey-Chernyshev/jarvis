@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
+use schemars::JsonSchema;
 use semver::{Version, VersionReq};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -828,7 +829,9 @@ pub struct PageContribution {
     pub instance_policy: InstancePolicy,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, JsonSchema, Serialize, Deserialize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum PagePlacement {
     Sidebar,
@@ -837,7 +840,7 @@ pub enum PagePlacement {
     PluginSettings,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InstancePolicy {
     Singleton,
@@ -859,13 +862,15 @@ pub struct CommandContribution {
     pub handler: CommandHandler,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, JsonSchema, Serialize, Deserialize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum CommandPlacement {
     GlobalPalette,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Risk {
     Read,
@@ -910,7 +915,9 @@ pub struct ActionContribution {
     pub context: Vec<ContextField>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, JsonSchema, Serialize, Deserialize,
+)]
 pub enum ActionLocation {
     #[serde(rename = "chat.composer.actions")]
     ChatComposerActions,
@@ -942,7 +949,9 @@ pub struct HotkeyContribution {
     pub scope: HotkeyScope,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, JsonSchema, Serialize, Deserialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum HotkeyScope {
     Global,

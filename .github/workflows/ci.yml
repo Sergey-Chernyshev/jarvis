@@ -59,6 +59,9 @@ jobs:
           cargo test --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
           cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
 
+      - name: Power helper core tests
+        run: cargo test --locked --manifest-path crates/jarvis-power-core/Cargo.toml
+
       - name: Agent VM sidecar tests
         run: cargo test --manifest-path plugins/agent-vm/Cargo.toml
 
@@ -89,8 +92,9 @@ jobs:
         with:
           toolchain: 1.77.2
 
-      - name: Public plugin crates on declared MSRV
+      - name: Public and core crates on declared MSRV
         run: |
           cargo test --locked --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
           cargo test --locked --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
           cargo test --locked --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
+          cargo test --locked --manifest-path crates/jarvis-power-core/Cargo.toml

@@ -2311,6 +2311,7 @@ dependencies = [
  "flate2",
  "hound",
  "jarvis-plugin-protocol",
+ "jarvis-power-core",
  "jarvis-secret-store",
  "libc",
  "objc2",
@@ -2336,6 +2337,14 @@ dependencies = [
 
 [[package]]
 name = "jarvis-plugin-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "jarvis-power-core"
 version = "0.1.0"
 dependencies = [
  "serde",

@@ -1,4 +1,40 @@
-use serde::{Deserialize, Serialize};
+use serde::de;
+use serde::{Deserialize, Deserializer, Serialize};
+
+const MAX_OPERATION_REF_BYTES: usize = 128;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct OperationRef(String);
+
+impl OperationRef {
+    pub fn new(value: impl Into<String>) -> Result<Self, &'static str> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > MAX_OPERATION_REF_BYTES
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
+            })
+        {
+            return Err("invalid operation ref");
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for OperationRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(de::Error::custom)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

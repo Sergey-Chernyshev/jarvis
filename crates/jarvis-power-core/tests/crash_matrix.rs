@@ -1,6 +1,6 @@
 use jarvis_power_core::engine::{
     AcquireOutcome, AcquireResult, Effect, Engine, EngineConfig, EngineError, Plan, ProcessState,
-    RuntimeGuardError,
+    RuntimeGuardError, RuntimeGuardFailureOutcome,
 };
 use jarvis_power_core::protocol::{ErrorCode, ProtocolError, Response, MIN_TTL_MS};
 use jarvis_power_core::state::{
@@ -77,6 +77,7 @@ struct World {
     verified: Vec<bool>,
     monotonic_now: MonotonicTime,
     immediate_reconciliations: usize,
+    reconciliation_failure_injected: bool,
 }
 
 impl World {
@@ -87,6 +88,7 @@ impl World {
             verified: Vec::new(),
             monotonic_now: now(0),
             immediate_reconciliations: 0,
+            reconciliation_failure_injected: false,
         }
     }
 
@@ -145,11 +147,11 @@ impl World {
         plan: &Plan,
         slow_persist_index: usize,
         completes_at: MonotonicTime,
-    ) -> Result<Option<u64>, RuntimeEffectError> {
+    ) -> Result<Option<u64>, RuntimeGuardFailureOutcome> {
         self.execute_guarded_plan(plan, Some((slow_persist_index, completes_at)))
     }
 
-    fn execute_response_plan(&mut self, plan: &Plan) -> Result<u64, RuntimeEffectError> {
+    fn execute_response_plan(&mut self, plan: &Plan) -> Result<u64, RuntimeGuardFailureOutcome> {
         self.execute_guarded_plan(plan, None)
             .map(|ttl_ms| ttl_ms.expect("response plan must measure remaining TTL"))
     }
@@ -158,7 +160,7 @@ impl World {
         &mut self,
         plan: &Plan,
         slow_persist: Option<(usize, MonotonicTime)>,
-    ) -> Result<Option<u64>, RuntimeEffectError> {
+    ) -> Result<Option<u64>, RuntimeGuardFailureOutcome> {
         let mut persisted_in_plan = false;
         let mut response_ttl_ms = None;
         for (index, effect) in plan.effects.iter().enumerate() {
@@ -170,10 +172,14 @@ impl World {
                     }
                 }
                 Err(error) => {
-                    if persisted_in_plan || matches!(effect, Effect::CheckRemainingTtl(_, _)) {
-                        self.reconcile_alive_now();
-                    }
-                    return Err(error);
+                    let needs_reconciliation =
+                        persisted_in_plan || matches!(effect, Effect::CheckRemainingTtl(_, _));
+                    let outcome = if needs_reconciliation && self.reconcile_alive_now().is_err() {
+                        RuntimeGuardFailureOutcome::RecoveryRequired(error)
+                    } else {
+                        RuntimeGuardFailureOutcome::Recovered(error)
+                    };
+                    return Err(outcome);
                 }
             }
             if matches!(effect, Effect::PersistState(_)) {
@@ -210,20 +216,23 @@ impl World {
         panic!("world did not converge");
     }
 
-    fn reconcile_alive_now(&mut self) {
+    fn reconcile_alive_now(&mut self) -> Result<(), ()> {
         self.immediate_reconciliations += 1;
+        if self.reconciliation_failure_injected {
+            return Err(());
+        }
         let at = self.monotonic_now;
         for _ in 0..3 {
             let plan = self
                 .engine()
                 .reconcile(BOOT_ID, at, |_| ProcessState::AliveExact)
-                .expect("immediate reconciliation must converge");
+                .map_err(|_| ())?;
             if plan.effects.is_empty() {
-                return;
+                return Ok(());
             }
             self.execute_plan(&plan);
         }
-        panic!("immediate reconciliation did not converge");
+        Err(())
     }
 }
 
@@ -274,7 +283,14 @@ fn runtime_ttl_guard_failures_have_a_closed_protocol_mapping() {
         RuntimeGuardError::DeadlineExpired,
         RuntimeGuardError::RemainingTtlTooShort,
     ] {
-        assert_eq!(failure.protocol_error_code(), ErrorCode::LeaseExpired);
+        assert_eq!(
+            RuntimeGuardFailureOutcome::Recovered(failure).protocol_error_code(),
+            ErrorCode::LeaseExpired
+        );
+        assert_eq!(
+            RuntimeGuardFailureOutcome::RecoveryRequired(failure).protocol_error_code(),
+            ErrorCode::RecoveryRequired
+        );
     }
 
     for response in [
@@ -1021,7 +1037,9 @@ fn idempotent_retry_with_one_millisecond_remaining_never_returns_stale_ttl() {
     world.monotonic_now = now(4_999);
     assert_eq!(
         world.execute_response_plan(&retry.plan),
-        Err(RuntimeEffectError::RemainingTtlTooShort)
+        Err(RuntimeGuardFailureOutcome::Recovered(
+            RuntimeEffectError::RemainingTtlTooShort
+        ))
     );
     assert_eq!(world.immediate_reconciliations, 1);
     assert!(world.persisted.is_some());
@@ -1035,7 +1053,9 @@ fn first_acquire_fsync_past_new_deadline_recovers_before_success() {
 
     assert_eq!(
         world.execute_plan_with_slow_persist(&acquire, 5, now(8_000)),
-        Err(RuntimeEffectError::RemainingTtlTooShort)
+        Err(RuntimeGuardFailureOutcome::Recovered(
+            RuntimeEffectError::RemainingTtlTooShort
+        ))
     );
     assert_eq!(world.immediate_reconciliations, 1);
     assert!(!world.sleep_disabled);
@@ -1062,7 +1082,9 @@ fn additional_acquire_fsync_past_new_deadline_recovers_before_success() {
 
     assert_eq!(
         world.execute_plan_with_slow_persist(&additional.plan, 1, now(8_000)),
-        Err(RuntimeEffectError::RemainingTtlTooShort)
+        Err(RuntimeGuardFailureOutcome::Recovered(
+            RuntimeEffectError::RemainingTtlTooShort
+        ))
     );
     assert_eq!(world.immediate_reconciliations, 1);
     assert!(world.sleep_disabled);
@@ -1088,7 +1110,9 @@ fn renew_fsync_past_new_deadline_recovers_before_success() {
 
     assert_eq!(
         world.execute_plan_with_slow_persist(&renew, 1, now(8_000)),
-        Err(RuntimeEffectError::RemainingTtlTooShort)
+        Err(RuntimeGuardFailureOutcome::Recovered(
+            RuntimeEffectError::RemainingTtlTooShort
+        ))
     );
     assert_eq!(world.immediate_reconciliations, 1);
     assert!(!world.sleep_disabled);
@@ -1171,11 +1195,41 @@ fn first_acquire_at_deadline_minus_one_millisecond_cannot_report_success() {
 
     assert_eq!(
         world.execute_plan_with_slow_persist(&acquire, 5, now(4_999)),
-        Err(RuntimeEffectError::RemainingTtlTooShort)
+        Err(RuntimeGuardFailureOutcome::Recovered(
+            RuntimeEffectError::RemainingTtlTooShort
+        ))
     );
     assert_eq!(world.immediate_reconciliations, 1);
     assert!(world.sleep_disabled);
     let retained = world.persisted.expect("applied recovery evidence retained");
+    assert_eq!(retained.leases[0].deadline, now(5_000));
+}
+
+#[test]
+fn guard_failure_with_failed_reconciliation_requires_recovery_and_retains_evidence() {
+    let acquire = first_acquire(false);
+    let mut world = World::baseline(false);
+    world.reconciliation_failure_injected = true;
+
+    let result = world.execute_plan_with_slow_persist(&acquire, 5, now(4_999));
+    assert_eq!(
+        result,
+        Err(RuntimeGuardFailureOutcome::RecoveryRequired(
+            RuntimeGuardError::RemainingTtlTooShort
+        ))
+    );
+    assert_eq!(
+        result
+            .expect_err("guard failure cannot report success")
+            .protocol_error_code(),
+        ErrorCode::RecoveryRequired
+    );
+    assert_eq!(world.immediate_reconciliations, 1);
+    assert!(world.sleep_disabled);
+    let retained = world
+        .persisted
+        .expect("failed reconciliation retains applied evidence");
+    assert_eq!(retained.phase, MutationPhase::Applied);
     assert_eq!(retained.leases[0].deadline, now(5_000));
 }
 
@@ -1199,7 +1253,9 @@ fn additional_acquire_at_deadline_minus_one_millisecond_cannot_report_success() 
 
     assert_eq!(
         world.execute_plan_with_slow_persist(&additional.plan, 1, now(4_999)),
-        Err(RuntimeEffectError::RemainingTtlTooShort)
+        Err(RuntimeGuardFailureOutcome::Recovered(
+            RuntimeEffectError::RemainingTtlTooShort
+        ))
     );
     assert_eq!(world.immediate_reconciliations, 1);
     assert!(world.sleep_disabled);
@@ -1225,7 +1281,9 @@ fn renew_at_deadline_minus_one_millisecond_cannot_report_success() {
 
     assert_eq!(
         world.execute_plan_with_slow_persist(&renew, 1, now(5_000)),
-        Err(RuntimeEffectError::RemainingTtlTooShort)
+        Err(RuntimeGuardFailureOutcome::Recovered(
+            RuntimeEffectError::RemainingTtlTooShort
+        ))
     );
     assert_eq!(world.immediate_reconciliations, 1);
     assert!(world.sleep_disabled);

@@ -66,18 +66,30 @@ pub enum Effect {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Finite failures produced by the coordinator while executing runtime guards.
 ///
-/// A successful reconciliation after either failure is reported to the client
-/// as an expired lease. If reconciliation itself fails, the coordinator must
-/// instead return `RecoveryRequired`.
+/// This error must not be mapped to the protocol directly. The coordinator
+/// first attempts required reconciliation and then constructs a
+/// [`RuntimeGuardFailureOutcome`].
 pub enum RuntimeGuardError {
     DeadlineExpired,
     RemainingTtlTooShort,
 }
 
-impl RuntimeGuardError {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Closed result of handling a runtime guard failure.
+///
+/// This type intentionally has no success variant. `RecoveryRequired` means
+/// reconciliation failed and persisted recovery evidence must remain intact;
+/// `Recovered` means reconciliation succeeded or no recovery was required.
+pub enum RuntimeGuardFailureOutcome {
+    Recovered(RuntimeGuardError),
+    RecoveryRequired(RuntimeGuardError),
+}
+
+impl RuntimeGuardFailureOutcome {
     pub const fn protocol_error_code(self) -> ErrorCode {
         match self {
-            Self::DeadlineExpired | Self::RemainingTtlTooShort => ErrorCode::LeaseExpired,
+            Self::Recovered(_) => ErrorCode::LeaseExpired,
+            Self::RecoveryRequired(_) => ErrorCode::RecoveryRequired,
         }
     }
 }

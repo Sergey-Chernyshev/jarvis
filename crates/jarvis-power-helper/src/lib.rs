@@ -11,6 +11,10 @@ pub mod watchdog;
 pub enum HelperEvent {
     StartupRecovery,
     StartupReady,
+    WatchdogSchedulerReady,
+    WatchdogSchedulerStopped,
+    WatchdogSchedulerJoined,
+    WatchdogSchedulerTerminated,
     WatchdogRecovery,
     LockAcquired,
     PowerRead(bool),

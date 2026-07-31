@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -604,7 +603,7 @@ fn owner() -> Principal {
 
 #[test]
 fn acquire_holds_one_lock_through_durable_write_mutation_readback_and_reply() {
-    let mut harness = Harness::baseline(false);
+    let harness = Harness::baseline(false);
     harness.acquire(DEFAULT_TTL_MS).unwrap();
 
     assert_eq!(
@@ -630,7 +629,7 @@ fn acquire_holds_one_lock_through_durable_write_mutation_readback_and_reply() {
 
 #[test]
 fn idempotent_acquire_renew_and_exact_release_complete_under_the_coordinator() {
-    let mut harness = Harness::baseline(false);
+    let harness = Harness::baseline(false);
     let first = harness
         .runtime
         .acquire(&owner(), "prod", "generation-a", DEFAULT_TTL_MS)
@@ -661,7 +660,7 @@ fn idempotent_acquire_renew_and_exact_release_complete_under_the_coordinator() {
 #[test]
 fn dead_or_mismatched_process_and_deadline_expiry_restore_autonomously() {
     for process_state in [ProcessState::Dead, ProcessState::Mismatch] {
-        let mut harness = Harness::baseline(false);
+        let harness = Harness::baseline(false);
         harness.acquire(DEFAULT_TTL_MS).unwrap();
         harness.set_process_state(process_state);
         harness.scheduler.trigger_interval();
@@ -669,7 +668,7 @@ fn dead_or_mismatched_process_and_deadline_expiry_restore_autonomously() {
         assert_eq!(harness.store.load().unwrap(), None);
     }
 
-    let mut expired = Harness::baseline(false);
+    let expired = Harness::baseline(false);
     expired.acquire(MIN_TTL_MS).unwrap();
     expired.clock.set(6_000);
     expired.scheduler.trigger_interval();
@@ -679,7 +678,7 @@ fn dead_or_mismatched_process_and_deadline_expiry_restore_autonomously() {
 
 #[test]
 fn failed_restore_retains_a_restore_pending_tombstone() {
-    let mut harness = Harness::baseline(false);
+    let harness = Harness::baseline(false);
     harness.acquire(DEFAULT_TTL_MS).unwrap();
     harness.set_process_state(ProcessState::Dead);
     harness.fail_restore();
@@ -697,7 +696,7 @@ fn failed_restore_retains_a_restore_pending_tombstone() {
 
 #[test]
 fn startup_reconciles_before_a_listener_permit_can_exist() {
-    let mut harness = Harness::baseline(false);
+    let harness = Harness::baseline(false);
     harness.acquire(DEFAULT_TTL_MS).unwrap();
     harness.set_process_state(ProcessState::Dead);
     harness.sink.clear();
@@ -819,7 +818,7 @@ fn scheduler_and_requests_share_one_serialized_runtime_core() {
     let next_call = probe.calls() + 1;
     probe.block_next_call();
     let runtime = Arc::new(fixture.arm(SystemSchedulerTestMode::Normal));
-    assert!(probe.wait_for_calls(next_call, Duration::from_millis(500)));
+    let scheduler_entered = probe.wait_for_calls(next_call, Duration::from_millis(500));
 
     let request_runtime = runtime.clone();
     let (result_tx, result_rx) = mpsc::sync_channel(1);
@@ -827,13 +826,16 @@ fn scheduler_and_requests_share_one_serialized_runtime_core() {
         let result = request_runtime.acquire(&owner(), "secondary", "generation-b", DEFAULT_TTL_MS);
         result_tx.send(result).unwrap();
     });
-    assert!(matches!(
+    let request_blocked = matches!(
         result_rx.recv_timeout(Duration::from_millis(50)),
         Err(mpsc::RecvTimeoutError::Timeout)
-    ));
-    assert_eq!(probe.maximum_active(), 1);
+    );
+    let maximum_while_blocked = probe.maximum_active();
 
     probe.release();
+    assert!(scheduler_entered);
+    assert!(request_blocked);
+    assert_eq!(maximum_while_blocked, 1);
     assert!(result_rx
         .recv_timeout(Duration::from_millis(500))
         .unwrap()
@@ -915,6 +917,9 @@ fn scheduler_failure_blocks_mutations_retains_tombstone_and_retries_to_health() 
         .sink
         .events()
         .contains(&HelperEvent::PowerWrite(false)));
+    let status = harness.runtime.status().unwrap();
+    assert!(status.recovery_required);
+    assert_eq!(status.phase, Some(MutationPhase::RestorePending));
 
     harness.scheduler.trigger_interval();
     assert!(matches!(
@@ -953,7 +958,7 @@ fn scheduler_is_the_only_post_startup_recovery_trigger_and_ticks_each_second() {
 
 #[test]
 fn baseline_true_is_cleared_without_ever_writing_false() {
-    let mut harness = Harness::baseline(true);
+    let harness = Harness::baseline(true);
     harness.acquire(DEFAULT_TTL_MS).unwrap();
     harness.set_process_state(ProcessState::Dead);
     harness.sink.clear();
@@ -970,7 +975,7 @@ fn baseline_true_is_cleared_without_ever_writing_false() {
 
 #[test]
 fn runtime_guard_failure_reconciles_under_the_same_lock_and_never_replies_success() {
-    let mut harness = Harness::baseline(false);
+    let harness = Harness::baseline(false);
     harness.clock.script([1_000, 6_000, 6_000, 6_000]);
 
     let error = harness.acquire(MIN_TTL_MS).unwrap_err();
@@ -1002,7 +1007,7 @@ fn runtime_guard_failure_reconciles_under_the_same_lock_and_never_replies_succes
 
 #[test]
 fn unverifiable_process_blocks_recovery_and_keeps_applied_evidence() {
-    let mut harness = Harness::baseline(false);
+    let harness = Harness::baseline(false);
     harness.acquire(DEFAULT_TTL_MS).unwrap();
     harness.set_process_state(ProcessState::Unverifiable);
 
@@ -1023,7 +1028,7 @@ fn unverifiable_process_blocks_recovery_and_keeps_applied_evidence() {
 
 #[test]
 fn symlink_inserted_between_read_and_persist_is_rejected_not_overwritten() {
-    let mut harness = Harness::baseline(false);
+    let harness = Harness::baseline(false);
     harness
         .backend_state
         .lock()
@@ -1043,7 +1048,7 @@ fn symlink_inserted_between_read_and_persist_is_rejected_not_overwritten() {
 
 #[test]
 fn failed_prepared_persist_never_reaches_the_power_mutation() {
-    let mut harness = Harness::baseline(false);
+    let harness = Harness::baseline(false);
     harness.store.arm_fault(StoreFault::TempFsync);
 
     assert_eq!(
@@ -1061,7 +1066,7 @@ fn failed_prepared_persist_never_reaches_the_power_mutation() {
 
 #[test]
 fn ambiguous_pmset_failure_and_applied_persist_failure_reconcile_immediately() {
-    let mut ambiguous = Harness::baseline(false);
+    let ambiguous = Harness::baseline(false);
     ambiguous.backend_state.lock().unwrap().fail_after_set = Some(true);
     assert_eq!(
         ambiguous.acquire(DEFAULT_TTL_MS),
@@ -1070,7 +1075,7 @@ fn ambiguous_pmset_failure_and_applied_persist_failure_reconcile_immediately() {
     assert!(!ambiguous.disabled());
     assert_eq!(ambiguous.store.load().unwrap(), None);
 
-    let mut applied_persist = Harness::baseline(false);
+    let applied_persist = Harness::baseline(false);
     applied_persist
         .backend_state
         .lock()

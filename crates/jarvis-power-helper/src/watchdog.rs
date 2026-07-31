@@ -1,4 +1,8 @@
+use std::fmt;
 use std::marker::PhantomData;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use jarvis_power_core::engine::ProcessState;
@@ -10,11 +14,12 @@ use crate::coordinator::{
 };
 use crate::pmset::{PmsetBackend, SystemPmset};
 use crate::root_store::RootStore;
-use crate::HelperEvent;
+use crate::{HelperEvent, HelperEventSink};
 
 pub const HELPER_SERVICE_VERSION: u64 = 1;
 pub const MINIMUM_CLIENT_BUILD: u64 = 1;
 pub const WATCHDOG_INTERVAL: Duration = Duration::from_secs(1);
+pub const WATCHDOG_READY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// A helper instance that has not yet performed synchronous startup recovery.
 ///
@@ -131,7 +136,175 @@ where
     coordinator: Coordinator<B, C, P, R>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeHealth {
+    Healthy,
+    Unhealthy {
+        last_error: CoordinatorError,
+        consecutive_failures: u32,
+    },
+    SchedulerTerminated,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchedulerArmError {
+    SpawnFailed,
+    ReadyTimeout,
+}
+
+impl fmt::Display for SchedulerArmError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::SpawnFailed => "watchdog scheduler failed to start",
+            Self::ReadyTimeout => "watchdog scheduler did not become ready",
+        })
+    }
+}
+
+impl std::error::Error for SchedulerArmError {}
+
+pub(crate) type WatchdogTask = Box<dyn FnMut() + Send + 'static>;
+pub(crate) type WatchdogTermination = Box<dyn Fn() + Send + 'static>;
+
+pub(crate) trait WatchdogGuard: Send + Sync {}
+
+pub(crate) trait SchedulerFactory {
+    fn start(
+        self,
+        interval: Duration,
+        ready_timeout: Duration,
+        task: WatchdogTask,
+        termination: WatchdogTermination,
+    ) -> Result<Box<dyn WatchdogGuard>, SchedulerArmError>;
+}
+
+struct RuntimeCore<B, C, P, R>
+where
+    B: PmsetBackend,
+    C: MonotonicClock,
+    P: ProcessInspector,
+    R: RandomSource,
+{
+    coordinator: Coordinator<B, C, P, R>,
+    health: RuntimeHealth,
+}
+
+impl<B, C, P, R> RuntimeCore<B, C, P, R>
+where
+    B: PmsetBackend,
+    C: MonotonicClock,
+    P: ProcessInspector,
+    R: RandomSource,
+{
+    fn watchdog_tick(&mut self) {
+        self.coordinator
+            .store()
+            .events()
+            .record(HelperEvent::WatchdogRecovery);
+        match self.coordinator.reconcile_internal() {
+            Ok(()) => self.health = RuntimeHealth::Healthy,
+            Err(error) => {
+                let failures = match self.health {
+                    RuntimeHealth::Unhealthy {
+                        consecutive_failures,
+                        ..
+                    } => consecutive_failures.saturating_add(1),
+                    RuntimeHealth::Healthy | RuntimeHealth::SchedulerTerminated => 1,
+                };
+                self.health = RuntimeHealth::Unhealthy {
+                    last_error: error,
+                    consecutive_failures: failures,
+                };
+            }
+        }
+    }
+
+    fn require_healthy(&self) -> Result<(), CoordinatorError> {
+        if self.health == RuntimeHealth::Healthy {
+            Ok(())
+        } else {
+            Err(CoordinatorError::RecoveryRequired)
+        }
+    }
+}
+
+pub struct ServingRuntime<B, C, P, R>
+where
+    B: PmsetBackend,
+    C: MonotonicClock,
+    P: ProcessInspector,
+    R: RandomSource,
+{
+    core: Arc<Mutex<RuntimeCore<B, C, P, R>>>,
+    scheduler: Option<Box<dyn WatchdogGuard>>,
+}
+
 impl<B, C, P, R> ReadyRuntime<B, C, P, R>
+where
+    B: PmsetBackend + 'static,
+    C: MonotonicClock + 'static,
+    P: ProcessInspector + 'static,
+    R: RandomSource + 'static,
+{
+    fn arm<S>(
+        self,
+        scheduler: S,
+        interval: Duration,
+        ready_timeout: Duration,
+    ) -> Result<ServingRuntime<B, C, P, R>, SchedulerArmError>
+    where
+        S: SchedulerFactory,
+    {
+        let core = Arc::new(Mutex::new(RuntimeCore {
+            coordinator: self.coordinator,
+            health: RuntimeHealth::Healthy,
+        }));
+        let tick_core = core.clone();
+        let task: WatchdogTask = Box::new(move || {
+            lock_runtime_core(&tick_core).watchdog_tick();
+        });
+        let termination_core = core.clone();
+        let termination: WatchdogTermination = Box::new(move || {
+            lock_runtime_core(&termination_core).health = RuntimeHealth::SchedulerTerminated;
+        });
+        let scheduler = scheduler.start(interval, ready_timeout, task, termination)?;
+        Ok(ServingRuntime {
+            core,
+            scheduler: Some(scheduler),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_with_scheduler<S>(
+        self,
+        scheduler: S,
+    ) -> Result<ServingRuntime<B, C, P, R>, SchedulerArmError>
+    where
+        S: SchedulerFactory,
+    {
+        self.arm(scheduler, WATCHDOG_INTERVAL, WATCHDOG_READY_TIMEOUT)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_system_for_testing(
+        self,
+        interval: Duration,
+        ready_timeout: Duration,
+        mode: SystemSchedulerTestMode,
+    ) -> Result<ServingRuntime<B, C, P, R>, SchedulerArmError> {
+        let events = self.coordinator.store().events();
+        self.arm(
+            SystemSchedulerFactory {
+                events,
+                mode: mode.into(),
+            },
+            interval,
+            ready_timeout,
+        )
+    }
+}
+
+impl<B, C, P, R> ServingRuntime<B, C, P, R>
 where
     B: PmsetBackend,
     C: MonotonicClock,
@@ -140,86 +313,270 @@ where
 {
     pub fn listener_permit(&self) -> ListenerPermit<'_> {
         ListenerPermit {
-            _ready: PhantomData,
+            _serving: PhantomData,
         }
     }
 
     pub fn acquire(
-        &mut self,
+        &self,
         principal: &Principal,
         profile: &str,
         owner_generation: &str,
         ttl_ms: u64,
     ) -> Result<LeaseGrant, CoordinatorError> {
-        self.coordinator
+        let mut core = lock_runtime_core(&self.core);
+        core.require_healthy()?;
+        core.coordinator
             .acquire(principal, profile, owner_generation, ttl_ms)
     }
 
     pub fn renew(
-        &mut self,
+        &self,
         principal: &Principal,
         lease_id: &LeaseId,
         owner_generation: &str,
         ttl_ms: u64,
     ) -> Result<LeaseGrant, CoordinatorError> {
-        self.coordinator
+        let mut core = lock_runtime_core(&self.core);
+        core.require_healthy()?;
+        core.coordinator
             .renew(principal, lease_id, owner_generation, ttl_ms)
     }
 
     pub fn release(
-        &mut self,
+        &self,
         principal: &Principal,
         lease_id: &LeaseId,
         owner_generation: &str,
     ) -> Result<(), CoordinatorError> {
-        self.coordinator
+        let mut core = lock_runtime_core(&self.core);
+        core.require_healthy()?;
+        core.coordinator
             .release(principal, lease_id, owner_generation)
     }
 
-    pub fn status(&mut self) -> Result<CoordinatorStatus, CoordinatorError> {
-        self.coordinator.status()
+    pub fn status(&self) -> Result<CoordinatorStatus, CoordinatorError> {
+        let mut core = lock_runtime_core(&self.core);
+        core.coordinator.status()
     }
 
-    pub fn watchdog(&mut self) -> Watchdog<'_, B, C, P, R> {
-        Watchdog {
-            coordinator: &mut self.coordinator,
+    pub fn health(&self) -> RuntimeHealth {
+        lock_runtime_core(&self.core).health
+    }
+}
+
+impl<B, C, P, R> Drop for ServingRuntime<B, C, P, R>
+where
+    B: PmsetBackend,
+    C: MonotonicClock,
+    P: ProcessInspector,
+    R: RandomSource,
+{
+    fn drop(&mut self) {
+        // The guard's destructor signals and joins without holding `core`.
+        // Dropping it explicitly keeps the coordinator alive until the worker
+        // can no longer call its task or termination callback.
+        drop(self.scheduler.take());
+    }
+}
+
+/// Opaque proof that startup recovery and scheduler arming completed.
+pub struct ListenerPermit<'a> {
+    _serving: PhantomData<&'a ()>,
+}
+
+fn lock_runtime_core<B, C, P, R>(
+    core: &Arc<Mutex<RuntimeCore<B, C, P, R>>>,
+) -> MutexGuard<'_, RuntimeCore<B, C, P, R>>
+where
+    B: PmsetBackend,
+    C: MonotonicClock,
+    P: ProcessInspector,
+    R: RandomSource,
+{
+    core.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[derive(Clone, Copy)]
+enum SystemSchedulerMode {
+    Normal,
+    #[cfg(test)]
+    ExitAfterReady,
+    #[cfg(test)]
+    PanicAfterReady,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SystemSchedulerTestMode {
+    Normal,
+    ExitAfterReady,
+    PanicAfterReady,
+}
+
+#[cfg(test)]
+impl From<SystemSchedulerTestMode> for SystemSchedulerMode {
+    fn from(mode: SystemSchedulerTestMode) -> Self {
+        match mode {
+            SystemSchedulerTestMode::Normal => Self::Normal,
+            SystemSchedulerTestMode::ExitAfterReady => Self::ExitAfterReady,
+            SystemSchedulerTestMode::PanicAfterReady => Self::PanicAfterReady,
         }
     }
 }
 
-/// Opaque proof that startup recovery completed. Transport code may require
-/// this value before publishing its listener.
-pub struct ListenerPermit<'a> {
-    _ready: PhantomData<&'a ()>,
+struct SystemSchedulerFactory {
+    events: Arc<dyn HelperEventSink>,
+    mode: SystemSchedulerMode,
 }
 
-pub struct Watchdog<'a, B, C, P, R>
-where
-    B: PmsetBackend,
-    C: MonotonicClock,
-    P: ProcessInspector,
-    R: RandomSource,
-{
-    coordinator: &'a mut Coordinator<B, C, P, R>,
-}
-
-impl<B, C, P, R> Watchdog<'_, B, C, P, R>
-where
-    B: PmsetBackend,
-    C: MonotonicClock,
-    P: ProcessInspector,
-    R: RandomSource,
-{
-    pub const INTERVAL: Duration = WATCHDOG_INTERVAL;
-
-    /// The sole public post-startup autonomous recovery trigger.
-    pub fn tick(&mut self) -> Result<(), CoordinatorError> {
-        self.coordinator
-            .store()
-            .events()
-            .record(HelperEvent::WatchdogRecovery);
-        self.coordinator.reconcile_internal()
+impl SystemSchedulerFactory {
+    fn production(events: Arc<dyn HelperEventSink>) -> Self {
+        Self {
+            events,
+            mode: SystemSchedulerMode::Normal,
+        }
     }
+}
+
+type StopControl = Arc<(Mutex<bool>, Condvar)>;
+
+struct SystemWatchdogGuard {
+    stop: StopControl,
+    worker: Mutex<Option<JoinHandle<()>>>,
+    events: Arc<dyn HelperEventSink>,
+}
+
+impl WatchdogGuard for SystemWatchdogGuard {}
+
+impl Drop for SystemWatchdogGuard {
+    fn drop(&mut self) {
+        signal_stop(&self.stop);
+        if let Some(worker) = self
+            .worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = worker.join();
+            self.events.record(HelperEvent::WatchdogSchedulerJoined);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WorkerExit {
+    Stopped,
+    #[cfg(test)]
+    Unexpected,
+}
+
+impl SchedulerFactory for SystemSchedulerFactory {
+    fn start(
+        self,
+        interval: Duration,
+        ready_timeout: Duration,
+        mut task: WatchdogTask,
+        termination: WatchdogTermination,
+    ) -> Result<Box<dyn WatchdogGuard>, SchedulerArmError> {
+        let stop: StopControl = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_stop = stop.clone();
+        let worker_events = self.events.clone();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (activate_tx, activate_rx) = mpsc::sync_channel(1);
+        let mode = self.mode;
+        let worker = thread::Builder::new()
+            .name("jarvis-power-watchdog".to_owned())
+            .spawn(move || {
+                let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+                    if ready_tx.send(()).is_err() || activate_rx.recv().is_err() {
+                        return WorkerExit::Stopped;
+                    }
+                    match mode {
+                        SystemSchedulerMode::Normal => {}
+                        #[cfg(test)]
+                        SystemSchedulerMode::ExitAfterReady => return WorkerExit::Unexpected,
+                        #[cfg(test)]
+                        SystemSchedulerMode::PanicAfterReady => {
+                            panic!("test-only watchdog panic")
+                        }
+                    }
+                    loop {
+                        let stopped = worker_stop
+                            .1
+                            .wait_timeout_while(
+                                worker_stop
+                                    .0
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                interval,
+                                |stopped| !*stopped,
+                            )
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .0;
+                        if *stopped {
+                            return WorkerExit::Stopped;
+                        }
+                        drop(stopped);
+                        task();
+                    }
+                }));
+                match outcome {
+                    Ok(WorkerExit::Stopped) => {
+                        worker_events.record(HelperEvent::WatchdogSchedulerStopped);
+                    }
+                    #[cfg(test)]
+                    Ok(WorkerExit::Unexpected) => {
+                        termination();
+                        worker_events.record(HelperEvent::WatchdogSchedulerTerminated);
+                    }
+                    Err(_) => {
+                        termination();
+                        worker_events.record(HelperEvent::WatchdogSchedulerTerminated);
+                    }
+                }
+            })
+            .map_err(|_| SchedulerArmError::SpawnFailed)?;
+
+        match ready_rx.recv_timeout(ready_timeout) {
+            Ok(()) => {
+                self.events.record(HelperEvent::WatchdogSchedulerReady);
+                if activate_tx.send(()).is_err() {
+                    signal_stop(&stop);
+                    let _ = worker.join();
+                    self.events.record(HelperEvent::WatchdogSchedulerJoined);
+                    return Err(SchedulerArmError::SpawnFailed);
+                }
+                Ok(Box::new(SystemWatchdogGuard {
+                    stop,
+                    worker: Mutex::new(Some(worker)),
+                    events: self.events,
+                }))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                signal_stop(&stop);
+                let _ = activate_tx.send(());
+                let _ = worker.join();
+                self.events.record(HelperEvent::WatchdogSchedulerJoined);
+                Err(SchedulerArmError::ReadyTimeout)
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                signal_stop(&stop);
+                let _ = worker.join();
+                self.events.record(HelperEvent::WatchdogSchedulerJoined);
+                Err(SchedulerArmError::SpawnFailed)
+            }
+        }
+    }
+}
+
+fn signal_stop(stop: &StopControl) {
+    *stop
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+    stop.1.notify_all();
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -314,15 +671,32 @@ impl ProductionStartup {
         })
     }
 
-    pub fn reconcile_before_listener(self) -> Result<ProductionRuntime, CoordinatorError> {
+    pub fn reconcile_before_listener(self) -> Result<ProductionReadyRuntime, CoordinatorError> {
         self.inner
             .reconcile_before_listener()
+            .map(|inner| ProductionReadyRuntime { inner })
+    }
+}
+
+pub struct ProductionReadyRuntime {
+    inner: ReadyRuntime<SystemPmset, SystemMonotonicClock, SystemProcessInspector, SystemRandom>,
+}
+
+impl ProductionReadyRuntime {
+    pub fn arm_watchdog(self) -> Result<ProductionRuntime, SchedulerArmError> {
+        let events = self.inner.coordinator.store().events();
+        self.inner
+            .arm(
+                SystemSchedulerFactory::production(events),
+                WATCHDOG_INTERVAL,
+                WATCHDOG_READY_TIMEOUT,
+            )
             .map(|inner| ProductionRuntime { inner })
     }
 }
 
 pub struct ProductionRuntime {
-    inner: ReadyRuntime<SystemPmset, SystemMonotonicClock, SystemProcessInspector, SystemRandom>,
+    inner: ServingRuntime<SystemPmset, SystemMonotonicClock, SystemProcessInspector, SystemRandom>,
 }
 
 impl ProductionRuntime {
@@ -331,7 +705,7 @@ impl ProductionRuntime {
     }
 
     pub fn acquire(
-        &mut self,
+        &self,
         principal: &Principal,
         profile: &str,
         owner_generation: &str,
@@ -342,7 +716,7 @@ impl ProductionRuntime {
     }
 
     pub fn renew(
-        &mut self,
+        &self,
         principal: &Principal,
         lease_id: &LeaseId,
         owner_generation: &str,
@@ -353,7 +727,7 @@ impl ProductionRuntime {
     }
 
     pub fn release(
-        &mut self,
+        &self,
         principal: &Principal,
         lease_id: &LeaseId,
         owner_generation: &str,
@@ -361,14 +735,12 @@ impl ProductionRuntime {
         self.inner.release(principal, lease_id, owner_generation)
     }
 
-    pub fn status(&mut self) -> Result<CoordinatorStatus, CoordinatorError> {
+    pub fn status(&self) -> Result<CoordinatorStatus, CoordinatorError> {
         self.inner.status()
     }
 
-    pub fn watchdog(
-        &mut self,
-    ) -> Watchdog<'_, SystemPmset, SystemMonotonicClock, SystemProcessInspector, SystemRandom> {
-        self.inner.watchdog()
+    pub fn health(&self) -> RuntimeHealth {
+        self.inner.health()
     }
 }
 

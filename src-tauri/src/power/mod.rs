@@ -230,12 +230,27 @@ fn release_was_confirmed(outcome: clamshell::ReleaseOutcome) -> bool {
     !matches!(outcome, clamshell::ReleaseOutcome::NotOwned)
 }
 
+fn release_resolves_obligation(
+    obligation: clamshell::AcquireObligation,
+    outcome: clamshell::ReleaseOutcome,
+) -> bool {
+    match obligation {
+        clamshell::AcquireObligation::None | clamshell::AcquireObligation::LeaseMayExist => true,
+        clamshell::AcquireObligation::MutationMayRemain => release_was_confirmed(outcome),
+    }
+}
+
 fn failed_acquire_needs_owner_retry(
-    primary: &clamshell::PowerError,
+    failure: &clamshell::AcquireFailure,
     cleanup: &Result<clamshell::ReleaseOutcome, clamshell::PowerError>,
 ) -> bool {
-    matches!(primary, clamshell::PowerError::RollbackFailed(_))
-        && !matches!(cleanup, Ok(outcome) if release_was_confirmed(*outcome))
+    match failure.obligation {
+        clamshell::AcquireObligation::None => false,
+        clamshell::AcquireObligation::LeaseMayExist => cleanup.is_err(),
+        clamshell::AcquireObligation::MutationMayRemain => {
+            !matches!(cleanup, Ok(outcome) if release_was_confirmed(*outcome))
+        }
+    }
 }
 
 #[derive(Default)]
@@ -245,6 +260,7 @@ struct Clam {
     armed: bool,
     armed_by: Option<&'static str>, // 'manual' | 'auto'
     owner_generation: Option<String>,
+    owner_obligation: Option<clamshell::AcquireObligation>,
     busy: bool,                     // arm/disarm в полёте — не наслаиваем
     last_guard_at: i64,
     lid_causes_sleep: Option<bool>, // кэш для статусной строки меню
@@ -386,17 +402,23 @@ impl Power {
     }
 
     fn deactivate_clamshell_inner(d: &Arc<Daemon>) -> ClamshellDisposeOutcome {
-        let (was_active, owner_generation) = {
+        let (was_active, owner_generation, owner_obligation) = {
             let mut clam = d.power.clam.lock().unwrap();
             let was_active = clam.active;
             if !was_active && clam.owner_generation.is_none() {
                 return ClamshellDisposeOutcome::Idle;
             }
             clam.active = false;
-            (was_active, clam.owner_generation.clone())
+            (
+                was_active,
+                clam.owner_generation.clone(),
+                clam.owner_obligation,
+            )
         };
         let mut outcome = ClamshellDisposeOutcome::Idle;
         if let Some(owner_generation) = owner_generation {
+            let obligation =
+                owner_obligation.unwrap_or(clamshell::AcquireObligation::MutationMayRemain);
             match clamshell::release_with(
                 &clamshell::SystemPmset,
                 &crate::power::ownership_store::OwnershipStore::global(),
@@ -404,14 +426,19 @@ impl Power {
                 &owner_generation,
             ) {
                 Ok(release) => {
-                    if release_was_confirmed(release) {
+                    if release_resolves_obligation(obligation, release) {
                         let mut clam = d.power.clam.lock().unwrap();
                         if clam.owner_generation.as_deref() == Some(owner_generation.as_str()) {
                             clam.armed = false;
                             clam.armed_by = None;
                             clam.owner_generation = None;
+                            clam.owner_obligation = None;
                         }
-                        outcome = ClamshellDisposeOutcome::Released(release);
+                        outcome = if release == clamshell::ReleaseOutcome::NotOwned {
+                            ClamshellDisposeOutcome::Idle
+                        } else {
+                            ClamshellDisposeOutcome::Released(release)
+                        };
                     } else {
                         let error =
                             "ownership registry no longer proves the in-memory clamshell lease";
@@ -1058,25 +1085,33 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
         let store = crate::power::ownership_store::OwnershipStore::global();
         let acquire_result = match clamshell::acquire_with(&clamshell::SystemPmset, &store, lease) {
             Ok(outcome) => Ok(outcome),
-            Err(primary) => {
+            Err(failure) => {
                 let cleanup = clamshell::release_with(
                     &clamshell::SystemPmset,
                     &store,
                     &profile,
                     &retry_generation,
                 );
-                if failed_acquire_needs_owner_retry(&primary, &cleanup) {
+                if failed_acquire_needs_owner_retry(&failure, &cleanup) {
                     let mut clam = retry_daemon.power.clam.lock().unwrap();
                     clam.armed = true;
                     clam.armed_by = Some(by);
                     clam.owner_generation = Some(retry_generation.clone());
+                    clam.owner_obligation = Some(failure.obligation);
                 }
                 let message = match cleanup {
-                    Ok(release) if release_was_confirmed(release) => primary.to_string(),
+                    Ok(release)
+                        if release_resolves_obligation(failure.obligation, release) =>
+                    {
+                        failure.error.to_string()
+                    }
                     Ok(release) => format!(
-                        "{primary}; cleanup retry was not ownership-confirmed: {release:?}"
+                        "{}; cleanup retry did not resolve {:?}: {release:?}",
+                        failure.error, failure.obligation
                     ),
-                    Err(cleanup) => format!("{primary}; cleanup retry failed: {cleanup}"),
+                    Err(cleanup) => {
+                        format!("{}; cleanup retry failed: {cleanup}", failure.error)
+                    }
                 };
                 Err(message)
             }
@@ -1091,6 +1126,7 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
                 clam.armed = true;
                 clam.armed_by = Some(by);
                 clam.owner_generation = Some(commit_generation);
+                clam.owner_obligation = Some(clamshell::AcquireObligation::MutationMayRemain);
                 clam.last_guard_at = 0;
             },
             move || {
@@ -1106,6 +1142,8 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
                         clam.armed = true;
                         clam.armed_by = Some(by);
                         clam.owner_generation = Some(rollback_generation);
+                        clam.owner_obligation =
+                            Some(clamshell::AcquireObligation::MutationMayRemain);
                         Err(format!(
                             "late rollback was not ownership-confirmed: {release:?}"
                         ))
@@ -1115,6 +1153,8 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
                         clam.armed = true;
                         clam.armed_by = Some(by);
                         clam.owner_generation = Some(rollback_generation);
+                        clam.owner_obligation =
+                            Some(clamshell::AcquireObligation::MutationMayRemain);
                         Err(error.to_string())
                     }
                 }
@@ -1156,7 +1196,10 @@ async fn disarm(d: &Arc<Daemon>) -> Value {
         }
         clam.busy = true;
     }
-    let owner_generation = d.power.clam.lock().unwrap().owner_generation.clone();
+    let (owner_generation, owner_obligation) = {
+        let clam = d.power.clam.lock().unwrap();
+        (clam.owner_generation.clone(), clam.owner_obligation)
+    };
     let Some(owner_generation) = owner_generation else {
         d.power.clam.lock().unwrap().busy = false;
         return json!({
@@ -1164,6 +1207,8 @@ async fn disarm(d: &Arc<Daemon>) -> Value {
             "error": "старый marker не доказывает владение; нужен явный repair"
         });
     };
+    let owner_obligation =
+        owner_obligation.unwrap_or(clamshell::AcquireObligation::MutationMayRemain);
     let profile = power_profile_id();
     let released = tauri::async_runtime::spawn_blocking(move || {
         let outcome = clamshell::release_with(
@@ -1186,11 +1231,12 @@ async fn disarm(d: &Arc<Daemon>) -> Value {
         }
     };
     let result = match release {
-        Ok(outcome) if release_was_confirmed(outcome) => {
+        Ok(outcome) if release_resolves_obligation(owner_obligation, outcome) => {
             let mut clam = d.power.clam.lock().unwrap();
             clam.armed = false;
             clam.armed_by = None;
             clam.owner_generation = None;
+            clam.owner_obligation = None;
             drop(clam);
             changed(d);
             json!({ "ok": true })
@@ -1234,6 +1280,7 @@ async fn restore_after_restart(d: &Arc<Daemon>) {
         clam.armed = true;
         clam.armed_by = Some("manual");
         clam.owner_generation = None;
+        clam.owner_obligation = None;
         clam.last_guard_at = 0;
     }
     changed(d);
@@ -1272,7 +1319,15 @@ async fn battery_guard(d: &Arc<Daemon>) {
         return;
     };
     println!("[jarvis:clamshell] батарея {pct}% ≤ {floor}% — освобождаю ownership lease");
-    let owner_generation = d.power.clam.lock().unwrap().owner_generation.clone();
+    let (owner_generation, owner_obligation) = {
+        let clam = d.power.clam.lock().unwrap();
+        (
+            clam.owner_generation.clone(),
+            clam
+                .owner_obligation
+                .unwrap_or(clamshell::AcquireObligation::MutationMayRemain),
+        )
+    };
     let mut operation = Some(operation);
     let release_outcome = if let Some(owner_generation) = owner_generation {
         let profile = power_profile_id();
@@ -1290,23 +1345,30 @@ async fn battery_guard(d: &Arc<Daemon>) {
         .ok()
         .and_then(|(worker_operation, outcome)| {
             operation = Some(worker_operation);
-            outcome.ok().filter(|outcome| release_was_confirmed(*outcome))
+            outcome
+                .ok()
+                .filter(|outcome| release_resolves_obligation(owner_obligation, *outcome))
+                .map(|outcome| (outcome, owner_obligation))
         })
     } else {
         None
     };
-    if let Some(outcome) = release_outcome {
+    if let Some((outcome, obligation)) = release_outcome {
         {
             let mut clam = d.power.clam.lock().unwrap();
             clam.armed = false;
             clam.armed_by = None;
             clam.owner_generation = None;
+            clam.owner_obligation = None;
         }
         changed(d);
         if !d.power.operations.accepting() {
             return;
         }
-        if outcome.sleep_disabled() == Some(false) {
+        if outcome.sleep_disabled() == Some(false)
+            || (obligation == clamshell::AcquireObligation::LeaseMayExist
+                && outcome == clamshell::ReleaseOutcome::NotOwned)
+        {
             d.notify(
                 "⌒ Крышка: батарея садится",
                 &format!("Осталось {pct}% — вернул нормальный сон"),
@@ -1516,25 +1578,50 @@ mod tests {
     }
 
     #[test]
-    fn failed_acquire_retains_identity_only_for_unconfirmed_rollback_failure() {
+    fn failed_acquire_retention_uses_explicit_obligation() {
+        let no_obligation = clamshell::AcquireFailure {
+            error: clamshell::PowerError::RollbackUnavailable,
+            obligation: clamshell::AcquireObligation::None,
+        };
         assert!(!failed_acquire_needs_owner_retry(
-            &clamshell::PowerError::RollbackUnavailable,
+            &no_obligation,
             &Ok(clamshell::ReleaseOutcome::NotOwned),
         ));
         assert!(!failed_acquire_needs_owner_retry(
-            &clamshell::PowerError::RollbackUnavailable,
+            &no_obligation,
             &Err(clamshell::PowerError::Command("cleanup failed".into())),
         ));
-        assert!(failed_acquire_needs_owner_retry(
-            &clamshell::PowerError::RollbackFailed("rollback unknown".into()),
+        let lease_may_exist = clamshell::AcquireFailure {
+            error: clamshell::PowerError::Store(
+                crate::power::ownership_store::StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "post-rename fsync failed",
+                )),
+            ),
+            obligation: clamshell::AcquireObligation::LeaseMayExist,
+        };
+        assert!(!failed_acquire_needs_owner_retry(
+            &lease_may_exist,
             &Ok(clamshell::ReleaseOutcome::NotOwned),
         ));
         assert!(failed_acquire_needs_owner_retry(
-            &clamshell::PowerError::RollbackFailed("rollback unknown".into()),
+            &lease_may_exist,
+            &Err(clamshell::PowerError::Command("cleanup failed".into())),
+        ));
+        let mutation_may_remain = clamshell::AcquireFailure {
+            error: clamshell::PowerError::RollbackFailed("rollback unknown".into()),
+            obligation: clamshell::AcquireObligation::MutationMayRemain,
+        };
+        assert!(failed_acquire_needs_owner_retry(
+            &mutation_may_remain,
+            &Ok(clamshell::ReleaseOutcome::NotOwned),
+        ));
+        assert!(failed_acquire_needs_owner_retry(
+            &mutation_may_remain,
             &Err(clamshell::PowerError::Command("cleanup failed".into())),
         ));
         assert!(!failed_acquire_needs_owner_retry(
-            &clamshell::PowerError::RollbackFailed("rollback unknown".into()),
+            &mutation_may_remain,
             &Ok(clamshell::ReleaseOutcome::Restored(false)),
         ));
     }

@@ -227,6 +227,70 @@ pub enum AcquireOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcquireObligation {
+    None,
+    LeaseMayExist,
+    MutationMayRemain,
+}
+
+#[derive(Debug)]
+pub struct AcquireFailure {
+    pub error: PowerError,
+    pub obligation: AcquireObligation,
+}
+
+impl AcquireFailure {
+    fn none(error: impl Into<PowerError>) -> Self {
+        Self {
+            error: error.into(),
+            obligation: AcquireObligation::None,
+        }
+    }
+
+    fn lease_may_exist(error: impl Into<PowerError>) -> Self {
+        Self {
+            error: error.into(),
+            obligation: AcquireObligation::LeaseMayExist,
+        }
+    }
+
+    fn mutation_may_remain(error: impl Into<PowerError>) -> Self {
+        Self {
+            error: error.into(),
+            obligation: AcquireObligation::MutationMayRemain,
+        }
+    }
+}
+
+impl fmt::Display for AcquireFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} (cleanup obligation: {:?})",
+            self.error, self.obligation
+        )
+    }
+}
+
+impl std::error::Error for AcquireFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl From<PowerError> for AcquireFailure {
+    fn from(error: PowerError) -> Self {
+        Self::none(error)
+    }
+}
+
+impl From<StoreError> for AcquireFailure {
+    fn from(error: StoreError) -> Self {
+        Self::none(error)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseOutcome {
     NotOwned,
     KeptApplied,
@@ -366,40 +430,45 @@ pub fn acquire_with<B: PmsetBackend>(
     backend: &B,
     store: &OwnershipStore,
     lease: Lease,
-) -> Result<AcquireOutcome, PowerError> {
+) -> Result<AcquireOutcome, AcquireFailure> {
     let guard = store.lock()?;
     if let Some(mut state) = guard.read()? {
         validate_ownership_state(&state)?;
         if state.leases.is_empty() {
             return Err(PowerError::InvalidState(
                 "a pending restore must complete before another acquire".into(),
-            ));
+            )
+            .into());
         }
         let current_boot = backend.boot_id()?;
         if state.boot_id != current_boot {
             return Err(PowerError::InvalidState(format!(
                 "registry boot {} does not match current boot {}",
                 state.boot_id, current_boot
-            )));
+            ))
+            .into());
         }
         let current = backend.read_disabled()?;
         if current != state.applied {
             return Err(PowerError::InvalidState(format!(
                 "registry says applied={}, system reports {}",
                 state.applied, current
-            )));
+            ))
+            .into());
         }
         if state.did_mutate && !backend.can_restore_noninteractive() {
-            return Err(PowerError::RollbackUnavailable);
+            return Err(PowerError::RollbackUnavailable.into());
         }
         state.acquire(lease);
-        guard.write(&state)?;
+        guard
+            .write(&state)
+            .map_err(AcquireFailure::lease_may_exist)?;
         return Ok(AcquireOutcome::Joined);
     }
 
     let baseline = backend.read_disabled()?;
     if !baseline && !backend.can_restore_noninteractive() {
-        return Err(PowerError::RollbackUnavailable);
+        return Err(PowerError::RollbackUnavailable.into());
     }
     let mut state = OwnershipState::new(
         baseline,
@@ -407,7 +476,9 @@ pub fn acquire_with<B: PmsetBackend>(
         u64::try_from(now_ms()).unwrap_or_default(),
     );
     state.acquire(lease);
-    guard.write(&state)?;
+    guard
+        .write(&state)
+        .map_err(AcquireFailure::lease_may_exist)?;
 
     if baseline {
         return Ok(AcquireOutcome::BaselineAlreadyOn);
@@ -549,18 +620,20 @@ fn rollback_acquire<B: PmsetBackend>(
     guard: &crate::power::ownership_store::OwnershipStoreGuard<'_>,
     baseline: bool,
     primary: PowerError,
-) -> PowerError {
+) -> AcquireFailure {
     let rollback = backend
         .set_disabled(baseline)
         .and_then(|()| verify_state(backend, baseline));
     match rollback {
         Ok(()) => match guard.clear() {
-            Ok(()) => primary,
-            Err(error) => PowerError::RollbackFailed(format!(
+            Ok(()) => AcquireFailure::none(primary),
+            Err(error) => AcquireFailure::lease_may_exist(PowerError::RollbackFailed(format!(
                 "baseline restored but ownership record could not be cleared: {error}"
-            )),
+            ))),
         },
-        Err(error) => PowerError::RollbackFailed(format!("{primary}; rollback error: {error}")),
+        Err(error) => AcquireFailure::mutation_may_remain(PowerError::RollbackFailed(format!(
+            "{primary}; rollback error: {error}"
+        ))),
     }
 }
 
@@ -818,10 +891,39 @@ mod tests {
 
         assert!(matches!(
             acquire_with(&backend, &store, test_lease("prod", "generation")),
-            Err(PowerError::RollbackUnavailable)
+            Err(AcquireFailure {
+                error: PowerError::RollbackUnavailable,
+                obligation: AcquireObligation::None,
+            })
         ));
         assert!(!backend.current());
         assert!(store.read().unwrap().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn post_rename_write_error_reports_visible_lease_obligation() {
+        let (dir, store) = test_store("post-rename-write-error");
+        let backend = FakePmset::new(false);
+        store.fail_next_parent_sync_after_rename();
+
+        let failure =
+            acquire_with(&backend, &store, test_lease("prod", "generation")).unwrap_err();
+
+        assert_eq!(failure.obligation, AcquireObligation::LeaseMayExist);
+        assert!(matches!(failure.error, PowerError::Store(_)));
+        let visible = store.read().unwrap().unwrap();
+        assert!(visible
+            .leases
+            .iter()
+            .any(|lease| lease.profile == "prod" && lease.owner_generation == "generation"));
+        assert!(!backend.current());
+        assert!(!backend
+            .trace
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|step| step.starts_with("set:")));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -880,7 +982,10 @@ mod tests {
 
         assert!(matches!(
             acquire_with(&backend, &store, test_lease("prod", "generation")),
-            Err(PowerError::Command(_))
+            Err(AcquireFailure {
+                error: PowerError::Command(_),
+                obligation: AcquireObligation::None,
+            })
         ));
         assert!(!backend.current());
         assert!(store.read().unwrap().is_none());
@@ -927,7 +1032,10 @@ mod tests {
 
         assert!(matches!(
             acquire_with(&backend, &store, test_lease("prod", "generation")),
-            Err(PowerError::Store(_))
+            Err(AcquireFailure {
+                error: PowerError::Store(_),
+                obligation: AcquireObligation::None,
+            })
         ));
         assert!(!backend.current());
         assert!(std::fs::read(dir.join("ownership.json"))
@@ -948,7 +1056,10 @@ mod tests {
 
         assert!(matches!(
             acquire_with(&backend, &store, test_lease("dev", "other")),
-            Err(PowerError::InvalidState(_))
+            Err(AcquireFailure {
+                error: PowerError::InvalidState(_),
+                obligation: AcquireObligation::None,
+            })
         ));
         assert!(matches!(
             release_with(&backend, &store, "prod", "generation"),

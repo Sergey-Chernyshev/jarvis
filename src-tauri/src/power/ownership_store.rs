@@ -5,6 +5,8 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -66,11 +68,17 @@ impl From<io::Error> for StoreError {
 #[derive(Debug)]
 pub struct OwnershipStore {
     path: PathBuf,
+    #[cfg(test)]
+    fail_parent_sync_after_rename: AtomicBool,
 }
 
 impl OwnershipStore {
     pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            #[cfg(test)]
+            fail_parent_sync_after_rename: AtomicBool::new(false),
+        }
     }
 
     pub fn global() -> Self {
@@ -138,6 +146,12 @@ impl OwnershipStore {
 
     pub fn clear(&self) -> Result<(), StoreError> {
         self.lock()?.clear()
+    }
+
+    #[cfg(test)]
+    pub fn fail_next_parent_sync_after_rename(&self) {
+        self.fail_parent_sync_after_rename
+            .store(true, Ordering::SeqCst);
     }
 
     fn open_lock_file(&self, lock_path: &Path) -> Result<File, StoreError> {
@@ -221,6 +235,17 @@ impl OwnershipStoreGuard<'_> {
             temp.sync_all()?;
             drop(temp);
             fs::rename(&temp_path, &self.store.path)?;
+            #[cfg(test)]
+            if self
+                .store
+                .fail_parent_sync_after_rename
+                .swap(false, Ordering::SeqCst)
+            {
+                return Err(StoreError::Io(io::Error::new(
+                    io::ErrorKind::Other,
+                    "injected parent fsync failure after rename",
+                )));
+            }
             File::open(parent)?.sync_all()?;
             Ok(())
         })();

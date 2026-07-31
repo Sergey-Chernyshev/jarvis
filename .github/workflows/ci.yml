@@ -48,6 +48,17 @@ jobs:
       - name: Public repository boundary
         run: npm run check:public
 
+      - name: Plugin source boundary
+        run: |
+          npm run test:plugin-boundaries
+          npm run check:plugin-boundaries
+
+      - name: Plugin public contract tests
+        run: |
+          cargo test --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
+          cargo test --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
+          cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
+
       - name: Agent VM sidecar tests
         run: cargo test --manifest-path plugins/agent-vm/Cargo.toml
 
@@ -66,3 +77,20 @@ jobs:
         run: >
           cargo test --manifest-path src-tauri/Cargo.toml
           --features wakeword-ort,whisper-native,stt-vad
+
+  plugin-msrv:
+    name: plugin crates · Rust 1.77.2
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust 1.77.2
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.77.2
+
+      - name: Public plugin crates on declared MSRV
+        run: |
+          cargo test --locked --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
+          cargo test --locked --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
+          cargo test --locked --manifest-path crates/jarvis-plugin-test-host/Cargo.toml

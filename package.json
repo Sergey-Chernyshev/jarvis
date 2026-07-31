@@ -12,6 +12,8 @@
     "test": "cargo test --manifest-path src-tauri/Cargo.toml && cargo test --manifest-path plugins/agent-vm/Cargo.toml",
     "test:ui": "node --test ui/*.test.mjs",
     "check:public": "bash scripts/check-public-repo-secrets.sh",
+    "test:plugin-boundaries": "bash scripts/check-plugin-boundaries.test.sh",
+    "check:plugin-boundaries": "bash scripts/check-plugin-boundaries.sh",
     "setup": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- install",
     "teardown": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- uninstall",
     "status": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- status",

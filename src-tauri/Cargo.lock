@@ -2310,6 +2310,7 @@ dependencies = [
  "cpal 0.17.1",
  "flate2",
  "hound",
+ "jarvis-plugin-protocol",
  "jarvis-secret-store",
  "libc",
  "objc2",
@@ -2331,6 +2332,14 @@ dependencies = [
  "voice_activity_detector",
  "whisper-rs",
  "zeroize",
+]
+
+[[package]]
+name = "jarvis-plugin-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

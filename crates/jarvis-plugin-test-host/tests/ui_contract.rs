@@ -3,8 +3,7 @@ use jarvis_plugin_protocol::bridge::{
 };
 use jarvis_plugin_test_host::ui::{BoundPage, UiTestHost};
 
-const DIGEST: &str =
-    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 #[test]
 fn payload_identity_never_changes_bound_principal() {

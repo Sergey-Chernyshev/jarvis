@@ -419,4 +419,8 @@ if [[ "$lock_digests_before" != "$lock_digests_after" ]]; then
   exit 1
 fi
 
+mkdir -p "$fixture_root/schemas"
+printf '%s\n' '{}' > "$fixture_root/schemas/plugin-private-v1.schema.json"
+expect_rejected "public plugin schema is not allowlisted"
+
 echo "plugin boundary negative fixtures passed"

@@ -15,7 +15,8 @@ pub mod ownership_store;
 
 use serde_json::{json, Map, Value};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use crate::daemon::Daemon;
 use crate::model::{Session, Status};
@@ -27,7 +28,170 @@ const SUGGEST_GAP_MS: i64 = 60 * 60 * 1000; // подсказка не чаще 
 const GUARD_EVERY_MS: i64 = 60 * 1000;
 const WAKE_GAP_MS: i64 = 90 * 1000;
 const CLAMSHELL_LEASE_TTL_MS: i64 = 5 * 60 * 1000;
+const POWER_OPERATION_BARRIER_TIMEOUT: Duration = Duration::from_secs(90);
 static NEXT_OWNER_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Default)]
+struct ShutdownGate(AtomicBool);
+
+impl ShutdownGate {
+    fn accepting(&self) -> bool {
+        !self.0.load(Ordering::Acquire)
+    }
+
+    fn close(&self) -> bool {
+        !self.0.swap(true, Ordering::AcqRel)
+    }
+}
+
+#[derive(Default)]
+struct OperationBarrier {
+    active: Mutex<bool>,
+    idle: Condvar,
+}
+
+impl OperationBarrier {
+    fn try_enter(self: &Arc<Self>, epoch: u64) -> Option<PowerOperation> {
+        let mut active = self.active.lock().unwrap_or_else(|error| error.into_inner());
+        if *active {
+            return None;
+        }
+        *active = true;
+        Some(PowerOperation {
+            epoch,
+            barrier: self.clone(),
+        })
+    }
+
+    fn wait_for_idle(&self, timeout: Duration) -> bool {
+        let active = self.active.lock().unwrap_or_else(|error| error.into_inner());
+        if !*active {
+            return true;
+        }
+        let waited = self
+            .idle
+            .wait_timeout_while(active, timeout, |active| *active);
+        match waited {
+            Ok((active, _)) => !*active,
+            Err(_) => false,
+        }
+    }
+}
+
+struct PowerOperation {
+    epoch: u64,
+    barrier: Arc<OperationBarrier>,
+}
+
+impl PowerOperation {
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
+impl Drop for PowerOperation {
+    fn drop(&mut self) {
+        *self
+            .barrier
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = false;
+        self.barrier.idle.notify_all();
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AcquireDisposition {
+    Committed,
+    RolledBack,
+}
+
+#[derive(Default)]
+struct PowerOperations {
+    gate: ShutdownGate,
+    epoch: AtomicU64,
+    barrier: Arc<OperationBarrier>,
+}
+
+impl PowerOperations {
+    fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    fn admitted_epoch(&self) -> Option<u64> {
+        let epoch = self.epoch();
+        (self.gate.accepting() && self.epoch() == epoch).then_some(epoch)
+    }
+
+    fn accepts(&self, epoch: u64) -> bool {
+        self.gate.accepting() && self.epoch() == epoch
+    }
+
+    fn begin(&self) -> Option<PowerOperation> {
+        let epoch = self.admitted_epoch()?;
+        let operation = self.barrier.try_enter(epoch)?;
+        if self.accepts(epoch) {
+            Some(operation)
+        } else {
+            None
+        }
+    }
+
+    fn begin_wait(&self, timeout: Duration) -> Option<PowerOperation> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(operation) = self.begin() {
+                return Some(operation);
+            }
+            if !self.gate.accepting() {
+                return None;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline || !self.barrier.wait_for_idle(deadline - now) {
+                return None;
+            }
+        }
+    }
+
+    fn accepting(&self) -> bool {
+        self.gate.accepting()
+    }
+
+    fn advance(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn close(&self) -> bool {
+        if !self.gate.close() {
+            return false;
+        }
+        self.advance();
+        true
+    }
+
+    fn wait_for_idle(&self, timeout: Duration) -> bool {
+        self.barrier.wait_for_idle(timeout)
+    }
+
+    fn finish_acquire<T, E>(
+        &self,
+        operation: PowerOperation,
+        acquired: Result<T, E>,
+        commit: impl FnOnce(T),
+        rollback: impl FnOnce() -> Result<(), E>,
+    ) -> Result<AcquireDisposition, E> {
+        let acquired = acquired?;
+        let disposition = if self.accepts(operation.epoch()) {
+            commit(acquired);
+            AcquireDisposition::Committed
+        } else {
+            rollback()?;
+            AcquireDisposition::RolledBack
+        };
+        drop(operation);
+        Ok(disposition)
+    }
+}
 
 /// Декларативный пункт меню трея от плагина.
 pub enum TrayItem {
@@ -62,6 +226,7 @@ pub struct Power {
     last_suggest_at: AtomicI64,
     /// Тикер «ещё 47м»: при активном ручном таймере обновляем UI раз в 30с.
     last_countdown_at: AtomicI64,
+    operations: PowerOperations,
 }
 
 impl Power {
@@ -75,6 +240,7 @@ impl Power {
             last_working: AtomicUsize::new(0),
             last_suggest_at: AtomicI64::new(0),
             last_countdown_at: AtomicI64::new(0),
+            operations: PowerOperations::default(),
         }
     }
 
@@ -110,6 +276,9 @@ impl Power {
     }
 
     fn activate_keep_awake(d: &Arc<Daemon>) {
+        if !d.power.operations.accepting() {
+            return;
+        }
         let s = Self::ka_settings(d);
         let mut engine = Engine::new(
             IopmBlocker,
@@ -119,7 +288,13 @@ impl Power {
         // демон мог рестартовать посреди работы — подхватываем текущее состояние
         let working = working_count(&d.snapshot());
         let events = engine.set_working(working, now_ms());
-        *d.power.engine.lock().unwrap() = Some(engine);
+        let mut slot = d.power.engine.lock().unwrap();
+        if !d.power.operations.accepting() || slot.is_some() {
+            engine.dispose();
+            return;
+        }
+        *slot = Some(engine);
+        drop(slot);
         println!("[jarvis:keep-awake] включён");
         handle_engine_events(d, events); // assertion взялась сразу → связка с «Крышкой»
     }
@@ -132,25 +307,49 @@ impl Power {
     }
 
     fn activate_clamshell(d: &Arc<Daemon>) {
+        if !d.power.operations.accepting() {
+            return;
+        }
         {
             let mut clam = d.power.clam.lock().unwrap();
-            if clam.active {
+            if !d.power.operations.accepting() || clam.active {
                 return; // уже включён — повторный _enable не дёргает restore
             }
             clam.active = true;
         }
         let d2 = d.clone();
         tauri::async_runtime::spawn(async move {
+            if !d2.power.operations.accepting() {
+                return;
+            }
             d2.power
                 .is_air
                 .store(clamshell::detect_is_air().await, Ordering::SeqCst);
+            if !d2.power.operations.accepting() {
+                return;
+            }
             restore_after_restart(&d2).await;
+            if !d2.power.operations.accepting() {
+                return;
+            }
             refresh_lid(&d2).await;
         });
         println!("[jarvis:clamshell] включён");
     }
 
     fn deactivate_clamshell(d: &Arc<Daemon>) {
+        let Some(_operation) = d
+            .power
+            .operations
+            .begin_wait(POWER_OPERATION_BARRIER_TIMEOUT)
+        else {
+            eprintln!("[jarvis:clamshell] release admission timed out or shutdown started");
+            return;
+        };
+        Self::deactivate_clamshell_inner(d);
+    }
+
+    fn deactivate_clamshell_inner(d: &Arc<Daemon>) {
         let (was_active, owner_generation) = {
             let mut clam = d.power.clam.lock().unwrap();
             let was_active = clam.active;
@@ -190,8 +389,18 @@ impl Power {
     /// Выход из приложения: снять assertion и синхронно освободить только
     /// доказанную Jarvis-owned clamshell lease через non-interactive backend.
     pub fn dispose(d: &Arc<Daemon>) {
+        d.power.operations.close();
         Self::deactivate_keep_awake(d);
-        Self::deactivate_clamshell(d);
+        if d
+            .power
+            .operations
+            .wait_for_idle(POWER_OPERATION_BARRIER_TIMEOUT)
+        {
+            // Admission is closed, so no new operation can race this retry.
+            Self::deactivate_clamshell_inner(d);
+        } else {
+            eprintln!("[jarvis:power] timed out waiting for in-flight clamshell rollback");
+        }
     }
 
     fn ka_enabled(&self) -> bool {
@@ -201,6 +410,9 @@ impl Power {
     /* ================= снапшот сессий → авто-триггер ================= */
 
     pub fn on_sessions(&self, d: &Arc<Daemon>, list: &[Session]) {
+        if !self.operations.accepting() {
+            return;
+        }
         let events = {
             let mut engine = self.engine.lock().unwrap();
             match engine.as_mut() {
@@ -282,6 +494,9 @@ impl Power {
     /* ================= команды из панели и трея ================= */
 
     pub async fn cmd(d: &Arc<Daemon>, id: &str, name: &str, args: &Value) -> Value {
+        if !d.power.operations.accepting() {
+            return json!({ "ok": false, "error": "Jarvis завершает работу" });
+        }
         if name == "_enable" {
             let on = args.get("on").and_then(Value::as_bool).unwrap_or(false);
             let mut patch = Map::new();
@@ -531,7 +746,13 @@ impl Power {
         if !known {
             return false;
         }
+        if !d.power.operations.accepting() {
+            return true;
+        }
         tauri::async_runtime::spawn(async move {
+            if !d.power.operations.accepting() {
+                return;
+            }
             let ka = Self::ka_settings(&d);
             let cs = Self::cs_settings(&d);
             let armed = d.power.clam.lock().unwrap().armed;
@@ -581,6 +802,9 @@ impl Power {
     /* ================= секундный тик ================= */
 
     pub async fn tick(d: &Arc<Daemon>) {
+        if !d.power.operations.accepting() {
+            return;
+        }
         let now = now_ms();
         let p = &d.power;
         let prev_tick = p.last_tick_at.swap(now, Ordering::SeqCst);
@@ -631,8 +855,14 @@ impl Power {
     /// состояние крышки (Electron собирал их в момент right-click; у Tauri
     /// меню статичное — обновляем на клик, меню пересобирается через changed).
     pub fn refresh_processes(d: &Arc<Daemon>) {
+        if !d.power.operations.accepting() {
+            return;
+        }
         let d = d.clone();
         tauri::async_runtime::spawn(async move {
+            if !d.power.operations.accepting() {
+                return;
+            }
             let mut dirty = false;
             if d.power.clam.lock().unwrap().active {
                 refresh_lid(&d).await;
@@ -640,6 +870,9 @@ impl Power {
             }
             if d.power.ka_enabled() {
                 let procs = list_processes(&d).await;
+                if !d.power.operations.accepting() {
+                    return;
+                }
                 *d.power.processes.lock().unwrap() = procs;
                 dirty = true;
             }
@@ -687,11 +920,17 @@ fn power_lease(owner_generation: &str) -> ownership::Lease {
 /// «Крышкой» дёргается только из событий keep-awake, иначе ручной disarm
 /// крышки мгновенно ре-армился бы peer_sync'ом).
 fn changed(d: &Arc<Daemon>) {
+    if !d.power.operations.accepting() {
+        return;
+    }
     crate::tray::update(d, &d.snapshot());
     crate::plugins::emit_statuses(d);
 }
 
 fn handle_engine_events(d: &Arc<Daemon>, events: Vec<Event>) {
+    if !d.power.operations.accepting() {
+        return;
+    }
     for e in &events {
         match e {
             Event::TimerEnd => {
@@ -712,6 +951,9 @@ fn handle_engine_events(d: &Arc<Daemon>, events: Vec<Event>) {
 /// Связка clamshell ↔ keep-awake: авто-режим «Крышки» повторяет assertion
 /// (нужен sudoers — admin-диалог из фона недопустим).
 fn peer_sync(d: &Arc<Daemon>) {
+    if !d.power.operations.accepting() {
+        return;
+    }
     let s = Power::cs_settings(d);
     let (active, busy, armed, armed_by) = {
         let clam = d.power.clam.lock().unwrap();
@@ -723,6 +965,9 @@ fn peer_sync(d: &Arc<Daemon>) {
     let ka_active = d.power.engine.lock().unwrap().as_ref().is_some_and(|e| e.active());
     let d = d.clone();
     tauri::async_runtime::spawn(async move {
+        if !d.power.operations.accepting() {
+            return;
+        }
         if ka_active && !armed {
             arm(&d, "auto").await;
         } else if !ka_active && armed && armed_by == Some("auto") {
@@ -732,6 +977,9 @@ fn peer_sync(d: &Arc<Daemon>) {
 }
 
 async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
+    let Some(operation) = d.power.operations.begin() else {
+        return json!({ "ok": false, "error": "Jarvis завершает работу или power занят" });
+    };
     {
         let mut clam = d.power.clam.lock().unwrap();
         if clam.busy {
@@ -744,29 +992,82 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
     }
     let owner_generation = new_owner_generation();
     let lease = power_lease(&owner_generation);
+    let profile = lease.profile.clone();
+    let worker_daemon = d.clone();
+    let commit_daemon = d.clone();
+    let retry_daemon = d.clone();
+    let commit_generation = owner_generation.clone();
+    let rollback_generation = owner_generation.clone();
+    let retry_generation = owner_generation.clone();
     let acquired = tauri::async_runtime::spawn_blocking(move || {
-        clamshell::acquire_with(
-            &clamshell::SystemPmset,
-            &crate::power::ownership_store::OwnershipStore::global(),
-            lease,
+        let worker_operations = &worker_daemon.power.operations;
+        if !worker_operations.accepts(operation.epoch()) {
+            return Ok(AcquireDisposition::RolledBack);
+        }
+        let store = crate::power::ownership_store::OwnershipStore::global();
+        let acquire_result = match clamshell::acquire_with(&clamshell::SystemPmset, &store, lease) {
+            Ok(outcome) => Ok(outcome),
+            Err(primary) => match clamshell::release_with(
+                &clamshell::SystemPmset,
+                &store,
+                &profile,
+                &retry_generation,
+            ) {
+                Ok(_) => Err(primary.to_string()),
+                Err(cleanup) => {
+                    let mut clam = retry_daemon.power.clam.lock().unwrap();
+                    clam.armed = true;
+                    clam.armed_by = Some(by);
+                    clam.owner_generation = Some(retry_generation);
+                    Err(format!("{primary}; cleanup retry failed: {cleanup}"))
+                }
+            },
+        };
+        let rollback_daemon = worker_daemon.clone();
+        let rollback_profile = profile.clone();
+        worker_operations.finish_acquire(
+            operation,
+            acquire_result,
+            move |_| {
+                let mut clam = commit_daemon.power.clam.lock().unwrap();
+                clam.armed = true;
+                clam.armed_by = Some(by);
+                clam.owner_generation = Some(commit_generation);
+                clam.last_guard_at = 0;
+            },
+            move || {
+                match clamshell::release_with(
+                    &clamshell::SystemPmset,
+                    &store,
+                    &rollback_profile,
+                    &rollback_generation,
+                ) {
+                    Ok(_) => Ok(()),
+                    Err(error) => {
+                        let mut clam = rollback_daemon.power.clam.lock().unwrap();
+                        clam.armed = true;
+                        clam.armed_by = Some(by);
+                        clam.owner_generation = Some(rollback_generation);
+                        Err(error.to_string())
+                    }
+                }
+            },
         )
     })
     .await;
-    let result = if matches!(&acquired, Ok(Ok(_))) {
-        {
-            let mut clam = d.power.clam.lock().unwrap();
-            clam.armed = true;
-            clam.armed_by = Some(by);
-            clam.owner_generation = Some(owner_generation);
-            clam.last_guard_at = 0;
-        }
+    let result = if matches!(
+        &acquired,
+        Ok(Ok(AcquireDisposition::Committed))
+    ) && d.power.operations.accepting()
+    {
         changed(d);
         json!({ "ok": true })
     } else {
         let error = match acquired {
+            Ok(Ok(AcquireDisposition::RolledBack)) => "Jarvis завершает работу".into(),
+            Ok(Ok(AcquireDisposition::Committed)) => "Jarvis завершает работу".into(),
             Ok(Err(error)) => error.to_string(),
             Err(error) => format!("power worker failed: {error}"),
-            Ok(Ok(_)) => unreachable!(),
         };
         json!({ "ok": false, "error": error })
     };
@@ -775,6 +1076,9 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
 }
 
 async fn disarm(d: &Arc<Daemon>) -> Value {
+    let Some(operation) = d.power.operations.begin() else {
+        return json!({ "ok": false, "error": "Jarvis завершает работу или power занят" });
+    };
     {
         let mut clam = d.power.clam.lock().unwrap();
         if clam.busy {
@@ -795,6 +1099,7 @@ async fn disarm(d: &Arc<Daemon>) -> Value {
     };
     let profile = power_profile_id();
     let released = tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
         clamshell::release_with(
             &clamshell::SystemPmset,
             &crate::power::ownership_store::OwnershipStore::global(),
@@ -826,12 +1131,19 @@ async fn disarm(d: &Arc<Daemon>) -> Value {
 
 /// Подвисший с прошлой жизни демона disablesleep — вернуть как было.
 async fn restore_after_restart(d: &Arc<Daemon>) {
+    if !d.power.operations.accepting() {
+        return;
+    }
     let legacy = clamshell::legacy_marker_state();
     match &legacy {
         clamshell::LegacyMarkerState::Missing => return,
         clamshell::LegacyMarkerState::Present(_) | clamshell::LegacyMarkerState::Corrupt => {}
     }
-    if clamshell::decide_legacy_marker(clamshell::read_sleep_disabled().await)
+    let current = clamshell::read_sleep_disabled().await;
+    if !d.power.operations.accepting() {
+        return;
+    }
+    if clamshell::decide_legacy_marker(current)
         == clamshell::LegacyMarkerDecision::ClearMarker
     {
         clamshell::clear_marker();
@@ -861,7 +1173,13 @@ async fn restore_after_restart(d: &Arc<Daemon>) {
 }
 
 async fn refresh_lid(d: &Arc<Daemon>) {
+    if !d.power.operations.accepting() {
+        return;
+    }
     let lid = clamshell::read_lid().await;
+    if !d.power.operations.accepting() {
+        return;
+    }
     d.power.clam.lock().unwrap().lid_causes_sleep = lid.causes_sleep;
 }
 
@@ -873,21 +1191,30 @@ async fn battery_guard(d: &Arc<Daemon>) {
     if pct > floor {
         return;
     }
+    let Some(operation) = d.power.operations.begin() else {
+        return;
+    };
     println!("[jarvis:clamshell] батарея {pct}% ≤ {floor}% — освобождаю ownership lease");
     let owner_generation = d.power.clam.lock().unwrap().owner_generation.clone();
+    let mut operation = Some(operation);
     let release_outcome = if let Some(owner_generation) = owner_generation {
         let profile = power_profile_id();
+        let worker_operation = operation.take().unwrap();
         tauri::async_runtime::spawn_blocking(move || {
-            clamshell::release_with(
+            let outcome = clamshell::release_with(
                 &clamshell::SystemPmset,
                 &crate::power::ownership_store::OwnershipStore::global(),
                 &profile,
                 &owner_generation,
-            )
+            );
+            (worker_operation, outcome)
         })
         .await
         .ok()
-        .and_then(Result::ok)
+        .and_then(|(worker_operation, outcome)| {
+            operation = Some(worker_operation);
+            outcome.ok()
+        })
     } else {
         None
     };
@@ -899,6 +1226,9 @@ async fn battery_guard(d: &Arc<Daemon>) {
             clam.owner_generation = None;
         }
         changed(d);
+        if !d.power.operations.accepting() {
+            return;
+        }
         if outcome.sleep_disabled() == Some(false) {
             d.notify(
                 "⌒ Крышка: батарея садится",
@@ -919,6 +1249,9 @@ async fn battery_guard(d: &Arc<Daemon>) {
             clamshell::force_sleep_now().await;
         }
     } else {
+        if !d.power.operations.accepting() {
+            return;
+        }
         // тихо не получилось, диалог под закрытой крышкой бессмыслен —
         // форс-сон (root не нужен) спасает батарею и температуру
         d.notify(
@@ -929,11 +1262,18 @@ async fn battery_guard(d: &Arc<Daemon>) {
         );
         clamshell::force_sleep_now().await;
     }
+    drop(operation);
 }
 
 /// Проснулись после сна, который прервал работу → подсказка про closed-display.
 async fn on_resume(d: &Arc<Daemon>, working_at_sleep: usize) {
+    if !d.power.operations.accepting() {
+        return;
+    }
     refresh_lid(d).await;
+    if !d.power.operations.accepting() {
+        return;
+    }
     let (active, armed) = {
         let clam = d.power.clam.lock().unwrap();
         (clam.active, clam.armed)
@@ -985,6 +1325,9 @@ async fn on_resume(d: &Arc<Daemon>, working_at_sleep: usize) {
 /// Установка sudoers-правила: visudo -c валидирует ДО установки;
 /// всё одним admin-скриптом = один пароль.
 async fn install_sudoers(d: &Arc<Daemon>) -> Value {
+    if !d.power.operations.accepting() {
+        return json!({ "ok": false, "error": "Jarvis завершает работу" });
+    }
     let user = std::env::var("USER").unwrap_or_default();
     let content = match clamshell::sudoers_content(&user) {
         Ok(c) => c,
@@ -1009,6 +1352,9 @@ async fn install_sudoers(d: &Arc<Daemon>) -> Value {
     .and_then(Result::ok)
     .is_some_and(|o| o.status.success());
     let _ = std::fs::remove_file(&tmp);
+    if !d.power.operations.accepting() {
+        return json!({ "ok": false, "error": "Jarvis завершает работу" });
+    }
     if !ok {
         return json!({ "ok": false, "error": "установка отменена" });
     }
@@ -1064,4 +1410,129 @@ async fn list_processes(d: &Arc<Daemon>) -> Vec<(i64, String)> {
         own.extend(apps);
     }
     own
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn shutdown_gate_is_one_way_and_idempotent() {
+        let gate = ShutdownGate::default();
+        assert!(gate.accepting());
+        assert!(gate.close());
+        assert!(!gate.accepting());
+        assert!(!gate.close());
+    }
+
+    #[test]
+    fn shutdown_gate_advances_epoch_and_rejects_new_operations() {
+        let operations = PowerOperations::default();
+        let admitted_epoch = operations.begin().unwrap().epoch();
+
+        assert!(operations.close());
+        assert_ne!(operations.epoch(), admitted_epoch);
+        assert!(operations.begin().is_none());
+        assert!(!operations.close());
+    }
+
+    #[test]
+    fn acquire_that_finishes_after_close_is_rolled_back_before_barrier_opens() {
+        let operations = Arc::new(PowerOperations::default());
+        let operation = operations.begin().unwrap();
+        let (acquire_started_tx, acquire_started_rx) = mpsc::channel();
+        let (finish_acquire_tx, finish_acquire_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let lease_present = Arc::new(AtomicBool::new(false));
+        let sleep_disabled = Arc::new(AtomicBool::new(false));
+
+        let worker_operations = operations.clone();
+        let worker_lease = lease_present.clone();
+        let worker_sleep = sleep_disabled.clone();
+        let worker = std::thread::spawn(move || {
+            acquire_started_tx.send(()).unwrap();
+            finish_acquire_rx.recv().unwrap();
+            worker_lease.store(true, Ordering::SeqCst);
+            worker_sleep.store(true, Ordering::SeqCst);
+
+            let disposition = worker_operations
+                .finish_acquire(
+                    operation,
+                    Ok::<_, ()>(()),
+                    |_| panic!("closed acquire must not commit"),
+                    || {
+                        assert!(worker_lease.swap(false, Ordering::SeqCst));
+                        worker_sleep.store(false, Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            finished_tx.send(disposition).unwrap();
+        });
+
+        acquire_started_rx.recv().unwrap();
+        assert!(operations.close());
+        assert!(!operations.wait_for_idle(Duration::ZERO));
+        finish_acquire_tx.send(()).unwrap();
+
+        assert_eq!(finished_rx.recv().unwrap(), AcquireDisposition::RolledBack);
+        assert!(operations.wait_for_idle(Duration::ZERO));
+        assert!(!lease_present.load(Ordering::SeqCst));
+        assert!(!sleep_disabled.load(Ordering::SeqCst));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn acquire_commit_finishes_before_operation_barrier_opens() {
+        let operations = PowerOperations::default();
+        let operation = operations.begin().unwrap();
+        let mut committed = false;
+
+        let disposition = operations
+            .finish_acquire(
+                operation,
+                Ok::<_, ()>(()),
+                |_| {
+                    assert!(!operations.wait_for_idle(Duration::ZERO));
+                    committed = true;
+                },
+                || panic!("accepted acquire must not roll back"),
+            )
+            .unwrap();
+
+        assert_eq!(disposition, AcquireDisposition::Committed);
+        assert!(committed);
+        assert!(operations.wait_for_idle(Duration::ZERO));
+    }
+
+    #[test]
+    fn failed_late_rollback_still_opens_operation_barrier() {
+        let operations = PowerOperations::default();
+        let operation = operations.begin().unwrap();
+        assert!(operations.close());
+
+        let result = operations.finish_acquire(
+            operation,
+            Ok::<_, &'static str>(()),
+            |_| panic!("closed acquire must not commit"),
+            || Err("rollback failed"),
+        );
+
+        assert_eq!(result, Err("rollback failed"));
+        assert!(operations.wait_for_idle(Duration::ZERO));
+    }
+
+    #[test]
+    fn worker_returned_operation_keeps_barrier_closed_for_async_bookkeeping() {
+        let operations = PowerOperations::default();
+        let operation = operations.begin().unwrap();
+        let returned_operation = std::thread::spawn(move || operation).join().unwrap();
+
+        assert!(operations.close());
+        assert!(!operations.wait_for_idle(Duration::ZERO));
+        drop(returned_operation);
+        assert!(operations.wait_for_idle(Duration::ZERO));
+    }
 }

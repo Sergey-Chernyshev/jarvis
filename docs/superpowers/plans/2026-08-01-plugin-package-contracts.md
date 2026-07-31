@@ -506,8 +506,9 @@ public-secret guards.
 
 This task owns the package wire format, byte-for-byte archive profile, bounded parser and quarantine extraction. It
 does **not** decide whether a signer is trusted. A4 owns trust, catalog and revocation checks and is the only production
-implementation of the verification callback defined below. A5 owns atomic activation of an already extracted,
-verified quarantine directory.
+implementation of the verification callback defined below. A3 supplies the low-level same-fd verified extraction
+primitive; A5 supplies durable path/receipt/journal/lock primitives only. A6 owns every lifecycle invocation of
+verification/extraction, the final version-directory rename, `current` activation and their crash/recovery semantics.
 
 - [ ] **Step 1: Pin the dependency and MSRV surface before writing format code**
 
@@ -1025,7 +1026,8 @@ Create an owner-only new quarantine root below a caller-supplied held parent `Ow
 Create implicit directories in sorted order through held fd stacks with mode `0700`; `EEXIST` is an error. Create each
 file with `openat(WRONLY|CREATE|EXCL|NOFOLLOW|CLOEXEC, 0600)`, stream exact bytes while hashing, require regular type
 and link count one, then `fchmod` to `0444` or `0555`. `fsync` and macOS `fcntl(F_FULLFSYNC)` every file, then fsync
-directories bottom-up. A5 owns final rename/activation and its power-loss semantics.
+directories bottom-up. A6 owns when and where this primitive runs, final version-directory rename/`current`
+activation and lifecycle power-loss recovery; it uses A5's durable path, receipt and journal primitives.
 
 On any failure, close files and remove exactly the recorded created files/directories in reverse order using
 `unlinkat` under retained parent fds; remove the quarantine root by its retained parent fd/name only after matching its
@@ -1218,8 +1220,13 @@ value, not a second lossy representation. All catalog structs are camelCase and 
 `PackageSignatureV1`, but signs the catalog domain. Signatures cover:
 
 ```text
-ASCII "jarvis-plugin-catalog-v1" || NUL || JCS of the catalog object with the signatures field omitted
-jarvis-plugin-package-v1\0<JCS package.json bytes>
+CatalogSignatureV1 message =
+  ASCII bytes "jarvis-plugin-catalog-v1" || one NUL byte ||
+  exact JCS bytes of the catalog object with the signatures field omitted
+
+PackageSignatureV1 message =
+  ASCII bytes "jarvis-plugin-package-v1" || one NUL byte ||
+  exact canonical package.json bytes
 ```
 
 The root catalog schema and protocol-crate copy are byte-identical, closed Draft 2020-12 schemas. Add
@@ -1535,6 +1542,7 @@ git commit -m "feat(plugins): persist install receipts and operations"
 
 - Create: `src-tauri/src/plugins/package_manager/manager.rs`
 - Create: `src-tauri/src/plugins/package_manager/downloader.rs`
+- Create: `src-tauri/src/plugins/package_manager/quarantine.rs`
 - Create: `src-tauri/src/plugins/package_manager/consent.rs`
 - Create: `src-tauri/src/plugins/package_manager/migration.rs`
 - Create: `src-tauri/src/plugins/package_manager/health.rs`
@@ -1583,6 +1591,24 @@ fn approved_install_commits_exact_verified_receipt() {
 }
 ```
 
+Add these barrier/failpoint tests to the same file:
+
+```text
+prepare_drop_manager_reopen_then_commit_reverifies_and_extracts_same_fd
+restart_rejects_quarantine_path_replacement_without_output
+restart_held_archive_inode_mutation_between_passes_is_rejected_without_output
+revocation_after_prepare_before_restart_commit_is_rejected_without_output
+recovery_of_approved_operation_uses_fresh_current_verifier
+```
+
+The first test performs `prepare_install`, drops every manager/A3/A4 object, opens a new manager from the durable
+journal and submits the exact approval to that reopened manager. It must observe a new A3 pass-1 call and a current A4
+verification before pass 2. The replacement test renames the prepared archive away and puts another valid-looking
+regular file at the old name after reopening the manager. The mutation test also reopens first, pauses after fresh
+evidence is minted, modifies the already held inode, then resumes pass 2. Every failure case asserts no extraction
+directory, version directory, `current` receipt or health process was created; the input quarantine archive and failed
+journal record may remain for bounded recovery/diagnostics.
+
 - [ ] **Step 2: Run integration tests and verify RED**
 
 Run:
@@ -1619,22 +1645,50 @@ quarantine file with archive-size and deadline limits. It never extracts or exec
 `InstallPlan` persists expected catalog sequence, archive/package digests, target, permission diff and exact native
 trust challenge.
 
+The operation journal also persists an **untrusted locator**, `QuarantineArchiveRef`: fixed quarantine-parent key,
+single-component archive name, expected parent device/inode/owner/mode and expected archive
+device/inode/owner/type/mode/link-count/size observed after the downloaded file is fsynced. The parent is `0700`; the
+archive is regular `0600` with link count one. These fields and the persisted digests are comparison facts only. They
+are never a serialized `VerifiedPackageEvidence`, verification boolean, trusted fd or authorization to extract.
+Prepare drops any pass-1 evidence before returning and may close every fd and process immediately after writing the
+journal; correctness must survive that drop.
+
 - [ ] **Step 4: Implement consent-bound commit and safe extraction**
 
 `commit_install` reloads the operation, revalidates current catalog freshness/revocation and matches the exact
-operation/digest/grant approval. It then:
+operation/digest/grant approval. It never calls extraction from the persisted plan/digest or from a prepare-time
+verification result. `quarantine.rs::reverify_for_extract` performs this sequence on every commit:
 
-1. extracts to a fresh owner-only quarantine directory;
-2. rehashes every file and validates concrete Manifest v2;
-3. performs declarative migrations on a copied state directory;
-4. executes a native health check only after exact-digest consent, with cleared environment, bounded args, timeout and
+1. open the fixed owner-only quarantine parent through A5's held-fd path primitive, without following any symlink;
+2. verify the parent's recorded device/inode, current effective-UID ownership, directory type, `0700` mode and valid
+   nonzero link count;
+3. validate the persisted archive name as one component, then `openat` it
+   `RDONLY|NOFOLLOW|CLOEXEC` from that held parent fd;
+4. `fstat` the open file and require the recorded device/inode, current effective-UID ownership, regular type,
+   `0600` mode, link count one and bounded size;
+5. select the exact package from the **current** A4 catalog/root/publisher/revocation state (or the current explicit
+   Developer Mode verifier for a local source), then rerun the complete A3 pass 1 on that open `File`;
+6. invoke that current A4 verifier over the fresh observation; only the A3 package module may then mint a new
+   non-serializable `VerifiedPackageEvidence` which owns this exact file descriptor;
+7. immediately move that evidence into A3 pass 2, which seeks/reparses the same held fd and extracts to a fresh
+   owner-only quarantine directory. There is no journal write, clone, path reopen, async handoff or boolean/digest
+   substitute between mint and consume.
+
+Only after pass 2 succeeds does `commit_install`:
+
+1. perform declarative migrations on a copied state directory;
+2. execute a native health check only after exact-digest consent, with cleared environment, bounded args, timeout and
    no network token;
-5. changes package files/directories to immutable modes;
-6. atomically renames into `versions/<version>/<digest>/`;
-7. writes the exact `current` receipt disabled by default;
-8. marks the durable operation succeeded.
+3. change package files/directories to immutable modes;
+4. use A5's durable primitive to atomically rename into `versions/<version>/<digest>/`;
+5. use A5's receipt primitive to write the exact `current` receipt disabled by default;
+6. mark the durable operation succeeded.
 
 An existing same version with a different digest is `version_digest_conflict`, not an overwrite.
+Parent/archive identity mismatch is `quarantine_archive_replaced`; unsafe owner/type/mode/link count is
+`quarantine_archive_unsafe`; a held-inode change detected by pass 2 remains `archive_changed_after_verification`.
+All three fail before health/final rename/current activation and clean any partial extraction through A3's fd-only
+cleanup path.
 
 - [ ] **Step 5: Add migration refusal tests and host-interpreted subset**
 
@@ -1698,6 +1752,14 @@ any current receipt, runtime process, socket or mount lease exists.
 `recovery.rs` reconciles every non-terminal operation on manager open using receipt generation, immutable version
 presence and saved transaction phase. It never guesses that a native health check succeeded.
 
+Recovery never reconstructs `VerifiedPackageEvidence` from journal JSON. A consent-waiting operation remains waiting.
+An approved/running operation that has not durably activated calls the same `reverify_for_extract` path with the
+current A4 catalog/verifier, mints fresh same-fd evidence and immediately consumes pass 2. A package revoked, removed
+from the current catalog or rebound to another publisher lineage fails closed even when prepare previously succeeded.
+Replaced/missing quarantine paths and held-inode mutation use the same errors and zero-output cleanup as normal
+commit. A crash after A6 invokes A5's final-rename/current-write primitives is reconciled from their durable state;
+A6 decides the lifecycle result and never reruns native code merely because the journal phase is stale.
+
 - [ ] **Step 8: Run package-manager lifecycle tests**
 
 Run:
@@ -1707,7 +1769,8 @@ cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
   plugins::package_manager::tests -- --nocapture
 ```
 
-Expected: install/update/rollback/uninstall, revocation, migration and every injected crash point pass.
+Expected: install/update/rollback/uninstall, restart re-verification, quarantine path/inode races, revocation,
+migration and every injected crash point pass.
 
 - [ ] **Step 9: Commit**
 

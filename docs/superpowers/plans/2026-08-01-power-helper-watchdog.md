@@ -152,15 +152,19 @@ docs/release/power-helper.md
 - Create: `crates/jarvis-power-core/src/protocol.rs`
 - Create: `crates/jarvis-power-core/tests/protocol_vectors.rs`
 - Modify: `src-tauri/Cargo.toml`
+- Modify: `.github/workflows/ci.yml`
 
-- [ ] **Step 1: Write RED protocol tests**
+- [x] **Step 1: Write RED protocol tests**
 
 ```rust
 #[test]
 fn arbitrary_commands_and_unknown_fields_are_rejected() {
     let input = r#"{"protocolVersion":2,"requestId":"018f0000-0000-7000-8000-000000000001",
                     "method":"run","args":["/usr/bin/pmset","-a","disablesleep","1"]}"#;
-    assert!(serde_json::from_str::<RequestEnvelope>(input).is_err());
+    assert_eq!(
+        decode_request(input.as_bytes()),
+        Err(ProtocolError::MalformedFrame)
+    );
 }
 
 #[test]
@@ -170,13 +174,18 @@ fn recovery_is_not_a_client_triggered_protocol_method() {
             r#"{{"protocolVersion":2,"requestId":"018f0000-0000-7000-8000-000000000001",
                  "method":"{method}"}}"#
         );
-        assert!(serde_json::from_str::<RequestEnvelope>(&input).is_err());
+        assert_eq!(
+            decode_request(input.as_bytes()),
+            Err(ProtocolError::MalformedFrame)
+        );
     }
 }
 
 #[test]
 fn wire_contract_has_no_caller_identity_or_mutation_fields() {
-    let text = serde_json::to_string(&acquire_request("prod", "generation-a", 45_000)).unwrap();
+    let text = String::from_utf8(
+        encode_request(&acquire_request("prod", "generation-a", 45_000)).unwrap()
+    ).unwrap();
     for forbidden in ["command", "args", "path", "uid", "pid", "teamId", "baseline", "pmset"] {
         assert!(!text.contains(forbidden), "{forbidden} leaked into protocol");
     }
@@ -184,13 +193,13 @@ fn wire_contract_has_no_caller_identity_or_mutation_fields() {
 
 #[test]
 fn wrong_version_ttl_and_oversized_identifiers_fail_closed() {
-    assert_eq!(decode(request_with_version(1)), Err(ProtocolError::IncompatibleVersion));
+    assert_eq!(decode_request(request_with_version(1)), Err(ProtocolError::IncompatibleVersion));
     assert!(acquire_request("prod", "g", 120_001).validate().is_err());
     assert!(acquire_request(&"p".repeat(129), "g", 45_000).validate().is_err());
 }
 ```
 
-- [ ] **Step 2: Prove RED**
+- [x] **Step 2: Prove RED**
 
 ```bash
 cargo test --manifest-path crates/jarvis-power-core/Cargo.toml --test protocol_vectors
@@ -198,7 +207,7 @@ cargo test --manifest-path crates/jarvis-power-core/Cargo.toml --test protocol_v
 
 Expected: FAIL because the crate/types do not exist.
 
-- [ ] **Step 3: Implement only this method surface**
+- [x] **Step 3: Implement only this method surface**
 
 ```rust
 #[serde(tag = "method", rename_all = "camelCase", deny_unknown_fields)]
@@ -211,11 +220,14 @@ pub enum Request {
 ```
 
 `RequestEnvelope` has only `protocol_version`, UUIDv7-shaped `request_id`, and flattened `Request`.
+Neither envelope implements public `Deserialize`: untrusted bytes must enter through the bounded `decode_request` or
+`decode_response` API, which checks `MAX_FRAME_BYTES` before parsing. `Acquired` and `Renewed` return bounded
+`grantedTtlMs`; the helper's authoritative monotonic deadline never crosses the wire.
 `ResponseEnvelope` echoes request id and returns `Acquired`, `Renewed`, `Released`, `Status`, or a finite error code.
 Use `#[serde(deny_unknown_fields)]` everywhere. Lease ids are helper-generated 128-bit CSPRNG values. Recovery has no
 wire request/response variant.
 
-- [ ] **Step 4: Run and commit**
+- [x] **Step 4: Run and commit**
 
 ```bash
 cargo test --manifest-path crates/jarvis-power-core/Cargo.toml

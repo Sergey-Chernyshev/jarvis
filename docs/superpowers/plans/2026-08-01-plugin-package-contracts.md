@@ -472,139 +472,634 @@ public-secret guards.
 **Files:**
 
 - Create: `schemas/plugin-package-v1.schema.json`
+- Create: `schemas/plugin-package-signature-v1.schema.json`
+- Create: `crates/jarvis-plugin-protocol/schema/plugin-package-v1.schema.json`
+- Create: `crates/jarvis-plugin-protocol/schema/plugin-package-signature-v1.schema.json`
 - Create: `crates/jarvis-plugin-protocol/src/package.rs`
 - Create: `src-tauri/src/plugins/package/mod.rs`
 - Create: `src-tauri/src/plugins/package/pack.rs`
+- Create: `src-tauri/src/plugins/package/source.rs`
+- Create: `src-tauri/src/plugins/package/spool.rs`
 - Create: `src-tauri/src/plugins/package/archive.rs`
+- Create: `src-tauri/src/plugins/package/extract.rs`
 - Create: `src-tauri/src/plugins/package/hash.rs`
+- Create: `src-tauri/src/plugins/package/jcs.rs`
 - Create: `src-tauri/tests/fixtures/plugin-packages/pack-source/plugin.json`
 - Create: `src-tauri/tests/fixtures/plugin-packages/pack-source/ui/index.html`
 - Create: `src-tauri/tests/fixtures/plugin-packages/pack-source/schemas/message.schema.json`
+- Create: `src-tauri/tests/fixtures/plugin-packages/golden/darwin-arm64.jarvis-plugin`
+- Create: `src-tauri/tests/fixtures/plugin-packages/golden/darwin-arm64.sha256`
+- Create: `src-tauri/tests/fixtures/plugin-trust/README.md`
+- Create: `src-tauri/tests/fixtures/plugin-trust/package-test-signing-seed.hex`
+- Create: `src-tauri/tests/fixtures/plugin-trust/package-test-public-key.hex`
+- Create: `src-tauri/tests/plugin_package_dependency_msrv.rs`
 - Modify: `crates/jarvis-plugin-protocol/src/lib.rs`
+- Modify: `crates/jarvis-plugin-protocol/src/manifest.rs`
+- Modify: `crates/jarvis-plugin-protocol/Cargo.toml`
+- Modify: `crates/jarvis-plugin-sdk/Cargo.lock`
+- Modify: `crates/jarvis-plugin-test-host/Cargo.lock`
 - Modify: `src-tauri/src/plugins/mod.rs`
 - Modify: `src-tauri/Cargo.toml`
+- Modify: `src-tauri/Cargo.lock`
+- Modify: `scripts/check-plugin-boundaries.sh`
+- Modify: `scripts/check-plugin-boundaries.test.sh`
 
-- [ ] **Step 1: Add RED deterministic pack tests**
+This task owns the package wire format, byte-for-byte archive profile, bounded parser and quarantine extraction. It
+does **not** decide whether a signer is trusted. A4 owns trust, catalog and revocation checks and is the only production
+implementation of the verification callback defined below. A5 owns atomic activation of an already extracted,
+verified quarantine directory.
 
-In `src-tauri/src/plugins/package/pack.rs`, add tests against a `FixtureSigner` whose signature is
-`sha256(domain || canonical_package_json)`:
+- [ ] **Step 1: Pin the dependency and MSRV surface before writing format code**
+
+Use these exact direct dependencies and features:
+
+```toml
+# crates/jarvis-plugin-protocol/Cargo.toml
+unicode-normalization = { version = "=0.1.24", default-features = false, features = ["std"] }
+
+# src-tauri/Cargo.toml [dependencies]
+base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
+caseless = "=0.2.2"
+libc = { version = "=0.2.186", default-features = false, features = ["std"] }
+rustix = { version = "=1.1.4", default-features = false, features = ["fs", "std"] }
+serde_json_canonicalizer = "=0.3.2"
+sha2 = { version = "=0.10.9", default-features = false, features = ["std"] }
+tar = { version = "=0.4.46", default-features = false }
+tempfile = { version = "=3.27.0", default-features = false, features = ["getrandom"] }
+unicode-normalization = { version = "=0.1.24", default-features = false, features = ["std"] }
+
+# src-tauri/Cargo.toml [dev-dependencies]
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["fast", "std", "zeroize"] }
+```
+
+`tar` is permitted only for `tar::Header::new_gnu()` and low-level `Builder::append()` when producing a stream.
+Production code must not call `append_path`, `append_file`, `append_dir_all`, `Archive::entries`, `Entry::unpack` or
+`Archive::unpack`; those APIs infer metadata or interpret extensions outside this profile. `tempfile` owns the
+unlinked spool. `rustix` owns fd-relative filesystem calls. The only A3 `libc` use is a small macOS-only RAII wrapper
+around `fdopendir`/`readdir`, because `rustix` does not expose macOS directory iteration.
+
+Keep the protocol, SDK, test-host and host at their declared `rust-version = "1.77.2"`. `ed25519-dalek` 2.1.1 has
+MSRV 1.60 and is test-only in A3; A4 promotes the same exact version and feature set to a host production dependency.
+JCS, tar, filesystem and signature libraries must not enter the protocol, SDK or test-host normal dependency graphs.
+
+Because not every selected crate declares reliable MSRV metadata, add
+`src-tauri/tests/plugin_package_dependency_msrv.rs`. It must compile and call the exact A3 APIs used from base64,
+caseless, rustix/fs, serde_json_canonicalizer, sha2, tar, tempfile, unicode-normalization and the test-only
+ed25519-dalek signer; a type-only unused import is insufficient. Do not claim the host MSRV is preserved until this
+target and the integrated host have actually compiled with Rust 1.77.2. If either fails, choose an older compatible
+exact version and repeat the gate; do not silently raise the declared MSRV in A3.
+
+After adding the probe but before adding the Cargo dependencies, run:
+
+```bash
+cargo +1.77.2 test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  --test plugin_package_dependency_msrv
+```
+
+Expected: FAIL with unresolved A3 dependency/API imports. Then add the exact Cargo entries above, update each committed
+lockfile without changing unrelated versions, and run:
+
+```bash
+cargo +1.77.2 update --manifest-path crates/jarvis-plugin-protocol/Cargo.toml \
+  -p unicode-normalization --precise 0.1.24
+cargo +1.77.2 update --manifest-path crates/jarvis-plugin-sdk/Cargo.toml \
+  -p unicode-normalization --precise 0.1.24
+cargo +1.77.2 update --manifest-path crates/jarvis-plugin-test-host/Cargo.toml \
+  -p unicode-normalization --precise 0.1.24
+cargo +1.77.2 update --manifest-path src-tauri/Cargo.toml \
+  -p unicode-normalization --precise 0.1.24
+cargo +1.77.2 check --locked --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
+cargo +1.77.2 check --locked --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
+cargo +1.77.2 check --locked --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
+cargo +1.77.2 test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
+  --test plugin_package_dependency_msrv
+cargo +1.77.2 check --locked --manifest-path src-tauri/Cargo.toml --no-default-features
+cargo tree --manifest-path crates/jarvis-plugin-protocol/Cargo.toml -e normal
+cargo tree --locked --manifest-path src-tauri/Cargo.toml \
+  -i unicode-normalization@0.1.24
+! cargo tree --locked --manifest-path src-tauri/Cargo.toml \
+  | rg 'unicode-normalization v0\\.1\\.25'
+```
+
+Expected after the edit: every command exits `0`; the public protocol tree contains `unicode-normalization 0.1.24` but none of
+`tar`, `rustix`, `libc`, `tempfile`, `sha2`, `base64`, `caseless`, `serde_json_canonicalizer` or `ed25519-dalek`.
+
+- [ ] **Step 2: Add RED wire-schema, JCS and signature tests**
+
+Define the following strict public DTOs in `crates/jarvis-plugin-protocol/src/package.rs`. All structs use
+`#[serde(rename_all = "camelCase", deny_unknown_fields)]`; all enum values below are the exact JSON strings:
 
 ```rust
-#[test]
-fn identical_input_produces_identical_archive_and_digest() {
-    let source = fixture("pack-source");
-    let first = pack_to_vec(&source, Target::darwin_arm64(), &FixtureSigner).unwrap();
-    let second = pack_to_vec(&source, Target::darwin_arm64(), &FixtureSigner).unwrap();
-    assert_eq!(first.bytes, second.bytes);
-    assert_eq!(first.archive_digest, second.archive_digest);
+pub const PACKAGE_SCHEMA_VERSION: u32 = 1;
+
+pub struct PackageMetadataV1 {
+    pub schema_version: u32,
+    pub plugin_id: PluginId,
+    pub publisher: PublisherId,
+    pub version: Version,
+    pub manifest_digest: Digest,
+    pub target: PackageTarget,
+    pub minimum_macos: MacOsVersion,
+    pub jarvis_range: VersionRange,
+    pub plugin_api: u32,
+    pub state: StateDeclaration,
+    pub files: Vec<PackageFile>,
+    pub payload_root: Digest,
 }
 
-#[test]
-fn package_manifest_covers_every_payload_entry() {
-    let packed = pack_to_vec(&fixture("pack-source"), Target::darwin_arm64(), &FixtureSigner).unwrap();
-    let inspected = inspect_bytes(&packed.bytes, ArchiveLimits::test()).unwrap();
-    assert_eq!(
-        inspected.metadata.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
-        ["plugin.json", "schemas/message.schema.json", "ui/index.html"]
-    );
+pub struct PackageFile {
+    pub path: PackagePath,
+    pub kind: PackageFileKind, // only "regular"
+    pub mode: PackageFileMode, // only "0444" or "0555"
+    pub size: u64,
+    pub digest: Digest,
+}
+
+pub enum PackageTarget { DarwinArm64, DarwinAmd64 } // "darwin-arm64", "darwin-amd64"
+pub enum PackageFileKind { Regular }                // "regular"
+pub enum PackageFileMode { ReadOnly, Executable }   // "0444", "0555"
+
+pub struct PackageSignatureV1 {
+    pub algorithm: SignatureAlgorithm, // only "ed25519"
+    pub key_id: String,
+    pub value: String,
 }
 ```
 
-- [ ] **Step 2: Run deterministic tests and verify RED**
+`MacOsVersion` accepts and emits exactly three decimal numeric components (`major.minor.patch`), with no leading zero
+except the component `0`, no sign, whitespace, prerelease or build suffix. `PackagePath` is relative NFC UTF-8, at most
+1,024 UTF-8 bytes total and 255 bytes per non-empty `/`-separated component. It rejects `.`, `..`, a leading or trailing
+slash, repeated slash, backslash, NUL, C0/C1 controls and `%`, `?`, `#`, `:`. `PackageSignatureV1.keyId` is 1–128 ASCII
+bytes matching `[A-Za-z0-9._:-]+`; `value` is canonical RFC 4648 padded standard base64 and decodes to exactly 64 bytes.
+
+Create closed Draft 2020-12 metadata and detached-signature schemas in both schema locations. Every object has
+`additionalProperties: false`, every string has explicit length/pattern constraints, every integer has a minimum and
+maximum, and local `$ref` values stay inside its file. Each root schema is byte-identical to its protocol-crate copy.
+The host validates `package.json` against the metadata schema and `SIGNATURE` against the detached-signature schema
+before typed deserialization. Add protocol tests named:
+
+```text
+package_schema_copies_are_byte_identical
+package_signature_schema_copies_are_byte_identical
+package_schema_rejects_unknown_fields_and_wrong_enum_spellings
+package_path_accepts_exact_1024_bytes_and_rejects_1025
+package_path_accepts_exact_255_byte_component_and_rejects_256
+macos_version_requires_canonical_three_component_form
+signature_requires_canonical_padded_base64_of_64_bytes
+package_metadata_round_trips_without_wire_field_drift
+```
+
+In `src-tauri/src/plugins/package/jcs.rs`, add RED golden tests for RFC 8785 number formatting, JSON string escaping and
+UTF-16 property-name ordering, plus rejection tests for duplicate object keys, a BOM, trailing newline/whitespace and
+non-canonical property/number encodings. A valid raw `package.json` or `SIGNATURE` must equal the exact bytes produced
+by `serde_json_canonicalizer 0.3.2` after bounded parsing; syntactically equivalent non-JCS bytes are invalid.
+
+Refactor the existing bounded duplicate-key-aware manifest JSON reader into
+`parse_bounded_json_with_limits(reader, JsonLimits)` in the protocol crate and preserve the old manifest wrapper and
+its tests. Package limits are specified in Step 7. The canonicalizer is invoked only after this parser succeeds.
+
+Run:
+
+```bash
+cargo test --manifest-path crates/jarvis-plugin-protocol/Cargo.toml package
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::jcs::tests
+```
+
+Expected: FAIL first because the package module, schemas and JCS adapter do not exist.
+
+- [ ] **Step 3: Implement the exact metadata, equality and hash contract**
+
+The source `plugin.json` is parsed with Manifest v2 limits, `${target}` is resolved to the selected
+`darwin-arm64`/`darwin-amd64` token, the resolved manifest is validated, then the concrete packaged `plugin.json` is
+written as exact JCS bytes. Packing options must explicitly provide `minimum_macos`; it is not inferred from the host.
+
+`PackageMetadataV1` must equal its packaged content:
+
+- `pluginId`, `publisher`, `version`, `jarvisRange`, `pluginApi` and the entire `state` object equal the concrete
+  packaged Manifest v2 fields;
+- `target` is the target used for `${target}` substitution;
+- `manifestDigest` is SHA-256 of the exact packaged `plugin.json` bytes;
+- `files[0]` is `plugin.json`; the remaining records are every other source payload file in NFC UTF-8 byte order;
+- only package-generated `package.json` and `SIGNATURE` are excluded from `files`;
+- `0555` appears exactly on verified-native `runtime.bridgeEntry` and, when present, `runtime.service.entry`; every
+  other payload file is `0444`.
+
+Reject a missing declared native entry, an executable file not declared by the manifest, any source entry named
+`package.json` or any case/canonical-equivalent of `SIGNATURE`, and any metadata/manifest mismatch. Do not inherit
+source mode, owner, timestamp or extended attributes.
+
+Compute `payloadRoot` over the already sorted `files` array:
+
+```text
+leaf   = SHA256("jarvis-plugin-file-v1\0" || JCS(PackageFile))
+parent = SHA256("jarvis-plugin-merkle-v1\0" || left_32_bytes || right_32_bytes)
+```
+
+Duplicate the final node at each odd-width level. There is no empty-tree value because `plugin.json` is mandatory.
+`Digest` always serializes as lowercase `sha256:` followed by exactly 64 lowercase hex digits.
+
+The exact detached-signature message is:
+
+```text
+ASCII bytes "jarvis-plugin-package-v1" || one NUL byte || exact canonical package.json bytes
+```
+
+`SIGNATURE` is the exact JCS serialization of `PackageSignatureV1`, with no BOM, whitespace or newline. Replace the
+old hash-shaped fake signer with an Ed25519 fixture signer built from
+`package-test-signing-seed.hex`; commit only this explicitly test-only seed and its matching public key under
+`src-tauri/tests/fixtures/plugin-trust`. Its README must say the seed is public deterministic test material, is not a
+credential and is forbidden for release catalogs. Add tests for a fixed expected signature value, one-bit
+message/signature/key changes, field equality, file ordering, executable-mode selection, Merkle roots for
+one/two/three/five leaves and schema/runtime DTO equality.
 
 Run:
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package::pack::tests::identical_input_produces_identical_archive_and_digest
+  plugins::package::hash::tests
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::pack::tests::metadata_equals_concrete_manifest
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::pack::tests::fixed_ed25519_signature_matches_golden
 ```
 
-Expected: FAIL because the package module does not exist.
+Expected after implementation: all commands exit `0`; no production private key or fixture signer is compiled outside
+`#[cfg(test)]`.
 
-- [ ] **Step 3: Define canonical package metadata**
+- [ ] **Step 4: Add RED source-race tests, then build an fd-only immutable spool**
 
-`package.rs` defines `PackageMetadataV1`, `PackageFile`, `PackageTarget`, state schema and migration graph. File records
-contain normalized UTF-8 path, regular-file kind, mode (`0444` or `0555`), size and `sha256:<hex>`. The file list excludes
-only `package.json` and detached `SIGNATURE`.
+`source.rs` and `spool.rs` must never use a pre-validated pathname later. Open the source root once as an `OwnedFd`
+with `RDONLY|DIRECTORY|NOFOLLOW|CLOEXEC` and retain its `fstat` identity. Enumerate through an isolated safe RAII
+wrapper around `fdopendir`/`readdir` operating on a duplicated directory fd. Only directories and regular files are
+allowed. Retain at most one fd per current recursion-depth component; the maximum depth is 64.
 
-Canonical bytes are JCS with domain:
+For each candidate, record normalized path plus device, inode, type, size, mtime and ctime from `fstatat` without
+following links; regular files must also have link count one. Compare full second and nanosecond timestamp fields, not
+rounded display values. Sort paths, then reopen every component from the held root fd with `openat` and
+`NOFOLLOW|CLOEXEC` (`DIRECTORY` on parent components), and require the reopened `fstat` identity/type to match.
+Copy each regular file exactly once into one `0600`, link-count-zero aggregate `tempfile::tempfile()` spool, use checked `u64`
+offsets, hash while copying, and compare file metadata before and after the copy. Any replacement or mutation returns
+stable code `source_raced`. Tar construction reads only `(offset, length)` spans from this spool and never reopens the
+source. Manifest parsing and `${target}` resolution consume the spooled `plugin.json` span, never the source path;
+the bounded concrete JCS manifest may then be appended to the spool as generated content. Before returning archive
+content, write the archive into a second owner-only unlinked tempfile, inspect that completed file, and compare its
+metadata and payload digests to the packer's expected records. Only then seek that same archive fd to zero and stream
+it to the caller's `Write`; a short/erroring destination returns failure. The public API never exposes the unchecked
+temporary file.
+
+Add deterministic barrier-driven tests:
 
 ```text
-jarvis-plugin-package-v1\0<canonical package.json bytes>
+source_file_replaced_after_enumeration_never_packages_outside_bytes
+source_file_changed_to_symlink_before_open_is_source_raced
+source_parent_directory_swap_is_source_raced
+source_file_mutated_during_copy_is_source_raced
+source_inode_reused_with_different_metadata_is_source_raced
+tar_writer_reads_only_spool_after_source_snapshot
 ```
 
-The final archive SHA-256 is separately bound by the catalog release record.
-
-- [ ] **Step 4: Implement deterministic uncompressed tar packing**
-
-`pack.rs`:
-
-1. validates the source Manifest v2 and resolves the concrete target;
-2. walks only regular files below the canonical source root without following links;
-3. rejects reserved archive names supplied by source;
-4. sorts normalized NFC UTF-8 paths bytewise;
-5. assigns mode `0555` only to declared native entries and `0444` to all other files;
-6. sets uid/gid/mtime to zero and owner/group names to empty;
-7. computes `package.json`, obtains detached signature from `PackageSigner`, then writes entries in the fixed order
-   `plugin.json`, payload paths, `package.json`, `SIGNATURE`;
-8. emits an uncompressed tar stream, so the final bytes have no compressor-version or dictionary variability.
-
-The source `plugin.json` becomes a concrete packaged `plugin.json`; source files are never modified.
-
-- [ ] **Step 5: Add RED malicious archive tests**
-
-In `archive.rs`, construct raw fixture archives and assert these stable errors:
-
-```rust
-for (fixture, code) in [
-    ("absolute-path", "archive_path"),
-    ("dot-dot", "archive_path"),
-    ("symlink", "archive_entry_type"),
-    ("hardlink", "archive_entry_type"),
-    ("fifo", "archive_entry_type"),
-    ("duplicate-normalized-name", "archive_duplicate"),
-    ("unicode-case-collision", "archive_case_collision"),
-    ("oversized-entry", "archive_quota"),
-    ("oversized-total", "archive_quota"),
-] {
-    assert_eq!(inspect_fixture(fixture).unwrap_err().code(), code);
-}
-```
-
-- [ ] **Step 6: Implement bounded inspection and extraction**
-
-`ArchiveLimits::production()` fixes:
-
-```text
-archive bytes: 2 GiB
-unpacked total: 2 GiB
-single file: 512 MiB
-entry count: 20,000
-path bytes: 1,024
-```
-
-Inspection streams tar without materializing unbounded input. It rejects absolute, `..`, `.`, empty, NUL,
-backslash and non-NFC paths; links, devices, sockets and sparse entries; duplicate normalized paths and
-case-insensitive collisions. Extraction uses an already-created owner-only quarantine directory, `openat` with
-`O_NOFOLLOW|O_CREAT|O_EXCL`, verifies every written size/digest, fsyncs files and directories, and never delegates path
-joining to the archive library.
-
-- [ ] **Step 7: Run the package security gate**
+For every race, the only allowed outcomes are `source_raced` or a valid self-consistent package containing bytes read
+from the original in-root fd. It must never contain attacker-controlled out-of-root bytes. Do not use sleeps; expose
+test-only barriers at the enumerate/open/copy boundaries.
 
 Run:
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features plugins::package
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::source::tests -- --test-threads=1
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::spool::tests -- --test-threads=1
 ```
 
-Expected: deterministic and malicious archive tests pass; extraction writes nothing outside the test quarantine.
-
-- [ ] **Step 8: Commit**
+Expected: RED until fd-relative snapshotting exists, then every race test is deterministic and passes 100 consecutive
+iterations:
 
 ```bash
-git add schemas/plugin-package-v1.schema.json crates/jarvis-plugin-protocol \
+for i in $(seq 1 100); do
+  cargo test --quiet --manifest-path src-tauri/Cargo.toml --no-default-features \
+    plugins::package::source::tests::source_parent_directory_swap_is_source_raced -- --exact
+done
+```
+
+- [ ] **Step 5: Specify and golden-test the only accepted GNU tar byte profile**
+
+Packing is uncompressed. Use GNU headers only: bytes 257–262 are exactly `b"ustar "` and bytes 263–264 exactly
+`b" \0"`. A test first compares those bytes with `tar 0.4.46`'s `Header::new_gnu()` and then asserts the literal bytes,
+so a future tar upgrade cannot silently redefine the profile.
+
+Numeric fields never use base-256 and have these exact encodings:
+
+```text
+mode, uid, gid, devmajor, devminor: 7 leading-zero octal digits + NUL (8 bytes)
+size and mtime:                       11 leading-zero octal digits + NUL (12 bytes)
+checksum:                            6 leading-zero octal digits + NUL + ASCII space (8 bytes)
+```
+
+Thus zero is exactly `b"0000000\0"` in an 8-byte numeric field and `b"00000000000\0"` in a 12-byte field; modes are
+exactly `b"0000444\0"`, `b"0000555\0"` or, for the long-name extension, `b"0000644\0"`. Reject values above
+`0o7777777` for an 8-byte field, above `0o77777777777` for a 12-byte field and above `0o777777` for checksum before
+encoding. The checksum sum is calculated with eight ASCII spaces in its field. Do not use `Header::set_cksum`, whose
+0.4.46 spelling is not this six-digit-plus-NUL-plus-space profile; write the checked profile checksum into
+`Header::as_mut_bytes()` after every other byte is final.
+
+Every logical regular file has typeflag ASCII `b'0'`, never NUL, uid/gid/mtime/devmajor/devminor `0`, all-NUL
+owner/group/link fields, and mode exactly its metadata mode. All GNU atime, ctime, offset, longnames, sparse,
+isextended, realsize, unused and padding fields are all-NUL bytes. File bodies are followed by zero padding to the next
+512-byte boundary.
+
+For a logical path of at most 100 bytes, put it directly in the regular header name. For a path of 101 through 1,024
+bytes, manually emit exactly one GNU long-name extension immediately before its regular header:
+
+```text
+extension header name: "././@LongLink"
+extension typeflag:    "L"
+extension mode:        0644
+extension uid/gid/mtime/devmajor/devminor: 0
+extension size:        logical path byte length + 1
+extension body:        exact UTF-8 path bytes + exactly one NUL + zero block padding
+following regular header name: "././@LongFile"
+```
+
+The following regular header contains the real payload metadata and size. Never set a prefix. Never emit PAX,
+USTAR, GNU sparse, global extensions, link entries or directory entries. Logical order is exact:
+
+```text
+plugin.json
+remaining payload paths in NFC UTF-8 byte order
+package.json
+SIGNATURE
+```
+
+Finish with exactly two 512-byte zero blocks and immediate EOF. No additional zero record or concatenated archive is
+allowed.
+
+Add raw 512-byte header assertions for the literal magic/version, all three exact zero encodings, modes `0444`,
+`0555`, `0644`, checksum spelling and ASCII `0`/`L` typeflags, plus paths of length 100, 101 and 1,024. The 1,024 case
+must be a valid multi-component NFC Unicode path whose components remain at most 255 bytes. Add negative 1,025-byte path and
+256-byte-component cases and direct encoder overflow tests for every numeric field width. Commit
+`golden/darwin-arm64.jarvis-plugin` and its lowercase archive SHA-256, generated only
+by an ignored `regenerate_package_golden` test. The normal test compares every byte and digest to the committed files.
+
+Run:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::pack::tests::gnu_header_profiles_are_byte_exact
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::pack::tests::identical_input_matches_committed_archive_golden
+git diff --exit-code -- src-tauri/tests/fixtures/plugin-packages/golden
+```
+
+Expected: the tests exit `0` and a normal test run never rewrites the goldens.
+
+- [ ] **Step 6: Add RED raw-parser failures, then implement a bounded 512-byte state machine**
+
+`archive.rs` parses raw `Read` input itself in fixed buffers; it must not use tar's logical archive iterator. The state
+machine has only `ExpectHeader`, `ExpectLongNameBody`, `ExpectLongNameTarget`, `ReadRegularBody`,
+`ExpectSecondZeroBlock` and `ExpectEof`. A long-name record is allowed at most once, only in the canonical form from
+Step 5, and must be immediately followed by the canonical placeholder regular header for a logical name longer than
+100 bytes. It also enforces the Step 5 logical order: exactly one `plugin.json` first, strictly increasing remaining
+payload names, exact canonical `package.json` penultimate and exact canonical `SIGNATURE` final. Generated metadata
+names are short and therefore may not use a long-name record.
+
+Before decoding, reject a numeric field whose high bit is set, non-octal bytes, non-canonical octal padding, a bad
+checksum, non-zero body padding and any header byte that differs from this profile. Explicitly reject typeflags
+`x`, `g`, `K`, `S`, links, directories and all special types; that includes PAX `size`, `path` and `GNU.sparse.*`
+overrides, old GNU sparse continuation chains, repeated/orphan long-name records and use of a long-name record for a
+path of at most 100 bytes. Reject truncation at every header/body/padding/terminator boundary, one zero block, non-zero
+bytes or another archive after the two terminator blocks, and read errors after the apparent terminator.
+
+Assert stable public codes rather than matching prose: malformed/non-canonical header, number or checksum is
+`archive_header`; forbidden type/extension is `archive_entry_type`; invalid path is `archive_path`; duplicate exact
+name is `archive_duplicate`; caseless collision is `archive_case_collision`; wrong mandatory order is
+`archive_order`; a short stream is `archive_truncated`; post-terminator data is `archive_trailing`; any table limit or
+checked-arithmetic overflow is `archive_quota`; package/signature schema, JCS or cross-field failure is
+`package_metadata`.
+
+Count raw records separately from logical entries:
+
+```text
+maximum payload files:          20,000
+maximum logical entries:        20,002 (payload + package.json + SIGNATURE)
+maximum raw records:            40,002 (one optional long-name record per logical entry)
+maximum GNU long-name body:      1,025 bytes (1,024-byte path + NUL)
+```
+
+All counters, sizes, offsets, block rounding and totals use checked `u64` arithmetic. Add raw byte fixtures generated
+inside tests, not through `tar`, for:
+
+```text
+archive_rejects_base256_size_before_decode
+archive_rejects_noncanonical_octal_and_checksum
+archive_rejects_pax_global_local_and_sparse_extensions
+archive_rejects_repeated_orphan_and_short_gnu_longname
+archive_rejects_truncated_header_body_padding_and_terminator
+archive_rejects_nonzero_padding_and_trailing_concatenated_archive
+archive_rejects_links_directories_devices_fifo_socket_and_sparse
+archive_rejects_absolute_dot_empty_backslash_nul_and_non_nfc_paths
+archive_rejects_duplicate_normalized_names
+archive_accepts_exact_raw_and_logical_record_limits
+archive_rejects_raw_and_logical_record_limits_plus_one
+```
+
+Run:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::archive::tests
+```
+
+Expected: RED before the manual state machine, then every malformed stream returns a stable `archive_*` code without
+panic, allocation proportional to declared entry size, or bytes written to disk.
+
+- [ ] **Step 7: Pin Unicode collision semantics and enforce every streaming quota**
+
+The collision key for a complete logical path is exactly:
+
+```text
+Unicode 16.0 NFD -> Unicode 16.0 full default non-Turkic case fold -> Unicode 16.0 NFD
+```
+
+Use `unicode-normalization 0.1.24` and `caseless 0.2.2`; add source-code comments and tests asserting that both pinned
+tables are Unicode 16.0 with
+`assert_eq!(unicode_normalization::UNICODE_VERSION, (16, 0, 0))` and
+`assert_eq!(caseless::UNICODE_VERSION, (16, 0, 0))`. Do not use locale-sensitive casing or macOS filesystem
+comparison. Apply the key to all
+payload names and the generated/reserved names `package.json` and `SIGNATURE`. Test `Straße`/`STRASSE`, all Greek
+sigma forms, `I`/`i` collision, `İ`/`i` non-collision, Kelvin-sign input rejection because its NFC form is `K`,
+`K`/`k` collision, decomposed non-NFC input rejection and reserved-name case/canonical collisions.
+
+Collision checking covers a namespace, not only final file strings: insert every logical file and every proper implicit
+directory prefix with its file/directory kind, plus the generated metadata files. Reject two spellings with one key
+and reject any file/directory conflict, including `a` versus `A/b` and `signature/payload` versus generated
+`SIGNATURE`. Extraction must consume this already validated namespace plan rather than recomputing looser rules.
+
+`ArchiveLimits::production()` is the following immutable table:
+
+```text
+physical archive bytes:         2 GiB
+unpacked payload bytes:         2 GiB
+single payload file:            512 MiB
+payload files:                  20,000
+logical entries:                20,002
+raw records:                    40,002
+path bytes:                     1,024
+component bytes:                255
+path depth:                     64
+namespace trie nodes:           100,000 (files plus unique implicit directories)
+caseless collision-key bytes:   4,096 per namespace path/prefix
+GNU long-name body:             1,025 bytes
+package.json bytes:             16 MiB
+SIGNATURE bytes:                4 KiB
+plugin.json bytes:              256 KiB
+package JSON nesting:           64
+package JSON nodes:             250,000
+package JSON string bytes:      64 KiB
+```
+
+The physical count includes headers, extension bodies, padding, both zero blocks and bytes observed while proving
+EOF. Unpacked total counts only logical payload file bodies, including `plugin.json`, and excludes generated metadata
+entries. Packing stages through the Step 4 archive tempfile and then copies to a caller-supplied `Write`; only
+`#[cfg(test)] pack_to_vec` may materialize a complete archive.
+
+Inspection pass 1 streams and hashes every physical and payload byte in fixed buffers. It may retain only bounded
+`package.json`, bounded `SIGNATURE`, the bounded packaged `plugin.json`, and at most 20,000 compact observation
+records containing path, mode, size, digest and raw offsets plus the bounded 100,000-node collision trie; it may not
+retain payload bodies. Add exact-limit and
+limit-plus-one tests for every table row, short/chunked/error-injecting readers, checked-overflow synthetic headers and
+an ignored RSS probe which inspects a sparse synthetic near-2-GiB stream while staying below 128 MiB RSS. The normal
+suite must prove the same property through an allocation-counting reader without allocating a 2-GiB `Vec`.
+
+Run:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::archive::tests::unicode_collision_vectors
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::archive::tests::all_limits_accept_exact_and_reject_plus_one
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::archive::tests::inspection_memory_is_bounded
+```
+
+Expected: all commands exit `0`; limit failures are reported before any output file is created.
+
+- [ ] **Step 8: Add the opaque A4 verification handoff and fd-only two-pass extraction**
+
+Pass 1 takes an already opened archive `File`, runs the strict parser, computes the physical archive digest and all
+payload digests, parses and cross-checks package metadata, and records the archive fd identity. Cross-checking requires
+schema version 1; exact observed file order/path/mode/size/digest equality with `files`; recomputed manifest digest and
+payload Merkle root; and exact Manifest v2 identity, compatibility, state and native-entry mode equality from Step 3.
+It then invokes:
+
+```rust
+pub(crate) trait PackageTrustVerifier {
+    fn verify(
+        &self,
+        observation: &UntrustedPackageObservation<'_>,
+    ) -> Result<(), PackageTrustError>;
+}
+```
+
+`UntrustedPackageObservation` contains exact canonical `package.json` and `SIGNATURE` bytes, physical archive digest
+and parsed metadata but exposes no method that can create trusted state. Only the package module can construct
+`VerifiedPackageEvidence`; its fields are private and it owns the same open `File`, the pass-1 observation and fd
+identity. Production has no permissive verifier: A4 supplies `CatalogPackageVerifier`; only `#[cfg(test)]` may supply a
+fixture verifier. Extend `check:plugin-boundaries` with a source guard that permits production
+`impl PackageTrustVerifier` only in `src-tauri/src/plugins/trust/package.rs` and permits fixture implementations only
+inside `#[cfg(test)]` modules.
+
+A4 must verify the catalog/root/publisher lineage, rotation, freshness and revocation first, then require exact
+equality between the selected `CatalogRelease` and this observation for plugin ID, publisher, version, target,
+`minimumMacos`, Jarvis range, plugin API, archive digest, package-signature algorithm/key ID/value and publisher-key
+lineage. It verifies Ed25519 over the exact Step 3 message before returning success. An A3 caller cannot extract from
+an observation, boolean, path or parsed DTO; extraction consumes the opaque evidence.
+
+Pass 2 seeks the same held fd to byte zero and reruns the strict raw parser. It recomputes the physical digest and
+requires the exact same canonical `package.json`, `SIGNATURE`, entry plan and fd identity before exposing output.
+A pathname replacement is irrelevant because it is never reopened; mutation of the held inode causes
+`archive_changed_after_verification`. No destination entry is created until all A4 checks have passed.
+
+Create an owner-only new quarantine root below a caller-supplied held parent `OwnedFd`, using `mkdirat` then
+`openat(DIRECTORY|NOFOLLOW|CLOEXEC)` and validating owner, type and identity. Archive directory entries do not exist.
+Create implicit directories in sorted order through held fd stacks with mode `0700`; `EEXIST` is an error. Create each
+file with `openat(WRONLY|CREATE|EXCL|NOFOLLOW|CLOEXEC, 0600)`, stream exact bytes while hashing, require regular type
+and link count one, then `fchmod` to `0444` or `0555`. `fsync` and macOS `fcntl(F_FULLFSYNC)` every file, then fsync
+directories bottom-up. A5 owns final rename/activation and its power-loss semantics.
+
+On any failure, close files and remove exactly the recorded created files/directories in reverse order using
+`unlinkat` under retained parent fds; remove the quarantine root by its retained parent fd/name only after matching its
+recorded identity. A cleanup failure returns a quarantined/manual-cleanup result and never returns activation
+evidence. Never recurse by pathname during cleanup.
+
+Add RED tests:
+
+```text
+bad_signature_never_creates_quarantine_output
+catalog_digest_mismatch_never_creates_quarantine_output
+extract_requires_opaque_verified_package_evidence
+archive_path_swap_after_verification_reads_same_fd
+same_inode_mutation_after_verification_is_rejected
+second_pass_requires_identical_package_signature_and_entry_plan
+symlink_parent_and_final_component_are_rejected
+preexisting_file_hardlink_and_special_file_are_rejected
+short_write_digest_mismatch_and_fsync_failure_cleanup_exactly
+cleanup_race_cannot_unlink_outside_quarantine
+successful_extract_uses_declared_modes_and_link_count_one
+```
+
+Use compile-fail doctests or `trybuild` fixtures for the opaque-evidence construction test. Use injected fd/fsync
+adapters and barriers, never sleeps. Run:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::extract::tests
+cargo test --doc --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package
+```
+
+Expected: RED until the verifier/evidence split and same-fd two-pass path exist, then all commands exit `0`;
+verification failure leaves no quarantine directory and no production caller can forge evidence.
+
+- [ ] **Step 9: Run the complete package security and reproducibility gate**
+
+Run:
+
+```bash
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo +1.77.2 test --locked --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
+cargo +1.77.2 check --locked --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
+cargo +1.77.2 check --locked --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
+cargo +1.77.2 clippy --locked --manifest-path crates/jarvis-plugin-protocol/Cargo.toml \
+  --all-targets -- -D warnings
+cargo +1.77.2 test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
+  --test plugin_package_dependency_msrv
+cargo +1.77.2 test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package
+cargo +1.77.2 clippy --locked --manifest-path src-tauri/Cargo.toml \
+  --no-default-features --all-targets -- -D warnings
+npm run check:plugin-boundaries
+npm run check:public
+```
+
+Expected: all commands exit `0`. The package test log includes the committed archive digest, exact/plus-one quota
+vectors, raw-parser failures, 100-iteration source races and same-fd mutation tests. `check:public` scans the documented
+test seed as public fixture material and finds no credential or production private key.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add schemas/plugin-package-v1.schema.json schemas/plugin-package-signature-v1.schema.json \
+  crates/jarvis-plugin-protocol \
+  crates/jarvis-plugin-sdk/Cargo.lock crates/jarvis-plugin-test-host/Cargo.lock \
   src-tauri/src/plugins/package src-tauri/src/plugins/mod.rs src-tauri/Cargo.toml \
-  src-tauri/tests/fixtures/plugin-packages
+  src-tauri/Cargo.lock src-tauri/tests/fixtures/plugin-packages \
+  src-tauri/tests/fixtures/plugin-trust/README.md \
+  src-tauri/tests/fixtures/plugin-trust/package-test-signing-seed.hex \
+  src-tauri/tests/fixtures/plugin-trust/package-test-public-key.hex \
+  src-tauri/tests/plugin_package_dependency_msrv.rs scripts/check-plugin-boundaries.sh \
+  scripts/check-plugin-boundaries.test.sh
+git diff --cached --check
 git commit -m "feat(plugins): add deterministic package format"
 ```
 
@@ -615,12 +1110,14 @@ git commit -m "feat(plugins): add deterministic package format"
 **Files:**
 
 - Create: `schemas/plugin-catalog-v1.schema.json`
+- Create: `crates/jarvis-plugin-protocol/schema/plugin-catalog-v1.schema.json`
 - Create: `crates/jarvis-plugin-protocol/src/catalog.rs`
 - Create: `src-tauri/src/plugins/trust/mod.rs`
 - Create: `src-tauri/src/plugins/trust/signature.rs`
 - Create: `src-tauri/src/plugins/trust/catalog.rs`
+- Create: `src-tauri/src/plugins/trust/package.rs`
 - Create: `src-tauri/resources/plugin-trust-roots.json`
-- Create: `src-tauri/tests/fixtures/plugin-trust/README.md`
+- Modify: `src-tauri/tests/fixtures/plugin-trust/README.md`
 - Create: `src-tauri/tests/fixtures/plugin-trust/root-public.json`
 - Create: `src-tauri/tests/fixtures/plugin-trust/catalog-seq-1.json`
 - Create: `src-tauri/tests/fixtures/plugin-trust/catalog-seq-2-rotated.json`
@@ -628,6 +1125,7 @@ git commit -m "feat(plugins): add deterministic package format"
 - Modify: `crates/jarvis-plugin-protocol/src/lib.rs`
 - Modify: `src-tauri/src/plugins/mod.rs`
 - Modify: `src-tauri/Cargo.toml`
+- Modify: `src-tauri/Cargo.lock`
 - Modify: `src-tauri/tauri.conf.json`
 
 - [ ] **Step 1: Add RED catalog trust tests**
@@ -658,7 +1156,12 @@ fn rejects_expired_replayed_conflicting_and_revoked_catalogs() {
 ```
 
 Add tests for unknown root, insufficient threshold, old-only key rotation, new-only key rotation, valid old+new threshold
-rotation, publisher key not bound to plugin ID, release target mismatch and package signature mismatch.
+rotation, publisher key not bound to plugin ID, and every release/package equality field. The latter is a table test
+which changes exactly one of plugin ID, publisher, version, target, minimum macOS, Jarvis range, plugin API, archive
+digest, signature algorithm, signature key ID, signature value or publisher lineage and expects
+`package_catalog_mismatch`. Add separate RED tests proving that a correct catalog with a bad Ed25519 package signature
+returns `package_signature_invalid`, a revoked package returns `package_revoked`, and neither case can produce
+`VerifiedPackageEvidence` or create a quarantine directory.
 
 - [ ] **Step 2: Run trust tests and verify RED**
 
@@ -682,30 +1185,45 @@ pub struct SignedCatalog {
     pub expires_at: String,
     pub previous_digest: Option<Digest>,
     pub payload: CatalogPayload,
-    pub signatures: Vec<Signature>,
+    pub signatures: Vec<CatalogSignatureV1>,
+}
+
+pub struct CatalogSignatureV1 {
+    pub algorithm: SignatureAlgorithm, // only "ed25519"
+    pub key_id: String,
+    pub value: String,
 }
 
 pub struct CatalogRelease {
     pub plugin_id: PluginId,
+    pub publisher: PublisherId,
     pub version: Version,
     pub publisher_key_id: String,
-    pub jarvis_range: VersionReq,
+    pub publisher_lineage: String,
+    pub jarvis_range: VersionRange,
     pub plugin_api: u32,
     pub target: PackageTarget,
+    pub minimum_macos: MacOsVersion,
     pub url: String,
     pub archive_digest: Digest,
-    pub package_signature: Signature,
+    pub package_signature: PackageSignatureV1,
     pub revoked: bool,
 }
 ```
 
 The payload also carries publisher key lineages, root rotation proposal, revoked package digests and revoked publisher
-keys. Signatures cover:
+keys. `PackageSignatureV1` is the exact A3 DTO; the catalog embeds the same algorithm, key ID and canonical base64
+value, not a second lossy representation. All catalog structs are camelCase and deny unknown fields.
+`CatalogSignatureV1` uses the same algorithm, key-ID and canonical 64-byte Ed25519 base64 constraints as
+`PackageSignatureV1`, but signs the catalog domain. Signatures cover:
 
 ```text
-jarvis-plugin-catalog-v1\0<JCS bytes without signatures>
+ASCII "jarvis-plugin-catalog-v1" || NUL || JCS of the catalog object with the signatures field omitted
 jarvis-plugin-package-v1\0<JCS package.json bytes>
 ```
+
+The root catalog schema and protocol-crate copy are byte-identical, closed Draft 2020-12 schemas. Add
+`catalog_schema_copies_are_byte_identical` and a schema/DTO round-trip fixture containing every release equality field.
 
 - [ ] **Step 4: Implement fail-closed verification**
 
@@ -716,6 +1234,39 @@ idempotent; lower sequence or same sequence/different digest is rejected.
 
 `trust/signature.rs` accepts only Ed25519, validates canonical base64 and key length, uses constant-time library
 verification and returns stable public errors without key material.
+
+Move A3's exact
+`ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["fast", "std", "zeroize"] }`
+from host dev-dependencies to host dependencies; keep the protocol, SDK and test-host free of crypto and keep the
+Rust 1.77.2 gates.
+
+`trust/package.rs` defines `CatalogPackageVerifier`, the only production implementation of A3's
+`PackageTrustVerifier`. It receives a previously selected verified catalog release and an A3
+`UntrustedPackageObservation`. It first proves catalog/root/publisher freshness, lineage and revocation, then requires
+exact equality for plugin ID, publisher, version, target, minimum macOS, Jarvis range, plugin API, physical archive
+digest, the complete package-signature object and its publisher-key lineage. Finally it verifies Ed25519 over the exact
+A3 package domain plus canonical `package.json`. Only after all checks return `Ok(())` may the A3 package module mint
+its opaque same-fd `VerifiedPackageEvidence`; A4 never constructs that type directly and no API accepts a boolean
+`verified` flag.
+
+Add the integration test file `src-tauri/src/plugins/trust/package.rs` tests:
+
+```text
+catalog_package_verifier_accepts_exact_observation_and_signature
+catalog_package_verifier_rejects_each_release_field_mismatch
+catalog_package_verifier_rejects_bad_signature_before_extraction
+catalog_package_verifier_rejects_revocation_before_extraction
+verified_evidence_keeps_the_pass_one_archive_fd
+```
+
+Run:
+
+```bash
+cargo +1.77.2 test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::trust::package::tests
+```
+
+Expected: all five tests exit `0`; mismatch/revocation/signature failures leave no filesystem output.
 
 - [ ] **Step 5: Add production root resource safely**
 
@@ -756,6 +1307,7 @@ Expected: all commands exit `0`; expired/replayed/conflicting fixtures are rejec
 ```bash
 git add schemas/plugin-catalog-v1.schema.json crates/jarvis-plugin-protocol \
   src-tauri/src/plugins/trust src-tauri/src/plugins/mod.rs src-tauri/Cargo.toml \
+  src-tauri/Cargo.lock \
   src-tauri/resources/plugin-trust-roots.json src-tauri/tests/fixtures/plugin-trust \
   src-tauri/tauri.conf.json docs/plugins/security.md
 git commit -m "feat(plugins): verify signed plugin catalogs"

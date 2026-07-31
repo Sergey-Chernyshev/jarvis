@@ -1,8 +1,10 @@
 use std::collections::VecDeque;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -19,11 +21,11 @@ use jarvis_power_helper::coordinator::{
 };
 use jarvis_power_helper::dev_store::{DevStore, DEV_LOCK_FILE, DEV_STATE_FILE};
 use jarvis_power_helper::dev_uds::{
-    bind_listener, handle_connection_for_testing, read_frame_for_testing, ConnectionEvent,
-    ConnectionObserver, PeerIdentityProbe, PeerSnapshot, RequestDispatcher, RuntimeDispatcher,
-    TransportError, DEV_SOCKET_FILE,
+    bind_listener, development_runtime_enabled, handle_connection_for_testing,
+    read_frame_for_testing, ConnectionEvent, ConnectionObserver, PeerIdentityProbe, PeerSnapshot,
+    RequestDispatcher, RuntimeDispatcher, TransportError, DEV_SOCKET_FILE,
 };
-use jarvis_power_helper::pmset::{PmsetBackend, PmsetError};
+use jarvis_power_helper::pmset::{DevSudoPmset, PmsetBackend, PmsetError};
 use jarvis_power_helper::watchdog::{
     GenericServingRuntime, GenericStartupRuntime, SchedulerArmError, SchedulerFactory,
     WatchdogGuard, WatchdogTask, WatchdogTermination,
@@ -239,6 +241,35 @@ fn current_uid() -> u32 {
 fn current_gid() -> u32 {
     // SAFETY: reads the current test process identity without mutating it.
     unsafe { libc::getegid() }
+}
+
+#[test]
+fn helper_runtime_flag_and_dev_sudo_policy_are_exact_and_closed() {
+    assert!(development_runtime_enabled(Some(OsStr::new("1"))));
+    for rejected in [
+        None,
+        Some(OsStr::new("")),
+        Some(OsStr::new("1 ")),
+        Some(OsStr::new("true")),
+    ] {
+        assert!(!development_runtime_enabled(rejected));
+    }
+    let non_unicode = OsString::from_vec(vec![b'1', 0xff]);
+    assert!(!development_runtime_enabled(Some(&non_unicode)));
+
+    let policy = DevSudoPmset::policy();
+    assert_eq!(policy.read_program(), "/usr/bin/pmset");
+    assert_eq!(policy.read_args(), ["-g"]);
+    assert_eq!(policy.write_program(), "/usr/bin/sudo");
+    assert_eq!(
+        policy.write_args(false),
+        ["-n", "/usr/bin/pmset", "-a", "disablesleep", "0"]
+    );
+    assert_eq!(
+        policy.write_args(true),
+        ["-n", "/usr/bin/pmset", "-a", "disablesleep", "1"]
+    );
+    assert_eq!(policy.timeout(), Duration::from_secs(8));
 }
 
 fn valid_peer() -> PeerSnapshot {
@@ -495,6 +526,19 @@ fn socket_and_dev_state_are_private_without_following_or_overwriting() {
     );
     drop(listener);
 
+    let stale_path = run.join(DEV_SOCKET_FILE);
+    let stale = UnixListener::bind(&stale_path).unwrap();
+    fs::set_permissions(&stale_path, fs::Permissions::from_mode(0o600)).unwrap();
+    drop(stale);
+    let replacement = bind_listener(
+        &harness.runtime.listener_permit(),
+        &harness.jarvis_dir,
+        current_uid(),
+        harness.sink.clone(),
+    )
+    .unwrap();
+    drop(replacement);
+
     let sentinel = harness._temp.path().join("sentinel");
     fs::write(&sentinel, b"sentinel").unwrap();
     symlink(&sentinel, run.join(DEV_SOCKET_FILE)).unwrap();
@@ -506,6 +550,51 @@ fn socket_and_dev_state_are_private_without_following_or_overwriting() {
     )
     .is_err());
     assert_eq!(fs::read(&sentinel).unwrap(), b"sentinel");
+
+    fs::remove_file(run.join(DEV_SOCKET_FILE)).unwrap();
+    fs::write(run.join(DEV_SOCKET_FILE), b"socket-sentinel").unwrap();
+    fs::set_permissions(run.join(DEV_SOCKET_FILE), fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(bind_listener(
+        &harness.runtime.listener_permit(),
+        &harness.jarvis_dir,
+        current_uid(),
+        harness.sink.clone(),
+    )
+    .is_err());
+    assert_eq!(
+        fs::read(run.join(DEV_SOCKET_FILE)).unwrap(),
+        b"socket-sentinel"
+    );
+}
+
+#[test]
+fn unsafe_dev_state_entries_are_rejected_without_following_or_overwriting() {
+    let temp = tempfile::tempdir().unwrap();
+    let jarvis_dir = temp.path().join("jarvis");
+    fs::create_dir(&jarvis_dir).unwrap();
+    fs::set_permissions(&jarvis_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let sink = Arc::new(RecordingSink::default());
+    let store = DevStore::open_for_testing(&jarvis_dir, sink).unwrap();
+    let outside = temp.path().join("outside");
+    fs::write(&outside, b"sentinel").unwrap();
+    let state = jarvis_dir.join("power").join(DEV_STATE_FILE);
+    symlink(&outside, &state).unwrap();
+    assert_eq!(
+        store.load(),
+        Err(jarvis_power_helper::root_store::StoreError::UnsafeMetadata)
+    );
+    assert_eq!(fs::read(&outside).unwrap(), b"sentinel");
+
+    fs::remove_file(&state).unwrap();
+    let sibling = temp.path().join("hardlink-source");
+    fs::write(&sibling, b"{}").unwrap();
+    fs::set_permissions(&sibling, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::hard_link(&sibling, &state).unwrap();
+    assert_eq!(
+        store.load(),
+        Err(jarvis_power_helper::root_store::StoreError::UnsafeMetadata)
+    );
+    assert_eq!(fs::read(&sibling).unwrap(), b"{}");
 }
 
 fn round_trip(
@@ -513,6 +602,9 @@ fn round_trip(
     envelope: &RequestEnvelope,
 ) -> Result<ResponseEnvelope, TransportError> {
     let (mut client, server) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .unwrap();
     client.write_all(&framed_request(envelope)).unwrap();
     client.shutdown(std::net::Shutdown::Write).unwrap();
     handle_connection_for_testing(
@@ -521,8 +613,10 @@ fn round_trip(
         &ScriptedPeer::stable(valid_peer()),
         &RuntimeDispatcher::new(runtime),
         &Observer::default(),
-    )?;
-    let bytes = read_frame_for_testing(&mut client)?;
+    )
+    .unwrap_or_else(|error| panic!("server round-trip failed: {error:?}"));
+    let bytes = read_frame_for_testing(&mut client)
+        .unwrap_or_else(|error| panic!("client round-trip failed: {error:?}"));
     decode_response(bytes).map_err(TransportError::Protocol)
 }
 
@@ -577,6 +671,37 @@ fn armed_runtime_round_trips_and_watchdog_recovers_without_a_uds_request() {
             recovery_required: false,
         }
     ));
+
+    let released = round_trip(
+        &harness.runtime,
+        &request(
+            "018f0000-0000-7000-8000-000000000004",
+            Request::ReleaseLease {
+                lease_id: lease_id.clone(),
+                owner_generation: "generation-a".into(),
+            },
+        ),
+    )
+    .unwrap();
+    assert!(matches!(
+        released.response,
+        Response::Released {
+            lease_id: ref released_id,
+        } if released_id == &lease_id
+    ));
+    let reacquired = round_trip(
+        &harness.runtime,
+        &request(
+            "018f0000-0000-7000-8000-000000000005",
+            Request::AcquireLease {
+                profile: "prod".into(),
+                owner_generation: "generation-b".into(),
+                ttl_ms: DEFAULT_TTL_MS,
+            },
+        ),
+    )
+    .unwrap();
+    assert!(matches!(reacquired.response, Response::Acquired { .. }));
 
     *harness.process.lock().unwrap() = ProcessState::Dead;
     harness.scheduler.trigger();

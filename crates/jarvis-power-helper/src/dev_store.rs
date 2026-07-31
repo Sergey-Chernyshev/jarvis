@@ -2,14 +2,15 @@ use std::ffi::CStr;
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(test)]
 use jarvis_power_core::state::HelperState;
 
-use crate::root_store::{
-    sealed, LockedRootStore, LockedState, RootStore, StateStore, StoreError, StoreFiles,
-};
+use crate::root_store::{sealed, LockedRootStore, RootStore, StateStore, StoreError, StoreFiles};
 use crate::HelperEventSink;
 
+#[cfg(test)]
 pub const DEV_STATE_FILE: &str = "dev-helper-v2.json";
+#[cfg(test)]
 pub const DEV_LOCK_FILE: &str = "dev-helper-v2.lock";
 
 const DEV_STATE_COMPONENT: &CStr = c"dev-helper-v2.json";

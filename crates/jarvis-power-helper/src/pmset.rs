@@ -5,6 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const PMSET_PROGRAM: &str = "/usr/bin/pmset";
+#[cfg(feature = "dev-uds")]
+const SUDO_PROGRAM: &str = "/usr/bin/sudo";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_CAPTURE_BYTES: usize = 16 * 1024;
 
@@ -102,6 +104,89 @@ impl PmsetBackend for SystemPmset {
     fn set_disabled(&mut self, value: bool) -> Result<(), PmsetError> {
         let output = self.run(PmsetInvocation::Write(value))?;
         if output.status.success() {
+            Ok(())
+        } else {
+            Err(PmsetError::CommandFailed)
+        }
+    }
+
+    fn boot_id(&mut self) -> Result<String, PmsetError> {
+        system_boot_id()
+    }
+}
+
+#[cfg(feature = "dev-uds")]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DevSudoPmset;
+
+#[cfg(feature = "dev-uds")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DevSudoPmsetPolicy;
+
+#[cfg(feature = "dev-uds")]
+impl DevSudoPmset {
+    pub(crate) const fn policy() -> DevSudoPmsetPolicy {
+        DevSudoPmsetPolicy
+    }
+
+    fn run_read(&self) -> Result<BoundedOutput, PmsetError> {
+        let policy = Self::policy();
+        run_bounded(policy.read_program(), &policy.read_args(), policy.timeout())
+            .map_err(PmsetError::from)
+    }
+
+    fn run_write(&self, value: bool) -> Result<BoundedOutput, PmsetError> {
+        let policy = Self::policy();
+        run_bounded(
+            policy.write_program(),
+            &policy.write_args(value),
+            policy.timeout(),
+        )
+        .map_err(PmsetError::from)
+    }
+}
+
+#[cfg(feature = "dev-uds")]
+impl DevSudoPmsetPolicy {
+    pub(crate) const fn read_program(self) -> &'static str {
+        PMSET_PROGRAM
+    }
+
+    pub(crate) const fn read_args(self) -> [&'static str; 1] {
+        ["-g"]
+    }
+
+    pub(crate) const fn write_program(self) -> &'static str {
+        SUDO_PROGRAM
+    }
+
+    pub(crate) const fn write_args(self, value: bool) -> [&'static str; 5] {
+        [
+            "-n",
+            PMSET_PROGRAM,
+            "-a",
+            "disablesleep",
+            if value { "1" } else { "0" },
+        ]
+    }
+
+    pub(crate) const fn timeout(self) -> Duration {
+        COMMAND_TIMEOUT
+    }
+}
+
+#[cfg(feature = "dev-uds")]
+impl PmsetBackend for DevSudoPmset {
+    fn read_disabled(&mut self) -> Result<bool, PmsetError> {
+        let output = self.run_read()?;
+        if !output.status.success() {
+            return Err(PmsetError::CommandFailed);
+        }
+        parse_disabled(&output.stdout)
+    }
+
+    fn set_disabled(&mut self, value: bool) -> Result<(), PmsetError> {
+        if self.run_write(value)?.status.success() {
             Ok(())
         } else {
             Err(PmsetError::CommandFailed)

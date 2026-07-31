@@ -19,3 +19,8 @@ serde_json = "1"
 
 [dev-dependencies]
 tempfile = { version = "3", default-features = false }
+
+[[bin]]
+name = "jarvis-power-helper-dev"
+path = "src/bin/jarvis-power-helper-dev.rs"
+required-features = ["dev-uds"]

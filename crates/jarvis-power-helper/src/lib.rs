@@ -5,6 +5,8 @@ use jarvis_power_core::state::MutationPhase;
 pub mod coordinator;
 #[cfg(feature = "dev-uds")]
 pub(crate) mod dev_store;
+#[cfg(feature = "dev-uds")]
+pub mod dev_uds;
 pub mod pmset;
 pub mod root_store;
 pub mod watchdog;
@@ -18,6 +20,8 @@ pub enum HelperEvent {
     WatchdogSchedulerJoined,
     WatchdogSchedulerTerminated,
     WatchdogRecovery,
+    #[cfg(feature = "dev-uds")]
+    DevListenerPublished,
     LockAcquired,
     PowerRead(bool),
     PowerWrite(bool),

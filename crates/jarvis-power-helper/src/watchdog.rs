@@ -37,7 +37,7 @@ where
     R: RandomSource,
     S: StateStore,
 {
-    fn from_parts(
+    pub(crate) fn from_parts(
         store: S,
         backend: B,
         clock: C,
@@ -347,6 +347,18 @@ where
         F: SchedulerFactory,
     {
         self.arm(scheduler, WATCHDOG_INTERVAL, WATCHDOG_READY_TIMEOUT)
+    }
+
+    #[cfg(feature = "dev-uds")]
+    pub(crate) fn arm_system(
+        self,
+    ) -> Result<GenericServingRuntime<B, C, P, R, S>, SchedulerArmError> {
+        let events = self.coordinator.store().events();
+        self.arm(
+            SystemSchedulerFactory::production(events),
+            WATCHDOG_INTERVAL,
+            WATCHDOG_READY_TIMEOUT,
+        )
     }
 }
 

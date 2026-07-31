@@ -375,25 +375,8 @@ impl RootStore {
         files: StoreFiles,
         events: Arc<dyn HelperEventSink>,
     ) -> Result<Self, StoreError> {
-        // SAFETY: these calls only inspect the effective identity of this
-        // process. Development helper state is deliberately unavailable to
-        // root so it cannot be confused with the production trust boundary.
-        let uid = unsafe { libc::geteuid() };
-        // SAFETY: see the identity-only note above.
-        let gid = unsafe { libc::getegid() };
-        if uid == 0 {
-            return Err(StoreError::UnsafeMetadata);
-        }
-        let policy = StorePolicy::for_owner(uid, gid);
-        let root = open_path(jarvis_directory, directory_open_flags())?;
-        validate_directory(root.as_raw_fd(), policy)?;
-        let power = open_or_create_private_directory(
-            root.as_raw_fd(),
-            POWER_DIRECTORY_DEV,
-            policy,
-            &ProvisionHooks::default(),
-        )?;
-        validate_directory(power.as_raw_fd(), policy)?;
+        let policy = development_policy()?;
+        let power = open_development_directory(jarvis_directory, POWER_DIRECTORY_DEV)?;
         Ok(Self::from_open_directory(power, policy, files, events))
     }
 
@@ -467,6 +450,38 @@ impl RootStore {
             false
         }
     }
+}
+
+#[cfg(feature = "dev-uds")]
+fn development_policy() -> Result<StorePolicy, StoreError> {
+    // SAFETY: these calls only inspect the effective identity of this
+    // process. Development helper state is deliberately unavailable to
+    // root so it cannot be confused with the production trust boundary.
+    let uid = unsafe { libc::geteuid() };
+    // SAFETY: see the identity-only note above.
+    let gid = unsafe { libc::getegid() };
+    if uid == 0 {
+        return Err(StoreError::UnsafeMetadata);
+    }
+    Ok(StorePolicy::for_owner(uid, gid))
+}
+
+#[cfg(feature = "dev-uds")]
+pub(crate) fn open_development_directory(
+    jarvis_directory: &Path,
+    child: &CStr,
+) -> Result<OwnedFd, StoreError> {
+    let policy = development_policy()?;
+    let root = open_path(jarvis_directory, directory_open_flags())?;
+    validate_directory(root.as_raw_fd(), policy)?;
+    let directory = open_or_create_private_directory(
+        root.as_raw_fd(),
+        child,
+        policy,
+        &ProvisionHooks::default(),
+    )?;
+    validate_directory(directory.as_raw_fd(), policy)?;
+    Ok(directory)
 }
 
 pub(crate) struct LockedRootStore<'a> {

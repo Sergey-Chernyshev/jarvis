@@ -291,29 +291,58 @@ pub enum CommandResult {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct OutboxItem {
-    pub operation_ref: OperationRef,
-    pub invocation: TypedCommandInvocation,
+pub struct EventMutation {
+    pub contract: ContractRef,
+    #[serde(deserialize_with = "deserialize_id")]
+    pub stream_id: String,
+    #[serde(deserialize_with = "deserialize_id")]
+    pub event_id: String,
+    #[serde(deserialize_with = "deserialize_id")]
+    pub subject: String,
+    #[serde(deserialize_with = "deserialize_state")]
+    pub kind: String,
+    #[serde(default, deserialize_with = "deserialize_optional_id")]
+    pub correlation_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_event_value")]
+    pub data: Value,
+    pub at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum OutboxMutation {
+    Entity { mutation: EntityMutation },
+    Event { event: EventMutation },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OutboxBatch {
     #[serde(deserialize_with = "deserialize_id")]
-    pub batch_id: String,
-    pub cursor: u64,
-    #[serde(deserialize_with = "deserialize_outbox_items")]
-    pub items: Vec<OutboxItem>,
+    pub source_instance_id: String,
+    #[serde(deserialize_with = "deserialize_id")]
+    pub outbox_id: String,
+    #[serde(deserialize_with = "deserialize_outbox_mutations")]
+    pub mutations: Vec<OutboxMutation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OutboxAck {
     #[serde(deserialize_with = "deserialize_id")]
-    pub batch_id: String,
-    pub cursor: u64,
+    pub source_instance_id: String,
+    #[serde(deserialize_with = "deserialize_id")]
+    pub outbox_id: String,
+    #[serde(deserialize_with = "deserialize_digest")]
+    pub payload_digest: String,
+    pub applied_broker_revision: u64,
     #[serde(deserialize_with = "deserialize_operation_refs")]
-    pub accepted: Vec<OperationRef>,
+    pub accepted_operation_refs: Vec<OperationRef>,
 }
 
 fn deserialize_contract_id<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -509,11 +538,11 @@ where
     Ok(values)
 }
 
-fn deserialize_outbox_items<'de, D>(deserializer: D) -> Result<Vec<OutboxItem>, D::Error>
+fn deserialize_outbox_mutations<'de, D>(deserializer: D) -> Result<Vec<OutboxMutation>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let values = Vec::<OutboxItem>::deserialize(deserializer)?;
+    let values = Vec::<OutboxMutation>::deserialize(deserializer)?;
     if values.is_empty() || values.len() > MAX_BROKER_BATCH_ITEMS {
         return Err(de::Error::custom("invalid outbox batch"));
     }

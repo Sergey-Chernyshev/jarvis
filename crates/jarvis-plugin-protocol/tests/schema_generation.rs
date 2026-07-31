@@ -58,6 +58,28 @@ fn bridge_request_schema_excludes_caller_identity() {
     }
 }
 
+#[test]
+fn enum_variant_fields_keep_the_runtime_camel_case_names() {
+    let schema = read_schema("plugin-broker-v1.schema.json");
+
+    assert_tagged_variant_field(
+        &schema,
+        "EntityMutation",
+        "type",
+        "put",
+        "expectedRevision",
+        "expected_revision",
+    );
+    assert_tagged_variant_field(
+        &schema,
+        "CommandResult",
+        "type",
+        "accepted",
+        "operationRef",
+        "operation_ref",
+    );
+}
+
 fn read_schema(filename: &str) -> Value {
     let path = schema_dir().join(filename);
     let bytes = fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
@@ -93,6 +115,42 @@ fn collect_open_typed_objects(value: &Value, pointer: &str, open_objects: &mut V
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
+}
+
+fn assert_tagged_variant_field(
+    schema: &Value,
+    definition: &str,
+    tag: &str,
+    variant_name: &str,
+    expected_field: &str,
+    forbidden_field: &str,
+) {
+    let variants = schema
+        .pointer(&format!("/definitions/{definition}/oneOf"))
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{definition} variants"));
+    let variant = variants
+        .iter()
+        .find(|variant| {
+            variant
+                .pointer(&format!("/properties/{tag}/enum/0"))
+                .and_then(Value::as_str)
+                == Some(variant_name)
+        })
+        .unwrap_or_else(|| panic!("{definition}.{variant_name} schema"));
+    let properties = variant
+        .get("properties")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("{definition}.{variant_name} properties"));
+
+    assert!(
+        properties.contains_key(expected_field),
+        "{definition}.{variant_name} must use runtime field {expected_field}"
+    );
+    assert!(
+        !properties.contains_key(forbidden_field),
+        "{definition}.{variant_name} must not expose Rust field {forbidden_field}"
+    );
 }
 
 fn escape_json_pointer(value: &str) -> String {

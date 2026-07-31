@@ -244,7 +244,7 @@ git commit -m "feat(power-core): define closed helper protocol"
 - Create: `crates/jarvis-power-core/tests/crash_matrix.rs`
 - Modify: `crates/jarvis-power-core/src/lib.rs`
 
-- [ ] **Step 1: Write RED transition tests**
+- [x] **Step 1: Write RED transition tests**
 
 ```rust
 #[test]
@@ -277,13 +277,13 @@ fn crash_after_each_effect_converges_safely() {
 }
 ```
 
-- [ ] **Step 2: Prove RED**
+- [x] **Step 2: Prove RED**
 
 ```bash
 cargo test --manifest-path crates/jarvis-power-core/Cargo.toml --test crash_matrix
 ```
 
-- [ ] **Step 3: Implement v2 state and ordered effects**
+- [x] **Step 3: Implement v2 state and ordered effects**
 
 ```rust
 pub struct HelperState {
@@ -306,13 +306,23 @@ Persist `Prepared` before mutation and `RestorePending` before restore. `ClearSt
 `VerifyDisabled(baseline)`. `Principal` is helper-derived: uid, pid, versioned Darwin start identity, bundle id, Team
 ID, requirement digest, and signed build. Protocol deserialization cannot create it.
 
-- [ ] **Step 4: Run and commit**
+- [x] **Step 4: Run and commit**
 
 ```bash
 cargo test --manifest-path crates/jarvis-power-core/Cargo.toml
 git add crates/jarvis-power-core
 git commit -m "feat(power-core): model renewable watchdog leases"
 ```
+
+**Completion evidence (2026-07-31):** integrated commits `516f360`,
+`cb72933`, `a5be900`, `0dd6394`, and `d394ba4` close admission caps,
+policy drift, idempotent acquire, no-shorten renewals, post-persist deadline
+checks, runtime-derived granted TTL, and the finite reconciliation outcomes
+`LeaseExpired`/`RecoveryRequired`. The independent review approved all 38
+crash-matrix tests, 13 protocol tests, five compile-fail doctests, current
+all-target clippy, Rust 1.77.2 tests and changed-scope clippy. The integrated
+branch reran the same 56 tests on current Rust plus all-target clippy with
+warnings denied.
 
 ## Task 3: Root store, fixed pmset coordinator, and watchdog
 

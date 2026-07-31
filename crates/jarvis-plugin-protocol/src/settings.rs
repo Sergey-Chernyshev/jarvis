@@ -2,13 +2,17 @@ use schemars::JsonSchema;
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::validation::is_safe_opaque_identifier;
+
 const MAX_SETTING_KEY_BYTES: usize = 128;
 const MAX_SETTING_VALUE_BYTES: usize = 64 * 1024;
 const MAX_REFERENCE_BYTES: usize = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, JsonSchema, Serialize)]
 #[serde(transparent)]
-pub struct SettingKey(String);
+pub struct SettingKey(
+    #[schemars(schema_with = "crate::validation::namespaced_key_128_schema")] String,
+);
 
 impl SettingKey {
     pub fn new(value: impl Into<String>) -> Result<Self, &'static str> {
@@ -41,6 +45,7 @@ impl<'de> Deserialize<'de> for SettingKey {
 #[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CredentialReference {
+    #[schemars(schema_with = "crate::validation::opaque_id_128_no_at_schema")]
     pub credential_id: String,
 }
 
@@ -49,6 +54,7 @@ impl CredentialReference {
         let value = value.into();
         if value.is_empty()
             || value.len() > MAX_REFERENCE_BYTES
+            || !is_safe_opaque_identifier(&value)
             || !value.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
             })
@@ -115,6 +121,8 @@ pub enum SettingValue {
 pub struct SettingRecord {
     pub key: SettingKey,
     pub scope: SettingScope,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::validation::optional_opaque_id_128_no_at_schema")]
     pub project_id: Option<String>,
     pub value: SettingValue,
     pub revision: u64,
@@ -152,6 +160,8 @@ impl<'de> Deserialize<'de> for SettingRecord {
 pub struct SettingWrite {
     pub key: SettingKey,
     pub scope: SettingScope,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::validation::optional_opaque_id_128_no_at_schema")]
     pub project_id: Option<String>,
     pub value: SettingValue,
     pub expected_revision: u64,
@@ -211,6 +221,7 @@ fn validate_scope(
         (SettingScope::Project, Some(project_id))
             if !project_id.is_empty()
                 && project_id.len() <= MAX_REFERENCE_BYTES
+                && is_safe_opaque_identifier(&project_id)
                 && project_id.bytes().all(|byte| {
                     byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
                 }) =>

@@ -2,17 +2,22 @@ use schemars::JsonSchema;
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::validation::is_safe_opaque_identifier;
+
 const MAX_OPERATION_REF_BYTES: usize = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, JsonSchema, Serialize)]
 #[serde(transparent)]
-pub struct OperationRef(String);
+pub struct OperationRef(
+    #[schemars(schema_with = "crate::validation::opaque_id_128_no_at_schema")] String,
+);
 
 impl OperationRef {
     pub fn new(value: impl Into<String>) -> Result<Self, &'static str> {
         let value = value.into();
         if value.is_empty()
             || value.len() > MAX_OPERATION_REF_BYTES
+            || !is_safe_opaque_identifier(&value)
             || !value.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
             })

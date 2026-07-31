@@ -25,6 +25,9 @@
           "additionalProperties": false,
           "properties": {
             "operationRef": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
               "type": "string"
             },
             "type": {
@@ -46,9 +49,15 @@
       "additionalProperties": false,
       "properties": {
         "id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?=[^/]*\\.)[a-z0-9._-]+/[a-z0-9._-]+$",
           "type": "string"
         },
         "schemaDigest": {
+          "maxLength": 71,
+          "minLength": 1,
+          "pattern": "^sha256:[0-9a-f]{64}$",
           "type": "string"
         },
         "version": {
@@ -120,6 +129,9 @@
         },
         "data": true,
         "id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         },
         "revision": {
@@ -131,6 +143,9 @@
           "type": "boolean"
         },
         "state": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         },
         "updatedAtMs": {
@@ -165,6 +180,9 @@
               "type": "integer"
             },
             "id": {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": "string"
             },
             "type": {
@@ -195,6 +213,9 @@
               "type": "integer"
             },
             "id": {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": "string"
             },
             "type": {
@@ -275,15 +296,25 @@
         "ids": {
           "default": [],
           "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
             "type": "string"
           },
+          "maxItems": 128,
+          "minItems": 0,
           "type": "array"
         },
         "states": {
           "default": [],
           "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
             "type": "string"
           },
+          "maxItems": 128,
+          "minItems": 0,
           "type": "array"
         }
       },
@@ -359,6 +390,9 @@
         },
         "correlationId": {
           "default": null,
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": [
             "string",
             "null"
@@ -366,9 +400,15 @@
         },
         "data": true,
         "eventId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         },
         "kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         },
         "seq": {
@@ -377,9 +417,15 @@
           "type": "integer"
         },
         "streamId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         },
         "subject": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         }
       },
@@ -407,6 +453,9 @@
         },
         "correlationId": {
           "default": null,
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": [
             "string",
             "null"
@@ -414,15 +463,27 @@
         },
         "data": true,
         "eventId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         },
         "kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         },
         "streamId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         },
         "subject": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         }
       },
@@ -456,8 +517,13 @@
         "subjects": {
           "default": [],
           "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
             "type": "string"
           },
+          "maxItems": 128,
+          "minItems": 0,
           "type": "array"
         }
       },
@@ -473,8 +539,13 @@
       "properties": {
         "fields": {
           "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
             "type": "string"
           },
+          "maxItems": 64,
+          "minItems": 1,
           "type": "array"
         }
       },
@@ -490,6 +561,9 @@
           "$ref": "#/definitions/ContractRef"
         },
         "subjectId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         }
       },
@@ -504,8 +578,12 @@
       "properties": {
         "acceptedOperationRefs": {
           "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
             "type": "string"
           },
+          "maxItems": 128,
           "type": "array"
         },
         "appliedBrokerRevision": {
@@ -514,12 +592,21 @@
           "type": "integer"
         },
         "outboxId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         },
         "payloadDigest": {
+          "maxLength": 71,
+          "minLength": 1,
+          "pattern": "^sha256:[0-9a-f]{64}$",
           "type": "string"
         },
         "sourceInstanceId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         }
       },
@@ -542,9 +629,15 @@
           "type": "array"
         },
         "outboxId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         },
         "sourceInstanceId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         }
       },
@@ -614,6 +707,9 @@
           "type": "integer"
         },
         "operationRef": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
           "type": "string"
         }
       },
@@ -645,6 +741,9 @@
       "additionalProperties": false,
       "properties": {
         "code": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         },
         "message": {
@@ -753,9 +852,15 @@
           "$ref": "#/definitions/ContractRef"
         },
         "operationRef": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
           "type": "string"
         },
         "phase": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
           "type": "string"
         },
         "providerGeneration": {

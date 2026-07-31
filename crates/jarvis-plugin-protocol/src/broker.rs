@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::manifest::Risk;
 use crate::operation::OperationRef;
+use crate::validation::is_safe_opaque_identifier;
 
 pub const MAX_ENTITY_BYTES: usize = 256 * 1024;
 pub const MAX_EVENT_BYTES: usize = 128 * 1024;
@@ -21,9 +22,11 @@ const MAX_ERROR_MESSAGE_BYTES: usize = 1024;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContractRef {
     #[serde(deserialize_with = "deserialize_contract_id")]
+    #[schemars(schema_with = "crate::validation::contract_id_256_schema")]
     pub id: String,
     pub version: Version,
     #[serde(deserialize_with = "deserialize_digest")]
+    #[schemars(schema_with = "crate::validation::sha256_digest_schema")]
     pub schema_digest: String,
 }
 
@@ -32,10 +35,12 @@ pub struct ContractRef {
 pub struct EntityEnvelope {
     pub contract: ContractRef,
     #[serde(deserialize_with = "deserialize_id")]
+    #[schemars(schema_with = "crate::validation::opaque_id_256_schema")]
     pub id: String,
     pub revision: u64,
     pub broker_revision: u64,
     #[serde(deserialize_with = "deserialize_state")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub state: String,
     #[serde(deserialize_with = "deserialize_entity_value")]
     pub data: Value,
@@ -48,15 +53,20 @@ pub struct EntityEnvelope {
 pub struct EventEnvelope {
     pub contract: ContractRef,
     #[serde(deserialize_with = "deserialize_id")]
+    #[schemars(schema_with = "crate::validation::opaque_id_256_schema")]
     pub stream_id: String,
     #[serde(deserialize_with = "deserialize_id")]
+    #[schemars(schema_with = "crate::validation::opaque_id_256_schema")]
     pub event_id: String,
     pub seq: u64,
     #[serde(deserialize_with = "deserialize_id")]
+    #[schemars(schema_with = "crate::validation::opaque_id_256_schema")]
     pub subject: String,
     #[serde(deserialize_with = "deserialize_state")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub kind: String,
     #[serde(default, deserialize_with = "deserialize_optional_id")]
+    #[schemars(schema_with = "crate::validation::optional_opaque_id_256_schema")]
     pub correlation_id: Option<String>,
     #[serde(deserialize_with = "deserialize_event_value")]
     pub data: Value,
@@ -68,8 +78,10 @@ pub struct EventEnvelope {
 pub struct EntitySelector {
     pub contract: ContractRef,
     #[serde(default, deserialize_with = "deserialize_ids")]
+    #[schemars(schema_with = "crate::validation::opaque_ids_256_schema")]
     pub ids: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_states")]
+    #[schemars(schema_with = "crate::validation::opaque_states_128_schema")]
     pub states: Vec<String>,
 }
 
@@ -77,6 +89,7 @@ pub struct EntitySelector {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FieldProjection {
     #[serde(deserialize_with = "deserialize_projection_fields")]
+    #[schemars(schema_with = "crate::validation::projection_fields_256_schema")]
     pub fields: Vec<String>,
 }
 
@@ -91,6 +104,7 @@ pub enum EntityMutation {
     Put {
         contract: ContractRef,
         #[serde(deserialize_with = "deserialize_id")]
+        #[schemars(schema_with = "crate::validation::opaque_id_256_schema")]
         id: String,
         #[schemars(rename = "expectedRevision")]
         expected_revision: u64,
@@ -100,6 +114,7 @@ pub enum EntityMutation {
     Delete {
         contract: ContractRef,
         #[serde(deserialize_with = "deserialize_id")]
+        #[schemars(schema_with = "crate::validation::opaque_id_256_schema")]
         id: String,
         #[schemars(rename = "expectedRevision")]
         expected_revision: u64,
@@ -156,6 +171,7 @@ pub struct EventWatchRequest {
     pub cursor: u64,
     pub contract: ContractRef,
     #[serde(default, deserialize_with = "deserialize_ids")]
+    #[schemars(schema_with = "crate::validation::opaque_ids_256_schema")]
     pub subjects: Vec<String>,
     #[serde(deserialize_with = "deserialize_limit")]
     pub limit: u32,
@@ -173,6 +189,7 @@ pub struct EventChange {
 pub struct OperationSubjectRef {
     pub contract: ContractRef,
     #[serde(deserialize_with = "deserialize_id")]
+    #[schemars(schema_with = "crate::validation::opaque_id_256_schema")]
     pub subject_id: String,
 }
 
@@ -194,6 +211,7 @@ pub enum RuntimeOperationState {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeOperationError {
     #[serde(deserialize_with = "deserialize_state")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub code: String,
     #[serde(default, deserialize_with = "deserialize_optional_error_message")]
     pub message: Option<String>,
@@ -207,6 +225,7 @@ pub struct RuntimeOperationView {
     pub exact_command: ContractRef,
     pub state: RuntimeOperationState,
     #[serde(deserialize_with = "deserialize_phase")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub phase: String,
     pub provider_generation: u64,
     pub created_at: i64,
@@ -298,14 +317,19 @@ pub enum CommandResult {
 pub struct EventMutation {
     pub contract: ContractRef,
     #[serde(deserialize_with = "deserialize_id")]
+    #[schemars(schema_with = "crate::validation::opaque_id_256_schema")]
     pub stream_id: String,
     #[serde(deserialize_with = "deserialize_id")]
+    #[schemars(schema_with = "crate::validation::opaque_id_256_schema")]
     pub event_id: String,
     #[serde(deserialize_with = "deserialize_id")]
+    #[schemars(schema_with = "crate::validation::opaque_id_256_schema")]
     pub subject: String,
     #[serde(deserialize_with = "deserialize_state")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub kind: String,
     #[serde(default, deserialize_with = "deserialize_optional_id")]
+    #[schemars(schema_with = "crate::validation::optional_opaque_id_256_schema")]
     pub correlation_id: Option<String>,
     #[serde(deserialize_with = "deserialize_event_value")]
     pub data: Value,
@@ -328,8 +352,10 @@ pub enum OutboxMutation {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OutboxBatch {
     #[serde(deserialize_with = "deserialize_id")]
+    #[schemars(schema_with = "crate::validation::opaque_id_256_schema")]
     pub source_instance_id: String,
     #[serde(deserialize_with = "deserialize_id")]
+    #[schemars(schema_with = "crate::validation::opaque_id_256_schema")]
     pub outbox_id: String,
     #[serde(deserialize_with = "deserialize_outbox_mutations")]
     pub mutations: Vec<OutboxMutation>,
@@ -339,13 +365,17 @@ pub struct OutboxBatch {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OutboxAck {
     #[serde(deserialize_with = "deserialize_id")]
+    #[schemars(schema_with = "crate::validation::opaque_id_256_schema")]
     pub source_instance_id: String,
     #[serde(deserialize_with = "deserialize_id")]
+    #[schemars(schema_with = "crate::validation::opaque_id_256_schema")]
     pub outbox_id: String,
     #[serde(deserialize_with = "deserialize_digest")]
+    #[schemars(schema_with = "crate::validation::sha256_digest_schema")]
     pub payload_digest: String,
     pub applied_broker_revision: u64,
     #[serde(deserialize_with = "deserialize_operation_refs")]
+    #[schemars(length(max = 128))]
     pub accepted_operation_refs: Vec<OperationRef>,
 }
 
@@ -354,7 +384,8 @@ where
     D: Deserializer<'de>,
 {
     let value = String::deserialize(deserializer)?;
-    if value.is_empty() || value.len() > MAX_CONTRACT_ID_BYTES {
+    if value.is_empty() || value.len() > MAX_CONTRACT_ID_BYTES || !is_safe_opaque_identifier(&value)
+    {
         return Err(de::Error::custom("invalid contract id"));
     }
     let Some((namespace, name)) = value.split_once('/') else {
@@ -605,6 +636,7 @@ where
 fn validate_token(value: String, maximum_bytes: usize) -> Result<String, &'static str> {
     if value.is_empty()
         || value.len() > maximum_bytes
+        || !is_safe_opaque_identifier(&value)
         || !value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-' | b'@')
         })

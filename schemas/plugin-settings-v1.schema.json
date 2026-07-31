@@ -6,6 +6,9 @@
       "additionalProperties": false,
       "properties": {
         "credentialId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
           "type": "string"
         }
       },
@@ -36,9 +39,16 @@
       "additionalProperties": false,
       "properties": {
         "key": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$",
           "type": "string"
         },
         "projectId": {
+          "default": null,
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
           "type": [
             "string",
             "null"
@@ -181,9 +191,16 @@
           "type": "integer"
         },
         "key": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$",
           "type": "string"
         },
         "projectId": {
+          "default": null,
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
           "type": [
             "string",
             "null"

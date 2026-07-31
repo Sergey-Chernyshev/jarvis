@@ -3,6 +3,8 @@ use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+use crate::validation::is_safe_opaque_identifier;
+
 pub const BRIDGE_PROTOCOL_V1: u32 = 1;
 pub const MAX_BRIDGE_MESSAGE_BYTES: usize = 1_048_576;
 pub const MAX_BRIDGE_IN_FLIGHT: usize = 64;
@@ -30,13 +32,17 @@ pub struct Welcome {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
     pub v: u32,
     #[serde(deserialize_with = "deserialize_plugin_id")]
+    #[schemars(schema_with = "crate::validation::plugin_id_128_schema")]
     pub plugin_id: String,
     #[serde(deserialize_with = "deserialize_digest")]
+    #[schemars(schema_with = "crate::validation::sha256_digest_schema")]
     pub package_digest: String,
     #[serde(deserialize_with = "deserialize_identifier")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub page_id: String,
     pub generation: u64,
     #[serde(deserialize_with = "deserialize_grants")]
+    #[schemars(schema_with = "crate::validation::bridge_grants_128_schema")]
     pub grants: Vec<String>,
 }
 
@@ -46,11 +52,14 @@ pub struct BridgeRequest {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
     pub v: u32,
     #[serde(deserialize_with = "deserialize_identifier")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub id: String,
     pub generation: u64,
     #[serde(deserialize_with = "deserialize_namespace")]
+    #[schemars(schema_with = "crate::validation::bridge_namespace_128_schema")]
     pub namespace: String,
     #[serde(deserialize_with = "deserialize_method")]
+    #[schemars(schema_with = "crate::validation::bridge_namespace_128_schema")]
     pub method: String,
     pub params: Value,
     #[serde(deserialize_with = "deserialize_deadline")]
@@ -63,6 +72,7 @@ pub struct BridgeResponse {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
     pub v: u32,
     #[serde(deserialize_with = "deserialize_identifier")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub id: String,
     pub generation: u64,
     pub result: Value,
@@ -74,9 +84,11 @@ pub struct SubscribeResult {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
     pub v: u32,
     #[serde(deserialize_with = "deserialize_identifier")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub id: String,
     pub generation: u64,
     #[serde(deserialize_with = "deserialize_identifier")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub subscription_id: String,
     pub cursor: u64,
 }
@@ -88,6 +100,7 @@ pub struct BridgeEvent {
     pub v: u32,
     pub generation: u64,
     #[serde(deserialize_with = "deserialize_identifier")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub subscription_id: String,
     pub cursor: u64,
     pub event: Value,
@@ -108,6 +121,7 @@ pub struct Cancel {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
     pub v: u32,
     #[serde(deserialize_with = "deserialize_identifier")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub id: String,
     pub generation: u64,
 }
@@ -119,6 +133,7 @@ pub struct Unsubscribe {
     pub v: u32,
     pub generation: u64,
     #[serde(deserialize_with = "deserialize_identifier")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub subscription_id: String,
 }
 
@@ -129,6 +144,7 @@ pub struct Gap {
     pub v: u32,
     pub generation: u64,
     #[serde(deserialize_with = "deserialize_identifier")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub subscription_id: String,
     pub requested_cursor: u64,
     pub earliest_cursor: u64,
@@ -142,6 +158,7 @@ pub struct Close {
     pub v: u32,
     pub generation: u64,
     #[serde(deserialize_with = "deserialize_code")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub code: String,
 }
 
@@ -151,13 +168,16 @@ pub struct BridgeError {
     #[serde(deserialize_with = "deserialize_protocol_v1")]
     pub v: u32,
     #[serde(default, deserialize_with = "deserialize_optional_identifier")]
+    #[schemars(schema_with = "crate::validation::optional_opaque_id_128_schema")]
     pub id: Option<String>,
     pub generation: u64,
     #[serde(deserialize_with = "deserialize_code")]
+    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
     pub code: String,
     #[serde(default, deserialize_with = "deserialize_optional_message")]
     pub message: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_identifier")]
+    #[schemars(schema_with = "crate::validation::optional_opaque_id_128_schema")]
     pub correlation_id: Option<String>,
 }
 
@@ -329,6 +349,7 @@ where
 fn validate_ascii_token(value: String, max_bytes: usize) -> Result<String, &'static str> {
     if value.is_empty()
         || value.len() > max_bytes
+        || !is_safe_opaque_identifier(&value)
         || !value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-' | b'@')
         })

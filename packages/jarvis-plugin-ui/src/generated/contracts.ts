@@ -83,6 +83,10 @@ export type BridgeClientFrame =
 export type BridgeHostFrame =
   | {
       generation: number;
+      /**
+       * @minItems 0
+       * @maxItems 256
+       */
       grants: string[];
       packageDigest: string;
       pageId: string;
@@ -248,11 +252,23 @@ export interface EntityQuery {
   selectors: EntitySelector[];
 }
 export interface FieldProjection {
+  /**
+   * @minItems 1
+   * @maxItems 64
+   */
   fields: string[];
 }
 export interface EntitySelector {
   contract: ContractRef;
+  /**
+   * @minItems 0
+   * @maxItems 128
+   */
   ids?: string[];
+  /**
+   * @minItems 0
+   * @maxItems 128
+   */
   states?: string[];
 }
 export interface EntityQuerySnapshot {
@@ -294,6 +310,10 @@ export interface EventWatchRequest {
   contract: ContractRef;
   cursor: number;
   limit: number;
+  /**
+   * @minItems 0
+   * @maxItems 128
+   */
   subjects?: string[];
 }
 export interface OperationSubjectRef {
@@ -301,6 +321,9 @@ export interface OperationSubjectRef {
   subjectId: string;
 }
 export interface OutboxAck {
+  /**
+   * @maxItems 128
+   */
   acceptedOperationRefs: string[];
   appliedBrokerRevision: number;
   outboxId: string;

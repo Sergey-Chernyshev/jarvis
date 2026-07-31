@@ -69,6 +69,15 @@ fn bridge_error_has_stable_redacted_fields() {
     assert!(serde_json::from_value::<BridgeHostFrame>(unknown).is_err());
 }
 
+#[test]
+fn bridge_optional_identifiers_keep_the_same_at_character_contract() {
+    let mut error = golden("bridgeError");
+    error["id"] = json!("request@01");
+    error["correlationId"] = json!("correlation@01");
+    let parsed: BridgeHostFrame = serde_json::from_value(error.clone()).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), error);
+}
+
 fn path_like_ids() -> [&'static str; 10] {
     [
         "/Users/alice/repo",

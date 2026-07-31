@@ -7,3 +7,5 @@ pub mod manifest;
 pub mod operation;
 pub mod process;
 pub mod settings;
+
+mod validation;

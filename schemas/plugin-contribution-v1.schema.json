@@ -22,6 +22,9 @@
           "additionalProperties": false,
           "properties": {
             "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
               "type": "string"
             },
             "type": {
@@ -41,6 +44,9 @@
           "additionalProperties": false,
           "properties": {
             "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
               "type": "string"
             },
             "type": {
@@ -60,6 +66,9 @@
           "additionalProperties": false,
           "properties": {
             "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
               "type": "string"
             },
             "type": {
@@ -79,6 +88,9 @@
           "additionalProperties": false,
           "properties": {
             "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
               "type": "string"
             },
             "type": {
@@ -123,6 +135,9 @@
       "additionalProperties": false,
       "properties": {
         "command": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$",
           "type": "string"
         },
         "context": {
@@ -133,6 +148,9 @@
           "type": "array"
         },
         "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$",
           "type": "string"
         },
         "locations": {
@@ -168,6 +186,9 @@
           "type": "array"
         },
         "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$",
           "type": "string"
         },
         "placements": {
@@ -195,6 +216,9 @@
       "additionalProperties": false,
       "properties": {
         "command": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$",
           "type": "string"
         },
         "scope": {
@@ -215,6 +239,9 @@
       "additionalProperties": false,
       "properties": {
         "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$",
           "type": "string"
         },
         "instancePolicy": {

@@ -45,12 +45,21 @@
               "type": "integer"
             },
             "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": "string"
             },
             "method": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9._-]+$",
               "type": "string"
             },
             "namespace": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9._-]+$",
               "type": "string"
             },
             "params": true,
@@ -120,6 +129,9 @@
               "type": "integer"
             },
             "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": "string"
             },
             "type": {
@@ -151,6 +163,9 @@
               "type": "integer"
             },
             "subscriptionId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": "string"
             },
             "type": {
@@ -187,17 +202,31 @@
             },
             "grants": {
               "items": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
                 "type": "string"
               },
+              "maxItems": 256,
+              "minItems": 0,
               "type": "array"
             },
             "packageDigest": {
+              "maxLength": 71,
+              "minLength": 1,
+              "pattern": "^sha256:[0-9a-f]{64}$",
               "type": "string"
             },
             "pageId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": "string"
             },
             "pluginId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?=.*\\.)[a-z0-9._-]+$",
               "type": "string"
             },
             "type": {
@@ -232,6 +261,9 @@
               "type": "integer"
             },
             "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": "string"
             },
             "result": true,
@@ -270,9 +302,15 @@
               "type": "integer"
             },
             "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": "string"
             },
             "subscriptionId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": "string"
             },
             "type": {
@@ -312,6 +350,9 @@
               "type": "integer"
             },
             "subscriptionId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": "string"
             },
             "type": {
@@ -360,6 +401,9 @@
               "type": "integer"
             },
             "subscriptionId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": "string"
             },
             "type": {
@@ -389,6 +433,9 @@
           "additionalProperties": false,
           "properties": {
             "code": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": "string"
             },
             "generation": {
@@ -420,10 +467,16 @@
           "additionalProperties": false,
           "properties": {
             "code": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": "string"
             },
             "correlationId": {
               "default": null,
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": [
                 "string",
                 "null"
@@ -436,6 +489,9 @@
             },
             "id": {
               "default": null,
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/@-]+$",
               "type": [
                 "string",
                 "null"

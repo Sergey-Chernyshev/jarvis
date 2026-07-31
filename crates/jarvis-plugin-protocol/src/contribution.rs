@@ -5,6 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::manifest::{
     ActionLocation, CommandPlacement, HotkeyScope, InstancePolicy, PagePlacement, Risk,
 };
+use crate::validation::is_safe_opaque_identifier;
 
 const MAX_CONTRIBUTION_ID_BYTES: usize = 128;
 const MAX_TITLE_BYTES: usize = 256;
@@ -13,7 +14,9 @@ const MAX_PLACEMENTS: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, JsonSchema, Serialize)]
 #[serde(transparent)]
-pub struct ContributionId(String);
+pub struct ContributionId(
+    #[schemars(schema_with = "crate::validation::namespaced_key_128_schema")] String,
+);
 
 impl ContributionId {
     pub fn new(value: impl Into<String>) -> Result<Self, &'static str> {
@@ -53,18 +56,22 @@ impl<'de> Deserialize<'de> for ContributionId {
 pub enum ContextReference {
     Project {
         #[serde(deserialize_with = "deserialize_context_id")]
+        #[schemars(schema_with = "crate::validation::opaque_id_128_no_at_schema")]
         id: String,
     },
     Chat {
         #[serde(deserialize_with = "deserialize_context_id")]
+        #[schemars(schema_with = "crate::validation::opaque_id_128_no_at_schema")]
         id: String,
     },
     Runtime {
         #[serde(deserialize_with = "deserialize_context_id")]
+        #[schemars(schema_with = "crate::validation::opaque_id_128_no_at_schema")]
         id: String,
     },
     Session {
         #[serde(deserialize_with = "deserialize_context_id")]
+        #[schemars(schema_with = "crate::validation::opaque_id_128_no_at_schema")]
         id: String,
     },
 }
@@ -161,6 +168,7 @@ where
     let value = String::deserialize(deserializer)?;
     if value.is_empty()
         || value.len() > MAX_CONTRIBUTION_ID_BYTES
+        || !is_safe_opaque_identifier(&value)
         || !value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
         })

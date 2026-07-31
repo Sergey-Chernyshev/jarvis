@@ -16,10 +16,10 @@
 //! Старый ~/.jarvis/clamshell.json не содержал baseline, поэтому он только
 //! сигнализирует blocked repair и никогда не разрешает автоматический pmset 0.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::io;
 use std::process::{Command, Output, Stdio};
-use std::collections::HashSet;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -219,6 +219,127 @@ pub trait PmsetBackend: Send + Sync {
     fn boot_id(&self) -> Result<String, PowerError>;
 }
 
+/// Process liveness is useful only when it also proves the exact process
+/// incarnation. A PID by itself can be reused after a crash.
+pub trait ProcessInspector: Send + Sync {
+    fn start_identity(&self, pid: u32) -> Result<Option<String>, PowerError>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemProcesses;
+
+const PROCESS_IDENTITY_PREFIX: &str = "darwin-v1:uid=";
+const PROCESS_STATUS_ZOMBIE: u32 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessSnapshot {
+    status: u32,
+    uid: u32,
+    start_sec: u64,
+    start_usec: u64,
+}
+
+fn process_identity_from_snapshot(snapshot: ProcessSnapshot) -> Option<String> {
+    (snapshot.status != PROCESS_STATUS_ZOMBIE).then(|| {
+        format!(
+            "{PROCESS_IDENTITY_PREFIX}{}:start={}.{}",
+            snapshot.uid, snapshot.start_sec, snapshot.start_usec
+        )
+    })
+}
+
+pub(super) fn valid_process_identity(identity: &str) -> bool {
+    let Some(rest) = identity.strip_prefix(PROCESS_IDENTITY_PREFIX) else {
+        return false;
+    };
+    let Some((uid, start)) = rest.split_once(":start=") else {
+        return false;
+    };
+    let Some((sec, usec)) = start.split_once('.') else {
+        return false;
+    };
+    let (Ok(uid), Ok(sec), Ok(usec)) =
+        (uid.parse::<u32>(), sec.parse::<u64>(), usec.parse::<u64>())
+    else {
+        return false;
+    };
+    sec > 0
+        && usec < 1_000_000
+        && identity == format!("{PROCESS_IDENTITY_PREFIX}{uid}:start={sec}.{usec}")
+}
+
+#[cfg(target_os = "macos")]
+impl ProcessInspector for SystemProcesses {
+    fn start_identity(&self, pid: u32) -> Result<Option<String>, PowerError> {
+        let pid = i32::try_from(pid)
+            .map_err(|_| PowerError::InvalidState("process PID exceeds Darwin pid_t".into()))?;
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let expected = std::mem::size_of::<libc::proc_bsdinfo>();
+        let received = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                i32::try_from(expected).expect("proc_bsdinfo fits c_int"),
+            )
+        };
+        if received == 0 {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::ESRCH) | Some(libc::ENOENT) => Ok(None),
+                _ => Err(PowerError::Io(error)),
+            };
+        }
+        if received < 0 || usize::try_from(received).ok() != Some(expected) {
+            return Err(PowerError::InvalidState(format!(
+                "proc_pidinfo returned partial BSD info for PID {pid}: {received}/{expected}"
+            )));
+        }
+        let info = unsafe { info.assume_init() };
+        if info.pbi_pid != u32::try_from(pid).unwrap_or_default() {
+            return Err(PowerError::InvalidState(format!(
+                "proc_pidinfo PID mismatch: requested {pid}, got {}",
+                info.pbi_pid
+            )));
+        }
+        let snapshot = ProcessSnapshot {
+            status: info.pbi_status,
+            uid: info.pbi_uid,
+            start_sec: info.pbi_start_tvsec,
+            start_usec: info.pbi_start_tvusec,
+        };
+        if snapshot.status == PROCESS_STATUS_ZOMBIE {
+            return Ok(None);
+        }
+        if snapshot.start_sec == 0 || snapshot.start_usec >= 1_000_000 {
+            return Err(PowerError::InvalidState(format!(
+                "proc_pidinfo returned invalid start identity for PID {pid}"
+            )));
+        }
+        Ok(process_identity_from_snapshot(snapshot))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl ProcessInspector for SystemProcesses {
+    fn start_identity(&self, _pid: u32) -> Result<Option<String>, PowerError> {
+        Err(PowerError::InvalidState(
+            "Darwin process identity is unavailable on this platform".into(),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryOutcome {
+    NoRegistry,
+    KeptForLiveLease,
+    Restored(bool),
+    BaselineUnchanged(bool),
+    BlockedExpiredLiveLease,
+    BlockedLegacyRepair,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcquireOutcome {
     Mutated,
@@ -308,25 +429,11 @@ impl ReleaseOutcome {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LegacyMarkerDecision {
-    ClearMarker,
-    BlockedRepair,
-}
-
 #[derive(Debug, PartialEq)]
 pub enum LegacyMarkerState {
     Missing,
     Present(serde_json::Value),
     Corrupt,
-}
-
-pub fn decide_legacy_marker(current: Option<bool>) -> LegacyMarkerDecision {
-    if current == Some(false) {
-        LegacyMarkerDecision::ClearMarker
-    } else {
-        LegacyMarkerDecision::BlockedRepair
-    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -551,6 +658,85 @@ pub fn release_with<B: PmsetBackend>(
     Ok(outcome)
 }
 
+/// Recover machine-global ownership before any profile-specific startup path.
+///
+/// The registry lock spans classification, tombstone persistence, restore and
+/// read-back. Same-boot leases survive only when the exact versioned
+/// PID/start/UID identity still matches. Cross-boot leases are always stale.
+pub fn recover_with<B: PmsetBackend, P: ProcessInspector>(
+    backend: &B,
+    store: &OwnershipStore,
+    processes: &P,
+    current_time_ms: i64,
+) -> Result<RecoveryOutcome, PowerError> {
+    let guard = store.lock()?;
+    let Some(mut state) = guard.read()? else {
+        return Ok(RecoveryOutcome::NoRegistry);
+    };
+    validate_ownership_state(&state)?;
+
+    let current_boot = backend.boot_id()?;
+    if state.boot_id == current_boot {
+        let mut retained = Vec::with_capacity(state.leases.len());
+        let mut expired_live = false;
+        for lease in &state.leases {
+            if !valid_process_identity(&lease.process_identity) {
+                return Err(PowerError::InvalidState(format!(
+                    "unsupported process identity for profile {}",
+                    lease.profile
+                )));
+            }
+            match processes.start_identity(lease.pid)? {
+                Some(identity) if identity == lease.process_identity => {
+                    if current_time_ms >= lease.expires_at_ms {
+                        expired_live = true;
+                    }
+                    retained.push(lease.clone());
+                }
+                Some(_) | None => {}
+            }
+        }
+        if expired_live {
+            return Ok(RecoveryOutcome::BlockedExpiredLiveLease);
+        }
+        if !retained.is_empty() {
+            let current = backend.read_disabled()?;
+            if current != state.applied {
+                return Err(PowerError::InvalidState(format!(
+                    "registry says applied={}, system reports {}",
+                    state.applied, current
+                )));
+            }
+            if state.did_mutate && !backend.can_restore_noninteractive() {
+                return Err(PowerError::RollbackUnavailable);
+            }
+            if retained.len() != state.leases.len() {
+                state.leases = retained;
+                guard.write(&state)?;
+            }
+            return Ok(RecoveryOutcome::KeptForLiveLease);
+        }
+    }
+
+    // Persist the restore obligation before any pmset read or mutation.
+    if !state.leases.is_empty() {
+        state.leases.clear();
+        guard.write(&state)?;
+    }
+    if !state.did_mutate {
+        guard.clear()?;
+        return Ok(RecoveryOutcome::BaselineUnchanged(state.baseline));
+    }
+
+    match restore_and_clear(backend, &guard, state.baseline)? {
+        ReleaseOutcome::Restored(value) => Ok(RecoveryOutcome::Restored(value)),
+        ReleaseOutcome::BaselineUnchanged(value) => Ok(RecoveryOutcome::BaselineUnchanged(value)),
+        ReleaseOutcome::NotOwned | ReleaseOutcome::KeptApplied => Err(PowerError::InvalidState(
+            "startup recovery returned an impossible release outcome".into(),
+        )),
+    }
+}
+
 fn restore_and_clear<B: PmsetBackend>(
     backend: &B,
     guard: &crate::power::ownership_store::OwnershipStoreGuard<'_>,
@@ -653,11 +839,6 @@ pub fn sudoers_installed() -> bool {
     std::path::Path::new(SUDOERS).exists()
 }
 
-pub async fn read_sleep_disabled() -> Option<bool> {
-    let out = run("pmset", &["-g"], Duration::from_secs(4)).await?;
-    parse_sleep_disabled(&String::from_utf8_lossy(&out.stdout))
-}
-
 pub async fn read_battery() -> Battery {
     match run("pmset", &["-g", "batt"], Duration::from_secs(4)).await {
         Some(out) => parse_battery(&String::from_utf8_lossy(&out.stdout)),
@@ -718,14 +899,32 @@ fn marker_file() -> std::path::PathBuf {
 }
 
 pub fn legacy_marker_state() -> LegacyMarkerState {
-    let bytes = match std::fs::read(marker_file()) {
+    legacy_marker_state_at(&marker_file())
+}
+
+fn legacy_marker_state_at(path: &std::path::Path) -> LegacyMarkerState {
+    let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return LegacyMarkerState::Missing
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return LegacyMarkerState::Missing,
         Err(_) => return LegacyMarkerState::Corrupt,
     };
     parse_legacy_marker(&bytes)
+}
+
+/// Legacy markers never recorded a baseline and therefore cannot authorize
+/// either a pmset mutation or automatic deletion. The backend is deliberately
+/// injectable and deliberately unused so tests can prove observation-only
+/// behavior even when every power operation would fail.
+pub fn recover_legacy_with<B: PmsetBackend>(
+    _backend: &B,
+    marker: &std::path::Path,
+) -> Result<RecoveryOutcome, PowerError> {
+    Ok(match legacy_marker_state_at(marker) {
+        LegacyMarkerState::Missing => RecoveryOutcome::NoRegistry,
+        LegacyMarkerState::Present(_) | LegacyMarkerState::Corrupt => {
+            RecoveryOutcome::BlockedLegacyRepair
+        }
+    })
 }
 
 fn parse_legacy_marker(bytes: &[u8]) -> LegacyMarkerState {
@@ -735,15 +934,12 @@ fn parse_legacy_marker(bytes: &[u8]) -> LegacyMarkerState {
     }
 }
 
-pub fn clear_marker() {
-    let _ = std::fs::remove_file(marker_file());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::power::ownership::Lease;
     use crate::power::ownership_store::OwnershipStore;
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -768,6 +964,86 @@ mod tests {
             owner_generation: generation.into(),
             acquired_at_ms: 10,
             expires_at_ms: 20,
+        }
+    }
+
+    fn process_identity(uid: u32, sec: u64, usec: u64) -> String {
+        format!("darwin-v1:uid={uid}:start={sec}.{usec}")
+    }
+
+    fn recovery_lease(
+        profile: &str,
+        pid: u32,
+        identity: impl Into<String>,
+        expires_at_ms: i64,
+    ) -> Lease {
+        Lease {
+            profile: profile.into(),
+            pid,
+            process_identity: identity.into(),
+            owner_generation: format!("generation-{profile}"),
+            acquired_at_ms: 10,
+            expires_at_ms,
+        }
+    }
+
+    fn recovery_state(
+        baseline: bool,
+        boot_id: &str,
+        leases: impl IntoIterator<Item = Lease>,
+    ) -> OwnershipState {
+        let mut state = OwnershipState::new(baseline, boot_id, 1);
+        for lease in leases {
+            state.acquire(lease);
+        }
+        state
+    }
+
+    enum ProcessAnswer {
+        Identity(String),
+        Missing,
+        Ambiguous,
+    }
+
+    #[derive(Default)]
+    struct FakeProcesses {
+        answers: HashMap<u32, ProcessAnswer>,
+    }
+
+    impl FakeProcesses {
+        fn exact(pid: u32, identity: impl Into<String>) -> Self {
+            Self {
+                answers: HashMap::from([(pid, ProcessAnswer::Identity(identity.into()))]),
+            }
+        }
+
+        fn missing(pid: u32) -> Self {
+            Self {
+                answers: HashMap::from([(pid, ProcessAnswer::Missing)]),
+            }
+        }
+
+        fn ambiguous(pid: u32) -> Self {
+            Self {
+                answers: HashMap::from([(pid, ProcessAnswer::Ambiguous)]),
+            }
+        }
+
+        fn with(mut self, pid: u32, answer: ProcessAnswer) -> Self {
+            self.answers.insert(pid, answer);
+            self
+        }
+    }
+
+    impl ProcessInspector for FakeProcesses {
+        fn start_identity(&self, pid: u32) -> Result<Option<String>, PowerError> {
+            match self.answers.get(&pid) {
+                Some(ProcessAnswer::Identity(identity)) => Ok(Some(identity.clone())),
+                Some(ProcessAnswer::Missing) | None => Ok(None),
+                Some(ProcessAnswer::Ambiguous) => Err(PowerError::InvalidState(
+                    "injected process inspection ambiguity".into(),
+                )),
+            }
         }
     }
 
@@ -868,6 +1144,53 @@ mod tests {
         }
     }
 
+    struct ReadbackFailurePmset {
+        reads: Mutex<usize>,
+        fail_with_error: bool,
+    }
+
+    impl ReadbackFailurePmset {
+        fn mismatch() -> Self {
+            Self {
+                reads: Mutex::new(0),
+                fail_with_error: false,
+            }
+        }
+
+        fn error() -> Self {
+            Self {
+                reads: Mutex::new(0),
+                fail_with_error: true,
+            }
+        }
+    }
+
+    impl PmsetBackend for ReadbackFailurePmset {
+        fn read_disabled(&self) -> Result<bool, PowerError> {
+            let mut reads = self.reads.lock().unwrap();
+            *reads += 1;
+            if *reads == 1 {
+                Ok(true)
+            } else if self.fail_with_error {
+                Err(PowerError::Command("injected read-back failure".into()))
+            } else {
+                Ok(true)
+            }
+        }
+
+        fn can_restore_noninteractive(&self) -> bool {
+            true
+        }
+
+        fn set_disabled(&self, _value: bool) -> Result<(), PowerError> {
+            Ok(())
+        }
+
+        fn boot_id(&self) -> Result<String, PowerError> {
+            Ok("boot-test".into())
+        }
+    }
+
     #[test]
     fn acquire_writes_registry_before_mutation() {
         let (dir, store) = test_store("write-ahead");
@@ -907,8 +1230,7 @@ mod tests {
         let backend = FakePmset::new(false);
         store.fail_next_parent_sync_after_rename();
 
-        let failure =
-            acquire_with(&backend, &store, test_lease("prod", "generation")).unwrap_err();
+        let failure = acquire_with(&backend, &store, test_lease("prod", "generation")).unwrap_err();
 
         assert_eq!(failure.obligation, AcquireObligation::LeaseMayExist);
         assert!(matches!(failure.error, PowerError::Store(_)));
@@ -1024,6 +1346,377 @@ mod tests {
     }
 
     #[test]
+    fn startup_keeps_another_profile_only_for_exact_live_process_identity() {
+        let (dir, store) = test_store("recover-live");
+        let backend = FakePmset::new(true);
+        let identity = process_identity(501, 100, 7);
+        store
+            .write(&recovery_state(
+                false,
+                "boot-test",
+                [recovery_lease("dev", 42, &identity, 1_000)],
+            ))
+            .unwrap();
+
+        assert_eq!(
+            recover_with(&backend, &store, &FakeProcesses::exact(42, identity), 100).unwrap(),
+            RecoveryOutcome::KeptForLiveLease
+        );
+        assert_eq!(store.read().unwrap().unwrap().leases.len(), 1);
+        assert!(!backend
+            .trace
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|step| step.starts_with("set:")));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn startup_removes_stale_sibling_while_exact_live_lease_stays() {
+        let (dir, store) = test_store("recover-mixed");
+        let backend = FakePmset::new(true);
+        let live_identity = process_identity(501, 100, 7);
+        store
+            .write(&recovery_state(
+                false,
+                "boot-test",
+                [
+                    recovery_lease("prod", 41, process_identity(501, 90, 1), 1_000),
+                    recovery_lease("dev", 42, &live_identity, 1_000),
+                ],
+            ))
+            .unwrap();
+        let processes = FakeProcesses::missing(41).with(42, ProcessAnswer::Identity(live_identity));
+
+        assert_eq!(
+            recover_with(&backend, &store, &processes, 100).unwrap(),
+            RecoveryOutcome::KeptForLiveLease
+        );
+        let state = store.read().unwrap().unwrap();
+        assert_eq!(state.leases.len(), 1);
+        assert_eq!(state.leases[0].profile, "dev");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn startup_restores_last_stale_mutating_lease_from_tombstone() {
+        let (dir, store) = test_store("recover-last-stale");
+        let backend = FakePmset::new(true);
+        store
+            .write(&recovery_state(
+                false,
+                "boot-test",
+                [recovery_lease(
+                    "prod",
+                    42,
+                    process_identity(501, 100, 7),
+                    1_000,
+                )],
+            ))
+            .unwrap();
+
+        assert_eq!(
+            recover_with(&backend, &store, &FakeProcesses::missing(42), 100).unwrap(),
+            RecoveryOutcome::Restored(false)
+        );
+        assert!(!backend.current());
+        assert!(store.read().unwrap().is_none());
+        assert!(backend
+            .trace
+            .lock()
+            .unwrap()
+            .windows(3)
+            .any(|steps| steps == ["preflight:1", "set:0", "read:0"]));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reused_pid_with_different_start_identity_is_stale() {
+        let (dir, store) = test_store("recover-pid-reuse");
+        let backend = FakePmset::new(true);
+        store
+            .write(&recovery_state(
+                false,
+                "boot-test",
+                [recovery_lease(
+                    "prod",
+                    42,
+                    process_identity(501, 100, 7),
+                    1_000,
+                )],
+            ))
+            .unwrap();
+
+        assert_eq!(
+            recover_with(
+                &backend,
+                &store,
+                &FakeProcesses::exact(42, process_identity(501, 101, 7)),
+                100,
+            )
+            .unwrap(),
+            RecoveryOutcome::Restored(false)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn zombie_snapshot_is_proven_stale() {
+        assert_eq!(
+            process_identity_from_snapshot(ProcessSnapshot {
+                status: PROCESS_STATUS_ZOMBIE,
+                uid: 501,
+                start_sec: 100,
+                start_usec: 7,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn cross_boot_registry_cannot_retain_even_matching_process() {
+        let (dir, store) = test_store("recover-cross-boot");
+        let backend = FakePmset::new(true);
+        let identity = process_identity(501, 100, 7);
+        store
+            .write(&recovery_state(
+                false,
+                "old-boot",
+                [recovery_lease("prod", 42, &identity, 1_000)],
+            ))
+            .unwrap();
+
+        assert_eq!(
+            recover_with(&backend, &store, &FakeProcesses::exact(42, identity), 100).unwrap(),
+            RecoveryOutcome::Restored(false)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn expired_dead_or_reused_pid_is_stale_but_expired_exact_live_blocks() {
+        for (label, processes) in [
+            ("dead", FakeProcesses::missing(42)),
+            (
+                "reused",
+                FakeProcesses::exact(42, process_identity(501, 101, 7)),
+            ),
+        ] {
+            let (dir, store) = test_store(label);
+            let backend = FakePmset::new(true);
+            store
+                .write(&recovery_state(
+                    false,
+                    "boot-test",
+                    [recovery_lease(
+                        "prod",
+                        42,
+                        process_identity(501, 100, 7),
+                        99,
+                    )],
+                ))
+                .unwrap();
+            assert_eq!(
+                recover_with(&backend, &store, &processes, 100).unwrap(),
+                RecoveryOutcome::Restored(false)
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        let (dir, store) = test_store("expired-live");
+        let backend = FakePmset::new(true);
+        let identity = process_identity(501, 100, 7);
+        let state = recovery_state(
+            false,
+            "boot-test",
+            [recovery_lease("prod", 42, &identity, 99)],
+        );
+        store.write(&state).unwrap();
+        let before = std::fs::read(dir.join("ownership.json")).unwrap();
+
+        assert_eq!(
+            recover_with(&backend, &store, &FakeProcesses::exact(42, identity), 100).unwrap(),
+            RecoveryOutcome::BlockedExpiredLiveLease
+        );
+        assert_eq!(std::fs::read(dir.join("ownership.json")).unwrap(), before);
+        assert!(backend.trace.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unknown_provisional_identity_and_inspector_ambiguity_block_unchanged() {
+        for (label, identity, processes) in [
+            (
+                "unknown-identity",
+                "42:100".to_string(),
+                FakeProcesses::exact(42, "42:100"),
+            ),
+            (
+                "ambiguous-inspector",
+                process_identity(501, 100, 7),
+                FakeProcesses::ambiguous(42),
+            ),
+        ] {
+            let (dir, store) = test_store(label);
+            let backend = FakePmset::new(true);
+            store
+                .write(&recovery_state(
+                    false,
+                    "boot-test",
+                    [recovery_lease("prod", 42, identity, 1_000)],
+                ))
+                .unwrap();
+            let before = std::fs::read(dir.join("ownership.json")).unwrap();
+
+            assert!(matches!(
+                recover_with(&backend, &store, &processes, 100),
+                Err(PowerError::InvalidState(_))
+            ));
+            assert_eq!(std::fs::read(dir.join("ownership.json")).unwrap(), before);
+            assert!(backend.trace.lock().unwrap().is_empty());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn corrupt_schema_and_semantic_registry_remain_byte_for_byte() {
+        let cases = [
+            ("json", b"{".as_slice()),
+            (
+                "schema",
+                br#"{"schemaVersion":99,"bootId":"boot-test","baseline":false,"applied":true,"didMutate":true,"generation":1,"leases":[]}"#
+                    .as_slice(),
+            ),
+            (
+                "semantic",
+                br#"{"schemaVersion":1,"bootId":"","baseline":false,"applied":true,"didMutate":true,"generation":1,"leases":[]}"#
+                    .as_slice(),
+            ),
+        ];
+        for (label, bytes) in cases {
+            let (dir, store) = test_store(label);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("ownership.json"), bytes).unwrap();
+            let backend = FakePmset::new(false);
+
+            assert!(recover_with(&backend, &store, &FakeProcesses::default(), 100).is_err());
+            assert_eq!(std::fs::read(dir.join("ownership.json")).unwrap(), bytes);
+            assert!(backend.trace.lock().unwrap().is_empty());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn recovery_failure_leaves_zero_lease_tombstone_for_retry() {
+        for (label, backend) in [
+            ("preflight", FakePmset::without_rollback(true)),
+            ("set", FakePmset::failing_first_set(true)),
+        ] {
+            let (dir, store) = test_store(label);
+            store
+                .write(&recovery_state(
+                    false,
+                    "boot-test",
+                    [recovery_lease(
+                        "prod",
+                        42,
+                        process_identity(501, 100, 7),
+                        1_000,
+                    )],
+                ))
+                .unwrap();
+
+            assert!(recover_with(&backend, &store, &FakeProcesses::missing(42), 100).is_err());
+            let pending = store.read().unwrap().unwrap();
+            assert!(pending.leases.is_empty());
+            assert!(pending.did_mutate);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn recovery_readback_error_or_mismatch_keeps_tombstone_evidence() {
+        for (label, backend) in [
+            ("readback-error", ReadbackFailurePmset::error()),
+            ("readback-mismatch", ReadbackFailurePmset::mismatch()),
+        ] {
+            let (dir, store) = test_store(label);
+            store
+                .write(&recovery_state(
+                    false,
+                    "boot-test",
+                    [recovery_lease(
+                        "prod",
+                        42,
+                        process_identity(501, 100, 7),
+                        1_000,
+                    )],
+                ))
+                .unwrap();
+
+            assert!(recover_with(&backend, &store, &FakeProcesses::missing(42), 100).is_err());
+            let pending = store.read().unwrap().unwrap();
+            assert!(pending.leases.is_empty());
+            assert!(pending.did_mutate);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn recovery_of_baseline_true_never_writes_disablesleep_zero() {
+        let (dir, store) = test_store("recover-baseline-on");
+        let backend = FakePmset::new(true);
+        store
+            .write(&recovery_state(
+                true,
+                "boot-test",
+                [recovery_lease(
+                    "prod",
+                    42,
+                    process_identity(501, 100, 7),
+                    1_000,
+                )],
+            ))
+            .unwrap();
+
+        assert_eq!(
+            recover_with(&backend, &store, &FakeProcesses::missing(42), 100).unwrap(),
+            RecoveryOutcome::BaselineUnchanged(true)
+        );
+        assert!(!backend
+            .trace
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|step| step == "set:0"));
+        assert!(store.read().unwrap().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_marker_is_observation_only_even_when_backend_would_error() {
+        for (label, bytes) in [
+            ("present", br#"{"armed":true}"#.as_slice()),
+            ("corrupt", b"{".as_slice()),
+        ] {
+            let (dir, _) = test_store(label);
+            std::fs::create_dir_all(&dir).unwrap();
+            let marker = dir.join("clamshell.json");
+            std::fs::write(&marker, bytes).unwrap();
+            let backend = FakePmset::failing_first_set(false);
+
+            assert_eq!(
+                recover_legacy_with(&backend, &marker).unwrap(),
+                RecoveryOutcome::BlockedLegacyRepair
+            );
+            assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+            assert!(backend.trace.lock().unwrap().is_empty());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
     fn corrupt_registry_blocks_mutation() {
         let (dir, store) = test_store("corrupt");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1048,8 +1741,7 @@ mod tests {
     fn semantically_invalid_registry_blocks_join_and_release() {
         let (dir, store) = test_store("invalid-semantics");
         let backend = FakePmset::new(true);
-        let mut invalid =
-            crate::power::ownership::OwnershipState::new(false, "boot-test", 1);
+        let mut invalid = crate::power::ownership::OwnershipState::new(false, "boot-test", 1);
         invalid.did_mutate = false;
         invalid.acquire(test_lease("prod", "generation"));
         store.write(&invalid).unwrap();
@@ -1087,22 +1779,6 @@ mod tests {
             LegacyMarkerState::Corrupt
         );
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn ambiguous_legacy_marker_never_authorizes_disabling_sleep() {
-        assert_eq!(
-            decide_legacy_marker(Some(true)),
-            LegacyMarkerDecision::BlockedRepair
-        );
-        assert_eq!(
-            decide_legacy_marker(None),
-            LegacyMarkerDecision::BlockedRepair
-        );
-        assert_eq!(
-            decide_legacy_marker(Some(false)),
-            LegacyMarkerDecision::ClearMarker
-        );
     }
 
     #[test]

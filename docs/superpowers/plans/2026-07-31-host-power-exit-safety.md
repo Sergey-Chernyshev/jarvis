@@ -510,7 +510,7 @@ git commit -m "fix(shutdown): restore power before subsystem teardown"
 - Test: `src-tauri/src/power/clamshell.rs`
 - Test: `src-tauri/src/power/mod.rs`
 
-- [ ] **Step 1: Write failing recovery tests**
+- [x] **Step 1: Write failing recovery tests**
 
 Cover a stale mutating lease, another live profile lease, PID reuse,
 cross-boot state, expiry, a corrupt registry and the old profile-local marker:
@@ -562,7 +562,7 @@ fn ambiguous_legacy_marker_is_never_mutated_or_cleared_automatically() {
 }
 ```
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run:
 
@@ -572,7 +572,7 @@ cargo test --manifest-path src-tauri/Cargo.toml power::clamshell --no-default-fe
 
 Expected: recovery tests fail because `recover_with` is missing.
 
-- [ ] **Step 3: Run recovery at the start of Tauri setup**
+- [x] **Step 3: Run recovery at the start of Tauri setup**
 
 Implement `recover_with` using `OwnershipState::recover` and an injected
 `ProcessInspector`. On Darwin, process identity is derived from
@@ -596,13 +596,13 @@ baseline proof, so present/corrupt markers are observation-only blocked repair
 states and are never automatically mutated or deleted.
 
 Add
-`clamshell::recover_on_startup()` immediately after
+`power::recover_on_startup()` immediately after
 `install::prepare_clean_start()` and before settings, bundled-plugin install,
 Daemon creation and the `is_headless()` early return. Log each explicit
 outcome; leave corrupt/unrestorable state intact and expose a repairable health
 error instead of arming again.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run:
 
@@ -613,7 +613,7 @@ cargo test --manifest-path src-tauri/Cargo.toml shutdown:: --no-default-features
 
 Expected: all focused tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/power/clamshell.rs src-tauri/src/power/mod.rs src-tauri/src/main.rs

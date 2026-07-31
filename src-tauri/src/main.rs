@@ -267,6 +267,15 @@ fn main() {
                 io::Error::new(io::ErrorKind::AlreadyExists, format!("Jarvis profile already running: {err}"))
             })?;
 
+            // Machine-global power ownership must be reconciled before any
+            // headless/UI branch or subsystem construction. Failure is
+            // fail-closed for later arm, but never prevents Jarvis startup.
+            let power_recovery = power::recover_on_startup();
+            crate::log::line(&format!(
+                "[power] startup recovery {}",
+                power_recovery.summary()
+            ));
+
             // миграция схемы settings.json ДО первого чтения настроек (Daemon::new
             // их читает). Сейчас no-op v0→v1; задел под ломающие изменения формата.
             settings::Store::new().migrate_on_startup();

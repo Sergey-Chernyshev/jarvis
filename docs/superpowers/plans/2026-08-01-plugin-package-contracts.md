@@ -8,14 +8,17 @@ catalog trust chain, durable install receipts, transactional package manager, De
 keeping the current Agent VM usable through an explicit legacy bridge.
 
 **Architecture:** Three host-independent crates own the public wire/manifest DTOs, plugin author SDK and executable test
-host. Jarvis Core owns verification, immutable package storage and a receipt-backed resolver; all CLI and future UI
-operations call the same `PluginManager` service and return durable `Operation` records. Existing Manifest v1 Agent VM
-remains a narrowly scoped compatibility source until Increment E imports its data and writes a v2 receipt; a present but
-invalid v2 receipt never silently falls back to legacy code.
+host. A fourth, private `publish = false` crate owns the deterministic package engine behind a thin Jarvis adapter;
+only `src-tauri` may depend on it. Jarvis Core owns trust policy, immutable package storage and a receipt-backed
+resolver; all CLI and future UI operations call the same `PluginManager` service and return durable `Operation`
+records. Existing Manifest v1 Agent VM remains a narrowly scoped compatibility source until Increment E imports its
+data and writes a v2 receipt; a present but invalid v2 receipt never silently falls back to legacy code.
 
-**Tech Stack:** Rust 2021/MSRV 1.77.2, `serde`/JSON Schema, SemVer, JCS canonical JSON, SHA-256, Ed25519, deterministic
-uncompressed tar archives, SQLite/WAL for operation journaling, Axum/Tauri IPC, Node boundary tests, existing
-PluginHost supervision and Darwin `posix_spawn` with an inherited verified file descriptor.
+**Tech Stack:** Rust 2021 with real Rust 1.77.2 gates for the three public crates and the isolated private package
+crate, current-stable Rust for the integrated Tauri host, `serde`/JSON Schema, SemVer, JCS canonical JSON, SHA-256,
+Ed25519 trust verification in A4, deterministic uncompressed tar archives, SQLite/WAL for operation journaling,
+Axum/Tauri IPC, Node boundary tests, existing PluginHost supervision and Darwin `posix_spawn` with an inherited
+verified file descriptor. Increment A makes no whole-host or WASI MSRV claim.
 
 **Approved design:** `docs/superpowers/specs/2026-07-31-plugin-platform-agent-vm-v2-design.md` §§3, 5–7, 12, 23, 25.1,
 26 Increment A.
@@ -82,10 +85,17 @@ Increment A must not create or mutate that lock file.
 - `schemas/plugin-package-v1.schema.json` — strict `package.json` schema.
 - `schemas/plugin-catalog-v1.schema.json` — strict catalog envelope/payload schema.
 
+### Private host-support surface
+
+- `crates/jarvis-package/` — `publish = false` deterministic package pack/inspect/extract engine, with its own
+  committed lockfile and Rust 1.77.2 test/clippy gates. It is not a plugin-author API, only `src-tauri` may depend on
+  it, and its single unsafe island is the allowlisted macOS directory-iteration wrapper.
+
 ### Jarvis-owned implementation
 
 - `src-tauri/src/plugins/manifest_v2.rs` — bounded schema validation and source-template target resolution.
-- `src-tauri/src/plugins/package/` — deterministic pack, safe archive inspection/extraction and file hashing.
+- `src-tauri/src/plugins/package.rs` — thin host adapter from Manifest v2 and A4 trust services into
+  `jarvis-package`; no archive, hashing, source-walk or extraction implementation lives here.
 - `src-tauri/src/plugins/trust/` — catalog freshness, root/publisher signatures, rotations and revocations.
 - `src-tauri/src/plugins/package_manager/{paths,receipt,operation,lock}.rs` — neutral durable storage primitives and
   typed filesystem observations; these modules never decide a lifecycle result.
@@ -479,26 +489,28 @@ public-secret guards.
 - Create: `crates/jarvis-plugin-protocol/schema/plugin-package-v1.schema.json`
 - Create: `crates/jarvis-plugin-protocol/schema/plugin-package-signature-v1.schema.json`
 - Create: `crates/jarvis-plugin-protocol/src/package.rs`
-- Create: `src-tauri/src/plugins/package/mod.rs`
-- Create: `src-tauri/src/plugins/package/pack.rs`
-- Create: `src-tauri/src/plugins/package/source.rs`
-- Create: `src-tauri/src/plugins/package/spool.rs`
-- Create: `src-tauri/src/plugins/package/archive.rs`
-- Create: `src-tauri/src/plugins/package/extract.rs`
-- Create: `src-tauri/src/plugins/package/hash.rs`
-- Create: `src-tauri/src/plugins/package/jcs.rs`
-- Create: `src-tauri/tests/fixtures/plugin-packages/pack-source/plugin.json`
-- Create: `src-tauri/tests/fixtures/plugin-packages/pack-source/ui/index.html`
-- Create: `src-tauri/tests/fixtures/plugin-packages/pack-source/schemas/message.schema.json`
-- Create: `src-tauri/tests/fixtures/plugin-packages/golden/darwin-arm64.jarvis-plugin`
-- Create: `src-tauri/tests/fixtures/plugin-packages/golden/darwin-arm64.sha256`
-- Create: `src-tauri/tests/fixtures/plugin-trust/README.md`
-- Create: `src-tauri/tests/fixtures/plugin-trust/package-test-signing-seed.hex`
-- Create: `src-tauri/tests/fixtures/plugin-trust/package-test-public-key.hex`
-- Create: `src-tauri/tests/plugin_package_dependency_msrv.rs`
+- Create: `crates/jarvis-package/Cargo.toml`
+- Create: `crates/jarvis-package/Cargo.lock`
+- Create: `crates/jarvis-package/src/lib.rs`
+- Create: `crates/jarvis-package/src/pack.rs`
+- Create: `crates/jarvis-package/src/source.rs`
+- Create: `crates/jarvis-package/src/spool.rs`
+- Create: `crates/jarvis-package/src/archive.rs`
+- Create: `crates/jarvis-package/src/extract.rs`
+- Create: `crates/jarvis-package/src/hash.rs`
+- Create: `crates/jarvis-package/src/jcs.rs`
+- Create: `crates/jarvis-package/src/macos_dir.rs`
+- Create: `crates/jarvis-package/src/dependency_msrv.rs`
+- Create: `crates/jarvis-package/tests/fixtures/plugin-packages/pack-source/plugin.json`
+- Create: `crates/jarvis-package/tests/fixtures/plugin-packages/pack-source/ui/index.html`
+- Create: `crates/jarvis-package/tests/fixtures/plugin-packages/pack-source/schemas/message.schema.json`
+- Create: `crates/jarvis-package/tests/fixtures/plugin-packages/golden/darwin-arm64.jarvis-plugin`
+- Create: `crates/jarvis-package/tests/fixtures/plugin-packages/golden/darwin-arm64.sha256`
+- Create: `src-tauri/src/plugins/package.rs`
 - Modify: `crates/jarvis-plugin-protocol/src/lib.rs`
 - Modify: `crates/jarvis-plugin-protocol/src/manifest.rs`
 - Modify: `crates/jarvis-plugin-protocol/Cargo.toml`
+- Modify: `crates/jarvis-plugin-protocol/Cargo.lock`
 - Modify: `crates/jarvis-plugin-sdk/Cargo.lock`
 - Modify: `crates/jarvis-plugin-test-host/Cargo.lock`
 - Modify: `src-tauri/src/plugins/mod.rs`
@@ -506,63 +518,120 @@ public-secret guards.
 - Modify: `src-tauri/Cargo.lock`
 - Modify: `scripts/check-plugin-boundaries.sh`
 - Modify: `scripts/check-plugin-boundaries.test.sh`
+- Modify: `.github/workflows/ci.yml`
 
 This task owns the package wire format, byte-for-byte archive profile, bounded parser and quarantine extraction. It
-does **not** decide whether a signer is trusted. A4 owns trust, catalog and revocation checks and is the only production
-implementation of the verification callback defined below. A3 supplies the low-level same-fd verified extraction
-primitive; A5 supplies durable path/receipt/journal/lock primitives and typed durability observations only, without
-translating them into lifecycle outcomes. A6 owns every lifecycle invocation of verification/extraction, the final
-version-directory rename, `current` activation and all crash/recovery verdicts.
+does **not** decide whether a signer is trusted and contains no cryptographic implementation. A4 owns Ed25519, trust,
+catalog and revocation checks and is the only production implementation of the verification callback defined below.
+A3 supplies the low-level same-fd verified extraction primitive; A5 supplies durable path/receipt/journal/lock
+primitives and typed durability observations only, without translating them into lifecycle outcomes. A6 owns every
+lifecycle invocation of verification/extraction, the final version-directory rename, `current` activation and all
+crash/recovery verdicts.
 
-- [ ] **Step 1: Pin the dependency and MSRV surface before writing format code**
+`jarvis-package` is deliberately private rather than another `jarvis-plugin-*` crate. The three
+`jarvis-plugin-*` crates are public author-facing surfaces and remain fully safe; the package engine is host support,
+has one macOS unsafe island and must never become a plugin dependency.
 
-Use these exact direct dependencies and features:
+- [ ] **Step 1: Isolate and pin the dependency/MSRV surface before writing format code**
+
+First create a minimal private crate skeleton with only its package metadata, path dependency on the protocol crate,
+`#![deny(unsafe_code)]` in `src/lib.rs`, and the dependency probe below. The package manifest starts with:
+
+```toml
+[package]
+name = "jarvis-package"
+version = "0.1.0"
+description = "Private deterministic package engine for Jarvis"
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.2"
+publish = false
+
+[dependencies]
+jarvis-plugin-protocol = { version = "0.1.0", path = "../jarvis-plugin-protocol" }
+```
+
+Generate its initial committed lock and run the probe before adding any A3 library:
+
+```bash
+cargo +1.77.2 generate-lockfile --manifest-path crates/jarvis-package/Cargo.toml
+cargo +1.77.2 test --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  dependency_msrv::exact_dependency_apis_execute -- --exact --nocapture
+```
+
+Expected: FAIL with unresolved A3 dependency/API imports from this isolated crate, not while parsing an unrelated
+Tauri dependency.
+
+Then use these exact direct dependencies and features:
 
 ```toml
 # crates/jarvis-plugin-protocol/Cargo.toml
 unicode-normalization = { version = "=0.1.24", default-features = false, features = ["std"] }
 
-# src-tauri/Cargo.toml [dependencies]
+# crates/jarvis-package/Cargo.toml [dependencies]
+jarvis-plugin-protocol = { version = "0.1.0", path = "../jarvis-plugin-protocol" }
 base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
 caseless = "=0.2.2"
+getrandom = { version = "=0.3.4", default-features = false }
 libc = { version = "=0.2.186", default-features = false, features = ["std"] }
 rustix = { version = "=1.1.4", default-features = false, features = ["fs", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 serde_json_canonicalizer = "=0.3.2"
 sha2 = { version = "=0.10.9", default-features = false, features = ["std"] }
 tar = { version = "=0.4.46", default-features = false }
-tempfile = { version = "=3.27.0", default-features = false, features = ["getrandom"] }
+tempfile = { version = "=3.24.0", default-features = false, features = ["getrandom"] }
 unicode-normalization = { version = "=0.1.24", default-features = false, features = ["std"] }
 
-# src-tauri/Cargo.toml [dev-dependencies]
-ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["fast", "std", "zeroize"] }
+# src-tauri/Cargo.toml [dependencies] — the only A3 host dependency
+jarvis-package = { path = "../crates/jarvis-package" }
 ```
+
+`getrandom 0.3.4` is a normal exact dependency, not a dev-only or lock-only accident; it constrains and probes the
+random API used by the pinned tempfile surface. Do not add `uuid`, pin/downgrade `image`, `indexmap`, Tauri or any
+other host dependency. Do not add `ed25519-dalek` anywhere in A3. A4 adds real Ed25519 verification to the host after
+the package-format boundary is green.
 
 `tar` is permitted only for `tar::Header::new_gnu()` and low-level `Builder::append()` when producing a stream.
 Production code must not call `append_path`, `append_file`, `append_dir_all`, `Archive::entries`, `Entry::unpack` or
 `Archive::unpack`; those APIs infer metadata or interpret extensions outside this profile. `tempfile` owns the
-unlinked spool. `rustix` owns fd-relative filesystem calls. The only A3 `libc` use is a small macOS-only RAII wrapper
-around `fdopendir`/`readdir`, because `rustix` does not expose macOS directory iteration.
+unlinked spool. `rustix` owns fd-relative filesystem calls.
 
-Keep the protocol, SDK, test-host and host at their declared `rust-version = "1.77.2"`. `ed25519-dalek` 2.1.1 has
-MSRV 1.60 and is test-only in A3; A4 promotes the same exact version and feature set to a host production dependency.
-JCS, tar, filesystem and signature libraries must not enter the protocol, SDK or test-host normal dependency graphs.
+The crate root is exactly `#![deny(unsafe_code)]`. The only override is:
 
-Because not every selected crate declares reliable MSRV metadata, add
-`src-tauri/tests/plugin_package_dependency_msrv.rs`. It must compile and call the exact A3 APIs used from base64,
-caseless, rustix/fs, serde_json_canonicalizer, sha2, tar, tempfile, unicode-normalization and the test-only
-ed25519-dalek signer; a type-only unused import is insufficient. Do not claim the host MSRV is preserved until this
-target and the integrated host have actually compiled with Rust 1.77.2. If either fails, choose an older compatible
-exact version and repeat the gate; do not silently raise the declared MSRV in A3.
+```rust
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod macos_dir;
 
-After adding the probe but before adding the Cargo dependencies, run:
-
-```bash
-cargo +1.77.2 test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  --test plugin_package_dependency_msrv
+#[cfg(test)]
+mod dependency_msrv;
 ```
 
-Expected: FAIL with unresolved A3 dependency/API imports. Then add the exact Cargo entries above, update each committed
-lockfile without changing unrelated versions, and run:
+`macos_dir.rs` is a tiny safe RAII wrapper around `fdopendir`/`readdir`/`closedir` operating on an owned duplicate
+directory fd, because `rustix` does not expose macOS directory iteration. Its safe entry point is `pub(crate)`, not
+part of the crate's external API, so both production source walking and crate-unit tests exercise the same wrapper.
+No other Rust source or build script anywhere in the private crate may contain `#[allow(unsafe_code)]`, an `unsafe fn`
+or an `unsafe { ... }` block.
+
+`crates/jarvis-package/src/dependency_msrv.rs` is a crate-unit probe compiled only through the `#[cfg(test)]` module
+above and defines the test `exact_dependency_apis_execute`. It must compile and execute the exact A3 APIs used from
+base64, caseless, getrandom (`getrandom::fill`), rustix/fs, serde_json_canonicalizer, sha2, tar, tempfile and
+unicode-normalization, plus the real crate-private safe entry point from the macOS libc wrapper. It must not copy or
+introduce any unsafe directory-iteration code. A type-only unused import is insufficient. The fd-relative size
+assertion uses the explicit Rust 1.77-compatible cast:
+
+```rust
+assert_eq!(
+    path_stat.st_size,
+    b"jarvis-plugin".len() as libc::off_t,
+);
+```
+
+There is no signer call in the probe. Package-signature bytes are opaque to A3; cryptographic verification belongs to
+A4.
+
+Update all four committed public/private locks without changing unrelated versions:
 
 ```bash
 cargo +1.77.2 update --manifest-path crates/jarvis-plugin-protocol/Cargo.toml \
@@ -571,23 +640,89 @@ cargo +1.77.2 update --manifest-path crates/jarvis-plugin-sdk/Cargo.toml \
   -p unicode-normalization --precise 0.1.24
 cargo +1.77.2 update --manifest-path crates/jarvis-plugin-test-host/Cargo.toml \
   -p unicode-normalization --precise 0.1.24
-cargo +1.77.2 update --manifest-path src-tauri/Cargo.toml \
-  -p unicode-normalization --precise 0.1.24
+cargo +1.77.2 generate-lockfile --manifest-path crates/jarvis-package/Cargo.toml
+cargo +1.77.2 update --manifest-path crates/jarvis-package/Cargo.toml \
+  -p getrandom --precise 0.3.4
+```
+
+Add only the `jarvis-package` path dependency to the host manifest, let current-stable Cargo add that path package to
+`src-tauri/Cargo.lock`, and inspect the lock diff before continuing:
+
+```bash
+cargo check --manifest-path src-tauri/Cargo.toml --no-default-features
+git diff -- src-tauri/Cargo.lock
+```
+
+Expected: no existing registry package version changes; in particular there is no `uuid`, `image`, `tiff`,
+`indexmap`, `hashbrown`, TOML or Tauri downgrade.
+
+Extend `scripts/check-plugin-boundaries.sh` and its negative-fixture test so all of these are enforced:
+
+1. only `src-tauri/Cargo.toml` may declare a dependency whose package name is `jarvis-package` or whose path resolves
+   to `crates/jarvis-package`;
+2. the public protocol, SDK and test-host manifests and every `plugins/*/Cargo.toml` are explicitly rejected if they
+   depend on `jarvis-package`;
+3. `crates/jarvis-package/Cargo.toml` has `publish = false`, `edition = "2021"` and
+   `rust-version = "1.77.2"`;
+4. `crates/jarvis-package/src/lib.rs` has `#![deny(unsafe_code)]`;
+5. `#[allow(unsafe_code)]` and unsafe syntax anywhere in `crates/jarvis-package` — including `src`, `tests`,
+   `examples`, `benches` and `build.rs` if present — occur only in the exact
+   `crates/jarvis-package/src/macos_dir.rs` allowlist;
+6. the existing `jarvis-plugin-*` public-crate checks continue to require `#![forbid(unsafe_code)]`.
+
+Negative fixtures cover a public crate, a plugin and an unrelated private crate attempting the dependency, a
+publishable `jarvis-package`, and unsafe code or an unsafe allow in `src`, an integration test and `build.rs` outside
+the exact wrapper. The clean fixture includes the one allowed `src-tauri -> jarvis-package` edge and macOS wrapper.
+
+Add current-stable package test/clippy steps to the normal `rust` CI job. In the existing `plugin-msrv` macOS job,
+install the Rust 1.77.2 `clippy` component and add the same exact locked package commands:
+
+```bash
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml --all-targets
+cargo clippy --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  --all-targets -- -D warnings
+
+cargo +1.77.2 test --locked --manifest-path crates/jarvis-package/Cargo.toml --all-targets
+cargo +1.77.2 clippy --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  --all-targets -- -D warnings
+```
+
+The first pair is the current-stable local/CI gate; the second pair is the real MSRV gate. Both use the private
+crate's committed lock. Keep the existing public-crate MSRV commands. The host adapter is compiled/tested only on
+current stable; A3 does not add a Rust 1.77.2 host command and makes no WASI MSRV claim.
+
+Run the focused foundation gate:
+
+```bash
 cargo +1.77.2 check --locked --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
 cargo +1.77.2 check --locked --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
 cargo +1.77.2 check --locked --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
-cargo +1.77.2 test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
-  --test plugin_package_dependency_msrv
-cargo +1.77.2 check --locked --manifest-path src-tauri/Cargo.toml --no-default-features
-cargo tree --manifest-path crates/jarvis-plugin-protocol/Cargo.toml -e normal
-cargo tree --locked --manifest-path src-tauri/Cargo.toml \
-  -i unicode-normalization@0.1.24
-! cargo tree --locked --manifest-path src-tauri/Cargo.toml \
-  | rg 'unicode-normalization v0\\.1\\.25'
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  dependency_msrv::exact_dependency_apis_execute -- --exact --nocapture
+cargo +1.77.2 test --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  dependency_msrv::exact_dependency_apis_execute -- --exact --nocapture
+cargo tree --locked --manifest-path crates/jarvis-package/Cargo.toml -e normal
+cargo tree --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  -i getrandom@0.3.4
+! cargo tree --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  | rg 'getrandom v0\\.4|ed25519-dalek|base64ct|zeroize'
+cargo tree --locked --manifest-path crates/jarvis-plugin-protocol/Cargo.toml -e normal
+npm run test:plugin-boundaries
+npm run check:plugin-boundaries
 ```
 
-Expected after the edit: every command exits `0`; the public protocol tree contains `unicode-normalization 0.1.24` but none of
-`tar`, `rustix`, `libc`, `tempfile`, `sha2`, `base64`, `caseless`, `serde_json_canonicalizer` or `ed25519-dalek`.
+Expected: every command exits `0`; the package tree contains only the approved direct surface and compatible
+transitives, and the public protocol tree contains `unicode-normalization 0.1.24` but none of `tar`, `rustix`, `libc`,
+`tempfile`, `sha2`, `base64`, `caseless`, `getrandom`, `serde_json_canonicalizer` or `ed25519-dalek`.
+
+**Evidence for replacing the old host probe:** the rejected design put the probe under `src-tauri` and therefore asked
+Cargo 1.77.2 to parse the entire floating Tauri host lock before it could compile one A3 import. The blocked run failed
+first on unrelated Edition-2024 host packages and could reach A3 only by experimenting with UUID, image and indexmap
+downgrades. A fresh independent macOS audit also found `tempfile 3.27.0` selecting Edition-2024
+`getrandom 0.4.3`, while the Ed25519 test lock selected Edition-2024 `base64ct 1.8.3`/`zeroize 1.9`. With
+`tempfile 3.24.0`, normal exact `getrandom 0.3.4` and no Ed25519 dependency, real Cargo/rustc 1.77.2 passed locked
+`--all-targets` test and clippy for the isolated package crate. This is valid evidence for the A3 implementation
+surface; it is intentionally not evidence that the whole host or WASI supports Rust 1.77.2.
 
 - [ ] **Step 2: Add RED wire-schema, JCS and signature tests**
 
@@ -654,7 +789,7 @@ signature_requires_canonical_padded_base64_of_64_bytes
 package_metadata_round_trips_without_wire_field_drift
 ```
 
-In `src-tauri/src/plugins/package/jcs.rs`, add RED golden tests for RFC 8785 number formatting, JSON string escaping and
+In `crates/jarvis-package/src/jcs.rs`, add RED golden tests for RFC 8785 number formatting, JSON string escaping and
 UTF-16 property-name ordering, plus rejection tests for duplicate object keys, a BOM, trailing newline/whitespace and
 non-canonical property/number encodings. A valid raw `package.json` or `SIGNATURE` must equal the exact bytes produced
 by `serde_json_canonicalizer 0.3.2` after bounded parsing; syntactically equivalent non-JCS bytes are invalid.
@@ -667,17 +802,57 @@ Run:
 
 ```bash
 cargo test --manifest-path crates/jarvis-plugin-protocol/Cargo.toml package
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package::jcs::tests
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml jcs::tests
 ```
 
-Expected: FAIL first because the package module, schemas and JCS adapter do not exist.
+Expected: FAIL first because the private package engine, schemas and JCS adapter do not exist.
 
 - [ ] **Step 3: Implement the exact metadata, equality and hash contract**
 
 The source `plugin.json` is parsed with Manifest v2 limits, `${target}` is resolved to the selected
 `darwin-arm64`/`darwin-amd64` token, the resolved manifest is validated, then the concrete packaged `plugin.json` is
 written as exact JCS bytes. Packing options must explicitly provide `minimum_macos`; it is not inferred from the host.
+
+The private crate never reopens a manifest pathname and never imports Jarvis Core. It requires a
+`PackageDocumentAdapter` capability supplied by `src-tauri/src/plugins/package.rs`. The package engine passes the
+spooled source `plugin.json` bytes and target into that adapter; the adapter calls A2
+`validate_source_manifest`, returns the typed concrete manifest plus exact concrete JCS bytes, and later calls
+`validate_packaged_manifest` for inspected bytes. The same adapter validates the closed package/signature schemas
+before typed deserialization. Production pack/inspect APIs have no constructor or boolean flag that bypasses this
+adapter. Private-crate tests use exact bounded fixture adapters; current-stable host adapter tests prove the real A2
+schema and target-substitution path.
+
+The boundary is:
+
+```rust
+pub trait PackageDocumentAdapter {
+    fn resolve_source_manifest(
+        &self,
+        spooled_bytes: &[u8],
+        target: PackageTarget,
+    ) -> Result<ManifestV2, PackageError>;
+
+    fn validate_packaged_manifest(
+        &self,
+        canonical_bytes: &[u8],
+        target: PackageTarget,
+    ) -> Result<ManifestV2, PackageError>;
+
+    fn validate_package_metadata_schema(
+        &self,
+        canonical_bytes: &[u8],
+    ) -> Result<(), PackageError>;
+
+    fn validate_package_signature_schema(
+        &self,
+        canonical_bytes: &[u8],
+    ) -> Result<(), PackageError>;
+}
+```
+
+The private crate performs the bounded duplicate-key parse and JCS equality check before either schema callback, then
+typed-deserializes only after schema success. It canonicalizes the resolved typed source manifest itself, so the
+adapter never supplies unchecked output bytes.
 
 `PackageMetadataV1` must equal its packaged content:
 
@@ -711,33 +886,41 @@ ASCII bytes "jarvis-plugin-package-v1" || one NUL byte || exact canonical packag
 ```
 
 `SIGNATURE` is the exact JCS serialization of `PackageSignatureV1`, with no BOM, whitespace or newline. Replace the
-old hash-shaped fake signer with an Ed25519 fixture signer built from
-`package-test-signing-seed.hex`; commit only this explicitly test-only seed and its matching public key under
-`src-tauri/tests/fixtures/plugin-trust`. Its README must say the seed is public deterministic test material, is not a
-credential and is forbidden for release catalogs. Add tests for a fixed expected signature value, one-bit
-message/signature/key changes, field equality, file ordering, executable-mode selection, Merkle roots for
-one/two/three/five leaves and schema/runtime DTO equality.
+old hash-shaped fake signer with an opaque callback boundary. Packing supplies the exact domain-separated message to
+a caller-provided `PackageSignatureSource` and accepts only the returned validated `PackageSignatureV1`; A3 neither
+creates nor verifies a cryptographic signature. Production has no built-in signer. A3 tests use
+`FixedOpaqueSignature`, whose algorithm/key ID are fixed and whose value is canonical base64 of `[0xA5; 64]`. That
+fixture makes no authenticity claim and contains no key material. The exact fake verifier in Step 8 accepts only this
+fixed canonical signature plus the matching observation; one-bit message or signature changes fail. A4 replaces the
+test callback/verifier with real Ed25519 trust verification.
+
+Add tests for the fixed opaque signature value, one-bit message/signature changes, field equality, file ordering,
+executable-mode selection, Merkle roots for one/two/three/five leaves and schema/runtime DTO equality. There is no A3
+private/public signing seed and no key-change test.
 
 Run:
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package::hash::tests
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package::pack::tests::metadata_equals_concrete_manifest
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package::pack::tests::fixed_ed25519_signature_matches_golden
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml hash::tests
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  pack::tests::metadata_equals_concrete_manifest
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  pack::tests::fixed_opaque_signature_matches_golden
+cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::tests
 ```
 
-Expected after implementation: all commands exit `0`; no production private key or fixture signer is compiled outside
-`#[cfg(test)]`.
+Expected after implementation: all commands exit `0`; the host adapter contains only callback wiring/re-exports and
+no archive/JCS/hash/source/extract implementation, and no A3 target compiles a crypto library or key.
 
 - [ ] **Step 4: Add RED source-race tests, then build an fd-only immutable spool**
 
-`source.rs` and `spool.rs` must never use a pre-validated pathname later. Open the source root once as an `OwnedFd`
+`crates/jarvis-package/src/source.rs` and `spool.rs` must never use a pre-validated pathname later. Open the source
+root once as an `OwnedFd`
 with `RDONLY|DIRECTORY|NOFOLLOW|CLOEXEC` and retain its `fstat` identity. Enumerate through an isolated safe RAII
-wrapper around `fdopendir`/`readdir` operating on a duplicated directory fd. Only directories and regular files are
-allowed. Retain at most one fd per current recursion-depth component; the maximum depth is 64.
+wrapper from the allowlisted `macos_dir.rs` around `fdopendir`/`readdir` operating on a duplicated directory fd. Only
+directories and regular files are allowed. Retain at most one fd per current recursion-depth component; the maximum
+depth is 64.
 
 For each candidate, record normalized path plus device, inode, type, size, mtime and ctime from `fstatat` without
 following links; regular files must also have link count one. Compare full second and nanosecond timestamp fields, not
@@ -771,10 +954,10 @@ test-only barriers at the enumerate/open/copy boundaries.
 Run:
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package::source::tests -- --test-threads=1
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package::spool::tests -- --test-threads=1
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  source::tests -- --test-threads=1
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  spool::tests -- --test-threads=1
 ```
 
 Expected: RED until fd-relative snapshotting exists, then every race test is deterministic and passes 100 consecutive
@@ -782,8 +965,8 @@ iterations:
 
 ```bash
 for i in $(seq 1 100); do
-  cargo test --quiet --manifest-path src-tauri/Cargo.toml --no-default-features \
-    plugins::package::source::tests::source_parent_directory_swap_is_source_raced -- --exact
+  cargo test --quiet --locked --manifest-path crates/jarvis-package/Cargo.toml \
+    source::tests::source_parent_directory_swap_is_source_raced -- --exact
 done
 ```
 
@@ -849,11 +1032,11 @@ by an ignored `regenerate_package_golden` test. The normal test compares every b
 Run:
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package::pack::tests::gnu_header_profiles_are_byte_exact
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package::pack::tests::identical_input_matches_committed_archive_golden
-git diff --exit-code -- src-tauri/tests/fixtures/plugin-packages/golden
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  pack::tests::gnu_header_profiles_are_byte_exact
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  pack::tests::identical_input_matches_committed_archive_golden
+git diff --exit-code -- crates/jarvis-package/tests/fixtures/plugin-packages/golden
 ```
 
 Expected: the tests exit `0` and a normal test run never rewrites the goldens.
@@ -911,8 +1094,7 @@ archive_rejects_raw_and_logical_record_limits_plus_one
 Run:
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package::archive::tests
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml archive::tests
 ```
 
 Expected: RED before the manual state machine, then every malformed stream returns a stable `archive_*` code without
@@ -979,12 +1161,12 @@ suite must prove the same property through an allocation-counting reader without
 Run:
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package::archive::tests::unicode_collision_vectors
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package::archive::tests::all_limits_accept_exact_and_reject_plus_one
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package::archive::tests::inspection_memory_is_bounded
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  archive::tests::unicode_collision_vectors
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  archive::tests::all_limits_accept_exact_and_reject_plus_one
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  archive::tests::inspection_memory_is_bounded
 ```
 
 Expected: all commands exit `0`; limit failures are reported before any output file is created.
@@ -998,7 +1180,7 @@ payload Merkle root; and exact Manifest v2 identity, compatibility, state and na
 It then invokes:
 
 ```rust
-pub(crate) trait PackageTrustVerifier {
+pub trait PackageTrustVerifier {
     fn verify(
         &self,
         observation: &UntrustedPackageObservation<'_>,
@@ -1007,12 +1189,15 @@ pub(crate) trait PackageTrustVerifier {
 ```
 
 `UntrustedPackageObservation` contains exact canonical `package.json` and `SIGNATURE` bytes, physical archive digest
-and parsed metadata but exposes no method that can create trusted state. Only the package module can construct
+and parsed metadata but exposes no method that can create trusted state. The trait is public only because the
+unpublished private crate crosses into `src-tauri`; it is not a plugin API. Only `jarvis-package` can construct
 `VerifiedPackageEvidence`; its fields are private and it owns the same open `File`, the pass-1 observation and fd
 identity. Production has no permissive verifier: A4 supplies `CatalogPackageVerifier`; only `#[cfg(test)]` may supply a
-fixture verifier. Extend `check:plugin-boundaries` with a source guard that permits production
-`impl PackageTrustVerifier` only in `src-tauri/src/plugins/trust/package.rs` and permits fixture implementations only
-inside `#[cfg(test)]` modules.
+fixture verifier. A3's fixture verifier compares the complete observation to the fixed opaque signature/message/digest
+fixture and fails closed on any difference; it is not a cryptographic verifier. Extend `check:plugin-boundaries` with
+a source guard that permits a production `impl PackageTrustVerifier` only in
+`src-tauri/src/plugins/trust/package.rs` and permits fixture implementations only inside `#[cfg(test)]` modules in
+the private crate or host.
 
 A4 must verify the catalog/root/publisher lineage, rotation, freshness and revocation first, then require exact
 equality between the selected `CatalogRelease` and this observation for plugin ID, publisher, version, target,
@@ -1058,10 +1243,10 @@ Use compile-fail doctests or `trybuild` fixtures for the opaque-evidence constru
 adapters and barriers, never sleeps. Run:
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package::extract::tests
-cargo test --doc --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml extract::tests
+cargo test --locked --doc --manifest-path crates/jarvis-package/Cargo.toml
+cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::tests
 ```
 
 Expected: RED until the verifier/evidence split and same-fd two-pass path exist, then all commands exit `0`;
@@ -1072,25 +1257,30 @@ verification failure leaves no quarantine directory and no production caller can
 Run:
 
 ```bash
-cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo fmt --manifest-path crates/jarvis-package/Cargo.toml -- --check
 cargo +1.77.2 test --locked --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
 cargo +1.77.2 check --locked --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
 cargo +1.77.2 check --locked --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
 cargo +1.77.2 clippy --locked --manifest-path crates/jarvis-plugin-protocol/Cargo.toml \
   --all-targets -- -D warnings
-cargo +1.77.2 test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
-  --test plugin_package_dependency_msrv
-cargo +1.77.2 test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
-  plugins::package
-cargo +1.77.2 clippy --locked --manifest-path src-tauri/Cargo.toml \
-  --no-default-features --all-targets -- -D warnings
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml --all-targets
+cargo clippy --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  --all-targets -- -D warnings
+cargo +1.77.2 test --locked --manifest-path crates/jarvis-package/Cargo.toml --all-targets
+cargo +1.77.2 clippy --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  --all-targets -- -D warnings
+cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::tests
+git diff --exit-code -- crates/jarvis-package/tests/fixtures/plugin-packages/golden
+npm run test:plugin-boundaries
 npm run check:plugin-boundaries
 npm run check:public
 ```
 
 Expected: all commands exit `0`. The package test log includes the committed archive digest, exact/plus-one quota
-vectors, raw-parser failures, 100-iteration source races and same-fd mutation tests. `check:public` scans the documented
-test seed as public fixture material and finds no credential or production private key.
+vectors, raw-parser failures, 100-iteration source races and same-fd mutation tests. The current-stable host test
+proves the thin Manifest/A4 adapter compiles against the private crate. No command in this gate runs the Tauri host
+with Rust 1.77.2, and `check:public` finds no A3 signing key because A3 has none.
 
 - [ ] **Step 10: Commit**
 
@@ -1098,13 +1288,11 @@ test seed as public fixture material and finds no credential or production priva
 git add schemas/plugin-package-v1.schema.json schemas/plugin-package-signature-v1.schema.json \
   crates/jarvis-plugin-protocol \
   crates/jarvis-plugin-sdk/Cargo.lock crates/jarvis-plugin-test-host/Cargo.lock \
-  src-tauri/src/plugins/package src-tauri/src/plugins/mod.rs src-tauri/Cargo.toml \
-  src-tauri/Cargo.lock src-tauri/tests/fixtures/plugin-packages \
-  src-tauri/tests/fixtures/plugin-trust/README.md \
-  src-tauri/tests/fixtures/plugin-trust/package-test-signing-seed.hex \
-  src-tauri/tests/fixtures/plugin-trust/package-test-public-key.hex \
-  src-tauri/tests/plugin_package_dependency_msrv.rs scripts/check-plugin-boundaries.sh \
-  scripts/check-plugin-boundaries.test.sh
+  crates/jarvis-package \
+  src-tauri/src/plugins/package.rs src-tauri/src/plugins/mod.rs \
+  src-tauri/Cargo.toml src-tauri/Cargo.lock \
+  scripts/check-plugin-boundaries.sh scripts/check-plugin-boundaries.test.sh \
+  .github/workflows/ci.yml
 git diff --cached --check
 git commit -m "feat(plugins): add deterministic package format"
 ```
@@ -1123,7 +1311,9 @@ git commit -m "feat(plugins): add deterministic package format"
 - Create: `src-tauri/src/plugins/trust/catalog.rs`
 - Create: `src-tauri/src/plugins/trust/package.rs`
 - Create: `src-tauri/resources/plugin-trust-roots.json`
-- Modify: `src-tauri/tests/fixtures/plugin-trust/README.md`
+- Create: `src-tauri/tests/fixtures/plugin-trust/README.md`
+- Create: `src-tauri/tests/fixtures/plugin-trust/package-test-signing-seed.hex`
+- Create: `src-tauri/tests/fixtures/plugin-trust/package-test-public-key.hex`
 - Create: `src-tauri/tests/fixtures/plugin-trust/root-public.json`
 - Create: `src-tauri/tests/fixtures/plugin-trust/catalog-seq-1.json`
 - Create: `src-tauri/tests/fixtures/plugin-trust/catalog-seq-2-rotated.json`
@@ -1246,18 +1436,19 @@ idempotent; lower sequence or same sequence/different digest is rejected.
 `trust/signature.rs` accepts only Ed25519, validates canonical base64 and key length, uses constant-time library
 verification and returns stable public errors without key material.
 
-Move A3's exact
+Add
 `ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["fast", "std", "zeroize"] }`
-from host dev-dependencies to host dependencies; keep the protocol, SDK and test-host free of crypto and keep the
-Rust 1.77.2 gates.
+to host production dependencies in A4. A3 never contains this dependency. Keep the protocol, SDK, test-host and
+private package crate free of crypto. Host trust tests run on current stable; the public/private isolated MSRV gates
+remain separate and do not imply a whole-host Rust 1.77.2 claim.
 
 `trust/package.rs` defines `CatalogPackageVerifier`, the only production implementation of A3's
 `PackageTrustVerifier`. It receives a previously selected verified catalog release and an A3
 `UntrustedPackageObservation`. It first proves catalog/root/publisher freshness, lineage and revocation, then requires
 exact equality for plugin ID, publisher, version, target, minimum macOS, Jarvis range, plugin API, physical archive
 digest, the complete package-signature object and its publisher-key lineage. Finally it verifies Ed25519 over the exact
-A3 package domain plus canonical `package.json`. Only after all checks return `Ok(())` may the A3 package module mint
-its opaque same-fd `VerifiedPackageEvidence`; A4 never constructs that type directly and no API accepts a boolean
+A3 package domain plus canonical `package.json`. Only after all checks return `Ok(())` may the private package engine
+mint its opaque same-fd `VerifiedPackageEvidence`; A4 never constructs that type directly and no API accepts a boolean
 `verified` flag.
 
 Add the integration test file `src-tauri/src/plugins/trust/package.rs` tests:
@@ -1273,7 +1464,7 @@ verified_evidence_keeps_the_pass_one_archive_fd
 Run:
 
 ```bash
-cargo +1.77.2 test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
+cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
   plugins::trust::package::tests
 ```
 
@@ -1283,8 +1474,9 @@ Expected: all five tests exit `0`; mismatch/revocation/signature failures leave 
 
 `src-tauri/resources/plugin-trust-roots.json` contains the public owner root IDs, public Ed25519 keys, threshold and
 validity metadata only. No private/test signing key may appear outside `src-tauri/tests/fixtures/plugin-trust`.
-`src-tauri/tests/fixtures/plugin-trust/README.md` states that fixture private keys are public test material and forbidden
-for release catalogs. Bundle the public root resource through `tauri.conf.json`.
+Create `package-test-signing-seed.hex` and its matching `package-test-public-key.hex` here, in A4, not A3.
+`src-tauri/tests/fixtures/plugin-trust/README.md` states that fixture private keys are public test material and
+forbidden for release catalogs. Bundle the public root resource through `tauri.conf.json`.
 
 If the release owner key is not provisioned during this task, commit an empty production root set with threshold `1`.
 That state deliberately makes catalog install/update return `catalog_trust_not_provisioned`; local signed fixtures and
@@ -1810,7 +2002,7 @@ verification result. `quarantine.rs::reverify_for_extract` performs this sequenc
    `0600` mode, link count one and bounded size;
 6. select the exact package from the **current** A4 catalog/root/publisher/revocation state (or the current explicit
    Developer Mode verifier for a local source), then rerun the complete A3 pass 1 on that open `File`;
-7. invoke that current A4 verifier over the fresh observation; only the A3 package module may then mint a new
+7. invoke that current A4 verifier over the fresh observation; only the private package engine may then mint a new
    non-serializable `VerifiedPackageEvidence` which owns this exact file descriptor;
 8. immediately move that evidence into A3 pass 2, which seeks/reparses the same held fd and extracts to a fresh
    owner-only quarantine directory. There is no journal write, clone, path reopen, async handoff or boolean/digest
@@ -1834,7 +2026,7 @@ Parent device/inode mismatch is `quarantine_parent_replaced`; a parent symlink o
 `quarantine_parent_unsafe`. Archive identity mismatch is `quarantine_archive_replaced`; unsafe archive metadata is
 `quarantine_archive_unsafe`; a held-inode change detected by pass 2 remains
 `archive_changed_after_verification`. All five fail before health/final rename/current activation and clean any
-partial extraction through A3's fd-only cleanup path.
+partial extraction through the private package engine's fd-only cleanup path.
 
 - [ ] **Step 5: Add migration refusal tests and host-interpreted subset**
 
@@ -2384,6 +2576,13 @@ git commit -m "feat(plugins): activate verified receipt packages"
 ## Increment A acceptance and compatibility hand-off
 
 - [ ] Public protocol/SDK/test-host crates compile without Jarvis Core dependencies.
+- [ ] The unpublished `jarvis-package` crate owns its lockfile and passes locked test/clippy on current stable and a
+      real Rust `1.77.2`; the host remains a current-stable-only consumer and this does not claim whole-host or WASI
+      support on Rust `1.77.2`.
+- [ ] Only `src-tauri` depends on `jarvis-package`; the public crates and plugin packages cannot depend on it, and its
+      only unsafe code is the narrowly allowed macOS directory wrapper.
+- [ ] A3 uses the fixed opaque signature plus fake verifier only; production Ed25519 and its fixtures first enter in
+      A4, without changing the public/private package-crate dependency locks.
 - [ ] Manifest v2 rejects unknown security fields, invalid IDs/ranges, remote references and bounded-input violations.
 - [ ] Repacking identical input produces byte-identical archives and the same SHA-256.
 - [ ] Archive inspection rejects traversal, links, special files, normalized duplicates, case collisions and bombs.
@@ -2408,6 +2607,14 @@ git diff --check origin/master...HEAD
 cargo test --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
 cargo test --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
 cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
+cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml --all-targets
+cargo clippy --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  --all-targets -- -D warnings
+cargo +1.77.2 test --locked --manifest-path crates/jarvis-package/Cargo.toml --all-targets
+cargo +1.77.2 clippy --locked --manifest-path crates/jarvis-package/Cargo.toml \
+  --all-targets -- -D warnings
+cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::package::tests
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features plugins::
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features plugins::package_manager::tests
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features plugin_cli_tests

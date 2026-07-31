@@ -28,7 +28,34 @@ write_clean_fixture() {
     'tempfile = { version = "=3.27.0", default-features = false, features = ["getrandom"] }' \
     > "$fixture_root/crates/jarvis-package/Cargo.toml"
   printf '%s\n' \
+    '[package]' \
+    'name = "jarvis"' \
+    'version = "0.3.3"' \
+    '' \
+    '[dependencies]' \
+    'jarvis-package = { path = "../crates/jarvis-package" }' \
+    > "$fixture_root/src-tauri/Cargo.toml"
+  printf '%s\n' \
     'version = 4' \
+    '' \
+    '[[package]]' \
+    'name = "jarvis-package"' \
+    'version = "0.1.0"' \
+    'dependencies = [' \
+    '  "unicode-normalization",' \
+    '  "tempfile",' \
+    '  "tar",' \
+    '  "sha2",' \
+    '  "serde_json_canonicalizer",' \
+    '  "serde_json",' \
+    '  "serde",' \
+    '  "rustix",' \
+    '  "libc",' \
+    '  "jarvis-plugin-protocol",' \
+    '  "getrandom",' \
+    '  "caseless",' \
+    '  "base64",' \
+    ']' \
     '' \
     '[[package]]' \
     'name = "getrandom"' \
@@ -51,6 +78,17 @@ write_clean_fixture() {
     > "$fixture_root/crates/jarvis-package/Cargo.lock"
   printf '%s\n' \
     'version = 4' \
+    '' \
+    '[[package]]' \
+    'name = "jarvis"' \
+    'version = "0.3.3"' \
+    'dependencies = [' \
+    ' "jarvis-package",' \
+    ']' \
+    '' \
+    '[[package]]' \
+    'name = "jarvis-package"' \
+    'version = "0.1.0"' \
     '' \
     '[[package]]' \
     'name = "getrandom"' \
@@ -97,6 +135,28 @@ expect_rejected() {
 write_clean_fixture
 bash "$repo_root/scripts/check-package-lock-contract.sh" "$fixture_root" >/dev/null
 
+sed -i '' '/^  "getrandom",$/d' "$fixture_root/crates/jarvis-package/Cargo.lock"
+expect_rejected "private jarvis-package dependency block changed"
+
+write_clean_fixture
+sed -i '' '/^  "tempfile",$/d' "$fixture_root/crates/jarvis-package/Cargo.lock"
+expect_rejected "private jarvis-package dependency block changed"
+
+write_clean_fixture
+sed -i '' '/^ "jarvis-package",$/d' "$fixture_root/src-tauri/Cargo.lock"
+expect_rejected "host jarvis lock record must depend on jarvis-package"
+
+write_clean_fixture
+sed -i '' 's#path = "../crates/jarvis-package"#path = "../crates/not-jarvis-package"#' \
+  "$fixture_root/src-tauri/Cargo.toml"
+expect_rejected "host jarvis-package dependency must use the exact private path"
+
+write_clean_fixture
+sed -i '' 's/\[dependencies\]/[dev-dependencies]/' \
+  "$fixture_root/src-tauri/Cargo.toml"
+expect_rejected "host jarvis-package dependency must be a normal dependency"
+
+write_clean_fixture
 sed -i '' 's/=3.27.0/=3.24.0/' "$fixture_root/crates/jarvis-package/Cargo.toml"
 expect_rejected "private tempfile dependency must be pinned to 3.27.0"
 

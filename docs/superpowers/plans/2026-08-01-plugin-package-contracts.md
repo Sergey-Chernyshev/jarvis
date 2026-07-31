@@ -509,6 +509,7 @@ public-secret guards.
 - Create: `scripts/generate-jarvis-package-lock.sh`
 - Create: `scripts/check-package-lock-contract.sh`
 - Create: `scripts/check-package-lock-contract.test.sh`
+- Create: `scripts/scan-rust-unsafe-boundary.mjs`
 - Create: `src-tauri/src/plugins/package.rs`
 - Modify: `crates/jarvis-plugin-protocol/src/lib.rs`
 - Modify: `crates/jarvis-plugin-protocol/src/manifest.rs`
@@ -624,6 +625,11 @@ part of the crate's external API, so both production source walking and crate-un
 only that module. The boundary scan independently permits unsafe syntax — including unsafe functions, blocks, impls
 and traits — only in `crates/jarvis-package/src/macos_dir.rs`; no test, example, benchmark, build script or other
 source file may contain either an unsafe allow or unsafe syntax.
+
+The boundary gate tokenizes Rust before enforcing the unsafe allowlist, ignoring nested comments, string/byte/raw
+string literals and raw identifiers. This keeps the single module-scoped allow structurally exact while rejecting
+combined or multiline lint downgrades and split-line unsafe syntax without false positives from documentation or
+fixtures.
 
 `crates/jarvis-package/src/dependency_msrv.rs` is a crate-unit probe compiled only through the `#[cfg(test)]` module
 above and defines the test `exact_dependency_apis_execute`. It must compile and execute the exact A3 APIs used from

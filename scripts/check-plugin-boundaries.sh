@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 failed=0
 
 report_matches() {
@@ -73,10 +74,14 @@ if [[ -f "$package_manifest" ]]; then
     failed=1
   fi
 
+  unsafe_scan=""
+  if ! unsafe_scan="$(node "$script_dir/scan-rust-unsafe-boundary.mjs" "$package_root")"; then
+    echo "failed to scan jarvis-package Rust syntax: $package_root" >&2
+    failed=1
+  fi
   unsafe_allows="$(
-    rg -n --no-heading '#\s*\[\s*allow\s*\(\s*unsafe_code\s*\)\s*\]' \
-      "$package_root" -g '*.rs' -g '!target/**' \
-      || true
+    printf '%s\n' "$unsafe_scan" \
+      | awk -F '\t' '$1 == "allow" { print $2 }'
   )"
   unsafe_allow_count=0
   if [[ -n "$unsafe_allows" ]]; then
@@ -97,15 +102,15 @@ if [[ -f "$package_manifest" ]]; then
   fi
 
   unsafe_syntax="$(
-    rg -n --no-heading '\bunsafe\s+(fn|extern|impl|trait|\{)' \
-      "$package_root" -g '*.rs' -g '!target/**' \
-      || true
+    printf '%s\n' "$unsafe_scan" \
+      | awk -F '\t' '$1 == "unsafe" { print $2 }'
   )"
+  allowed_unsafe_path="$(cd "$package_root/src" && pwd -P)/macos_dir.rs"
   disallowed_unsafe=""
   while IFS= read -r match; do
     [[ -z "$match" ]] && continue
     match_path="${match%%:*}"
-    if [[ "$match_path" != "$package_root/src/macos_dir.rs" ]]; then
+    if [[ "$match_path" != "$allowed_unsafe_path" ]]; then
       disallowed_unsafe+="${disallowed_unsafe:+$'\n'}$match"
     fi
   done <<< "$unsafe_syntax"

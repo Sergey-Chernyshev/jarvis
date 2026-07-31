@@ -143,6 +143,16 @@ printf '%s\n' \
   '[package]' \
   'name = "jarvis-plugin-protocol"' \
   'version = "0.1.0"' \
+  '[dependencies."jarvis-package"]' \
+  'version = "0.1.0"' \
+  > "$fixture_root/crates/jarvis-plugin-protocol/Cargo.toml"
+expect_rejected "public or plugin crate depends on jarvis-package"
+
+write_clean_fixture
+printf '%s\n' \
+  '[package]' \
+  'name = "jarvis-plugin-protocol"' \
+  'version = "0.1.0"' \
   '[dependencies]' \
   '"jarvis-package" = "0.1.0"' \
   > "$fixture_root/crates/jarvis-plugin-protocol/Cargo.toml"
@@ -179,6 +189,46 @@ write_clean_fixture
 printf '%s\n' '#[allow(unsafe_code)]' \
   >> "$fixture_root/crates/jarvis-package/src/lib.rs"
 expect_rejected "jarvis-package unsafe allow must be exactly scoped"
+
+write_clean_fixture
+printf '%s\n' \
+  '#[allow(unsafe_code, dead_code)]' \
+  'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/src/escaped.rs"
+expect_rejected "jarvis-package unsafe allow must be exactly scoped"
+
+write_clean_fixture
+printf '%s\n' \
+  '#[allow(' \
+  '    unsafe_code' \
+  ')]' \
+  'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/src/escaped.rs"
+expect_rejected "jarvis-package unsafe allow must be exactly scoped"
+
+write_clean_fixture
+printf '%s\n' \
+  '#[allow(unsafe_code)]' \
+  'pub fn escaped() {' \
+  '    unsafe' \
+  '    {' \
+  '        std::ptr::read_volatile(&0_u8);' \
+  '    }' \
+  '}' \
+  > "$fixture_root/crates/jarvis-package/src/escaped.rs"
+expect_rejected "jarvis-package unsafe syntax outside macos_dir.rs"
+
+write_clean_fixture
+printf '%s\n' \
+  'pub const TEXT: &str = "unsafe { not Rust syntax }";' \
+  'pub const RAW: &str = r#"#[allow(unsafe_code)]"#;' \
+  'pub fn r#unsafe() {}' \
+  '// unsafe {' \
+  '/* #[allow(' \
+  ' * unsafe_code' \
+  ' *)] */' \
+  > "$fixture_root/crates/jarvis-package/src/text_mentions.rs"
+bash "$repo_root/scripts/check-plugin-boundaries.sh" "$fixture_root" >/dev/null
 
 write_clean_fixture
 printf '%s\n' \

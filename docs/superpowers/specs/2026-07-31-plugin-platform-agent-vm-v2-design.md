@@ -1462,6 +1462,9 @@ ChangeSet
 Core owns provider-neutral schemas
 `dev.jarvis.core/{project,catalog-preferences,project-runtime-provider,runtime,
 session,turn,change-set}@1.0.0`.
+`CatalogProjectionReceipt` intentionally is not in this public schema set: it
+is query-invisible host-only Broker evidence and is never registered,
+discovered or exported to plugin code.
 Каждый provider projection обязан валидироваться core schema; специфичные поля
 живут только в extension envelope:
 
@@ -1508,10 +1511,20 @@ Catalog outbox change set несёт полную preferences view и затро
 
 Outbox input не предсказывает Broker revision и не принимает acknowledgement
 от caller/provider: trusted writer аллоцирует revision и сам инжектит её в
-финальные Project/CatalogPreferences views. В той же Broker transaction
-пишется immutable host-only `CatalogProjectionReceipt` с exact source/ack
-pair и payload digest; snapshot reader валидирует старые/новые Project rows по
-этому Broker ledger без join к private Catalog DB.
+финальные затронутые Project и complete CatalogPreferences views. В той же
+Broker transaction для каждой записанной View создаётся immutable host-only
+`CatalogProjectionReceipt` с subject kind/ID, exact source/ack pair, canonical
+row digest и change-set digest. Несколько receipts одной transaction разделяют
+один Broker revision. Snapshot reader валидирует каждый Project по его
+собственному immutable receipt, а checkpoint — по latest applicable
+CatalogPreferences receipt, без join к private Catalog DB.
+
+Preferences-only mutation не переписывает Projects. Single-Project mutation
+переписывает только этот Project и complete Preferences; остальные Projects
+легально сохраняют более старые source/ack receipts. Поэтому snapshot может
+быть mixed-source, но остаётся одной Broker transaction snapshot и
+byte-identical для UI/headless. Равенство source revision всех Projects с
+latest Preferences checkpoint запрещено как ложный invariant.
 
 ### 13.2 Runtime
 
@@ -2413,6 +2426,8 @@ personal paths unless explicitly requested.
 
 - schema compatibility;
 - owner-only writes;
+- trusted-Core revision injection and per-row host-only receipts in one
+  transaction, with no plugin query/discovery path;
 - cross-project/subject/field ACL and revoke;
 - entity durability;
 - event cursor and gap/resync;
@@ -2427,6 +2442,9 @@ personal paths unless explicitly requested.
 - one Project with multiple Runtimes;
 - one Runtime with multiple Sessions;
 - one Session with multiple Turns;
+- preferences-only and single-Project mutations preserve per-row receipts,
+  select the latest applicable Preferences checkpoint and produce
+  byte-identical mixed-source UI/headless snapshots;
 - no project-card auto-start;
 - UI and CLI observe identical state;
 - provider conforms core Runtime/Session/Turn envelopes and full lifecycle
@@ -2547,11 +2565,15 @@ Smoke covers:
 - events/cursors, typed commands, ACL/audit and opaque resources;
 - persist-before-dispatch runtime Operation service с subject query,
   cursor gap/resync, authorized cancel и immutable terminal state;
+- trusted-Core revision injection and immutable query-invisible per-row
+  projection receipts;
 - query-invisible adapter-private provenance binding.
 
 ### Increment C — Generic Project Runtime
 
 - Project/CatalogPreferences/Runtime/Session/Turn/ChangeSet model;
+- per-Project immutable receipt validation and latest-applicable Preferences
+  checkpoint for mixed-source snapshots;
 - generic project UI;
 - plugin runtime contributions;
 - remove Agent VM-specific rendering/IPC from generic Projects surfaces;

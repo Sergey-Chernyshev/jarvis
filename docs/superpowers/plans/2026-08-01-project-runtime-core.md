@@ -54,6 +54,8 @@ Increment B owns all generic platform mechanics:
 - contract registry and schema validation;
 - durable Broker entities/events/cursors/outbox receipts;
 - Broker transaction and `brokerRevision` allocation;
+- trusted-Core projection transactions that inject the allocated revision and
+  persist query-invisible, per-row host receipts in that same transaction;
 - typed command registry, durable runtime Operation service, `OperationRef`,
   Gate v2, grants and audit;
 - adapter-private provenance bindings that never enter Broker
@@ -64,8 +66,11 @@ Increment B owns all generic platform mechanics:
 
 Increment C consumes those public contracts. C owns:
 
-- Core Project/CatalogPreferences/CatalogProjectionReceipt/Runtime/Session/Turn/ChangeSet Views,
+- public Core Project/CatalogPreferences/Runtime/Session/Turn/ChangeSet Views,
   allowlisted provider observations and state validation;
+- the host-only `CatalogProjectionReceipt` row shape and validation policy; it
+  is Broker-internal evidence, not a public Core contract or generated plugin
+  schema;
 - the stable Project Catalog, roots, preferences, aliases and projection outbox;
 - compilation of `contributes.projectRuntimes` into a provider-neutral catalog;
 - Core projections and the immutable Project Runtime snapshot;
@@ -134,7 +139,10 @@ Expected: every command exits `0`. The B tests must prove:
    after restart, have gap/resync watches, authorized cancellation and immutable
    terminal states;
 5. the coordinator cannot publish mixed package/grant/contribution revisions;
-6. page/route opening dispatches zero provider commands.
+6. page/route opening dispatches zero provider commands;
+7. one trusted-Core transaction can write multiple immutable per-row receipts
+   at its allocated Broker revision, while none of those receipts are visible
+   through plugin query/schema discovery.
 
 If any file or behavior is absent, stop. Complete or correct B in its own
 increment first. Do not recreate a local Broker shortcut inside C.
@@ -146,6 +154,13 @@ Core-owned mutations in one Broker transaction without pretending that the
 provider owns a Core contract. If B lands without this generic hook, add and
 review it in B before C starts; a fake Core plugin receipt or delegated
 owner-only write is not an acceptable C workaround.
+
+For Catalog projection specifically, that hook must allocate one Broker
+revision, inject it into the affected final Views and append one immutable
+host-only receipt per written Project or CatalogPreferences row. Receipt
+storage is query-invisible and allows multiple subject receipts at one Broker
+revision. If B only offers a single global/latest source receipt, repair and
+review B before C: C cannot validate a mixed-source snapshot with that API.
 
 The B handoff must also expose `RuntimeOperationService`. An
 `Accepted(OperationRef)` without a durable row committed before provider
@@ -235,13 +250,16 @@ path:
 ```text
 dev.jarvis.core/project@1.0.0
 dev.jarvis.core/catalog-preferences@1.0.0
-dev.jarvis.core/catalog-projection-receipt@1.0.0
 dev.jarvis.core/project-runtime-provider@1.0.0
 dev.jarvis.core/runtime@1.0.0
 dev.jarvis.core/session@1.0.0
 dev.jarvis.core/turn@1.0.0
 dev.jarvis.core/change-set@1.0.0
 ```
+
+`CatalogProjectionReceipt` is deliberately absent from that public contract
+list. It is a strict host-only Broker ledger row and is not registered,
+discoverable, exported to TypeScript or projected to any plugin.
 
 Project path fields are classified private. Trusted Core may read them;
 plugins receive `projectId` and B opaque resource handles only when granted.
@@ -301,15 +319,36 @@ the revision and injects that exact value into
 `CatalogPreferencesView.acknowledgedBrokerRevision`. Provider/caller payloads
 cannot set either field.
 
-The same Broker transaction writes an immutable, host-only
-`CatalogProjectionReceipt { catalogSourceRevision,
-acknowledgedBrokerRevision, payloadDigest, appliedAt }`. Exact source revision
-and Broker revision are each unique for a payload digest. It is readable only
-by trusted Core, never projected to plugins. Snapshot validation reads these
-receipts from the same Broker read transaction, so it never joins the private
-Catalog database. The public `CatalogCheckpoint` is the latest applicable
-receipt; older Project rows are validated against their own immutable Broker
-receipt without serializing the whole ledger.
+The same Broker transaction writes one immutable, host-only row per final
+Catalog-derived View:
+
+```text
+CatalogProjectionReceipt {
+  subjectKind: project | catalog-preferences,
+  subjectId,
+  catalogSourceRevision,
+  acknowledgedBrokerRevision,
+  rowDigest,
+  changeSetDigest,
+  appliedAt
+}
+```
+
+`rowDigest` hashes the exact canonical final View after B injects the
+acknowledgement; `changeSetDigest` binds every row back to the idempotent
+Catalog outbox item. The receipt key is
+`(subjectKind, subjectId, catalogSourceRevision)`. Reusing that key with other
+bytes or another acknowledgement is a conflict. Many subject receipts from one
+change set intentionally share one `acknowledgedBrokerRevision`; that revision
+is not globally unique per receipt row.
+
+Receipts are readable only by trusted Core and never registered/projected to
+plugins. Snapshot validation reads them in the same Broker read transaction, so
+it never joins the private Catalog database. The public `CatalogCheckpoint`
+points to the latest applicable CatalogPreferences receipt at or before the
+snapshot revision. Every Project row—often older than that checkpoint—is
+validated against its own immutable Project receipt. No invariant requires all
+Projects to carry the latest Catalog source revision.
 
 The Core provider envelope contains:
 
@@ -539,10 +578,11 @@ Project projection inputs and the complete preferences projection input, all
 tagged with one `catalogSourceRevision` and no predicted acknowledgement. The
 trusted projector idempotently materializes the final `ProjectView`s and
 `CatalogPreferencesView` at one B revision, injects that revision as their
-`acknowledgedBrokerRevision`, and persists the exact
-`catalogSourceRevision -> acknowledgedBrokerRevision` pair. A Catalog mutation
-is not reported as complete until that acknowledgement is durable or
-represented by a durable pending Operation.
+`acknowledgedBrokerRevision`, writes a per-row immutable receipt for each View,
+and persists the exact change-set
+`catalogSourceRevision -> acknowledgedBrokerRevision` acknowledgement in the
+private Catalog. A Catalog mutation is not reported as complete until that
+acknowledgement is durable or represented by a durable pending Operation.
 
 `ProjectRuntimeSnapshotService` then:
 
@@ -556,12 +596,16 @@ represented by a durable pending Operation.
 5. on mismatch releases both guards and retries a bounded number of times
    rather than requesting unsupported historical/time-travel rows;
 6. reads host-only `CatalogProjectionReceipt`s in that Broker transaction and
-   verifies every Catalog-derived row has one exact persisted
-   `(catalogSourceRevision, acknowledgedBrokerRevision, payloadDigest)`
-   mapping and that the acknowledgement is not newer than the snapshot;
-7. returns `snapshotRevision == brokerRevision`, the platform revision and an
-   exact `CatalogCheckpoint { catalogSourceRevision,
-   acknowledgedBrokerRevision, payloadDigest }`;
+   verifies every Catalog-derived row against its own exact
+   `(subjectKind, subjectId, catalogSourceRevision,
+   acknowledgedBrokerRevision, rowDigest, changeSetDigest)` receipt, with no
+   acknowledgement newer than the snapshot;
+7. selects the latest applicable CatalogPreferences receipt at or before that
+   Broker revision (maximum `acknowledgedBrokerRevision <= snapshotRevision`),
+   verifies the returned preferences row against it, and
+   returns it as `CatalogCheckpoint { catalogSourceRevision,
+   acknowledgedBrokerRevision, payloadDigest: rowDigest }`; Project rows may
+   legitimately reference older source/ack receipts;
 8. reads B's durable nonterminal runtime Operations for the returned canonical
    subjects plus the operation-change high-water cursor in that same B read
    transaction.
@@ -682,7 +726,6 @@ allocate new IDs for the same source.
 - Create: `crates/jarvis-plugin-protocol/tests/project_runtime_wire.rs`
 - Create: `schemas/core-project-v1.schema.json`
 - Create: `schemas/core-catalog-preferences-v1.schema.json`
-- Create: `schemas/core-catalog-projection-receipt-v1.schema.json`
 - Create: `schemas/core-project-runtime-provider-v1.schema.json`
 - Create: `schemas/core-runtime-v1.schema.json`
 - Create: `schemas/core-session-v1.schema.json`
@@ -713,8 +756,9 @@ Test strict round-trip fixtures for:
   process/attach field;
 - `SessionView` serializing no transport/backend-session/boot/tmux/PID/resume
   evidence;
-- `CatalogPreferencesView`, immutable host-only Catalog projection receipt and
-  exact Catalog checkpoint fields;
+- `CatalogPreferencesView` and exact Catalog checkpoint fields; host-only
+  Catalog projection receipts are tested in the Tauri host and are never part
+  of this public wire/export suite;
 - `ChangeSetView`/`ChangedFileView` with opaque IDs/display metadata and no
   path, bytes, diff or handle;
 - `ProviderChangeSetObservation` rejecting canonical IDs, host revisions,
@@ -1261,7 +1305,8 @@ git add src-tauri/src/project_runtime/migration \
   src-tauri/tests/project_aliases.rs \
   src-tauri/tests/project_import_recovery.rs \
   src-tauri/tests/fixtures/project-runtime \
-  src-tauri/src/history.rs src-tauri/src/project_runtime
+  src-tauri/src/entities.rs src-tauri/src/history.rs \
+  src-tauri/src/project_runtime
 git commit -m "feat(projects): migrate legacy catalog aliases"
 ```
 
@@ -1277,6 +1322,7 @@ git commit -m "feat(projects): migrate legacy catalog aliases"
 - Create: `src-tauri/src/project_runtime/change_sets.rs`
 - Create: `src-tauri/src/project_runtime/projection.rs`
 - Create: `src-tauri/src/project_runtime/projector.rs`
+- Create: `src-tauri/src/project_runtime/catalog/projection_receipt.rs`
 - Create: `src-tauri/tests/project_runtime_provider_registry.rs`
 - Create: `src-tauri/tests/project_runtime_state_machine.rs`
 - Create: `src-tauri/tests/project_runtime_projection.rs`
@@ -1406,8 +1452,11 @@ must fail before a Broker write.
 through B's trusted-Core writer into its affected Core Project envelopes and
 the complete `CatalogPreferencesView` at one Broker revision. B injects that
 allocated revision as the acknowledgement on every final View; the outbox
-cannot supply it, and writes the immutable host-only
-`CatalogProjectionReceipt` in that transaction. A duplicate
+cannot supply it. For every affected Project row and the complete Preferences
+row, B canonicalizes the final injected View and writes an immutable host-only
+`CatalogProjectionReceipt` with subject kind/ID, source/ack revisions, exact row
+digest and change-set digest in that transaction. Multiple receipts share the
+one allocated Broker revision. A duplicate
 outbox ID/digest and `catalogSourceRevision` returns the original
 `acknowledgedBrokerRevision`; changed bytes, a second Broker revision for the
 same source revision, or one Broker revision reused for different Catalog
@@ -1416,7 +1465,10 @@ commit. It does not manufacture a plugin principal or pass through the
 provider-owned ingress path.
 
 Catalog preference/path updates visible to trusted UI are projected in the
-same Core transaction. Plugin field projection removes private root path.
+same Core transaction. A preferences-only mutation writes no Project row; a
+single-Project mutation writes only that Project plus the complete Preferences
+row. Unaffected Projects retain their prior source/ack revisions and immutable
+receipts. Plugin field projection removes private root path.
 
 - [ ] **Step 6: Verify and commit C4**
 
@@ -1481,8 +1533,22 @@ In one Broker transaction publish:
 
 Pause a concurrent writer between logical records and assert a reader sees
 either the full old transaction or full new transaction, never a mixed graph.
-Every referenced parent must exist at the same revision or the row is
-quarantined/omitted with a recovery reason.
+Every referenced parent must be visible in the same Broker read snapshot—not
+carry the same Catalog source revision—or the row is quarantined/omitted with a
+recovery reason.
+
+Then execute and snapshot both of these legal mixed-source histories:
+
+1. a preferences-only Catalog mutation: Preferences/checkpoint advance while
+   both Projects retain their original per-row source/ack receipts;
+2. a single-Project mutation: that Project plus Preferences/checkpoint advance,
+   while the untouched Project retains its original receipt.
+
+At each point compare the complete UI and headless canonical JSON bytes.
+Missing, rewritten or digest-mismatched Project receipts and a
+CatalogPreferences receipt that is not the latest applicable one must fail
+closed. Mixed source revisions by themselves are valid and must not trigger a
+resync.
 
 Assert:
 
@@ -1490,8 +1556,9 @@ Assert:
 snapshot.snapshotRevision == broker snapshot revision
 snapshot.catalogCheckpoint.catalogSourceRevision
   maps exactly to catalogCheckpoint.acknowledgedBrokerRevision
-catalogCheckpoint.payloadDigest == immutable Broker receipt payloadDigest
-Project/Preferences catalogSourceRevision == checkpoint source revision
+catalogCheckpoint.payloadDigest == latest applicable Preferences receipt rowDigest
+Preferences source/ack == checkpoint source/ack
+each Project source/ack/digest == that Project row's own immutable receipt
 UI complete JSON bytes == headless complete JSON bytes
 UI operationCursor == headless operationCursor
 provider receipt generation == coordinator generation
@@ -1779,6 +1846,8 @@ git commit -m "feat(projects): bridge legacy runtime aliases"
 - Modify: `src-tauri/src/ipc.rs`
 - Modify: `src-tauri/src/main.rs`
 - Modify: `ui/bridge.js`
+- Modify: `ui/renderer.js`
+- Modify: `ui/agent-vm.test.mjs`
 
 - [ ] **Step 1: Define route-open as a RED invariant**
 
@@ -2066,8 +2135,9 @@ pass.
 - a revision gap invalidates and resyncs rather than merging;
 - selected Project/Runtime/Session survives only if present in the new graph;
 - provider generation drift enters recovery;
-- `CatalogPreferencesView` and Catalog checkpoint apply atomically with their
-  Projects or trigger resync;
+- `CatalogPreferencesView` and Catalog checkpoint apply atomically with the
+  affected Project rows; preferences-only and single-Project updates preserve
+  legal older receipts on untouched Projects instead of forcing a resync;
 - pending Operations are restored from the snapshot/subject resync after a
   fresh store with no prior browser memory;
 - no call to history/entities/project-manager/terminal readers occurs;
@@ -2497,6 +2567,7 @@ git commit -m "test(projects): prove recovery and neutral boundaries"
 - Create: `docs/project-runtime/core-contract.md`
 - Create: `docs/project-runtime/migration-and-rollback.md`
 - Create: `scripts/capture-agent-vm-inventory.sh`
+- Create: `scripts/cleanup-test-owned-agent-vm-inventory.sh`
 - Create: `scripts/check-agent-vm-inventory-leaks.sh`
 - Create: `scripts/check-agent-vm-inventory-leaks.test.sh`
 - Modify: `docs/plugins/manifest.md`
@@ -2531,10 +2602,16 @@ owner/reason before merge.
 
 Use a separate Jarvis dev profile and non-sensitive fixture Projects:
 
-1. before starting, capture normalized `avm list`, `limactl list --json` and
-   relevant Agent VM/Lima process inventory plus VM states into the audit
-   artifact. Record an ownership ledger; only a uniquely named VM created by
-   this exact smoke receipt/profile may be marked `test-owned`;
+1. before starting, capture normalized `avm list`, default
+   `limactl list --json`, Colima inventory and relevant Agent VM/Lima processes
+   into the audit artifact. Colima inventory must come from
+   `colima list --json` or, when that CLI is unavailable, a separately recorded
+   `LIMA_HOME=<resolved Colima _lima home> limactl list --json`; silently
+   inspecting only default `~/.lima` is a failed gate. Every VM artifact row is
+   keyed by exact `(manager, managerHome, name)` and records state. Initialize
+   an ownership ledger with a unique smoke `receiptId` and dev-profile ID; only
+   a uniquely named VM created by this exact receipt/profile, with its exact
+   manager/home/name and post-create identity, may be marked `test-owned`;
 2. import existing folder/history/favorite data and record IDs;
 3. open every Project route and prove provider/Operation/resource-handle/
    terminal counters stay zero;
@@ -2556,11 +2633,16 @@ Use a separate Jarvis dev profile and non-sensitive fixture Projects:
 13. click changed-file/attach actions and prove handles are absent before click,
     one-use, expiring and revoked with their grant;
 14. compare light/dark 100%/200% screens to approved Figma nodes;
-15. on every exit path, clean up only inventory entries present in the
-    test-owned ledger after revalidating their exact name/identity/receipt.
-    Capture the same three inventories again and require exact pre/post VM set
-    and state equality, no test-owned VM still running, no orphaned test-owned
-    process and no extra VM.
+15. install an executable `EXIT INT TERM HUP` trap before the first mutable
+    smoke action. The trap invokes
+    `cleanup-test-owned-agent-vm-inventory.sh` with the exact receipt-bound
+    ledger, re-enumerates the recorded manager and manager home, and may
+    stop/delete only a row whose manager/home/name, post-create identity,
+    profile and `receiptId` all still match. A missing/mismatched receipt is
+    manual recovery, not cleanup permission. Capture every manager/home
+    inventory again and require exact pre/post VM key+state equality, no
+    test-owned VM still running, no orphaned exact-receipt process and no extra
+    VM.
 
 Do not create/start/stop a real Agent VM as part of C route validation.
 Disposable live Agent VM controller/provider smoke belongs to D/E/G. If a
@@ -2568,12 +2650,19 @@ running legacy VM is observed, the C smoke is read-only. The planning-time live
 audit observed managed `sup`/`t-bank` entries stopped and an unrelated Colima
 VM; recapture instead of assuming that state, and never stop/delete/reconfigure
 Colima or any unledgered user VM/process. Inventory drift fails the smoke for
-manual investigation; the cleanup trap does not “repair” unrelated inventory.
+manual investigation; unledgered added/missing/state-changed rows are reported
+with manager/home/name and are never passed to a stop/delete command. The
+cleanup trap does not “repair” unrelated inventory. C creates no real VM, so
+its production smoke ledger is expected to remain empty.
 
 `check-agent-vm-inventory-leaks.test.sh` uses fixtures to prove equal inventory
-passes, added/missing/state-changed VM fails, an orphan test-owned process
-fails, an unledgered VM is never selected for cleanup, and unchanged unrelated
-Colima is preserved.
+passes, manager-home differences do not collapse into one key,
+added/missing/state-changed VM fails, an orphan exact-receipt process fails, and
+unchanged unrelated Colima is preserved. It executes the cleanup trap against
+fake `avm`/`limactl`/`colima` shims and proves only an exact receipt-bound ledger
+row can produce a stop/delete call; unledgered drift, stale receipt, manager
+home/name/identity mismatch and a real empty C ledger produce zero mutation
+calls.
 
 - [ ] **Step 3: Document the public handoff**
 
@@ -2614,9 +2703,18 @@ npm run test:ui
 npm run check:public
 bash scripts/check-agent-vm-inventory-leaks.test.sh
 jarvis_vm_audit_dir="$(mktemp -d)"
+jarvis_vm_smoke_receipt="$(uuidgen)"
 bash scripts/capture-agent-vm-inventory.sh \
   --out "$jarvis_vm_audit_dir/before.json" \
-  --init-ownership-ledger "$jarvis_vm_audit_dir/test-owned.json"
+  --init-ownership-ledger "$jarvis_vm_audit_dir/test-owned.json" \
+  --receipt-id "$jarvis_vm_smoke_receipt" \
+  --profile-id "project-runtime-c-smoke"
+jarvis_vm_cleanup() {
+  bash scripts/cleanup-test-owned-agent-vm-inventory.sh \
+    --ownership-ledger "$jarvis_vm_audit_dir/test-owned.json" \
+    --receipt-id "$jarvis_vm_smoke_receipt"
+}
+trap jarvis_vm_cleanup EXIT INT TERM HUP
 cargo test --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
 cargo +1.77.2 test --locked \
@@ -2631,6 +2729,8 @@ bash scripts/check-agent-vm-inventory-leaks.sh \
   --before "$jarvis_vm_audit_dir/before.json" \
   --after "$jarvis_vm_audit_dir/after.json" \
   --ownership-ledger "$jarvis_vm_audit_dir/test-owned.json"
+jarvis_vm_cleanup
+trap - EXIT INT TERM HUP
 ```
 
 Expected: every command exits `0`; generated files produce no diff; all four
@@ -2643,6 +2743,7 @@ provider mutation was needed to prove C.
 git add docs/audits docs/project-runtime docs/plugins/manifest.md \
   docs/design/plugin-platform-v2-figma.md \
   scripts/capture-agent-vm-inventory.sh \
+  scripts/cleanup-test-owned-agent-vm-inventory.sh \
   scripts/check-agent-vm-inventory-leaks.sh \
   scripts/check-agent-vm-inventory-leaks.test.sh \
   docs/superpowers/plans/2026-07-31-plugin-platform-agent-vm-v2.md
@@ -2663,6 +2764,10 @@ git commit -m "docs(projects): certify runtime core increment"
   rejected.
 - [ ] Every Catalog change set includes complete preferences and persists one
   exact `catalogSourceRevision -> acknowledgedBrokerRevision` mapping.
+- [ ] Every projected Project has its own immutable host-only receipt; the
+  checkpoint is the latest applicable Preferences receipt, and
+  preferences-only/single-Project mutations preserve valid mixed-source
+  snapshots with byte-identical UI/headless output.
 - [ ] Project, Runtime, Session and Turn readers use one Broker snapshot
   revision.
 - [ ] UI and headless/CLI port serialize byte-identical complete snapshots,
@@ -2700,8 +2805,10 @@ git commit -m "docs(projects): certify runtime core increment"
   memory/mounts or durable notifications.
 - [ ] Crash, rollback, alias conflict, watch gap and provider generation
   recovery are proven.
-- [ ] Live before/after `avm`/Lima/process inventory is exact-set/state equal;
-  no test-owned VM/process leaks and no unrelated Colima/user VM was touched.
+- [ ] Live before/after `avm`/default-Lima/Colima/process inventory is
+  exact manager/home/name/state equal; the executable trap can mutate only
+  exact receipt-bound ledger rows, no test-owned VM/process leaks and no
+  unrelated or unledgered VM was touched.
 - [ ] Rust 1.77.2 is claimed/tested only for public/pure Core crates; Tauri host
   gates use current stable unless the complete dependency graph is pinned.
 - [ ] Approved Figma nodes and keyboard/VoiceOver/200% evidence are recorded.

@@ -1,8 +1,9 @@
-use std::fs;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::fs::{self, File};
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -10,8 +11,10 @@ use jarvis_power_core::state::{
     DarwinProcessIdentity, HelperState, Lease, LeaseId, MonotonicTime, MutationPhase, Principal,
     STATE_SCHEMA_VERSION,
 };
-use jarvis_power_helper::root_store::StoreFault;
-use jarvis_power_helper::root_store::{RootStore, StoreError, MAX_STATE_BYTES};
+use jarvis_power_helper::root_store::{
+    validate_trusted_anchor_metadata_for_testing, verify_entry_identity_for_testing, RootStore,
+    StoreError, StoreFault, MAX_STATE_BYTES,
+};
 use tempfile::TempDir;
 
 struct Fixture {
@@ -49,6 +52,207 @@ impl Fixture {
     fn write_state(&self, bytes: &[u8], mode: u32) {
         fs::write(self.state_path(), bytes).unwrap();
         fs::set_permissions(self.state_path(), fs::Permissions::from_mode(mode)).unwrap();
+    }
+}
+
+struct ProvisionFixture {
+    _temp: TempDir,
+    library: std::path::PathBuf,
+    anchor: std::path::PathBuf,
+    uid: u32,
+    gid: u32,
+}
+
+impl ProvisionFixture {
+    fn empty() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let library = temp.path().join("Library");
+        let anchor = library.join("Application Support");
+        fs::create_dir(&library).unwrap();
+        fs::set_permissions(&library, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::create_dir(&anchor).unwrap();
+        fs::set_permissions(&anchor, fs::Permissions::from_mode(0o755)).unwrap();
+        Self {
+            _temp: temp,
+            library,
+            anchor,
+            // SAFETY: these libc calls only query the current test process.
+            uid: unsafe { libc::geteuid() },
+            // SAFETY: these libc calls only query the current test process.
+            gid: unsafe { libc::getegid() },
+        }
+    }
+
+    fn library_fd(&self) -> OwnedFd {
+        File::open(&self.library).unwrap().into()
+    }
+
+    fn provision(&self) -> Result<RootStore, StoreError> {
+        self.provision_with_private_owner(self.uid, self.gid)
+    }
+
+    fn provision_with_private_owner(
+        &self,
+        directory_uid: u32,
+        directory_gid: u32,
+    ) -> Result<RootStore, StoreError> {
+        RootStore::provision_from_parent_for_testing(
+            self.library_fd(),
+            self.uid,
+            directory_uid,
+            directory_gid,
+            directory_uid,
+            directory_gid,
+        )
+    }
+
+    fn private_components(&self) -> [std::path::PathBuf; 3] {
+        let jarvis = self.anchor.join("Jarvis");
+        let power = jarvis.join("Power");
+        let v2 = power.join("v2");
+        [jarvis, power, v2]
+    }
+}
+
+#[test]
+fn trusted_anchor_accepts_nonwheel_0755_metadata_and_rejects_writable_or_substituted() {
+    // SAFETY: libc::stat is plain old data and this value is used only by the
+    // pure metadata validator.
+    let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+    metadata.st_mode = libc::S_IFDIR | 0o755;
+    metadata.st_uid = 501;
+    metadata.st_gid = 80;
+    assert_eq!(
+        validate_trusted_anchor_metadata_for_testing(&metadata, 501),
+        Ok(())
+    );
+
+    metadata.st_mode = libc::S_IFDIR | 0o775;
+    assert_eq!(
+        validate_trusted_anchor_metadata_for_testing(&metadata, 501),
+        Err(StoreError::UnsafeMetadata)
+    );
+    assert_eq!(
+        verify_entry_identity_for_testing((1, 2), (1, 3)),
+        Err(StoreError::UnsafeMetadata)
+    );
+}
+
+#[test]
+fn clean_install_provisions_only_private_descendants_from_the_anchor_fd() {
+    let fixture = ProvisionFixture::empty();
+    let store = fixture.provision().unwrap();
+
+    for component in fixture.private_components() {
+        let metadata = fs::symlink_metadata(component).unwrap();
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.mode() & 0o7777, 0o700);
+        assert_eq!(metadata.uid(), fixture.uid);
+        assert_eq!(metadata.gid(), fixture.gid);
+    }
+    assert_eq!(store.load().unwrap(), None);
+    assert_eq!(
+        fs::symlink_metadata(&fixture.anchor).unwrap().mode() & 0o7777,
+        0o755
+    );
+}
+
+#[test]
+fn unsafe_anchor_and_descendants_are_rejected_without_repair_or_following() {
+    let writable_anchor = ProvisionFixture::empty();
+    fs::set_permissions(&writable_anchor.anchor, fs::Permissions::from_mode(0o775)).unwrap();
+    assert!(matches!(
+        writable_anchor.provision(),
+        Err(StoreError::UnsafeMetadata)
+    ));
+    assert_eq!(
+        fs::symlink_metadata(&writable_anchor.anchor)
+            .unwrap()
+            .mode()
+            & 0o7777,
+        0o775
+    );
+
+    let file = ProvisionFixture::empty();
+    fs::write(file.anchor.join("Jarvis"), b"sentinel").unwrap();
+    assert!(matches!(file.provision(), Err(StoreError::UnsafeMetadata)));
+    assert_eq!(fs::read(file.anchor.join("Jarvis")).unwrap(), b"sentinel");
+
+    let mode = ProvisionFixture::empty();
+    fs::create_dir(mode.anchor.join("Jarvis")).unwrap();
+    fs::set_permissions(
+        mode.anchor.join("Jarvis"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    assert!(matches!(mode.provision(), Err(StoreError::UnsafeMetadata)));
+    assert_eq!(
+        fs::symlink_metadata(mode.anchor.join("Jarvis"))
+            .unwrap()
+            .mode()
+            & 0o7777,
+        0o755
+    );
+
+    let owner = ProvisionFixture::empty();
+    fs::create_dir(owner.anchor.join("Jarvis")).unwrap();
+    fs::set_permissions(
+        owner.anchor.join("Jarvis"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    assert!(matches!(
+        owner.provision_with_private_owner(owner.uid.wrapping_add(1), owner.gid),
+        Err(StoreError::UnsafeMetadata)
+    ));
+    assert_eq!(
+        fs::symlink_metadata(owner.anchor.join("Jarvis"))
+            .unwrap()
+            .uid(),
+        owner.uid
+    );
+
+    let symlinked = ProvisionFixture::empty();
+    let outside = symlinked._temp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("sentinel"), b"outside").unwrap();
+    symlink(&outside, symlinked.anchor.join("Jarvis")).unwrap();
+    assert!(matches!(
+        symlinked.provision(),
+        Err(StoreError::UnsafeMetadata)
+    ));
+    assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"outside");
+    assert!(fs::symlink_metadata(symlinked.anchor.join("Jarvis"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[test]
+fn concurrent_clean_install_converges_on_one_safe_tree() {
+    let fixture = ProvisionFixture::empty();
+    let barrier = Arc::new(Barrier::new(4));
+    let mut workers = Vec::new();
+    for _ in 0..4 {
+        let library = fixture.library.clone();
+        let barrier = barrier.clone();
+        let uid = fixture.uid;
+        let gid = fixture.gid;
+        workers.push(thread::spawn(move || {
+            let parent: OwnedFd = File::open(library).unwrap().into();
+            barrier.wait();
+            RootStore::provision_from_parent_for_testing(parent, uid, uid, gid, uid, gid)
+        }));
+    }
+    for worker in workers {
+        assert!(worker.join().unwrap().is_ok());
+    }
+    for component in fixture.private_components() {
+        let metadata = fs::symlink_metadata(component).unwrap();
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.mode() & 0o7777, 0o700);
+        assert_eq!(metadata.uid(), fixture.uid);
+        assert_eq!(metadata.gid(), fixture.gid);
     }
 }
 

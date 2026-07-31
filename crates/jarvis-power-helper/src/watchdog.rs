@@ -98,6 +98,29 @@ where
 
 /// Runtime state that proves startup recovery completed before listener
 /// publication.
+///
+/// Recovery alone is deliberately insufficient for serving. Only an armed
+/// [`ServingRuntime`] may publish a listener or dispatch requests.
+///
+/// ```compile_fail
+/// use jarvis_power_helper::coordinator::SystemRandom;
+/// use jarvis_power_helper::pmset::SystemPmset;
+/// use jarvis_power_helper::watchdog::{
+///     ReadyRuntime, SystemMonotonicClock, SystemProcessInspector,
+/// };
+///
+/// type Ready = ReadyRuntime<
+///     SystemPmset,
+///     SystemMonotonicClock,
+///     SystemProcessInspector,
+///     SystemRandom,
+/// >;
+///
+/// fn publish_or_dispatch_too_early(ready: &mut Ready) {
+///     let _ = ready.listener_permit();
+///     let _ = ready.status();
+/// }
+/// ```
 pub struct ReadyRuntime<B, C, P, R>
 where
     B: PmsetBackend,

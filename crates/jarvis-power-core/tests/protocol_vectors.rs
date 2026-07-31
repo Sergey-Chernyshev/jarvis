@@ -297,10 +297,7 @@ fn duplicate_and_trailing_json_are_rejected() {
 #[test]
 fn frame_size_is_bounded_before_json_decode() {
     let oversized = vec![b' '; MAX_FRAME_BYTES + 1];
-    assert_eq!(
-        decode_request(&oversized),
-        Err(ProtocolError::FrameTooLarge)
-    );
+    assert_eq!(decode_request(oversized), Err(ProtocolError::FrameTooLarge));
 }
 
 #[test]

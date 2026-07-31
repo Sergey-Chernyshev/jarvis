@@ -124,7 +124,7 @@ Increment A must not create or mutate that lock file.
 - Modify: `package.json`
 - Modify: `.github/workflows/ci.yml`
 
-- [ ] **Step 1: Add RED wire fixtures for protocol v2**
+- [x] **Step 1: Add RED wire fixtures for protocol v2**
 
 Create `crates/jarvis-plugin-protocol/tests/wire_compat.rs` with exact stable JSON names:
 
@@ -159,7 +159,7 @@ fn operation_state_names_are_stable() {
 }
 ```
 
-- [ ] **Step 2: Run the protocol test and verify RED**
+- [x] **Step 2: Run the protocol test and verify RED**
 
 Run:
 
@@ -169,7 +169,7 @@ cargo test --manifest-path crates/jarvis-plugin-protocol/Cargo.toml --test wire_
 
 Expected: FAIL because the crate and DTOs do not exist.
 
-- [ ] **Step 3: Create the protocol crate and stable DTOs**
+- [x] **Step 3: Create the protocol crate and stable DTOs**
 
 `crates/jarvis-plugin-protocol/src/lib.rs` must forbid host coupling:
 
@@ -216,7 +216,7 @@ pub enum OperationState {
 
 Keep path handling, HTTP, Tauri, tokens, settings and secret-store types out of this crate.
 
-- [ ] **Step 4: Add RED SDK environment and fake-host tests**
+- [x] **Step 4: Add RED SDK environment and fake-host tests**
 
 `crates/jarvis-plugin-sdk/tests/environment.rs`:
 
@@ -257,7 +257,7 @@ fn test_host_rejects_stale_generation_and_replays_nothing() {
 }
 ```
 
-- [ ] **Step 5: Run SDK/test-host tests and verify RED**
+- [x] **Step 5: Run SDK/test-host tests and verify RED**
 
 Run:
 
@@ -268,7 +268,7 @@ cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
 
 Expected: both FAIL because their APIs do not exist.
 
-- [ ] **Step 6: Implement the minimal SDK and in-memory test host**
+- [x] **Step 6: Implement the minimal SDK and in-memory test host**
 
 `jarvis-plugin-sdk` depends only on `jarvis-plugin-protocol`, `serde`, `serde_json` and a transport trait. Define
 `PluginEnvironment::from_pairs`, `PluginEnvironment::from_process`, `PluginClient<T: Transport>`, and redacted
@@ -278,7 +278,7 @@ Expected: both FAIL because their APIs do not exist.
 frames, records lifecycle frames and returns stable `ContractError::code()` values. It must not depend on
 `src-tauri`.
 
-- [ ] **Step 7: Enforce the source boundary in CI**
+- [x] **Step 7: Enforce the source boundary in CI**
 
 Create `scripts/check-plugin-boundaries.sh` that exits non-zero when:
 
@@ -297,7 +297,7 @@ The script prints the matching file and line. Add:
 to `package.json`, run it after `check:public` in `.github/workflows/ci.yml`, and add Cargo test steps for all three
 public crates.
 
-- [ ] **Step 8: Run the complete A1 gate**
+- [x] **Step 8: Run the complete A1 gate**
 
 Run:
 
@@ -310,7 +310,7 @@ npm run check:plugin-boundaries
 
 Expected: all commands exit `0`; no secret/token appears in test output.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add crates/jarvis-plugin-protocol crates/jarvis-plugin-sdk crates/jarvis-plugin-test-host \
@@ -336,7 +336,7 @@ git commit -m "feat(plugins): add public v2 contract crates"
 - Modify: `src-tauri/src/plugins/mod.rs`
 - Modify: `src-tauri/Cargo.toml`
 
-- [ ] **Step 1: Add RED contract tests for strict manifest parsing**
+- [x] **Step 1: Add RED contract tests for strict manifest parsing**
 
 Create `crates/jarvis-plugin-protocol/tests/manifest_contract.rs`:
 
@@ -371,7 +371,7 @@ Also cover invalid SemVer/range, non-namespaced community ID, reserved short ID 
 contribution IDs, remote `$ref`, manifest over 256 KiB, more than 64 nested levels and unresolved `${target}` in a
 packaged manifest.
 
-- [ ] **Step 2: Run the contract test and verify RED**
+- [x] **Step 2: Run the contract test and verify RED**
 
 Run:
 
@@ -381,7 +381,7 @@ cargo test --manifest-path crates/jarvis-plugin-protocol/Cargo.toml --test manif
 
 Expected: FAIL because `manifest` and its fixtures do not exist.
 
-- [ ] **Step 3: Add the complete strict schema and typed DTOs**
+- [x] **Step 3: Add the complete strict schema and typed DTOs**
 
 `schemas/plugin-manifest-v2.schema.json` is the bundled source of truth. It has:
 
@@ -415,7 +415,7 @@ pub struct ManifestV2 {
 All contribution IDs are unique within a plugin; handlers may reference only declared pages/commands; manifest paths
 must be normalized relative paths; `admin`/arbitrary shell permissions do not exist.
 
-- [ ] **Step 4: Add host-side bounded validation**
+- [x] **Step 4: Add host-side bounded validation**
 
 `src-tauri/src/plugins/manifest_v2.rs` embeds the schema bytes and provides:
 
@@ -432,7 +432,7 @@ stable codes `manifest_too_large`, `manifest_too_deep`, `manifest_schema`, `mani
 
 Do not modify or delete `src-tauri/src/plugins/manifest.rs`; that file remains the v1 compatibility parser.
 
-- [ ] **Step 5: Run focused host and protocol tests**
+- [x] **Step 5: Run focused host and protocol tests**
 
 Run:
 
@@ -443,13 +443,13 @@ cargo test --manifest-path src-tauri/Cargo.toml --no-default-features plugins::m
 
 Expected: all manifest tests pass, including bounded malicious inputs in under one second each.
 
-- [ ] **Step 6: Document the author contract**
+- [x] **Step 6: Document the author contract**
 
 `docs/plugins/manifest.md` includes the complete minimal UI-only and verified-native examples, ID/publisher rules,
 compatibility rules, path restrictions, permission diff behavior, schema command and the explicit statement that
 Manifest v1 is accepted only for the built-in `agent-vm` transition.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add schemas/plugin-manifest-v2.schema.json crates/jarvis-plugin-protocol \
@@ -457,6 +457,13 @@ git add schemas/plugin-manifest-v2.schema.json crates/jarvis-plugin-protocol \
   src-tauri/tests/fixtures/plugin-packages docs/plugins/manifest.md
 git commit -m "feat(plugins): validate strict manifest v2"
 ```
+
+Completion evidence (2026-07-31): A1 landed as `61c6fbb`; A2 landed as
+`be060f1` plus review fixes in `b8a89c7`. Independent re-review approved the
+closed schema, path and namespace rules. Rust 1.77.2 passed all three public
+crate test and clippy gates; the integrated branch additionally passed 18
+Manifest v2 host tests, seven unchanged Manifest v1 tests, plugin-boundary and
+public-secret guards.
 
 ---
 

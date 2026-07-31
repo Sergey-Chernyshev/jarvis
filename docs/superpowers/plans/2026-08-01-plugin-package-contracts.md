@@ -506,6 +506,9 @@ public-secret guards.
 - Create: `crates/jarvis-package/tests/fixtures/plugin-packages/pack-source/schemas/message.schema.json`
 - Create: `crates/jarvis-package/tests/fixtures/plugin-packages/golden/darwin-arm64.jarvis-plugin`
 - Create: `crates/jarvis-package/tests/fixtures/plugin-packages/golden/darwin-arm64.sha256`
+- Create: `scripts/generate-jarvis-package-lock.sh`
+- Create: `scripts/check-package-lock-contract.sh`
+- Create: `scripts/check-package-lock-contract.test.sh`
 - Create: `src-tauri/src/plugins/package.rs`
 - Modify: `crates/jarvis-plugin-protocol/src/lib.rs`
 - Modify: `crates/jarvis-plugin-protocol/src/manifest.rs`
@@ -518,6 +521,7 @@ public-secret guards.
 - Modify: `src-tauri/Cargo.lock`
 - Modify: `scripts/check-plugin-boundaries.sh`
 - Modify: `scripts/check-plugin-boundaries.test.sh`
+- Modify: `package.json`
 - Modify: `.github/workflows/ci.yml`
 
 This task owns the package wire format, byte-for-byte archive profile, bounded parser and quarantine extraction. It
@@ -551,16 +555,20 @@ publish = false
 jarvis-plugin-protocol = { version = "0.1.0", path = "../jarvis-plugin-protocol" }
 ```
 
-Generate its initial committed lock and run the probe before adding any A3 library:
+Generate its initial committed lock with current Cargo's Rust-aware resolver and run the probe with the declared
+compiler before adding any A3 library:
 
 ```bash
-cargo +1.77.2 generate-lockfile --manifest-path crates/jarvis-package/Cargo.toml
+cargo --config 'resolver.incompatible-rust-versions="fallback"' \
+  generate-lockfile --manifest-path crates/jarvis-package/Cargo.toml
 cargo +1.77.2 test --locked --manifest-path crates/jarvis-package/Cargo.toml \
   dependency_msrv::exact_dependency_apis_execute -- --exact --nocapture
 ```
 
 Expected: FAIL with unresolved A3 dependency/API imports from this isolated crate, not while parsing an unrelated
-Tauri dependency.
+Tauri dependency. At GREEN, `generate-jarvis-package-lock.sh` wraps that same current-Cargo command and validates its
+result. Never persist the fallback setting in `.cargo/config*`; Cargo 1.77.2 is a locked consumer/test/clippy compiler,
+not the lock generator.
 
 Then use these exact direct dependencies and features:
 
@@ -580,17 +588,17 @@ serde_json = "1"
 serde_json_canonicalizer = "=0.3.2"
 sha2 = { version = "=0.10.9", default-features = false, features = ["std"] }
 tar = { version = "=0.4.46", default-features = false }
-tempfile = { version = "=3.24.0", default-features = false, features = ["getrandom"] }
+tempfile = { version = "=3.27.0", default-features = false, features = ["getrandom"] }
 unicode-normalization = { version = "=0.1.24", default-features = false, features = ["std"] }
 
 # src-tauri/Cargo.toml [dependencies] — the only A3 host dependency
 jarvis-package = { path = "../crates/jarvis-package" }
 ```
 
-`getrandom 0.3.4` is a normal exact dependency, not a dev-only or lock-only accident; it constrains and probes the
-random API used by the pinned tempfile surface. Do not add `uuid`, pin/downgrade `image`, `indexmap`, Tauri or any
-other host dependency. Do not add `ed25519-dalek` anywhere in A3. A4 adds real Ed25519 verification to the host after
-the package-format boundary is green.
+`getrandom 0.3.4` is a normal exact dependency, not a dev-only or lock-only accident; it fixes and probes the direct
+random API while the Rust-aware resolver selects the compatible tempfile branch. Do not add `uuid`, pin/downgrade
+`image`, `indexmap`, Tauri or any other host dependency. Do not add `ed25519-dalek` anywhere in A3. A4 adds real
+Ed25519 verification to the host after the package-format boundary is green.
 
 `tar` is permitted only for `tar::Header::new_gnu()` and low-level `Builder::append()` when producing a stream.
 Production code must not call `append_path`, `append_file`, `append_dir_all`, `Archive::entries`, `Entry::unpack` or
@@ -634,7 +642,8 @@ assert_eq!(
 There is no signer call in the probe. Package-signature bytes are opaque to A3; cryptographic verification belongs to
 A4.
 
-Update all four committed public/private locks without changing unrelated versions:
+Update the three public locks without changing unrelated versions, then regenerate the private lock only through the
+current-Cargo wrapper:
 
 ```bash
 cargo +1.77.2 update --manifest-path crates/jarvis-plugin-protocol/Cargo.toml \
@@ -643,10 +652,20 @@ cargo +1.77.2 update --manifest-path crates/jarvis-plugin-sdk/Cargo.toml \
   -p unicode-normalization --precise 0.1.24
 cargo +1.77.2 update --manifest-path crates/jarvis-plugin-test-host/Cargo.toml \
   -p unicode-normalization --precise 0.1.24
-cargo +1.77.2 generate-lockfile --manifest-path crates/jarvis-package/Cargo.toml
-cargo +1.77.2 update --manifest-path crates/jarvis-package/Cargo.toml \
-  -p getrandom --precise 0.3.4
+bash scripts/generate-jarvis-package-lock.sh
 ```
+
+The wrapper executes exactly:
+
+```bash
+cargo --config 'resolver.incompatible-rust-versions="fallback"' \
+  generate-lockfile --manifest-path crates/jarvis-package/Cargo.toml
+```
+
+The resulting private lock contains `tempfile 3.27.0` and only `getrandom 0.3.4`. The Rust-aware current resolver
+prefers the MSRV-compatible 0.3 branch of tempfile's `>=0.3, <0.5` range, then the normal direct exact dependency
+fixes and unifies that branch at 0.3.4. Cargo is permitted to resolve incompatible 0.x minor lines simultaneously, so
+the direct pin alone is not the fallback policy. Do not generate or update this lock with Cargo 1.77.2.
 
 Add only the `jarvis-package` path dependency to the host manifest, let current-stable Cargo add that path package to
 `src-tauri/Cargo.lock`, align the host's existing Unicode package to the public/private crate pin, and inspect the lock
@@ -661,8 +680,24 @@ git diff -- src-tauri/Cargo.lock
 
 Expected: the only existing registry-package version change is the required
 `unicode-normalization 0.1.25 -> 0.1.24` downgrade, plus new entries required by `jarvis-package`. Apart from replacing
-that one Unicode entry, no existing registry package version or checksum changes; in particular there is no `uuid`,
-`image`, `tiff`, `indexmap`, `hashbrown`, TOML or Tauri churn.
+that one Unicode entry, no existing registry package version or checksum changes. In particular, the existing host
+`tempfile 3.27.0` and `getrandom 0.4.2` version/checksum blocks remain byte-for-byte unchanged, and there is no `uuid`,
+`image`, `tiff`, `indexmap`, `hashbrown`, TOML or Tauri churn. The host may retain its 0.4 edge while
+`jarvis-package` also has the already-present direct `getrandom 0.3.4` edge; only the isolated private lock makes the
+Rust 1.77.2 claim.
+
+Add `scripts/generate-jarvis-package-lock.sh`, `scripts/check-package-lock-contract.sh` and a negative-fixture test.
+The executable regression gate checks the exact private manifest pins, semantic private lock records
+(`tempfile 3.27.0`, `getrandom 0.3.4`, no 0.4), the unchanged host tempfile/getrandom version-checksum records and
+dependency linkage, and the command-local generator argv. The generator invokes that gate after Cargo exits, so an
+older Cargo silently ignoring the fallback still fails when it produces a private 0.4 edge. The checker parses package
+records and sorted dependency sets independently and must not bind to whole-lock ordering.
+Run it in the normal Rust CI job before package tests:
+
+```bash
+npm run test:package-lock
+npm run check:package-lock
+```
 
 Extend `scripts/check-plugin-boundaries.sh` and its negative-fixture test so all of these are enforced:
 
@@ -718,6 +753,8 @@ cargo tree --locked --manifest-path crates/jarvis-package/Cargo.toml \
 ! cargo tree --locked --manifest-path crates/jarvis-package/Cargo.toml \
   | rg 'getrandom v0\\.4|ed25519-dalek|base64ct|zeroize'
 cargo tree --locked --manifest-path crates/jarvis-plugin-protocol/Cargo.toml -e normal
+npm run test:package-lock
+npm run check:package-lock
 npm run test:plugin-boundaries
 npm run check:plugin-boundaries
 ```
@@ -729,11 +766,14 @@ transitives, and the public protocol tree contains `unicode-normalization 0.1.24
 **Evidence for replacing the old host probe:** the rejected design put the probe under `src-tauri` and therefore asked
 Cargo 1.77.2 to parse the entire floating Tauri host lock before it could compile one A3 import. The blocked run failed
 first on unrelated Edition-2024 host packages and could reach A3 only by experimenting with UUID, image and indexmap
-downgrades. A fresh independent macOS audit also found `tempfile 3.27.0` selecting Edition-2024
-`getrandom 0.4.3`, while the Ed25519 test lock selected Edition-2024 `base64ct 1.8.3`/`zeroize 1.9`. With
-`tempfile 3.24.0`, normal exact `getrandom 0.3.4` and no Ed25519 dependency, real Cargo/rustc 1.77.2 passed locked
-`--all-targets` test and clippy for the isolated package crate. This is valid evidence for the A3 implementation
-surface; it is intentionally not evidence that the whole host or WASI supports Rust 1.77.2.
+downgrades. A fresh independent macOS audit found that an unconstrained `tempfile 3.27.0` resolution selected
+Edition-2024 `getrandom 0.4.3`, while the Ed25519 test lock selected Edition-2024
+`base64ct 1.8.3`/`zeroize 1.9`. Pinning tempfile itself to 3.24 avoided that private failure but forced Cargo to
+downgrade the host's existing tempfile/getrandom edge, violating the no-host-churn gate. The accepted resolution pins
+`tempfile 3.27.0` and normal exact `getrandom 0.3.4`, generates the isolated lock with current Cargo's command-local
+Rust-aware fallback, and then proves that locked graph with real Cargo/rustc 1.77.2 test and clippy. This is valid
+evidence for the A3 implementation surface; it is intentionally not evidence that the whole host or WASI supports
+Rust 1.77.2.
 
 - [ ] **Step 2: Add RED wire-schema, JCS and signature tests**
 

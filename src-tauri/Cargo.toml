@@ -11,6 +11,7 @@ default-run = "jarvis"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+jarvis-package = { path = "../crates/jarvis-package" }
 jarvis-power-core = { path = "../crates/jarvis-power-core" }
 jarvis-plugin-protocol = { path = "../crates/jarvis-plugin-protocol" }
 jarvis-secret-store = { path = "../crates/jarvis-secret-store" }

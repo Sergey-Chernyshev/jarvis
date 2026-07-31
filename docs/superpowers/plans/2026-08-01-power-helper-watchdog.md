@@ -164,6 +164,17 @@ fn arbitrary_commands_and_unknown_fields_are_rejected() {
 }
 
 #[test]
+fn recovery_is_not_a_client_triggered_protocol_method() {
+    for method in ["recoverExpired", "recover", "tick", "restoreBaseline"] {
+        let input = format!(
+            r#"{{"protocolVersion":2,"requestId":"018f0000-0000-7000-8000-000000000001",
+                 "method":"{method}"}}"#
+        );
+        assert!(serde_json::from_str::<RequestEnvelope>(&input).is_err());
+    }
+}
+
+#[test]
 fn wire_contract_has_no_caller_identity_or_mutation_fields() {
     let text = serde_json::to_string(&acquire_request("prod", "generation-a", 45_000)).unwrap();
     for forbidden in ["command", "args", "path", "uid", "pid", "teamId", "baseline", "pmset"] {
@@ -196,13 +207,13 @@ pub enum Request {
     RenewLease { lease_id: String, owner_generation: String, ttl_ms: u64 },
     ReleaseLease { lease_id: String, owner_generation: String },
     Status,
-    RecoverExpired,
 }
 ```
 
 `RequestEnvelope` has only `protocol_version`, UUIDv7-shaped `request_id`, and flattened `Request`.
-`ResponseEnvelope` echoes request id and returns `Acquired`, `Renewed`, `Released`, `Status`, `Recovered`, or a finite
-error code. Use `#[serde(deny_unknown_fields)]` everywhere. Lease ids are helper-generated 128-bit CSPRNG values.
+`ResponseEnvelope` echoes request id and returns `Acquired`, `Renewed`, `Released`, `Status`, or a finite error code.
+Use `#[serde(deny_unknown_fields)]` everywhere. Lease ids are helper-generated 128-bit CSPRNG values. Recovery has no
+wire request/response variant.
 
 - [ ] **Step 4: Run and commit**
 
@@ -355,7 +366,9 @@ argument vector.
 
 The coordinator holds the root lock across engine decision, durable transition, mutation, and read-back. The watchdog
 ticks each second, checks monotonic deadline and exact `proc_pidinfo` start identity, and executes the same release
-transaction. Logs contain request id, finite error, generation, and lease-id prefix only.
+transaction. Before publishing or accepting the XPC/UDS listener, helper startup synchronously runs this same
+serialized internal watchdog tick; the timer is its only later trigger. No client request can invoke recovery. Logs
+contain request id, finite error, generation, and lease-id prefix only.
 
 - [ ] **Step 4: Run and commit**
 

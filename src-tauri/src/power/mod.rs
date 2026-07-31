@@ -202,6 +202,34 @@ pub enum TrayItem {
     Separator,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClamshellDisposeOutcome {
+    Idle,
+    Released(clamshell::ReleaseOutcome),
+    BarrierTimeout,
+    ReleaseFailed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PowerDisposeReport {
+    pub clamshell: ClamshellDisposeOutcome,
+}
+
+impl PowerDisposeReport {
+    pub fn released(&self) -> bool {
+        match self.clamshell {
+            ClamshellDisposeOutcome::Idle => true,
+            ClamshellDisposeOutcome::Released(outcome) => release_was_confirmed(outcome),
+            ClamshellDisposeOutcome::BarrierTimeout
+            | ClamshellDisposeOutcome::ReleaseFailed(_) => false,
+        }
+    }
+}
+
+fn release_was_confirmed(outcome: clamshell::ReleaseOutcome) -> bool {
+    !matches!(outcome, clamshell::ReleaseOutcome::NotOwned)
+}
+
 #[derive(Default)]
 struct Clam {
     /// Плагин «Крышка» включён (runtime-аналог p.active у Electron-хоста).
@@ -346,19 +374,20 @@ impl Power {
             eprintln!("[jarvis:clamshell] release admission timed out or shutdown started");
             return;
         };
-        Self::deactivate_clamshell_inner(d);
+        let _ = Self::deactivate_clamshell_inner(d);
     }
 
-    fn deactivate_clamshell_inner(d: &Arc<Daemon>) {
+    fn deactivate_clamshell_inner(d: &Arc<Daemon>) -> ClamshellDisposeOutcome {
         let (was_active, owner_generation) = {
             let mut clam = d.power.clam.lock().unwrap();
             let was_active = clam.active;
             if !was_active && clam.owner_generation.is_none() {
-                return;
+                return ClamshellDisposeOutcome::Idle;
             }
             clam.active = false;
             (was_active, clam.owner_generation.clone())
         };
+        let mut outcome = ClamshellDisposeOutcome::Idle;
         if let Some(owner_generation) = owner_generation {
             match clamshell::release_with(
                 &clamshell::SystemPmset,
@@ -366,41 +395,55 @@ impl Power {
                 &power_profile_id(),
                 &owner_generation,
             ) {
-                Ok(_) => {
-                    let mut clam = d.power.clam.lock().unwrap();
-                    if clam.owner_generation.as_deref() == Some(owner_generation.as_str()) {
-                        clam.armed = false;
-                        clam.armed_by = None;
-                        clam.owner_generation = None;
+                Ok(release) => {
+                    if release_was_confirmed(release) {
+                        let mut clam = d.power.clam.lock().unwrap();
+                        if clam.owner_generation.as_deref() == Some(owner_generation.as_str()) {
+                            clam.armed = false;
+                            clam.armed_by = None;
+                            clam.owner_generation = None;
+                        }
+                        outcome = ClamshellDisposeOutcome::Released(release);
+                    } else {
+                        let error =
+                            "ownership registry no longer proves the in-memory clamshell lease";
+                        eprintln!("[jarvis:clamshell] release on deactivate ambiguous: {error}");
+                        outcome = ClamshellDisposeOutcome::ReleaseFailed(error.into());
                     }
                 }
                 Err(error) => {
                     // Keep the exact identity for a later shutdown/startup
                     // retry; losing it could strand SleepDisabled=1.
                     eprintln!("[jarvis:clamshell] release on deactivate failed: {error}");
+                    outcome = ClamshellDisposeOutcome::ReleaseFailed(error.to_string());
                 }
             }
         }
         if was_active {
             println!("[jarvis:clamshell] выключен");
         }
+        outcome
     }
 
     /// Выход из приложения: снять assertion и синхронно освободить только
     /// доказанную Jarvis-owned clamshell lease через non-interactive backend.
-    pub fn dispose(d: &Arc<Daemon>) {
+    pub fn dispose(d: &Arc<Daemon>) -> PowerDisposeReport {
         d.power.operations.close();
+        // IOKit assertions are process-local and cheap to release, so do this
+        // before waiting for a potentially blocked cross-process transaction.
         Self::deactivate_keep_awake(d);
-        if d
+        let clamshell = if d
             .power
             .operations
             .wait_for_idle(POWER_OPERATION_BARRIER_TIMEOUT)
         {
             // Admission is closed, so no new operation can race this retry.
-            Self::deactivate_clamshell_inner(d);
+            Self::deactivate_clamshell_inner(d)
         } else {
             eprintln!("[jarvis:power] timed out waiting for in-flight clamshell rollback");
-        }
+            ClamshellDisposeOutcome::BarrierTimeout
+        };
+        PowerDisposeReport { clamshell }
     }
 
     fn ka_enabled(&self) -> bool {
@@ -1013,7 +1056,16 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
                 &profile,
                 &retry_generation,
             ) {
-                Ok(_) => Err(primary.to_string()),
+                Ok(release) if release_was_confirmed(release) => Err(primary.to_string()),
+                Ok(release) => {
+                    let mut clam = retry_daemon.power.clam.lock().unwrap();
+                    clam.armed = true;
+                    clam.armed_by = Some(by);
+                    clam.owner_generation = Some(retry_generation);
+                    Err(format!(
+                        "{primary}; cleanup retry was not ownership-confirmed: {release:?}"
+                    ))
+                }
                 Err(cleanup) => {
                     let mut clam = retry_daemon.power.clam.lock().unwrap();
                     clam.armed = true;
@@ -1042,7 +1094,16 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
                     &rollback_profile,
                     &rollback_generation,
                 ) {
-                    Ok(_) => Ok(()),
+                    Ok(release) if release_was_confirmed(release) => Ok(()),
+                    Ok(release) => {
+                        let mut clam = rollback_daemon.power.clam.lock().unwrap();
+                        clam.armed = true;
+                        clam.armed_by = Some(by);
+                        clam.owner_generation = Some(rollback_generation);
+                        Err(format!(
+                            "late rollback was not ownership-confirmed: {release:?}"
+                        ))
+                    }
                     Err(error) => {
                         let mut clam = rollback_daemon.power.clam.lock().unwrap();
                         clam.armed = true;
@@ -1108,22 +1169,25 @@ async fn disarm(d: &Arc<Daemon>) -> Value {
         )
     })
     .await;
-    let result = if matches!(&released, Ok(Ok(_))) {
-        {
+    let result = match released {
+        Ok(Ok(outcome)) if release_was_confirmed(outcome) => {
             let mut clam = d.power.clam.lock().unwrap();
             clam.armed = false;
             clam.armed_by = None;
             clam.owner_generation = None;
+            drop(clam);
+            changed(d);
+            json!({ "ok": true })
         }
-        changed(d);
-        json!({ "ok": true })
-    } else {
-        let error = match released {
-            Ok(Err(error)) => error.to_string(),
-            Err(error) => format!("power worker failed: {error}"),
-            Ok(Ok(_)) => unreachable!(),
-        };
-        json!({ "ok": false, "error": error })
+        Ok(Ok(outcome)) => json!({
+            "ok": false,
+            "error": format!("release was not ownership-confirmed: {outcome:?}")
+        }),
+        Ok(Err(error)) => json!({ "ok": false, "error": error.to_string() }),
+        Err(error) => json!({
+            "ok": false,
+            "error": format!("power worker failed: {error}")
+        }),
     };
     d.power.clam.lock().unwrap().busy = false;
     result
@@ -1213,7 +1277,7 @@ async fn battery_guard(d: &Arc<Daemon>) {
         .ok()
         .and_then(|(worker_operation, outcome)| {
             operation = Some(worker_operation);
-            outcome.ok()
+            outcome.ok().filter(|outcome| release_was_confirmed(*outcome))
         })
     } else {
         None
@@ -1417,6 +1481,26 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn missing_registry_does_not_confirm_an_in_memory_release() {
+        assert!(!release_was_confirmed(
+            clamshell::ReleaseOutcome::NotOwned
+        ));
+        assert!(!PowerDisposeReport {
+            clamshell: ClamshellDisposeOutcome::Released(clamshell::ReleaseOutcome::NotOwned),
+        }
+        .released());
+        assert!(release_was_confirmed(
+            clamshell::ReleaseOutcome::KeptApplied
+        ));
+        assert!(release_was_confirmed(
+            clamshell::ReleaseOutcome::BaselineUnchanged(false)
+        ));
+        assert!(release_was_confirmed(
+            clamshell::ReleaseOutcome::Restored(false)
+        ));
+    }
 
     #[test]
     fn shutdown_gate_is_one_way_and_idempotent() {

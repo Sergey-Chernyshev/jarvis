@@ -1245,7 +1245,7 @@ pub async fn update_check_install(app: AppHandle) -> Value {
 /// Перезапустить приложение (после установки обновления).
 #[tauri::command]
 pub fn app_relaunch(app: AppHandle) {
-    app.restart();
+    crate::shutdown::request_restart(&Daemon::get(&app));
 }
 
 /* ================= плагины, usage, история ================= */

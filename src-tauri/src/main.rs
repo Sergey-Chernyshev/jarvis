@@ -427,16 +427,12 @@ fn main() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 let d = Daemon::get(app);
-                d.write_state_now(); // реестр переживает перезапуск
-                d.plugins.dispose(&d); // погасить внешние plugin-процессы
-                if !is_headless() {
-                    power::Power::dispose(&d); // снять assertion, вернуть disablesleep
+                let report = shutdown::cleanup(&d);
+                if !report.complete() {
+                    crate::log::line(&format!(
+                        "[shutdown] Exit fallback remains incomplete: {report:?}"
+                    ));
                 }
-                d.voice.dispose(); // погасить Silero-сайдкар, если был поднят
-                d.stt.dispose(); // погасить Qwen3-MLX-сайдкар, если был поднят
-                d.wake.dispose(); // остановить wake-word consumer-поток
-                d.audio.dispose(); // остановить общий аудио-захват (drop cpal Stream)
-                let _ = std::fs::remove_file(util::sock_path());
             }
         });
 }

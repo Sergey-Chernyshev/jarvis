@@ -6,9 +6,13 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 const SUPPORTED_SCHEMA_VERSION: u32 = 1;
+const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 pub fn global_registry_path() -> PathBuf {
     crate::util::home_dir().join("Library/Application Support/Jarvis/power/ownership.json")
@@ -17,6 +21,7 @@ pub fn global_registry_path() -> PathBuf {
 #[derive(Debug)]
 pub enum StoreError {
     Io(io::Error),
+    LockTimeout { path: PathBuf, timeout: Duration },
     Corrupt(String),
     Serialize(serde_json::Error),
 }
@@ -25,6 +30,12 @@ impl fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(formatter, "ownership store I/O failed: {error}"),
+            Self::LockTimeout { path, timeout } => write!(
+                formatter,
+                "ownership lock {} was not acquired within {} ms",
+                path.display(),
+                timeout.as_millis()
+            ),
             Self::Corrupt(error) => write!(formatter, "ownership registry is corrupt: {error}"),
             Self::Serialize(error) => {
                 write!(
@@ -41,7 +52,7 @@ impl std::error::Error for StoreError {
         match self {
             Self::Io(error) => Some(error),
             Self::Serialize(error) => Some(error),
-            Self::Corrupt(_) => None,
+            Self::LockTimeout { .. } | Self::Corrupt(_) => None,
         }
     }
 }
@@ -70,26 +81,51 @@ impl OwnershipStore {
     /// Multi-step power transactions must use the guard methods throughout;
     /// calling the store-level convenience methods while holding it would relock.
     pub fn lock(&self) -> Result<OwnershipStoreGuard<'_>, StoreError> {
-        self.acquire_lock(false)?
-            .map(|lock_file| OwnershipStoreGuard {
-                store: self,
-                lock_file,
-            })
-            .ok_or_else(|| {
-                StoreError::Io(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "blocking ownership lock unexpectedly unavailable",
-                ))
-            })
+        self.lock_with_timeout(DEFAULT_LOCK_TIMEOUT)
+    }
+
+    pub fn lock_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<OwnershipStoreGuard<'_>, StoreError> {
+        let lock_path = self.path.with_extension("lock");
+        let lock_file = self.open_lock_file(&lock_path)?;
+        let started = Instant::now();
+
+        loop {
+            match try_exclusive_lock(&lock_file) {
+                Ok(true) => {
+                    return Ok(OwnershipStoreGuard {
+                        store: self,
+                        lock_file,
+                    });
+                }
+                Ok(false) if started.elapsed() >= timeout => {
+                    return Err(StoreError::LockTimeout {
+                        path: lock_path,
+                        timeout,
+                    });
+                }
+                Ok(false) => {
+                    let remaining = timeout.saturating_sub(started.elapsed());
+                    thread::sleep(LOCK_POLL_INTERVAL.min(remaining));
+                }
+                Err(error) => return Err(StoreError::Io(error)),
+            }
+        }
     }
 
     pub fn try_lock(&self) -> Result<Option<OwnershipStoreGuard<'_>>, StoreError> {
-        Ok(self
-            .acquire_lock(true)?
-            .map(|lock_file| OwnershipStoreGuard {
+        let lock_path = self.path.with_extension("lock");
+        let lock_file = self.open_lock_file(&lock_path)?;
+        match try_exclusive_lock(&lock_file) {
+            Ok(true) => Ok(Some(OwnershipStoreGuard {
                 store: self,
                 lock_file,
-            }))
+            })),
+            Ok(false) => Ok(None),
+            Err(error) => Err(StoreError::Io(error)),
+        }
     }
 
     pub fn read(&self) -> Result<Option<OwnershipState>, StoreError> {
@@ -104,29 +140,28 @@ impl OwnershipStore {
         self.lock()?.clear()
     }
 
-    fn acquire_lock(&self, nonblocking: bool) -> Result<Option<File>, StoreError> {
+    fn open_lock_file(&self, lock_path: &Path) -> Result<File, StoreError> {
         let parent = parent_dir(&self.path);
         fs::create_dir_all(parent)?;
-        let lock_path = self.path.with_extension("lock");
-        let lock_file = OpenOptions::new()
+        Ok(OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .mode(0o600)
-            .open(lock_path)?;
-        let operation = libc::LOCK_EX | if nonblocking { libc::LOCK_NB } else { 0 };
+            .open(lock_path)?)
+    }
+}
 
-        if unsafe { libc::flock(lock_file.as_raw_fd(), operation) } == 0 {
-            return Ok(Some(lock_file));
-        }
-
-        let error = io::Error::last_os_error();
-        if nonblocking && error.kind() == io::ErrorKind::WouldBlock {
-            Ok(None)
-        } else {
-            Err(StoreError::Io(error))
-        }
+fn try_exclusive_lock(lock_file: &File) -> io::Result<bool> {
+    if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::WouldBlock {
+        Ok(false)
+    } else {
+        Err(error)
     }
 }
 
@@ -224,6 +259,7 @@ mod tests {
     use crate::power::ownership::OwnershipState;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -302,6 +338,26 @@ mod tests {
 
         drop(owner_guard);
         assert!(contender.try_lock().unwrap().is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn held_lock_times_out_without_modifying_registry() {
+        let dir = unique_test_dir("lock-timeout");
+        let path = dir.join("ownership.json");
+        let owner = OwnershipStore::at(&path);
+        let contender = OwnershipStore::at(&path);
+        let expected = OwnershipState::new(false, "boot-a", 7);
+        owner.write(&expected).unwrap();
+        let owner_guard = owner.lock().unwrap();
+
+        assert!(matches!(
+            contender.lock_with_timeout(Duration::ZERO),
+            Err(StoreError::LockTimeout { .. })
+        ));
+        assert_eq!(owner_guard.read().unwrap(), Some(expected));
+
+        drop(owner_guard);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

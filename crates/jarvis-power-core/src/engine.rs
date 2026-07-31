@@ -1,4 +1,4 @@
-use crate::protocol::{MAX_TTL_MS, MIN_TTL_MS};
+use crate::protocol::{ErrorCode, MAX_TTL_MS, MIN_TTL_MS};
 use crate::state::{
     valid_identifier, HelperState, Lease, LeaseId, MonotonicTime, MutationPhase, Principal,
     StateError, MAX_ACTIVE_LEASES, STATE_SCHEMA_VERSION,
@@ -46,19 +46,40 @@ impl EngineConfig {
 pub enum Effect {
     PersistState(HelperState),
     /// Abort the remaining plan when the helper's current monotonic time is
-    /// greater than or equal to this deadline.
+    /// greater than or equal to this deadline, yielding
+    /// [`RuntimeGuardError::DeadlineExpired`].
     CheckDeadline(MonotonicTime),
     /// Sample the helper's monotonic clock once, reject when the remaining
     /// duration is below the supplied minimum, and retain that same measured
     /// duration for the response's `grantedTtlMs`.
     ///
-    /// For [`AcquireOutcome::Existing`], this is the only and final permitted
-    /// blocking action. The coordinator must reconcile immediately on failure
-    /// or reply immediately with the measured duration on success.
+    /// For every successful acquire or renewal, this is the only and final
+    /// runtime TTL sample. The coordinator must reconcile immediately on
+    /// `RuntimeGuardError::RemainingTtlTooShort` or reply immediately with the
+    /// measured duration on success.
     CheckRemainingTtl(MonotonicTime, u64),
     CompareAndSetDisabled(bool),
     VerifyDisabled(bool),
     ClearState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Finite failures produced by the coordinator while executing runtime guards.
+///
+/// A successful reconciliation after either failure is reported to the client
+/// as an expired lease. If reconciliation itself fails, the coordinator must
+/// instead return `RecoveryRequired`.
+pub enum RuntimeGuardError {
+    DeadlineExpired,
+    RemainingTtlTooShort,
+}
+
+impl RuntimeGuardError {
+    pub const fn protocol_error_code(self) -> ErrorCode {
+        match self {
+            Self::DeadlineExpired | Self::RemainingTtlTooShort => ErrorCode::LeaseExpired,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,7 +87,9 @@ pub enum Effect {
 ///
 /// `state` is the projected state after every effect succeeds; it is provided
 /// for inspection and response construction, not as a substitute for executing
-/// the ordered persistence effects.
+/// the ordered persistence effects. An acquire or renewal response must use
+/// the duration returned by its final `CheckRemainingTtl`; no earlier value is
+/// a valid `grantedTtlMs`.
 pub struct Plan {
     pub state: Option<HelperState>,
     pub effects: Vec<Effect>,
@@ -85,8 +108,9 @@ impl Plan {
 pub enum AcquireOutcome {
     Created {
         lease_id: LeaseId,
+        /// The response TTL is deliberately absent: it must be the value
+        /// measured by the plan's final `CheckRemainingTtl`.
         deadline: MonotonicTime,
-        granted_ttl_ms: u64,
     },
     Existing {
         /// The authoritative ID from persisted state, which can differ from
@@ -103,7 +127,8 @@ pub enum AcquireOutcome {
 pub struct AcquireResult {
     pub plan: Plan,
     /// The authoritative lease identity for the response. A coordinator must
-    /// never answer with its proposed lease id instead of this outcome.
+    /// never answer with its proposed lease id instead of this outcome and
+    /// must obtain `grantedTtlMs` only from the plan's final runtime sample.
     pub outcome: AcquireOutcome,
 }
 
@@ -204,7 +229,7 @@ impl Engine {
         };
 
         match &self.state {
-            None => self.acquire_first(lease, observed_disabled, mutation_generation, ttl_ms),
+            None => self.acquire_first(lease, observed_disabled, mutation_generation),
             Some(_) => {
                 let mut state = self.checked_state_for_boot(&self.config.boot_id)?.clone();
                 self.ensure_current_policy(&state)?;
@@ -262,7 +287,6 @@ impl Engine {
                 let outcome = AcquireOutcome::Created {
                     lease_id: lease.lease_id.clone(),
                     deadline: lease.deadline,
-                    granted_ttl_ms: ttl_ms,
                 };
                 state.leases.push(lease);
                 state.validate().map_err(EngineError::CorruptState)?;
@@ -272,7 +296,7 @@ impl Engine {
                         effects: vec![
                             Effect::CheckDeadline(deadline),
                             Effect::PersistState(state),
-                            Effect::CheckDeadline(deadline),
+                            Effect::CheckRemainingTtl(deadline, MIN_TTL_MS),
                         ],
                     },
                     outcome,
@@ -324,7 +348,7 @@ impl Engine {
             effects: vec![
                 Effect::CheckDeadline(old_deadline),
                 Effect::PersistState(state),
-                Effect::CheckDeadline(deadline),
+                Effect::CheckRemainingTtl(deadline, MIN_TTL_MS),
             ],
         })
     }
@@ -424,12 +448,10 @@ impl Engine {
         lease: Lease,
         baseline: bool,
         mutation_generation: u64,
-        granted_ttl_ms: u64,
     ) -> Result<AcquireResult, EngineError> {
         let outcome = AcquireOutcome::Created {
             lease_id: lease.lease_id.clone(),
             deadline: lease.deadline,
-            granted_ttl_ms,
         };
         let deadline = lease.deadline;
         let prepared = HelperState {
@@ -461,7 +483,7 @@ impl Engine {
         effects.push(Effect::VerifyDisabled(true));
         effects.push(Effect::CheckDeadline(deadline));
         effects.push(Effect::PersistState(applied.clone()));
-        effects.push(Effect::CheckDeadline(deadline));
+        effects.push(Effect::CheckRemainingTtl(deadline, MIN_TTL_MS));
 
         Ok(AcquireResult {
             plan: Plan {

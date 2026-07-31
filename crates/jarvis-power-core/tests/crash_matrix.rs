@@ -1,7 +1,8 @@
 use jarvis_power_core::engine::{
     AcquireOutcome, AcquireResult, Effect, Engine, EngineConfig, EngineError, Plan, ProcessState,
+    RuntimeGuardError,
 };
-use jarvis_power_core::protocol::MIN_TTL_MS;
+use jarvis_power_core::protocol::{ErrorCode, ProtocolError, Response, MIN_TTL_MS};
 use jarvis_power_core::state::{
     DarwinProcessIdentity, HelperState, Lease, LeaseId, MonotonicTime, MutationPhase, Principal,
     StateError, MAX_ACTIVE_LEASES,
@@ -67,11 +68,7 @@ fn first_acquire(baseline: bool) -> Plan {
     acquire_with_ttl(baseline, 5_000).plan
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RuntimeEffectError {
-    DeadlineExpired,
-    RemainingTtlTooShort,
-}
+type RuntimeEffectError = RuntimeGuardError;
 
 #[derive(Clone, Debug)]
 struct World {
@@ -255,6 +252,43 @@ fn assert_restore_order(plan: &Plan, baseline: bool, did_mutate: bool) {
     assert_eq!(plan.effects[index], Effect::VerifyDisabled(baseline));
     assert_eq!(plan.effects[index + 1], Effect::ClearState);
     assert_eq!(plan.effects.len(), index + 2);
+}
+
+fn assert_single_final_ttl_sample(plan: &Plan, deadline: MonotonicTime) {
+    assert_eq!(
+        plan.effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::CheckRemainingTtl(_, _)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        plan.effects.last(),
+        Some(&Effect::CheckRemainingTtl(deadline, MIN_TTL_MS))
+    );
+}
+
+#[test]
+fn runtime_ttl_guard_failures_have_a_closed_protocol_mapping() {
+    for failure in [
+        RuntimeGuardError::DeadlineExpired,
+        RuntimeGuardError::RemainingTtlTooShort,
+    ] {
+        assert_eq!(failure.protocol_error_code(), ErrorCode::LeaseExpired);
+    }
+
+    for response in [
+        Response::Acquired {
+            lease_id: LEASE_A.to_owned(),
+            granted_ttl_ms: 1,
+        },
+        Response::Renewed {
+            lease_id: LEASE_A.to_owned(),
+            granted_ttl_ms: 1,
+        },
+    ] {
+        assert_eq!(response.validate(), Err(ProtocolError::InvalidResponse));
+    }
 }
 
 #[test]
@@ -471,7 +505,10 @@ fn multiple_profiles_restore_only_when_the_last_lease_leaves() {
     assert_eq!(second.effects.len(), 3);
     assert_eq!(second.effects[0], Effect::CheckDeadline(now(5_010)));
     assert!(matches!(second.effects[1], Effect::PersistState(_)));
-    assert_eq!(second.effects[2], Effect::CheckDeadline(now(5_010)));
+    assert_eq!(
+        second.effects[2],
+        Effect::CheckRemainingTtl(now(5_010), MIN_TTL_MS)
+    );
     world.execute_plan(&second);
 
     let release_first = world
@@ -606,7 +643,6 @@ fn lost_acquire_response_returns_the_existing_authoritative_lease() {
         AcquireOutcome::Created {
             lease_id: lease_id(LEASE_A),
             deadline: now(45_000),
-            granted_ttl_ms: 45_000,
         }
     );
     let mut world = World::baseline(false);
@@ -793,7 +829,7 @@ fn renew_extends_only_the_existing_exact_lease_and_persists_it() {
         vec![
             Effect::CheckDeadline(now(5_000)),
             Effect::PersistState(state.clone()),
-            Effect::CheckDeadline(now(46_000)),
+            Effect::CheckRemainingTtl(now(46_000), MIN_TTL_MS),
         ]
     );
 }
@@ -999,7 +1035,7 @@ fn first_acquire_fsync_past_new_deadline_recovers_before_success() {
 
     assert_eq!(
         world.execute_plan_with_slow_persist(&acquire, 5, now(8_000)),
-        Err(RuntimeEffectError::DeadlineExpired)
+        Err(RuntimeEffectError::RemainingTtlTooShort)
     );
     assert_eq!(world.immediate_reconciliations, 1);
     assert!(!world.sleep_disabled);
@@ -1026,7 +1062,7 @@ fn additional_acquire_fsync_past_new_deadline_recovers_before_success() {
 
     assert_eq!(
         world.execute_plan_with_slow_persist(&additional.plan, 1, now(8_000)),
-        Err(RuntimeEffectError::DeadlineExpired)
+        Err(RuntimeEffectError::RemainingTtlTooShort)
     );
     assert_eq!(world.immediate_reconciliations, 1);
     assert!(world.sleep_disabled);
@@ -1052,7 +1088,7 @@ fn renew_fsync_past_new_deadline_recovers_before_success() {
 
     assert_eq!(
         world.execute_plan_with_slow_persist(&renew, 1, now(8_000)),
-        Err(RuntimeEffectError::DeadlineExpired)
+        Err(RuntimeEffectError::RemainingTtlTooShort)
     );
     assert_eq!(world.immediate_reconciliations, 1);
     assert!(!world.sleep_disabled);
@@ -1060,7 +1096,145 @@ fn renew_fsync_past_new_deadline_recovers_before_success() {
 }
 
 #[test]
-fn created_outcome_uses_relative_ttl_at_nonzero_monotonic_time() {
+fn first_acquire_success_uses_one_final_runtime_ttl_sample() {
+    let acquire = acquire_with_ttl(false, 45_000);
+    assert_single_final_ttl_sample(&acquire.plan, now(45_000));
+
+    let mut world = World::baseline(false);
+    world.monotonic_now = now(1_000);
+    assert_eq!(
+        world
+            .execute_response_plan(&acquire.plan)
+            .expect("runtime TTL sample"),
+        44_000
+    );
+}
+
+#[test]
+fn additional_acquire_success_uses_one_final_runtime_ttl_sample() {
+    let mut world = World::baseline(false);
+    world.execute_plan(&acquire_with_ttl(false, 45_000).plan);
+    let additional = world
+        .engine()
+        .acquire(
+            &other_owner(),
+            lease_id(LEASE_B),
+            "work",
+            "generation-b",
+            now(1_000),
+            45_000,
+            true,
+            1,
+        )
+        .expect("additional acquire");
+
+    assert_single_final_ttl_sample(&additional.plan, now(46_000));
+    world.monotonic_now = now(2_000);
+    assert_eq!(
+        world
+            .execute_response_plan(&additional.plan)
+            .expect("runtime TTL sample"),
+        44_000
+    );
+}
+
+#[test]
+fn renew_success_uses_one_final_runtime_ttl_sample() {
+    let world = applied_world(false);
+    let renew = world
+        .engine()
+        .renew(
+            &owner(),
+            &lease_id(LEASE_A),
+            "generation-a",
+            BOOT_ID,
+            now(1),
+            45_000,
+        )
+        .expect("renew");
+
+    assert_single_final_ttl_sample(&renew, now(45_001));
+    let mut runtime = world;
+    runtime.monotonic_now = now(1_001);
+    assert_eq!(
+        runtime
+            .execute_response_plan(&renew)
+            .expect("runtime TTL sample"),
+        44_000
+    );
+}
+
+#[test]
+fn first_acquire_at_deadline_minus_one_millisecond_cannot_report_success() {
+    let acquire = first_acquire(false);
+    let mut world = World::baseline(false);
+
+    assert_eq!(
+        world.execute_plan_with_slow_persist(&acquire, 5, now(4_999)),
+        Err(RuntimeEffectError::RemainingTtlTooShort)
+    );
+    assert_eq!(world.immediate_reconciliations, 1);
+    assert!(world.sleep_disabled);
+    let retained = world.persisted.expect("applied recovery evidence retained");
+    assert_eq!(retained.leases[0].deadline, now(5_000));
+}
+
+#[test]
+fn additional_acquire_at_deadline_minus_one_millisecond_cannot_report_success() {
+    let mut world = World::baseline(false);
+    world.execute_plan(&acquire_with_ttl(false, 45_000).plan);
+    let additional = world
+        .engine()
+        .acquire(
+            &other_owner(),
+            lease_id(LEASE_B),
+            "work",
+            "generation-b",
+            now(0),
+            5_000,
+            true,
+            1,
+        )
+        .expect("additional acquire");
+
+    assert_eq!(
+        world.execute_plan_with_slow_persist(&additional.plan, 1, now(4_999)),
+        Err(RuntimeEffectError::RemainingTtlTooShort)
+    );
+    assert_eq!(world.immediate_reconciliations, 1);
+    assert!(world.sleep_disabled);
+    let retained = world.persisted.expect("both live leases retained");
+    assert_eq!(retained.leases.len(), 2);
+    assert_eq!(retained.leases[1].deadline, now(5_000));
+}
+
+#[test]
+fn renew_at_deadline_minus_one_millisecond_cannot_report_success() {
+    let mut world = applied_world(false);
+    let renew = world
+        .engine()
+        .renew(
+            &owner(),
+            &lease_id(LEASE_A),
+            "generation-a",
+            BOOT_ID,
+            now(1),
+            5_000,
+        )
+        .expect("renew");
+
+    assert_eq!(
+        world.execute_plan_with_slow_persist(&renew, 1, now(5_000)),
+        Err(RuntimeEffectError::RemainingTtlTooShort)
+    );
+    assert_eq!(world.immediate_reconciliations, 1);
+    assert!(world.sleep_disabled);
+    let retained = world.persisted.expect("renewed evidence retained");
+    assert_eq!(retained.leases[0].deadline, now(5_001));
+}
+
+#[test]
+fn created_outcome_uses_relative_deadline_at_nonzero_monotonic_time() {
     let result = Engine::empty(config())
         .acquire(
             &owner(),
@@ -1079,7 +1253,6 @@ fn created_outcome_uses_relative_ttl_at_nonzero_monotonic_time() {
         AcquireOutcome::Created {
             lease_id: lease_id(LEASE_A),
             deadline: now(15_000),
-            granted_ttl_ms: 5_000,
         }
     );
 }

@@ -1495,6 +1495,20 @@ to host production dependencies in A4. A3 never contains this dependency. Keep t
 private package crate free of crypto. Host trust tests run on current stable; the public/private isolated MSRV gates
 remain separate and do not imply a whole-host Rust 1.77.2 claim.
 
+Immediately after adding the exact host dependency, materialize and inspect its lock transition with the current
+stable toolchain before any `--locked` GREEN command:
+
+```bash
+cargo check --manifest-path src-tauri/Cargo.toml --no-default-features
+git diff -- src-tauri/Cargo.lock
+```
+
+Expected: the lock adds `ed25519-dalek 2.1.1` and only its required approved
+cryptographic transitive entries or dependency edges. No unrelated existing
+registry package version or checksum changes. Revert and investigate any
+unrelated churn before continuing; all subsequent A4 host commands use
+`--locked`.
+
 `trust/package.rs` defines `CatalogPackageVerifier`, the only production implementation of A3's
 `PackageTrustVerifier`. It receives a previously selected verified catalog release and an A3
 `UntrustedPackageObservation`. It first proves catalog/root/publisher freshness, lineage and revocation, then requires

@@ -186,7 +186,7 @@ fn opened_directory_fd_is_used_after_the_original_path_is_replaced() {
     let store = fixture.store();
 
     let moved = fixture._temp.path().join("moved-v2");
-    fs::rename(&fixture.directory, &moved).unwrap();
+    fs::rename(&fixture.directory, moved).unwrap();
     let decoy = fixture._temp.path().join("decoy");
     fs::create_dir(&decoy).unwrap();
     fs::set_permissions(&decoy, fs::Permissions::from_mode(0o700)).unwrap();

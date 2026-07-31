@@ -107,23 +107,106 @@ where
 /// Recovery alone is deliberately insufficient for serving. Only an armed
 /// [`ServingRuntime`] may publish a listener or dispatch requests.
 ///
-/// ```compile_fail
+/// `StartupRuntime` cannot publish before synchronous recovery:
+///
+/// ```compile_fail,E0599
+/// use jarvis_power_helper::coordinator::SystemRandom;
+/// use jarvis_power_helper::pmset::SystemPmset;
+/// use jarvis_power_helper::watchdog::{
+///     StartupRuntime, SystemMonotonicClock, SystemProcessInspector,
+/// };
+/// type Startup = StartupRuntime<
+///     SystemPmset, SystemMonotonicClock, SystemProcessInspector, SystemRandom,
+/// >;
+/// fn publish_too_early(startup: &Startup) {
+///     let _ = startup.listener_permit();
+/// }
+/// ```
+///
+/// `ReadyRuntime` independently rejects listener publication and every request
+/// or manual-recovery surface:
+///
+/// ```compile_fail,E0599
 /// use jarvis_power_helper::coordinator::SystemRandom;
 /// use jarvis_power_helper::pmset::SystemPmset;
 /// use jarvis_power_helper::watchdog::{
 ///     ReadyRuntime, SystemMonotonicClock, SystemProcessInspector,
 /// };
-///
 /// type Ready = ReadyRuntime<
-///     SystemPmset,
-///     SystemMonotonicClock,
-///     SystemProcessInspector,
-///     SystemRandom,
+///     SystemPmset, SystemMonotonicClock, SystemProcessInspector, SystemRandom,
 /// >;
-///
-/// fn publish_or_dispatch_too_early(ready: &mut Ready) {
+/// fn publish_too_early(ready: &Ready) {
 ///     let _ = ready.listener_permit();
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use jarvis_power_helper::coordinator::SystemRandom;
+/// use jarvis_power_helper::pmset::SystemPmset;
+/// use jarvis_power_helper::watchdog::{
+///     ReadyRuntime, SystemMonotonicClock, SystemProcessInspector,
+/// };
+/// type Ready = ReadyRuntime<
+///     SystemPmset, SystemMonotonicClock, SystemProcessInspector, SystemRandom,
+/// >;
+/// fn acquire_too_early(ready: &mut Ready) {
+///     let _ = ready.acquire(todo!(), "prod", "generation", 5_000);
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use jarvis_power_helper::coordinator::SystemRandom;
+/// use jarvis_power_helper::pmset::SystemPmset;
+/// use jarvis_power_helper::watchdog::{
+///     ReadyRuntime, SystemMonotonicClock, SystemProcessInspector,
+/// };
+/// type Ready = ReadyRuntime<
+///     SystemPmset, SystemMonotonicClock, SystemProcessInspector, SystemRandom,
+/// >;
+/// fn renew_too_early(ready: &mut Ready) {
+///     let _ = ready.renew(todo!(), todo!(), "generation", 5_000);
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use jarvis_power_helper::coordinator::SystemRandom;
+/// use jarvis_power_helper::pmset::SystemPmset;
+/// use jarvis_power_helper::watchdog::{
+///     ReadyRuntime, SystemMonotonicClock, SystemProcessInspector,
+/// };
+/// type Ready = ReadyRuntime<
+///     SystemPmset, SystemMonotonicClock, SystemProcessInspector, SystemRandom,
+/// >;
+/// fn release_too_early(ready: &mut Ready) {
+///     let _ = ready.release(todo!(), todo!(), "generation");
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use jarvis_power_helper::coordinator::SystemRandom;
+/// use jarvis_power_helper::pmset::SystemPmset;
+/// use jarvis_power_helper::watchdog::{
+///     ReadyRuntime, SystemMonotonicClock, SystemProcessInspector,
+/// };
+/// type Ready = ReadyRuntime<
+///     SystemPmset, SystemMonotonicClock, SystemProcessInspector, SystemRandom,
+/// >;
+/// fn status_too_early(ready: &mut Ready) {
 ///     let _ = ready.status();
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use jarvis_power_helper::coordinator::SystemRandom;
+/// use jarvis_power_helper::pmset::SystemPmset;
+/// use jarvis_power_helper::watchdog::{
+///     ReadyRuntime, SystemMonotonicClock, SystemProcessInspector,
+/// };
+/// type Ready = ReadyRuntime<
+///     SystemPmset, SystemMonotonicClock, SystemProcessInspector, SystemRandom,
+/// >;
+/// fn tick_too_early(ready: &mut Ready) {
+///     let _ = ready.watchdog().tick();
 /// }
 /// ```
 pub struct ReadyRuntime<B, C, P, R>

@@ -255,7 +255,7 @@ fn concurrent_clean_install_retries_inherited_anchor_gid_then_normalizes_created
     let private_gid = fixture.gid;
     let paused_once = Arc::new(AtomicBool::new(false));
     let pause_gate = Arc::new((Mutex::new(false), Condvar::new()));
-    let (created_tx, created_rx) = mpsc::sync_channel(0);
+    let (created_tx, created_rx) = mpsc::sync_channel(1);
     let first = {
         let paused_once = paused_once.clone();
         let pause_gate = pause_gate.clone();
@@ -275,7 +275,9 @@ fn concurrent_clean_install_retries_inherited_anchor_gid_then_normalizes_created
                         drop(
                             pause_gate
                                 .1
-                                .wait_while(released, |released| !*released)
+                                .wait_timeout_while(released, Duration::from_secs(2), |released| {
+                                    !*released
+                                })
                                 .unwrap(),
                         );
                     }

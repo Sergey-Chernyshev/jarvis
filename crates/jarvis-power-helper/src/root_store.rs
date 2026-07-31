@@ -34,6 +34,14 @@ const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 const CREATION_RACE_TIMEOUT: Duration = Duration::from_millis(250);
 const CREATION_RACE_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 
+#[derive(Default)]
+struct ProvisionHooks {
+    #[cfg(test)]
+    after_mkdir: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    after_eexist: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StorePolicy {
     directory_uid: u32,
@@ -156,8 +164,9 @@ impl RootStore {
     ///
     /// No caller path or owner policy is accepted by this constructor.
     pub fn open_production() -> Result<Self, StoreError> {
-        // The production policy relies on mkdirat inheriting root:wheel.
-        // Refuse to provision when either effective identity differs.
+        // Darwin mkdirat inherits the trusted parent's group. Root privileges
+        // are required to normalize only newly created private descendants to
+        // the fixed root:wheel policy.
         if unsafe { libc::geteuid() } != 0 || unsafe { libc::getegid() } != 0 {
             return Err(StoreError::UnsafeMetadata);
         }
@@ -165,7 +174,13 @@ impl RootStore {
         let root = open_path(Path::new("/"), directory_open_flags())?;
         validate_intermediate_directory(root.as_raw_fd())?;
         let library = open_trusted_directory_component(root.as_raw_fd(), LIBRARY_DIRECTORY, 0)?;
-        Self::provision_from_library(library, 0, StorePolicy::PRODUCTION, Arc::new(NoopEventSink))
+        Self::provision_from_library(
+            library,
+            0,
+            StorePolicy::PRODUCTION,
+            Arc::new(NoopEventSink),
+            ProvisionHooks::default(),
+        )
     }
 
     fn provision_from_library(
@@ -173,6 +188,7 @@ impl RootStore {
         trusted_anchor_uid: u32,
         policy: StorePolicy,
         events: Arc<dyn HelperEventSink>,
+        hooks: ProvisionHooks,
     ) -> Result<Self, StoreError> {
         validate_trusted_directory(library.as_raw_fd(), trusted_anchor_uid)?;
         let application_support = open_trusted_directory_component(
@@ -184,10 +200,12 @@ impl RootStore {
             application_support.as_raw_fd(),
             JARVIS_DIRECTORY,
             policy,
+            &hooks,
         )?;
-        let power = open_or_create_private_directory(jarvis.as_raw_fd(), POWER_DIRECTORY, policy)?;
+        let power =
+            open_or_create_private_directory(jarvis.as_raw_fd(), POWER_DIRECTORY, policy, &hooks)?;
         let directory =
-            open_or_create_private_directory(power.as_raw_fd(), VERSION_DIRECTORY, policy)?;
+            open_or_create_private_directory(power.as_raw_fd(), VERSION_DIRECTORY, policy, &hooks)?;
         validate_directory(directory.as_raw_fd(), policy)?;
         Ok(Self::from_open_directory(directory, policy, events))
     }
@@ -207,6 +225,59 @@ impl RootStore {
             trusted_anchor_uid,
             StorePolicy::for_testing(directory_uid, directory_gid, file_uid, file_gid),
             Arc::new(NoopEventSink),
+            ProvisionHooks::default(),
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn provision_from_parent_with_creation_hook_for_testing<F>(
+        library: OwnedFd,
+        trusted_anchor_uid: u32,
+        directory_uid: u32,
+        directory_gid: u32,
+        file_uid: u32,
+        file_gid: u32,
+        creation_hook: F,
+    ) -> Result<Self, StoreError>
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        Self::provision_from_library(
+            library,
+            trusted_anchor_uid,
+            StorePolicy::for_testing(directory_uid, directory_gid, file_uid, file_gid),
+            Arc::new(NoopEventSink),
+            ProvisionHooks {
+                after_mkdir: Some(Arc::new(creation_hook)),
+                after_eexist: None,
+            },
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn provision_from_parent_with_eexist_hook_for_testing<F>(
+        library: OwnedFd,
+        trusted_anchor_uid: u32,
+        directory_uid: u32,
+        directory_gid: u32,
+        file_uid: u32,
+        file_gid: u32,
+        eexist_hook: F,
+    ) -> Result<Self, StoreError>
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        Self::provision_from_library(
+            library,
+            trusted_anchor_uid,
+            StorePolicy::for_testing(directory_uid, directory_gid, file_uid, file_gid),
+            Arc::new(NoopEventSink),
+            ProvisionHooks {
+                after_mkdir: None,
+                after_eexist: Some(Arc::new(eexist_hook)),
+            },
         )
     }
 
@@ -512,17 +583,28 @@ fn open_or_create_private_directory(
     parent: RawFd,
     name: &CStr,
     policy: StorePolicy,
+    hooks: &ProvisionHooks,
 ) -> Result<OwnedFd, StoreError> {
+    #[cfg(not(test))]
+    let _ = hooks;
     // SAFETY: parent is an already-validated directory descriptor and name is
     // a fixed, NUL-terminated single component.
     let created =
         unsafe { libc::mkdirat(parent, name.as_ptr(), policy.directory_mode as libc::mode_t) };
     if created == 0 {
+        #[cfg(test)]
+        if let Some(hook) = hooks.after_mkdir.as_deref() {
+            hook();
+        }
         return finish_created_private_directory(parent, name, policy);
     }
 
     let error = io::Error::last_os_error();
     if error.raw_os_error() == Some(libc::EEXIST) {
+        #[cfg(test)]
+        if let Some(hook) = hooks.after_eexist.as_deref() {
+            hook();
+        }
         return open_existing_private_directory(parent, name, policy);
     }
     Err(map_metadata_or_unavailable(error))
@@ -533,17 +615,32 @@ fn finish_created_private_directory(
     name: &CStr,
     policy: StorePolicy,
 ) -> Result<OwnedFd, StoreError> {
+    let parent_metadata = stat_fd(parent)?;
     let expected = stat_entry(parent, name)?.ok_or(StoreError::UnsafeMetadata)?;
-    validate_new_private_directory_metadata(&expected, policy)?;
+    validate_new_private_directory_metadata(&expected, policy, parent_metadata.st_gid)?;
     let directory = open_directory_component(parent, name)?;
     let actual = stat_fd(directory.as_raw_fd())?;
-    validate_new_private_directory_metadata(&actual, policy)?;
+    validate_new_private_directory_metadata(&actual, policy, parent_metadata.st_gid)?;
     require_same_file(expected, actual)?;
 
     // Only the successful mkdirat path is normalized. An EEXIST path is
     // validation-only so unsafe pre-existing metadata is never repaired.
     // SAFETY: directory is the validated descriptor for the entry created by
     // this invocation.
+    if unsafe {
+        libc::fchown(
+            directory.as_raw_fd(),
+            policy.directory_uid,
+            policy.directory_gid,
+        )
+    } != 0
+    {
+        return Err(StoreError::Unavailable);
+    }
+    // SAFETY: ownership normalization above applies only to the validated
+    // descriptor created by this invocation. Darwin inherits the trusted
+    // anchor's group (normally admin), so the new private directory must be
+    // moved to the fixed root:wheel policy before exact validation.
     if unsafe { libc::fchmod(directory.as_raw_fd(), policy.directory_mode as libc::mode_t) } != 0 {
         return Err(StoreError::Unavailable);
     }
@@ -564,6 +661,7 @@ fn open_existing_private_directory(
     policy: StorePolicy,
 ) -> Result<OwnedFd, StoreError> {
     let started = Instant::now();
+    let inherited_gid = stat_fd(parent)?.st_gid;
     loop {
         let expected = stat_entry(parent, name)?.ok_or(StoreError::UnsafeMetadata)?;
         match validate_private_directory_metadata(&expected, policy) {
@@ -575,7 +673,7 @@ fn open_existing_private_directory(
                 return Ok(directory);
             }
             Err(StoreError::UnsafeMetadata)
-                if is_stricter_creation_race_metadata(&expected, policy)
+                if is_expected_creation_race_metadata(&expected, policy, inherited_gid)
                     && started.elapsed() < CREATION_RACE_TIMEOUT =>
             {
                 thread::sleep(CREATION_RACE_RETRY_INTERVAL);
@@ -588,11 +686,12 @@ fn open_existing_private_directory(
 fn validate_new_private_directory_metadata(
     metadata: &libc::stat,
     policy: StorePolicy,
+    inherited_gid: u32,
 ) -> Result<(), StoreError> {
     let mode = permission_bits(metadata);
     if file_kind(metadata) != libc::S_IFDIR
         || metadata.st_uid != policy.directory_uid
-        || metadata.st_gid != policy.directory_gid
+        || (metadata.st_gid != policy.directory_gid && metadata.st_gid != inherited_gid)
         || mode & !policy.directory_mode != 0
     {
         return Err(StoreError::UnsafeMetadata);
@@ -600,13 +699,61 @@ fn validate_new_private_directory_metadata(
     Ok(())
 }
 
-fn is_stricter_creation_race_metadata(metadata: &libc::stat, policy: StorePolicy) -> bool {
+#[cfg(test)]
+pub(crate) fn validate_new_private_directory_metadata_for_testing(
+    metadata: &libc::stat,
+    trusted_uid: u32,
+    private_gid: u32,
+    inherited_gid: u32,
+    directory_mode: u32,
+) -> Result<(), StoreError> {
+    validate_new_private_directory_metadata(
+        metadata,
+        StorePolicy {
+            directory_uid: trusted_uid,
+            directory_gid: private_gid,
+            directory_mode,
+            file_uid: trusted_uid,
+            file_gid: metadata.st_gid,
+            file_mode: FILE_MODE,
+        },
+        inherited_gid,
+    )
+}
+
+fn is_expected_creation_race_metadata(
+    metadata: &libc::stat,
+    policy: StorePolicy,
+    inherited_gid: u32,
+) -> bool {
     let mode = permission_bits(metadata);
     file_kind(metadata) == libc::S_IFDIR
         && metadata.st_uid == policy.directory_uid
-        && metadata.st_gid == policy.directory_gid
-        && mode != policy.directory_mode
+        && (metadata.st_gid == policy.directory_gid || metadata.st_gid == inherited_gid)
+        && (mode != policy.directory_mode || metadata.st_gid != policy.directory_gid)
         && mode & !policy.directory_mode == 0
+}
+
+#[cfg(test)]
+pub(crate) fn is_expected_creation_race_metadata_for_testing(
+    metadata: &libc::stat,
+    trusted_uid: u32,
+    private_gid: u32,
+    inherited_gid: u32,
+    directory_mode: u32,
+) -> bool {
+    is_expected_creation_race_metadata(
+        metadata,
+        StorePolicy {
+            directory_uid: trusted_uid,
+            directory_gid: private_gid,
+            directory_mode,
+            file_uid: trusted_uid,
+            file_gid: private_gid,
+            file_mode: FILE_MODE,
+        },
+        inherited_gid,
+    )
 }
 
 fn stat_entry(directory: RawFd, name: &CStr) -> Result<Option<libc::stat>, StoreError> {

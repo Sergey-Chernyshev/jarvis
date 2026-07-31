@@ -12,6 +12,7 @@ use jarvis_power_core::state::{
     STATE_SCHEMA_VERSION,
 };
 use jarvis_power_helper::root_store::{
+    validate_new_private_directory_metadata_for_testing,
     validate_trusted_anchor_metadata_for_testing, verify_entry_identity_for_testing, RootStore,
     StoreError, StoreFault, MAX_STATE_BYTES,
 };
@@ -158,7 +159,31 @@ fn clean_install_provisions_only_private_descendants_from_the_anchor_fd() {
 }
 
 #[test]
-fn unsafe_anchor_and_descendants_are_rejected_without_repair_or_following() {
+fn clean_install_allows_anchor_gid_only_before_new_fd_owner_normalization() {
+    // Darwin inherits the parent directory group for mkdirat. A normal
+    // root:admin Application Support anchor therefore yields root:admin here,
+    // even though the private policy must finish as root:wheel.
+    // SAFETY: libc::stat is plain old data and this value is used only by the
+    // pure pre-normalization metadata validator.
+    let mut inherited = unsafe { std::mem::zeroed::<libc::stat>() };
+    inherited.st_mode = libc::S_IFDIR | 0o700;
+    inherited.st_uid = 0;
+    inherited.st_gid = 80;
+    assert_eq!(
+        validate_new_private_directory_metadata_for_testing(&inherited, 0, 0o700),
+        Ok(())
+    );
+
+    inherited.st_uid = 501;
+    assert_eq!(
+        validate_new_private_directory_metadata_for_testing(&inherited, 0, 0o700),
+        Err(StoreError::UnsafeMetadata)
+    );
+    assert!(include_str!("../../src/root_store.rs").contains("libc::fchown"));
+}
+
+#[test]
+fn unsafe_existing_descendant_or_anchor_is_rejected_without_repair_or_following() {
     let writable_anchor = ProvisionFixture::empty();
     fs::set_permissions(&writable_anchor.anchor, fs::Permissions::from_mode(0o775)).unwrap();
     assert!(matches!(

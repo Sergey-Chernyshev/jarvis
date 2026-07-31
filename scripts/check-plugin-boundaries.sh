@@ -289,6 +289,28 @@ while IFS= read -r manifest; do
   fi
 done <<< "$all_manifests"
 
+public_schemas="$(
+  rg --files "$repo_root/schemas" 2>/dev/null \
+    | rg '/plugin-[^/]+\.schema\.json$' \
+    || true
+)"
+while IFS= read -r schema; do
+  [[ -z "$schema" ]] && continue
+  relative_schema="${schema#"$repo_root"/}"
+  case "$relative_schema" in
+    schemas/plugin-manifest-v2.schema.json \
+      | schemas/plugin-broker-v1.schema.json \
+      | schemas/plugin-ui-bridge-v1.schema.json \
+      | schemas/plugin-contribution-v1.schema.json \
+      | schemas/plugin-settings-v1.schema.json)
+      ;;
+    *)
+      echo "public plugin schema is not allowlisted: $relative_schema" >&2
+      failed=1
+      ;;
+  esac
+done <<< "$public_schemas"
+
 plugin_manifests="$(
   rg --files "$repo_root/plugins" 2>/dev/null \
     | rg '/Cargo\.toml$' \

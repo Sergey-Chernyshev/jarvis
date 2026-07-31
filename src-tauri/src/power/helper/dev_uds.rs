@@ -155,8 +155,9 @@ mod tests {
     use std::collections::VecDeque;
     use std::fs;
     use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    use std::os::unix::net::UnixListener;
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
@@ -168,7 +169,8 @@ mod tests {
     };
 
     use super::{
-        next_request_id, read_frame_with_timeout_for_testing, DevUdsClient,
+        connect_path_with_timeout_for_testing, next_request_id,
+        read_frame_with_timeout_for_testing, ClientConnectStage, DevUdsClient,
         ServerPeerIdentityProbe, ServerPeerSnapshot, SOCKET_NAME,
     };
     use crate::power::helper::client::{HelperClient, HelperClientError, HelperTrust};
@@ -327,6 +329,67 @@ mod tests {
             Err(HelperClientError::PeerRejected)
         ));
         drop(listener);
+    }
+
+    #[test]
+    fn client_rejects_root_replacement_after_connect_before_public_use() {
+        let temp = TestTempDirectory::new();
+        let original = temp.path().join("jarvis");
+        fs::create_dir(&original).unwrap();
+        fs::set_permissions(&original, fs::Permissions::from_mode(0o700)).unwrap();
+        let run = original.join("run");
+        fs::create_dir(&run).unwrap();
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = run.join(SOCKET_NAME);
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let moved = temp.path().join("moved");
+
+        let result = DevUdsClient::new(&original).connect_with_hook_for_testing(
+            &ScriptedServerPeer::stable(),
+            |stage| {
+                assert_eq!(stage, ClientConnectStage::AfterConnectBeforeRevalidation);
+                fs::rename(&original, &moved).unwrap();
+                fs::create_dir(&original).unwrap();
+                fs::set_permissions(&original, fs::Permissions::from_mode(0o700)).unwrap();
+                let replacement_run = original.join("run");
+                fs::create_dir(&replacement_run).unwrap();
+                fs::set_permissions(
+                    &replacement_run,
+                    fs::Permissions::from_mode(0o700),
+                )
+                .unwrap();
+                let replacement =
+                    UnixListener::bind(replacement_run.join(SOCKET_NAME)).unwrap();
+                fs::set_permissions(
+                    replacement_run.join(SOCKET_NAME),
+                    fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
+                drop(replacement);
+            },
+        );
+        assert!(matches!(result, Err(HelperClientError::InvalidFrame)));
+        drop(listener);
+    }
+
+    #[test]
+    fn nonblocking_connect_to_a_full_backlog_obeys_its_deadline() {
+        let temp = TestTempDirectory::new();
+        let socket = temp.path().join(SOCKET_NAME);
+        let listener = UnixListener::bind(&socket).unwrap();
+        // SAFETY: listener is a live AF_UNIX listener and lowering backlog
+        // does not transfer ownership of its descriptor.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let blocker = UnixStream::connect(&socket).unwrap();
+
+        let started = Instant::now();
+        assert!(matches!(
+            connect_path_with_timeout_for_testing(&socket, Duration::from_millis(125)),
+            Err(HelperClientError::Deadline)
+        ));
+        assert!(started.elapsed() < Duration::from_millis(700));
+        drop((blocker, listener));
     }
 
     #[test]

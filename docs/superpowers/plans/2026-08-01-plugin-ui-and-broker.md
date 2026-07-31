@@ -1228,10 +1228,12 @@ git commit -m "feat(plugins): persist broker schemas and entities"
 - Create: `src-tauri/src/plugin_platform/broker/event_store.rs`
 - Create: `src-tauri/src/plugin_platform/broker/cursor_store.rs`
 - Create: `src-tauri/src/plugin_platform/broker/outbox_ingress.rs`
+- Create: `src-tauri/src/plugin_platform/broker/projection_adapter.rs`
 - Create: `src-tauri/src/plugin_platform/broker/private_storage.rs`
 - Create: `src-tauri/migrations/plugin-broker/0002_events_storage_outbox.sql`
 - Create: `src-tauri/tests/broker_events.rs`
 - Create: `src-tauri/tests/broker_outbox.rs`
+- Create: `src-tauri/tests/broker_projection_adapter.rs`
 - Create: `src-tauri/tests/plugin_private_storage.rs`
 - Create: `crates/jarvis-plugin-sdk/src/outbox.rs`
 - Create: `crates/jarvis-plugin-sdk/tests/outbox_replay.rs`
@@ -1289,13 +1291,19 @@ outbox table. They prove:
 5. restart resumes from the last unacknowledged row;
 6. projection failure leaves the provider outbox row retryable;
 7. a reused outbox ID with different bytes is rejected.
+8. an authenticated provider cannot owner-write a host/Core-owned contract;
+9. a registered host projection adapter can validate a provider observation
+   and atomically apply host-owned mutations with the outbox receipt;
+10. adapter validation/failure leaves the provider row unacknowledged and
+    applies neither receipt nor partial projection.
 
 Run:
 
 ```bash
 cargo test --manifest-path crates/jarvis-plugin-sdk/Cargo.toml --test outbox_replay
 cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml --test outbox_contract
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test broker_outbox
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
+  --test broker_outbox --test broker_projection_adapter
 ```
 
 Expected RED: SDK/test-host outbox APIs and host ingress are absent.
@@ -1310,6 +1318,18 @@ Core's `OutboxIngress::apply` authenticates the provider, validates its exact ac
 Broker transaction records the outbox receipt and applies entity/event mutations. It never reads Agent VM tables,
 `runId`, cwd or provider files. Accepted work may return an A1 `OperationRef`; acknowledgement still means only
 Broker commit, not external operation completion.
+
+For host-owned projection contracts, `projection_adapter.rs` exposes a
+crate-private registry of bounded adapters. The authenticated provider submits
+an adapter-specific observation batch, not a host-owned `EntityEnvelope`.
+Inside the same `IMMEDIATE` Broker transaction, the adapter validates the exact
+provider receipt/generation and observation and returns bounded host-owned
+mutations; Broker applies those mutations with a trusted host principal and
+records the provider outbox receipt atomically. The adapter cannot allocate a
+revision, open a second transaction or bypass schema validation. Provider
+payloads can never select the host principal/adapter owner. B ships only this
+generic mechanism and a fake adapter conformance test; C owns the concrete
+Project Runtime observation DTO, state validation and Core projection.
 
 - [ ] **Step 5: Add RED private-storage tests**
 
@@ -1350,7 +1370,8 @@ Run:
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
-  --test broker_events --test broker_outbox --test plugin_private_storage
+  --test broker_events --test broker_outbox --test broker_projection_adapter \
+  --test plugin_private_storage
 cargo test --manifest-path crates/jarvis-plugin-sdk/Cargo.toml --test outbox_replay
 cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml --test outbox_contract
 cargo +1.77.2 test --locked --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
@@ -1362,6 +1383,7 @@ Expected: all commands exit `0`; replay is idempotent and a pruned cursor produc
 ```bash
 git add src-tauri/src/plugin_platform/broker src-tauri/migrations/plugin-broker \
   src-tauri/tests/broker_events.rs src-tauri/tests/broker_outbox.rs \
+  src-tauri/tests/broker_projection_adapter.rs \
   src-tauri/tests/plugin_private_storage.rs crates/jarvis-plugin-sdk \
   crates/jarvis-plugin-test-host
 git commit -m "feat(plugins): persist broker events and private storage"
@@ -2988,6 +3010,8 @@ git commit -m "test(plugins): certify ui host and data broker"
 - [ ] Opening a manager/project/plugin route produces no provider, VM, terminal or Session side effect.
 - [ ] Generic B modules pass the provider-neutral boundary lint.
 - [ ] Core and plugin projections prove one Broker snapshot revision.
+- [ ] Provider outbox adapters atomically create host-owned projections without
+  granting providers ownership of Core contracts.
 - [ ] Figma evidence and four independent review reports have no unresolved high/critical finding.
 - [ ] Final documentation says Projects ↔ Agent VM synchronization remains contingent on C and E.
 

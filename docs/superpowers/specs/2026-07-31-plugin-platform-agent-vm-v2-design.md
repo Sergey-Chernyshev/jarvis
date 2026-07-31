@@ -2492,34 +2492,27 @@ Smoke covers:
 - SDK/protocol/test host foundation;
 - remove automatic bundled Agent VM install.
 
-### Increment B — Plugin UI Host
+### Increment B — Plugin UI Host and Data Broker
 
-- isolated custom pages;
-- multi-page routing;
-- UI SDK/tokens;
-- command palette;
-- extension actions;
-- hotkey registration;
-- Developer Mode.
+- isolated custom pages and multi-page routing;
+- UI SDK/tokens, command palette, extension actions and hotkeys;
+- typed settings and Developer Mode surfaces;
+- durable EntityStore, schema registry and provider outbox ingress;
+- events/cursors, typed commands, ACL/audit and opaque resources.
 
-### Increment C — Data Broker
-
-- durable EntityStore;
-- schema registry;
-- events/cursors;
-- typed commands;
-- ACL/audit;
-- opaque resources.
-
-### Increment D — Generic Project Runtime
+### Increment C — Generic Project Runtime
 
 - Project/Runtime/Session/Turn model;
 - generic project UI;
 - plugin runtime contributions;
-- remove Agent VM-specific core rendering/IPC;
+- remove Agent VM-specific rendering/IPC from generic Projects surfaces;
 - compatibility migration for current runs.
 
-### Increment E — Agent VM controller and CLI
+Final deletion of the fenced legacy Agent VM view/IPC happens in E after its
+package pages/actions and rollback handoff are proven; C does not remove a
+working fallback before the provider migration.
+
+### Increment D — Agent VM controller and CLI
 
 - durable controller DB;
 - single-writer leases;
@@ -2529,7 +2522,7 @@ Smoke covers:
 - safe stop/drain;
 - resource budgets.
 
-### Increment F — Agent VM plugin migration
+### Increment E — Agent VM plugin migration
 
 - move all plugin-specific logic behind public SDK;
 - package from `plugins/agent-vm`;
@@ -2538,7 +2531,7 @@ Smoke covers:
 - core actions/search/hotkeys;
 - update/rollback/uninstall.
 
-### Increment G — memory, mounts and notifications
+### Increment F — memory, mounts and notifications
 
 - scoped Memory Broker;
 - snapshot/overlay/sync-back;
@@ -2546,13 +2539,32 @@ Smoke covers:
 - durable notification dedupe/supersession ledger;
 - drift/resource UI.
 
-### Increment H — validation and release
+### Increment G — validation and release
 
 - independent reviews;
 - full automated suites;
 - macOS live smoke;
 - migration/rollback rehearsal;
 - docs and sample plugins.
+
+The delivery labels above are canonical and match the master implementation
+roadmap. Historical references elsewhere in review notes map without changing
+feature ownership:
+
+| Historical design label | Canonical delivery increment |
+|---|---|
+| B — Plugin UI Host | B — Plugin UI Host and Data Broker |
+| C — Data Broker | B — Plugin UI Host and Data Broker |
+| D — Generic Project Runtime | C — Generic Project Runtime |
+| E — Agent VM controller and CLI | D — Agent VM controller and CLI |
+| F — Agent VM plugin migration | E — Agent VM plugin migration |
+| G — memory, mounts and notifications | F — memory, mounts and notifications |
+| H — validation and release | G — validation and release |
+
+Generic Broker mechanisms remain owned by B. C consumes those committed
+contracts and owns only the core Project Catalog, provider-neutral runtime
+schemas/projections and generic Projects surfaces; it does not add
+Agent VM-specific dispatch shortcuts.
 
 ## 27. Acceptance criteria
 

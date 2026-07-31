@@ -622,6 +622,13 @@ git commit -m "fix(power): recover before headless startup"
 
 ### Task 7: Renewable watchdog/helper lease and production release gate
 
+> Superseded by the executable hardened plan in
+> `docs/superpowers/plans/2026-08-01-power-helper-watchdog.md`. That plan locks
+> the minimum OS to macOS 13, removes all production fallback paths, separates
+> shared core/dev UDS/attested XPC verticals, and adds migration, updater,
+> uninstall, signing, notarization, and live-smoke gates. Keep this section only
+> as the original high-level context.
+
 **Files:**
 
 - Create: `src-tauri/power-core/Cargo.toml`

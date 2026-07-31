@@ -92,6 +92,7 @@ pub enum EntityMutation {
         contract: ContractRef,
         #[serde(deserialize_with = "deserialize_id")]
         id: String,
+        #[schemars(rename = "expectedRevision")]
         expected_revision: u64,
         #[serde(deserialize_with = "deserialize_entity_value")]
         data: Value,
@@ -100,6 +101,7 @@ pub enum EntityMutation {
         contract: ContractRef,
         #[serde(deserialize_with = "deserialize_id")]
         id: String,
+        #[schemars(rename = "expectedRevision")]
         expected_revision: u64,
     },
 }
@@ -286,6 +288,7 @@ pub enum CommandResult {
         result: Value,
     },
     Accepted {
+        #[schemars(rename = "operationRef")]
         operation_ref: OperationRef,
     },
 }

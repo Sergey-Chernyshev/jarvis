@@ -24,7 +24,7 @@
         {
           "additionalProperties": false,
           "properties": {
-            "operation_ref": {
+            "operationRef": {
               "type": "string"
             },
             "type": {
@@ -35,7 +35,7 @@
             }
           },
           "required": [
-            "operation_ref",
+            "operationRef",
             "type"
           ],
           "type": "object"
@@ -159,7 +159,7 @@
               "$ref": "#/definitions/ContractRef"
             },
             "data": true,
-            "expected_revision": {
+            "expectedRevision": {
               "format": "uint64",
               "minimum": 0.0,
               "type": "integer"
@@ -177,7 +177,7 @@
           "required": [
             "contract",
             "data",
-            "expected_revision",
+            "expectedRevision",
             "id",
             "type"
           ],
@@ -189,7 +189,7 @@
             "contract": {
               "$ref": "#/definitions/ContractRef"
             },
-            "expected_revision": {
+            "expectedRevision": {
               "format": "uint64",
               "minimum": 0.0,
               "type": "integer"
@@ -206,7 +206,7 @@
           },
           "required": [
             "contract",
-            "expected_revision",
+            "expectedRevision",
             "id",
             "type"
           ],

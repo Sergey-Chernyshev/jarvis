@@ -490,7 +490,7 @@ schema-valid Agent VM manifest; последующие короткие JSON-ф�
   "version": "1.0.0",
   "publisher": "jarvis-owner",
   "compatibility": {
-    "jarvis": ">=0.4.0 <0.5.0",
+    "jarvis": ">=0.4.0, <0.5.0",
     "pluginApi": 2
   },
   "runtime": {

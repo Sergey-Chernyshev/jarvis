@@ -1,0 +1,1048 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Jarvis Plugin Manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "name",
+    "version",
+    "publisher",
+    "compatibility",
+    "runtime",
+    "permissions",
+    "state",
+    "contributes"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "id": {
+      "$ref": "#/$defs/pluginId"
+    },
+    "name": {
+      "$ref": "#/$defs/title"
+    },
+    "version": {
+      "$ref": "#/$defs/semver"
+    },
+    "publisher": {
+      "$ref": "#/$defs/publisherId"
+    },
+    "compatibility": {
+      "$ref": "#/$defs/compatibility"
+    },
+    "runtime": {
+      "$ref": "#/$defs/runtime"
+    },
+    "permissions": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/permission"
+      }
+    },
+    "state": {
+      "$ref": "#/$defs/state"
+    },
+    "contributes": {
+      "$ref": "#/$defs/contributions"
+    }
+  },
+  "$defs": {
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9.-]*$"
+    },
+    "pluginId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9.-]*$"
+    },
+    "publisherId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "semver": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 128
+    },
+    "versionRange": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "contractId": {
+      "type": "string",
+      "minLength": 7,
+      "maxLength": 256
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jarvis",
+        "pluginApi"
+      ],
+      "properties": {
+        "jarvis": {
+          "$ref": "#/$defs/versionRange"
+        },
+        "pluginApi": {
+          "const": 2
+        }
+      }
+    },
+    "runtime": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/uiRuntime"
+        },
+        {
+          "$ref": "#/$defs/nativeRuntime"
+        }
+      ]
+    },
+    "uiRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "protocol",
+        "activationEvents"
+      ],
+      "properties": {
+        "kind": {
+          "const": "ui-only"
+        },
+        "protocol": {
+          "const": 2
+        },
+        "activationEvents": {
+          "$ref": "#/$defs/activationEvents"
+        }
+      }
+    },
+    "nativeRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "lifecycle",
+        "bridgeEntry",
+        "service",
+        "protocol",
+        "activationEvents"
+      ],
+      "properties": {
+        "kind": {
+          "const": "verified-native"
+        },
+        "lifecycle": {
+          "const": "service-bridge"
+        },
+        "bridgeEntry": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "service": {
+          "$ref": "#/$defs/service"
+        },
+        "protocol": {
+          "const": 2
+        },
+        "activationEvents": {
+          "$ref": "#/$defs/activationEvents"
+        }
+      }
+    },
+    "activationEvents": {
+      "type": "array",
+      "maxItems": 512,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "manager",
+        "entry",
+        "survivesCoreExit"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "manager": {
+          "const": "launchd-user"
+        },
+        "entry": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "survivesCoreExit": {
+          "type": "boolean"
+        }
+      }
+    },
+    "permission": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/selectedPermission"
+        },
+        {
+          "$ref": "#/$defs/mountPermission"
+        },
+        {
+          "$ref": "#/$defs/memoryPermission"
+        },
+        {
+          "$ref": "#/$defs/unscopedPermission"
+        },
+        {
+          "$ref": "#/$defs/credentialsPermission"
+        },
+        {
+          "$ref": "#/$defs/invocationPermission"
+        }
+      ]
+    },
+    "selectedPermission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scope"
+      ],
+      "properties": {
+        "id": {
+          "const": "projects.read"
+        },
+        "scope": {
+          "const": "selected"
+        }
+      }
+    },
+    "mountPermission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scope",
+        "modes"
+      ],
+      "properties": {
+        "id": {
+          "const": "filesystem.mount"
+        },
+        "scope": {
+          "const": "selected"
+        },
+        "modes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "read",
+              "write"
+            ]
+          }
+        }
+      }
+    },
+    "memoryPermission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scope"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "memory.read",
+            "memory.propose-write"
+          ]
+        },
+        "scope": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "global",
+              "selected-project"
+            ]
+          }
+        }
+      }
+    },
+    "unscopedPermission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "notifications.publish",
+            "process.vm-provider",
+            "chat.compose.contribute",
+            "projects.contribute"
+          ]
+        }
+      }
+    },
+    "credentialsPermission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scope"
+      ],
+      "properties": {
+        "id": {
+          "const": "credentials.request"
+        },
+        "scope": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "claude",
+              "codex"
+            ]
+          }
+        }
+      }
+    },
+    "invocationPermission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scope"
+      ],
+      "properties": {
+        "id": {
+          "const": "chat.composer.text.read"
+        },
+        "scope": {
+          "const": "invocation"
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "migrations",
+        "rollbackCompatibleThrough"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "migrations": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/migration"
+          }
+        },
+        "rollbackCompatibleThrough": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to",
+        "entry"
+      ],
+      "properties": {
+        "from": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "to": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "entry": {
+          "$ref": "#/$defs/relativePath"
+        }
+      }
+    },
+    "contributions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pages",
+        "commands",
+        "actions",
+        "hotkeys",
+        "settings",
+        "projectRuntimes",
+        "dataContracts"
+      ],
+      "properties": {
+        "pages": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "$ref": "#/$defs/page"
+          }
+        },
+        "commands": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "$ref": "#/$defs/command"
+          }
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "$ref": "#/$defs/action"
+          }
+        },
+        "hotkeys": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "$ref": "#/$defs/hotkey"
+          }
+        },
+        "settings": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "$ref": "#/$defs/setting"
+          }
+        },
+        "projectRuntimes": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "$ref": "#/$defs/projectRuntime"
+          }
+        },
+        "dataContracts": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "$ref": "#/$defs/dataContract"
+          }
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "entry",
+        "placements",
+        "instancePolicy"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "title": {
+          "$ref": "#/$defs/title"
+        },
+        "entry": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "placements": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "sidebar",
+              "commandPalette",
+              "deepLink",
+              "pluginSettings"
+            ]
+          }
+        },
+        "paramsSchema": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "instancePolicy": {
+          "enum": [
+            "singleton",
+            "per-project",
+            "per-session"
+          ]
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "risk",
+        "placements",
+        "handler"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "title": {
+          "$ref": "#/$defs/title"
+        },
+        "risk": {
+          "$ref": "#/$defs/risk"
+        },
+        "placements": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "const": "globalPalette"
+          }
+        },
+        "argsSchema": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "resultSchema": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "invocationUI": {
+          "$ref": "#/$defs/invocationUI"
+        },
+        "handler": {
+          "$ref": "#/$defs/commandHandler"
+        }
+      }
+    },
+    "commandHandler": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/openPageHandler"
+        },
+        {
+          "$ref": "#/$defs/runtimeCommandHandler"
+        }
+      ]
+    },
+    "openPageHandler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "page"
+      ],
+      "properties": {
+        "type": {
+          "const": "openPage"
+        },
+        "page": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "runtimeCommandHandler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "command"
+      ],
+      "properties": {
+        "type": {
+          "const": "runtimeCommand"
+        },
+        "command": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "invocationUI": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "defaultsFromContext"
+      ],
+      "properties": {
+        "type": {
+          "const": "schemaForm"
+        },
+        "defaultsFromContext": {
+          "type": "array",
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/contextField"
+          }
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "icon",
+        "locations",
+        "command",
+        "when",
+        "context"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "title": {
+          "$ref": "#/$defs/title"
+        },
+        "icon": {
+          "$ref": "#/$defs/title"
+        },
+        "locations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "chat.composer.actions",
+              "project.actions",
+              "project.session.context"
+            ]
+          }
+        },
+        "command": {
+          "$ref": "#/$defs/identifier"
+        },
+        "when": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "context": {
+          "type": "array",
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/contextField"
+          }
+        }
+      }
+    },
+    "contextField": {
+      "enum": [
+        "project.id",
+        "chat.id",
+        "composer.text",
+        "runtime.id",
+        "session.id"
+      ]
+    },
+    "hotkey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "default",
+        "scope"
+      ],
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/identifier"
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "scope": {
+          "const": "global"
+        }
+      }
+    },
+    "setting": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/integerSetting"
+        },
+        {
+          "$ref": "#/$defs/numberSetting"
+        },
+        {
+          "$ref": "#/$defs/booleanSetting"
+        },
+        {
+          "$ref": "#/$defs/stringSetting"
+        }
+      ]
+    },
+    "integerSetting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "type",
+        "default"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "title": {
+          "$ref": "#/$defs/title"
+        },
+        "type": {
+          "const": "integer"
+        },
+        "default": {
+          "type": "integer"
+        },
+        "minimum": {
+          "type": "integer"
+        },
+        "maximum": {
+          "type": "integer"
+        }
+      }
+    },
+    "numberSetting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "type",
+        "default"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "title": {
+          "$ref": "#/$defs/title"
+        },
+        "type": {
+          "const": "number"
+        },
+        "default": {
+          "type": "number"
+        },
+        "minimum": {
+          "type": "number"
+        },
+        "maximum": {
+          "type": "number"
+        }
+      }
+    },
+    "booleanSetting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "type",
+        "default"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "title": {
+          "$ref": "#/$defs/title"
+        },
+        "type": {
+          "const": "boolean"
+        },
+        "default": {
+          "type": "boolean"
+        }
+      }
+    },
+    "stringSetting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "type",
+        "default"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "title": {
+          "$ref": "#/$defs/title"
+        },
+        "type": {
+          "const": "string"
+        },
+        "default": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "minimumLength": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "maximumLength": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "enum": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "maxLength": 65536
+          }
+        }
+      }
+    },
+    "projectRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "projectKinds",
+        "page",
+        "providerSchema",
+        "lifecycleCommands",
+        "contracts"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "title": {
+          "$ref": "#/$defs/title"
+        },
+        "projectKinds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "const": "local-folder"
+          }
+        },
+        "page": {
+          "$ref": "#/$defs/identifier"
+        },
+        "providerSchema": {
+          "$ref": "#/$defs/contractId"
+        },
+        "lifecycleCommands": {
+          "$ref": "#/$defs/lifecycleCommands"
+        },
+        "contracts": {
+          "$ref": "#/$defs/runtimeContracts"
+        }
+      }
+    },
+    "lifecycleCommands": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provision",
+        "start",
+        "stop",
+        "destroy",
+        "sessionCreate",
+        "sessionStop"
+      ],
+      "properties": {
+        "provision": {
+          "$ref": "#/$defs/contractId"
+        },
+        "start": {
+          "$ref": "#/$defs/contractId"
+        },
+        "stop": {
+          "$ref": "#/$defs/contractId"
+        },
+        "destroy": {
+          "$ref": "#/$defs/contractId"
+        },
+        "sessionCreate": {
+          "$ref": "#/$defs/contractId"
+        },
+        "sessionStop": {
+          "$ref": "#/$defs/contractId"
+        }
+      }
+    },
+    "runtimeContracts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime",
+        "session",
+        "turn"
+      ],
+      "properties": {
+        "runtime": {
+          "$ref": "#/$defs/contractBinding"
+        },
+        "session": {
+          "$ref": "#/$defs/contractBinding"
+        },
+        "turn": {
+          "$ref": "#/$defs/contractBinding"
+        }
+      }
+    },
+    "contractBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "core",
+        "extension"
+      ],
+      "properties": {
+        "core": {
+          "$ref": "#/$defs/contractId"
+        },
+        "extension": {
+          "$ref": "#/$defs/contractId"
+        }
+      }
+    },
+    "dataContract": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/entityContract"
+        },
+        {
+          "$ref": "#/$defs/commandContract"
+        }
+      ]
+    },
+    "entityContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "schema",
+        "visibility",
+        "sensitivity"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/contractId"
+        },
+        "kind": {
+          "const": "entity"
+        },
+        "schema": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "visibility": {
+          "enum": [
+            "private",
+            "granted",
+            "public"
+          ]
+        },
+        "sensitivity": {
+          "enum": [
+            "public",
+            "internal",
+            "sensitive"
+          ]
+        }
+      }
+    },
+    "commandContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "argsSchema",
+        "resultSchema",
+        "risk"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/contractId"
+        },
+        "kind": {
+          "const": "command"
+        },
+        "argsSchema": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "resultSchema": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "risk": {
+          "$ref": "#/$defs/risk"
+        }
+      }
+    },
+    "risk": {
+      "enum": [
+        "read",
+        "control",
+        "destructive"
+      ]
+    }
+  }
+}

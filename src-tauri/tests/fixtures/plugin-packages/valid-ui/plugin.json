@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 2,
+  "id": "dev.example.hello-page",
+  "name": "Hello Page",
+  "version": "1.0.0",
+  "publisher": "example",
+  "compatibility": {
+    "jarvis": ">=0.4.0, <0.5.0",
+    "pluginApi": 2
+  },
+  "runtime": {
+    "kind": "ui-only",
+    "protocol": 2,
+    "activationEvents": [
+      "onPage:home",
+      "onCommand:dev.example.hello-page.open"
+    ]
+  },
+  "permissions": [],
+  "state": {
+    "schemaVersion": 1,
+    "migrations": [],
+    "rollbackCompatibleThrough": 1
+  },
+  "contributes": {
+    "pages": [
+      {
+        "id": "home",
+        "title": "Hello",
+        "entry": "ui/pages/home/index.html",
+        "placements": ["sidebar", "commandPalette"],
+        "instancePolicy": "singleton"
+      }
+    ],
+    "commands": [
+      {
+        "id": "dev.example.hello-page.open",
+        "title": "Open Hello",
+        "risk": "read",
+        "placements": ["globalPalette"],
+        "handler": {
+          "type": "openPage",
+          "page": "home"
+        }
+      }
+    ],
+    "actions": [],
+    "hotkeys": [],
+    "settings": [],
+    "projectRuntimes": [],
+    "dataContracts": []
+  }
+}

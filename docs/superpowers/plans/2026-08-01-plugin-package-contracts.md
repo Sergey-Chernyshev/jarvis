@@ -357,7 +357,7 @@ fn parses_namespaced_ui_manifest() {
 fn unknown_security_field_is_rejected() {
     let raw = br#"{
       "schemaVersion":2,"id":"dev.example.echo","name":"Echo","version":"1.0.0",
-      "publisher":"example","compatibility":{"jarvis":">=0.4.0 <0.5.0","pluginApi":2},
+      "publisher":"example","compatibility":{"jarvis":">=0.4.0, <0.5.0","pluginApi":2},
       "runtime":{"kind":"ui-only","protocol":2,"activationEvents":[],"escapeSandbox":true},
       "permissions":[],"state":{"schemaVersion":1,"migrations":[],"rollbackCompatibleThrough":1},
       "contributes":{"pages":[],"commands":[],"actions":[],"hotkeys":[],"settings":[],

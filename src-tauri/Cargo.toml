@@ -14,9 +14,12 @@ tauri-build = { version = "2", features = [] }
 jarvis-power-core = { path = "../crates/jarvis-power-core" }
 jarvis-plugin-protocol = { path = "../crates/jarvis-plugin-protocol" }
 jarvis-secret-store = { path = "../crates/jarvis-secret-store" }
+jsonschema = { version = "=0.18.3", default-features = false, features = ["draft202012"] }
+semver = "1"
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
+url = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-updater = "2"

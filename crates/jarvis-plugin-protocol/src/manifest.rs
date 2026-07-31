@@ -6,6 +6,7 @@ use semver::{Version, VersionReq};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
+use unicode_normalization::UnicodeNormalization;
 
 pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
 pub const PLUGIN_API_VERSION: u32 = 2;
@@ -171,6 +172,13 @@ impl ContractId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn namespace(&self) -> &str {
+        self.0
+            .split_once('/')
+            .map(|(namespace, _)| namespace)
+            .expect("validated contract id always contains a namespace separator")
+    }
 }
 
 impl<'de> Deserialize<'de> for ContractId {
@@ -307,7 +315,7 @@ impl ManifestV2 {
         validate_permissions(&self.permissions)?;
         self.state.validate()?;
         self.contributes
-            .validate(&self.id, &self.runtime.activation_events)?;
+            .validate(&self.id, &self.publisher, &self.runtime.activation_events)?;
         Ok(())
     }
 }
@@ -640,7 +648,11 @@ impl StateDeclaration {
         }
         let mut edges = BTreeSet::new();
         for migration in &self.migrations {
-            if migration.from >= migration.to || !edges.insert((migration.from, migration.to)) {
+            if migration.from == 0
+                || migration.to == 0
+                || migration.from >= migration.to
+                || !edges.insert((migration.from, migration.to))
+            {
                 return Err(ManifestError::Schema);
             }
         }
@@ -672,6 +684,7 @@ impl Contributions {
     fn validate(
         &self,
         plugin_id: &PluginId,
+        publisher: &PublisherId,
         activation_events: &[String],
     ) -> Result<(), ManifestError> {
         for length in [
@@ -694,6 +707,8 @@ impl Contributions {
         let mut runtimes = BTreeSet::new();
         let mut contracts = BTreeSet::new();
         let mut command_contracts = BTreeSet::new();
+        let declared_contract_namespace =
+            declared_contract_namespace(plugin_id, publisher).ok_or(ManifestError::Schema)?;
 
         for page in &self.pages {
             validate_contribution_id(&page.id)?;
@@ -748,7 +763,9 @@ impl Contributions {
             }
         }
         for contract in &self.data_contracts {
-            if !all_ids.insert(contract.id().as_str()) || !contracts.insert(contract.id().as_str())
+            if contract.id().namespace() != declared_contract_namespace
+                || !all_ids.insert(contract.id().as_str())
+                || !contracts.insert(contract.id().as_str())
             {
                 return Err(ManifestError::Schema);
             }
@@ -1035,22 +1052,23 @@ impl SettingContribution {
                 {
                     return Err(ManifestError::Schema);
                 }
+                let invalid_allowed_values = allowed_values
+                    .as_ref()
+                    .map(|values| {
+                        let unique: BTreeSet<_> = values.iter().collect();
+                        values.is_empty()
+                            || values.len() > 256
+                            || unique.len() != values.len()
+                            || !values.iter().any(|value| value == default)
+                    })
+                    .unwrap_or(false);
                 if minimum_length
                     .map(|minimum| default.chars().count() < minimum)
                     .unwrap_or(false)
                     || maximum_length
                         .map(|maximum| default.chars().count() > maximum)
                         .unwrap_or(false)
-                    || allowed_values
-                        .as_ref()
-                        .map(|values| {
-                            let unique: BTreeSet<_> = values.iter().collect();
-                            values.is_empty()
-                                || values.len() > 256
-                                || unique.len() != values.len()
-                                || !values.iter().any(|value| value == default)
-                        })
-                        .unwrap_or(false)
+                    || invalid_allowed_values
                 {
                     return Err(ManifestError::Schema);
                 }
@@ -1373,19 +1391,28 @@ fn valid_segment(value: &str) -> bool {
 fn valid_relative_path(value: &str) -> bool {
     if value.is_empty()
         || value.len() > 1024
+        || !value.nfc().eq(value.chars())
         || value.starts_with('/')
         || value.starts_with('\\')
         || value.contains('\\')
-        || value.contains('\0')
+        || value
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '%' | '?' | '#' | ':'))
         || value.contains("//")
         || value.ends_with('/')
-        || value.as_bytes().get(1) == Some(&b':')
     {
         return false;
     }
     value
         .split('/')
         .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+fn declared_contract_namespace(plugin_id: &PluginId, publisher: &PublisherId) -> Option<String> {
+    if plugin_id.as_str().contains('.') {
+        return Some(plugin_id.as_str().to_owned());
+    }
+    (publisher.as_str() == "jarvis-owner").then(|| format!("dev.jarvis.{}", plugin_id.as_str()))
 }
 
 fn value_contains_template(value: &Value) -> bool {

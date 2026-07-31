@@ -201,6 +201,28 @@ fn plugin_and_contract_ids_are_strict() {
         parse_value(&contract_range).unwrap_err().code(),
         "manifest_schema"
     );
+
+    let mut namespace_squat = valid_ui();
+    namespace_squat["contributes"]["dataContracts"] = json!([{
+        "id": "dev.victim.plugin/message@1.0.0",
+        "kind": "entity",
+        "schema": "schemas/message.schema.json",
+        "visibility": "granted",
+        "sensitivity": "internal"
+    }]);
+    assert_eq!(
+        parse_value(&namespace_squat).unwrap_err().code(),
+        "manifest_schema"
+    );
+
+    owner_short["contributes"]["dataContracts"] = json!([{
+        "id": "dev.jarvis.agent-vm/session@1.0.0",
+        "kind": "entity",
+        "schema": "schemas/session.schema.json",
+        "visibility": "granted",
+        "sensitivity": "internal"
+    }]);
+    assert!(parse_value(&owner_short).is_ok());
 }
 
 #[test]
@@ -226,6 +248,16 @@ fn absolute_parent_and_non_normalized_paths_are_rejected() {
         "ui/../index.html",
         "ui//index.html",
         r"ui\index.html",
+        "ui/%2e%2e/index.html",
+        "ui/%2findex.html",
+        "ui/%5cindex.html",
+        "ui/index.html?mode=full",
+        "ui/index.html#main",
+        "ui/index:alternate.html",
+        "ui/index\n.html",
+        "ui/index\t.html",
+        "ui/index\u{7f}.html",
+        "ui/cafe\u{301}.html",
     ] {
         let mut raw = valid_ui();
         raw["contributes"]["pages"][0]["entry"] = json!(path);
@@ -233,6 +265,27 @@ fn absolute_parent_and_non_normalized_paths_are_rejected() {
             parse_value(&raw).unwrap_err().code(),
             "manifest_schema",
             "accepted unsafe path {path}"
+        );
+    }
+
+    let mut nfc = valid_ui();
+    nfc["contributes"]["pages"][0]["entry"] = json!("ui/café.html");
+    assert!(parse_value(&nfc).is_ok());
+}
+
+#[test]
+fn migration_versions_are_strictly_positive() {
+    for (from, to) in [(0, 1), (1, 0)] {
+        let mut raw = valid_ui();
+        raw["state"]["migrations"] = json!([{
+            "from": from,
+            "to": to,
+            "entry": "migrations/upgrade"
+        }]);
+        assert_eq!(
+            parse_value(&raw).unwrap_err().code(),
+            "manifest_schema",
+            "accepted migration edge {from}->{to}"
         );
     }
 }

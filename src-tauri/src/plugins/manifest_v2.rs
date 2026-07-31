@@ -103,6 +103,11 @@ fn validate_manifest(
         return Err(ManifestError::UnresolvedTarget);
     }
 
+    // Typed public semantics run first so every consumer sees the same stable
+    // error code. The bundled schema remains a second, defense-in-depth gate.
+    let concrete = serde_json::to_vec(&value).map_err(|_| ManifestError::Schema)?;
+    let manifest = ManifestV2::parse(&concrete)?;
+
     let schema: Value =
         serde_json::from_slice(MANIFEST_SCHEMA_JSON).map_err(|_| ManifestError::Schema)?;
     validate_schema_references(&schema)?;
@@ -117,8 +122,6 @@ fn validate_manifest(
         return Err(ManifestError::Schema);
     }
 
-    let concrete = serde_json::to_vec(&value).map_err(|_| ManifestError::Schema)?;
-    let manifest = ManifestV2::parse(&concrete)?;
     if host.plugin_api != PLUGIN_API_VERSION
         || manifest.compatibility.plugin_api != host.plugin_api
         || !manifest.compatibility.jarvis.matches(&host.jarvis_version)
@@ -187,7 +190,7 @@ fn validate_schema_references(schema: &Value) -> Result<(), ManifestError> {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use jarvis_plugin_protocol::manifest::{RuntimeKind, MANIFEST_SCHEMA_JSON};
+    use jarvis_plugin_protocol::manifest::{ManifestV2, RuntimeKind, MANIFEST_SCHEMA_JSON};
     use jsonschema::{Draft, JSONSchema, SchemaResolver};
     use serde_json::{json, Value};
     use url::Url;
@@ -238,6 +241,81 @@ mod tests {
     #[test]
     fn public_and_host_ui_fixtures_are_byte_identical() {
         assert_eq!(PUBLIC_VALID_UI, VALID_UI);
+    }
+
+    #[test]
+    fn public_and_host_error_codes_are_identical() {
+        let mut cases = Vec::new();
+
+        let mut invalid_version = ui_value();
+        invalid_version["version"] = json!("1.0");
+        cases.push((
+            serde_json::to_vec(&invalid_version).unwrap(),
+            "manifest_semver",
+        ));
+
+        let mut incompatible_api = ui_value();
+        incompatible_api["compatibility"]["pluginApi"] = json!(3);
+        cases.push((
+            serde_json::to_vec(&incompatible_api).unwrap(),
+            "manifest_incompatible",
+        ));
+
+        let mut incompatible_protocol = ui_value();
+        incompatible_protocol["runtime"]["protocol"] = json!(3);
+        cases.push((
+            serde_json::to_vec(&incompatible_protocol).unwrap(),
+            "manifest_incompatible",
+        ));
+
+        let mut encoded_path = ui_value();
+        encoded_path["contributes"]["pages"][0]["entry"] = json!("ui/%2e%2e/index.html");
+        cases.push((
+            serde_json::to_vec(&encoded_path).unwrap(),
+            "manifest_schema",
+        ));
+
+        let mut unknown_field = ui_value();
+        unknown_field["escapeSandbox"] = json!(true);
+        cases.push((
+            serde_json::to_vec(&unknown_field).unwrap(),
+            "manifest_schema",
+        ));
+
+        let mut invalid_permission = ui_value();
+        invalid_permission["permissions"] = json!([{"id": "projects.read"}]);
+        cases.push((
+            serde_json::to_vec(&invalid_permission).unwrap(),
+            "manifest_schema",
+        ));
+
+        let mut zero_migration = ui_value();
+        zero_migration["state"]["migrations"] = json!([{
+            "from": 0,
+            "to": 1,
+            "entry": "migrations/upgrade"
+        }]);
+        cases.push((
+            serde_json::to_vec(&zero_migration).unwrap(),
+            "manifest_schema",
+        ));
+
+        cases.push((vec![b' '; MAX_MANIFEST_BYTES + 1], "manifest_too_large"));
+
+        for (bytes, expected) in cases {
+            assert_eq!(
+                ManifestV2::parse(&bytes).unwrap_err().code(),
+                expected,
+                "public parser returned a different error for {expected}"
+            );
+            assert_eq!(
+                validate_packaged_manifest(&bytes, &Target::darwin_arm64(), &future_host())
+                    .unwrap_err()
+                    .code(),
+                expected,
+                "host parser returned a different error for {expected}"
+            );
+        }
     }
 
     #[test]
@@ -354,6 +432,38 @@ mod tests {
                 raw["permissions"][0]
             );
         }
+    }
+
+    #[test]
+    fn bundled_schema_rejects_expressible_noncanonical_paths() {
+        let schema: Value = serde_json::from_slice(MANIFEST_SCHEMA_JSON).unwrap();
+        let mut options = JSONSchema::options();
+        options.with_draft(Draft::Draft202012);
+        let compiled = options.compile(&schema).unwrap();
+
+        for path in [
+            "/ui/index.html",
+            r"ui\index.html",
+            "ui/../index.html",
+            "ui//index.html",
+            "ui/%2e%2e/index.html",
+            "ui/index.html?mode=full",
+            "ui/index.html#main",
+            "ui/index:alternate.html",
+            "ui/index\n.html",
+            "ui/index\u{85}.html",
+        ] {
+            let mut raw = ui_value();
+            raw["contributes"]["pages"][0]["entry"] = json!(path);
+            assert!(
+                !compiled.is_valid(&raw),
+                "schema accepted noncanonical path {path:?}"
+            );
+        }
+
+        let mut nfc = ui_value();
+        nfc["contributes"]["pages"][0]["entry"] = json!("ui/café.html");
+        assert!(compiled.is_valid(&nfc));
     }
 
     #[test]

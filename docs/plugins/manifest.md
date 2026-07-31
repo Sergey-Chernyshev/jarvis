@@ -193,7 +193,12 @@ plugin.
 
 `version` and every data-contract ID use a complete semantic version. A
 contract ID has the form `namespace/contract@1.2.3`; ranges are not accepted in
-contract IDs.
+contract IDs. A dotted plugin may declare contracts only in the namespace equal
+to its plugin ID. An owner short ID uses `dev.jarvis.<plugin-id>`; for example,
+`agent-vm` declares `dev.jarvis.agent-vm/...`. External provider and core
+contract references are not restricted by this declaration rule. The
+`jarvis-owner` text alone is not trust: the signed catalog and publisher
+entitlement establish ownership during installation.
 
 `compatibility.jarvis` uses the SemVer requirement grammar implemented by the
 Rust `semver` crate. Multiple comparators must be comma-separated:
@@ -208,11 +213,15 @@ version or Plugin API does not match.
 
 ## Paths, references, and limits
 
-Every declared package path is relative and normalized. Absolute paths,
-Windows drive paths, backslashes, empty components, `.` and `..` components,
-repeated separators, trailing separators, and NUL bytes are rejected. File
-existence and archive membership are checked by the package layer after
-manifest validation.
+Every declared package path is relative, NFC-normalized UTF-8, control-free,
+and safe to embed in a `jarvis-plugin:` URL. Absolute paths, colons,
+backslashes, percent encoding, query or fragment delimiters, empty components,
+`.` and `..` components, repeated separators, trailing separators, and control
+bytes are rejected. File existence and archive membership are checked by the
+package layer after manifest validation.
+
+State migration `from` and `to` versions start at 1 and each edge must move
+strictly forward.
 
 Page, command, action, hotkey, runtime, activation-event, and data-contract
 references must resolve to declarations in the same manifest where the
@@ -263,10 +272,11 @@ npx --yes ajv-cli@5 validate --spec=draft2020 \
   -d path/to/plugin.json
 ```
 
-Schema validation is only the structural first pass. Jarvis additionally
-performs semantic version, normalized-path, cross-reference, compatibility,
-duplicate-key, template, and quota validation. The repository gate for both
-passes is:
+The public typed parser runs first so SDK and host return identical stable error
+codes. The bundled schema is then a defense-in-depth structural pass. Together
+they enforce semantic versions, canonical paths, cross-references,
+compatibility, duplicate keys, templates, and quotas. The repository gate for
+both passes is:
 
 ```sh
 cargo test --manifest-path crates/jarvis-plugin-protocol/Cargo.toml manifest

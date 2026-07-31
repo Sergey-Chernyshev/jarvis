@@ -88,7 +88,20 @@
     "relativePath": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 1024
+      "maxLength": 1024,
+      "pattern": "^[^/\\\\%?#:\\u0000-\\u001F\\u007F-\\u009F](?:[^\\\\%?#:\\u0000-\\u001F\\u007F-\\u009F]*[^/\\\\%?#:\\u0000-\\u001F\\u007F-\\u009F])?$",
+      "allOf": [
+        {
+          "not": {
+            "pattern": "(^|/)(\\.{1,2})(/|$)"
+          }
+        },
+        {
+          "not": {
+            "pattern": "//"
+          }
+        }
+      ]
     },
     "contractId": {
       "type": "string",

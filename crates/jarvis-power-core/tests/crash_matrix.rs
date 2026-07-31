@@ -1,6 +1,7 @@
 use jarvis_power_core::engine::{
     AcquireOutcome, AcquireResult, Effect, Engine, EngineConfig, EngineError, Plan, ProcessState,
 };
+use jarvis_power_core::protocol::MIN_TTL_MS;
 use jarvis_power_core::state::{
     DarwinProcessIdentity, HelperState, Lease, LeaseId, MonotonicTime, MutationPhase, Principal,
     StateError, MAX_ACTIVE_LEASES,
@@ -69,6 +70,7 @@ fn first_acquire(baseline: bool) -> Plan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeEffectError {
     DeadlineExpired,
+    RemainingTtlTooShort,
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +79,7 @@ struct World {
     sleep_disabled: bool,
     verified: Vec<bool>,
     monotonic_now: MonotonicTime,
+    immediate_reconciliations: usize,
 }
 
 impl World {
@@ -86,6 +89,7 @@ impl World {
             sleep_disabled,
             verified: Vec::new(),
             monotonic_now: now(0),
+            immediate_reconciliations: 0,
         }
     }
 
@@ -93,13 +97,22 @@ impl World {
         self.try_execute(effect).expect("runtime effect");
     }
 
-    fn try_execute(&mut self, effect: &Effect) -> Result<(), RuntimeEffectError> {
+    fn try_execute(&mut self, effect: &Effect) -> Result<Option<u64>, RuntimeEffectError> {
         match effect {
             Effect::PersistState(state) => self.persisted = Some(state.clone()),
             Effect::CheckDeadline(deadline) => {
                 if self.monotonic_now >= *deadline {
                     return Err(RuntimeEffectError::DeadlineExpired);
                 }
+            }
+            Effect::CheckRemainingTtl(deadline, minimum_ttl_ms) => {
+                let remaining_ttl_ms = deadline
+                    .as_millis()
+                    .saturating_sub(self.monotonic_now.as_millis());
+                if remaining_ttl_ms < *minimum_ttl_ms {
+                    return Err(RuntimeEffectError::RemainingTtlTooShort);
+                }
+                return Ok(Some(remaining_ttl_ms));
             }
             Effect::CompareAndSetDisabled(target) => self.sleep_disabled = *target,
             Effect::VerifyDisabled(expected) => {
@@ -115,7 +128,7 @@ impl World {
                 self.persisted = None;
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     fn execute_plan(&mut self, plan: &Plan) {
@@ -128,6 +141,54 @@ impl World {
         for effect in plan.effects.iter().take(count) {
             self.execute(effect);
         }
+    }
+
+    fn execute_plan_with_slow_persist(
+        &mut self,
+        plan: &Plan,
+        slow_persist_index: usize,
+        completes_at: MonotonicTime,
+    ) -> Result<Option<u64>, RuntimeEffectError> {
+        self.execute_guarded_plan(plan, Some((slow_persist_index, completes_at)))
+    }
+
+    fn execute_response_plan(&mut self, plan: &Plan) -> Result<u64, RuntimeEffectError> {
+        self.execute_guarded_plan(plan, None)
+            .map(|ttl_ms| ttl_ms.expect("response plan must measure remaining TTL"))
+    }
+
+    fn execute_guarded_plan(
+        &mut self,
+        plan: &Plan,
+        slow_persist: Option<(usize, MonotonicTime)>,
+    ) -> Result<Option<u64>, RuntimeEffectError> {
+        let mut persisted_in_plan = false;
+        let mut response_ttl_ms = None;
+        for (index, effect) in plan.effects.iter().enumerate() {
+            match self.try_execute(effect) {
+                Ok(measured_ttl_ms) => {
+                    if measured_ttl_ms.is_some() {
+                        assert!(response_ttl_ms.is_none(), "TTL may be measured only once");
+                        response_ttl_ms = measured_ttl_ms;
+                    }
+                }
+                Err(error) => {
+                    if persisted_in_plan || matches!(effect, Effect::CheckRemainingTtl(_, _)) {
+                        self.reconcile_alive_now();
+                    }
+                    return Err(error);
+                }
+            }
+            if matches!(effect, Effect::PersistState(_)) {
+                persisted_in_plan = true;
+                if let Some((slow_persist_index, completes_at)) = slow_persist {
+                    if index == slow_persist_index {
+                        self.monotonic_now = completes_at;
+                    }
+                }
+            }
+        }
+        Ok(response_ttl_ms)
     }
 
     fn engine(&self) -> Engine {
@@ -150,6 +211,22 @@ impl World {
             self.execute_plan(&plan);
         }
         panic!("world did not converge");
+    }
+
+    fn reconcile_alive_now(&mut self) {
+        self.immediate_reconciliations += 1;
+        let at = self.monotonic_now;
+        for _ in 0..3 {
+            let plan = self
+                .engine()
+                .reconcile(BOOT_ID, at, |_| ProcessState::AliveExact)
+                .expect("immediate reconciliation must converge");
+            if plan.effects.is_empty() {
+                return;
+            }
+            self.execute_plan(&plan);
+        }
+        panic!("immediate reconciliation did not converge");
     }
 }
 
@@ -391,9 +468,10 @@ fn multiple_profiles_restore_only_when_the_last_lease_leaves() {
         AcquireOutcome::Created { .. }
     ));
     let second = second_result.plan;
-    assert_eq!(second.effects.len(), 2);
+    assert_eq!(second.effects.len(), 3);
     assert_eq!(second.effects[0], Effect::CheckDeadline(now(5_010)));
     assert!(matches!(second.effects[1], Effect::PersistState(_)));
+    assert_eq!(second.effects[2], Effect::CheckDeadline(now(5_010)));
     world.execute_plan(&second);
 
     let release_first = world
@@ -548,22 +626,28 @@ fn lost_acquire_response_returns_the_existing_authoritative_lease() {
         )
         .expect("lost-response retry");
     let AcquireResult { plan, outcome } = retry;
-    assert_eq!(plan.effects, vec![Effect::CheckDeadline(now(45_000))]);
+    assert_eq!(
+        plan.effects,
+        vec![Effect::CheckRemainingTtl(now(45_000), MIN_TTL_MS)]
+    );
     assert_eq!(plan.state.as_ref().expect("state").leases.len(), 1);
     let existing_id = match outcome {
-        AcquireOutcome::Existing {
-            lease_id,
-            deadline,
-            granted_ttl_ms,
-        } => {
+        AcquireOutcome::Existing { lease_id, deadline } => {
             assert_eq!(deadline, now(45_000));
-            assert_eq!(granted_ttl_ms, 44_000);
             lease_id
         }
         outcome => panic!("expected existing lease, got {outcome:?}"),
     };
     assert_eq!(existing_id, lease_id(LEASE_A));
     assert_ne!(existing_id, lease_id(LEASE_B));
+
+    world.monotonic_now = now(2_000);
+    assert_eq!(
+        world
+            .execute_response_plan(&plan)
+            .expect("runtime TTL remains admissible"),
+        43_000
+    );
 
     let release = world
         .engine()
@@ -593,12 +677,11 @@ fn idempotent_acquire_rejects_existing_lease_below_minimum_remaining_ttl() {
         AcquireOutcome::Existing {
             lease_id: lease_id(LEASE_A),
             deadline: now(5_000),
-            granted_ttl_ms: 5_000,
         }
     );
     assert_eq!(
         exact_boundary.plan.effects,
-        vec![Effect::CheckDeadline(now(5_000))]
+        vec![Effect::CheckRemainingTtl(now(5_000), MIN_TTL_MS)]
     );
 
     assert_eq!(
@@ -702,7 +785,7 @@ fn renew_extends_only_the_existing_exact_lease_and_persists_it() {
         )
         .expect("renew exact lease");
 
-    assert_eq!(plan.effects.len(), 2);
+    assert_eq!(plan.effects.len(), 3);
     let state = plan.state.as_ref().expect("renewed state");
     assert_eq!(state.leases[0].deadline.as_millis(), 46_000);
     assert_eq!(
@@ -710,6 +793,7 @@ fn renew_extends_only_the_existing_exact_lease_and_persists_it() {
         vec![
             Effect::CheckDeadline(now(5_000)),
             Effect::PersistState(state.clone()),
+            Effect::CheckDeadline(now(46_000)),
         ]
     );
 }
@@ -863,14 +947,116 @@ fn runtime_deadline_checks_guard_slow_first_acquire_additional_acquire_and_renew
     .expect("idempotent retry");
     assert_eq!(
         existing.plan.effects,
-        vec![Effect::CheckDeadline(now(5_000))]
+        vec![Effect::CheckRemainingTtl(now(5_000), MIN_TTL_MS)]
     );
     let mut delayed_reply = World::baseline(false);
     delayed_reply.monotonic_now = now(8_000);
     assert_eq!(
         delayed_reply.try_execute(&existing.plan.effects[0]),
+        Err(RuntimeEffectError::RemainingTtlTooShort)
+    );
+}
+
+#[test]
+fn idempotent_retry_with_one_millisecond_remaining_never_returns_stale_ttl() {
+    let mut world = World::baseline(false);
+    world.execute_plan(&acquire_with_ttl(false, 5_000).plan);
+    let retry = world
+        .engine()
+        .acquire(
+            &owner(),
+            lease_id(LEASE_B),
+            "prod",
+            "generation-a",
+            now(0),
+            45_000,
+            true,
+            1,
+        )
+        .expect("retry is initially admissible");
+    assert_eq!(
+        retry.outcome,
+        AcquireOutcome::Existing {
+            lease_id: lease_id(LEASE_A),
+            deadline: now(5_000),
+        }
+    );
+
+    world.monotonic_now = now(4_999);
+    assert_eq!(
+        world.execute_response_plan(&retry.plan),
+        Err(RuntimeEffectError::RemainingTtlTooShort)
+    );
+    assert_eq!(world.immediate_reconciliations, 1);
+    assert!(world.persisted.is_some());
+    assert!(world.sleep_disabled);
+}
+
+#[test]
+fn first_acquire_fsync_past_new_deadline_recovers_before_success() {
+    let acquire = first_acquire(false);
+    let mut world = World::baseline(false);
+
+    assert_eq!(
+        world.execute_plan_with_slow_persist(&acquire, 5, now(8_000)),
         Err(RuntimeEffectError::DeadlineExpired)
     );
+    assert_eq!(world.immediate_reconciliations, 1);
+    assert!(!world.sleep_disabled);
+    assert!(world.persisted.is_none());
+}
+
+#[test]
+fn additional_acquire_fsync_past_new_deadline_recovers_before_success() {
+    let mut world = World::baseline(false);
+    world.execute_plan(&acquire_with_ttl(false, 45_000).plan);
+    let additional = world
+        .engine()
+        .acquire(
+            &other_owner(),
+            lease_id(LEASE_B),
+            "work",
+            "generation-b",
+            now(0),
+            5_000,
+            true,
+            1,
+        )
+        .expect("additional acquire");
+
+    assert_eq!(
+        world.execute_plan_with_slow_persist(&additional.plan, 1, now(8_000)),
+        Err(RuntimeEffectError::DeadlineExpired)
+    );
+    assert_eq!(world.immediate_reconciliations, 1);
+    assert!(world.sleep_disabled);
+    let recovered = world.persisted.expect("live first lease is retained");
+    assert_eq!(recovered.leases.len(), 1);
+    assert_eq!(recovered.leases[0].lease_id, lease_id(LEASE_A));
+}
+
+#[test]
+fn renew_fsync_past_new_deadline_recovers_before_success() {
+    let mut world = applied_world(false);
+    let renew = world
+        .engine()
+        .renew(
+            &owner(),
+            &lease_id(LEASE_A),
+            "generation-a",
+            BOOT_ID,
+            now(1),
+            5_000,
+        )
+        .expect("renew");
+
+    assert_eq!(
+        world.execute_plan_with_slow_persist(&renew, 1, now(8_000)),
+        Err(RuntimeEffectError::DeadlineExpired)
+    );
+    assert_eq!(world.immediate_reconciliations, 1);
+    assert!(!world.sleep_disabled);
+    assert!(world.persisted.is_none());
 }
 
 #[test]

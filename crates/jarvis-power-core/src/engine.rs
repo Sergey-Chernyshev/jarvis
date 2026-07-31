@@ -39,15 +39,23 @@ impl EngineConfig {
 /// An ordered side effect that the privileged coordinator executes serially.
 ///
 /// Execution must stop on the first failed effect. In particular,
-/// `ClearState` is emitted only after a matching `VerifyDisabled`.
+/// `ClearState` is emitted only after a matching `VerifyDisabled`. When a
+/// runtime guard fails after this plan has persisted state, the coordinator
+/// must synchronously reconcile that persisted state before returning the
+/// failure and must never emit a success response for the plan.
 pub enum Effect {
     PersistState(HelperState),
     /// Abort the remaining plan when the helper's current monotonic time is
-    /// greater than or equal to this deadline. For an idempotent
-    /// [`AcquireOutcome::Existing`] response, this is the only and final
-    /// permitted blocking action; the coordinator must reply immediately
-    /// after it succeeds.
+    /// greater than or equal to this deadline.
     CheckDeadline(MonotonicTime),
+    /// Sample the helper's monotonic clock once, reject when the remaining
+    /// duration is below the supplied minimum, and retain that same measured
+    /// duration for the response's `grantedTtlMs`.
+    ///
+    /// For [`AcquireOutcome::Existing`], this is the only and final permitted
+    /// blocking action. The coordinator must reconcile immediately on failure
+    /// or reply immediately with the measured duration on success.
+    CheckRemainingTtl(MonotonicTime, u64),
     CompareAndSetDisabled(bool),
     VerifyDisabled(bool),
     ClearState,
@@ -84,8 +92,10 @@ pub enum AcquireOutcome {
         /// The authoritative ID from persisted state, which can differ from
         /// the retry's proposed ID after a lost response.
         lease_id: LeaseId,
+        /// The authoritative deadline is retained for diagnostics and exact
+        /// release. The response TTL is deliberately absent: it must be the
+        /// value measured by the plan's final `CheckRemainingTtl`.
         deadline: MonotonicTime,
-        granted_ttl_ms: u64,
     },
 }
 
@@ -111,9 +121,9 @@ pub enum ProcessState {
 /// The Task 3 adapter should map `LeaseNearExpiry` and `Expired` to its
 /// lease-expired response; `PolicyMismatch` and `RecoveryRequired` to its
 /// recovery-required response; and `LeaseLimitReached` and `NotExtended` to
-/// its conflict response. A failed runtime [`Effect::CheckDeadline`] must be
-/// surfaced as lease-expired or recovery-required, never as a successful
-/// acquire or renewal.
+/// its conflict response. A failed runtime [`Effect::CheckDeadline`] or
+/// [`Effect::CheckRemainingTtl`] must be surfaced as lease-expired or
+/// recovery-required, never as a successful acquire or renewal.
 pub enum EngineError {
     CorruptState(StateError),
     InvalidIdentifier,
@@ -230,12 +240,11 @@ impl Engine {
                     return Ok(AcquireResult {
                         plan: Plan {
                             state: Some(state),
-                            effects: vec![Effect::CheckDeadline(existing_deadline)],
+                            effects: vec![Effect::CheckRemainingTtl(existing_deadline, MIN_TTL_MS)],
                         },
                         outcome: AcquireOutcome::Existing {
                             lease_id: existing_lease_id,
                             deadline: existing_deadline,
-                            granted_ttl_ms: remaining_ttl_ms,
                         },
                     });
                 }
@@ -260,7 +269,11 @@ impl Engine {
                 Ok(AcquireResult {
                     plan: Plan {
                         state: Some(state.clone()),
-                        effects: vec![Effect::CheckDeadline(deadline), Effect::PersistState(state)],
+                        effects: vec![
+                            Effect::CheckDeadline(deadline),
+                            Effect::PersistState(state),
+                            Effect::CheckDeadline(deadline),
+                        ],
                     },
                     outcome,
                 })
@@ -311,6 +324,7 @@ impl Engine {
             effects: vec![
                 Effect::CheckDeadline(old_deadline),
                 Effect::PersistState(state),
+                Effect::CheckDeadline(deadline),
             ],
         })
     }
@@ -447,6 +461,7 @@ impl Engine {
         effects.push(Effect::VerifyDisabled(true));
         effects.push(Effect::CheckDeadline(deadline));
         effects.push(Effect::PersistState(applied.clone()));
+        effects.push(Effect::CheckDeadline(deadline));
 
         Ok(AcquireResult {
             plan: Plan {

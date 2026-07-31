@@ -597,7 +597,8 @@ Production code must not call `append_path`, `append_file`, `append_dir_all`, `A
 `Archive::unpack`; those APIs infer metadata or interpret extensions outside this profile. `tempfile` owns the
 unlinked spool. `rustix` owns fd-relative filesystem calls.
 
-The crate root is exactly `#![deny(unsafe_code)]`. The only override is:
+The crate root is exactly `#![deny(unsafe_code)]`. The only scoped override is attached to the macOS module
+declaration:
 
 ```rust
 #[cfg(target_os = "macos")]
@@ -611,8 +612,10 @@ mod dependency_msrv;
 `macos_dir.rs` is a tiny safe RAII wrapper around `fdopendir`/`readdir`/`closedir` operating on an owned duplicate
 directory fd, because `rustix` does not expose macOS directory iteration. Its safe entry point is `pub(crate)`, not
 part of the crate's external API, so both production source walking and crate-unit tests exercise the same wrapper.
-No other Rust source or build script anywhere in the private crate may contain `#[allow(unsafe_code)]`, an `unsafe fn`
-or an `unsafe { ... }` block.
+`#[allow(unsafe_code)]` appears exactly once, on the `mod macos_dir;` declaration shown above, so its lint scope is
+only that module. The boundary scan independently permits unsafe syntax — including unsafe functions, blocks, impls
+and traits — only in `crates/jarvis-package/src/macos_dir.rs`; no test, example, benchmark, build script or other
+source file may contain either an unsafe allow or unsafe syntax.
 
 `crates/jarvis-package/src/dependency_msrv.rs` is a crate-unit probe compiled only through the `#[cfg(test)]` module
 above and defines the test `exact_dependency_apis_execute`. It must compile and execute the exact A3 APIs used from
@@ -646,15 +649,20 @@ cargo +1.77.2 update --manifest-path crates/jarvis-package/Cargo.toml \
 ```
 
 Add only the `jarvis-package` path dependency to the host manifest, let current-stable Cargo add that path package to
-`src-tauri/Cargo.lock`, and inspect the lock diff before continuing:
+`src-tauri/Cargo.lock`, align the host's existing Unicode package to the public/private crate pin, and inspect the lock
+diff before continuing:
 
 ```bash
+cargo update --manifest-path src-tauri/Cargo.toml \
+  -p unicode-normalization --precise 0.1.24
 cargo check --manifest-path src-tauri/Cargo.toml --no-default-features
 git diff -- src-tauri/Cargo.lock
 ```
 
-Expected: no existing registry package version changes; in particular there is no `uuid`, `image`, `tiff`,
-`indexmap`, `hashbrown`, TOML or Tauri downgrade.
+Expected: the only existing registry-package version change is the required
+`unicode-normalization 0.1.25 -> 0.1.24` downgrade, plus new entries required by `jarvis-package`. Apart from replacing
+that one Unicode entry, no existing registry package version or checksum changes; in particular there is no `uuid`,
+`image`, `tiff`, `indexmap`, `hashbrown`, TOML or Tauri churn.
 
 Extend `scripts/check-plugin-boundaries.sh` and its negative-fixture test so all of these are enforced:
 
@@ -665,14 +673,17 @@ Extend `scripts/check-plugin-boundaries.sh` and its negative-fixture test so all
 3. `crates/jarvis-package/Cargo.toml` has `publish = false`, `edition = "2021"` and
    `rust-version = "1.77.2"`;
 4. `crates/jarvis-package/src/lib.rs` has `#![deny(unsafe_code)]`;
-5. `#[allow(unsafe_code)]` and unsafe syntax anywhere in `crates/jarvis-package` — including `src`, `tests`,
-   `examples`, `benches` and `build.rs` if present — occur only in the exact
+5. `src/lib.rs` contains exactly one `#[allow(unsafe_code)]`, directly on the macOS-gated `mod macos_dir;`
+   declaration, and no other unsafe allow exists anywhere in the private crate;
+6. unsafe syntax anywhere in `crates/jarvis-package` — including functions, blocks, impls and traits under `src`,
+   `tests`, `examples`, `benches` and `build.rs` if present — occurs only in the exact
    `crates/jarvis-package/src/macos_dir.rs` allowlist;
-6. the existing `jarvis-plugin-*` public-crate checks continue to require `#![forbid(unsafe_code)]`.
+7. the existing `jarvis-plugin-*` public-crate checks continue to require `#![forbid(unsafe_code)]`.
 
 Negative fixtures cover a public crate, a plugin and an unrelated private crate attempting the dependency, a
-publishable `jarvis-package`, and unsafe code or an unsafe allow in `src`, an integration test and `build.rs` outside
-the exact wrapper. The clean fixture includes the one allowed `src-tauri -> jarvis-package` edge and macOS wrapper.
+publishable `jarvis-package`, a second/misplaced unsafe allow, and unsafe code in another source module, an integration
+test and `build.rs`. The clean fixture includes the one allowed `src-tauri -> jarvis-package` edge, the exact scoped
+module allow in `src/lib.rs`, and unsafe blocks only in `src/macos_dir.rs`.
 
 Add current-stable package test/clippy steps to the normal `rust` CI job. In the existing `plugin-msrv` macOS job,
 install the Rust 1.77.2 `clippy` component and add the same exact locked package commands:
@@ -816,11 +827,12 @@ written as exact JCS bytes. Packing options must explicitly provide `minimum_mac
 The private crate never reopens a manifest pathname and never imports Jarvis Core. It requires a
 `PackageDocumentAdapter` capability supplied by `src-tauri/src/plugins/package.rs`. The package engine passes the
 spooled source `plugin.json` bytes and target into that adapter; the adapter calls A2
-`validate_source_manifest`, returns the typed concrete manifest plus exact concrete JCS bytes, and later calls
-`validate_packaged_manifest` for inspected bytes. The same adapter validates the closed package/signature schemas
-before typed deserialization. Production pack/inspect APIs have no constructor or boolean flag that bypasses this
-adapter. Private-crate tests use exact bounded fixture adapters; current-stable host adapter tests prove the real A2
-schema and target-substitution path.
+`validate_source_manifest` and returns only the parsed `ManifestV2`, then later calls `validate_packaged_manifest` for
+inspected bytes and again returns only the parsed `ManifestV2`. The same adapter validates the closed
+package/signature schemas before typed deserialization and returns only `()`. Every concrete manifest or metadata JCS
+byte sequence is computed inside the private package engine; the adapter never supplies canonical bytes. Production
+pack/inspect APIs have no constructor or boolean flag that bypasses this adapter. Private-crate tests use exact bounded
+fixture adapters; current-stable host adapter tests prove the real A2 schema and target-substitution path.
 
 The boundary is:
 
@@ -851,8 +863,8 @@ pub trait PackageDocumentAdapter {
 ```
 
 The private crate performs the bounded duplicate-key parse and JCS equality check before either schema callback, then
-typed-deserializes only after schema success. It canonicalizes the resolved typed source manifest itself, so the
-adapter never supplies unchecked output bytes.
+typed-deserializes only after schema success. It canonicalizes the adapter's parsed source manifest itself and
+computes every later JCS encoding itself; no adapter method returns bytes.
 
 `PackageMetadataV1` must equal its packaged content:
 
@@ -1359,6 +1371,15 @@ digest, signature algorithm, signature key ID, signature value or publisher line
 returns `package_signature_invalid`, a revoked package returns `package_revoked`, and neither case can produce
 `VerifiedPackageEvidence` or create a quarantine directory.
 
+Add these RED primitive tests in `src-tauri/src/plugins/trust/signature.rs`:
+
+```text
+package_signature_known_answer_accepts_fixed_vector
+package_signature_known_answer_rejects_one_bit_message_change
+package_signature_known_answer_rejects_one_bit_signature_change
+package_signature_known_answer_rejects_one_bit_public_key_change
+```
+
 - [ ] **Step 2: Run trust tests and verify RED**
 
 Run:
@@ -1369,7 +1390,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --no-default-features plugins::t
 
 Expected: FAIL because trust modules and fixtures do not exist.
 
-- [ ] **Step 3: Define the catalog envelope and trust state**
+- [ ] **Step 3: Define the catalog envelope, trust state and deterministic fixtures**
 
 `catalog.rs` in the protocol crate defines:
 
@@ -1426,6 +1447,38 @@ PackageSignatureV1 message =
 The root catalog schema and protocol-crate copy are byte-identical, closed Draft 2020-12 schemas. Add
 `catalog_schema_copies_are_byte_identical` and a schema/DTO round-trip fixture containing every release equality field.
 
+Before any GREEN verifier command, create every `src-tauri/tests/fixtures/plugin-trust` file listed in this task.
+`package-test-signing-seed.hex` contains exactly the following public deterministic test seed plus one trailing
+newline:
+
+```text
+9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60
+```
+
+`package-test-public-key.hex` contains exactly its matching public key plus one trailing newline:
+
+```text
+d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
+```
+
+The README labels that seed as public test material, not a credential, and forbids it for release catalogs. Use it to
+create the signed package/catalog test fixtures. The signature primitive's fixed package-domain known-answer vector is:
+
+```text
+canonical package.json bytes: 7b7d
+message hex:
+  6a61727669732d706c7567696e2d7061636b6167652d7631007b7d
+expected canonical base64 signature:
+  gDDYgr16HoixPzQjmuL8+CTds3bPmnZlxOHqex3+FifEyJqpD8PHzZT5HUWX4tQrUrijxOGqKbQu/ZaPOSAjCQ==
+```
+
+The positive test compares against that literal signature rather than regenerating its expected value. The three
+negative tests independently flip the low bit of a copied message byte, decoded signature byte and public-key byte;
+each must return `package_signature_invalid`. This primitive vector deliberately uses canonical `{}` only to test the
+exact package signature domain; the package-verifier integration fixtures use a complete schema-valid
+`package.json`. Finish `root-public.json`, `catalog-seq-1.json` and `catalog-seq-2-rotated.json` in this step so Step 4
+never runs GREEN tests against fixtures scheduled for a later step.
+
 - [ ] **Step 4: Implement fail-closed verification**
 
 `trust/catalog.rs` verifies schema, RFC3339 dates, issued/expires interval, current time, sequence, previous digest,
@@ -1465,18 +1518,20 @@ Run:
 
 ```bash
 cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
+  plugins::trust::signature::tests
+cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features \
   plugins::trust::package::tests
 ```
 
-Expected: all five tests exit `0`; mismatch/revocation/signature failures leave no filesystem output.
+Expected: both commands exit `0`; the four fixed-vector tests and five package-verifier tests pass, and
+mismatch/revocation/signature failures leave no filesystem output.
 
 - [ ] **Step 5: Add production root resource safely**
 
 `src-tauri/resources/plugin-trust-roots.json` contains the public owner root IDs, public Ed25519 keys, threshold and
 validity metadata only. No private/test signing key may appear outside `src-tauri/tests/fixtures/plugin-trust`.
-Create `package-test-signing-seed.hex` and its matching `package-test-public-key.hex` here, in A4, not A3.
-`src-tauri/tests/fixtures/plugin-trust/README.md` states that fixture private keys are public test material and
-forbidden for release catalogs. Bundle the public root resource through `tauri.conf.json`.
+The fixture seed, matching public key, README and signed fixtures already exist from Step 3, before the GREEN verifier
+tests; do not recreate or rewrite them here. Bundle the public root resource through `tauri.conf.json`.
 
 If the release owner key is not provisioned during this task, commit an empty production root set with threshold `1`.
 That state deliberately makes catalog install/update return `catalog_trust_not_provisioned`; local signed fixtures and

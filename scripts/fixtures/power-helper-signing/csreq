@@ -4,6 +4,12 @@ set -euo pipefail
 : "${JARVIS_TEST_TOOL_LOG:?}"
 printf 'csreq %s\n' "$*" >>"$JARVIS_TEST_TOOL_LOG"
 
+if [[ " $* " == *" -t "* || " $* " == *" -t" ]]; then
+  team_id="${APPLE_TEAM_ID:-ABCDEFGHIJ}"
+  printf 'designated => anchor apple generic and identifier "app.jarvis.monitor.power-helper" and certificate leaf[subject.OU] = %s and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */\n' "$team_id"
+  exit 0
+fi
+
 output=""
 while (($#)); do
   if [[ "$1" == "-b" ]]; then

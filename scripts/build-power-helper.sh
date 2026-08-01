@@ -110,6 +110,7 @@ case "$mode" in
     helper_identifier="app.jarvis.monitor.power-helper"
     designated_requirement="designated => anchor apple generic and identifier \"$helper_identifier\" and certificate leaf[subject.OU] = \"$APPLE_TEAM_ID\" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
     csreq -r="$designated_requirement" -b "$requirement_blob"
+    canonical_requirement="$(csreq -r "$requirement_blob" -t)"
     codesign \
       --force \
       --options runtime \
@@ -146,18 +147,16 @@ case "$mode" in
     for evidence in \
       "Authority=Developer ID Application:" \
       "Authority=Developer ID Certification Authority" \
-      "Authority=Apple Root CA" \
-      "designated =>" \
-      "identifier \"$helper_identifier\"" \
-      "anchor apple generic" \
-      "certificate leaf[subject.OU] = \"$APPLE_TEAM_ID\"" \
-      "certificate 1[field.1.2.840.113635.100.6.2.6] exists" \
-      "certificate leaf[field.1.2.840.113635.100.6.1.13] exists"; do
+      "Authority=Apple Root CA"; do
       if ! /usr/bin/grep -F -q -- "$evidence" <<<"$signing_details"; then
         echo "signed helper is missing required evidence: $evidence" >&2
         exit 1
       fi
     done
+    if ! /usr/bin/grep -F -x -q -- "$canonical_requirement" <<<"$signing_details"; then
+      echo "signed helper designated requirement does not match compiled policy" >&2
+      exit 1
+    fi
     if /usr/bin/grep -F -q -- "Signature=adhoc" <<<"$signing_details"; then
       echo "ad-hoc production helper signature is forbidden" >&2
       exit 1

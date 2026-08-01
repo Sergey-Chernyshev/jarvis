@@ -12,6 +12,16 @@ pub(crate) enum HelperTrust {
     DevelopmentOnly,
 }
 
+impl HelperTrust {
+    /// Development transport evidence is deliberately non-authoritative.
+    ///
+    /// A same-UID local process can create an indistinguishable Unix listener,
+    /// so this value must never unlock production helper behavior.
+    pub(crate) const fn authorizes_production(self) -> bool {
+        false
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct HelperReply {
     pub(crate) response: ResponseEnvelope,
@@ -22,6 +32,7 @@ pub(crate) struct HelperReply {
 pub(crate) enum HelperClientError {
     Deadline,
     InvalidFrame,
+    PeerRejected,
     Io(io::Error),
     Protocol(ProtocolError),
     RandomnessUnavailable,
@@ -34,6 +45,9 @@ impl fmt::Display for HelperClientError {
         match self {
             Self::Deadline => formatter.write_str("power-helper development I/O deadline expired"),
             Self::InvalidFrame => formatter.write_str("power-helper development frame is invalid"),
+            Self::PeerRejected => {
+                formatter.write_str("power-helper development peer identity is inconsistent")
+            }
             Self::Io(error) => write!(formatter, "power-helper development I/O failed: {error}"),
             Self::Protocol(error) => write!(formatter, "power-helper protocol failed: {error}"),
             Self::RandomnessUnavailable => {

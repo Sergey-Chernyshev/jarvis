@@ -608,6 +608,11 @@ mod tests {
             release.archive_digest().as_str(),
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
+        assert_eq!(verified.sequence(), 1);
+        assert_eq!(
+            verified.digest().as_str(),
+            "sha256:382bdf240eb09eb2b7ba8fa8283ecb3aecb3f5a13b514abdfd36e65f1a7af472"
+        );
         assert_eq!(state.sequence(), 1);
     }
 
@@ -780,7 +785,7 @@ mod tests {
     fn empty_production_roots_fail_closed_without_test_material() {
         let roots = RootTrustConfig::parse(PRODUCTION_ROOTS).unwrap();
         assert!(!roots.is_provisioned());
-        let mut state = CatalogState::new(roots);
+        let mut state = CatalogState::empty();
         assert_eq!(
             verify(CATALOG_1, "2026-08-01T00:30:00Z", &mut state)
                 .unwrap_err()

@@ -14,6 +14,7 @@ use crate::PackageError;
 pub(crate) const BLOCK_SIZE: usize = 512;
 const GNU_LONG_LINK: &[u8] = b"././@LongLink";
 const GNU_LONG_FILE: &[u8] = b"././@LongFile";
+const NAMESPACE_NODE_ALLOCATION_CHARGE: u64 = 256;
 
 const REGULAR_TYPE: u8 = b'0';
 const LONG_NAME_TYPE: u8 = b'L';
@@ -54,6 +55,35 @@ pub(crate) fn append_profile_entry<W: Write, R: Read>(
             .map_err(|_| PackageError::archive_write())?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn projected_entry_bytes(path: &PackagePath, size: u64) -> Result<u64, PackageError> {
+    let regular = (BLOCK_SIZE as u64)
+        .checked_add(padded_body_bytes(size)?)
+        .ok_or_else(PackageError::archive_quota)?;
+    if path.as_str().len() <= 100 {
+        return Ok(regular);
+    }
+    let long_body = u64::try_from(path.as_str().len())
+        .map_err(|_| PackageError::archive_quota())?
+        .checked_add(1)
+        .ok_or_else(PackageError::archive_quota)?;
+    (BLOCK_SIZE as u64)
+        .checked_add(padded_body_bytes(long_body)?)
+        .and_then(|long| long.checked_add(regular))
+        .ok_or_else(PackageError::archive_quota)
+}
+
+#[cfg(target_os = "macos")]
+fn padded_body_bytes(size: u64) -> Result<u64, PackageError> {
+    let block = BLOCK_SIZE as u64;
+    let remainder = size % block;
+    if remainder == 0 {
+        return Ok(size);
+    }
+    size.checked_add(block - remainder)
+        .ok_or_else(PackageError::archive_quota)
 }
 
 fn build_header(name: &[u8], mode: u32, size: u64, entry_type: u8) -> Result<Header, PackageError> {
@@ -135,6 +165,7 @@ pub(crate) struct ArchiveLimits {
     pub(crate) max_component_bytes: u64,
     pub(crate) max_path_depth: u64,
     pub(crate) max_namespace_nodes: u64,
+    pub(crate) max_namespace_stored_bytes: u64,
     pub(crate) max_collision_key_bytes: u64,
     pub(crate) max_long_name_body: u64,
     pub(crate) max_package_json_bytes: u64,
@@ -158,6 +189,7 @@ impl ArchiveLimits {
             max_component_bytes: 255,
             max_path_depth: 64,
             max_namespace_nodes: 100_000,
+            max_namespace_stored_bytes: 24 * 1024 * 1024,
             max_collision_key_bytes: 4_096,
             max_long_name_body: 1_025,
             max_package_json_bytes: 16 * 1024 * 1024,
@@ -204,6 +236,7 @@ impl ObservedArchiveEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ArchiveInspection {
     entries: Vec<ObservedArchiveEntry>,
+    validated_directories: Vec<PackagePath>,
     plugin_json: Vec<u8>,
     package_json: Vec<u8>,
     signature: Vec<u8>,
@@ -219,6 +252,10 @@ impl ArchiveInspection {
     pub(crate) fn payload_entries(&self) -> &[ObservedArchiveEntry] {
         let end = self.entries.len().saturating_sub(2);
         &self.entries[..end]
+    }
+
+    pub(crate) fn validated_directories(&self) -> &[PackagePath] {
+        &self.validated_directories
     }
 
     pub(crate) fn plugin_json(&self) -> &[u8] {
@@ -274,6 +311,8 @@ struct ParserContext {
     exact_paths: BTreeSet<String>,
     namespace: BTreeMap<String, NamespaceNode>,
     namespace_nodes: u64,
+    namespace_stored_bytes: u64,
+    validated_directories: BTreeSet<String>,
     logical_entries: u64,
     payload_files: u64,
     unpacked_payload_bytes: u64,
@@ -292,6 +331,8 @@ impl ParserContext {
             exact_paths: BTreeSet::new(),
             namespace: BTreeMap::new(),
             namespace_nodes: 0,
+            namespace_stored_bytes: 0,
+            validated_directories: BTreeSet::new(),
             logical_entries: 0,
             payload_files: 0,
             unpacked_payload_bytes: 0,
@@ -413,6 +454,29 @@ impl ParserContext {
             if self.namespace_nodes > self.limits.max_namespace_nodes {
                 return Err(PackageError::archive_quota());
             }
+            let directory_plan_bytes = if kind == NamespaceKind::Directory {
+                u64::try_from(prefix.len()).map_err(|_| PackageError::archive_quota())?
+            } else {
+                0
+            };
+            let allocation_charge = u64::try_from(key.len())
+                .map_err(|_| PackageError::archive_quota())?
+                .checked_add(
+                    u64::try_from(prefix.len()).map_err(|_| PackageError::archive_quota())?,
+                )
+                .and_then(|value| value.checked_add(directory_plan_bytes))
+                .and_then(|value| value.checked_add(NAMESPACE_NODE_ALLOCATION_CHARGE))
+                .ok_or_else(PackageError::archive_quota)?;
+            self.namespace_stored_bytes = self
+                .namespace_stored_bytes
+                .checked_add(allocation_charge)
+                .ok_or_else(PackageError::archive_quota)?;
+            if self.namespace_stored_bytes > self.limits.max_namespace_stored_bytes {
+                return Err(PackageError::archive_quota());
+            }
+            if kind == NamespaceKind::Directory {
+                self.validated_directories.insert(prefix.clone());
+            }
             self.namespace.insert(
                 key,
                 NamespaceNode {
@@ -458,8 +522,21 @@ impl ParserContext {
         if self.phase != ArchivePhase::Signature {
             return Err(PackageError::archive_order());
         }
+        let mut validated_directories = self
+            .validated_directories
+            .into_iter()
+            .map(|path| PackagePath::new(path).map_err(|_| PackageError::archive_path()))
+            .collect::<Result<Vec<_>, _>>()?;
+        validated_directories.sort_by(|left, right| {
+            left.as_str()
+                .matches('/')
+                .count()
+                .cmp(&right.as_str().matches('/').count())
+                .then_with(|| left.as_str().cmp(right.as_str()))
+        });
         Ok(ArchiveInspection {
             entries: self.entries,
+            validated_directories,
             plugin_json: self.plugin_json,
             package_json: self.package_json,
             signature: self.signature,
@@ -675,6 +752,11 @@ fn regular_plan(
         _ => return Err(PackageError::archive_header()),
     };
     let entry_class = context.accept_entry(&path, header.size)?;
+    if matches!(entry_class, EntryClass::Package | EntryClass::Signature)
+        && mode != PackageFileMode::ReadOnly
+    {
+        return Err(PackageError::archive_header());
+    }
     Ok(RegularPlan {
         path,
         mode,
@@ -1305,6 +1387,7 @@ mod tests {
         assert_eq!(production.max_component_bytes, 255);
         assert_eq!(production.max_path_depth, 64);
         assert_eq!(production.max_namespace_nodes, 100_000);
+        assert_eq!(production.max_namespace_stored_bytes, 24 * 1024 * 1024);
         assert_eq!(production.max_collision_key_bytes, 4_096);
         assert_eq!(production.max_long_name_body, 1_025);
         assert_eq!(production.max_package_json_bytes, 16 * 1024 * 1024);
@@ -1335,6 +1418,7 @@ mod tests {
         assert_exact!(max_component_bytes, 12);
         assert_exact!(max_path_depth, 1);
         assert_exact!(max_namespace_nodes, 3);
+        assert_exact!(max_namespace_stored_bytes, 832);
         assert_exact!(max_collision_key_bytes, 12);
         assert_exact!(max_package_json_bytes, 2);
         assert_exact!(max_signature_bytes, 2);
@@ -1386,6 +1470,9 @@ mod tests {
         let mut namespace = production;
         namespace.max_namespace_nodes = 2;
         assert_code_with_limits(&archive, namespace, "archive_quota");
+        let mut namespace_stored = production;
+        namespace_stored.max_namespace_stored_bytes = 831;
+        assert_code_with_limits(&archive, namespace_stored, "archive_quota");
         let mut collision_key = production;
         collision_key.max_collision_key_bytes = 11;
         assert_code_with_limits(&archive, collision_key, "archive_quota");
@@ -1465,6 +1552,24 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "archive_trailing"
+        );
+    }
+
+    #[test]
+    fn inspection_retains_validated_directories_in_parent_first_order() {
+        let archive = valid_archive(&[
+            (b"a/b/c", 0o444, b"one"),
+            (b"a/d", 0o444, b"two"),
+            (b"z/file", 0o444, b"three"),
+        ]);
+        let inspection = inspect_bytes(&archive).unwrap();
+        assert_eq!(
+            inspection
+                .validated_directories()
+                .iter()
+                .map(|path| path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "z", "a/b"]
         );
     }
 

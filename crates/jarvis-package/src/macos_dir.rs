@@ -18,6 +18,16 @@ impl Drop for DirectoryStream {
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn read_directory_names<Fd: AsFd>(directory: Fd) -> io::Result<Vec<OsString>> {
+    read_directory_names_bounded(directory, u64::MAX, u64::MAX, 0)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "directory exceeds limits"))
+}
+
+pub(crate) fn read_directory_names_bounded<Fd: AsFd>(
+    directory: Fd,
+    max_entries: u64,
+    max_stored_bytes: u64,
+    allocation_charge: u64,
+) -> io::Result<Option<Vec<OsString>>> {
     let duplicate = rustix::io::fcntl_dupfd_cloexec(directory, 0)?;
     let duplicate_raw = duplicate.into_raw_fd();
     let stream = match NonNull::new(unsafe { libc::fdopendir(duplicate_raw) }) {
@@ -32,6 +42,7 @@ pub(crate) fn read_directory_names<Fd: AsFd>(directory: Fd) -> io::Result<Vec<Os
     };
 
     let mut names = Vec::new();
+    let mut stored_bytes = 0_u64;
     loop {
         unsafe {
             *libc::__error() = 0;
@@ -40,13 +51,28 @@ pub(crate) fn read_directory_names<Fd: AsFd>(directory: Fd) -> io::Result<Vec<Os
         if entry.is_null() {
             let errno = unsafe { *libc::__error() };
             if errno == 0 {
-                return Ok(names);
+                return Ok(Some(names));
             }
             return Err(io::Error::from_raw_os_error(errno));
         }
 
         let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if bytes != b"." && bytes != b".." {
+            let next_entries = u64::try_from(names.len())
+                .ok()
+                .and_then(|count| count.checked_add(1));
+            let next_stored_bytes = u64::try_from(bytes.len())
+                .ok()
+                .and_then(|length| length.checked_add(allocation_charge))
+                .and_then(|length| stored_bytes.checked_add(length));
+            let (Some(next_entries), Some(next_stored_bytes)) = (next_entries, next_stored_bytes)
+            else {
+                return Ok(None);
+            };
+            if next_entries > max_entries || next_stored_bytes > max_stored_bytes {
+                return Ok(None);
+            }
+            stored_bytes = next_stored_bytes;
             names.push(std::ffi::OsStr::from_bytes(bytes).to_os_string());
         }
     }

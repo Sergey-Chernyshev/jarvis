@@ -492,40 +492,13 @@ fn extract_payload<H: ExtractionHook>(
     state: &mut ExtractionState,
     hook: &H,
 ) -> Result<(), PackageError> {
-    let directories = implicit_directories(inspection.payload_entries());
-    for directory in directories {
-        create_directory(state, &directory)?;
+    for directory in inspection.validated_directories() {
+        create_directory(state, directory.as_str())?;
     }
     for entry in inspection.payload_entries() {
         create_file_from_entry(archive, state, entry, hook)?;
     }
     Ok(())
-}
-
-fn implicit_directories(entries: &[ObservedArchiveEntry]) -> Vec<String> {
-    let mut directories = BTreeSet::new();
-    for entry in entries {
-        let mut prefix = String::new();
-        let mut components = entry.path().as_str().split('/').peekable();
-        while let Some(component) = components.next() {
-            if components.peek().is_none() {
-                break;
-            }
-            if !prefix.is_empty() {
-                prefix.push('/');
-            }
-            prefix.push_str(component);
-            directories.insert(prefix.clone());
-        }
-    }
-    let mut directories = directories.into_iter().collect::<Vec<_>>();
-    directories.sort_by(|left, right| {
-        left.matches('/')
-            .count()
-            .cmp(&right.matches('/').count())
-            .then_with(|| left.cmp(right))
-    });
-    directories
 }
 
 fn create_directory(state: &mut ExtractionState, path: &str) -> Result<(), PackageError> {

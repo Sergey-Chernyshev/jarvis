@@ -200,6 +200,22 @@ printf '%s\n' \
   > "$fixture_root/src-tauri/src/plugins/trust/package.rs"
 run_fixture_boundary >/dev/null
 
+write_clean_fixture
+mkdir -p \
+  "$fixture_root/src-tauri/src/plugins/trust" \
+  "$fixture_root/src-tauri/src/plugins"
+printf '%s\n' \
+  '#[macro_export]' \
+  'macro_rules! catalog_verifier {' \
+  '    ($type:ty) => { impl PackageTrustVerifier for $type {} };' \
+  '}' \
+  > "$fixture_root/src-tauri/src/plugins/trust/package.rs"
+printf '%s\n' \
+  'struct EscapedVerifier;' \
+  'catalog_verifier!(EscapedVerifier);' \
+  > "$fixture_root/src-tauri/src/plugins/wrong.rs"
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
 printf '%s\n' \
   '[package]' \
   'name = "jarvis-plugin-protocol"' \

@@ -11,12 +11,14 @@ use jarvis_plugin_protocol::package::PackagePath;
 use rustix::fs::{fstat, open, openat, statat, AtFlags, FileType, Mode, OFlags, Stat};
 use sha2::{Digest as _, Sha256};
 
-use crate::macos_dir::read_directory_names;
+use crate::archive::{projected_entry_bytes, ArchiveLimits, BLOCK_SIZE};
+use crate::macos_dir::read_directory_names_bounded;
 use crate::spool::{SourceSnapshot, SpooledFile};
 use crate::PackageError;
 
 const MAX_SOURCE_DEPTH: usize = 64;
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
+const SOURCE_NAMESPACE_NODE_ALLOCATION_CHARGE: u64 = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SourceIdentity {
@@ -75,6 +77,137 @@ struct SourceDirectory {
     identity: SourceIdentity,
 }
 
+struct SourceBudget {
+    limits: ArchiveLimits,
+    payload_files: u64,
+    unpacked_payload_bytes: u64,
+    projected_physical_bytes: u64,
+    namespace_nodes: u64,
+    namespace_stored_bytes: u64,
+    plugin_json_present: bool,
+}
+
+impl SourceBudget {
+    fn production() -> Result<Self, PackageError> {
+        let limits = ArchiveLimits::production();
+        let package_path =
+            PackagePath::new("package.json").map_err(|_| PackageError::archive_quota())?;
+        let signature_path =
+            PackagePath::new("SIGNATURE").map_err(|_| PackageError::archive_quota())?;
+        let projected_physical_bytes = (2 * BLOCK_SIZE as u64)
+            .checked_add(projected_entry_bytes(&package_path, 0)?)
+            .and_then(|size| {
+                projected_entry_bytes(&signature_path, 0)
+                    .ok()
+                    .and_then(|entry| size.checked_add(entry))
+            })
+            .ok_or_else(PackageError::archive_quota)?;
+        Ok(Self {
+            limits,
+            payload_files: 0,
+            unpacked_payload_bytes: 0,
+            projected_physical_bytes,
+            namespace_nodes: 0,
+            namespace_stored_bytes: 0,
+            plugin_json_present: false,
+        })
+    }
+
+    fn remaining_namespace_nodes(&self) -> u64 {
+        self.limits
+            .max_namespace_nodes
+            .saturating_sub(self.namespace_nodes)
+    }
+
+    fn remaining_namespace_stored_bytes(&self) -> u64 {
+        self.limits
+            .max_namespace_stored_bytes
+            .saturating_sub(self.namespace_stored_bytes)
+    }
+
+    fn record_file(&mut self, path: &PackagePath, size: u64) -> Result<(), PackageError> {
+        self.payload_files = self
+            .payload_files
+            .checked_add(1)
+            .ok_or_else(PackageError::archive_quota)?;
+        if self.payload_files > self.limits.max_payload_files
+            || size > self.limits.max_single_payload_file
+        {
+            return Err(PackageError::archive_quota());
+        }
+        self.unpacked_payload_bytes = self
+            .unpacked_payload_bytes
+            .checked_add(size)
+            .ok_or_else(PackageError::archive_quota)?;
+        if self.unpacked_payload_bytes > self.limits.max_unpacked_payload_bytes {
+            return Err(PackageError::archive_quota());
+        }
+        if path.as_str() == "plugin.json" {
+            if size > self.limits.max_plugin_json_bytes {
+                return Err(PackageError::archive_quota());
+            }
+            self.plugin_json_present = true;
+        }
+        self.record_namespace_path(path.as_str(), 1)?;
+        let projected_size = if path.as_str() == "plugin.json" {
+            0
+        } else {
+            size
+        };
+        self.projected_physical_bytes = self
+            .projected_physical_bytes
+            .checked_add(projected_entry_bytes(path, projected_size)?)
+            .ok_or_else(PackageError::archive_quota)?;
+        if self.projected_physical_bytes > self.limits.max_physical_bytes {
+            return Err(PackageError::archive_quota());
+        }
+        Ok(())
+    }
+
+    fn record_directory(&mut self, path: &str) -> Result<(), PackageError> {
+        self.record_namespace_path(path, 3)
+    }
+
+    fn record_namespace_path(
+        &mut self,
+        path: &str,
+        retained_copies: u64,
+    ) -> Result<(), PackageError> {
+        self.namespace_nodes = self
+            .namespace_nodes
+            .checked_add(1)
+            .ok_or_else(PackageError::archive_quota)?;
+        if self.namespace_nodes > self.limits.max_namespace_nodes {
+            return Err(PackageError::archive_quota());
+        }
+        let path_bytes = u64::try_from(path.len())
+            .map_err(|_| PackageError::archive_quota())?
+            .checked_mul(retained_copies)
+            .ok_or_else(PackageError::archive_quota)?;
+        let charge = path_bytes
+            .checked_add(SOURCE_NAMESPACE_NODE_ALLOCATION_CHARGE)
+            .ok_or_else(PackageError::archive_quota)?;
+        self.namespace_stored_bytes = self
+            .namespace_stored_bytes
+            .checked_add(charge)
+            .ok_or_else(PackageError::archive_quota)?;
+        if self.namespace_stored_bytes > self.limits.max_namespace_stored_bytes {
+            return Err(PackageError::archive_quota());
+        }
+        Ok(())
+    }
+
+    fn finish(&self) -> Result<(), PackageError> {
+        if !self.plugin_json_present {
+            return Err(PackageError::source_invalid());
+        }
+        if self.projected_physical_bytes > self.limits.max_physical_bytes {
+            return Err(PackageError::archive_quota());
+        }
+        Ok(())
+    }
+}
+
 pub(crate) trait SnapshotHook {
     fn after_enumeration(&self) {}
     fn before_open(&self, _path: &str) {}
@@ -104,7 +237,9 @@ pub(crate) fn snapshot_source_with_hook<H: SnapshotHook>(
 
     let mut files = Vec::new();
     let mut directories = BTreeMap::new();
-    enumerate_directory(&root_fd, "", 0, &mut files, &mut directories)?;
+    let mut budget = SourceBudget::production()?;
+    enumerate_directory(&root_fd, "", 0, &mut files, &mut directories, &mut budget)?;
+    budget.finish()?;
     files.sort_by(|left, right| left.path.as_str().cmp(right.path.as_str()));
     hook.after_enumeration();
 
@@ -162,12 +297,21 @@ fn enumerate_directory(
     depth: usize,
     files: &mut Vec<SourceFile>,
     directories: &mut BTreeMap<String, SourceDirectory>,
+    budget: &mut SourceBudget,
 ) -> Result<(), PackageError> {
     if depth >= MAX_SOURCE_DEPTH {
         return Err(PackageError::source_invalid());
     }
-    let mut names =
-        read_directory_names(directory_fd).map_err(|_| PackageError::source_invalid())?;
+    let Some(mut names) = read_directory_names_bounded(
+        directory_fd,
+        budget.remaining_namespace_nodes(),
+        budget.remaining_namespace_stored_bytes(),
+        SOURCE_NAMESPACE_NODE_ALLOCATION_CHARGE,
+    )
+    .map_err(|_| PackageError::source_invalid())?
+    else {
+        return Err(PackageError::archive_quota());
+    };
     names.sort_by(|left, right| left.as_encoded_bytes().cmp(right.as_encoded_bytes()));
 
     for name in names {
@@ -183,12 +327,16 @@ fn enumerate_directory(
             .map_err(|_| PackageError::source_invalid())?;
         let identity = SourceIdentity::from_stat(&stat);
         match identity.file_type {
-            FileType::RegularFile => files.push(SourceFile {
-                path,
-                identity: identity.validate_regular()?,
-            }),
+            FileType::RegularFile => {
+                let identity = identity.validate_regular()?;
+                let size =
+                    u64::try_from(identity.size).map_err(|_| PackageError::source_invalid())?;
+                budget.record_file(&path, size)?;
+                files.push(SourceFile { path, identity });
+            }
             FileType::Directory => {
                 let identity = identity.validate_directory()?;
+                budget.record_directory(&path_text)?;
                 let child = openat(
                     directory_fd,
                     &name,
@@ -211,7 +359,7 @@ fn enumerate_directory(
                         identity,
                     },
                 );
-                enumerate_directory(&child, &path_text, depth + 1, files, directories)?;
+                enumerate_directory(&child, &path_text, depth + 1, files, directories, budget)?;
             }
             _ => return Err(PackageError::source_invalid()),
         }

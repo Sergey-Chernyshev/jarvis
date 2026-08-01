@@ -400,6 +400,73 @@ where
 }
 
 #[cfg(target_os = "macos")]
+fn validate_prepared_archive_limits(
+    prepared: &PreparedPackageDocuments,
+    limits: crate::archive::ArchiveLimits,
+) -> Result<u64, PackageError> {
+    let payload_files = u64::try_from(prepared.metadata().files.len())
+        .map_err(|_| PackageError::archive_quota())?;
+    let logical_entries = payload_files
+        .checked_add(2)
+        .ok_or_else(PackageError::archive_quota)?;
+    if payload_files > limits.max_payload_files || logical_entries > limits.max_logical_entries {
+        return Err(PackageError::archive_quota());
+    }
+
+    let mut raw_records = 2_u64;
+    let mut unpacked_payload_bytes = 0_u64;
+    let mut physical_bytes = 2 * crate::archive::BLOCK_SIZE as u64;
+    for file in &prepared.metadata().files {
+        if file.size > limits.max_single_payload_file
+            || (file.path.as_str() == "plugin.json" && file.size > limits.max_plugin_json_bytes)
+        {
+            return Err(PackageError::archive_quota());
+        }
+        unpacked_payload_bytes = unpacked_payload_bytes
+            .checked_add(file.size)
+            .ok_or_else(PackageError::archive_quota)?;
+        physical_bytes = physical_bytes
+            .checked_add(crate::archive::projected_entry_bytes(
+                &file.path, file.size,
+            )?)
+            .ok_or_else(PackageError::archive_quota)?;
+        raw_records = raw_records
+            .checked_add(if file.path.as_str().len() > 100 { 2 } else { 1 })
+            .ok_or_else(PackageError::archive_quota)?;
+    }
+    if unpacked_payload_bytes > limits.max_unpacked_payload_bytes {
+        return Err(PackageError::archive_quota());
+    }
+
+    let package_size = u64::try_from(prepared.metadata_bytes().len())
+        .map_err(|_| PackageError::archive_quota())?;
+    let signature_size = u64::try_from(prepared.signature_bytes().len())
+        .map_err(|_| PackageError::archive_quota())?;
+    if package_size > limits.max_package_json_bytes || signature_size > limits.max_signature_bytes {
+        return Err(PackageError::archive_quota());
+    }
+    let package_path =
+        PackagePath::new("package.json").map_err(|_| PackageError::archive_quota())?;
+    let signature_path =
+        PackagePath::new("SIGNATURE").map_err(|_| PackageError::archive_quota())?;
+    physical_bytes = physical_bytes
+        .checked_add(crate::archive::projected_entry_bytes(
+            &package_path,
+            package_size,
+        )?)
+        .and_then(|size| {
+            crate::archive::projected_entry_bytes(&signature_path, signature_size)
+                .ok()
+                .and_then(|entry| size.checked_add(entry))
+        })
+        .ok_or_else(PackageError::archive_quota)?;
+    if raw_records > limits.max_raw_records || physical_bytes > limits.max_physical_bytes {
+        return Err(PackageError::archive_quota());
+    }
+    Ok(physical_bytes)
+}
+
+#[cfg(target_os = "macos")]
 pub fn pack_plugin<A, S, W>(
     source_root: &Path,
     options: PackOptions,
@@ -433,6 +500,8 @@ where
         adapter,
         signature_source,
     )?;
+    let projected_physical_bytes =
+        validate_prepared_archive_limits(&prepared, crate::archive::ArchiveLimits::production())?;
 
     let mut archive_file = owner_only_archive_tempfile()?;
     {
@@ -495,7 +564,12 @@ where
         &mut archive_file,
         crate::archive::ArchiveLimits::production(),
     )?;
-    validate_packed_archive(&archive_file, &inspection, &prepared)?;
+    validate_packed_archive(
+        &archive_file,
+        &inspection,
+        &prepared,
+        projected_physical_bytes,
+    )?;
     archive_file
         .seek(SeekFrom::Start(0))
         .map_err(|_| PackageError::archive_write())?;
@@ -509,11 +583,13 @@ fn validate_packed_archive(
     archive_file: &File,
     inspection: &crate::archive::ArchiveInspection,
     prepared: &PreparedPackageDocuments,
+    projected_physical_bytes: u64,
 ) -> Result<(), PackageError> {
     let stat = rustix::fs::fstat(archive_file).map_err(|_| PackageError::archive_write())?;
     if stat.st_size < 0
         || u64::try_from(stat.st_size).map_err(|_| PackageError::archive_write())?
             != inspection.physical_bytes()
+        || inspection.physical_bytes() != projected_physical_bytes
         || inspection.plugin_json() != prepared.manifest_bytes()
         || inspection.package_json() != prepared.metadata_bytes()
         || inspection.signature() != prepared.signature_bytes()
@@ -837,6 +913,36 @@ mod tests {
             &changed_signature,
             &expected_message
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn prepared_archive_projection_accepts_exact_physical_limit_only() {
+        let prepared = prepare_package_documents(
+            SOURCE_MANIFEST,
+            ui_payload(),
+            options(),
+            &FixtureAdapter,
+            &FixedOpaqueSignature,
+        )
+        .unwrap();
+        let production = crate::archive::ArchiveLimits::production();
+        let projected = super::validate_prepared_archive_limits(&prepared, production).unwrap();
+        let archive = pack_fixture_archive().unwrap();
+        assert_eq!(u64::try_from(archive.len()).unwrap(), projected);
+        let mut exact = production;
+        exact.max_physical_bytes = projected;
+        assert_eq!(
+            super::validate_prepared_archive_limits(&prepared, exact).unwrap(),
+            projected
+        );
+        exact.max_physical_bytes = projected - 1;
+        assert_eq!(
+            super::validate_prepared_archive_limits(&prepared, exact)
+                .unwrap_err()
+                .code(),
+            "archive_quota"
+        );
     }
 
     fn native_manifest() -> Vec<u8> {

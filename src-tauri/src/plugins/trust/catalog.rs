@@ -490,19 +490,13 @@ fn parse_timestamp(value: &str, code: &'static str) -> Result<DateTime<Utc>, Tru
 }
 
 fn compare_macos(left: &MacOsVersion, right: &MacOsVersion) -> std::cmp::Ordering {
-    macos_components(left).cmp(&macos_components(right))
-}
-
-fn macos_components(version: &MacOsVersion) -> [u64; 3] {
-    let mut components = version
-        .as_str()
-        .split('.')
-        .map(|component| component.parse::<u64>().expect("validated macOS version"));
-    [
-        components.next().expect("validated macOS major version"),
-        components.next().expect("validated macOS minor version"),
-        components.next().expect("validated macOS patch version"),
-    ]
+    for (left, right) in left.as_str().split('.').zip(right.as_str().split('.')) {
+        let ordering = left.len().cmp(&right.len()).then_with(|| left.cmp(right));
+        if ordering.is_ne() {
+            return ordering;
+        }
+    }
+    std::cmp::Ordering::Equal
 }
 
 #[cfg(test)]

@@ -36,6 +36,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": [
+      "resources/plugin-trust-roots.json"
+    ],
     "externalBin": [
       "binaries/jarvis-agent-vm-plugin"
     ],

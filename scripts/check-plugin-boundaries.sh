@@ -389,6 +389,7 @@ while IFS= read -r schema; do
     schemas/plugin-manifest-v2.schema.json \
       | schemas/plugin-package-v1.schema.json \
       | schemas/plugin-package-signature-v1.schema.json \
+      | schemas/plugin-catalog-v1.schema.json \
       | schemas/plugin-broker-v1.schema.json \
       | schemas/plugin-ui-bridge-v1.schema.json \
       | schemas/plugin-contribution-v1.schema.json \

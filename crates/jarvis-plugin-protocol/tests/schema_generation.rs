@@ -106,9 +106,13 @@ fn public_identifier_schemas_encode_the_no_path_rule() {
         &settings,
         "/definitions/CredentialReference/properties/credentialId/pattern",
     );
-    assert_no_path_pattern(
-        &settings,
-        "/definitions/SettingRecord/properties/projectId/pattern",
+    let project = tagged_variant(&settings, "SettingRecord", "scope", "project");
+    assert_no_path_guards(
+        project
+            .pointer("/properties/projectId/pattern")
+            .and_then(Value::as_str)
+            .expect("project setting id pattern"),
+        "SettingRecord.project.projectId",
     );
 }
 
@@ -143,24 +147,38 @@ fn bridge_optional_identifier_schema_matches_runtime_at_character() {
 }
 
 #[test]
-fn optional_identifier_fields_remain_optional_in_public_schemas() {
+fn public_schemas_keep_optional_bridge_ids_and_structural_setting_scope() {
     let bridge = read_schema("plugin-ui-bridge-v1.schema.json");
     let error = tagged_variant(&bridge, "BridgeHostFrame", "type", "error");
     assert_fields_not_required(error, &["id", "correlationId"]);
 
     let settings = read_schema("plugin-settings-v1.schema.json");
     for definition in ["SettingRecord", "SettingWrite"] {
-        let object = settings
-            .pointer(&format!("/definitions/{definition}"))
-            .unwrap_or_else(|| panic!("{definition} schema"));
-        assert_fields_not_required(object, &["projectId"]);
+        let user = tagged_variant(&settings, definition, "scope", "user");
+        assert!(
+            user.pointer("/properties/projectId").is_none(),
+            "{definition}.user cannot represent projectId"
+        );
+
+        let project = tagged_variant(&settings, definition, "scope", "project");
+        let required = project
+            .get("required")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{definition}.project required fields"));
+        assert!(
+            required
+                .iter()
+                .any(|field| field.as_str() == Some("projectId")),
+            "{definition}.project must require projectId"
+        );
     }
 }
 
 #[test]
 fn public_named_identifiers_have_exact_runtime_schema_contracts() {
-    const NAMESPACED_KEY_PATTERN: &str = r"^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)+$";
-    const CONTRACT_ID_PATTERN: &str = r"^(?!/)(?!~/)(?![A-Za-z]:[/\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\.|\.\.)(?:/|$))(?=[^/]*\.)[a-z0-9._-]+/[a-z0-9._-]+$";
+    const NAMESPACED_KEY_PATTERN: &str =
+        r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$";
+    const CONTRACT_ID_PATTERN: &str = r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$";
 
     let broker = read_schema("plugin-broker-v1.schema.json");
     assert_exact_string_contract(
@@ -183,11 +201,162 @@ fn public_named_identifiers_have_exact_runtime_schema_contracts() {
 
     let settings = read_schema("plugin-settings-v1.schema.json");
     for pointer in [
-        "/definitions/SettingRecord/properties/key",
-        "/definitions/SettingWrite/properties/key",
+        "/definitions/SettingRecord/oneOf/0/properties/key",
+        "/definitions/SettingRecord/oneOf/1/properties/key",
+        "/definitions/SettingWrite/oneOf/0/properties/key",
+        "/definitions/SettingWrite/oneOf/1/properties/key",
     ] {
         assert_exact_string_contract(&settings, pointer, 128, NAMESPACED_KEY_PATTERN);
     }
+}
+
+#[test]
+fn custom_serde_bounds_are_present_in_public_schema_metadata() {
+    let bridge = read_schema("plugin-ui-bridge-v1.schema.json");
+    for definition in ["BridgeClientFrame", "BridgeHostFrame"] {
+        for variant in bridge
+            .pointer(&format!("/definitions/{definition}/oneOf"))
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{definition} variants"))
+        {
+            let version = variant
+                .pointer("/properties/v")
+                .unwrap_or_else(|| panic!("{definition} version schema"));
+            assert_eq!(version.get("enum"), Some(&serde_json::json!([1])));
+            assert_number_range(version, 1.0, 1.0);
+        }
+    }
+    assert_number_range(
+        tagged_variant(&bridge, "BridgeClientFrame", "type", "request")
+            .pointer("/properties/deadlineMs")
+            .expect("bridge request deadline schema"),
+        1.0,
+        30_000.0,
+    );
+
+    let broker = read_schema("plugin-broker-v1.schema.json");
+    for (definition, field, minimum) in [
+        ("EntityQuery", "selectors", 1),
+        ("EntityQuerySnapshot", "entities", 0),
+        ("EntityWatchRequest", "selectors", 1),
+        ("RuntimeOperationQuery", "subjects", 1),
+        ("RuntimeOperationWatch", "subjects", 1),
+        ("OutboxBatch", "mutations", 1),
+    ] {
+        assert_array_bounds(
+            broker
+                .pointer(&format!("/definitions/{definition}/properties/{field}"))
+                .unwrap_or_else(|| panic!("{definition}.{field} schema")),
+            minimum,
+            128,
+        );
+    }
+    for definition in [
+        "EntityQuery",
+        "EntityWatchRequest",
+        "EventWatchRequest",
+        "RuntimeOperationQuery",
+        "RuntimeOperationWatch",
+    ] {
+        assert_number_range(
+            broker
+                .pointer(&format!("/definitions/{definition}/properties/limit"))
+                .unwrap_or_else(|| panic!("{definition}.limit schema")),
+            1.0,
+            128.0,
+        );
+    }
+    assert_number_range(
+        broker
+            .pointer("/definitions/TypedCommandInvocation/properties/deadlineMs")
+            .expect("typed command deadline schema"),
+        1.0,
+        30_000.0,
+    );
+    for (pointer, maximum) in [
+        ("/definitions/EntityEnvelope/properties/data", 256 * 1024),
+        ("/definitions/EventEnvelope/properties/data", 128 * 1024),
+        (
+            "/definitions/TypedCommandInvocation/properties/args",
+            256 * 1024,
+        ),
+    ] {
+        assert_eq!(
+            broker
+                .pointer(pointer)
+                .and_then(|schema| schema.get("x-maxJsonBytes"))
+                .and_then(Value::as_u64),
+            Some(maximum),
+            "{pointer} JSON byte bound"
+        );
+    }
+
+    let contributions = read_schema("plugin-contribution-v1.schema.json");
+    for field in ["pages", "commands", "actions", "hotkeys"] {
+        assert_array_bounds(
+            contributions
+                .pointer(&format!("/properties/{field}"))
+                .unwrap_or_else(|| panic!("contributions.{field} schema")),
+            0,
+            512,
+        );
+    }
+    assert_utf8_byte_bound(
+        &contributions,
+        "/definitions/ResolvedPageContribution/properties/title",
+        256,
+    );
+    assert_array_bounds(
+        contributions
+            .pointer("/definitions/ResolvedCommandContribution/properties/context")
+            .expect("command context schema"),
+        0,
+        16,
+    );
+    assert_array_bounds(
+        contributions
+            .pointer("/definitions/ResolvedPageContribution/properties/placements")
+            .expect("page placements schema"),
+        1,
+        16,
+    );
+
+    let settings = read_schema("plugin-settings-v1.schema.json");
+    let string_variant = tagged_variant(&settings, "SettingValue", "type", "string");
+    assert_eq!(
+        string_variant
+            .pointer("/properties/value/x-maxUtf8Bytes")
+            .and_then(Value::as_u64),
+        Some(65_536)
+    );
+}
+
+#[test]
+fn generated_types_keep_literals_unions_and_limit_annotations() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/jarvis-plugin-ui/src/generated/contracts.ts");
+    let generated = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+
+    assert_eq!(generated.matches("v: 1;").count(), 12);
+    for marker in [
+        "export type PublicErrorCode =",
+        "export type SettingRecord =",
+        "scope: \"user\";",
+        "scope: \"project\";",
+        "Inclusive range: 1..=30000.",
+        "Inclusive range: 1..=128.",
+        "@maxItems 512",
+        "UTF-8 byte length: 1..=256.",
+        "UTF-8 byte length: 0..=65536.",
+        "Serialized JSON size must not exceed 262144 bytes.",
+    ] {
+        assert!(
+            generated.contains(marker),
+            "generated contracts missing {marker}"
+        );
+    }
+    assert!(!generated.contains("message?: string"));
 }
 
 fn read_schema(filename: &str) -> Value {
@@ -195,6 +364,36 @@ fn read_schema(filename: &str) -> Value {
     let bytes = fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     serde_json::from_slice(&bytes)
         .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+}
+
+fn assert_number_range(schema: &Value, minimum: f64, maximum: f64) {
+    assert_eq!(schema.get("minimum").and_then(Value::as_f64), Some(minimum));
+    assert_eq!(schema.get("maximum").and_then(Value::as_f64), Some(maximum));
+}
+
+fn assert_array_bounds(schema: &Value, minimum: u64, maximum: u64) {
+    assert_eq!(
+        schema.get("minItems").and_then(Value::as_u64).unwrap_or(0),
+        minimum
+    );
+    assert_eq!(
+        schema.get("maxItems").and_then(Value::as_u64),
+        Some(maximum)
+    );
+}
+
+fn assert_utf8_byte_bound(root: &Value, pointer: &str, maximum: u64) {
+    let schema = root
+        .pointer(pointer)
+        .unwrap_or_else(|| panic!("{pointer} schema"));
+    assert_eq!(
+        schema.get("x-maxUtf8Bytes").and_then(Value::as_u64),
+        Some(maximum)
+    );
+    assert_eq!(
+        schema.get("maxLength").and_then(Value::as_u64),
+        Some(maximum)
+    );
 }
 
 fn schema_dir() -> PathBuf {
@@ -276,6 +475,10 @@ fn assert_no_path_pattern(schema: &Value, pointer: &str) {
         .pointer(pointer)
         .and_then(Value::as_str)
         .unwrap_or_else(|| panic!("missing identifier pattern at {pointer}"));
+    assert_no_path_guards(pattern, pointer);
+}
+
+fn assert_no_path_guards(pattern: &str, label: &str) {
     for required_guard in [
         "(?!/)",
         "(?!~/)",
@@ -286,7 +489,7 @@ fn assert_no_path_pattern(schema: &Value, pointer: &str) {
     ] {
         assert!(
             pattern.contains(required_guard),
-            "{pointer} is missing no-path guard {required_guard}"
+            "{label} is missing no-path guard {required_guard}"
         );
     }
 }

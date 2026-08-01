@@ -5,6 +5,9 @@
  */
 export type CommandResult =
   | {
+      /**
+       * Serialized JSON size must not exceed 262144 bytes. Validators must enforce x-maxJsonBytes; generic Draft 7 validators ignore extension keywords.
+       */
       result: unknown;
       type: "completed";
     }
@@ -15,6 +18,9 @@ export type CommandResult =
 export type EntityMutation =
   | {
       contract: ContractRef;
+      /**
+       * Serialized JSON size must not exceed 262144 bytes. Validators must enforce x-maxJsonBytes; generic Draft 7 validators ignore extension keywords.
+       */
       data: unknown;
       expectedRevision: number;
       id: string;
@@ -35,6 +41,30 @@ export type OutboxMutation =
       event: EventMutation;
       kind: "event";
     };
+export type PublicErrorCode =
+  | "bridge_protocol_incompatible"
+  | "bridge_message_too_large"
+  | "bridge_rate_limited"
+  | "bridge_in_flight_limit"
+  | "bridge_subscription_limit"
+  | "bridge_deadline"
+  | "bridge_cancelled"
+  | "page_binding_missing"
+  | "page_generation_stale"
+  | "package_digest_stale"
+  | "grant_revoked"
+  | "grant_scope_denied"
+  | "contract_not_found"
+  | "contract_incompatible"
+  | "schema_invalid"
+  | "revision_conflict"
+  | "cursor_gap"
+  | "resource_handle_invalid"
+  | "resource_handle_expired"
+  | "resource_handle_exhausted"
+  | "operation_pending"
+  | "provider_unavailable"
+  | "plugin_ui_isolation_unavailable";
 export type RuntimeOperationState =
   | "queued"
   | "dispatching"
@@ -50,9 +80,15 @@ export type BridgeClientFrame =
   | {
       generation: number;
       type: "hello";
-      v: number;
+      /**
+       * Must equal 1.
+       */
+      v: 1;
     }
   | {
+      /**
+       * Inclusive range: 1..=30000.
+       */
       deadlineMs: number;
       generation: number;
       id: string;
@@ -60,25 +96,37 @@ export type BridgeClientFrame =
       namespace: string;
       params: unknown;
       type: "request";
-      v: number;
+      /**
+       * Must equal 1.
+       */
+      v: 1;
     }
   | {
       cursor: number;
       generation: number;
       type: "poll";
-      v: number;
+      /**
+       * Must equal 1.
+       */
+      v: 1;
     }
   | {
       generation: number;
       id: string;
       type: "cancel";
-      v: number;
+      /**
+       * Must equal 1.
+       */
+      v: 1;
     }
   | {
       generation: number;
       subscriptionId: string;
       type: "unsubscribe";
-      v: number;
+      /**
+       * Must equal 1.
+       */
+      v: 1;
     };
 export type BridgeHostFrame =
   | {
@@ -92,14 +140,20 @@ export type BridgeHostFrame =
       pageId: string;
       pluginId: string;
       type: "welcome";
-      v: number;
+      /**
+       * Must equal 1.
+       */
+      v: 1;
     }
   | {
       generation: number;
       id: string;
       result: unknown;
       type: "response";
-      v: number;
+      /**
+       * Must equal 1.
+       */
+      v: 1;
     }
   | {
       cursor: number;
@@ -107,7 +161,10 @@ export type BridgeHostFrame =
       id: string;
       subscriptionId: string;
       type: "subscribeResult";
-      v: number;
+      /**
+       * Must equal 1.
+       */
+      v: 1;
     }
   | {
       cursor: number;
@@ -115,7 +172,10 @@ export type BridgeHostFrame =
       generation: number;
       subscriptionId: string;
       type: "event";
-      v: number;
+      /**
+       * Must equal 1.
+       */
+      v: 1;
     }
   | {
       earliestCursor: number;
@@ -124,22 +184,30 @@ export type BridgeHostFrame =
       requestedCursor: number;
       subscriptionId: string;
       type: "gap";
-      v: number;
+      /**
+       * Must equal 1.
+       */
+      v: 1;
     }
   | {
-      code: string;
+      code: PublicErrorCode;
       generation: number;
       type: "close";
-      v: number;
+      /**
+       * Must equal 1.
+       */
+      v: 1;
     }
   | {
-      code: string;
+      code: PublicErrorCode;
       correlationId?: string | null;
       generation: number;
       id?: string | null;
-      message?: string | null;
       type: "error";
-      v: number;
+      /**
+       * Must equal 1.
+       */
+      v: 1;
     };
 export type ContextReference =
   | {
@@ -164,7 +232,20 @@ export type CommandPlacement = "globalPalette";
 export type HotkeyScope = "global";
 export type InstancePolicy = "singleton" | "per-project" | "per-session";
 export type PagePlacement = "sidebar" | "commandPalette" | "deepLink" | "pluginSettings";
-export type SettingScope = "user" | "project";
+export type SettingRecord =
+  | {
+      key: string;
+      revision: number;
+      scope: "user";
+      value: SettingValue;
+    }
+  | {
+      key: string;
+      projectId: string;
+      revision: number;
+      scope: "project";
+      value: SettingValue;
+    };
 export type SettingValue =
   | {
       type: "integer";
@@ -180,11 +261,28 @@ export type SettingValue =
     }
   | {
       type: "string";
+      /**
+       * UTF-8 byte length: 0..=65536. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.
+       */
       value: string;
     }
   | {
       reference: CredentialReference;
       type: "credentialReference";
+    };
+export type SettingWrite =
+  | {
+      expectedRevision: number;
+      key: string;
+      scope: "user";
+      value: SettingValue;
+    }
+  | {
+      expectedRevision: number;
+      key: string;
+      projectId: string;
+      scope: "project";
+      value: SettingValue;
     };
 
 export interface JarvisPluginUiContracts {
@@ -239,6 +337,9 @@ export interface EntityChange {
 export interface EntityEnvelope {
   brokerRevision: number;
   contract: ContractRef;
+  /**
+   * Serialized JSON size must not exceed 262144 bytes. Validators must enforce x-maxJsonBytes; generic Draft 7 validators ignore extension keywords.
+   */
   data: unknown;
   id: string;
   revision: number;
@@ -247,8 +348,15 @@ export interface EntityEnvelope {
   updatedAtMs: number;
 }
 export interface EntityQuery {
+  /**
+   * Inclusive range: 1..=128.
+   */
   limit: number;
   projection?: FieldProjection | null;
+  /**
+   * @minItems 1
+   * @maxItems 128
+   */
   selectors: EntitySelector[];
 }
 export interface FieldProjection {
@@ -272,13 +380,23 @@ export interface EntitySelector {
   states?: string[];
 }
 export interface EntityQuerySnapshot {
+  /**
+   * @maxItems 128
+   */
   entities: EntityEnvelope[];
   snapshotRevision: number;
 }
 export interface EntityWatchRequest {
   cursor: number;
+  /**
+   * Inclusive range: 1..=128.
+   */
   limit: number;
   projection?: FieldProjection | null;
+  /**
+   * @minItems 1
+   * @maxItems 128
+   */
   selectors: EntitySelector[];
 }
 export interface EventChange {
@@ -289,6 +407,9 @@ export interface EventEnvelope {
   atMs: number;
   contract: ContractRef;
   correlationId?: string | null;
+  /**
+   * Serialized JSON size must not exceed 131072 bytes. Validators must enforce x-maxJsonBytes; generic Draft 7 validators ignore extension keywords.
+   */
   data: unknown;
   eventId: string;
   kind: string;
@@ -300,6 +421,9 @@ export interface EventMutation {
   atMs: number;
   contract: ContractRef;
   correlationId?: string | null;
+  /**
+   * Serialized JSON size must not exceed 131072 bytes. Validators must enforce x-maxJsonBytes; generic Draft 7 validators ignore extension keywords.
+   */
   data: unknown;
   eventId: string;
   kind: string;
@@ -309,6 +433,9 @@ export interface EventMutation {
 export interface EventWatchRequest {
   contract: ContractRef;
   cursor: number;
+  /**
+   * Inclusive range: 1..=128.
+   */
   limit: number;
   /**
    * @minItems 0
@@ -331,6 +458,10 @@ export interface OutboxAck {
   sourceInstanceId: string;
 }
 export interface OutboxBatch {
+  /**
+   * @minItems 1
+   * @maxItems 128
+   */
   mutations: OutboxMutation[];
   outboxId: string;
   sourceInstanceId: string;
@@ -356,8 +487,7 @@ export interface RuntimeOperationView {
   updatedAt: number;
 }
 export interface RuntimeOperationError {
-  code: string;
-  message?: string | null;
+  code: PublicErrorCode;
 }
 export interface RuntimeOperationGap {
   earliestCursor: number;
@@ -366,12 +496,26 @@ export interface RuntimeOperationGap {
 }
 export interface RuntimeOperationQuery {
   includeTerminalSince?: number | null;
+  /**
+   * Inclusive range: 1..=128.
+   */
   limit: number;
+  /**
+   * @minItems 1
+   * @maxItems 128
+   */
   subjects: OperationSubjectRef[];
 }
 export interface RuntimeOperationWatch {
   cursor: number;
+  /**
+   * Inclusive range: 1..=128.
+   */
   limit: number;
+  /**
+   * @minItems 1
+   * @maxItems 128
+   */
   subjects: OperationSubjectRef[];
 }
 export interface TypedCommandDeclaration {
@@ -379,8 +523,14 @@ export interface TypedCommandDeclaration {
   riskFloor: Risk;
 }
 export interface TypedCommandInvocation {
+  /**
+   * Serialized JSON size must not exceed 262144 bytes. Validators must enforce x-maxJsonBytes; generic Draft 7 validators ignore extension keywords.
+   */
   args: unknown;
   command: ContractRef;
+  /**
+   * Inclusive range: 1..=30000.
+   */
   deadlineMs: number;
   subject: OperationSubjectRef;
 }
@@ -389,35 +539,77 @@ export interface BridgeContractV1 {
   hostFrame: BridgeHostFrame;
 }
 export interface ResolvedContributions {
+  /**
+   * @maxItems 512
+   */
   actions?: ResolvedActionContribution[];
+  /**
+   * @maxItems 512
+   */
   commands?: ResolvedCommandContribution[];
+  /**
+   * @maxItems 512
+   */
   hotkeys?: ResolvedHotkeyContribution[];
+  /**
+   * @maxItems 512
+   */
   pages?: ResolvedPageContribution[];
 }
 export interface ResolvedActionContribution {
   command: string;
+  /**
+   * @maxItems 16
+   */
   context?: ContextReference[];
   id: string;
+  /**
+   * @minItems 1
+   * @maxItems 16
+   */
   locations: ActionLocation[];
   riskFloor: Risk;
+  /**
+   * UTF-8 byte length: 1..=256. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.
+   */
   title: string;
 }
 export interface ResolvedCommandContribution {
+  /**
+   * @maxItems 16
+   */
   context?: ContextReference[];
   id: string;
+  /**
+   * @minItems 1
+   * @maxItems 16
+   */
   placements: CommandPlacement[];
   riskFloor: Risk;
+  /**
+   * UTF-8 byte length: 1..=256. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.
+   */
   title: string;
 }
 export interface ResolvedHotkeyContribution {
   command: string;
   scope: HotkeyScope;
+  /**
+   * UTF-8 byte length: 1..=128. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.
+   */
   shortcut: string;
 }
 export interface ResolvedPageContribution {
   id: string;
   instancePolicy: InstancePolicy;
+  /**
+   * @minItems 1
+   * @maxItems 16
+   */
   placements: PagePlacement[];
+  /**
+   * UTF-8 byte length: 1..=256. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.
+   */
   title: string;
 }
 export interface SettingsContractV1 {
@@ -430,20 +622,6 @@ export interface SettingChange {
   cursor: number;
   setting: SettingRecord;
 }
-export interface SettingRecord {
-  key: string;
-  projectId?: string | null;
-  revision: number;
-  scope: SettingScope;
-  value: SettingValue;
-}
 export interface CredentialReference {
   credentialId: string;
-}
-export interface SettingWrite {
-  expectedRevision: number;
-  key: string;
-  projectId?: string | null;
-  scope: SettingScope;
-  value: SettingValue;
 }

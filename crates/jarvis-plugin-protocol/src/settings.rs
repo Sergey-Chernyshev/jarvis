@@ -178,6 +178,7 @@ pub enum SettingRecord {
     },
     Project {
         key: SettingKey,
+        #[schemars(rename = "projectId")]
         project_id: ProjectId,
         value: SettingValue,
         revision: u64,
@@ -217,12 +218,15 @@ pub enum SettingWrite {
     User {
         key: SettingKey,
         value: SettingValue,
+        #[schemars(rename = "expectedRevision")]
         expected_revision: u64,
     },
     Project {
         key: SettingKey,
+        #[schemars(rename = "projectId")]
         project_id: ProjectId,
         value: SettingValue,
+        #[schemars(rename = "expectedRevision")]
         expected_revision: u64,
     },
 }

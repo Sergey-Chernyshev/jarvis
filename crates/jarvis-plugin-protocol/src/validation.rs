@@ -1,13 +1,16 @@
 use schemars::r#gen::SchemaGenerator;
-use schemars::schema::{ArrayValidation, Schema, SchemaObject, SingleOrVec, StringValidation};
+use schemars::schema::{
+    ArrayValidation, NumberValidation, Schema, SchemaObject, SingleOrVec, StringValidation,
+};
 use schemars::JsonSchema;
+use serde_json::Value;
 
 const OPAQUE_ID_PATTERN: &str = r"^(?!/)(?!~/)(?![A-Za-z]:[/\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\.|\.\.)(?:/|$))(?!.*\/$)[A-Za-z0-9._/@-]+$";
 const OPAQUE_ID_NO_AT_PATTERN: &str = r"^(?!/)(?!~/)(?![A-Za-z]:[/\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\.|\.\.)(?:/|$))(?!.*\/$)[A-Za-z0-9._/-]+$";
 const CONTRACT_ID_PATTERN: &str = r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$";
 const NAMESPACED_KEY_PATTERN: &str =
     r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$";
-const BRIDGE_NAMESPACE_PATTERN: &str = r"^[a-z0-9._-]+$";
+const BRIDGE_NAMESPACE_PATTERN: &str = r"^(?!\.\.?$)[a-z0-9._-]+$";
 const PLUGIN_ID_PATTERN: &str =
     r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$";
 const SHA256_DIGEST_PATTERN: &str = r"^sha256:[0-9a-f]{64}$";
@@ -98,12 +101,111 @@ pub(crate) fn sha256_digest_schema(generator: &mut SchemaGenerator) -> Schema {
     string_schema(generator, 71, SHA256_DIGEST_PATTERN)
 }
 
+pub(crate) fn protocol_v1_schema(generator: &mut SchemaGenerator) -> Schema {
+    exact_u32_schema(generator, 1)
+}
+
+pub(crate) fn bridge_deadline_schema(generator: &mut SchemaGenerator) -> Schema {
+    bounded_u64_schema(generator, 1, 30_000)
+}
+
+pub(crate) fn broker_limit_schema(generator: &mut SchemaGenerator) -> Schema {
+    bounded_u32_schema(generator, 1, 128)
+}
+
+pub(crate) fn command_deadline_schema(generator: &mut SchemaGenerator) -> Schema {
+    bounded_u64_schema(generator, 1, 30_000)
+}
+
+pub(crate) fn contribution_title_256_schema(generator: &mut SchemaGenerator) -> Schema {
+    utf8_string_schema(generator, 1, 256, true)
+}
+
+pub(crate) fn contribution_shortcut_128_schema(generator: &mut SchemaGenerator) -> Schema {
+    utf8_string_schema(generator, 1, 128, true)
+}
+
 pub(crate) fn setting_string_65536_schema(generator: &mut SchemaGenerator) -> Schema {
+    utf8_string_schema(generator, 0, 65_536, false)
+}
+
+pub(crate) fn entity_value_schema(generator: &mut SchemaGenerator) -> Schema {
+    bounded_json_value_schema(generator, 256 * 1024)
+}
+
+pub(crate) fn event_value_schema(generator: &mut SchemaGenerator) -> Schema {
+    bounded_json_value_schema(generator, 128 * 1024)
+}
+
+fn exact_u32_schema(generator: &mut SchemaGenerator, value: u32) -> Schema {
+    let mut schema: SchemaObject = <u32>::json_schema(generator).into();
+    schema.metadata().description = Some(format!("Must equal {value}."));
+    schema.enum_values = Some(vec![serde_json::json!(value)]);
+    let validation = schema
+        .number
+        .get_or_insert_with(|| Box::new(NumberValidation::default()));
+    validation.minimum = Some(f64::from(value));
+    validation.maximum = Some(f64::from(value));
+    schema.into()
+}
+
+fn bounded_u32_schema(generator: &mut SchemaGenerator, minimum: u32, maximum: u32) -> Schema {
+    let mut schema: SchemaObject = <u32>::json_schema(generator).into();
+    schema.metadata().description = Some(format!("Inclusive range: {minimum}..={maximum}."));
+    let validation = schema
+        .number
+        .get_or_insert_with(|| Box::new(NumberValidation::default()));
+    validation.minimum = Some(f64::from(minimum));
+    validation.maximum = Some(f64::from(maximum));
+    schema.into()
+}
+
+fn bounded_u64_schema(generator: &mut SchemaGenerator, minimum: u64, maximum: u64) -> Schema {
+    let mut schema: SchemaObject = <u64>::json_schema(generator).into();
+    schema.metadata().description = Some(format!("Inclusive range: {minimum}..={maximum}."));
+    let validation = schema
+        .number
+        .get_or_insert_with(|| Box::new(NumberValidation::default()));
+    validation.minimum = Some(minimum as f64);
+    validation.maximum = Some(maximum as f64);
+    schema.into()
+}
+
+fn utf8_string_schema(
+    generator: &mut SchemaGenerator,
+    min_length: u32,
+    max_bytes: u32,
+    forbid_controls: bool,
+) -> Schema {
     let mut schema: SchemaObject = <String>::json_schema(generator).into();
+    schema.metadata().description = Some(format!(
+        "UTF-8 byte length: {min_length}..={max_bytes}. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars."
+    ));
     let validation = schema
         .string
         .get_or_insert_with(|| Box::new(StringValidation::default()));
-    validation.max_length = Some(65_536);
+    validation.min_length = Some(min_length);
+    validation.max_length = Some(max_bytes);
+    if forbid_controls {
+        validation.pattern = Some(r"^[^\u0000-\u001F\u007F-\u009F]*$".to_owned());
+    }
+    schema
+        .extensions
+        .insert("x-maxUtf8Bytes".to_owned(), serde_json::json!(max_bytes));
+    schema.into()
+}
+
+fn bounded_json_value_schema(generator: &mut SchemaGenerator, max_bytes: usize) -> Schema {
+    let mut schema: SchemaObject = <Value>::json_schema(generator).into();
+    schema.metadata().description = Some(format!(
+        "Serialized JSON size must not exceed {max_bytes} bytes. Validators must enforce x-maxJsonBytes; generic Draft 7 validators ignore extension keywords."
+    ));
+    schema
+        .extensions
+        .insert("tsType".to_owned(), serde_json::json!("unknown"));
+    schema
+        .extensions
+        .insert("x-maxJsonBytes".to_owned(), serde_json::json!(max_bytes));
     schema.into()
 }
 
@@ -120,7 +222,7 @@ pub(crate) fn projection_fields_256_schema(generator: &mut SchemaGenerator) -> S
 }
 
 pub(crate) fn bridge_grants_128_schema(generator: &mut SchemaGenerator) -> Schema {
-    string_array_schema(generator, 0, 256, 128, OPAQUE_ID_NO_AT_PATTERN)
+    string_array_schema(generator, 0, 256, 128, BRIDGE_NAMESPACE_PATTERN)
 }
 
 fn string_schema(generator: &mut SchemaGenerator, max_length: u32, pattern: &str) -> Schema {

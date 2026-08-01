@@ -8,7 +8,7 @@
         "credentialId": {
           "maxLength": 128,
           "minLength": 1,
-          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/-]+$",
           "type": "string"
         }
       },
@@ -36,50 +36,79 @@
       "type": "object"
     },
     "SettingRecord": {
-      "additionalProperties": false,
-      "properties": {
-        "key": {
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$",
-          "type": "string"
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "scope": {
+              "enum": [
+                "user"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/definitions/SettingValue"
+            }
+          },
+          "required": [
+            "key",
+            "revision",
+            "scope",
+            "value"
+          ],
+          "type": "object"
         },
-        "projectId": {
-          "default": null,
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "revision": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "scope": {
-          "$ref": "#/definitions/SettingScope"
-        },
-        "value": {
-          "$ref": "#/definitions/SettingValue"
+        {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
+              "type": "string"
+            },
+            "projectId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/-]+$",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "scope": {
+              "enum": [
+                "project"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/definitions/SettingValue"
+            }
+          },
+          "required": [
+            "key",
+            "projectId",
+            "revision",
+            "scope",
+            "value"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "key",
-        "revision",
-        "scope",
-        "value"
-      ],
-      "type": "object"
-    },
-    "SettingScope": {
-      "enum": [
-        "user",
-        "project"
-      ],
-      "type": "string"
+      ]
     },
     "SettingValue": {
       "oneOf": [
@@ -152,7 +181,11 @@
               "type": "string"
             },
             "value": {
-              "type": "string"
+              "description": "UTF-8 byte length: 0..=65536. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.",
+              "maxLength": 65536,
+              "minLength": 0,
+              "type": "string",
+              "x-maxUtf8Bytes": 65536
             }
           },
           "required": [
@@ -183,43 +216,79 @@
       ]
     },
     "SettingWrite": {
-      "additionalProperties": false,
-      "properties": {
-        "expectedRevision": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expectedRevision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "key": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
+              "type": "string"
+            },
+            "scope": {
+              "enum": [
+                "user"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/definitions/SettingValue"
+            }
+          },
+          "required": [
+            "expectedRevision",
+            "key",
+            "scope",
+            "value"
+          ],
+          "type": "object"
         },
-        "key": {
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$",
-          "type": "string"
-        },
-        "projectId": {
-          "default": null,
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "scope": {
-          "$ref": "#/definitions/SettingScope"
-        },
-        "value": {
-          "$ref": "#/definitions/SettingValue"
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expectedRevision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "key": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
+              "type": "string"
+            },
+            "projectId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/-]+$",
+              "type": "string"
+            },
+            "scope": {
+              "enum": [
+                "project"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/definitions/SettingValue"
+            }
+          },
+          "required": [
+            "expectedRevision",
+            "key",
+            "projectId",
+            "scope",
+            "value"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "expectedRevision",
-        "key",
-        "scope",
-        "value"
-      ],
-      "type": "object"
+      ]
     }
   },
   "properties": {

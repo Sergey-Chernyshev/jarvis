@@ -25,6 +25,7 @@ pub struct Hello {
         deserialize_with = "deserialize_protocol_v1",
         serialize_with = "serialize_protocol_v1"
     )]
+    #[schemars(schema_with = "crate::validation::protocol_v1_schema")]
     pub v: u32,
     pub generation: u64,
 }
@@ -36,6 +37,7 @@ pub struct Welcome {
         deserialize_with = "deserialize_protocol_v1",
         serialize_with = "serialize_protocol_v1"
     )]
+    #[schemars(schema_with = "crate::validation::protocol_v1_schema")]
     pub v: u32,
     #[serde(
         deserialize_with = "deserialize_plugin_id",
@@ -71,6 +73,7 @@ pub struct BridgeRequest {
         deserialize_with = "deserialize_protocol_v1",
         serialize_with = "serialize_protocol_v1"
     )]
+    #[schemars(schema_with = "crate::validation::protocol_v1_schema")]
     pub v: u32,
     #[serde(
         deserialize_with = "deserialize_identifier",
@@ -96,6 +99,7 @@ pub struct BridgeRequest {
         deserialize_with = "deserialize_deadline",
         serialize_with = "serialize_deadline"
     )]
+    #[schemars(schema_with = "crate::validation::bridge_deadline_schema")]
     pub deadline_ms: u64,
 }
 
@@ -106,6 +110,7 @@ pub struct BridgeResponse {
         deserialize_with = "deserialize_protocol_v1",
         serialize_with = "serialize_protocol_v1"
     )]
+    #[schemars(schema_with = "crate::validation::protocol_v1_schema")]
     pub v: u32,
     #[serde(
         deserialize_with = "deserialize_identifier",
@@ -124,6 +129,7 @@ pub struct SubscribeResult {
         deserialize_with = "deserialize_protocol_v1",
         serialize_with = "serialize_protocol_v1"
     )]
+    #[schemars(schema_with = "crate::validation::protocol_v1_schema")]
     pub v: u32,
     #[serde(
         deserialize_with = "deserialize_identifier",
@@ -148,6 +154,7 @@ pub struct BridgeEvent {
         deserialize_with = "deserialize_protocol_v1",
         serialize_with = "serialize_protocol_v1"
     )]
+    #[schemars(schema_with = "crate::validation::protocol_v1_schema")]
     pub v: u32,
     pub generation: u64,
     #[serde(
@@ -167,6 +174,7 @@ pub struct Poll {
         deserialize_with = "deserialize_protocol_v1",
         serialize_with = "serialize_protocol_v1"
     )]
+    #[schemars(schema_with = "crate::validation::protocol_v1_schema")]
     pub v: u32,
     pub generation: u64,
     pub cursor: u64,
@@ -179,6 +187,7 @@ pub struct Cancel {
         deserialize_with = "deserialize_protocol_v1",
         serialize_with = "serialize_protocol_v1"
     )]
+    #[schemars(schema_with = "crate::validation::protocol_v1_schema")]
     pub v: u32,
     #[serde(
         deserialize_with = "deserialize_identifier",
@@ -196,6 +205,7 @@ pub struct Unsubscribe {
         deserialize_with = "deserialize_protocol_v1",
         serialize_with = "serialize_protocol_v1"
     )]
+    #[schemars(schema_with = "crate::validation::protocol_v1_schema")]
     pub v: u32,
     pub generation: u64,
     #[serde(
@@ -213,6 +223,7 @@ pub struct Gap {
         deserialize_with = "deserialize_protocol_v1",
         serialize_with = "serialize_protocol_v1"
     )]
+    #[schemars(schema_with = "crate::validation::protocol_v1_schema")]
     pub v: u32,
     pub generation: u64,
     #[serde(
@@ -233,6 +244,7 @@ pub struct Close {
         deserialize_with = "deserialize_protocol_v1",
         serialize_with = "serialize_protocol_v1"
     )]
+    #[schemars(schema_with = "crate::validation::protocol_v1_schema")]
     pub v: u32,
     pub generation: u64,
     pub code: PublicErrorCode,
@@ -245,6 +257,7 @@ pub struct BridgeError {
         deserialize_with = "deserialize_protocol_v1",
         serialize_with = "serialize_protocol_v1"
     )]
+    #[schemars(schema_with = "crate::validation::protocol_v1_schema")]
     pub v: u32,
     #[serde(
         default,

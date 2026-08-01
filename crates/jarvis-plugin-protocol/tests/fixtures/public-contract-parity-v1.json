@@ -114,6 +114,17 @@
       }
     },
     {
+      "name": "contract ref rejects a non-full semver",
+      "schema": "broker",
+      "target": "ContractRef",
+      "valid": false,
+      "value": {
+        "id": "dev.example/runtime",
+        "version": "1.2",
+        "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    {
       "name": "bridge protocol version one is valid",
       "schema": "bridge",
       "target": "BridgeClientFrame",
@@ -253,6 +264,37 @@
         "method": "entities.query",
         "params": {},
         "deadlineMs": 10000
+      }
+    },
+    {
+      "name": "bridge rejects a dot-only namespace",
+      "schema": "bridge",
+      "target": "BridgeClientFrame",
+      "valid": false,
+      "value": {
+        "v": 1,
+        "type": "request",
+        "id": "request/01",
+        "generation": 1,
+        "namespace": ".",
+        "method": "entities.query",
+        "params": {},
+        "deadlineMs": 10000
+      }
+    },
+    {
+      "name": "welcome rejects a noncanonical uppercase grant",
+      "schema": "bridge",
+      "target": "BridgeHostFrame",
+      "valid": false,
+      "value": {
+        "v": 1,
+        "type": "welcome",
+        "pluginId": "example",
+        "packageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "pageId": "home",
+        "generation": 1,
+        "grants": ["BROKER.entities.query"]
       }
     },
     {
@@ -496,6 +538,21 @@
       }
     },
     {
+      "name": "broker selector ids reject an opaque URI",
+      "schema": "broker",
+      "target": "EntitySelector",
+      "valid": false,
+      "value": {
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "ids": ["https:opaque"],
+        "states": []
+      }
+    },
+    {
       "name": "broker selector states exact boundary is valid",
       "schema": "broker",
       "target": "EntitySelector",
@@ -528,6 +585,21 @@
       }
     },
     {
+      "name": "broker selector states reject an opaque URI",
+      "schema": "broker",
+      "target": "EntitySelector",
+      "valid": false,
+      "value": {
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "ids": [],
+        "states": ["urn:secret"]
+      }
+    },
+    {
       "name": "broker projection fields exact boundary is valid",
       "schema": "broker",
       "target": "FieldProjection",
@@ -542,6 +614,13 @@
       "valid": false,
       "repeat": {"pointer": "/fields", "count": 65},
       "value": {"fields": ["summary"]}
+    },
+    {
+      "name": "broker projection fields reject a drive-relative path",
+      "schema": "broker",
+      "target": "FieldProjection",
+      "valid": false,
+      "value": {"fields": ["C:repo"]}
     },
     {
       "name": "broker projection fields must be nonempty",
@@ -715,6 +794,22 @@
       }
     },
     {
+      "name": "event watch subjects reject a drive-relative path",
+      "schema": "broker",
+      "target": "EventWatchRequest",
+      "valid": false,
+      "value": {
+        "cursor": 0,
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "subjects": ["C:repo"],
+        "limit": 128
+      }
+    },
+    {
       "name": "event watch limit zero is invalid",
       "schema": "broker",
       "target": "EventWatchRequest",
@@ -779,6 +874,24 @@
             "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           },
           "subjectId": "subject/01"
+        }],
+        "includeTerminalSince": null,
+        "limit": 128
+      }
+    },
+    {
+      "name": "runtime operation query subject rejects a trailing separator",
+      "schema": "broker",
+      "target": "RuntimeOperationQuery",
+      "valid": false,
+      "value": {
+        "subjects": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "project/"
         }],
         "includeTerminalSince": null,
         "limit": 128
@@ -1471,6 +1584,18 @@
       }
     },
     {
+      "name": "contribution title rejects control characters",
+      "schema": "contributions",
+      "target": "ResolvedPageContribution",
+      "valid": false,
+      "value": {
+        "id": "dev.example.page",
+        "title": "Page\nsecret",
+        "placements": ["sidebar"],
+        "instancePolicy": "singleton"
+      }
+    },
+    {
       "name": "contribution context exact boundary is valid",
       "schema": "contributions",
       "target": "ResolvedCommandContribution",
@@ -1545,6 +1670,17 @@
       "value": {
         "command": "dev.example.command",
         "shortcut": "x",
+        "scope": "global"
+      }
+    },
+    {
+      "name": "contribution shortcut rejects control characters",
+      "schema": "contributions",
+      "target": "ResolvedHotkeyContribution",
+      "valid": false,
+      "value": {
+        "command": "dev.example.command",
+        "shortcut": "CommandOrControl+\u0085K",
         "scope": "global"
       }
     },

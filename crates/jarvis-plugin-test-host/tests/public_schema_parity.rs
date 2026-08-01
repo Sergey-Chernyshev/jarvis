@@ -1,8 +1,12 @@
+#![allow(clippy::result_large_err)]
+
 use std::collections::BTreeMap;
 use std::fs;
+use std::iter::{empty, once};
 use std::path::{Path, PathBuf};
 
-use jsonschema::{Draft, JSONSchema};
+use jsonschema::paths::{JSONPointer, JsonPointerNode};
+use jsonschema::{Draft, ErrorIterator, JSONSchema, Keyword, ValidationError};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -46,20 +50,26 @@ struct RepeatString {
 fn shared_public_contract_corpus_matches_real_json_schema_validation() {
     let corpus: Corpus = serde_json::from_str(CORPUS).expect("parse parity corpus");
     let roots = load_schema_roots();
+    let mut validators = BTreeMap::new();
     let mut mismatches = Vec::new();
 
+    for case in &corpus.cases {
+        let key = (case.schema.clone(), case.target.clone());
+        validators.entry(key).or_insert_with(|| {
+            let target_schema = target_schema(
+                roots
+                    .get(&case.schema)
+                    .unwrap_or_else(|| panic!("unknown schema {}", case.schema)),
+                case,
+            );
+            compile_keyword_aware_schema(&target_schema, &case.name)
+        });
+    }
+
     for case in corpus.cases {
-        let target_schema = target_schema(
-            roots
-                .get(&case.schema)
-                .unwrap_or_else(|| panic!("unknown schema {}", case.schema)),
-            &case,
-        );
-        let mut options = JSONSchema::options();
-        options.with_draft(Draft::Draft7);
-        let compiled = options
-            .compile(&target_schema)
-            .unwrap_or_else(|error| panic!("compile {}: {error}", case.name));
+        let compiled = validators
+            .get(&(case.schema.clone(), case.target.clone()))
+            .expect("compiled corpus target schema");
         let value = expanded_value(&case);
         let accepted = compiled.is_valid(&value);
         if accepted != case.valid {
@@ -75,6 +85,143 @@ fn shared_public_contract_corpus_matches_real_json_schema_validation() {
         "JSON Schema diverged from the shared public contract corpus:\n{}",
         mismatches.join("\n")
     );
+}
+
+fn compile_keyword_aware_schema(schema: &Value, label: &str) -> JSONSchema {
+    let mut options = JSONSchema::options();
+    options.with_draft(Draft::Draft7);
+    options.with_keyword("x-maxUtf8Bytes", max_utf8_bytes_factory);
+    options.with_keyword("x-maxJsonBytes", max_json_bytes_factory);
+    options
+        .compile(schema)
+        .unwrap_or_else(|error| panic!("compile {label}: {error}"))
+}
+
+#[test]
+fn draft7_byte_extensions_require_keyword_aware_validation() {
+    let cases = [
+        (json!({"type":"string","x-maxUtf8Bytes":1}), json!("é")),
+        (json!({"x-maxJsonBytes":3}), json!({"value":"too large"})),
+    ];
+
+    for (schema, instance) in cases {
+        let mut generic_options = JSONSchema::options();
+        generic_options.with_draft(Draft::Draft7);
+        let generic = generic_options
+            .compile(&schema)
+            .expect("generic Draft 7 schema");
+        assert!(
+            generic.is_valid(&instance),
+            "generic Draft 7 must be treated as keyword-unaware, not byte-limit enforcement"
+        );
+
+        let mut aware_options = JSONSchema::options();
+        aware_options.with_draft(Draft::Draft7);
+        aware_options.with_keyword("x-maxUtf8Bytes", max_utf8_bytes_factory);
+        aware_options.with_keyword("x-maxJsonBytes", max_json_bytes_factory);
+        let aware = aware_options
+            .compile(&schema)
+            .expect("keyword-aware Draft 7 schema");
+        assert!(
+            !aware.is_valid(&instance),
+            "registered byte-limit keyword must reject the oversized instance"
+        );
+    }
+}
+
+#[derive(Debug)]
+struct MaxUtf8Bytes {
+    maximum: usize,
+}
+
+impl Keyword for MaxUtf8Bytes {
+    fn validate<'instance>(
+        &self,
+        instance: &'instance Value,
+        instance_path: &JsonPointerNode,
+    ) -> ErrorIterator<'instance> {
+        if self.is_valid(instance) {
+            Box::new(empty())
+        } else {
+            Box::new(once(ValidationError::custom(
+                JSONPointer::default(),
+                instance_path.into(),
+                instance,
+                format!("string exceeds {} UTF-8 bytes", self.maximum),
+            )))
+        }
+    }
+
+    fn is_valid(&self, instance: &Value) -> bool {
+        instance
+            .as_str()
+            .map(|value| value.len() <= self.maximum)
+            .unwrap_or(true)
+    }
+}
+
+#[derive(Debug)]
+struct MaxJsonBytes {
+    maximum: usize,
+}
+
+impl Keyword for MaxJsonBytes {
+    fn validate<'instance>(
+        &self,
+        instance: &'instance Value,
+        instance_path: &JsonPointerNode,
+    ) -> ErrorIterator<'instance> {
+        if self.is_valid(instance) {
+            Box::new(empty())
+        } else {
+            Box::new(once(ValidationError::custom(
+                JSONPointer::default(),
+                instance_path.into(),
+                instance,
+                format!("value exceeds {} serialized JSON bytes", self.maximum),
+            )))
+        }
+    }
+
+    fn is_valid(&self, instance: &Value) -> bool {
+        serde_json::to_vec(instance)
+            .map(|bytes| bytes.len() <= self.maximum)
+            .unwrap_or(false)
+    }
+}
+
+fn max_utf8_bytes_factory<'a>(
+    _: &'a serde_json::Map<String, Value>,
+    schema: &'a Value,
+    path: JSONPointer,
+) -> Result<Box<dyn Keyword>, ValidationError<'a>> {
+    Ok(Box::new(MaxUtf8Bytes {
+        maximum: keyword_limit(schema, path)?,
+    }))
+}
+
+fn max_json_bytes_factory<'a>(
+    _: &'a serde_json::Map<String, Value>,
+    schema: &'a Value,
+    path: JSONPointer,
+) -> Result<Box<dyn Keyword>, ValidationError<'a>> {
+    Ok(Box::new(MaxJsonBytes {
+        maximum: keyword_limit(schema, path)?,
+    }))
+}
+
+fn keyword_limit<'a>(schema: &'a Value, path: JSONPointer) -> Result<usize, ValidationError<'a>> {
+    schema
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| {
+            ValidationError::custom(
+                JSONPointer::default(),
+                path,
+                schema,
+                "byte-limit keyword must be an unsigned integer",
+            )
+        })
 }
 
 fn load_schema_roots() -> BTreeMap<String, Value> {

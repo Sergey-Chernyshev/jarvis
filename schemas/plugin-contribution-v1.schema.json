@@ -24,7 +24,7 @@
             "id": {
               "maxLength": 128,
               "minLength": 1,
-              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/-]+$",
               "type": "string"
             },
             "type": {
@@ -46,7 +46,7 @@
             "id": {
               "maxLength": 128,
               "minLength": 1,
-              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/-]+$",
               "type": "string"
             },
             "type": {
@@ -68,7 +68,7 @@
             "id": {
               "maxLength": 128,
               "minLength": 1,
-              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/-]+$",
               "type": "string"
             },
             "type": {
@@ -90,7 +90,7 @@
             "id": {
               "maxLength": 128,
               "minLength": 1,
-              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))[A-Za-z0-9._:/-]+$",
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/-]+$",
               "type": "string"
             },
             "type": {
@@ -137,7 +137,7 @@
         "command": {
           "maxLength": 128,
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$",
+          "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
           "type": "string"
         },
         "context": {
@@ -145,25 +145,33 @@
           "items": {
             "$ref": "#/definitions/ContextReference"
           },
+          "maxItems": 16,
           "type": "array"
         },
         "id": {
           "maxLength": 128,
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$",
+          "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
           "type": "string"
         },
         "locations": {
           "items": {
             "$ref": "#/definitions/ActionLocation"
           },
+          "maxItems": 16,
+          "minItems": 1,
           "type": "array"
         },
         "riskFloor": {
           "$ref": "#/definitions/Risk"
         },
         "title": {
-          "type": "string"
+          "description": "UTF-8 byte length: 1..=256. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.",
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+          "type": "string",
+          "x-maxUtf8Bytes": 256
         }
       },
       "required": [
@@ -183,25 +191,33 @@
           "items": {
             "$ref": "#/definitions/ContextReference"
           },
+          "maxItems": 16,
           "type": "array"
         },
         "id": {
           "maxLength": 128,
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$",
+          "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
           "type": "string"
         },
         "placements": {
           "items": {
             "$ref": "#/definitions/CommandPlacement"
           },
+          "maxItems": 16,
+          "minItems": 1,
           "type": "array"
         },
         "riskFloor": {
           "$ref": "#/definitions/Risk"
         },
         "title": {
-          "type": "string"
+          "description": "UTF-8 byte length: 1..=256. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.",
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+          "type": "string",
+          "x-maxUtf8Bytes": 256
         }
       },
       "required": [
@@ -218,14 +234,19 @@
         "command": {
           "maxLength": 128,
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$",
+          "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
           "type": "string"
         },
         "scope": {
           "$ref": "#/definitions/HotkeyScope"
         },
         "shortcut": {
-          "type": "string"
+          "description": "UTF-8 byte length: 1..=128. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+          "type": "string",
+          "x-maxUtf8Bytes": 128
         }
       },
       "required": [
@@ -241,7 +262,7 @@
         "id": {
           "maxLength": 128,
           "minLength": 1,
-          "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)+$",
+          "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
           "type": "string"
         },
         "instancePolicy": {
@@ -251,10 +272,17 @@
           "items": {
             "$ref": "#/definitions/PagePlacement"
           },
+          "maxItems": 16,
+          "minItems": 1,
           "type": "array"
         },
         "title": {
-          "type": "string"
+          "description": "UTF-8 byte length: 1..=256. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.",
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+          "type": "string",
+          "x-maxUtf8Bytes": 256
         }
       },
       "required": [
@@ -280,6 +308,7 @@
       "items": {
         "$ref": "#/definitions/ResolvedActionContribution"
       },
+      "maxItems": 512,
       "type": "array"
     },
     "commands": {
@@ -287,6 +316,7 @@
       "items": {
         "$ref": "#/definitions/ResolvedCommandContribution"
       },
+      "maxItems": 512,
       "type": "array"
     },
     "hotkeys": {
@@ -294,6 +324,7 @@
       "items": {
         "$ref": "#/definitions/ResolvedHotkeyContribution"
       },
+      "maxItems": 512,
       "type": "array"
     },
     "pages": {
@@ -301,6 +332,7 @@
       "items": {
         "$ref": "#/definitions/ResolvedPageContribution"
       },
+      "maxItems": 512,
       "type": "array"
     }
   },

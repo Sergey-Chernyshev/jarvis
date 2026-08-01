@@ -11,6 +11,7 @@ use jarvis_plugin_protocol::bridge::{
 use serde_json::{json, Value};
 
 const DEFAULT_PAGE_ID: &str = "fixture";
+const MAX_BRIDGE_IDENTIFIER_BYTES: usize = 128;
 const CALLER_IDENTITY_FIELDS: [&str; 8] = [
     "pluginId",
     "packageDigest",
@@ -118,7 +119,7 @@ impl UiTestHost {
             .map_err(|_| UiContractError::ProviderUnavailable)?;
 
         let response = if request.method.ends_with(".watch") {
-            let subscription_id = format!("subscription/{}", request.id);
+            let subscription_id = subscription_id_for(&request.id);
             if !state.subscriptions.contains(&subscription_id)
                 && state.subscriptions.len() >= MAX_BRIDGE_SUBSCRIPTIONS
             {
@@ -144,6 +145,23 @@ impl UiTestHost {
         state.recorded_requests.push(request);
         Ok(response)
     }
+}
+
+fn subscription_id_for(request_id: &str) -> String {
+    // Request IDs are opaque and may already consume the full public 128-byte
+    // budget. A stable hash keeps the fake host output bounded without
+    // truncating two distinct request IDs to the same subscription ID.
+    let mut first = 0xcbf29ce484222325_u64;
+    let mut second = 0x84222325cbf29ce4_u64;
+    for byte in request_id.as_bytes() {
+        first ^= u64::from(*byte);
+        first = first.wrapping_mul(0x100000001b3);
+        second ^= u64::from(*byte);
+        second = second.wrapping_mul(0x100000001b3).rotate_left(13);
+    }
+    let id = format!("subscription/{first:016x}{second:016x}");
+    debug_assert!(id.len() <= MAX_BRIDGE_IDENTIFIER_BYTES);
+    id
 }
 
 fn deterministic_result(request: &BridgeRequest) -> Value {

@@ -309,7 +309,7 @@ impl DevListener {
 
 struct SocketCleanup {
     run_directory: OwnedFd,
-    identity: SocketIdentity,
+    identity: Option<SocketIdentity>,
     uid: u32,
     gid: u32,
     quarantine: CString,
@@ -410,17 +410,18 @@ where
     let path = root.path().join("run").join(DEV_SOCKET_FILE);
     let quarantine = new_quarantine_name()?;
     let listener = UnixListener::bind(&path).map_err(|_| TransportError::Io)?;
-    let initial =
-        socket_metadata(run_directory.as_raw_fd())?.ok_or(TransportError::UnsafeMetadata)?;
-    validate_socket_owner_kind(&initial, expected_uid, gid)?;
-    let identity = SocketIdentity::from(initial);
-    let cleanup = SocketCleanup {
+    let mut cleanup = SocketCleanup {
         run_directory,
-        identity,
+        identity: None,
         uid: expected_uid,
         gid,
         quarantine,
     };
+    let initial = socket_metadata(cleanup.run_directory.as_raw_fd())?
+        .ok_or(TransportError::UnsafeMetadata)?;
+    validate_socket_owner_kind(&initial, expected_uid, gid)?;
+    let identity = SocketIdentity::from(initial);
+    cleanup.identity = Some(identity);
 
     // SAFETY: the fixed single component is resolved relative to the held,
     // validated run directory and symlinks are never followed.
@@ -875,7 +876,7 @@ fn new_quarantine_name() -> Result<CString, TransportError> {
 #[cfg(target_os = "macos")]
 fn quarantine_owned_socket(
     directory: RawFd,
-    identity: SocketIdentity,
+    identity: Option<SocketIdentity>,
     uid: u32,
     gid: u32,
     quarantine: &CStr,
@@ -896,16 +897,12 @@ fn quarantine_owned_socket(
         return;
     }
 
-    let removable = socket_metadata_named(directory, quarantine)
+    let retained_owned_socket = socket_metadata_named(directory, quarantine)
         .ok()
         .flatten()
         .filter(|metadata| validate_socket_metadata(metadata, uid, gid).is_ok())
-        .is_some_and(|metadata| SocketIdentity::from(metadata) == identity);
-    if removable {
-        // SAFETY: quarantine was just atomically populated and its complete
-        // metadata plus inode identity were revalidated above.
-        let _ = unsafe { libc::unlinkat(directory, quarantine.as_ptr(), 0) };
-    } else {
+        .is_some_and(|metadata| Some(SocketIdentity::from(metadata)) == identity);
+    if identity.is_some() && !retained_owned_socket {
         // A raced sentinel is never deleted. Best effort restores its original
         // public name, but RENAME_EXCL also refuses to overwrite a new entry.
         // SAFETY: same held directory and fixed single components as above.
@@ -919,12 +916,16 @@ fn quarantine_owned_socket(
             )
         };
     }
+    // There is no Darwin primitive for "unlink this name only if it still has
+    // the inode just validated". Retaining our random quarantine entry is the
+    // fail-safe alternative to a stat/unlink swap race. With no validated
+    // identity, retain the isolated entry as evidence instead of guessing.
 }
 
 #[cfg(not(target_os = "macos"))]
 fn quarantine_owned_socket(
     _directory: RawFd,
-    _identity: SocketIdentity,
+    _identity: Option<SocketIdentity>,
     _uid: u32,
     _gid: u32,
     _quarantine: &CStr,

@@ -1,15 +1,32 @@
 #!/usr/bin/env node
 
-import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
-const packageRoot = process.argv[2] ? realpathSync(resolve(process.argv[2])) : '';
-if (!packageRoot) {
-  console.error('usage: scan-rust-unsafe-boundary.mjs <package-root>');
+const MAX_DISCOVERY_ENTRIES = 200_000;
+const MAX_RUST_FILES = 20_000;
+const MAX_RUST_SOURCE_BYTES = 128 * 1024 * 1024;
+
+const scanArguments = process.argv.slice(2);
+const trustRootsMode = scanArguments[0] === '--trust-roots';
+const rootArguments = trustRootsMode ? scanArguments.slice(1) : scanArguments.slice(0, 1);
+if (rootArguments.length === 0) {
+  console.error(
+    'usage: scan-rust-unsafe-boundary.mjs <package-root> [target-sources...] | --trust-roots <root>...',
+  );
   process.exit(2);
 }
+const scanRoots = [...new Set(rootArguments.map((root) => realpathSync(resolve(root))))];
+const explicitTargetSources = trustRootsMode ? [] : scanArguments.slice(1);
 
-function rustFiles(root, explicitTargetSources) {
+function rustFiles(root, targetSources, discoveryBudget) {
   const files = new Set();
   const sourceEscapes = [];
   const rootBuildOutput = join(root, 'target');
@@ -18,21 +35,39 @@ function rustFiles(root, explicitTargetSources) {
     for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
       a.name.localeCompare(b.name),
     )) {
-      if (entry.name === '.git') continue;
+      discoveryBudget.entries += 1;
+      if (discoveryBudget.entries > MAX_DISCOVERY_ENTRIES) {
+        throw new Error(`Rust source discovery exceeds ${MAX_DISCOVERY_ENTRIES} entries`);
+      }
+      if (
+        entry.name === '.git' ||
+        entry.name === '.worktrees' ||
+        entry.name === 'node_modules'
+      ) {
+        continue;
+      }
       const path = join(directory, entry.name);
       if (entry.isSymbolicLink()) {
         sourceEscapes.push({ path, line: 1, reason: 'symlink source entry' });
       } else if (entry.isDirectory()) {
-        if (path === rootBuildOutput) continue;
+        if (
+          path === rootBuildOutput ||
+          (entry.name === 'target' && existsSync(join(directory, 'Cargo.toml')))
+        ) {
+          continue;
+        }
         visit(path);
       } else if (entry.isFile() && entry.name.endsWith('.rs')) {
         files.add(path);
+        if (files.size > MAX_RUST_FILES) {
+          throw new Error(`Rust source discovery exceeds ${MAX_RUST_FILES} files`);
+        }
       }
     }
   }
 
   visit(root);
-  for (const targetSource of explicitTargetSources) {
+  for (const targetSource of targetSources) {
     let sourceInfo;
     try {
       sourceInfo = lstatSync(targetSource);
@@ -579,14 +614,33 @@ function packageTrustVerifierMacroInvocations(
   return invocations;
 }
 
-const discovery = rustFiles(packageRoot, process.argv.slice(3));
-for (const escape of discovery.sourceEscapes) {
+const discoveryBudget = { entries: 0 };
+const discoveredFiles = new Set();
+const sourceEscapes = [];
+for (const root of scanRoots) {
+  const discovery = rustFiles(root, explicitTargetSources, discoveryBudget);
+  for (const file of discovery.files) {
+    discoveredFiles.add(file);
+    if (discoveredFiles.size > MAX_RUST_FILES) {
+      throw new Error(`Rust source discovery exceeds ${MAX_RUST_FILES} files`);
+    }
+  }
+  sourceEscapes.push(...discovery.sourceEscapes);
+}
+for (const escape of sourceEscapes) {
   process.stdout.write(`source\t${escape.path}:${escape.line}\t${escape.reason}\n`);
 }
-const tokenizedFiles = discovery.files.map((file) => ({
-  file,
-  tokens: lexRust(readFileSync(file, 'utf8')),
-}));
+let rustSourceBytes = 0;
+const tokenizedFiles = [...discoveredFiles].sort().map((file) => {
+  rustSourceBytes += statSync(file).size;
+  if (rustSourceBytes > MAX_RUST_SOURCE_BYTES) {
+    throw new Error(`Rust sources exceed ${MAX_RUST_SOURCE_BYTES} bytes`);
+  }
+  return {
+    file,
+    tokens: lexRust(readFileSync(file, 'utf8')),
+  };
+});
 const verifierNames = packageTrustVerifierNames(tokenizedFiles);
 const verifierMacroNames = packageTrustVerifierMacroNames(
   tokenizedFiles,

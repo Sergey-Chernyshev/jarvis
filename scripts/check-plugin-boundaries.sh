@@ -196,15 +196,20 @@ if [[ -f "$package_manifest" ]]; then
   report_matches "jarvis-package source discovery escape:" "$source_escapes"
 fi
 
-trust_scan=""
+trust_roots=()
 for trust_root in "$repo_root/crates" "$repo_root/plugins" "$repo_root/src-tauri"; do
-  [[ -d "$trust_root" ]] || continue
-  scanned="$(
-    node "$script_dir/scan-rust-unsafe-boundary.mjs" "$trust_root" \
-      | awk -F '\t' '$1 == "trust" || $1 == "trust-test" { print }'
-  )"
-  trust_scan+="${trust_scan:+$'\n'}$scanned"
+  [[ -d "$trust_root" ]] && trust_roots+=("$trust_root")
 done
+trust_scan=""
+if [[ "${#trust_roots[@]}" -gt 0 ]] && ! trust_scan="$(
+  node "$script_dir/scan-rust-unsafe-boundary.mjs" \
+    --trust-roots "${trust_roots[@]}" \
+    | awk -F '\t' '$1 == "trust" || $1 == "trust-test" { print }'
+)"; then
+  echo "failed to scan PackageTrustVerifier ownership roots" >&2
+  failed=1
+  trust_scan=""
+fi
 disallowed_trust=""
 while IFS=$'\t' read -r kind match; do
   [[ -z "$match" ]] && continue

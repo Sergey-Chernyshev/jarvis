@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::ffi::{CStr, OsStr};
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -33,6 +35,7 @@ pub const DEV_CLEANUP_RESIDUE_FILE: &str = ".power-helper-dev.cleanup-residue";
 const RUN_DIRECTORY: &CStr = c"run";
 const DEV_SOCKET_COMPONENT: &CStr = c"power-helper-dev.sock";
 const QUARANTINE_COMPONENT: &CStr = c".power-helper-dev.cleanup-residue";
+const CLEANUP_INFLIGHT_COMPONENT: &CStr = c".power-helper-dev.cleanup-inflight";
 const DIRECTORY_MODE: u32 = 0o700;
 const SOCKET_MODE: u32 = 0o600;
 const IO_TIMEOUT: Duration = Duration::from_millis(250);
@@ -40,6 +43,11 @@ const DEV_BUNDLE_ID: &str = "app.jarvis.dev";
 const DEV_TEAM_ID: &str = "JARVISDEV1";
 const DEV_REQUIREMENT_DIGEST: [u8; 32] = [0x44; 32];
 const DEV_SIGNED_BUILD: u64 = 1;
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_POST_SUCCESS_DEADLINE: Cell<bool> = const { Cell::new(false) };
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportError {
@@ -359,6 +367,7 @@ pub(crate) fn bind_listener(
 pub(crate) enum BindStage {
     AfterBindBeforeIdentity,
     AfterSocketPreparedBeforeProof,
+    ResidueMovedBeforeUnlink,
 }
 
 #[cfg(not(test))]
@@ -366,6 +375,7 @@ pub(crate) enum BindStage {
 enum BindStage {
     AfterBindBeforeIdentity,
     AfterSocketPreparedBeforeProof,
+    ResidueMovedBeforeUnlink,
 }
 
 #[cfg(test)]
@@ -410,12 +420,12 @@ where
     if socket_metadata(run_directory.as_raw_fd())?.is_some() {
         return Err(TransportError::UnsafeMetadata);
     }
-    if socket_metadata_named(run_directory.as_raw_fd(), QUARANTINE_COMPONENT)?.is_some() {
-        return Err(TransportError::CleanupRequired);
-    }
+    let path = root.path().join("run").join(DEV_SOCKET_FILE);
+    cleanup_owned_residue(run_directory.as_raw_fd(), expected_uid, gid, |stage| {
+        hook(stage, &path)
+    })?;
 
     root.revalidate_child_path(RUN_DIRECTORY, run_directory.as_raw_fd())?;
-    let path = root.path().join("run").join(DEV_SOCKET_FILE);
     let listener = UnixListener::bind(&path).map_err(|_| TransportError::Io)?;
     let mut cleanup = SocketCleanup {
         run_directory,
@@ -515,6 +525,11 @@ pub(crate) fn write_frame_with_timeout_for_testing(
     write_frame_until(stream, body, Deadline::after(timeout))
 }
 
+#[cfg(test)]
+pub(crate) fn force_post_success_deadline_for_testing() {
+    FORCE_POST_SUCCESS_DEADLINE.with(|forced| forced.set(true));
+}
+
 fn handle_connection<P, D, O>(
     mut stream: UnixStream,
     expected_uid: u32,
@@ -607,9 +622,16 @@ fn read_frame_until(
     read_exact_until(stream, &mut body, deadline)?;
     let mut trailing = [0_u8; 1];
     loop {
+        deadline.ensure_remaining()?;
         match stream.read(&mut trailing) {
-            Ok(0) => return Ok(body),
-            Ok(_) => return Err(TransportError::InvalidFrame),
+            Ok(0) => {
+                deadline.ensure_after_success()?;
+                return Ok(body);
+            }
+            Ok(_) => {
+                deadline.ensure_after_success()?;
+                return Err(TransportError::InvalidFrame);
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 wait_fd(stream.as_raw_fd(), libc::POLLIN, deadline)?;
@@ -655,6 +677,22 @@ impl Deadline {
         }
         let rounded_up = remaining.as_millis().saturating_add(1);
         Ok(i32::try_from(rounded_up.min(i32::MAX as u128)).unwrap_or(i32::MAX))
+    }
+
+    fn ensure_remaining(self) -> Result<(), TransportError> {
+        if Instant::now() < self.expires_at {
+            Ok(())
+        } else {
+            Err(TransportError::Deadline)
+        }
+    }
+
+    fn ensure_after_success(self) -> Result<(), TransportError> {
+        #[cfg(test)]
+        if FORCE_POST_SUCCESS_DEADLINE.with(|forced| forced.replace(false)) {
+            return Err(TransportError::Deadline);
+        }
+        self.ensure_remaining()
     }
 }
 
@@ -726,11 +764,13 @@ fn read_exact_until(
     deadline: Deadline,
 ) -> Result<(), TransportError> {
     while !destination.is_empty() {
+        deadline.ensure_remaining()?;
         match stream.read(destination) {
             Ok(0) => return Err(TransportError::InvalidFrame),
             Ok(read) => {
                 let (_, remaining) = destination.split_at_mut(read);
                 destination = remaining;
+                deadline.ensure_after_success()?;
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -748,9 +788,13 @@ fn write_all_until(
     deadline: Deadline,
 ) -> Result<(), TransportError> {
     while !source.is_empty() {
+        deadline.ensure_remaining()?;
         match stream.write(source) {
             Ok(0) => return Err(TransportError::Io),
-            Ok(written) => source = &source[written..],
+            Ok(written) => {
+                source = &source[written..];
+                deadline.ensure_after_success()?;
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 wait_fd(stream.as_raw_fd(), libc::POLLOUT, deadline)?;
@@ -878,6 +922,85 @@ fn validate_owned_socket_entry(
     }
 }
 
+fn cleanup_owned_residue<F>(
+    directory: RawFd,
+    uid: u32,
+    gid: u32,
+    mut hook: F,
+) -> Result<(), TransportError>
+where
+    F: FnMut(BindStage),
+{
+    if socket_metadata_named(directory, CLEANUP_INFLIGHT_COMPONENT)?.is_some() {
+        return Err(TransportError::CleanupRequired);
+    }
+    let Some(metadata) = socket_metadata_named(directory, QUARANTINE_COMPONENT)? else {
+        return Ok(());
+    };
+    validate_socket_metadata(&metadata, uid, gid)?;
+    let identity = SocketIdentity::from(metadata);
+
+    // Move the validated residue away from its externally observable fixed
+    // name before deletion. RENAME_EXCL means a concurrent replacement at the
+    // original name is never selected for cleanup.
+    // SAFETY: both fixed components are beneath the held private directory.
+    if unsafe {
+        libc::renameatx_np(
+            directory,
+            QUARANTINE_COMPONENT.as_ptr(),
+            directory,
+            CLEANUP_INFLIGHT_COMPONENT.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    } != 0
+    {
+        return Err(TransportError::CleanupRequired);
+    }
+
+    let moved_owned_socket = socket_metadata_named(directory, CLEANUP_INFLIGHT_COMPONENT)
+        .ok()
+        .flatten()
+        .filter(|metadata| validate_socket_metadata(metadata, uid, gid).is_ok())
+        .is_some_and(|metadata| SocketIdentity::from(metadata) == identity);
+    if !moved_owned_socket {
+        // Never unlink an entry whose identity changed. Restore it only when
+        // the fixed residue name is still available; otherwise leave evidence
+        // in place and fail closed.
+        let _ = unsafe {
+            libc::renameatx_np(
+                directory,
+                CLEANUP_INFLIGHT_COMPONENT.as_ptr(),
+                directory,
+                QUARANTINE_COMPONENT.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        return Err(TransportError::CleanupRequired);
+    }
+
+    hook(BindStage::ResidueMovedBeforeUnlink);
+    let still_owned = socket_metadata_named(directory, CLEANUP_INFLIGHT_COMPONENT)
+        .ok()
+        .flatten()
+        .filter(|metadata| validate_socket_metadata(metadata, uid, gid).is_ok())
+        .is_some_and(|metadata| SocketIdentity::from(metadata) == identity);
+    if !still_owned {
+        return Err(TransportError::CleanupRequired);
+    }
+    // SAFETY: only the identity-checked entry moved to the private inflight
+    // component is removed. Any replacement at the public residue name is a
+    // separate directory entry and remains untouched.
+    if unsafe { libc::unlinkat(directory, CLEANUP_INFLIGHT_COMPONENT.as_ptr(), 0) } != 0 {
+        return Err(TransportError::CleanupRequired);
+    }
+    if socket_metadata_named(directory, CLEANUP_INFLIGHT_COMPONENT)?.is_some()
+        || socket_metadata_named(directory, QUARANTINE_COMPONENT)?.is_some()
+    {
+        return Err(TransportError::CleanupRequired);
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn quarantine_owned_socket(directory: RawFd, identity: Option<SocketIdentity>, uid: u32, gid: u32) {
     let Some(identity) = identity else {
@@ -920,10 +1043,6 @@ fn quarantine_owned_socket(directory: RawFd, identity: Option<SocketIdentity>, u
             )
         };
     }
-    // There is no Darwin primitive for "unlink this name only if it still has
-    // the inode just validated". Retaining one fixed quarantine entry is the
-    // fail-safe alternative. A later bind rejects this residue instead of
-    // performing unsafe garbage collection or accumulating more entries.
 }
 
 #[cfg(not(target_os = "macos"))]

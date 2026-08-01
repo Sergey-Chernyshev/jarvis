@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -24,10 +24,10 @@ use jarvis_power_helper::coordinator::{
 use jarvis_power_helper::dev_store::{DevStore, DEV_LOCK_FILE, DEV_STATE_FILE};
 use jarvis_power_helper::dev_uds::{
     bind_listener, bind_listener_with_hook_for_testing, development_runtime_enabled,
-    handle_connection_for_testing, read_frame_for_testing, read_frame_with_timeout_for_testing,
-    BindStage, ConnectionEvent, ConnectionObserver, PeerIdentityProbe, PeerSnapshot,
-    RequestDispatcher, RuntimeDispatcher, TransportError, DEV_CLEANUP_RESIDUE_FILE,
-    DEV_SOCKET_FILE, write_frame_with_timeout_for_testing,
+    force_post_success_deadline_for_testing, handle_connection_for_testing, read_frame_for_testing,
+    read_frame_with_timeout_for_testing, write_frame_with_timeout_for_testing, BindStage,
+    ConnectionEvent, ConnectionObserver, PeerIdentityProbe, PeerSnapshot, RequestDispatcher,
+    RuntimeDispatcher, TransportError, DEV_CLEANUP_RESIDUE_FILE, DEV_SOCKET_FILE,
 };
 use jarvis_power_helper::pmset::{DevSudoPmset, PmsetBackend, PmsetError};
 use jarvis_power_helper::root_store::DevRoot;
@@ -536,7 +536,6 @@ fn socket_and_dev_state_are_private_without_following_or_overwriting() {
     drop(listener);
     let cleanup_residue = run.join(DEV_CLEANUP_RESIDUE_FILE);
     assert!(cleanup_residue.exists());
-    fs::remove_file(&cleanup_residue).unwrap();
 
     let stale_path = run.join(DEV_SOCKET_FILE);
     let stale = UnixListener::bind(&stale_path).unwrap();
@@ -831,7 +830,7 @@ fn listener_drop_removes_the_public_name_and_restart_cleans_owned_residue_automa
                 .is_some_and(|name| name == DEV_CLEANUP_RESIDUE_FILE)
         })
         .collect::<Vec<_>>();
-    assert!(residues.is_empty(), "normal dev stop must not leave residue");
+    assert_eq!(residues.len(), 1, "stop leaves one bounded cleanup receipt");
 
     let restarted = bind_listener(
         &harness.runtime.listener_permit(),
@@ -840,7 +839,89 @@ fn listener_drop_removes_the_public_name_and_restart_cleans_owned_residue_automa
         harness.sink.clone(),
     )
     .expect("normal dev restart should be automatic");
+    assert!(!residues[0].exists(), "restart must reclaim the receipt");
     drop(restarted);
+
+    let sentinel = b"inflight-replacement-must-survive";
+    let result = bind_listener_with_hook_for_testing(
+        &harness.runtime.listener_permit(),
+        &harness.root,
+        current_uid(),
+        harness.sink.clone(),
+        |stage, path| {
+            if stage == BindStage::ResidueMovedBeforeUnlink {
+                let replacement = path.with_file_name(".power-helper-dev.cleanup-inflight");
+                fs::remove_file(&replacement).unwrap();
+                fs::write(&replacement, sentinel).unwrap();
+                fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        },
+    );
+    assert_eq!(result.err(), Some(TransportError::CleanupRequired));
+    assert_eq!(
+        fs::read(run.join(".power-helper-dev.cleanup-inflight")).unwrap(),
+        sentinel
+    );
+}
+
+#[test]
+fn restart_reclaims_one_existing_valid_residue_without_manual_deletion() {
+    let harness = DevHarness::new();
+    let initial = bind_listener(
+        &harness.runtime.listener_permit(),
+        &harness.root,
+        current_uid(),
+        harness.sink.clone(),
+    )
+    .unwrap_or_else(|error| panic!("initial bind failed at {:?}: {error:?}", harness.jarvis_dir));
+    let residue = initial.path().with_file_name(DEV_CLEANUP_RESIDUE_FILE);
+    drop(initial);
+    assert!(residue.exists());
+
+    let listener = bind_listener(
+        &harness.runtime.listener_permit(),
+        &harness.root,
+        current_uid(),
+        harness.sink.clone(),
+    )
+    .expect("a validated stale dev residue should be reclaimed automatically");
+    assert!(!residue.exists());
+    drop(listener);
+    assert!(residue.exists());
+}
+
+#[test]
+fn replacement_at_residue_during_cleanup_is_preserved_and_restart_fails_closed() {
+    let harness = DevHarness::new();
+    let initial = bind_listener(
+        &harness.runtime.listener_permit(),
+        &harness.root,
+        current_uid(),
+        harness.sink.clone(),
+    )
+    .unwrap();
+    let residue = initial.path().with_file_name(DEV_CLEANUP_RESIDUE_FILE);
+    let run = residue.parent().unwrap().to_path_buf();
+    drop(initial);
+    assert!(residue.exists());
+
+    let sentinel = b"replacement-must-survive";
+    let result = bind_listener_with_hook_for_testing(
+        &harness.runtime.listener_permit(),
+        &harness.root,
+        current_uid(),
+        harness.sink.clone(),
+        |stage, path| {
+            if stage == BindStage::ResidueMovedBeforeUnlink {
+                let replacement = path.with_file_name(DEV_CLEANUP_RESIDUE_FILE);
+                fs::write(&replacement, sentinel).unwrap();
+                fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        },
+    );
+    assert_eq!(result.err(), Some(TransportError::CleanupRequired));
+    assert_eq!(fs::read(&residue).unwrap(), sentinel);
+    assert!(!run.join(".power-helper-dev.cleanup-inflight").exists());
 }
 
 #[test]
@@ -864,8 +945,38 @@ fn already_expired_deadline_rejects_buffered_write_before_success() {
         write_frame_with_timeout_for_testing(&mut writer, b"done", Duration::ZERO),
         Err(TransportError::Deadline)
     );
+    reader.set_nonblocking(true).unwrap();
     let mut bytes = [0_u8; 32];
-    assert_eq!(reader.read(&mut bytes).unwrap(), 0);
+    assert_eq!(
+        reader.read(&mut bytes).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn post_success_read_is_rejected_when_absolute_deadline_expires() {
+    let (mut writer, mut reader) = UnixStream::pair().unwrap();
+    let mut frame = Vec::from(4_u32.to_be_bytes());
+    frame.extend_from_slice(b"done");
+    writer.write_all(&frame).unwrap();
+    writer.shutdown(std::net::Shutdown::Write).unwrap();
+    force_post_success_deadline_for_testing();
+
+    assert_eq!(
+        read_frame_with_timeout_for_testing(&mut reader, Duration::from_secs(1)),
+        Err(TransportError::Deadline)
+    );
+}
+
+#[test]
+fn post_success_write_is_rejected_when_absolute_deadline_expires() {
+    let (mut writer, _reader) = UnixStream::pair().unwrap();
+    force_post_success_deadline_for_testing();
+
+    assert_eq!(
+        write_frame_with_timeout_for_testing(&mut writer, b"done", Duration::from_secs(1)),
+        Err(TransportError::Deadline)
+    );
 }
 
 #[test]

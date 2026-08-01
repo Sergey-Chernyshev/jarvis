@@ -395,8 +395,14 @@ fn read_frame_until(
     loop {
         deadline.ensure_remaining()?;
         match stream.read(&mut trailing) {
-            Ok(0) => return Ok(body),
-            Ok(_) => return Err(HelperClientError::InvalidFrame),
+            Ok(0) => {
+                deadline.ensure_remaining()?;
+                return Ok(body);
+            }
+            Ok(_) => {
+                deadline.ensure_remaining()?;
+                return Err(HelperClientError::InvalidFrame);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 wait_fd(stream.as_raw_fd(), libc::POLLIN, deadline)?;
@@ -469,6 +475,7 @@ fn read_exact_until(
             Ok(read) => {
                 let (_, remaining) = destination.split_at_mut(read);
                 destination = remaining;
+                deadline.ensure_remaining()?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -494,7 +501,10 @@ fn write_all_until(
                     "development helper socket wrote zero bytes",
                 )))
             }
-            Ok(written) => source = &source[written..],
+            Ok(written) => {
+                source = &source[written..];
+                deadline.ensure_remaining()?;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 wait_fd(stream.as_raw_fd(), libc::POLLOUT, deadline)?;

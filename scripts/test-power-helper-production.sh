@@ -7,7 +7,12 @@ config="$repo_root/src-tauri/tauri.conf.json"
 info_plist="$repo_root/src-tauri/Info.plist"
 fixture_tools="$repo_root/scripts/fixtures/power-helper-signing"
 helper_binary="$repo_root/crates/jarvis-power-helper/target/release/jarvis-power-helper"
-expected_build=340
+minimum_build_floor=340
+expected_build="$(
+  node -e \
+    'process.stdout.write(require(process.argv[1]).bundle.macOS.bundleVersion)' \
+    "$config"
+)"
 expected_team=ABCDEFGHIJ
 
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/jarvis-power-production-test.XXXXXX")"
@@ -35,7 +40,7 @@ record_failure() {
   failures=$((failures + 1))
 }
 
-if ! node - "$config" "$info_plist" "$expected_build" <<'NODE'
+if ! node - "$config" "$info_plist" "$minimum_build_floor" <<'NODE'
 const { execFileSync } = require("node:child_process");
 const { readFileSync } = require("node:fs");
 
@@ -68,15 +73,32 @@ then
   record_failure "canonical app build number is missing or inconsistent"
 fi
 
+mismatch_log="$test_root/build-mismatch.log"
+mismatched_build=$((expected_build + 1))
 if APPLE_TEAM_ID="$expected_team" \
-  JARVIS_APP_BUILD=341 \
+  JARVIS_APP_BUILD="$mismatched_build" \
+  MACOSX_DEPLOYMENT_TARGET=13.0 \
+  cargo check --quiet --locked \
+    --manifest-path "$repo_root/crates/jarvis-power-helper/Cargo.toml" \
+    --no-default-features \
+    --features production-xpc \
+    --bin jarvis-power-helper >"$mismatch_log" 2>&1; then
+  record_failure "helper build accepted a build number different from Tauri config"
+elif ! rg -F -q \
+  'JARVIS_APP_BUILD must equal bundle.macOS.bundleVersion' \
+  "$mismatch_log"; then
+  record_failure "helper build rejected mismatched build for an unrelated reason"
+fi
+
+if ! APPLE_TEAM_ID="$expected_team" \
+  JARVIS_APP_BUILD="$expected_build" \
   MACOSX_DEPLOYMENT_TARGET=13.0 \
   cargo check --quiet --locked \
     --manifest-path "$repo_root/crates/jarvis-power-helper/Cargo.toml" \
     --no-default-features \
     --features production-xpc \
     --bin jarvis-power-helper; then
-  record_failure "helper build accepted a build number different from Tauri config"
+  record_failure "helper build rejected the canonical app build number"
 fi
 
 run_mock_production() {
@@ -136,6 +158,23 @@ if find "$test_root" -maxdepth 1 -name '.*.stage.*' -print -quit | rg -q .; then
   record_failure "failed signing left staging residue"
 fi
 
+symlink_target="$test_root/symlink-target"
+printf 'do not replace through symlink\n' >"$symlink_target"
+symlink_output="$test_root/symlink-helper"
+ln -s "$symlink_target" "$symlink_output"
+symlink_log="$test_root/symlink.log"
+if run_mock_production \
+  "$symlink_output" \
+  "Developer ID Application: Jarvis Test ($expected_team)" \
+  "$expected_team" \
+  valid \
+  "$symlink_log"; then
+  record_failure "production publish accepted a symlink output"
+fi
+if [[ "$(cat "$symlink_target")" != "do not replace through symlink" ]]; then
+  record_failure "production publish modified a symlink target"
+fi
+
 valid_log="$test_root/valid.log"
 valid_output="$test_root/verified-helper"
 if ! run_mock_production \
@@ -149,7 +188,7 @@ elif [[ ! -f "$valid_output" ]]; then
   record_failure "verified helper output is missing"
 fi
 for required_log in \
-  'cargo JARVIS_APP_BUILD=340' \
+  "cargo JARVIS_APP_BUILD=$expected_build" \
   'csreq ' \
   'codesign --force' \
   'codesign --display' \
@@ -159,6 +198,9 @@ for required_log in \
     record_failure "production flow omitted evidence step: $required_log"
   fi
 done
+if find "$test_root" -maxdepth 1 -name '.*.stage.*' -print -quit | rg -q .; then
+  record_failure "successful signing left staging residue"
+fi
 
 if [[ "$failures" -ne 0 ]]; then
   echo "$failures production power-helper contract failure(s)" >&2

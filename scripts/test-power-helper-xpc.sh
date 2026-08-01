@@ -106,4 +106,6 @@ for (const token of [
 }
 NODE
 
+bash "$repo_root/scripts/test-power-helper-production.sh"
+
 echo "power-helper XPC contract checks passed"

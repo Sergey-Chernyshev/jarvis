@@ -9,6 +9,7 @@ use crate::manifest::{Digest, PluginId, PublisherId, VersionRange};
 use crate::package::{MacOsVersion, PackageSignatureV1, PackageTarget, SignatureAlgorithm};
 
 pub const CATALOG_SCHEMA_VERSION: u32 = 1;
+pub const CATALOG_MAX_SEQUENCE: u64 = 9_007_199_254_740_991;
 pub const CATALOG_SCHEMA_JSON: &[u8] = include_bytes!("../schema/plugin-catalog-v1.schema.json");
 
 const MAX_CATALOG_BYTES: usize = 4 * 1024 * 1024;
@@ -98,7 +99,10 @@ impl SignedCatalog {
     }
 
     pub fn validate(&self) -> Result<(), CatalogContractError> {
-        if self.schema_version != CATALOG_SCHEMA_VERSION || self.sequence == 0 {
+        if self.schema_version != CATALOG_SCHEMA_VERSION
+            || self.sequence == 0
+            || self.sequence > CATALOG_MAX_SEQUENCE
+        {
             return Err(CatalogContractError::schema());
         }
         validate_timestamp_shape(&self.issued_at)?;

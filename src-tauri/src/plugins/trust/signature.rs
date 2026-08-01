@@ -22,6 +22,9 @@ struct UnsignedCatalog<'a> {
 }
 
 pub fn catalog_signature_message(catalog: &SignedCatalog) -> Result<Vec<u8>, TrustError> {
+    catalog
+        .validate()
+        .map_err(|error| TrustError::new(error.code()))?;
     let unsigned = UnsignedCatalog {
         schema_version: catalog.schema_version,
         sequence: catalog.sequence,

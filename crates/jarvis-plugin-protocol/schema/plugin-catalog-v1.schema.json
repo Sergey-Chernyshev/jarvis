@@ -15,7 +15,7 @@
   ],
   "properties": {
     "schemaVersion": { "const": 1, "type": "integer", "minimum": 1, "maximum": 1 },
-    "sequence": { "type": "integer", "minimum": 1 },
+    "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
     "issuedAt": { "$ref": "#/$defs/timestamp" },
     "expiresAt": { "$ref": "#/$defs/timestamp" },
     "previousDigest": {

@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -42,6 +43,30 @@ impl fmt::Display for LeaseError {
 }
 
 impl Error for LeaseError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExactReleaseOutcome {
+    Confirmed,
+    AlreadyAbsent(ErrorCode),
+    Retryable(LeaseError),
+}
+
+impl ExactReleaseOutcome {
+    pub(crate) fn from_result(result: Result<(), LeaseError>) -> Self {
+        match result {
+            Ok(()) => Self::Confirmed,
+            Err(LeaseError::Rejected(
+                code @ (ErrorCode::LeaseExpired | ErrorCode::LeaseNotFound),
+            )) => Self::AlreadyAbsent(code),
+            Err(error) => Self::Retryable(error),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn resolved(self) -> bool {
+        matches!(self, Self::Confirmed | Self::AlreadyAbsent(_))
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct LeaseClient {
@@ -125,15 +150,32 @@ struct RenewalControl {
     wake: Condvar,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RenewalExit {
+    Cancelled,
+    AttemptStopped,
+    ControlFailed,
+    Panicked,
+}
+
 pub(crate) struct RenewalHandle {
     control: Arc<RenewalControl>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl RenewalHandle {
+    #[cfg(test)]
     pub(crate) fn try_start(
         interval: Duration,
+        attempt: impl FnMut() -> bool + Send + 'static,
+    ) -> std::io::Result<Self> {
+        Self::try_start_with_exit(interval, attempt, |_| {})
+    }
+
+    pub(crate) fn try_start_with_exit(
+        interval: Duration,
         mut attempt: impl FnMut() -> bool + Send + 'static,
+        on_exit: impl FnOnce(RenewalExit) + Send + 'static,
     ) -> std::io::Result<Self> {
         let control = Arc::new(RenewalControl {
             cancelled: Mutex::new(false),
@@ -142,19 +184,29 @@ impl RenewalHandle {
         let worker_control = control.clone();
         let worker = std::thread::Builder::new()
             .name("jarvis-power-renewal".into())
-            .spawn(move || loop {
-                let cancelled = worker_control
-                    .cancelled
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                let cancelled = worker_control
-                    .wake
-                    .wait_timeout_while(cancelled, interval, |cancelled| !*cancelled)
-                    .map(|(cancelled, _)| *cancelled)
-                    .unwrap_or(true);
-                if cancelled || !attempt() {
-                    break;
-                }
+            .spawn(move || {
+                let exit = catch_unwind(AssertUnwindSafe(|| loop {
+                    let cancelled = worker_control
+                        .cancelled
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    let cancelled = match worker_control.wake.wait_timeout_while(
+                        cancelled,
+                        interval,
+                        |cancelled| !*cancelled,
+                    ) {
+                        Ok((cancelled, _)) => *cancelled,
+                        Err(_) => return RenewalExit::ControlFailed,
+                    };
+                    if cancelled {
+                        return RenewalExit::Cancelled;
+                    }
+                    if !attempt() {
+                        return RenewalExit::AttemptStopped;
+                    }
+                }))
+                .unwrap_or(RenewalExit::Panicked);
+                on_exit(exit);
             })?;
         Ok(Self {
             control,
@@ -170,8 +222,25 @@ impl RenewalHandle {
         Self::try_start(interval, attempt).expect("renewal test worker")
     }
 
+    #[cfg(test)]
+    pub(crate) fn start_with_exit(
+        interval: Duration,
+        attempt: impl FnMut() -> bool + Send + 'static,
+        on_exit: impl FnOnce(RenewalExit) + Send + 'static,
+    ) -> Self {
+        Self::try_start_with_exit(interval, attempt, on_exit)
+            .expect("renewal test worker with exit reporting")
+    }
+
     pub(crate) fn stop(mut self) {
         self.stop_inner();
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        match self.worker.as_ref() {
+            Some(worker) => worker.is_finished(),
+            None => true,
+        }
     }
 
     fn stop_inner(&mut self) {
@@ -390,8 +459,7 @@ mod tests {
     #[test]
     fn terminal_absence_resolves_only_the_exact_receipt_debt() {
         for code in [ErrorCode::LeaseExpired, ErrorCode::LeaseNotFound] {
-            let outcome =
-                ExactReleaseOutcome::from_result(Err(LeaseError::Rejected(code)));
+            let outcome = ExactReleaseOutcome::from_result(Err(LeaseError::Rejected(code)));
             assert_eq!(outcome, ExactReleaseOutcome::AlreadyAbsent(code));
             assert!(outcome.resolved());
         }

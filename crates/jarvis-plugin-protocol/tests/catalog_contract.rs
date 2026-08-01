@@ -1,6 +1,6 @@
 use jarvis_plugin_protocol::catalog::{
-    CatalogPayload, CatalogRelease, CatalogSignatureV1, PublisherKey, PublisherKeyLineage,
-    RootKey, RootRotationProposal, SignedCatalog, CATALOG_SCHEMA_JSON, CATALOG_SCHEMA_VERSION,
+    CatalogPayload, CatalogRelease, CatalogSignatureV1, PublisherKey, PublisherKeyLineage, RootKey,
+    RootRotationProposal, SignedCatalog, CATALOG_SCHEMA_JSON, CATALOG_SCHEMA_VERSION,
 };
 use jarvis_plugin_protocol::package::{PackageTarget, SignatureAlgorithm};
 use serde_json::{json, Value};

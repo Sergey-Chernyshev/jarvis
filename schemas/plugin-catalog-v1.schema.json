@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jarvis.local/schemas/plugin-catalog-v1.schema.json",
+  "title": "Jarvis Signed Plugin Catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "sequence",
+    "issuedAt",
+    "expiresAt",
+    "previousDigest",
+    "payload",
+    "signatures"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1, "type": "integer", "minimum": 1, "maximum": 1 },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "issuedAt": { "$ref": "#/$defs/timestamp" },
+    "expiresAt": { "$ref": "#/$defs/timestamp" },
+    "previousDigest": {
+      "oneOf": [
+        { "$ref": "#/$defs/digest" },
+        { "type": "null" }
+      ]
+    },
+    "payload": { "$ref": "#/$defs/payload" },
+    "signatures": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/catalogSignature" }
+    }
+  },
+  "$defs": {
+    "catalogSignature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "keyId", "value"],
+      "properties": {
+        "algorithm": { "const": "ed25519" },
+        "keyId": { "$ref": "#/$defs/keyId" },
+        "value": { "$ref": "#/$defs/signature" }
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "publisherLineages",
+        "releases",
+        "rootRotation",
+        "revokedPackageDigests",
+        "revokedPublisherKeys"
+      ],
+      "properties": {
+        "publisherLineages": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/publisherLineage" }
+        },
+        "releases": {
+          "type": "array",
+          "maxItems": 20000,
+          "items": { "$ref": "#/$defs/release" }
+        },
+        "rootRotation": {
+          "oneOf": [
+            { "$ref": "#/$defs/rootRotation" },
+            { "type": "null" }
+          ]
+        },
+        "revokedPackageDigests": {
+          "type": "array",
+          "maxItems": 20000,
+          "items": { "$ref": "#/$defs/digest" }
+        },
+        "revokedPublisherKeys": {
+          "type": "array",
+          "maxItems": 20000,
+          "items": { "$ref": "#/$defs/keyId" }
+        }
+      }
+    },
+    "publisherLineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "publisher", "pluginIds", "keys"],
+      "properties": {
+        "id": { "$ref": "#/$defs/keyId" },
+        "publisher": { "$ref": "#/$defs/publisherId" },
+        "pluginIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/pluginId" }
+        },
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/publicKey" }
+        }
+      }
+    },
+    "rootRotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["threshold", "keys"],
+      "properties": {
+        "threshold": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/rootKey" }
+        }
+      }
+    },
+    "publicKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["keyId", "algorithm", "publicKey", "validFrom", "validUntil"],
+      "properties": {
+        "keyId": { "$ref": "#/$defs/keyId" },
+        "algorithm": { "const": "ed25519" },
+        "publicKey": { "$ref": "#/$defs/publicKeyHex" },
+        "validFrom": { "$ref": "#/$defs/timestamp" },
+        "validUntil": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "rootKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["keyId", "algorithm", "publicKey", "validFrom", "validUntil"],
+      "properties": {
+        "keyId": { "$ref": "#/$defs/keyId" },
+        "algorithm": { "const": "ed25519" },
+        "publicKey": { "$ref": "#/$defs/publicKeyHex" },
+        "validFrom": { "$ref": "#/$defs/timestamp" },
+        "validUntil": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pluginId",
+        "publisher",
+        "version",
+        "publisherKeyId",
+        "publisherLineage",
+        "jarvisRange",
+        "pluginApi",
+        "target",
+        "minimumMacos",
+        "url",
+        "archiveDigest",
+        "packageSignature",
+        "revoked"
+      ],
+      "properties": {
+        "pluginId": { "$ref": "#/$defs/pluginId" },
+        "publisher": { "$ref": "#/$defs/publisherId" },
+        "version": { "$ref": "#/$defs/semver" },
+        "publisherKeyId": { "$ref": "#/$defs/keyId" },
+        "publisherLineage": { "$ref": "#/$defs/keyId" },
+        "jarvisRange": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "pluginApi": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "target": { "enum": ["darwin-arm64", "darwin-amd64"] },
+        "minimumMacos": { "$ref": "#/$defs/macosVersion" },
+        "url": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "archiveDigest": { "$ref": "#/$defs/digest" },
+        "packageSignature": { "$ref": "#/$defs/packageSignature" },
+        "revoked": { "type": "boolean" }
+      }
+    },
+    "packageSignature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "keyId", "value"],
+      "properties": {
+        "algorithm": { "const": "ed25519" },
+        "keyId": { "$ref": "#/$defs/keyId" },
+        "value": { "$ref": "#/$defs/signature" }
+      }
+    },
+    "pluginId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$"
+    },
+    "publisherId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
+    },
+    "semver": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 128,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 71,
+      "maxLength": 71,
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "macosVersion": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 32,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "keyId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "publicKeyHex": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 88,
+      "maxLength": 88,
+      "pattern": "^[A-Za-z0-9+/]{85}[AQgw]==$"
+    },
+    "timestamp": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "format": "date-time"
+    }
+  }
+}

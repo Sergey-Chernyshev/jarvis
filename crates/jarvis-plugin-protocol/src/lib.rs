@@ -2,6 +2,7 @@
 
 pub mod bridge;
 pub mod broker;
+pub mod catalog;
 pub mod contribution;
 pub mod error;
 pub mod json;

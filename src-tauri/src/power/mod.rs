@@ -2140,6 +2140,124 @@ mod tests {
         }
     }
 
+    fn other_helper_receipt() -> LeaseReceipt {
+        LeaseReceipt {
+            lease_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            owner_generation: "other".into(),
+        }
+    }
+
+    #[test]
+    fn clamshell_transition_fences_arm_until_the_serialized_toggle_finishes() {
+        let receipt = helper_receipt();
+        let mut clam = Clam::default();
+        let transition = clam.begin_transition();
+
+        assert!(clam.transitioning);
+        assert_eq!(
+            clam.commit_acquired_if_active(receipt.clone(), "manual"),
+            Err(receipt)
+        );
+        assert!(clam.set_transition_active(transition, true));
+        assert!(!clam.finish_transition(transition.wrapping_sub(1)));
+        assert!(
+            clam.transitioning,
+            "stale completion must not open the fence"
+        );
+        assert!(clam.finish_transition(transition));
+        assert!(clam.active);
+        assert!(!clam.transitioning);
+
+        let source = include_str!("mod.rs");
+        let enable = source
+            .split_once("async fn set_clamshell_enabled")
+            .expect("serialized clamshell toggle")
+            .1
+            .split_once("fn deactivate_clamshell")
+            .expect("toggle boundary")
+            .0;
+        assert!(enable.contains("clam_transition.lock().await"));
+        assert!(enable.contains("persisted_clamshell_enabled"));
+    }
+
+    #[test]
+    fn mismatched_receipt_debt_is_a_full_noop() {
+        let current = other_helper_receipt();
+        let stale = helper_receipt();
+        let mut clam = Clam {
+            active: true,
+            armed: true,
+            armed_by: Some("manual"),
+            lease: Some(current.clone()),
+            renewal_error: Some("current error".into()),
+            ..Clam::default()
+        };
+
+        assert!(!clam.retain_lease_debt(stale, "stale error"));
+        assert!(clam.active);
+        assert!(clam.armed);
+        assert_eq!(clam.armed_by, Some("manual"));
+        assert_eq!(clam.lease.as_ref(), Some(&current));
+        assert_eq!(clam.renewal_error.as_deref(), Some("current error"));
+    }
+
+    #[test]
+    fn retained_debt_and_terminal_loss_remain_battery_guarded() {
+        let receipt = helper_receipt();
+        let mut clam = Clam {
+            lease: Some(receipt.clone()),
+            armed: false,
+            last_guard_at: 0,
+            ..Clam::default()
+        };
+
+        assert!(clam.needs_battery_guard(GUARD_EVERY_MS));
+        assert!(clam.mark_terminal_lease_loss(&receipt, "lease expired"));
+        assert!(clam.lease.is_none());
+        assert!(clam.safety_sleep_pending);
+        assert!(clam.needs_battery_guard(GUARD_EVERY_MS));
+    }
+
+    #[test]
+    fn unknown_acquire_retries_the_same_generation_with_backoff_until_ttl() {
+        let mut pending = UnknownAcquire::new(
+            "profile".into(),
+            "generation-a".into(),
+            "manual",
+            10_000,
+            "first response timed out".into(),
+        );
+
+        assert!(pending.blocks_blind_retry(10_000));
+        assert!(!pending.retry_due(pending.next_retry_at - 1));
+        assert!(pending.retry_due(pending.next_retry_at));
+        let generation = pending.owner_generation.clone();
+        let first_retry_at = pending.next_retry_at;
+        assert!(pending.record_retry_failure(first_retry_at, "still unknown".into()));
+        assert_eq!(pending.owner_generation, generation);
+        assert!(pending.next_retry_at > first_retry_at);
+        assert!(!pending.blocks_blind_retry(pending.expires_at));
+    }
+
+    #[test]
+    fn cleanup_debt_has_truthful_tray_status_and_safe_retry_action() {
+        let clam = Clam {
+            active: false,
+            lease: Some(helper_receipt()),
+            renewal_error: Some("helper unavailable".into()),
+            ..Clam::default()
+        };
+
+        let status = clamshell_tray_status(&clam);
+        assert!(status.contains("освобождение"));
+        assert!(!status.contains("уснёт"));
+        assert!(clam.can_retry_cleanup());
+
+        let source = include_str!("mod.rs");
+        assert!(source.contains("\"retry-cleanup\" => retry_clamshell_cleanup"));
+        assert!(source.contains("\"cs:retry-cleanup\""));
+    }
+
     #[test]
     fn disabled_clamshell_rejects_late_acquire_and_keeps_cleanup_debt_visible() {
         let receipt = helper_receipt();

@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jarvis.local/schemas/plugin-package-v1.schema.json",
+  "title": "Jarvis Plugin Package Metadata v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "pluginId",
+    "publisher",
+    "version",
+    "manifestDigest",
+    "target",
+    "minimumMacos",
+    "jarvisRange",
+    "pluginApi",
+    "state",
+    "files",
+    "payloadRoot"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1, "type": "integer", "minimum": 1, "maximum": 1 },
+    "pluginId": { "$ref": "#/$defs/pluginId" },
+    "publisher": { "$ref": "#/$defs/publisherId" },
+    "version": { "$ref": "#/$defs/semver" },
+    "manifestDigest": { "$ref": "#/$defs/digest" },
+    "target": { "enum": ["darwin-arm64", "darwin-amd64"] },
+    "minimumMacos": { "$ref": "#/$defs/macosVersion" },
+    "jarvisRange": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "pluginApi": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "state": { "$ref": "#/$defs/state" },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20000,
+      "items": { "$ref": "#/$defs/file" }
+    },
+    "payloadRoot": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "pluginId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$"
+    },
+    "publisherId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
+    },
+    "semver": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 128,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 71,
+      "maxLength": 71,
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "macosVersion": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 32,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "packagePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*[/]$)(?!.*[\\\\%?#:\\u0000-\\u001F\\u007F-\\u009F]).+$"
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "migrations", "rollbackCompatibleThrough"],
+      "properties": {
+        "schemaVersion": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "migrations": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "to", "entry"],
+            "properties": {
+              "from": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+              "to": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+              "entry": { "$ref": "#/$defs/packagePath" }
+            }
+          }
+        },
+        "rollbackCompatibleThrough": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "mode", "size", "digest"],
+      "properties": {
+        "path": { "$ref": "#/$defs/packagePath" },
+        "kind": { "const": "regular" },
+        "mode": { "enum": ["0444", "0555"] },
+        "size": { "type": "integer", "minimum": 0, "maximum": 536870912 },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    }
+  }
+}

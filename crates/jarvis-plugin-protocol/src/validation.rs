@@ -143,7 +143,7 @@ fn exact_u32_schema(generator: &mut SchemaGenerator, value: u32) -> Schema {
     schema.enum_values = Some(vec![serde_json::json!(value)]);
     let validation = schema
         .number
-        .get_or_insert_with(|| Box::new(NumberValidation::default()));
+        .get_or_insert_with(Box::<NumberValidation>::default);
     validation.minimum = Some(f64::from(value));
     validation.maximum = Some(f64::from(value));
     schema.into()
@@ -154,7 +154,7 @@ fn bounded_u32_schema(generator: &mut SchemaGenerator, minimum: u32, maximum: u3
     schema.metadata().description = Some(format!("Inclusive range: {minimum}..={maximum}."));
     let validation = schema
         .number
-        .get_or_insert_with(|| Box::new(NumberValidation::default()));
+        .get_or_insert_with(Box::<NumberValidation>::default);
     validation.minimum = Some(f64::from(minimum));
     validation.maximum = Some(f64::from(maximum));
     schema.into()
@@ -165,7 +165,7 @@ fn bounded_u64_schema(generator: &mut SchemaGenerator, minimum: u64, maximum: u6
     schema.metadata().description = Some(format!("Inclusive range: {minimum}..={maximum}."));
     let validation = schema
         .number
-        .get_or_insert_with(|| Box::new(NumberValidation::default()));
+        .get_or_insert_with(Box::<NumberValidation>::default);
     validation.minimum = Some(minimum as f64);
     validation.maximum = Some(maximum as f64);
     schema.into()
@@ -183,7 +183,7 @@ fn utf8_string_schema(
     ));
     let validation = schema
         .string
-        .get_or_insert_with(|| Box::new(StringValidation::default()));
+        .get_or_insert_with(Box::<StringValidation>::default);
     validation.min_length = Some(min_length);
     validation.max_length = Some(max_bytes);
     if forbid_controls {
@@ -251,7 +251,7 @@ fn string_array_schema(
     let mut schema: SchemaObject = <Vec<String>>::json_schema(generator).into();
     let validation = schema
         .array
-        .get_or_insert_with(|| Box::new(ArrayValidation::default()));
+        .get_or_insert_with(Box::<ArrayValidation>::default);
     validation.min_items = Some(min_items);
     validation.max_items = Some(max_items);
     validation.items = Some(SingleOrVec::Single(Box::new(string_schema(
@@ -265,7 +265,7 @@ fn string_array_schema(
 fn apply_string_validation(schema: &mut SchemaObject, max_length: u32, pattern: &str) {
     let validation = schema
         .string
-        .get_or_insert_with(|| Box::new(StringValidation::default()));
+        .get_or_insert_with(Box::<StringValidation>::default);
     validation.min_length = Some(1);
     validation.max_length = Some(max_length);
     validation.pattern = Some(pattern.to_owned());

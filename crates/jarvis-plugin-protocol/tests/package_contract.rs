@@ -74,8 +74,13 @@ fn package_schema_rejects_unknown_fields_and_wrong_enum_spellings() {
 
 #[test]
 fn package_path_accepts_exact_1024_bytes_and_rejects_1025() {
-    let exact = ["a".repeat(255), "b".repeat(255), "c".repeat(255), "d".repeat(255)]
-        .join("/");
+    let exact = [
+        "a".repeat(255),
+        "b".repeat(255),
+        "c".repeat(255),
+        "d".repeat(255),
+    ]
+    .join("/");
     assert_eq!(exact.len(), 1023);
     let exact = format!("x/{exact}");
     assert_eq!(exact.len(), 1025);
@@ -132,7 +137,8 @@ fn macos_version_requires_canonical_three_component_form() {
 
 #[test]
 fn signature_requires_canonical_padded_base64_of_64_bytes() {
-    let canonical = "paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpQ==";
+    let canonical =
+        "paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpQ==";
     let signature: PackageSignatureV1 = serde_json::from_value(json!({
         "algorithm": "ed25519",
         "keyId": "example.release-key:1",
@@ -161,12 +167,18 @@ fn signature_requires_canonical_padded_base64_of_64_bytes() {
 fn package_metadata_round_trips_without_wire_field_drift() {
     let metadata: PackageMetadataV1 = serde_json::from_value(metadata_value()).unwrap();
     assert_eq!(metadata.schema_version, PACKAGE_SCHEMA_VERSION);
-    assert_eq!(metadata.plugin_id, PluginId::new("dev.example.echo").unwrap());
+    assert_eq!(
+        metadata.plugin_id,
+        PluginId::new("dev.example.echo").unwrap()
+    );
     assert_eq!(metadata.publisher, PublisherId::new("example").unwrap());
     assert_eq!(metadata.version, Version::parse("1.2.3").unwrap());
     assert_eq!(metadata.manifest_digest, Digest::new(DIGEST_A).unwrap());
     assert_eq!(metadata.target, PackageTarget::DarwinArm64);
-    assert_eq!(metadata.minimum_macos, MacOsVersion::parse("14.0.0").unwrap());
+    assert_eq!(
+        metadata.minimum_macos,
+        MacOsVersion::parse("14.0.0").unwrap()
+    );
     assert_eq!(metadata.jarvis_range.as_str(), ">=0.4.0, <0.5.0");
     assert_eq!(
         metadata.state,
@@ -186,8 +198,5 @@ fn package_metadata_round_trips_without_wire_field_drift() {
             digest: Digest::new(DIGEST_A).unwrap(),
         }]
     );
-    assert_eq!(
-        serde_json::to_value(metadata).unwrap(),
-        metadata_value()
-    );
+    assert_eq!(serde_json::to_value(metadata).unwrap(), metadata_value());
 }

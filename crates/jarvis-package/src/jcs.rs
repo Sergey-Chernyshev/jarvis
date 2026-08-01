@@ -1,3 +1,24 @@
+use jarvis_plugin_protocol::json::{parse_bounded_json_with_limits, JsonLimits};
+use serde_json::Value;
+
+// Step A3.3 wires this bounded canonical reader into package metadata construction.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JcsError {
+    InvalidJson,
+    NotCanonical,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn parse_exact_jcs(bytes: &[u8], limits: JsonLimits) -> Result<Value, JcsError> {
+    let value = parse_bounded_json_with_limits(bytes, limits).map_err(|_| JcsError::InvalidJson)?;
+    let canonical = serde_json_canonicalizer::to_vec(&value).map_err(|_| JcsError::InvalidJson)?;
+    if canonical != bytes {
+        return Err(JcsError::NotCanonical);
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_exact_jcs, JcsError};
@@ -15,9 +36,9 @@ mod tests {
 
     #[test]
     fn rfc8785_number_formatting_is_byte_exact() {
-        let raw = br#"{"numbers":[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001]}"#;
-        let canonical =
-            br#"{"numbers":[333333333.3333333,1e+30,4.5,0.002,1e-27]}"#;
+        let raw =
+            br#"{"numbers":[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001]}"#;
+        let canonical = br#"{"numbers":[333333333.3333333,1e+30,4.5,0.002,1e-27]}"#;
 
         assert_eq!(
             parse_exact_jcs(raw.as_slice(), package_limits()).unwrap_err(),
@@ -50,10 +71,12 @@ mod tests {
 
     #[test]
     fn rfc8785_orders_object_names_by_utf16_code_units() {
-        let canonical = "{\"\\r\":\"CR\",\"1\":\"one\",\"€\":\"euro\",\"😀\":\"grin\",\"דּ\":\"ligature\"}";
+        let canonical =
+            "{\"\\r\":\"CR\",\"1\":\"one\",\"€\":\"euro\",\"😀\":\"grin\",\"דּ\":\"ligature\"}";
         assert!(parse_exact_jcs(canonical.as_bytes(), package_limits()).is_ok());
 
-        let wrong = "{\"\\r\":\"CR\",\"1\":\"one\",\"€\":\"euro\",\"דּ\":\"ligature\",\"😀\":\"grin\"}";
+        let wrong =
+            "{\"\\r\":\"CR\",\"1\":\"one\",\"€\":\"euro\",\"דּ\":\"ligature\",\"😀\":\"grin\"}";
         assert_eq!(
             parse_exact_jcs(wrong.as_bytes(), package_limits()).unwrap_err(),
             JcsError::NotCanonical

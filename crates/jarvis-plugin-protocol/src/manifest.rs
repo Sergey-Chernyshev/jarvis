@@ -4,11 +4,12 @@ use std::fmt;
 
 use schemars::JsonSchema;
 use semver::{Version, VersionReq};
-use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::de::{self};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use unicode_normalization::UnicodeNormalization;
 
+use crate::json::{parse_bounded_json_with_limits, BoundedJsonError, JsonLimits};
 use crate::validation::{
     is_canonical_dotted_id as valid_dotted_id, is_canonical_segment as valid_segment,
 };
@@ -258,6 +259,16 @@ impl Serialize for VersionRange {
     }
 }
 
+impl<'de> Deserialize<'de> for VersionRange {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(raw).map_err(|_| de::Error::custom("invalid semantic version range"))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManifestV2 {
@@ -326,167 +337,20 @@ impl ManifestV2 {
 }
 
 pub fn parse_bounded_json(bytes: &[u8]) -> Result<Value, ManifestError> {
-    if bytes.len() > MAX_MANIFEST_BYTES {
-        return Err(ManifestError::TooLarge);
-    }
-    validate_raw_depth(bytes)?;
-    reject_duplicate_keys(bytes)?;
-    let value: Value = serde_json::from_slice(bytes).map_err(|_| ManifestError::Schema)?;
-    validate_value_quotas(&value)?;
-    Ok(value)
-}
-
-fn validate_raw_depth(bytes: &[u8]) -> Result<(), ManifestError> {
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for byte in bytes {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if *byte == b'\\' {
-                escaped = true;
-            } else if *byte == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match *byte {
-            b'"' => in_string = true,
-            b'{' | b'[' => {
-                depth += 1;
-                if depth > MAX_JSON_DEPTH {
-                    return Err(ManifestError::TooDeep);
-                }
-            }
-            b'}' | b']' => {
-                if depth == 0 {
-                    return Err(ManifestError::Schema);
-                }
-                depth -= 1;
-            }
-            _ => {}
-        }
-    }
-    if in_string || depth != 0 {
-        return Err(ManifestError::Schema);
-    }
-    Ok(())
-}
-
-fn reject_duplicate_keys(bytes: &[u8]) -> Result<(), ManifestError> {
-    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    NoDuplicateValue::deserialize(&mut deserializer).map_err(|_| ManifestError::Schema)?;
-    deserializer.end().map_err(|_| ManifestError::Schema)
-}
-
-struct NoDuplicateValue;
-
-impl<'de> Deserialize<'de> for NoDuplicateValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(NoDuplicateVisitor)
-    }
-}
-
-struct NoDuplicateVisitor;
-
-impl<'de> Visitor<'de> for NoDuplicateVisitor {
-    type Value = NoDuplicateValue;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a JSON value without duplicate object keys")
-    }
-
-    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
-        Ok(NoDuplicateValue)
-    }
-
-    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
-        Ok(NoDuplicateValue)
-    }
-
-    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
-        Ok(NoDuplicateValue)
-    }
-
-    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
-        Ok(NoDuplicateValue)
-    }
-
-    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
-        Ok(NoDuplicateValue)
-    }
-
-    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
-        Ok(NoDuplicateValue)
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(NoDuplicateValue)
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(NoDuplicateValue)
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        while sequence.next_element::<NoDuplicateValue>()?.is_some() {}
-        Ok(NoDuplicateValue)
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut keys = BTreeSet::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if !keys.insert(key) {
-                return Err(de::Error::custom("duplicate JSON object key"));
-            }
-            map.next_value::<NoDuplicateValue>()?;
-        }
-        Ok(NoDuplicateValue)
-    }
-}
-
-fn validate_value_quotas(value: &Value) -> Result<(), ManifestError> {
-    let mut nodes = 0usize;
-    let mut stack = vec![(value, 0usize)];
-    while let Some((current, depth)) = stack.pop() {
-        nodes += 1;
-        if nodes > MAX_JSON_NODES {
-            return Err(ManifestError::TooLarge);
-        }
-        if depth > MAX_JSON_DEPTH {
-            return Err(ManifestError::TooDeep);
-        }
-        match current {
-            Value::String(value) => {
-                if value.len() > MAX_JSON_STRING_BYTES {
-                    return Err(ManifestError::TooLarge);
-                }
-            }
-            Value::Array(values) => {
-                stack.extend(values.iter().map(|value| (value, depth + 1)));
-            }
-            Value::Object(values) => {
-                for (key, value) in values {
-                    if key.len() > MAX_JSON_STRING_BYTES {
-                        return Err(ManifestError::TooLarge);
-                    }
-                    stack.push((value, depth + 1));
-                }
-            }
-            Value::Null | Value::Bool(_) | Value::Number(_) => {}
-        }
-    }
-    Ok(())
+    parse_bounded_json_with_limits(
+        bytes,
+        JsonLimits {
+            max_bytes: MAX_MANIFEST_BYTES,
+            max_depth: MAX_JSON_DEPTH,
+            max_nodes: MAX_JSON_NODES,
+            max_string_bytes: MAX_JSON_STRING_BYTES,
+        },
+    )
+    .map_err(|error| match error {
+        BoundedJsonError::TooLarge => ManifestError::TooLarge,
+        BoundedJsonError::TooDeep => ManifestError::TooDeep,
+        BoundedJsonError::Invalid | BoundedJsonError::Io(_) => ManifestError::Schema,
+    })
 }
 
 #[derive(Deserialize)]

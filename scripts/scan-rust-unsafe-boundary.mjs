@@ -461,13 +461,17 @@ function isCoveredTrustSource(file, literal, discoveredFiles) {
   );
 }
 
-function sourceDiscoveryViolations(tokens, file, discoveredFiles) {
+function sourceDiscoveryViolations(
+  tokens,
+  file,
+  discoveredFiles,
+  sourceMacroNames,
+) {
   const violations = [];
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (
-      token.kind === 'identifier' &&
-      token.value === 'include' &&
+      isNamedSymbol(token, sourceMacroNames) &&
       tokens[index + 1]?.value === '!'
     ) {
       const opener = tokens[index + 2]?.value;
@@ -610,6 +614,12 @@ function addUseAliases(tokenizedFiles, names) {
 
 function packageTrustVerifierNames(tokenizedFiles) {
   const names = new Set([canonicalSymbolName('PackageTrustVerifier')]);
+  addUseAliases(tokenizedFiles, names);
+  return names;
+}
+
+function sourceExpandingMacroNames(tokenizedFiles) {
+  const names = new Set([canonicalSymbolName('include')]);
   addUseAliases(tokenizedFiles, names);
   return names;
 }
@@ -778,6 +788,7 @@ const tokenizedFiles = [...discoveredFiles].sort().map((file) => {
     tokens: lexRust(readFileSync(file, 'utf8')),
   };
 });
+const sourceMacroNames = sourceExpandingMacroNames(tokenizedFiles);
 const verifierNames = packageTrustVerifierNames(tokenizedFiles);
 const verifierMacroNames = packageTrustVerifierMacroNames(
   tokenizedFiles,
@@ -788,6 +799,7 @@ for (const { file, tokens } of tokenizedFiles) {
     tokens,
     file,
     discoveredFiles,
+    sourceMacroNames,
   )) {
     process.stdout.write(`source\t${file}:${violation.line}\t${violation.reason}\n`);
   }

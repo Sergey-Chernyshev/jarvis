@@ -1,8 +1,7 @@
-pub(crate) mod lifecycle;
-pub(crate) mod xpc;
-
-#[cfg(feature = "power-helper-dev")]
 pub(crate) mod client;
+pub(crate) mod lifecycle;
+pub(crate) mod renewal;
+pub(crate) mod xpc;
 
 #[cfg(feature = "power-helper-dev")]
 pub(crate) mod dev_uds;

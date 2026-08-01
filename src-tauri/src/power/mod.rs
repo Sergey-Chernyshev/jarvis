@@ -1966,7 +1966,7 @@ mod tests {
                     operation,
                     Ok::<_, ()>(()),
                     |_| panic!("closed acquire must not commit"),
-                    || {
+                    |_| {
                         assert!(worker_lease.swap(false, Ordering::SeqCst));
                         worker_sleep.store(false, Ordering::SeqCst);
                         Ok(())
@@ -2002,7 +2002,7 @@ mod tests {
                     assert!(!operations.wait_for_idle(Duration::ZERO));
                     committed = true;
                 },
-                || panic!("accepted acquire must not roll back"),
+                |_| panic!("accepted acquire must not roll back"),
             )
             .unwrap();
 
@@ -2021,7 +2021,7 @@ mod tests {
             operation,
             Ok::<_, &'static str>(()),
             |_| panic!("closed acquire must not commit"),
-            || Err("rollback failed"),
+            |_| Err("rollback failed"),
         );
 
         assert_eq!(result, Err("rollback failed"));

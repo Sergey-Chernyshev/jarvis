@@ -1,10 +1,12 @@
 use std::error::Error;
+#[cfg(feature = "power-helper-dev")]
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 
 use jarvis_power_core::protocol::{ProtocolError, Request, ResponseEnvelope};
 
+#[cfg(feature = "power-helper-dev")]
 use super::dev_uds::DevUdsClient;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +83,7 @@ pub(crate) trait HelperClient {
     fn trust(&self) -> HelperTrust;
 }
 
+#[cfg(feature = "power-helper-dev")]
 pub(crate) fn select_for_runtime_value(value: Option<&OsStr>) -> Option<DevUdsClient> {
     (value == Some(OsStr::new("1"))).then(|| DevUdsClient::new(crate::util::jarvis_dir()))
 }
@@ -93,7 +96,7 @@ pub(super) fn map_io_error(error: io::Error) -> HelperClientError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "power-helper-dev"))]
 mod tests {
     use std::ffi::{OsStr, OsString};
     use std::os::unix::ffi::OsStringExt;

@@ -769,6 +769,7 @@ printf '%s\n' \
   'pub const SOURCE_TEXT: &str = "include!(\"escaped.inc\") #[path = \"escaped.rs\"]";' \
   'pub fn r#unsafe() {}' \
   'pub fn r#include() {}' \
+  'pub fn r#path() {}' \
   'pub fn data_macros() {' \
   '    let _ = include_str!("text_mentions.rs");' \
   '    let _ = include_bytes!("text_mentions.rs");' \
@@ -806,11 +807,33 @@ expect_rejected "jarvis-package source discovery escape"
 
 write_clean_fixture
 printf '%s\n' \
+  '#[allow(unsafe_code)]' \
+  'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/src/escaped.inc"
+printf '%s\n' 'r#include!("escaped.inc");' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+expect_cargo_accepts_private_source
+expect_rejected "jarvis-package source discovery escape"
+
+write_clean_fixture
+printf '%s\n' \
   '#![allow(unsafe_code)]' \
   'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
   > "$fixture_root/crates/jarvis-package/src/escaped.inc"
 printf '%s\n' \
   '#[path = "escaped.inc"]' \
+  'mod escaped;' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+expect_cargo_accepts_private_source
+expect_rejected "jarvis-package source discovery escape"
+
+write_clean_fixture
+printf '%s\n' \
+  '#![allow(unsafe_code)]' \
+  'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/src/escaped.inc"
+printf '%s\n' \
+  '#[r#path = "escaped.inc"]' \
   'mod escaped;' \
   >> "$fixture_root/crates/jarvis-package/src/lib.rs"
 expect_cargo_accepts_private_source
@@ -841,6 +864,15 @@ printf '%s\n' 'mod linked;' \
   >> "$fixture_root/crates/jarvis-package/src/lib.rs"
 expect_cargo_accepts_private_source
 expect_rejected "jarvis-package source discovery escape"
+
+write_clean_fixture
+mkdir -p "$fixture_root/external-source"
+printf '%s\n' \
+  'pub struct HiddenSource;' \
+  > "$fixture_root/external-source/hidden.rs"
+ln -s ../../../external-source/hidden.rs \
+  "$fixture_root/plugins/community/src/linked.rs"
+expect_rejected "PackageTrustVerifier source discovery escape"
 
 write_clean_fixture
 printf '%s\n' \

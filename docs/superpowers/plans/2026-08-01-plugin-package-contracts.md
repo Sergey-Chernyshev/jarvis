@@ -629,7 +629,16 @@ source file may contain either an unsafe allow or unsafe syntax.
 The boundary gate tokenizes Rust before enforcing the unsafe allowlist, ignoring nested comments, string/byte/raw
 string literals and raw identifiers. This keeps the single module-scoped allow structurally exact while rejecting
 combined or multiline lint downgrades and split-line unsafe syntax without false positives from documentation or
-fixtures.
+fixtures. It walks every nested source directory except the package-root Cargo build output, rejects symlinked source,
+`include!` and custom `#[path]`, and adds every Cargo target `src_path` even when the crate root has a non-Rust
+extension. Compiler-consumed Rust therefore cannot hide behind an extension or directory name. `include_str!` and
+`include_bytes!` remain ordinary data access and are not source-expansion violations.
+
+Cargo dependency boundaries use `cargo metadata --no-deps --format-version=1 --locked --offline` for repository
+manifests, then compare the normalized underlying package name and canonical path. TOML key quoting, dotted-table
+syntax, aliases and field order therefore cannot bypass the `src-tauri -> jarvis-package` ownership rule. Ephemeral
+negative fixtures use Cargo's read-only manifest parser under a temp-root-only guard, so the production path remains
+locked, offline and non-mutating.
 
 `crates/jarvis-package/src/dependency_msrv.rs` is a crate-unit probe compiled only through the `#[cfg(test)]` module
 above and defines the test `exact_dependency_apis_execute`. It must compile and execute the exact A3 APIs used from
@@ -719,12 +728,19 @@ Extend `scripts/check-plugin-boundaries.sh` and its negative-fixture test so all
 6. unsafe syntax anywhere in `crates/jarvis-package` — including functions, blocks, impls and traits under `src`,
    `tests`, `examples`, `benches` and `build.rs` if present — occurs only in the exact
    `crates/jarvis-package/src/macos_dir.rs` allowlist;
-7. the existing `jarvis-plugin-*` public-crate checks continue to require `#![forbid(unsafe_code)]`.
+7. nested directories are scanned as source even when named `target`, Cargo target `src_path` entries are scanned
+   regardless of extension, while symlink source, `include!` and custom `#[path]` are rejected rather than incompletely
+   resolved;
+8. the existing `jarvis-plugin-*` public-crate checks continue to require `#![forbid(unsafe_code)]`.
 
 Negative fixtures cover a public crate, a plugin and an unrelated private crate attempting the dependency, a
 publishable `jarvis-package`, a second/misplaced unsafe allow, and unsafe code in another source module, an integration
-test and `build.rs`. The clean fixture includes the one allowed `src-tauri -> jarvis-package` edge, the exact scoped
-module allow in `src/lib.rs`, and unsafe blocks only in `src/macos_dir.rs`.
+test and `build.rs`. Fully quoted Cargo tables are parsed by Cargo before rejection. Nested-`target`, non-Rust-extension
+`include!`/`#[path]` and symlink-directory candidates pass a real `cargo check` before the boundary gate rejects them.
+The clean fixture includes the one allowed `src-tauri -> jarvis-package` edge, the exact scoped module allow in
+`src/lib.rs`, unsafe blocks only in `src/macos_dir.rs`, and false-positive guards for comments, raw strings, raw
+identifiers, `include_str!` and `include_bytes!`. The fixture suite also hashes every committed Cargo lock before and
+after a production-mode boundary run, proving that the gate does not rewrite repository lockfiles.
 
 Add current-stable package test/clippy steps to the normal `rust` CI job. In the existing `plugin-msrv` macOS job,
 install the Rust 1.77.2 `clippy` component and add the same exact locked package commands:

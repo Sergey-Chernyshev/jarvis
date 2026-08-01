@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { readFileSync, readdirSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 const packageRoot = process.argv[2] ? realpathSync(resolve(process.argv[2])) : '';
 if (!packageRoot) {
@@ -9,25 +9,85 @@ if (!packageRoot) {
   process.exit(2);
 }
 
-function rustFiles(root) {
-  const files = [];
+function rustFiles(root, explicitTargetSources) {
+  const files = new Set();
+  const sourceEscapes = [];
+  const rootBuildOutput = join(root, 'target');
 
   function visit(directory) {
     for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
       a.name.localeCompare(b.name),
     )) {
-      if (entry.name === 'target' || entry.name === '.git') continue;
+      if (entry.name === '.git') continue;
       const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
+      if (entry.isSymbolicLink()) {
+        sourceEscapes.push({ path, line: 1, reason: 'symlink source entry' });
+      } else if (entry.isDirectory()) {
+        if (path === rootBuildOutput) continue;
         visit(path);
-      } else if ((entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith('.rs')) {
-        files.push(path);
+      } else if (entry.isFile() && entry.name.endsWith('.rs')) {
+        files.add(path);
       }
     }
   }
 
   visit(root);
-  return files;
+  for (const targetSource of explicitTargetSources) {
+    let sourceInfo;
+    try {
+      sourceInfo = lstatSync(targetSource);
+    } catch {
+      sourceEscapes.push({
+        path: targetSource,
+        line: 1,
+        reason: 'missing Cargo target source',
+      });
+      continue;
+    }
+    if (sourceInfo.isSymbolicLink()) {
+      sourceEscapes.push({
+        path: targetSource,
+        line: 1,
+        reason: 'symlink Cargo target source',
+      });
+      continue;
+    }
+    const realSource = realpathSync(targetSource);
+    const relativeSource = relative(root, realSource);
+    if (
+      relativeSource === '..' ||
+      relativeSource.startsWith(`..${sep}`) ||
+      isAbsolute(relativeSource)
+    ) {
+      sourceEscapes.push({
+        path: targetSource,
+        line: 1,
+        reason: 'Cargo target source outside package root',
+      });
+      continue;
+    }
+    if (
+      realSource === rootBuildOutput ||
+      realSource.startsWith(`${rootBuildOutput}${sep}`)
+    ) {
+      sourceEscapes.push({
+        path: targetSource,
+        line: 1,
+        reason: 'Cargo target source inside build output',
+      });
+      continue;
+    }
+    if (!sourceInfo.isFile()) {
+      sourceEscapes.push({
+        path: targetSource,
+        line: 1,
+        reason: 'Cargo target source is not a regular file',
+      });
+      continue;
+    }
+    files.add(realSource);
+  }
+  return { files: [...files].sort(), sourceEscapes };
 }
 
 function isIdentifierStart(character) {
@@ -206,8 +266,8 @@ function matchingToken(tokens, start, open, close, limit = tokens.length) {
   return -1;
 }
 
-function unsafeLintAttributes(tokens) {
-  const lines = [];
+function attributes(tokens) {
+  const ranges = [];
   for (let index = 0; index < tokens.length; index += 1) {
     if (tokens[index].value !== '#') continue;
     let bracket = index + 1;
@@ -215,8 +275,16 @@ function unsafeLintAttributes(tokens) {
     if (tokens[bracket]?.value !== '[') continue;
     const bracketEnd = matchingToken(tokens, bracket, '[', ']');
     if (bracketEnd === -1) continue;
+    ranges.push({ start: bracket + 1, end: bracketEnd });
+    index = bracketEnd;
+  }
+  return ranges;
+}
 
-    for (let cursor = bracket + 1; cursor < bracketEnd; cursor += 1) {
+function unsafeLintAttributes(tokens) {
+  const lines = [];
+  for (const attribute of attributes(tokens)) {
+    for (let cursor = attribute.start; cursor < attribute.end; cursor += 1) {
       const lintLevel = tokens[cursor];
       if (
         lintLevel.kind !== 'identifier' ||
@@ -225,7 +293,7 @@ function unsafeLintAttributes(tokens) {
       ) {
         continue;
       }
-      const argumentsEnd = matchingToken(tokens, cursor + 1, '(', ')', bracketEnd);
+      const argumentsEnd = matchingToken(tokens, cursor + 1, '(', ')', attribute.end);
       if (argumentsEnd === -1) continue;
       if (
         tokens
@@ -236,13 +304,48 @@ function unsafeLintAttributes(tokens) {
       }
       cursor = argumentsEnd;
     }
-    index = bracketEnd;
   }
   return lines;
 }
 
-for (const file of rustFiles(packageRoot)) {
+function sourceDiscoveryViolations(tokens) {
+  const violations = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (
+      token.kind === 'identifier' &&
+      !token.raw &&
+      token.value === 'include' &&
+      tokens[index + 1]?.value === '!'
+    ) {
+      violations.push({ line: token.line, reason: 'include! source expansion' });
+    }
+  }
+  for (const attribute of attributes(tokens)) {
+    for (let index = attribute.start; index < attribute.end; index += 1) {
+      const token = tokens[index];
+      if (
+        token.kind === 'identifier' &&
+        !token.raw &&
+        token.value === 'path' &&
+        tokens[index + 1]?.value === '='
+      ) {
+        violations.push({ line: token.line, reason: 'custom #[path] source' });
+      }
+    }
+  }
+  return violations;
+}
+
+const discovery = rustFiles(packageRoot, process.argv.slice(3));
+for (const escape of discovery.sourceEscapes) {
+  process.stdout.write(`source\t${escape.path}:${escape.line}\t${escape.reason}\n`);
+}
+for (const file of discovery.files) {
   const tokens = lexRust(readFileSync(file, 'utf8'));
+  for (const violation of sourceDiscoveryViolations(tokens)) {
+    process.stdout.write(`source\t${file}:${violation.line}\t${violation.reason}\n`);
+  }
   for (const line of unsafeLintAttributes(tokens)) {
     process.stdout.write(`allow\t${file}:${line}\n`);
   }

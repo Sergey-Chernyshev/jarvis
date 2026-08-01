@@ -3,7 +3,37 @@ set -euo pipefail
 
 repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cargo_bin="${CARGO_BIN:-cargo}"
 failed=0
+
+repo_root_resolved="$(cd "$repo_root" && pwd -P)"
+boundary_fixture_mode=0
+if [[ "${JARVIS_BOUNDARY_ALLOW_UNLOCKED_FIXTURES:-0}" == "1" ]]; then
+  tmp_root_resolved="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+  case "$repo_root_resolved" in
+    "$tmp_root_resolved"/jarvis-plugin-boundary.*)
+      boundary_fixture_mode=1
+      ;;
+    *)
+      echo "unlocked Cargo boundary mode is restricted to temporary fixtures: $repo_root" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+semantic_manifest_json() {
+  local manifest="$1"
+  if [[ "$boundary_fixture_mode" == "1" ]]; then
+    "$cargo_bin" read-manifest --manifest-path "$manifest"
+  else
+    "$cargo_bin" metadata \
+      --no-deps \
+      --format-version=1 \
+      --locked \
+      --offline \
+      --manifest-path "$manifest"
+  fi
+}
 
 report_matches() {
   local message="$1"
@@ -74,8 +104,50 @@ if [[ -f "$package_manifest" ]]; then
     failed=1
   fi
 
+  package_manifest_json=""
+  if ! package_manifest_json="$(semantic_manifest_json "$package_manifest")"; then
+    echo "failed to parse private package targets semantically: $package_manifest" >&2
+    failed=1
+  fi
+  package_target_sources=()
+  if [[ -n "$package_manifest_json" ]]; then
+    package_target_source_lines=""
+    if ! package_target_source_lines="$(
+      printf '%s\n' "$package_manifest_json" \
+        | node -e '
+          const { realpathSync } = require("node:fs");
+          let source = "";
+          process.stdin.setEncoding("utf8");
+          process.stdin.on("data", (chunk) => { source += chunk; });
+          process.stdin.on("end", () => {
+            const payload = JSON.parse(source);
+            const packages = payload.packages ?? [payload];
+            const wantedManifest = realpathSync(process.argv[1]);
+            const packageRecord = packages.find(
+              (candidate) => realpathSync(candidate.manifest_path) === wantedManifest,
+            );
+            if (!packageRecord) process.exit(2);
+            for (const target of packageRecord.targets) {
+              process.stdout.write(`${target.src_path}\n`);
+            }
+          });
+        ' "$package_manifest"
+    )"; then
+      echo "failed to select private package target metadata: $package_manifest" >&2
+      failed=1
+    else
+      while IFS= read -r target_source; do
+        [[ -n "$target_source" ]] && package_target_sources+=("$target_source")
+      done <<< "$package_target_source_lines"
+    fi
+  fi
   unsafe_scan=""
-  if ! unsafe_scan="$(node "$script_dir/scan-rust-unsafe-boundary.mjs" "$package_root")"; then
+  if ! unsafe_scan="$(
+    node \
+      "$script_dir/scan-rust-unsafe-boundary.mjs" \
+      "$package_root" \
+      "${package_target_sources[@]}"
+  )"; then
     echo "failed to scan jarvis-package Rust syntax: $package_root" >&2
     failed=1
   fi
@@ -115,48 +187,97 @@ if [[ -f "$package_manifest" ]]; then
     fi
   done <<< "$unsafe_syntax"
   report_matches "jarvis-package unsafe syntax outside macos_dir.rs:" "$disallowed_unsafe"
+  source_escapes="$(
+    printf '%s\n' "$unsafe_scan" \
+      | awk -F '\t' '$1 == "source" { print $2 " (" $3 ")" }'
+  )"
+  report_matches "jarvis-package source discovery escape:" "$source_escapes"
 fi
 
 package_root_resolved=""
 if [[ -d "$package_root" ]]; then
   package_root_resolved="$(cd "$package_root" && pwd -P)"
 fi
-all_manifests="$(
-  rg --files "$repo_root" 2>/dev/null \
-    | rg '/Cargo\.toml$' \
-    | rg -v '/target/' \
-    || true
-)"
+if [[ "$boundary_fixture_mode" == "1" ]]; then
+  all_manifests="$(
+    find "$repo_root" -type f -name Cargo.toml -print \
+      | LC_ALL=C sort
+  )"
+else
+  all_manifests="$(
+    while IFS= read -r -d '' manifest_relative; do
+      printf '%s/%s\n' "$repo_root_resolved" "$manifest_relative"
+    done < <(
+      git -C "$repo_root_resolved" ls-files \
+        --cached \
+        --others \
+        --exclude-standard \
+        -z \
+        -- ':(glob)**/Cargo.toml'
+    )
+  )"
+fi
+crates_root_resolved="$(cd "$repo_root/crates" && pwd -P)"
+plugins_root_resolved="$(cd "$repo_root/plugins" && pwd -P)"
+allowed_package_manifest="$(cd "$repo_root/src-tauri" && pwd -P)/Cargo.toml"
 while IFS= read -r manifest; do
   [[ -z "$manifest" ]] && continue
-  dependency_matches="$(
-    rg -n --no-heading \
-      '^\s*(jarvis-package|["'"'"']jarvis-package["'"'"'])\s*=|^\s*\[[^]]*dependencies\.(jarvis-package|["'"'"']jarvis-package["'"'"'])\]\s*$|package\s*=\s*["'"'"']jarvis-package["'"'"']' \
-      "$manifest" \
-      || true
-  )"
-
-  path_matches="$(rg -n --no-heading 'path\s*=\s*["'"'"'][^"'"'"']+["'"'"']' "$manifest" || true)"
-  while IFS= read -r path_match; do
-    [[ -z "$path_match" ]] && continue
-    path_line="${path_match#*:}"
-    path_line="${path_line#*:}"
-    dependency_path="$(
-      printf '%s\n' "$path_line" \
-        | sed -E 's/.*path[[:space:]]*=[[:space:]]*["'"'"']([^"'"'"']+)["'"'"'].*/\1/'
-    )"
-    resolved_path=""
-    if [[ -d "$(dirname "$manifest")/$dependency_path" ]]; then
-      resolved_path="$(cd "$(dirname "$manifest")/$dependency_path" && pwd -P)"
+  manifest_resolved="$(cd "$(dirname "$manifest")" && pwd -P)/$(basename "$manifest")"
+  manifest_json=""
+  if ! manifest_json="$(semantic_manifest_json "$manifest")"; then
+    echo "failed to parse Cargo manifest semantically: $manifest" >&2
+    failed=1
+    continue
+  fi
+  semantic_dependencies=""
+  if ! semantic_dependencies="$(
+    printf '%s\n' "$manifest_json" \
+      | node -e '
+        const { realpathSync } = require("node:fs");
+        let source = "";
+        process.stdin.setEncoding("utf8");
+        process.stdin.on("data", (chunk) => { source += chunk; });
+        process.stdin.on("end", () => {
+          const payload = JSON.parse(source);
+          const packages = payload.packages ?? [payload];
+          const wantedManifest = realpathSync(process.argv[1]);
+          const packageRecord = packages.find(
+            (candidate) => realpathSync(candidate.manifest_path) === wantedManifest,
+          );
+          if (!packageRecord) process.exit(2);
+          for (const dependency of packageRecord.dependencies) {
+            process.stdout.write(
+              `${dependency.name}\t${dependency.rename ?? ""}\t${dependency.path ?? ""}\n`,
+            );
+          }
+        });
+      ' "$manifest_resolved"
+  )"; then
+    echo "failed to select Cargo package metadata: $manifest" >&2
+    failed=1
+    continue
+  fi
+  dependency_matches=""
+  while IFS=$'\t' read -r dependency_name dependency_rename dependency_path; do
+    [[ -z "$dependency_name" ]] && continue
+    dependency_path_resolved=""
+    if [[ -n "$dependency_path" ]] && [[ -d "$dependency_path" ]]; then
+      dependency_path_resolved="$(cd "$dependency_path" && pwd -P)"
     fi
-    if [[ -n "$package_root_resolved" ]] && [[ "$resolved_path" == "$package_root_resolved" ]]; then
-      dependency_matches+="${dependency_matches:+$'\n'}$path_match"
+    if [[ "$dependency_name" == "jarvis-package" ]] \
+      || [[ -n "$package_root_resolved" \
+        && "$dependency_path_resolved" == "$package_root_resolved" ]]; then
+      if [[ -n "$dependency_matches" ]]; then
+        dependency_matches+=$'\n'
+      fi
+      dependency_matches+="$manifest: package=$dependency_name rename=${dependency_rename:--} path=${dependency_path:--}"
     fi
-  done <<< "$path_matches"
+  done <<< "$semantic_dependencies"
 
-  if [[ -n "$dependency_matches" ]] && [[ "$manifest" != "$repo_root/src-tauri/Cargo.toml" ]]; then
-    if [[ "$manifest" == "$repo_root"/crates/jarvis-plugin-*/Cargo.toml ]] \
-      || [[ "$manifest" == "$repo_root"/plugins/*/Cargo.toml ]]; then
+  if [[ -n "$dependency_matches" ]] \
+    && [[ "$manifest_resolved" != "$allowed_package_manifest" ]]; then
+    if [[ "$manifest_resolved" == "$crates_root_resolved"/jarvis-plugin-*/Cargo.toml ]] \
+      || [[ "$manifest_resolved" == "$plugins_root_resolved"/*/Cargo.toml ]]; then
       report_matches \
         "public or plugin crate depends on jarvis-package:" \
         "$dependency_matches"

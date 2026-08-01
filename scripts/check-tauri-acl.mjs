@@ -3,6 +3,8 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { parse } from 'parse5';
+
 const CORE_WEBVIEWS = ['main', 'toast', 'onboarding', 'agent-chat'];
 const CORE_WEBVIEW_SET = new Set(CORE_WEBVIEWS);
 const EXPECTED_CSP =
@@ -34,18 +36,16 @@ function fail(code, detail) {
   throw new TauriAclError(code, detail);
 }
 
-function isHtmlWhitespace(character) {
-  return (
-    character === ' ' ||
-    character === '\t' ||
-    character === '\n' ||
-    character === '\r' ||
-    character === '\f'
-  );
-}
-
 function foldAsciiCodeUnit(codeUnit) {
   return codeUnit >= 65 && codeUnit <= 90 ? codeUnit + 32 : codeUnit;
+}
+
+function foldAsciiString(source) {
+  let folded = '';
+  for (let index = 0; index < source.length; index += 1) {
+    folded += String.fromCharCode(foldAsciiCodeUnit(source.charCodeAt(index)));
+  }
+  return folded;
 }
 
 function asciiCaseInsensitiveEqualAt(source, offset, token) {
@@ -59,13 +59,6 @@ function asciiCaseInsensitiveEqualAt(source, offset, token) {
     }
   }
   return true;
-}
-
-function asciiCaseInsensitiveEquals(left, right) {
-  return (
-    left.length === right.length &&
-    asciiCaseInsensitiveEqualAt(left, 0, right)
-  );
 }
 
 function indexOfAsciiCaseInsensitive(source, token, fromIndex) {
@@ -82,94 +75,116 @@ export function parseClassicExternalScripts(
 ) {
   const invalid = (detail) =>
     fail('tauri_acl_script_tag_invalid', `${relative}: ${detail}`);
-  const scripts = [];
-  let cursor = 0;
+  const parseErrors = [];
+  const document = parse(source, {
+    scriptingEnabled: true,
+    sourceCodeLocationInfo: true,
+    onParseError(error) {
+      parseErrors.push(error.code);
+    },
+  });
+  const blockingParseError = parseErrors.find(
+    (code) => code !== 'invalid-first-character-of-tag-name',
+  );
+  if (blockingParseError) {
+    invalid(`html parse error ${blockingParseError}`);
+  }
 
+  const html = document.childNodes.find((node) => node.nodeName === 'html');
+  const body = html?.childNodes?.find((node) => node.nodeName === 'body');
+  const htmlLocation = html?.sourceCodeLocation;
+  const bodyLocation = body?.sourceCodeLocation;
+  if (!htmlLocation?.startTag || !htmlLocation.endTag) {
+    invalid('explicit html boundary required');
+  }
+  if (!body || !bodyLocation?.startTag || !bodyLocation.endTag) {
+    invalid('explicit body boundary required');
+  }
+
+  const allScriptOffsets = new Set();
+  const scripts = [];
+  const visit = (node, parent) => {
+    if (node.nodeName === 'script') {
+      const location = node.sourceCodeLocation;
+      if (!location?.startTag || !location.endTag) {
+        invalid('script source location missing');
+      }
+      allScriptOffsets.add(location.startTag.startOffset);
+      if (
+        node.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+        parent !== body ||
+        location.startTag.startOffset < bodyLocation.startTag.endOffset ||
+        location.endTag.endOffset > bodyLocation.endTag.startOffset
+      ) {
+        invalid('script must be a direct body child');
+      }
+      if (
+        !Array.isArray(node.attrs) ||
+        node.attrs.length !== 1 ||
+        node.attrs[0].name !== 'src' ||
+        node.attrs[0].namespace != null ||
+        node.attrs[0].prefix != null ||
+        node.attrs[0].value.length === 0
+      ) {
+        invalid('script must have exactly one non-empty src attribute');
+      }
+      const rawStartTag = source.slice(
+        location.startTag.startOffset,
+        location.startTag.endOffset,
+      );
+      if (
+        !/^<script[ \t\n\r\f]+src[ \t\n\r\f]*=[ \t\n\r\f]*(?:"[^"]+"|'[^']+')[ \t\n\r\f]*>$/.test(
+          foldAsciiString(rawStartTag),
+        )
+      ) {
+        invalid('script src must be the only quoted attribute');
+      }
+      if (
+        (node.childNodes ?? []).some(
+          (child) =>
+            child.nodeName !== '#text' ||
+            String(child.value ?? '').trim().length > 0,
+        )
+      ) {
+        invalid('inline script body');
+      }
+      scripts.push(Object.freeze({ src: node.attrs[0].value }));
+    }
+
+    for (const child of node.childNodes ?? []) {
+      visit(child, node);
+    }
+    if (node.nodeName === 'template' && node.content) {
+      visit(node.content, node);
+    }
+  };
+  visit(document, null);
+
+  const rawScriptOffsets = [];
+  let cursor = 0;
   while (cursor < source.length) {
     const start = indexOfAsciiCaseInsensitive(source, '<script', cursor);
     if (start === -1) break;
-
-    let offset = start + '<script'.length;
+    const boundary = source[start + '<script'.length];
     if (
-      offset >= source.length ||
-      (!isHtmlWhitespace(source[offset]) && source[offset] !== '>')
+      boundary === undefined ||
+      boundary === ' ' ||
+      boundary === '\t' ||
+      boundary === '\n' ||
+      boundary === '\r' ||
+      boundary === '\f' ||
+      boundary === '>' ||
+      boundary === '/'
     ) {
-      invalid('malformed opening tag');
+      rawScriptOffsets.push(start);
     }
-
-    let src;
-    while (offset < source.length) {
-      while (isHtmlWhitespace(source[offset])) offset += 1;
-      if (source[offset] === '>') {
-        offset += 1;
-        break;
-      }
-      if (
-        offset >= source.length ||
-        source[offset] === '/' ||
-        source[offset] === '<' ||
-        source[offset] === '"' ||
-        source[offset] === "'"
-      ) {
-        invalid('malformed attribute');
-      }
-
-      const nameStart = offset;
-      while (
-        offset < source.length &&
-        !isHtmlWhitespace(source[offset]) &&
-        !['=', '>', '/', '<', '"', "'"].includes(source[offset])
-      ) {
-        offset += 1;
-      }
-      if (offset === nameStart) invalid('empty attribute');
-      const name = source.slice(nameStart, offset);
-      if (!asciiCaseInsensitiveEquals(name, 'src') || src !== undefined) {
-        invalid(`forbidden or duplicate attribute ${name}`);
-      }
-
-      while (isHtmlWhitespace(source[offset])) offset += 1;
-      if (source[offset] !== '=') invalid('src must have a value');
-      offset += 1;
-      while (isHtmlWhitespace(source[offset])) offset += 1;
-      const quote = source[offset];
-      if (quote !== '"' && quote !== "'") {
-        invalid('src must be quoted');
-      }
-      offset += 1;
-      const valueStart = offset;
-      while (offset < source.length && source[offset] !== quote) offset += 1;
-      if (offset >= source.length) invalid('unterminated src');
-      src = source.slice(valueStart, offset);
-      if (!src) invalid('empty src');
-      offset += 1;
-      if (
-        offset < source.length &&
-        !isHtmlWhitespace(source[offset]) &&
-        source[offset] !== '>'
-      ) {
-        invalid('missing attribute separator');
-      }
-    }
-
-    if (src === undefined) invalid('missing src');
-    const closeStart = indexOfAsciiCaseInsensitive(source, '</script', offset);
-    if (closeStart === -1) invalid('missing closing tag');
-    if (source.slice(offset, closeStart).trim()) {
-      invalid('inline script body');
-    }
-    let closeOffset = closeStart + '</script'.length;
-    if (
-      closeOffset >= source.length ||
-      (!isHtmlWhitespace(source[closeOffset]) && source[closeOffset] !== '>')
-    ) {
-      invalid('malformed closing tag');
-    }
-    while (isHtmlWhitespace(source[closeOffset])) closeOffset += 1;
-    if (source[closeOffset] !== '>') invalid('malformed closing tag');
-
-    scripts.push(Object.freeze({ src }));
-    cursor = closeOffset + 1;
+    cursor = start + '<script'.length;
+  }
+  if (
+    rawScriptOffsets.length !== allScriptOffsets.size ||
+    rawScriptOffsets.some((offset) => !allScriptOffsets.has(offset))
+  ) {
+    invalid('script token is inert, malformed, or hidden from the DOM');
   }
 
   return Object.freeze(scripts);
@@ -458,7 +473,8 @@ function checkDependencyPins(root) {
   const dependencies = packageJson.devDependencies ?? {};
   if (
     dependencies['@tauri-apps/api'] !== '2.11.1' ||
-    dependencies.esbuild !== '0.25.12'
+    dependencies.esbuild !== '0.25.12' ||
+    dependencies.parse5 !== '8.0.0'
   ) {
     fail('tauri_acl_dependency_pin_invalid');
   }

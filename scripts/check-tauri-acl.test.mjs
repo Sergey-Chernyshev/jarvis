@@ -36,6 +36,7 @@ async function safeFixture() {
         devDependencies: {
           '@tauri-apps/api': '2.11.1',
           esbuild: '0.25.12',
+          parse5: '8.0.0',
         },
       },
       null,

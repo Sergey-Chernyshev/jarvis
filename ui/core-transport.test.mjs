@@ -25,6 +25,10 @@ function scriptSources(html) {
   );
 }
 
+function trustedHtml(body) {
+  return `<!doctype html><html><head><title>fixture</title></head><body>${body}</body></html>`;
+}
+
 test('bridge initializes from the explicit core transport without touching window.__TAURI__', async () => {
   const invoked = [];
   const listened = [];
@@ -94,15 +98,19 @@ test('all trusted documents load one transport immediately before its consumer',
 test('script scan preserves Unicode indices while folding ASCII tag names only', () => {
   const fixtures = [
     [
-      'İ<script src="./first.js"></script>',
+      trustedHtml('İ<script src="./first.js"></script>'),
       ['./first.js'],
     ],
     [
-      '<script src="./first.js"></script>İ<script src="./second.js"></script>',
+      trustedHtml(
+        '<script src="./first.js"></script>İ<script src="./second.js"></script>',
+      ),
       ['./first.js', './second.js'],
     ],
     [
-      'Привет🙂<ScRiPt SRC = "./first.js"></sCrIpT>世界<script src="./second.js"></script>',
+      trustedHtml(
+        'Привет🙂<ScRiPt SRC = "./first.js"></sCrIpT>世界<script src="./second.js"></script>',
+      ),
       ['./first.js', './second.js'],
     ],
   ];
@@ -118,7 +126,7 @@ test('script scan preserves Unicode indices while folding ASCII tag names only',
 
   assert.deepEqual(
     parseClassicExternalScripts(
-      '<ѕcript src="./lookalike.js"></ѕcript>',
+      trustedHtml('<ѕcript src="./lookalike.js"></ѕcript>'),
       'unicode lookalike',
     ),
     [],
@@ -126,20 +134,25 @@ test('script scan preserves Unicode indices while folding ASCII tag names only',
   assert.throws(
     () =>
       parseClassicExternalScripts(
-        'İ<ScRiPt src="./unsafe.js" AsYnC="false"></sCrIpT>',
+        trustedHtml(
+          'İ<ScRiPt src="./unsafe.js" AsYnC="false"></sCrIpT>',
+        ),
         'unicode unsafe attribute',
       ),
     (error) =>
       error.code === 'tauri_acl_script_tag_invalid' &&
-      error.message.includes('forbidden or duplicate attribute AsYnC'),
+      error.message.includes(
+        'script must have exactly one non-empty src attribute',
+      ),
   );
 });
 
 test('transport and consumer reject execution-changing or malformed attributes', () => {
   const transport = './generated/tauri-transport.js';
   const consumer = './bridge.js';
-  const base = `<script src="${transport}"></script>
+  const body = `<script src="${transport}"></script>
 <script src="${consumer}"></script>`;
+  const base = trustedHtml(body);
   const attributes = [
     ' async',
     ' AsYnC="false"',
@@ -180,13 +193,54 @@ test('transport and consumer reject execution-changing or malformed attributes',
     }
   }
 
-  const onboardingState = `<script src="onboarding-state.js" defer></script>
+  const onboardingState = trustedHtml(`<script src="onboarding-state.js" defer></script>
 <script src="${transport}"></script>
-<script src="onboarding.js"></script>`;
+<script src="onboarding.js"></script>`);
   assert.throws(
     () => parseClassicExternalScripts(onboardingState, 'onboarding-state'),
     (error) => error.code === 'tauri_acl_script_tag_invalid',
   );
+});
+
+test('trusted scripts cannot hide in inert, raw-text, comment, or foreign contexts', () => {
+  const pair =
+    '<script src="./generated/tauri-transport.js"></script><script src="./bridge.js"></script>';
+  const wrappers = [
+    `<textarea>${pair}</textarea>`,
+    `<template>${pair}</template>`,
+    `<title>${pair}</title>`,
+    `<style>${pair}</style>`,
+    `<xmp>${pair}</xmp>`,
+    `<iframe>${pair}</iframe>`,
+    `<noframes>${pair}</noframes>`,
+    `<noscript>${pair}</noscript>`,
+    `<plaintext>${pair}`,
+    `<!--${pair}-->`,
+    `<svg>${pair}</svg>`,
+    `<div>${pair}</div>`,
+  ];
+
+  for (const wrapped of wrappers) {
+    assert.throws(
+      () => parseClassicExternalScripts(trustedHtml(wrapped), wrapped),
+      (error) => error.code === 'tauri_acl_script_tag_invalid',
+      wrapped,
+    );
+  }
+});
+
+test('malformed trusted HTML fails closed before script ordering', () => {
+  for (const malformed of [
+    '<html><body><script src="./x.js"></script></body></html>',
+    '<!doctype html><html><body><script src="./x.js"></body></html>',
+    '<!doctype html><html><body><script src="./x.js"/></body></html>',
+    '<!doctype html><html><body><script src="./x.js"></script>',
+  ]) {
+    assert.throws(
+      () => parseClassicExternalScripts(malformed, 'malformed fixture'),
+      (error) => error.code === 'tauri_acl_script_tag_invalid',
+    );
+  }
 });
 
 test('all trusted documents use the same explicit IPC-capable CSP', async () => {

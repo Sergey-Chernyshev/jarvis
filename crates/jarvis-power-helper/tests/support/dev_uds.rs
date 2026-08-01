@@ -537,6 +537,13 @@ fn socket_and_dev_state_are_private_without_following_or_overwriting() {
     let cleanup_residue = run.join(DEV_CLEANUP_RESIDUE_FILE);
     assert!(cleanup_residue.exists());
 
+    // The first harness intentionally retains its bounded quarantine receipt;
+    // all subsequent pathname-replacement checks use a fresh private root so
+    // they do not bypass the fail-closed restart invariant.
+    let harness = DevHarness::new();
+    let run = harness.jarvis_dir.join("run");
+    fs::create_dir(&run).unwrap();
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).unwrap();
     let stale_path = run.join(DEV_SOCKET_FILE);
     let stale = UnixListener::bind(&stale_path).unwrap();
     fs::set_permissions(&stale_path, fs::Permissions::from_mode(0o600)).unwrap();

@@ -35,7 +35,6 @@ pub const DEV_CLEANUP_RESIDUE_FILE: &str = ".power-helper-dev.cleanup-residue";
 const RUN_DIRECTORY: &CStr = c"run";
 const DEV_SOCKET_COMPONENT: &CStr = c"power-helper-dev.sock";
 const QUARANTINE_COMPONENT: &CStr = c".power-helper-dev.cleanup-residue";
-const CLEANUP_INFLIGHT_COMPONENT: &CStr = c".power-helper-dev.cleanup-inflight";
 const DIRECTORY_MODE: u32 = 0o700;
 const SOCKET_MODE: u32 = 0o600;
 const IO_TIMEOUT: Duration = Duration::from_millis(250);
@@ -72,7 +71,7 @@ impl fmt::Display for TransportError {
             Self::PeerRejected => "development power peer was rejected",
             Self::UnsafeMetadata => "development power socket metadata is unsafe",
             Self::CleanupRequired => {
-                "development power restart is blocked by $JARVIS_DIR/run/.power-helper-dev.cleanup-residue"
+                "development-only power restart is fail-closed by the bounded cleanup receipt at $JARVIS_DIR/run/.power-helper-dev.cleanup-residue; production Task5 transport must not use this path"
             }
             Self::Deadline => "development power transport deadline expired",
             Self::InvalidFrame => "development power frame is invalid",
@@ -367,7 +366,6 @@ pub(crate) fn bind_listener(
 pub(crate) enum BindStage {
     AfterBindBeforeIdentity,
     AfterSocketPreparedBeforeProof,
-    ResidueMovedBeforeUnlink,
 }
 
 #[cfg(not(test))]
@@ -375,7 +373,6 @@ pub(crate) enum BindStage {
 enum BindStage {
     AfterBindBeforeIdentity,
     AfterSocketPreparedBeforeProof,
-    ResidueMovedBeforeUnlink,
 }
 
 #[cfg(test)]
@@ -420,10 +417,10 @@ where
     if socket_metadata(run_directory.as_raw_fd())?.is_some() {
         return Err(TransportError::UnsafeMetadata);
     }
+    if socket_metadata_named(run_directory.as_raw_fd(), QUARANTINE_COMPONENT)?.is_some() {
+        return Err(TransportError::CleanupRequired);
+    }
     let path = root.path().join("run").join(DEV_SOCKET_FILE);
-    cleanup_owned_residue(run_directory.as_raw_fd(), expected_uid, gid, |stage| {
-        hook(stage, &path)
-    })?;
 
     root.revalidate_child_path(RUN_DIRECTORY, run_directory.as_raw_fd())?;
     let listener = UnixListener::bind(&path).map_err(|_| TransportError::Io)?;
@@ -922,85 +919,6 @@ fn validate_owned_socket_entry(
     }
 }
 
-fn cleanup_owned_residue<F>(
-    directory: RawFd,
-    uid: u32,
-    gid: u32,
-    mut hook: F,
-) -> Result<(), TransportError>
-where
-    F: FnMut(BindStage),
-{
-    if socket_metadata_named(directory, CLEANUP_INFLIGHT_COMPONENT)?.is_some() {
-        return Err(TransportError::CleanupRequired);
-    }
-    let Some(metadata) = socket_metadata_named(directory, QUARANTINE_COMPONENT)? else {
-        return Ok(());
-    };
-    validate_socket_metadata(&metadata, uid, gid)?;
-    let identity = SocketIdentity::from(metadata);
-
-    // Move the validated residue away from its externally observable fixed
-    // name before deletion. RENAME_EXCL means a concurrent replacement at the
-    // original name is never selected for cleanup.
-    // SAFETY: both fixed components are beneath the held private directory.
-    if unsafe {
-        libc::renameatx_np(
-            directory,
-            QUARANTINE_COMPONENT.as_ptr(),
-            directory,
-            CLEANUP_INFLIGHT_COMPONENT.as_ptr(),
-            libc::RENAME_EXCL,
-        )
-    } != 0
-    {
-        return Err(TransportError::CleanupRequired);
-    }
-
-    let moved_owned_socket = socket_metadata_named(directory, CLEANUP_INFLIGHT_COMPONENT)
-        .ok()
-        .flatten()
-        .filter(|metadata| validate_socket_metadata(metadata, uid, gid).is_ok())
-        .is_some_and(|metadata| SocketIdentity::from(metadata) == identity);
-    if !moved_owned_socket {
-        // Never unlink an entry whose identity changed. Restore it only when
-        // the fixed residue name is still available; otherwise leave evidence
-        // in place and fail closed.
-        let _ = unsafe {
-            libc::renameatx_np(
-                directory,
-                CLEANUP_INFLIGHT_COMPONENT.as_ptr(),
-                directory,
-                QUARANTINE_COMPONENT.as_ptr(),
-                libc::RENAME_EXCL,
-            )
-        };
-        return Err(TransportError::CleanupRequired);
-    }
-
-    hook(BindStage::ResidueMovedBeforeUnlink);
-    let still_owned = socket_metadata_named(directory, CLEANUP_INFLIGHT_COMPONENT)
-        .ok()
-        .flatten()
-        .filter(|metadata| validate_socket_metadata(metadata, uid, gid).is_ok())
-        .is_some_and(|metadata| SocketIdentity::from(metadata) == identity);
-    if !still_owned {
-        return Err(TransportError::CleanupRequired);
-    }
-    // SAFETY: only the identity-checked entry moved to the private inflight
-    // component is removed. Any replacement at the public residue name is a
-    // separate directory entry and remains untouched.
-    if unsafe { libc::unlinkat(directory, CLEANUP_INFLIGHT_COMPONENT.as_ptr(), 0) } != 0 {
-        return Err(TransportError::CleanupRequired);
-    }
-    if socket_metadata_named(directory, CLEANUP_INFLIGHT_COMPONENT)?.is_some()
-        || socket_metadata_named(directory, QUARANTINE_COMPONENT)?.is_some()
-    {
-        return Err(TransportError::CleanupRequired);
-    }
-    Ok(())
-}
-
 #[cfg(target_os = "macos")]
 fn quarantine_owned_socket(directory: RawFd, identity: Option<SocketIdentity>, uid: u32, gid: u32) {
     let Some(identity) = identity else {
@@ -1043,6 +961,10 @@ fn quarantine_owned_socket(directory: RawFd, identity: Option<SocketIdentity>, u
             )
         };
     }
+    // Darwin has no identity-conditional unlink primitive. Keep one bounded
+    // quarantine receipt and fail closed on the next development bind rather
+    // than risking deletion of a same-UID replacement. This path is
+    // development-only; production Task5 transport owns restart lifecycle.
 }
 
 #[cfg(not(target_os = "macos"))]

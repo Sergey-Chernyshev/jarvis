@@ -122,6 +122,8 @@ mod tests {
         include_str!("../../../tests/fixtures/plugin-trust/package-test-signing-seed.hex");
     const TEST_PUBLIC_KEY: &str =
         include_str!("../../../tests/fixtures/plugin-trust/package-test-public-key.hex");
+    const ROOT_2_TEST_SEED: &str =
+        include_str!("../../../tests/fixtures/plugin-trust/root-2-test-signing-seed.hex");
     const SOURCE_RELATIVE: &str =
         "../crates/jarvis-package/tests/fixtures/plugin-packages/pack-source";
     const NOW: &str = "2026-08-01T00:30:00Z";
@@ -299,6 +301,10 @@ mod tests {
 
     fn fixture_seed() -> [u8; 32] {
         decode_seed(TEST_SEED.trim())
+    }
+
+    fn root_2_fixture_seed() -> [u8; 32] {
+        decode_seed(ROOT_2_TEST_SEED.trim())
     }
 
     fn decode_seed(value: &str) -> [u8; 32] {
@@ -548,7 +554,7 @@ mod tests {
 
     #[test]
     fn catalog_package_verifier_rejects_bad_signature_before_extraction() {
-        let fixture = PackedFixture::signed_with([7u8; 32]);
+        let fixture = PackedFixture::signed_with(root_2_fixture_seed());
         let output = TestDirectory::new();
         let verifier = verifier_for(&fixture.observation);
         assert_eq!(

@@ -409,10 +409,18 @@ function cfgTestModuleRanges(tokens) {
   return ranges;
 }
 
+function canonicalSymbolName(value) {
+  return value.normalize('NFC');
+}
+
 function isNamedSymbol(token, names) {
-  // Rust raw identifiers and ordinary identifiers with the same value resolve
-  // to the same symbol. Keyword recognition must continue to inspect token.raw.
-  return token?.kind === 'identifier' && names.has(token.value);
+  // Rust raw identifiers, ordinary identifiers, and canonically equivalent
+  // Unicode spellings resolve to the same symbol. Keyword recognition must
+  // continue to inspect token.raw and the source text stays unmodified.
+  return (
+    token?.kind === 'identifier' &&
+    names.has(canonicalSymbolName(token.value))
+  );
 }
 
 function addUseAliases(tokenizedFiles, names) {
@@ -462,8 +470,9 @@ function addUseAliases(tokenizedFiles, names) {
         ) {
           continue;
         }
-        if (!names.has(tokens[index + 1].value)) {
-          names.add(tokens[index + 1].value);
+        const aliasName = canonicalSymbolName(tokens[index + 1].value);
+        if (!names.has(aliasName)) {
+          names.add(aliasName);
           changed = true;
           added = true;
         }
@@ -474,7 +483,7 @@ function addUseAliases(tokenizedFiles, names) {
 }
 
 function packageTrustVerifierNames(tokenizedFiles) {
-  const names = new Set(['PackageTrustVerifier']);
+  const names = new Set([canonicalSymbolName('PackageTrustVerifier')]);
   addUseAliases(tokenizedFiles, names);
   return names;
 }
@@ -553,8 +562,9 @@ function packageTrustVerifierMacroNames(tokenizedFiles, verifierNames) {
               isNamedSymbol(token, macroNames) &&
               body[bodyIndex + 1]?.value === '!',
           );
-        if (namesVerifier && !macroNames.has(tokens[index + 2].value)) {
-          macroNames.add(tokens[index + 2].value);
+        const macroName = canonicalSymbolName(tokens[index + 2].value);
+        if (namesVerifier && !macroNames.has(macroName)) {
+          macroNames.add(macroName);
           changed = true;
         }
         index = bodyEnd;
@@ -584,7 +594,7 @@ function packageTrustVerifierMacroInvocations(
     const argumentsEnd = matchingToken(tokens, index + 2, opener, closer);
     if (argumentsEnd === -1) continue;
     const carriesVerifier =
-      verifierMacroNames.has(tokens[index].value) ||
+      isNamedSymbol(tokens[index], verifierMacroNames) ||
       tokens
         .slice(index + 3, argumentsEnd)
         .some((token) => isNamedSymbol(token, verifierNames));

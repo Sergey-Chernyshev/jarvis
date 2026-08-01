@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 pub mod install;
 pub mod manifest;
 pub mod manifest_v2;
+pub mod package;
 pub mod protocol;
 pub mod supervisor;
 

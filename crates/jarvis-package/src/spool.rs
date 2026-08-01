@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io::{self, Read};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 
@@ -120,6 +121,14 @@ impl SourceSnapshot {
         Ok(bytes)
     }
 
+    pub(crate) fn reader<'a>(&'a self, file: &SpooledFile) -> SpoolReader<'a> {
+        SpoolReader {
+            spool: &self.spool,
+            offset: file.offset,
+            remaining: file.length,
+        }
+    }
+
     #[cfg(test)]
     fn spool_identity(&self) -> std::io::Result<SpoolIdentity> {
         let stat = fstat(&self.spool)?;
@@ -127,6 +136,40 @@ impl SourceSnapshot {
             mode: stat.st_mode,
             link_count: stat.st_nlink,
         })
+    }
+}
+
+pub(crate) struct SpoolReader<'a> {
+    spool: &'a File,
+    offset: u64,
+    remaining: u64,
+}
+
+impl Read for SpoolReader<'_> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() || self.remaining == 0 {
+            return Ok(0);
+        }
+        let requested = usize::try_from(
+            self.remaining
+                .min(u64::try_from(output.len()).unwrap_or(u64::MAX)),
+        )
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "spool span exceeds usize"))?;
+        let read = self.spool.read_at(&mut output[..requested], self.offset)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "spool span is truncated",
+            ));
+        }
+        let read_u64 = u64::try_from(read)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "read exceeds u64"))?;
+        self.offset = self
+            .offset
+            .checked_add(read_u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "spool offset overflow"))?;
+        self.remaining -= read_u64;
+        Ok(read)
     }
 }
 

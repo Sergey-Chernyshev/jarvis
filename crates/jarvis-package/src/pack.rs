@@ -1,5 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+#[cfg(target_os = "macos")]
+use std::fs::File;
+#[cfg(target_os = "macos")]
+use std::io::{Cursor, Seek, SeekFrom, Write};
+#[cfg(target_os = "macos")]
+use std::path::Path;
 
 use jarvis_plugin_protocol::json::JsonLimits;
 use jarvis_plugin_protocol::manifest::{ManifestError, ManifestV2, RuntimeKind};
@@ -12,6 +18,8 @@ use jarvis_plugin_protocol::package::{
 
 use crate::hash::{merkle_root, sha256_digest};
 use crate::jcs::parse_exact_jcs;
+#[cfg(target_os = "macos")]
+use crate::source::snapshot_source;
 
 pub const SIGNATURE_MESSAGE_DOMAIN: &[u8] = b"jarvis-plugin-package-v1";
 
@@ -53,6 +61,12 @@ impl PackageError {
     pub(crate) fn source_raced() -> Self {
         Self {
             code: "source_raced",
+        }
+    }
+
+    pub(crate) fn archive_write() -> Self {
+        Self {
+            code: "archive_write",
         }
     }
 
@@ -103,6 +117,7 @@ pub(crate) struct PayloadObservation {
     path: PackagePath,
     size: u64,
     digest: jarvis_plugin_protocol::manifest::Digest,
+    source_mode: u32,
 }
 
 impl PayloadObservation {
@@ -110,8 +125,14 @@ impl PayloadObservation {
         path: PackagePath,
         size: u64,
         digest: jarvis_plugin_protocol::manifest::Digest,
+        source_mode: u32,
     ) -> Self {
-        Self { path, size, digest }
+        Self {
+            path,
+            size,
+            digest,
+            source_mode,
+        }
     }
 }
 
@@ -185,9 +206,12 @@ where
             return Err(PackageError::package_metadata());
         }
     }
-    let Some(_) = by_path.remove("plugin.json") else {
+    let Some(source_manifest) = by_path.remove("plugin.json") else {
         return Err(PackageError::package_metadata());
     };
+    if source_manifest.source_mode & 0o111 != 0 {
+        return Err(PackageError::package_metadata());
+    }
 
     let mut executable_paths = BTreeSet::new();
     match manifest.runtime.kind {
@@ -223,7 +247,11 @@ where
         digest: sha256_digest(&manifest_bytes),
     });
     for (_, observed) in by_path {
-        let mode = if executable_paths.contains(observed.path.as_str()) {
+        let declared_executable = executable_paths.contains(observed.path.as_str());
+        if observed.source_mode & 0o111 != 0 && !declared_executable {
+            return Err(PackageError::package_metadata());
+        }
+        let mode = if declared_executable {
             PackageFileMode::Executable
         } else {
             PackageFileMode::ReadOnly
@@ -293,6 +321,118 @@ where
     })
 }
 
+#[cfg(target_os = "macos")]
+pub fn pack_plugin<A, S, W>(
+    source_root: &Path,
+    options: PackOptions,
+    adapter: &A,
+    signature_source: &S,
+    mut output: W,
+) -> Result<(), PackageError>
+where
+    A: PackageDocumentAdapter,
+    S: PackageSignatureSource,
+    W: Write,
+{
+    let snapshot = snapshot_source(source_root)?;
+    let source_manifest_bytes = snapshot.read_file("plugin.json")?;
+    let payload = snapshot
+        .files()
+        .iter()
+        .map(|file| {
+            Ok(PayloadObservation::new(
+                file.path().clone(),
+                file.length(),
+                file.digest().clone(),
+                file.source_mode(),
+            ))
+        })
+        .collect::<Result<Vec<_>, PackageError>>()?;
+    let prepared = prepare_package_documents(
+        &source_manifest_bytes,
+        payload,
+        options,
+        adapter,
+        signature_source,
+    )?;
+
+    let mut archive_file = owner_only_archive_tempfile()?;
+    {
+        let mut builder = tar::Builder::new(&mut archive_file);
+        for file in &prepared.metadata().files {
+            if file.path.as_str() == "plugin.json" {
+                crate::archive::append_profile_entry(
+                    &mut builder,
+                    &file.path,
+                    file.mode.as_octal(),
+                    file.size,
+                    Cursor::new(prepared.manifest_bytes()),
+                )?;
+            } else {
+                let spooled = snapshot
+                    .files()
+                    .iter()
+                    .find(|spooled| spooled.path() == &file.path)
+                    .ok_or_else(PackageError::package_metadata)?;
+                crate::archive::append_profile_entry(
+                    &mut builder,
+                    &file.path,
+                    file.mode.as_octal(),
+                    file.size,
+                    snapshot.reader(spooled),
+                )?;
+            }
+        }
+        let package_path =
+            PackagePath::new("package.json").map_err(|_| PackageError::package_metadata())?;
+        crate::archive::append_profile_entry(
+            &mut builder,
+            &package_path,
+            PackageFileMode::ReadOnly.as_octal(),
+            u64::try_from(prepared.metadata_bytes().len())
+                .map_err(|_| PackageError::package_metadata())?,
+            Cursor::new(prepared.metadata_bytes()),
+        )?;
+        let signature_path =
+            PackagePath::new("SIGNATURE").map_err(|_| PackageError::package_metadata())?;
+        crate::archive::append_profile_entry(
+            &mut builder,
+            &signature_path,
+            PackageFileMode::ReadOnly.as_octal(),
+            u64::try_from(prepared.signature_bytes().len())
+                .map_err(|_| PackageError::package_metadata())?,
+            Cursor::new(prepared.signature_bytes()),
+        )?;
+        builder
+            .finish()
+            .map_err(|_| PackageError::archive_write())?;
+    }
+    archive_file
+        .flush()
+        .map_err(|_| PackageError::archive_write())?;
+    archive_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| PackageError::archive_write())?;
+    std::io::copy(&mut archive_file, &mut output).map_err(|_| PackageError::archive_write())?;
+    output.flush().map_err(|_| PackageError::archive_write())?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn owner_only_archive_tempfile() -> Result<File, PackageError> {
+    let file = tempfile::tempfile().map_err(|_| PackageError::archive_write())?;
+    rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(0o600))
+        .map_err(|_| PackageError::archive_write())?;
+    let stat = rustix::fs::fstat(&file).map_err(|_| PackageError::archive_write())?;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile
+        || stat.st_nlink != 0
+        || stat.st_mode & 0o777 != 0o600
+    {
+        return Err(PackageError::archive_write());
+    }
+    Ok(file)
+}
+
 #[cfg(test)]
 pub(crate) const FIXED_OPAQUE_SIGNATURE_VALUE: &str =
     "paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpQ==";
@@ -334,9 +474,9 @@ mod tests {
     };
 
     use super::{
-        fixed_opaque_observation_matches, pack_fixture_archive, prepare_package_documents,
-        FixedOpaqueSignature, PackOptions, PackageDocumentAdapter, PackageError,
-        PayloadObservation, FIXED_OPAQUE_SIGNATURE_VALUE, SIGNATURE_MESSAGE_DOMAIN,
+        fixed_opaque_observation_matches, prepare_package_documents, FixedOpaqueSignature,
+        PackOptions, PackageDocumentAdapter, PackageError, PayloadObservation,
+        FIXED_OPAQUE_SIGNATURE_VALUE, SIGNATURE_MESSAGE_DOMAIN,
     };
     use crate::archive::{encode_checksum_for_test, encode_number_for_test, entry_bytes_for_test};
     use crate::hash::sha256_digest;
@@ -386,6 +526,7 @@ mod tests {
             PackagePath::new(path).unwrap(),
             u64::try_from(bytes.len()).unwrap(),
             sha256_digest(bytes),
+            0o644,
         )
     }
 
@@ -606,6 +747,39 @@ mod tests {
         .join("/")
     }
 
+    #[cfg(target_os = "macos")]
+    fn pack_fixture_archive() -> Result<Vec<u8>, PackageError> {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/plugin-packages/pack-source");
+        let mut archive = Vec::new();
+        super::pack_plugin(
+            &source,
+            options(),
+            &FixtureAdapter,
+            &FixedOpaqueSignature,
+            &mut archive,
+        )?;
+        Ok(archive)
+    }
+
+    #[test]
+    fn executable_source_not_declared_by_manifest_is_rejected() {
+        let mut payload = ui_payload();
+        payload[1].source_mode = 0o755;
+        assert_eq!(
+            prepare_package_documents(
+                SOURCE_MANIFEST,
+                payload,
+                options(),
+                &FixtureAdapter,
+                &FixedOpaqueSignature,
+            )
+            .unwrap_err()
+            .code(),
+            "package_metadata"
+        );
+    }
+
     #[test]
     fn gnu_header_profiles_are_byte_exact() {
         let tar_header = tar::Header::new_gnu();
@@ -625,6 +799,20 @@ mod tests {
         assert_eq!(&short[263..265], b" \0");
         assert_eq!(&short[329..337], b"0000000\0");
         assert_eq!(&short[337..345], b"0000000\0");
+        assert!(short[157..257].iter().all(|byte| *byte == 0));
+        assert!(short[265..329].iter().all(|byte| *byte == 0));
+        assert!(short[345..512].iter().all(|byte| *byte == 0));
+        assert_eq!(short[154], 0);
+        assert_eq!(short[155], b' ');
+        let stored_checksum =
+            u64::from_str_radix(std::str::from_utf8(&short[148..154]).unwrap(), 8).unwrap();
+        let mut checksum_header = short[..512].to_vec();
+        checksum_header[148..156].fill(b' ');
+        let recomputed_checksum = checksum_header
+            .iter()
+            .map(|byte| u64::from(*byte))
+            .sum::<u64>();
+        assert_eq!(stored_checksum, recomputed_checksum);
         assert_eq!(short.len(), 512 + 512 + 1024);
         assert!(short[513..1024].iter().all(|byte| *byte == 0));
         assert!(short[1024..].iter().all(|byte| *byte == 0));
@@ -637,7 +825,7 @@ mod tests {
         assert_eq!(long[156], b'L');
         assert_eq!(&long[512..613], path_101.as_bytes());
         assert_eq!(long[613], 0);
-        assert_eq!(&long[1024..1036], b"././@LongFile");
+        assert_eq!(&long[1024..1037], b"././@LongFile");
         assert_eq!(&long[1124..1132], b"0000555\0");
         assert_eq!(long[1180], b'0');
 
@@ -648,7 +836,7 @@ mod tests {
         assert_eq!(&longest[124..136], b"00000002001\0");
         assert_eq!(&longest[512..1536], path_1024.as_bytes());
         assert_eq!(longest[1536], 0);
-        assert_eq!(&longest[2048..2060], b"././@LongFile");
+        assert_eq!(&longest[2048..2061], b"././@LongFile");
         assert_eq!(longest[2204], b'0');
 
         assert!(entry_bytes_for_test(&long_path(254), 0o444, b"").is_err());

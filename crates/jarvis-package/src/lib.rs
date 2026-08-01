@@ -18,6 +18,8 @@ mod source;
 #[cfg_attr(not(test), allow(dead_code))]
 mod spool;
 
+#[cfg(target_os = "macos")]
+pub use pack::pack_plugin;
 pub use pack::{PackOptions, PackageDocumentAdapter, PackageError, PackageSignatureSource};
 
 #[cfg(test)]

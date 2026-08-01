@@ -782,6 +782,27 @@ mod tests {
     }
 
     #[test]
+    fn oversized_numeric_macos_component_is_incompatible_without_panicking() {
+        let mut catalog = catalog_value(CATALOG_1);
+        catalog["payload"]["releases"][0]["minimumMacos"] =
+            json!("18446744073709551616.0.0");
+        let catalog = signed_catalog(catalog, &["jarvis.root:1"]);
+        let mut state = fixture_state();
+        let verified = verify(&catalog, "2026-08-01T00:30:00Z", &mut state).unwrap();
+        assert_eq!(
+            verified
+                .release(
+                    "dev.example.echo",
+                    "1.0.0",
+                    PackageTarget::DarwinArm64,
+                )
+                .unwrap_err()
+                .code(),
+            "package_incompatible"
+        );
+    }
+
+    #[test]
     fn empty_production_roots_fail_closed_without_test_material() {
         let roots = RootTrustConfig::parse(PRODUCTION_ROOTS).unwrap();
         assert!(!roots.is_provisioned());

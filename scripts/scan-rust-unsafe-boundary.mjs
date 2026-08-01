@@ -409,6 +409,12 @@ function cfgTestModuleRanges(tokens) {
   return ranges;
 }
 
+function isNamedSymbol(token, names) {
+  // Rust raw identifiers and ordinary identifiers with the same value resolve
+  // to the same symbol. Keyword recognition must continue to inspect token.raw.
+  return token?.kind === 'identifier' && names.has(token.value);
+}
+
 function addUseAliases(tokenizedFiles, names) {
   let added = false;
   let changed = true;
@@ -420,8 +426,7 @@ function addUseAliases(tokenizedFiles, names) {
           tokens[index].kind !== 'identifier' ||
           tokens[index].raw ||
           tokens[index].value !== 'as' ||
-          tokens[index + 1]?.kind !== 'identifier' ||
-          tokens[index + 1]?.raw
+          tokens[index + 1]?.kind !== 'identifier'
         ) {
           continue;
         }
@@ -453,12 +458,7 @@ function addUseAliases(tokenizedFiles, names) {
         if (
           !tokens
             .slice(branchStart + 1, index)
-            .some(
-              (token) =>
-                token.kind === 'identifier' &&
-                !token.raw &&
-                names.has(token.value),
-            )
+            .some((token) => isNamedSymbol(token, names))
         ) {
           continue;
         }
@@ -501,11 +501,7 @@ function packageTrustVerifierImplementations(tokens, verifierNames) {
     for (; cursor < tokens.length; cursor += 1) {
       const token = tokens[cursor];
       if (token.value === '{' || token.value === ';') break;
-      if (
-        token.kind === 'identifier' &&
-        !token.raw &&
-        verifierNames.has(token.value)
-      ) {
+      if (isNamedSymbol(token, verifierNames)) {
         verifier = cursor;
       }
       if (
@@ -541,7 +537,6 @@ function packageTrustVerifierMacroNames(tokenizedFiles, verifierNames) {
           tokens[index].value !== 'macro_rules' ||
           tokens[index + 1]?.value !== '!' ||
           tokens[index + 2]?.kind !== 'identifier' ||
-          tokens[index + 2]?.raw ||
           !['(', '[', '{'].includes(tokens[index + 3]?.value)
         ) {
           continue;
@@ -552,17 +547,10 @@ function packageTrustVerifierMacroNames(tokenizedFiles, verifierNames) {
         if (bodyEnd === -1) continue;
         const body = tokens.slice(index + 4, bodyEnd);
         const namesVerifier =
-          body.some(
-            (token) =>
-              token.kind === 'identifier' &&
-              !token.raw &&
-              verifierNames.has(token.value),
-          ) ||
+          body.some((token) => isNamedSymbol(token, verifierNames)) ||
           body.some(
             (token, bodyIndex) =>
-              token.kind === 'identifier' &&
-              !token.raw &&
-              macroNames.has(token.value) &&
+              isNamedSymbol(token, macroNames) &&
               body[bodyIndex + 1]?.value === '!',
           );
         if (namesVerifier && !macroNames.has(tokens[index + 2].value)) {
@@ -586,7 +574,6 @@ function packageTrustVerifierMacroInvocations(
   for (let index = 0; index < tokens.length - 2; index += 1) {
     if (
       tokens[index].kind !== 'identifier' ||
-      tokens[index].raw ||
       tokens[index + 1]?.value !== '!' ||
       !['(', '[', '{'].includes(tokens[index + 2]?.value)
     ) {
@@ -600,12 +587,7 @@ function packageTrustVerifierMacroInvocations(
       verifierMacroNames.has(tokens[index].value) ||
       tokens
         .slice(index + 3, argumentsEnd)
-        .some(
-          (token) =>
-            token.kind === 'identifier' &&
-            !token.raw &&
-            verifierNames.has(token.value),
-        );
+        .some((token) => isNamedSymbol(token, verifierNames));
     if (!carriesVerifier) {
       index = argumentsEnd;
       continue;

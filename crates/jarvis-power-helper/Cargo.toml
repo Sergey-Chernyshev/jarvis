@@ -9,6 +9,11 @@ rust-version = "1.77.2"
 [features]
 default = []
 dev-uds = []
+production-xpc = []
+unsigned-test = ["production-xpc"]
+
+[build-dependencies]
+cc = "1"
 
 [dependencies]
 getrandom = "0.2"
@@ -16,6 +21,7 @@ jarvis-power-core = { path = "../jarvis-power-core", version = "0.1.0" }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = { version = "3", default-features = false }
@@ -24,3 +30,8 @@ tempfile = { version = "3", default-features = false }
 name = "jarvis-power-helper-dev"
 path = "src/bin/jarvis-power-helper-dev.rs"
 required-features = ["dev-uds"]
+
+[[bin]]
+name = "jarvis-power-helper"
+path = "src/bin/jarvis-power-helper.rs"
+required-features = ["production-xpc"]

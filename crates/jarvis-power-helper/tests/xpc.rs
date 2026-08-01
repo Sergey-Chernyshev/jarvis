@@ -53,7 +53,7 @@ fn claims(team_id: &str, identifier: &str, build: u64) -> AttestationClaims {
 }
 
 #[test]
-fn policy_pins_team_bundle_requirement_and_version_floor() {
+fn xpc_policy_pins_team_bundle_requirement_and_version_floor() {
     let policy = production_policy(TEAM_ID, MINIMUM_BUILD, MemoryFloor::new(MINIMUM_BUILD))
         .expect("valid fixed production policy");
     let valid = claims(TEAM_ID, BUNDLE_ID, MINIMUM_BUILD);
@@ -83,7 +83,7 @@ fn policy_pins_team_bundle_requirement_and_version_floor() {
 }
 
 #[test]
-fn missing_or_changing_identity_claims_fail_closed() {
+fn xpc_missing_or_changing_identity_claims_fail_closed() {
     let policy = production_policy(TEAM_ID, MINIMUM_BUILD, MemoryFloor::new(MINIMUM_BUILD))
         .expect("valid fixed production policy");
     let complete = claims(TEAM_ID, BUNDLE_ID, MINIMUM_BUILD);
@@ -140,7 +140,7 @@ fn missing_or_changing_identity_claims_fail_closed() {
 }
 
 #[test]
-fn accepted_higher_build_is_persisted_as_the_next_policy_floor() {
+fn xpc_accepted_higher_build_is_persisted_as_the_next_policy_floor() {
     let store = MemoryFloor::new(MINIMUM_BUILD);
     let first_policy =
         production_policy(TEAM_ID, MINIMUM_BUILD, store.clone()).expect("first policy");
@@ -204,7 +204,7 @@ fn status_payload() -> Vec<u8> {
 }
 
 #[test]
-fn each_message_is_attested_not_only_connection_setup() {
+fn xpc_each_message_is_attested_not_only_connection_setup() {
     let valid = claims(TEAM_ID, BUNDLE_ID, MINIMUM_BUILD);
     let wrong_team = claims("ZZZZZZZZZZ", BUNDLE_ID, MINIMUM_BUILD);
     let attestation_count = Arc::new(AtomicUsize::new(0));
@@ -237,7 +237,7 @@ fn each_message_is_attested_not_only_connection_setup() {
 }
 
 #[test]
-fn every_message_payload_is_fixed_nonempty_and_bounded_before_dispatch() {
+fn xpc_every_message_payload_is_fixed_nonempty_and_bounded_before_dispatch() {
     let valid = claims(TEAM_ID, BUNDLE_ID, MINIMUM_BUILD);
     let attestation_count = Arc::new(AtomicUsize::new(0));
     let dispatch_count = Arc::new(AtomicUsize::new(0));

@@ -55,7 +55,7 @@ xcrun --sdk macosx clang \
 
 nm -u "$test_root/xpc_server.o" | rg -q '_SecCodeCreateWithXPCMessage$'
 nm -u "$test_root/xpc_server.o" | rg -q '_SecCodeCheckValidity$'
-nm -u "$test_root/power_helper_client.o" | rg -q '_OBJC_CLASS_\\$_SMAppService$'
+nm -u "$test_root/power_helper_client.o" | rg -q '_OBJC_CLASS_\$_SMAppService$'
 
 plutil -lint "$daemon_plist" "$entitlements" >/dev/null
 node - "$daemon_plist" "$helper_native" "$client_native" <<'NODE'

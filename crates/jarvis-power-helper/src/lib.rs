@@ -10,6 +10,7 @@ pub mod dev_uds;
 pub mod pmset;
 pub mod root_store;
 pub mod watchdog;
+pub mod xpc_server;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HelperEvent {

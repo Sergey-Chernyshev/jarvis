@@ -11,6 +11,7 @@ app_command_inventory::with_app_commands!(define_app_command_names);
 
 fn main() {
     ensure_external_bin_placeholder();
+    build_power_helper_client();
 
     // Dev-only: встроить Info.plist (с NSMicrophoneUsageDescription) в RAW-бинарь
     // `jarvis`, чтобы macOS мог показать диалог разрешения микрофона при запуске
@@ -30,6 +31,23 @@ fn main() {
             .app_manifest(tauri_build::AppManifest::new().commands(APP_COMMAND_NAMES)),
     )
     .expect("tauri build with explicit app command manifest");
+}
+
+fn build_power_helper_client() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    println!("cargo:rerun-if-changed=native/power_helper_client.h");
+    println!("cargo:rerun-if-changed=native/power_helper_client.m");
+    cc::Build::new()
+        .file("native/power_helper_client.m")
+        .flag("-fobjc-arc")
+        .flag("-fblocks")
+        .flag("-mmacosx-version-min=13.0")
+        .compile("jarvis_power_helper_client");
+    println!("cargo:rustc-link-lib=framework=Foundation");
+    println!("cargo:rustc-link-lib=framework=ServiceManagement");
+    println!("cargo:rustc-link-lib=framework=System");
 }
 
 /// `tauri-build` валидирует externalBin даже для `cargo test`. Release/dev

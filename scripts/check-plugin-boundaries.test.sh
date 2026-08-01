@@ -966,6 +966,67 @@ expect_rejected "jarvis-package source discovery escape"
 
 write_clean_fixture
 printf '%s\n' \
+  '#[allow(unsafe_code)]' \
+  'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/src/escaped.inc"
+printf '%s\n' \
+  'use std::include as hidden_source;' \
+  'hidden_source!("escaped.inc");' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+expect_cargo_accepts_private_source
+expect_rejected "jarvis-package source discovery escape"
+
+write_clean_fixture
+printf '%s\n' \
+  '#[allow(unsafe_code)]' \
+  'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/src/escaped.inc"
+printf '%s\n' \
+  'use std::{include as grouped_source};' \
+  'grouped_source!("escaped.inc");' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+expect_cargo_accepts_private_source
+expect_rejected "jarvis-package source discovery escape"
+
+write_clean_fixture
+printf '%s\n' \
+  '#[allow(unsafe_code)]' \
+  'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/src/escaped.inc"
+printf '%s\n' \
+  'use std::include as first_source;' \
+  'use first_source as transitive_source;' \
+  'transitive_source!("escaped.inc");' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+expect_cargo_accepts_private_source
+expect_rejected "jarvis-package source discovery escape"
+
+write_clean_fixture
+printf '%s\n' \
+  '#[allow(unsafe_code)]' \
+  'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/src/escaped.inc"
+printf '%s\n' \
+  'use std::include as r#type;' \
+  'r#type!("escaped.inc");' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+expect_cargo_accepts_private_source
+expect_rejected "jarvis-package source discovery escape"
+
+write_clean_fixture
+printf '%s\n' \
+  '#[allow(unsafe_code)]' \
+  'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/src/escaped.inc"
+printf '%s\n' \
+  'use std::include as inclúde;' \
+  'inclúde!("escaped.inc");' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+expect_cargo_accepts_private_source
+expect_rejected "jarvis-package source discovery escape"
+
+write_clean_fixture
+printf '%s\n' \
   '#![allow(unsafe_code)]' \
   'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
   > "$fixture_root/crates/jarvis-package/src/escaped.inc"

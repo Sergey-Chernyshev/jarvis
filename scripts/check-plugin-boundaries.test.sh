@@ -292,6 +292,166 @@ expect_rejected "PackageTrustVerifier production implementation outside host tru
 write_clean_fixture
 mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
 printf '%s\n' \
+  'mod plugins;' \
+  > "$fixture_root/src-tauri/src/lib.rs"
+printf '%s\n' \
+  'pub mod trust;' \
+  'mod wrong;' \
+  > "$fixture_root/src-tauri/src/plugins/mod.rs"
+printf '%s\n' \
+  'pub mod package;' \
+  > "$fixture_root/src-tauri/src/plugins/trust/mod.rs"
+printf '%s\n' \
+  '#[macro_export]' \
+  'macro_rules! catalog_verifier {' \
+  '    ($target:ty) => { impl jarvis_package::PackageTrustVerifier for $target {} };' \
+  '}' \
+  > "$fixture_root/src-tauri/src/plugins/trust/package.rs"
+printf '%s\n' \
+  'macro_rules! forward_verifier {' \
+  '    ($implementation_macro:path, $target:ty) => {' \
+  '        $implementation_macro!($target);' \
+  '    };' \
+  '}' \
+  'struct ForwardedVerifier;' \
+  'forward_verifier!(crate::catalog_verifier, ForwardedVerifier);' \
+  > "$fixture_root/src-tauri/src/plugins/wrong.rs"
+expect_cargo_accepts_host_source
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
+printf '%s\n' \
+  'mod plugins;' \
+  > "$fixture_root/src-tauri/src/lib.rs"
+printf '%s\n' \
+  'pub mod trust;' \
+  'mod wrong;' \
+  > "$fixture_root/src-tauri/src/plugins/mod.rs"
+printf '%s\n' \
+  'pub mod package;' \
+  > "$fixture_root/src-tauri/src/plugins/trust/mod.rs"
+printf '%s\n' \
+  '#[macro_export]' \
+  'macro_rules! catalog_verifier {' \
+  '    ($target:ty) => { impl jarvis_package::PackageTrustVerifier for $target {} };' \
+  '}' \
+  > "$fixture_root/src-tauri/src/plugins/trust/package.rs"
+printf '%s\n' \
+  'macro_rules! forward_verifier {' \
+  '    ($implementation_macro:path, $target:ty) => {' \
+  '        $implementation_macro!($target);' \
+  '    };' \
+  '}' \
+  'macro_rules! forward_twice {' \
+  '    ($implementation_macro:path, $target:ty) => {' \
+  '        forward_verifier!($implementation_macro, $target);' \
+  '    };' \
+  '}' \
+  'struct TransitivelyForwardedVerifier;' \
+  'forward_twice!(crate::catalog_verifier, TransitivelyForwardedVerifier);' \
+  > "$fixture_root/src-tauri/src/plugins/wrong.rs"
+expect_cargo_accepts_host_source
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
+printf '%s\n' \
+  'mod plugins;' \
+  > "$fixture_root/src-tauri/src/lib.rs"
+printf '%s\n' \
+  'pub mod trust;' \
+  'mod wrong;' \
+  > "$fixture_root/src-tauri/src/plugins/mod.rs"
+printf '%s\n' \
+  'pub mod package;' \
+  > "$fixture_root/src-tauri/src/plugins/trust/mod.rs"
+printf '%s\n' \
+  '#[macro_export]' \
+  'macro_rules! catalog_verifier {' \
+  '    ($target:ty) => { impl jarvis_package::PackageTrustVerifier for $target {} };' \
+  '}' \
+  > "$fixture_root/src-tauri/src/plugins/trust/package.rs"
+printf '%s\n' \
+  'use crate::catalog_verifier as r#type;' \
+  'macro_rules! forward_verifier {' \
+  '    ($implementation_macro:path, $target:ty) => {' \
+  '        $implementation_macro!($target);' \
+  '    };' \
+  '}' \
+  'struct RawForwardedVerifier;' \
+  'forward_verifier!(r#type, RawForwardedVerifier);' \
+  > "$fixture_root/src-tauri/src/plugins/wrong.rs"
+expect_cargo_accepts_host_source
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
+printf '%s\n' \
+  'mod plugins;' \
+  > "$fixture_root/src-tauri/src/lib.rs"
+printf '%s\n' \
+  'pub mod trust;' \
+  'mod wrong;' \
+  > "$fixture_root/src-tauri/src/plugins/mod.rs"
+printf '%s\n' \
+  'pub mod package;' \
+  > "$fixture_root/src-tauri/src/plugins/trust/mod.rs"
+printf '%s\n' \
+  '#[macro_export]' \
+  'macro_rules! catalog_verifier {' \
+  '    ($target:ty) => { impl jarvis_package::PackageTrustVerifier for $target {} };' \
+  '}' \
+  > "$fixture_root/src-tauri/src/plugins/trust/package.rs"
+printf '%s\n' \
+  'use crate::catalog_verifier as vérifier;' \
+  'macro_rules! forward_verifier {' \
+  '    ($implementation_macro:path, $target:ty) => {' \
+  '        $implementation_macro!($target);' \
+  '    };' \
+  '}' \
+  'struct CanonicallyForwardedVerifier;' \
+  'forward_verifier!(vérifier, CanonicallyForwardedVerifier);' \
+  > "$fixture_root/src-tauri/src/plugins/wrong.rs"
+expect_cargo_accepts_host_source
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
+printf '%s\n' \
+  'mod plugins;' \
+  > "$fixture_root/src-tauri/src/lib.rs"
+printf '%s\n' \
+  'pub mod trust;' \
+  'mod wrong;' \
+  > "$fixture_root/src-tauri/src/plugins/mod.rs"
+printf '%s\n' \
+  'pub mod package;' \
+  > "$fixture_root/src-tauri/src/plugins/trust/mod.rs"
+printf '%s\n' \
+  '#[macro_export]' \
+  'macro_rules! catalog_verifier {' \
+  '    ($target:ty) => { impl jarvis_package::PackageTrustVerifier for $target {} };' \
+  '}' \
+  > "$fixture_root/src-tauri/src/plugins/trust/package.rs"
+printf '%s\n' \
+  'macro_rules! catalog_verifer {' \
+  '    ($target:ty) => { const _: usize = std::mem::size_of::<$target>(); };' \
+  '}' \
+  'macro_rules! forward_data {' \
+  '    ($implementation_macro:path, $target:ty) => {' \
+  '        $implementation_macro!($target);' \
+  '    };' \
+  '}' \
+  'struct UnrelatedForwardTarget;' \
+  'forward_data!(catalog_verifer, UnrelatedForwardTarget);' \
+  > "$fixture_root/src-tauri/src/plugins/wrong.rs"
+expect_cargo_accepts_host_source
+run_fixture_boundary >/dev/null
+
+write_clean_fixture
+mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
+printf '%s\n' \
   '#[macro_export]' \
   'macro_rules! cross_root_verifier {' \
   '    ($type:ty) => { impl PackageTrustVerifier for $type {} };' \

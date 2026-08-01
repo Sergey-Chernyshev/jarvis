@@ -597,7 +597,11 @@ function packageTrustVerifierMacroInvocations(
       isNamedSymbol(tokens[index], verifierMacroNames) ||
       tokens
         .slice(index + 3, argumentsEnd)
-        .some((token) => isNamedSymbol(token, verifierNames));
+        .some(
+          (token) =>
+            isNamedSymbol(token, verifierNames) ||
+            isNamedSymbol(token, verifierMacroNames),
+        );
     if (!carriesVerifier) {
       index = argumentsEnd;
       continue;

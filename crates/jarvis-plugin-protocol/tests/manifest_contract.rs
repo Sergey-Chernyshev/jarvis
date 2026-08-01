@@ -369,6 +369,27 @@ fn public_parse_rejects_duplicate_json_keys() {
 }
 
 #[test]
+fn typed_manifest_serialization_omits_absent_optional_fields() {
+    let manifest = ManifestV2::parse(VALID_UI).unwrap();
+    let serialized = serde_json::to_value(manifest).unwrap();
+
+    for pointer in [
+        "/runtime/lifecycle",
+        "/runtime/bridgeEntry",
+        "/runtime/service",
+        "/contributes/pages/0/paramsSchema",
+        "/contributes/commands/0/argsSchema",
+        "/contributes/commands/0/resultSchema",
+        "/contributes/commands/0/invocationUI",
+    ] {
+        assert!(
+            serialized.pointer(pointer).is_none(),
+            "unexpected null optional field at {pointer}: {serialized}"
+        );
+    }
+}
+
+#[test]
 fn public_parse_enforces_exact_byte_string_node_and_depth_quotas() {
     const MAX_DEPTH: usize = 64;
     const MAX_NODES: usize = 20_000;

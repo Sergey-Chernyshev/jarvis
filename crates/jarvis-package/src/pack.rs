@@ -326,16 +326,19 @@ pub(crate) fn fixed_opaque_observation_matches(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use jarvis_plugin_protocol::manifest::{ManifestV2, RuntimeKind};
     use jarvis_plugin_protocol::package::{
         MacOsVersion, PackageFileMode, PackagePath, PackageSignatureV1, PackageTarget,
     };
 
     use super::{
-        fixed_opaque_observation_matches, prepare_package_documents, FixedOpaqueSignature,
-        PackOptions, PackageDocumentAdapter, PackageError, PayloadObservation,
-        FIXED_OPAQUE_SIGNATURE_VALUE, SIGNATURE_MESSAGE_DOMAIN,
+        fixed_opaque_observation_matches, pack_fixture_archive, prepare_package_documents,
+        FixedOpaqueSignature, PackOptions, PackageDocumentAdapter, PackageError,
+        PayloadObservation, FIXED_OPAQUE_SIGNATURE_VALUE, SIGNATURE_MESSAGE_DOMAIN,
     };
+    use crate::archive::{encode_checksum_for_test, encode_number_for_test, entry_bytes_for_test};
     use crate::hash::sha256_digest;
 
     const SOURCE_MANIFEST: &[u8] =
@@ -590,5 +593,106 @@ mod tests {
           }
         }"#
         .to_vec()
+    }
+
+    fn long_path(component_before_unicode: usize) -> String {
+        [
+            "a".repeat(255),
+            "b".repeat(255),
+            "c".repeat(255),
+            "d".repeat(component_before_unicode),
+            "é".to_owned(),
+        ]
+        .join("/")
+    }
+
+    #[test]
+    fn gnu_header_profiles_are_byte_exact() {
+        let tar_header = tar::Header::new_gnu();
+        assert_eq!(&tar_header.as_bytes()[257..263], b"ustar ");
+        assert_eq!(&tar_header.as_bytes()[263..265], b" \0");
+
+        let short_path = "a".repeat(100);
+        let short = entry_bytes_for_test(&short_path, 0o444, b"x").unwrap();
+        assert_eq!(&short[0..100], short_path.as_bytes());
+        assert_eq!(&short[100..108], b"0000444\0");
+        assert_eq!(&short[108..116], b"0000000\0");
+        assert_eq!(&short[116..124], b"0000000\0");
+        assert_eq!(&short[124..136], b"00000000001\0");
+        assert_eq!(&short[136..148], b"00000000000\0");
+        assert_eq!(short[156], b'0');
+        assert_eq!(&short[257..263], b"ustar ");
+        assert_eq!(&short[263..265], b" \0");
+        assert_eq!(&short[329..337], b"0000000\0");
+        assert_eq!(&short[337..345], b"0000000\0");
+        assert_eq!(short.len(), 512 + 512 + 1024);
+        assert!(short[513..1024].iter().all(|byte| *byte == 0));
+        assert!(short[1024..].iter().all(|byte| *byte == 0));
+
+        let path_101 = "b".repeat(101);
+        let long = entry_bytes_for_test(&path_101, 0o555, b"xy").unwrap();
+        assert_eq!(&long[0..13], b"././@LongLink");
+        assert_eq!(&long[100..108], b"0000644\0");
+        assert_eq!(&long[124..136], b"00000000146\0");
+        assert_eq!(long[156], b'L');
+        assert_eq!(&long[512..613], path_101.as_bytes());
+        assert_eq!(long[613], 0);
+        assert_eq!(&long[1024..1036], b"././@LongFile");
+        assert_eq!(&long[1124..1132], b"0000555\0");
+        assert_eq!(long[1180], b'0');
+
+        let path_1024 = long_path(253);
+        assert_eq!(path_1024.len(), 1_024);
+        let longest = entry_bytes_for_test(&path_1024, 0o444, b"").unwrap();
+        assert_eq!(longest[156], b'L');
+        assert_eq!(&longest[124..136], b"00000002001\0");
+        assert_eq!(&longest[512..1536], path_1024.as_bytes());
+        assert_eq!(longest[1536], 0);
+        assert_eq!(&longest[2048..2060], b"././@LongFile");
+        assert_eq!(longest[2204], b'0');
+
+        assert!(entry_bytes_for_test(&long_path(254), 0o444, b"").is_err());
+        assert!(entry_bytes_for_test(&"z".repeat(256), 0o444, b"").is_err());
+
+        assert_eq!(encode_number_for_test(8, 0).unwrap(), b"0000000\0".to_vec());
+        assert_eq!(
+            encode_number_for_test(12, 0).unwrap(),
+            b"00000000000\0".to_vec()
+        );
+        assert_eq!(encode_checksum_for_test(0).unwrap(), b"000000\0 ".to_vec());
+        assert!(encode_number_for_test(8, 0o10_000_000).is_err());
+        assert!(encode_number_for_test(12, 0o1_000_000_000_000).is_err());
+        assert!(encode_checksum_for_test(0o1_000_000).is_err());
+    }
+
+    #[test]
+    fn identical_input_matches_committed_archive_golden() {
+        let actual = pack_fixture_archive().unwrap();
+        let fixture_root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugin-packages");
+        let expected = fs::read(fixture_root.join("golden/darwin-arm64.jarvis-plugin")).unwrap();
+        let expected_digest =
+            fs::read_to_string(fixture_root.join("golden/darwin-arm64.sha256")).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            crate::hash::sha256_digest(&actual).as_str(),
+            expected_digest.trim()
+        );
+    }
+
+    #[test]
+    #[ignore = "rewrites the committed deterministic archive golden"]
+    fn regenerate_package_golden() {
+        let archive = pack_fixture_archive().unwrap();
+        let fixture_root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugin-packages");
+        let golden = fixture_root.join("golden");
+        fs::create_dir_all(&golden).unwrap();
+        fs::write(golden.join("darwin-arm64.jarvis-plugin"), &archive).unwrap();
+        fs::write(
+            golden.join("darwin-arm64.sha256"),
+            format!("{}\n", crate::hash::sha256_digest(&archive).as_str()),
+        )
+        .unwrap();
     }
 }

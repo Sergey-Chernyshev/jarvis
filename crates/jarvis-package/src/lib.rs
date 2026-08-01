@@ -4,6 +4,7 @@
 #[allow(unsafe_code)]
 mod macos_dir;
 
+mod archive;
 // Step A3.4 wires these pure package primitives into the fd-only source/spool pipeline.
 #[cfg_attr(not(test), allow(dead_code))]
 mod hash;

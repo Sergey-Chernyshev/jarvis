@@ -19,6 +19,16 @@ run_fixture_boundary() {
     bash "$repo_root/scripts/check-plugin-boundaries.sh" "$fixture_root"
 }
 
+run_fixture_trust_scan() {
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    --trust-roots \
+    "$fixture_root/crates" \
+    "$fixture_root/plugins" \
+    "$fixture_root/src-tauri" \
+    --target-sources \
+    "$@"
+}
+
 write_clean_fixture() {
   rm -rf -- \
     "$fixture_root/cargo-target" \
@@ -793,6 +803,105 @@ printf '%s\n' \
   'pub fn covered() {}' \
   > "$fixture_root/plugins/community/src/covered.rs"
 run_fixture_boundary >/dev/null
+
+write_clean_fixture
+printf '%s\n' \
+  '' \
+  '[lib]' \
+  'path = "src/hidden.inc"' \
+  >> "$fixture_root/crates/jarvis-plugin-protocol/Cargo.toml"
+printf '%s\n' \
+  'struct HiddenCrateVerifier;' \
+  'impl PackageTrustVerifier for HiddenCrateVerifier {}' \
+  > "$fixture_root/crates/jarvis-plugin-protocol/src/hidden.inc"
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+printf '%s\n' \
+  '' \
+  '[lib]' \
+  'path = "src/hidden.inc"' \
+  >> "$fixture_root/plugins/community/Cargo.toml"
+printf '%s\n' \
+  'struct HiddenPluginVerifier;' \
+  'impl PackageTrustVerifier for HiddenPluginVerifier {}' \
+  > "$fixture_root/plugins/community/src/hidden.inc"
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+printf '%s\n' \
+  '' \
+  '[[bin]]' \
+  'name = "hidden-host"' \
+  'path = "src/hidden.inc"' \
+  >> "$fixture_root/src-tauri/Cargo.toml"
+printf '%s\n' \
+  'struct HiddenHostVerifier;' \
+  'impl PackageTrustVerifier for HiddenHostVerifier {}' \
+  > "$fixture_root/src-tauri/src/hidden.inc"
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+mkdir -p "$fixture_root/external-source"
+printf '%s\n' \
+  'pub fn outside() {}' \
+  > "$fixture_root/external-source/outside.rs"
+printf '%s\n' \
+  '' \
+  '[lib]' \
+  'path = "../../external-source/outside.rs"' \
+  >> "$fixture_root/plugins/community/Cargo.toml"
+expect_rejected "PackageTrustVerifier source discovery escape"
+
+write_clean_fixture
+mkdir -p "$fixture_root/plugins/community/target"
+printf '%s\n' \
+  'pub fn generated() {}' \
+  > "$fixture_root/plugins/community/target/generated.rs"
+printf '%s\n' \
+  '' \
+  '[lib]' \
+  'path = "target/generated.rs"' \
+  >> "$fixture_root/plugins/community/Cargo.toml"
+expect_rejected "PackageTrustVerifier source discovery escape"
+
+write_clean_fixture
+mkdir -p \
+  "$fixture_root/external-source" \
+  "$fixture_root/plugins/community/target"
+printf '%s\n' \
+  'pub fn outside() {}' \
+  > "$fixture_root/external-source/outside.rs"
+printf '%s\n' \
+  'pub fn generated() {}' \
+  > "$fixture_root/plugins/community/target/generated.rs"
+ln -s ../../../external-source/outside.rs \
+  "$fixture_root/plugins/community/src/linked.rs"
+trust_target_contract=""
+if ! trust_target_contract="$(
+  run_fixture_trust_scan \
+    "$fixture_root/external-source/outside.rs" \
+    "$fixture_root/plugins/community/target/generated.rs" \
+    "$fixture_root/plugins/community/src/linked.rs" \
+    "$fixture_root/plugins/community/src/missing.rs" \
+    "$fixture_root/plugins/community/src"
+)"; then
+  echo "trust scanner rejected semantic target-source contract invocation" >&2
+  exit 1
+fi
+for expected_source_record in \
+  "$fixture_root/external-source/outside.rs:1"$'\t'"Cargo target source outside trust roots" \
+  "$fixture_root/plugins/community/target/generated.rs:1"$'\t'"Cargo target source inside build output" \
+  "$fixture_root/plugins/community/src/linked.rs:1"$'\t'"symlink Cargo target source" \
+  "$fixture_root/plugins/community/src/missing.rs:1"$'\t'"missing Cargo target source" \
+  "$fixture_root/plugins/community/src:1"$'\t'"Cargo target source is not a regular file"
+do
+  if [[ "$trust_target_contract" != *$'source\t'"$expected_source_record"* ]]; then
+    echo "trust scanner missed semantic target source: $expected_source_record" >&2
+    echo "$trust_target_contract" >&2
+    exit 1
+  fi
+done
 
 write_clean_fixture
 mkdir -p "$fixture_root/crates/jarvis-package/src/target"

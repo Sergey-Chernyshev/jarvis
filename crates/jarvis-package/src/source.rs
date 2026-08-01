@@ -660,4 +660,54 @@ mod tests {
         assert_eq!(error.code(), "archive_quota");
         assert!(!copied.get(), "oversized source was copied into the spool");
     }
+
+    #[test]
+    fn directory_enumeration_contract_is_two_phase_without_fd_fanout() {
+        let source = include_str!("source.rs");
+        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let enumeration = production
+            .split_once("fn enumerate_directory(")
+            .unwrap()
+            .1
+            .split_once("fn reopen_file(")
+            .unwrap()
+            .0;
+        let metadata_phase = enumeration
+            .split_once("let mut child_directories = Vec::new();")
+            .unwrap()
+            .1
+            .split_once("drop(names);")
+            .unwrap()
+            .0;
+        assert!(metadata_phase.contains("for name in names.drain(..) {"));
+        assert!(metadata_phase.contains("statat("));
+        assert!(!metadata_phase.contains("openat("));
+
+        let recursion_phase = enumeration
+            .split_once("drop(names);")
+            .unwrap()
+            .1
+            .split_once("for child_directory in child_directories {")
+            .unwrap()
+            .1;
+        assert!(recursion_phase.contains("openat("));
+        assert!(recursion_phase.contains("enumerate_directory("));
+    }
+
+    #[test]
+    fn retained_parent_listings_share_the_namespace_memory_budget() {
+        let source = include_str!("source.rs");
+        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        assert!(production.contains("retained_listing_bytes: u64"));
+        assert!(production.contains("fn retain_directory_names("));
+        assert!(production.contains("fn release_directory_name("));
+        let remaining_budget = production
+            .split_once("fn remaining_namespace_stored_bytes(&self) -> u64 {")
+            .unwrap()
+            .1
+            .split_once("\n    }")
+            .unwrap()
+            .0;
+        assert!(remaining_budget.contains("self.retained_listing_bytes"));
+    }
 }

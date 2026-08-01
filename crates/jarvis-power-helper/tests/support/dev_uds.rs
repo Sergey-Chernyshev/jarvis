@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -806,7 +806,7 @@ fn listener_publication_follows_recovery_and_scheduler_acknowledgement() {
 }
 
 #[test]
-fn listener_drop_removes_the_public_name_and_restart_cleans_owned_residue_automatically() {
+fn listener_drop_removes_public_name_and_retains_one_validated_quarantine_receipt() {
     let harness = DevHarness::new();
     let listener = bind_listener(
         &harness.runtime.listener_permit(),
@@ -832,40 +832,24 @@ fn listener_drop_removes_the_public_name_and_restart_cleans_owned_residue_automa
         .collect::<Vec<_>>();
     assert_eq!(residues.len(), 1, "stop leaves one bounded cleanup receipt");
 
-    let restarted = bind_listener(
+    let metadata = fs::symlink_metadata(&residues[0]).unwrap();
+    assert!(metadata.file_type().is_socket());
+    assert_eq!(metadata.mode() & 0o7777, 0o600);
+    assert_eq!(metadata.uid(), current_uid());
+    assert_eq!(metadata.gid(), current_gid());
+    assert_eq!(metadata.nlink(), 1);
+    let restart = bind_listener(
         &harness.runtime.listener_permit(),
         &harness.root,
         current_uid(),
         harness.sink.clone(),
-    )
-    .expect("normal dev restart should be automatic");
-    assert!(!residues[0].exists(), "restart must reclaim the receipt");
-    drop(restarted);
-
-    let sentinel = b"inflight-replacement-must-survive";
-    let result = bind_listener_with_hook_for_testing(
-        &harness.runtime.listener_permit(),
-        &harness.root,
-        current_uid(),
-        harness.sink.clone(),
-        |stage, path| {
-            if stage == BindStage::ResidueMovedBeforeUnlink {
-                let replacement = path.with_file_name(".power-helper-dev.cleanup-inflight");
-                fs::remove_file(&replacement).unwrap();
-                fs::write(&replacement, sentinel).unwrap();
-                fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
-            }
-        },
     );
-    assert_eq!(result.err(), Some(TransportError::CleanupRequired));
-    assert_eq!(
-        fs::read(run.join(".power-helper-dev.cleanup-inflight")).unwrap(),
-        sentinel
-    );
+    assert_eq!(restart.err(), Some(TransportError::CleanupRequired));
+    assert!(residues[0].exists());
 }
 
 #[test]
-fn restart_reclaims_one_existing_valid_residue_without_manual_deletion() {
+fn repeated_restart_refusal_does_not_accumulate_quarantine_entries() {
     let harness = DevHarness::new();
     let initial = bind_listener(
         &harness.runtime.listener_permit(),
@@ -878,20 +862,38 @@ fn restart_reclaims_one_existing_valid_residue_without_manual_deletion() {
     drop(initial);
     assert!(residue.exists());
 
-    let listener = bind_listener(
+    let first = bind_listener(
         &harness.runtime.listener_permit(),
         &harness.root,
         current_uid(),
         harness.sink.clone(),
-    )
-    .expect("a validated stale dev residue should be reclaimed automatically");
-    assert!(!residue.exists());
-    drop(listener);
+    );
+    assert_eq!(first.err(), Some(TransportError::CleanupRequired));
     assert!(residue.exists());
+    let second = bind_listener(
+        &harness.runtime.listener_permit(),
+        &harness.root,
+        current_uid(),
+        harness.sink.clone(),
+    );
+    assert_eq!(second.err(), Some(TransportError::CleanupRequired));
+    assert_eq!(
+        fs::read_dir(residue.parent().unwrap())
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .ok()
+                    .and_then(|entry| entry.file_name().to_str().map(str::to_owned))
+                    .is_some_and(|name| name == DEV_CLEANUP_RESIDUE_FILE)
+            })
+            .count(),
+        1
+    );
 }
 
 #[test]
-fn replacement_at_residue_during_cleanup_is_preserved_and_restart_fails_closed() {
+fn unknown_cleanup_receipt_is_never_deleted_or_replaced() {
     let harness = DevHarness::new();
     let initial = bind_listener(
         &harness.runtime.listener_permit(),
@@ -901,27 +903,21 @@ fn replacement_at_residue_during_cleanup_is_preserved_and_restart_fails_closed()
     )
     .unwrap();
     let residue = initial.path().with_file_name(DEV_CLEANUP_RESIDUE_FILE);
-    let run = residue.parent().unwrap().to_path_buf();
     drop(initial);
-    assert!(residue.exists());
 
-    let sentinel = b"replacement-must-survive";
-    let result = bind_listener_with_hook_for_testing(
+    let sentinel = b"unknown-cleanup-entry";
+    fs::remove_file(&residue).unwrap();
+    fs::write(&residue, sentinel).unwrap();
+    fs::set_permissions(&residue, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let result = bind_listener(
         &harness.runtime.listener_permit(),
         &harness.root,
         current_uid(),
         harness.sink.clone(),
-        |stage, path| {
-            if stage == BindStage::ResidueMovedBeforeUnlink {
-                let replacement = path.with_file_name(DEV_CLEANUP_RESIDUE_FILE);
-                fs::write(&replacement, sentinel).unwrap();
-                fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).unwrap();
-            }
-        },
     );
     assert_eq!(result.err(), Some(TransportError::CleanupRequired));
     assert_eq!(fs::read(&residue).unwrap(), sentinel);
-    assert!(!run.join(".power-helper-dev.cleanup-inflight").exists());
 }
 
 #[test]

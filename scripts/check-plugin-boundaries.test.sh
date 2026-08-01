@@ -785,6 +785,16 @@ printf '%s\n' \
 run_fixture_boundary >/dev/null
 
 write_clean_fixture
+printf '%s\n' \
+  '#[path = "covered.rs"]' \
+  'mod covered;' \
+  > "$fixture_root/plugins/community/src/lib.rs"
+printf '%s\n' \
+  'pub fn covered() {}' \
+  > "$fixture_root/plugins/community/src/covered.rs"
+run_fixture_boundary >/dev/null
+
+write_clean_fixture
 mkdir -p "$fixture_root/crates/jarvis-package/src/target"
 printf '%s\n' \
   '#![allow(unsafe_code)]' \

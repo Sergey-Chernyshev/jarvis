@@ -161,6 +161,615 @@ expect_cargo_dependency() {
     '
 }
 
+provenance_root="$fixture_root/provenance"
+provenance_package_root="$provenance_root/member"
+provenance_manifest="$provenance_package_root/Cargo.toml"
+provenance_lock="$provenance_root/Cargo.lock"
+mkdir -p "$provenance_package_root/src"
+printf '%s\n' \
+  '[workspace]' \
+  'members = ["member"]' \
+  'resolver = "2"' \
+  > "$provenance_root/Cargo.toml"
+printf '%s\n' \
+  '[package]' \
+  'name = "provenance-fixture"' \
+  'version = "0.1.0"' \
+  > "$provenance_manifest"
+
+write_provenance_lock() {
+  local identities=("$@")
+  printf '%s\n' \
+    'version = 3' \
+    '' \
+    '[[package]]' \
+    'name = "provenance-fixture"' \
+    'version = "0.1.0"' \
+    > "$provenance_lock"
+  local identity
+  for identity in "${identities[@]}"; do
+    IFS='|' read -r package version source checksum <<< "$identity"
+    printf '%s\n' \
+      '' \
+      '[[package]]' \
+      "name = \"$package\"" \
+      "version = \"$version\"" \
+      "source = \"$source\"" \
+      "checksum = \"$checksum\"" \
+      >> "$provenance_lock"
+  done
+}
+
+run_provenance_contract() {
+  local dependency_name="$1"
+  local dependency_alias="$2"
+  local declared_source="$3"
+  local resolved_name="$4"
+  local resolved_version="$5"
+  local resolved_source="$6"
+  local scenario="${7:-exact}"
+  node -e '
+      const manifestPath = process.argv[1];
+      const workspaceRoot = require("node:path").dirname(
+        require("node:path").dirname(manifestPath),
+      );
+      const dependencyName = process.argv[2];
+      const dependencyAlias = process.argv[3];
+      const declaredSource = process.argv[4] || null;
+      const resolvedName = process.argv[5];
+      const resolvedVersion = process.argv[6];
+      const resolvedSource = process.argv[7] || null;
+      const scenario = process.argv[8];
+      const rootId = `path+file://${manifestPath}#provenance-fixture@0.1.0`;
+      const dependencyId =
+        `${resolvedSource ?? `path+file://${workspaceRoot}/patched`}` +
+        `#${resolvedName}@${resolvedVersion}`;
+      const dependencyPackage = {
+        name: resolvedName,
+        version: resolvedVersion,
+        id: dependencyId,
+        source: resolvedSource,
+        manifest_path: `${workspaceRoot}/registry/${resolvedName}/Cargo.toml`,
+        dependencies: [],
+        targets: [],
+      };
+      const packages = [{
+        name: "provenance-fixture",
+        version: "0.1.0",
+        id: rootId,
+        source: null,
+        manifest_path: manifestPath,
+        dependencies: [{
+          name: dependencyName,
+          source: declaredSource,
+          req: "^1",
+          kind: null,
+          rename: dependencyAlias === dependencyName ? null : dependencyAlias,
+          optional: false,
+          uses_default_features: true,
+          features: [],
+          target: null,
+          registry: null,
+          path: null,
+        }],
+        targets: [],
+      }, dependencyPackage];
+      const rootDependencies =
+        scenario === "missing-resolve"
+          ? []
+          : [{
+              name: dependencyAlias.replaceAll("-", "_"),
+              pkg: dependencyId,
+              dep_kinds: [{ kind: null, target: null }],
+            }];
+      const nodes = [{
+        id: rootId,
+        dependencies: rootDependencies.map((dependency) => dependency.pkg),
+        deps: rootDependencies,
+        features: [],
+      }, {
+        id: dependencyId,
+        dependencies: [],
+        deps: [],
+        features: [],
+      }];
+      if (scenario === "missing-package") {
+        packages.pop();
+      }
+      if (scenario === "ambiguous-direct") {
+        const secondId =
+          `${resolvedSource}#${resolvedName}@1.0.150`;
+        packages.push({
+          ...dependencyPackage,
+          version: "1.0.150",
+          id: secondId,
+        });
+        rootDependencies.push({
+          name: dependencyAlias.replaceAll("-", "_"),
+          pkg: secondId,
+          dep_kinds: [{ kind: null, target: "cfg(target_os = \"macos\")" }],
+        });
+        nodes.push({
+          id: secondId,
+          dependencies: [],
+          deps: [],
+          features: [],
+        });
+      }
+      if (scenario === "transitive-second") {
+        const secondId =
+          `${resolvedSource}#${resolvedName}@1.0.150`;
+        const carrierId =
+          "registry+https://github.com/rust-lang/crates.io-index#carrier@1.0.0";
+        packages[0].dependencies.push({
+          name: "carrier",
+          source: "registry+https://github.com/rust-lang/crates.io-index",
+          req: "^1",
+          kind: null,
+          rename: null,
+          optional: false,
+          uses_default_features: true,
+          features: [],
+          target: null,
+          registry: null,
+          path: null,
+        });
+        packages.push({
+          ...dependencyPackage,
+          version: "1.0.150",
+          id: secondId,
+        }, {
+          name: "carrier",
+          version: "1.0.0",
+          id: carrierId,
+          source: "registry+https://github.com/rust-lang/crates.io-index",
+          manifest_path: `${workspaceRoot}/registry/carrier/Cargo.toml`,
+          dependencies: [],
+          targets: [],
+        });
+        rootDependencies.push({
+          name: "carrier",
+          pkg: carrierId,
+          dep_kinds: [{ kind: null, target: null }],
+        });
+        nodes.push({
+          id: carrierId,
+          dependencies: [secondId],
+          deps: [{
+            name: resolvedName.replaceAll("-", "_"),
+            pkg: secondId,
+            dep_kinds: [{ kind: null, target: null }],
+          }],
+          features: [],
+        }, {
+          id: secondId,
+          dependencies: [],
+          deps: [],
+          features: [],
+        });
+      }
+      process.stdout.write(JSON.stringify({
+        packages,
+        workspace_root: workspaceRoot,
+        workspace_members: [rootId],
+        workspace_default_members: [rootId],
+        resolve:
+          scenario === "null-resolve"
+            ? null
+            : {
+                root: null,
+                nodes,
+              },
+      }));
+    ' \
+    "$provenance_manifest" \
+    "$dependency_name" \
+    "$dependency_alias" \
+    "$declared_source" \
+    "$resolved_name" \
+    "$resolved_version" \
+    "$resolved_source" \
+    "$scenario" \
+    | node "$repo_root/scripts/resolve-cargo-macro-provenance.mjs" \
+      "$provenance_manifest"
+}
+
+expect_provenance_rejected() {
+  local expected="$1"
+  shift
+  local output
+  if output="$(run_provenance_contract "$@" 2>&1)"; then
+    echo "Cargo macro provenance accepted forbidden identity: $expected" >&2
+    exit 1
+  fi
+  if [[ "$output" != *"$expected"* ]]; then
+    echo "Cargo macro provenance did not identify: $expected" >&2
+    echo "$output" >&2
+    exit 1
+  fi
+}
+
+registry_source='registry+https://github.com/rust-lang/crates.io-index'
+serde_1_0_150_checksum='e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9'
+serde_1_0_151_checksum='c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14'
+write_provenance_lock \
+  "serde_json|1.0.151|$registry_source|$serde_1_0_151_checksum"
+verified_provenance="$(
+  run_provenance_contract \
+    "serde_json" \
+    "serde_json" \
+    "$registry_source" \
+    "serde_json" \
+    "1.0.151" \
+    "$registry_source"
+)"
+printf '%s\n' "$verified_provenance" \
+  | node -e '
+    let source = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { source += chunk; });
+    process.stdin.on("end", () => {
+      const record = JSON.parse(source);
+      const identity = record.aliases?.serde_json;
+      if (
+        identity?.package !== "serde_json" ||
+        identity?.version !== "1.0.151" ||
+        identity?.checksum !==
+          "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+      ) {
+        process.exit(1);
+      }
+    });
+  '
+
+renamed_provenance="$(
+  run_provenance_contract \
+    "serde_json" \
+    "json_codec" \
+    "$registry_source" \
+    "serde_json" \
+    "1.0.151" \
+    "$registry_source"
+)"
+printf '%s\n' "$renamed_provenance" \
+  | node -e '
+    let source = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { source += chunk; });
+    process.stdin.on("end", () => {
+      const record = JSON.parse(source);
+      if (
+        Object.keys(record.aliases ?? {}).join(",") !== "json_codec" ||
+        record.aliases.json_codec.package !== "serde_json"
+      ) {
+        process.exit(1);
+      }
+    });
+  '
+
+expect_provenance_rejected \
+  "audited Cargo macro alias serde_json resolves to unaudited package lookalike" \
+  "lookalike" \
+  "serde_json" \
+  "$registry_source" \
+  "lookalike" \
+  "1.0.0" \
+  "$registry_source"
+
+expect_provenance_rejected \
+  "audited Cargo macro package serde_json must use the crates.io registry" \
+  "serde_json" \
+  "serde_json" \
+  "$registry_source" \
+  "serde_json" \
+  "1.0.151" \
+  "" \
+  "exact"
+
+expect_provenance_rejected \
+  "audited Cargo macro package serde_json must use the crates.io registry" \
+  "serde_json" \
+  "serde_json" \
+  "$registry_source" \
+  "serde_json" \
+  "1.0.151" \
+  "git+https://example.invalid/serde_json" \
+  "exact"
+
+write_provenance_lock \
+  "serde_json|1.0.151|$registry_source|0000000000000000000000000000000000000000000000000000000000000000"
+expect_provenance_rejected \
+  "serde_json 1.0.151 does not match an audited checksum" \
+  "serde_json" \
+  "serde_json" \
+  "$registry_source" \
+  "serde_json" \
+  "1.0.151" \
+  "$registry_source"
+
+write_provenance_lock \
+  "serde_json|1.0.150|$registry_source|$serde_1_0_150_checksum" \
+  "serde_json|1.0.151|$registry_source|$serde_1_0_151_checksum"
+expect_provenance_rejected \
+  "Cargo macro alias serde_json is ambiguous" \
+  "serde_json" \
+  "serde_json" \
+  "$registry_source" \
+  "serde_json" \
+  "1.0.151" \
+  "$registry_source" \
+  "ambiguous-direct"
+
+transitive_provenance="$(
+  run_provenance_contract \
+    "serde_json" \
+    "serde_json" \
+    "$registry_source" \
+    "serde_json" \
+    "1.0.151" \
+    "$registry_source" \
+    "transitive-second"
+)"
+if [[ "$transitive_provenance" != *'"version":"1.0.151"'* ]]; then
+  echo "unrelated transitive Cargo version changed direct macro identity" >&2
+  exit 1
+fi
+
+write_provenance_lock \
+  "serde_json|1.0.151|$registry_source|$serde_1_0_151_checksum"
+expect_provenance_rejected \
+  "Cargo resolve is missing audited alias serde_json" \
+  "serde_json" \
+  "serde_json" \
+  "$registry_source" \
+  "serde_json" \
+  "1.0.151" \
+  "$registry_source" \
+  "missing-resolve"
+
+expect_provenance_rejected \
+  "Cargo resolve package identity is missing" \
+  "serde_json" \
+  "serde_json" \
+  "$registry_source" \
+  "serde_json" \
+  "1.0.151" \
+  "$registry_source" \
+  "missing-package"
+
+expect_provenance_rejected \
+  "Cargo metadata resolve graph is missing" \
+  "serde_json" \
+  "serde_json" \
+  "$registry_source" \
+  "serde_json" \
+  "1.0.151" \
+  "$registry_source" \
+  "null-resolve"
+
+tauri_checksum='437404997acf375d85f1177afa7e11bb971f274ed6a7b83a2a3e339015f4cc28'
+tauri_macros_checksum='ae6cb4e3896c21d2f6da5b31251d2faea0153bba56ed0e970f918115dbee4924'
+run_tauri_provenance_contract() {
+  local provider_source="$1"
+  node -e '
+    const manifestPath = process.argv[1];
+    const workspaceRoot = require("node:path").dirname(
+      require("node:path").dirname(manifestPath),
+    );
+    const registry = process.argv[2];
+    const providerSource = process.argv[3] || null;
+    const rootId = `path+file://${manifestPath}#provenance-fixture@0.1.0`;
+    const tauriId = `${registry}#tauri@2.11.2`;
+    const macrosId =
+      `${providerSource ?? `path+file://${workspaceRoot}/patched`}` +
+      "#tauri-macros@2.6.2";
+    process.stdout.write(JSON.stringify({
+      packages: [{
+        name: "provenance-fixture",
+        version: "0.1.0",
+        id: rootId,
+        source: null,
+        manifest_path: manifestPath,
+        dependencies: [{
+          name: "tauri",
+          source: registry,
+          req: "^2.11.2",
+          kind: null,
+          rename: null,
+          optional: false,
+          uses_default_features: true,
+          features: [],
+          target: null,
+          registry: null,
+          path: null,
+        }],
+        targets: [],
+      }, {
+        name: "tauri",
+        version: "2.11.2",
+        id: tauriId,
+        source: registry,
+        manifest_path: `${workspaceRoot}/registry/tauri/Cargo.toml`,
+        dependencies: [],
+        targets: [],
+      }, {
+        name: "tauri-macros",
+        version: "2.6.2",
+        id: macrosId,
+        source: providerSource,
+        manifest_path: `${workspaceRoot}/registry/tauri-macros/Cargo.toml`,
+        dependencies: [],
+        targets: [],
+      }],
+      workspace_root: workspaceRoot,
+      workspace_members: [rootId],
+      workspace_default_members: [rootId],
+      resolve: {
+        root: null,
+        nodes: [{
+          id: rootId,
+          dependencies: [tauriId],
+          deps: [{
+            name: "tauri",
+            pkg: tauriId,
+            dep_kinds: [{ kind: null, target: null }],
+          }],
+          features: [],
+        }, {
+          id: tauriId,
+          dependencies: [macrosId],
+          deps: [{
+            name: "tauri_macros",
+            pkg: macrosId,
+            dep_kinds: [{ kind: null, target: null }],
+          }],
+          features: [],
+        }, {
+          id: macrosId,
+          dependencies: [],
+          deps: [],
+          features: [],
+        }],
+      },
+    }));
+  ' "$provenance_manifest" "$registry_source" "$provider_source" \
+    | node "$repo_root/scripts/resolve-cargo-macro-provenance.mjs" \
+      "$provenance_manifest"
+}
+
+write_provenance_lock \
+  "tauri|2.11.2|$registry_source|$tauri_checksum" \
+  "tauri-macros|2.6.2|$registry_source|$tauri_macros_checksum"
+tauri_provenance="$(run_tauri_provenance_contract "$registry_source")"
+if [[ "$tauri_provenance" != *'"tauri-macros"'* ]]; then
+  echo "Cargo provenance omitted the audited Tauri proc-macro provider" >&2
+  exit 1
+fi
+tauri_provider_output=""
+if tauri_provider_output="$(run_tauri_provenance_contract "" 2>&1)"; then
+  echo "Cargo provenance accepted a patched Tauri proc-macro provider" >&2
+  exit 1
+fi
+if [[ "$tauri_provider_output" != *"Cargo macro provider tauri-macros must use the crates.io registry"* ]]; then
+  echo "Cargo provenance did not identify the patched Tauri macro provider" >&2
+  echo "$tauri_provider_output" >&2
+  exit 1
+fi
+
+write_provenance_lock \
+  "serde_json|1.0.151|$registry_source|$serde_1_0_151_checksum"
+provenance_records="$provenance_root/provenance.ndjson"
+printf '%s\n' "$verified_provenance" > "$provenance_records"
+printf '%s\n' \
+  'pub fn audited() {' \
+  '    let _ = serde_json::json!({ "safe": true });' \
+  '}' \
+  > "$provenance_package_root/src/lib.rs"
+audited_macro_scan="$(
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    "$provenance_package_root" \
+    --cargo-provenance-file "$provenance_records"
+)"
+if [[ "$audited_macro_scan" == *$'source\t'* ]]; then
+  echo "scanner rejected Cargo-bound audited macro identity" >&2
+  echo "$audited_macro_scan" >&2
+  exit 1
+fi
+
+missing_provenance_scan="$(
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    "$provenance_package_root"
+)"
+if [[ "$missing_provenance_scan" != *$'source\t'* ]]; then
+  echo "scanner accepted audited macro text without Cargo provenance" >&2
+  exit 1
+fi
+
+mkdir -p "$provenance_package_root/nested/src"
+printf '%s\n' \
+  '[package]' \
+  'name = "nested-without-provenance"' \
+  'version = "0.1.0"' \
+  > "$provenance_package_root/nested/Cargo.toml"
+printf '%s\n' \
+  'pub fn nested() {' \
+  '    let _ = serde_json::json!({ "safe": true });' \
+  '}' \
+  > "$provenance_package_root/nested/src/lib.rs"
+scoped_provenance_scan="$(
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    "$provenance_package_root" \
+    --cargo-provenance-file "$provenance_records"
+)"
+if [[ "$scoped_provenance_scan" != *$'source\t'* ]]; then
+  echo "scanner leaked an enclosing package macro identity into a nested crate" >&2
+  exit 1
+fi
+rm -rf -- "$provenance_package_root/nested"
+
+printf '%s\n' "$renamed_provenance" > "$provenance_records"
+printf '%s\n' \
+  'pub fn renamed() {' \
+  '    let _ = json_codec::json!({ "safe": true });' \
+  '}' \
+  > "$provenance_package_root/src/lib.rs"
+renamed_macro_scan="$(
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    "$provenance_package_root" \
+    --cargo-provenance-file "$provenance_records"
+)"
+if [[ "$renamed_macro_scan" == *$'source\t'* ]]; then
+  echo "scanner rejected legitimate Cargo macro rename" >&2
+  echo "$renamed_macro_scan" >&2
+  exit 1
+fi
+
+printf '%s\n' "$verified_provenance" > "$provenance_records"
+printf '%s\n' \
+  'mod serde_json {' \
+  '    macro_rules! json {' \
+  '        ($($token:tt)*) => { () };' \
+  '    }' \
+  '    pub(crate) use json;' \
+  '}' \
+  'pub fn shadowed() {' \
+  '    let _ = serde_json::json!({ "safe": true });' \
+  '}' \
+  > "$provenance_package_root/src/lib.rs"
+shadowed_macro_scan="$(
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    "$provenance_package_root" \
+    --cargo-provenance-file "$provenance_records"
+)"
+if [[ "$shadowed_macro_scan" != *$'source\t'* ]]; then
+  echo "scanner accepted a locally shadowed Cargo macro alias" >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'mod serde_json {' \
+  '    macro_rules! json {' \
+  '        ($($token:tt)*) => { () };' \
+  '    }' \
+  '    pub(crate) use json;' \
+  '}' \
+  'pub fn absolute() {' \
+  '    let _ = ::serde_json::json!({ "safe": true });' \
+  '}' \
+  > "$provenance_package_root/src/lib.rs"
+absolute_macro_scan="$(
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    "$provenance_package_root" \
+    --cargo-provenance-file "$provenance_records"
+)"
+if [[ "$absolute_macro_scan" == *$'source\t'* ]]; then
+  echo "scanner rejected an absolute Cargo-bound macro path" >&2
+  echo "$absolute_macro_scan" >&2
+  exit 1
+fi
+
+rm -rf -- "$provenance_root"
+
 write_clean_fixture
 run_fixture_boundary >/dev/null
 
@@ -1342,6 +1951,59 @@ if [[ "$lock_digests_before" != "$lock_digests_after" ]]; then
     || true
   exit 1
 fi
+
+node -e '
+  const { readFileSync } = require("node:fs");
+  const workflow = readFileSync(process.argv[1], "utf8");
+  const boundaryScript = readFileSync(process.argv[2], "utf8");
+  const prepareMarker =
+    "      - name: Prepare plugin boundary Cargo metadata";
+  const boundaryMarker = "      - name: Plugin source boundary";
+  const prepareIndex = workflow.indexOf(prepareMarker);
+  const boundaryIndex = workflow.indexOf(boundaryMarker);
+  if (
+    prepareIndex === -1 ||
+    boundaryIndex === -1 ||
+    prepareIndex >= boundaryIndex
+  ) {
+    throw new Error(
+      "CI must prepare Cargo metadata before the offline plugin boundary",
+    );
+  }
+  const preparation = workflow.slice(prepareIndex, boundaryIndex);
+  const manifests = [
+    "crates/jarvis-package/Cargo.toml",
+    "crates/jarvis-plugin-protocol/Cargo.toml",
+    "crates/jarvis-plugin-sdk/Cargo.toml",
+    "crates/jarvis-plugin-test-host/Cargo.toml",
+    "crates/jarvis-power-core/Cargo.toml",
+    "crates/jarvis-power-helper/Cargo.toml",
+    "crates/jarvis-secret-store/Cargo.toml",
+    "plugins/agent-vm/Cargo.toml",
+    "src-tauri/Cargo.toml",
+  ];
+  const fetches = [
+    ...preparation.matchAll(
+      /cargo fetch --locked --manifest-path ([^\s]+)/g,
+    ),
+  ].map((match) => match[1]);
+  if (
+    fetches.length !== manifests.length ||
+    new Set(fetches).size !== fetches.length ||
+    manifests.some((manifest) => !fetches.includes(manifest))
+  ) {
+    throw new Error(
+      "CI Cargo metadata preparation must fetch each workspace root once",
+    );
+  }
+  for (const flag of ["--all-features", "--locked", "--offline"]) {
+    if (!boundaryScript.includes(flag)) {
+      throw new Error(`plugin boundary metadata is missing ${flag}`);
+    }
+  }
+' \
+  "$repo_root/.github/workflows/ci.yml" \
+  "$repo_root/scripts/check-plugin-boundaries.sh"
 
 mkdir -p "$fixture_root/schemas"
 printf '%s\n' '{}' > "$fixture_root/schemas/plugin-private-v1.schema.json"

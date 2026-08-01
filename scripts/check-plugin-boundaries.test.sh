@@ -868,13 +868,17 @@ expect_rejected "PackageTrustVerifier source discovery escape"
 write_clean_fixture
 mkdir -p \
   "$fixture_root/external-source" \
-  "$fixture_root/plugins/community/target"
+  "$fixture_root/plugins/community/target" \
+  "$fixture_root/plugins/community/node_modules"
 printf '%s\n' \
   'pub fn outside() {}' \
   > "$fixture_root/external-source/outside.rs"
 printf '%s\n' \
   'pub fn generated() {}' \
   > "$fixture_root/plugins/community/target/generated.rs"
+printf '%s\n' \
+  'pub fn excluded() {}' \
+  > "$fixture_root/plugins/community/node_modules/excluded.rs"
 ln -s ../../../external-source/outside.rs \
   "$fixture_root/plugins/community/src/linked.rs"
 trust_target_contract=""
@@ -882,6 +886,7 @@ if ! trust_target_contract="$(
   run_fixture_trust_scan \
     "$fixture_root/external-source/outside.rs" \
     "$fixture_root/plugins/community/target/generated.rs" \
+    "$fixture_root/plugins/community/node_modules/excluded.rs" \
     "$fixture_root/plugins/community/src/linked.rs" \
     "$fixture_root/plugins/community/src/missing.rs" \
     "$fixture_root/plugins/community/src"
@@ -889,12 +894,37 @@ if ! trust_target_contract="$(
   echo "trust scanner rejected semantic target-source contract invocation" >&2
   exit 1
 fi
+outside_target="$(
+  node -e 'console.log(require("node:path").resolve(process.argv[1]))' \
+    "$fixture_root/external-source/outside.rs"
+)"
+build_target="$(
+  node -e 'console.log(require("node:path").resolve(process.argv[1]))' \
+    "$fixture_root/plugins/community/target/generated.rs"
+)"
+excluded_target="$(
+  node -e 'console.log(require("node:path").resolve(process.argv[1]))' \
+    "$fixture_root/plugins/community/node_modules/excluded.rs"
+)"
+symlink_target="$(
+  node -e 'console.log(require("node:path").resolve(process.argv[1]))' \
+    "$fixture_root/plugins/community/src/linked.rs"
+)"
+missing_target="$(
+  node -e 'console.log(require("node:path").resolve(process.argv[1]))' \
+    "$fixture_root/plugins/community/src/missing.rs"
+)"
+directory_target="$(
+  node -e 'console.log(require("node:path").resolve(process.argv[1]))' \
+    "$fixture_root/plugins/community/src"
+)"
 for expected_source_record in \
-  "$fixture_root/external-source/outside.rs:1"$'\t'"Cargo target source outside trust roots" \
-  "$fixture_root/plugins/community/target/generated.rs:1"$'\t'"Cargo target source inside build output" \
-  "$fixture_root/plugins/community/src/linked.rs:1"$'\t'"symlink Cargo target source" \
-  "$fixture_root/plugins/community/src/missing.rs:1"$'\t'"missing Cargo target source" \
-  "$fixture_root/plugins/community/src:1"$'\t'"Cargo target source is not a regular file"
+  "$outside_target:1"$'\t'"Cargo target source outside trust roots" \
+  "$build_target:1"$'\t'"Cargo target source inside build output" \
+  "$excluded_target:1"$'\t'"Cargo target source inside excluded directory" \
+  "$symlink_target:1"$'\t'"symlink Cargo target source" \
+  "$missing_target:1"$'\t'"missing Cargo target source" \
+  "$directory_target:1"$'\t'"Cargo target source is not a regular file"
 do
   if [[ "$trust_target_contract" != *$'source\t'"$expected_source_record"* ]]; then
     echo "trust scanner missed semantic target source: $expected_source_record" >&2

@@ -20,13 +20,13 @@ run_fixture_boundary() {
 }
 
 run_fixture_trust_scan() {
-  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
-    --trust-roots \
-    "$fixture_root/crates" \
-    "$fixture_root/plugins" \
-    "$fixture_root/src-tauri" \
-    --target-sources \
-    "$@"
+  printf '%s\0' "$@" \
+    | node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+      --trust-roots \
+      "$fixture_root/crates" \
+      "$fixture_root/plugins" \
+      "$fixture_root/src-tauri" \
+      --target-sources-stdin0
 }
 
 write_clean_fixture() {
@@ -864,6 +864,110 @@ printf '%s\n' \
   'path = "target/generated.rs"' \
   >> "$fixture_root/plugins/community/Cargo.toml"
 expect_rejected "PackageTrustVerifier source discovery escape"
+
+write_clean_fixture
+target_count_output=""
+if target_count_output="$(
+  node -e '
+    process.stdout.on("error", (error) => {
+      if (error.code !== "EPIPE") throw error;
+    });
+    for (let index = 0; index <= 20_000; index += 1) {
+      process.stdout.write(`/definitely-missing/target-${index}\0`);
+    }
+  ' \
+    | node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+      --trust-roots \
+      "$fixture_root/crates" \
+      "$fixture_root/plugins" \
+      "$fixture_root/src-tauri" \
+      --target-sources-stdin0 \
+      2>&1
+)"; then
+  echo "trust scanner accepted too many semantic Cargo targets" >&2
+  exit 1
+fi
+if [[ "$target_count_output" != *"Cargo target source count exceeds 20000"* ]]; then
+  echo "trust scanner did not account target count before filesystem access" >&2
+  echo "$target_count_output" >&2
+  exit 1
+fi
+if [[ "$target_count_output" == *"missing Cargo target source"* ]]; then
+  echo "trust scanner diagnosed targets before applying the count budget" >&2
+  exit 1
+fi
+
+target_transport_output=""
+if target_transport_output="$(
+  node -e '
+    process.stdout.on("error", (error) => {
+      if (error.code !== "EPIPE") throw error;
+    });
+    process.stdout.write(Buffer.alloc(8 * 1024 * 1024 + 1, 0x61));
+  ' \
+    | node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+      --trust-roots \
+      "$fixture_root/crates" \
+      "$fixture_root/plugins" \
+      "$fixture_root/src-tauri" \
+      --target-sources-stdin0 \
+      2>&1
+)"; then
+  echo "trust scanner accepted oversized semantic target transport" >&2
+  exit 1
+fi
+if [[ "$target_transport_output" != *"Cargo target source transport exceeds 8388608 bytes"* ]]; then
+  echo "trust scanner did not bound semantic target transport before parsing" >&2
+  echo "$target_transport_output" >&2
+  exit 1
+fi
+
+target_diagnostic_output=""
+if target_diagnostic_output="$(
+  node -e '
+    process.stdout.on("error", (error) => {
+      if (error.code !== "EPIPE") throw error;
+    });
+    for (let index = 0; index <= 1_024; index += 1) {
+      process.stdout.write(`/definitely-missing/diagnostic-${index}\0`);
+    }
+  ' \
+    | node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+      --trust-roots \
+      "$fixture_root/crates" \
+      "$fixture_root/plugins" \
+      "$fixture_root/src-tauri" \
+      --target-sources-stdin0 \
+      2>&1
+)"; then
+  echo "trust scanner accepted unbounded target diagnostics" >&2
+  exit 1
+fi
+if [[ "$target_diagnostic_output" != *"Rust boundary diagnostics exceed 1024 records"* ]]; then
+  echo "trust scanner did not cap retained target diagnostics" >&2
+  echo "$target_diagnostic_output" >&2
+  exit 1
+fi
+target_diagnostic_bytes="$(
+  LC_ALL=C printf '%s' "$target_diagnostic_output" \
+    | wc -c \
+    | tr -d '[:space:]'
+)"
+if [[ "$target_diagnostic_bytes" -gt 1048576 ]]; then
+  echo "trust scanner emitted oversized target diagnostics: $target_diagnostic_bytes" >&2
+  exit 1
+fi
+
+if rg -q -- '--target-sources "\$\{[^}]*target[^}]*\[@\]\}"' \
+  "$repo_root/scripts/check-plugin-boundaries.sh"; then
+  echo "boundary gate still expands semantic Cargo targets into argv" >&2
+  exit 1
+fi
+if ! rg -q -- '--target-sources-stdin0' \
+  "$repo_root/scripts/check-plugin-boundaries.sh"; then
+  echo "boundary gate does not use bounded stdin transport for Cargo targets" >&2
+  exit 1
+fi
 
 write_clean_fixture
 mkdir -p \

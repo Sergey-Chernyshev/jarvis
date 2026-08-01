@@ -11,6 +11,7 @@ pub mod manifest_v2;
 pub mod package;
 pub mod protocol;
 pub mod supervisor;
+pub mod trust;
 
 use manifest::{LoadError, PluginPackage};
 use protocol::{EventQueue, PluginEvent, RegisterRequest};

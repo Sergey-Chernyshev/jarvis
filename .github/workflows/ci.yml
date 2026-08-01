@@ -43,8 +43,8 @@ jobs:
           npm run build:core-transport
           node --test ui/core-transport.test.mjs
           node --test scripts/check-tauri-acl.test.mjs
-          node scripts/check-tauri-acl.mjs
           cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --test app_command_acl
+          node scripts/check-tauri-acl.mjs
           git diff --exit-code -- ui/generated/tauri-transport.js
 
       # whisper.cpp (фича whisper-native) собирается через CMake.

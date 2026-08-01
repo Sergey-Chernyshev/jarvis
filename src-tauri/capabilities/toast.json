@@ -2,9 +2,11 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "toast",
   "description": "Trusted Jarvis toast surface with exact app-command grants",
+  "local": true,
   "webviews": ["toast"],
   "permissions": [
     "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "clipboard-manager:allow-write-text",
     "allow-question-answer",
     "allow-session-continue",

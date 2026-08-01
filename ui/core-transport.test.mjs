@@ -5,10 +5,25 @@ import vm from 'node:vm';
 
 const root = new URL('../', import.meta.url);
 const expectedCsp =
-  "default-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost";
+  "default-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost";
+const trustedDocuments = new Map([
+  ['ui/index.html', './bridge.js'],
+  ['ui/toast.html', './toast-bridge.js'],
+  ['ui/onboarding.html', 'onboarding.js'],
+  ['ui/agent-chat.html', 'agent-chat.js'],
+]);
 
 async function source(relative) {
   return readFile(new URL(relative, root), 'utf8');
+}
+
+function scriptSources(html) {
+  return [...html.matchAll(/<script\b([^>]*)>[\s\S]*?<\/script\s*>/gi)].map(
+    ([, attributes]) => {
+      const src = attributes.match(/\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+      return src ? (src[1] ?? src[2]) : null;
+    },
+  );
 }
 
 test('bridge initializes from the explicit core transport without touching window.__TAURI__', async () => {
@@ -47,35 +62,44 @@ test('bridge initializes from the explicit core transport without touching windo
   assert.deepEqual(listened, []);
 });
 
-test('all trusted documents load the deterministic transport before their bridge', async () => {
-  const documents = new Map([
-    ['ui/index.html', 'bridge.js'],
-    ['ui/toast.html', 'toast-bridge.js'],
-    ['ui/onboarding.html', 'onboarding.js'],
-    ['ui/agent-chat.html', 'agent-chat.js'],
-  ]);
-
-  for (const [document, bridge] of documents) {
+test('all trusted documents load one transport immediately before its consumer', async () => {
+  for (const [document, consumer] of trustedDocuments) {
     const html = await source(document);
-    const transportIndex = html.indexOf('generated/tauri-transport.js');
-    const bridgeIndex = html.indexOf(bridge);
-    assert.notEqual(transportIndex, -1, `${document} loads the core transport`);
-    assert.notEqual(bridgeIndex, -1, `${document} loads ${bridge}`);
-    assert.ok(
-      transportIndex < bridgeIndex,
-      `${document} loads the core transport before ${bridge}`,
+    const scripts = scriptSources(html);
+    assert.equal(
+      scripts.filter((src) => src === './generated/tauri-transport.js').length,
+      1,
+      `${document} loads the core transport exactly once`,
     );
+    assert.equal(
+      scripts.filter((src) => src === consumer).length,
+      1,
+      `${document} loads ${consumer} exactly once`,
+    );
+    const transportIndex = scripts.indexOf('./generated/tauri-transport.js');
+    assert.equal(
+      scripts[transportIndex + 1],
+      consumer,
+      `${document} consumes and deletes the transport without an intervening script`,
+    );
+    if (document === 'ui/onboarding.html') {
+      assert.equal(
+        scripts[transportIndex - 1],
+        'onboarding-state.js',
+        'onboarding state initializes before the transport bootstrap',
+      );
+    }
   }
 });
 
 test('all trusted documents use the same explicit IPC-capable CSP', async () => {
-  for (const document of [
-    'ui/index.html',
-    'ui/toast.html',
-    'ui/onboarding.html',
-    'ui/agent-chat.html',
-  ]) {
+  for (const document of trustedDocuments.keys()) {
     const html = await source(document);
+    assert.equal(
+      html.match(/http-equiv="Content-Security-Policy"/g)?.length,
+      1,
+      `${document} has exactly one CSP`,
+    );
     assert.match(
       html,
       new RegExp(
@@ -86,6 +110,14 @@ test('all trusted documents use the same explicit IPC-capable CSP', async () => 
       ),
       document,
     );
+  }
+});
+
+test('trusted documents do not load remote scripts or assets', async () => {
+  const remoteAsset =
+    /<(?:script|link|img|iframe|source|audio|video)\b[^>]*\b(?:src|href|srcset)\s*=\s*(?:"(?:https?:)?\/\/|'(?:https?:)?\/\/)/i;
+  for (const document of trustedDocuments.keys()) {
+    assert.doesNotMatch(await source(document), remoteAsset, document);
   }
 });
 

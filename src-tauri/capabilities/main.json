@@ -2,9 +2,11 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
   "description": "Trusted Jarvis main panel with exact app-command grants",
+  "local": true,
   "webviews": ["main"],
   "permissions": [
     "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "clipboard-manager:allow-write-text",
     "allow-state-get",
     "allow-state-clear",

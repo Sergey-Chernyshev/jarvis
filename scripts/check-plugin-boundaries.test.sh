@@ -67,9 +67,18 @@ write_clean_fixture() {
   printf '%s\n' \
     '#![deny(unsafe_code)]' \
     '' \
+    'pub trait PackageTrustVerifier {}' \
+    'struct ProductionVerifier;' \
+    '' \
     '#[cfg(target_os = "macos")]' \
     '#[allow(unsafe_code)]' \
     'mod macos_dir;' \
+    '' \
+    '#[cfg(test)]' \
+    'mod tests {' \
+    '    struct FixtureVerifier;' \
+    '    impl super::PackageTrustVerifier for FixtureVerifier {}' \
+    '}' \
     > "$fixture_root/crates/jarvis-package/src/lib.rs"
   printf '%s\n' \
     'pub(crate) fn read() {' \
@@ -127,6 +136,48 @@ expect_cargo_dependency() {
 }
 
 write_clean_fixture
+run_fixture_boundary >/dev/null
+
+write_clean_fixture
+printf '%s\n' \
+  'impl PackageTrustVerifier for ProductionVerifier {}' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+printf '%s\n' \
+  '#[cfg(not(test))]' \
+  'mod production {' \
+  '    struct HiddenVerifier;' \
+  '    impl super::PackageTrustVerifier for HiddenVerifier {}' \
+  '}' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+printf '%s\n' \
+  '#[cfg(any(test, feature = "permissive"))]' \
+  'mod production {' \
+  '    struct FeatureVerifier;' \
+  '    impl super::PackageTrustVerifier for FeatureVerifier {}' \
+  '}' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+mkdir -p "$fixture_root/src-tauri/src/plugins"
+printf '%s\n' \
+  'struct WrongVerifier;' \
+  'impl PackageTrustVerifier for WrongVerifier {}' \
+  > "$fixture_root/src-tauri/src/plugins/wrong.rs"
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
+printf '%s\n' \
+  'struct CatalogVerifier;' \
+  'impl PackageTrustVerifier for CatalogVerifier {}' \
+  > "$fixture_root/src-tauri/src/plugins/trust/package.rs"
 run_fixture_boundary >/dev/null
 
 printf '%s\n' \

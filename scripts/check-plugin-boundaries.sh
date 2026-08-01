@@ -85,6 +85,8 @@ done <<< "$public_manifests"
 package_root="$repo_root/crates/jarvis-package"
 package_manifest="$package_root/Cargo.toml"
 package_lib="$package_root/src/lib.rs"
+allowed_trust_verifier="$repo_root_resolved/src-tauri/src/plugins/trust/package.rs"
+allowed_private_test_verifier_root="$repo_root_resolved/crates/jarvis-package"
 
 if [[ -f "$package_manifest" ]]; then
   if ! rg -q '^\s*publish\s*=\s*false\s*$' "$package_manifest"; then
@@ -193,6 +195,31 @@ if [[ -f "$package_manifest" ]]; then
   )"
   report_matches "jarvis-package source discovery escape:" "$source_escapes"
 fi
+
+trust_scan=""
+for trust_root in "$repo_root/crates" "$repo_root/plugins" "$repo_root/src-tauri"; do
+  [[ -d "$trust_root" ]] || continue
+  scanned="$(
+    node "$script_dir/scan-rust-unsafe-boundary.mjs" "$trust_root" \
+      | awk -F '\t' '$1 == "trust" || $1 == "trust-test" { print }'
+  )"
+  trust_scan+="${trust_scan:+$'\n'}$scanned"
+done
+disallowed_trust=""
+while IFS=$'\t' read -r kind match; do
+  [[ -z "$match" ]] && continue
+  match_path="${match%%:*}"
+  if [[ "$match_path" == "$allowed_trust_verifier" ]]; then
+    continue
+  fi
+  if [[ "$kind" == "trust-test" && "$match_path" == "$allowed_private_test_verifier_root"/* ]]; then
+    continue
+  fi
+  disallowed_trust+="${disallowed_trust:+$'\n'}$match"
+done <<< "$trust_scan"
+report_matches \
+  "PackageTrustVerifier production implementation outside host trust adapter:" \
+  "$disallowed_trust"
 
 package_root_resolved=""
 if [[ -d "$package_root" ]]; then

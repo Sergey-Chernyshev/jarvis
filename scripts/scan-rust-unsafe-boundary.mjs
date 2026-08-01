@@ -337,6 +337,92 @@ function sourceDiscoveryViolations(tokens) {
   return violations;
 }
 
+function cfgTestModuleRanges(tokens) {
+  const ranges = [];
+  for (const attribute of attributes(tokens)) {
+    const attributeTokens = tokens.slice(attribute.start, attribute.end);
+    const isExactCfgTest =
+      attributeTokens.length === 4 &&
+      attributeTokens[0].kind === 'identifier' &&
+      attributeTokens[0].value === 'cfg' &&
+      attributeTokens[1].value === '(' &&
+      attributeTokens[2].kind === 'identifier' &&
+      attributeTokens[2].value === 'test' &&
+      attributeTokens[3].value === ')';
+    if (!isExactCfgTest) {
+      continue;
+    }
+    let module = -1;
+    let body = -1;
+    for (let cursor = attribute.end + 1; cursor < tokens.length; cursor += 1) {
+      if (tokens[cursor].value === ';') break;
+      if (
+        tokens[cursor].kind === 'identifier' &&
+        tokens[cursor].value === 'mod'
+      ) {
+        module = cursor;
+      }
+      if (tokens[cursor].value === '{') {
+        body = cursor;
+        break;
+      }
+    }
+    if (module === -1 || body === -1 || module > body) continue;
+    const bodyEnd = matchingToken(tokens, body, '{', '}');
+    if (bodyEnd !== -1) ranges.push({ start: body + 1, end: bodyEnd });
+  }
+  return ranges;
+}
+
+function packageTrustVerifierImplementations(tokens) {
+  const implementations = [];
+  const testModules = cfgTestModuleRanges(tokens);
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (
+      tokens[index].kind !== 'identifier' ||
+      tokens[index].raw ||
+      tokens[index].value !== 'impl'
+    ) {
+      continue;
+    }
+    let cursor = index + 1;
+    if (tokens[cursor]?.value === '<') {
+      const genericsEnd = matchingToken(tokens, cursor, '<', '>');
+      if (genericsEnd === -1) continue;
+      cursor = genericsEnd + 1;
+    }
+    let verifier = -1;
+    let forToken = -1;
+    for (; cursor < tokens.length; cursor += 1) {
+      const token = tokens[cursor];
+      if (token.value === '{' || token.value === ';') break;
+      if (
+        token.kind === 'identifier' &&
+        !token.raw &&
+        token.value === 'PackageTrustVerifier'
+      ) {
+        verifier = cursor;
+      }
+      if (
+        token.kind === 'identifier' &&
+        !token.raw &&
+        token.value === 'for'
+      ) {
+        forToken = cursor;
+        break;
+      }
+    }
+    if (verifier === -1 || forToken === -1 || verifier > forToken) continue;
+    implementations.push({
+      line: tokens[index].line,
+      testOnly: testModules.some(
+        (range) => index >= range.start && index < range.end,
+      ),
+    });
+  }
+  return implementations;
+}
+
 const discovery = rustFiles(packageRoot, process.argv.slice(3));
 for (const escape of discovery.sourceEscapes) {
   process.stdout.write(`source\t${escape.path}:${escape.line}\t${escape.reason}\n`);
@@ -353,5 +439,10 @@ for (const file of discovery.files) {
     if (token.kind === 'identifier' && !token.raw && token.value === 'unsafe') {
       process.stdout.write(`unsafe\t${file}:${token.line}\n`);
     }
+  }
+  for (const implementation of packageTrustVerifierImplementations(tokens)) {
+    process.stdout.write(
+      `${implementation.testOnly ? 'trust-test' : 'trust'}\t${file}:${implementation.line}\n`,
+    );
   }
 }

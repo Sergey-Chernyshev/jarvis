@@ -96,4 +96,64 @@ mod tests {
             assert!(parse_exact_jcs(invalid, package_limits()).is_err());
         }
     }
+
+    #[test]
+    fn bounded_jcs_accepts_exact_limits_and_rejects_plus_one() {
+        let depth_two = JsonLimits {
+            max_bytes: 5,
+            max_depth: 2,
+            max_nodes: 3,
+            max_string_bytes: 4,
+        };
+        assert!(parse_exact_jcs(b"[[0]]", depth_two).is_ok());
+        assert_eq!(
+            parse_exact_jcs(
+                b"[[0]]",
+                JsonLimits {
+                    max_depth: 1,
+                    ..depth_two
+                },
+            )
+            .unwrap_err(),
+            JcsError::InvalidJson
+        );
+
+        let three_nodes = JsonLimits {
+            max_bytes: 5,
+            max_depth: 1,
+            max_nodes: 3,
+            max_string_bytes: 4,
+        };
+        assert!(parse_exact_jcs(b"[0,1]", three_nodes).is_ok());
+        assert_eq!(
+            parse_exact_jcs(
+                b"[0,1]",
+                JsonLimits {
+                    max_nodes: 2,
+                    ..three_nodes
+                },
+            )
+            .unwrap_err(),
+            JcsError::InvalidJson
+        );
+
+        let four_string_bytes = JsonLimits {
+            max_bytes: 6,
+            max_depth: 0,
+            max_nodes: 1,
+            max_string_bytes: 4,
+        };
+        assert!(parse_exact_jcs(b"\"four\"", four_string_bytes).is_ok());
+        assert_eq!(
+            parse_exact_jcs(
+                b"\"four\"",
+                JsonLimits {
+                    max_string_bytes: 3,
+                    ..four_string_bytes
+                },
+            )
+            .unwrap_err(),
+            JcsError::InvalidJson
+        );
+    }
 }

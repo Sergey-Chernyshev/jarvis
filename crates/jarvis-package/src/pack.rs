@@ -124,6 +124,30 @@ impl PackageError {
         }
     }
 
+    pub(crate) fn package_trust() -> Self {
+        Self {
+            code: "package_trust",
+        }
+    }
+
+    pub(crate) fn archive_changed_after_verification() -> Self {
+        Self {
+            code: "archive_changed_after_verification",
+        }
+    }
+
+    pub(crate) fn extraction_failed() -> Self {
+        Self {
+            code: "extraction_failed",
+        }
+    }
+
+    pub(crate) fn quarantine_manual_cleanup() -> Self {
+        Self {
+            code: "quarantine_manual_cleanup",
+        }
+    }
+
     pub fn code(&self) -> &'static str {
         self.code
     }

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${JARVIS_TEST_TOOL_LOG:?}"
+printf 'csreq %s\n' "$*" >>"$JARVIS_TEST_TOOL_LOG"
+
+output=""
+while (($#)); do
+  if [[ "$1" == "-b" ]]; then
+    shift
+    output="${1:-}"
+    break
+  fi
+  shift
+done
+if [[ -z "$output" ]]; then
+  exit 2
+fi
+printf 'compiled requirement\n' >"$output"

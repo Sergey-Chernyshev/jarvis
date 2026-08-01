@@ -29,11 +29,15 @@ use helper::renewal::{
     run_shutdown_sequence, ExactReleaseOutcome, LeaseClient, LeaseReceipt, RenewalExit,
     RenewalHandle,
 };
+use jarvis_power_core::protocol::DEFAULT_TTL_MS;
 use keep_awake::{Engine, Event};
 
 const SUGGEST_GAP_MS: i64 = 60 * 60 * 1000; // подсказка не чаще раза в час
 const GUARD_EVERY_MS: i64 = 60 * 1000;
 const WAKE_GAP_MS: i64 = 90 * 1000;
+const UNKNOWN_ACQUIRE_RETRY_BASE_MS: i64 = 1_000;
+const UNKNOWN_ACQUIRE_RETRY_MAX_MS: i64 = 15_000;
+const UNKNOWN_ACQUIRE_TTL_MS: i64 = DEFAULT_TTL_MS as i64;
 #[cfg(test)]
 const CLAMSHELL_LEASE_TTL_MS: i64 = 5 * 60 * 1000;
 const POWER_OPERATION_BARRIER_TIMEOUT: Duration = Duration::from_secs(90);
@@ -443,6 +447,61 @@ fn failed_acquire_needs_owner_retry(
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UnknownAcquire {
+    profile: String,
+    owner_generation: String,
+    armed_by: &'static str,
+    next_retry_at: i64,
+    expires_at: i64,
+    attempts: u32,
+    last_error: String,
+}
+
+impl UnknownAcquire {
+    fn new(
+        profile: String,
+        owner_generation: String,
+        armed_by: &'static str,
+        now: i64,
+        error: String,
+    ) -> Self {
+        Self {
+            profile,
+            owner_generation,
+            armed_by,
+            next_retry_at: now.saturating_add(UNKNOWN_ACQUIRE_RETRY_BASE_MS),
+            expires_at: now.saturating_add(UNKNOWN_ACQUIRE_TTL_MS),
+            attempts: 0,
+            last_error: error,
+        }
+    }
+
+    fn blocks_blind_retry(&self, now: i64) -> bool {
+        now < self.expires_at
+    }
+
+    fn retry_due(&self, now: i64) -> bool {
+        self.blocks_blind_retry(now) && now >= self.next_retry_at
+    }
+
+    /// Returns true while the original helper attempt can still be live.
+    fn record_retry_failure(&mut self, now: i64, error: String) -> bool {
+        self.attempts = self.attempts.saturating_add(1);
+        self.last_error = error;
+        let shift = self.attempts.min(4);
+        let delay = UNKNOWN_ACQUIRE_RETRY_BASE_MS
+            .saturating_mul(1_i64 << shift)
+            .min(UNKNOWN_ACQUIRE_RETRY_MAX_MS);
+        self.next_retry_at = now.saturating_add(delay).min(self.expires_at);
+        self.blocks_blind_retry(now)
+    }
+
+    fn same_attempt(&self, other: &Self) -> bool {
+        self.profile == other.profile && self.owner_generation == other.owner_generation
+    }
+}
+
 #[derive(Default)]
 struct Clam {
     /// Плагин «Крышка» включён (runtime-аналог p.active у Electron-хоста).
@@ -452,60 +511,255 @@ struct Clam {
     lease: Option<LeaseReceipt>,
     renewal: Option<RenewalHandle>,
     renewal_error: Option<String>,
+    unknown_acquire: Option<UnknownAcquire>,
+    safety_sleep_pending: bool,
+    transitioning: bool,
+    transition_generation: u64,
     busy: bool, // arm/disarm в полёте — не наслаиваем
     last_guard_at: i64,
     lid_causes_sleep: Option<bool>, // кэш для статусной строки меню
 }
 
 impl Clam {
+    fn begin_transition(&mut self) -> u64 {
+        self.transition_generation = self.transition_generation.wrapping_add(1).max(1);
+        self.transitioning = true;
+        self.transition_generation
+    }
+
+    fn set_transition_active(&mut self, generation: u64, active: bool) -> bool {
+        if !self.transitioning || self.transition_generation != generation {
+            return false;
+        }
+        self.active = active;
+        true
+    }
+
+    fn finish_transition(&mut self, generation: u64) -> bool {
+        if !self.transitioning || self.transition_generation != generation {
+            return false;
+        }
+        self.transitioning = false;
+        true
+    }
+
     fn commit_acquired_if_active(
         &mut self,
         receipt: LeaseReceipt,
         by: &'static str,
     ) -> Result<(), LeaseReceipt> {
         if !self.active
+            || self.transitioning
             || !self.busy
             || self.armed
             || self.lease.is_some()
             || self.renewal.is_some()
+            || self.unknown_acquire.is_some()
         {
             return Err(receipt);
         }
         self.armed = true;
         self.armed_by = Some(by);
         self.lease = Some(receipt);
+        self.unknown_acquire = None;
         self.renewal_error = None;
+        self.safety_sleep_pending = false;
         self.last_guard_at = 0;
         Ok(())
     }
 
-    fn retain_lease_debt(&mut self, receipt: LeaseReceipt, error: impl Into<String>) {
-        if self.lease.is_none() || self.lease.as_ref() == Some(&receipt) {
-            self.lease = Some(receipt);
+    fn commit_reconciled_if_active(
+        &mut self,
+        pending: &UnknownAcquire,
+        receipt: LeaseReceipt,
+    ) -> Result<(), LeaseReceipt> {
+        if !self.active
+            || self.transitioning
+            || !self.busy
+            || self.armed
+            || self.lease.is_some()
+            || self.renewal.is_some()
+            || !self
+                .unknown_acquire
+                .as_ref()
+                .is_some_and(|current| current.same_attempt(pending))
+        {
+            return Err(receipt);
         }
-        self.armed = false;
-        self.armed_by = None;
-        self.renewal_error = Some(error.into());
+        self.armed = true;
+        self.armed_by = Some(pending.armed_by);
+        self.lease = Some(receipt);
+        self.unknown_acquire = None;
+        self.renewal_error = None;
+        self.safety_sleep_pending = false;
+        self.last_guard_at = 0;
+        Ok(())
     }
 
-    fn mark_lease_unrenewable(&mut self, receipt: &LeaseReceipt, error: impl Into<String>) {
+    fn resolve_unknown_after_release(&mut self, pending: &UnknownAcquire) -> bool {
+        if !self
+            .unknown_acquire
+            .as_ref()
+            .is_some_and(|current| current.same_attempt(pending))
+        {
+            return false;
+        }
+        self.unknown_acquire = None;
+        self.armed = false;
+        self.armed_by = None;
+        self.renewal_error = None;
+        true
+    }
+
+    fn retain_lease_debt(&mut self, receipt: LeaseReceipt, error: impl Into<String>) -> bool {
+        if self
+            .lease
+            .as_ref()
+            .is_some_and(|existing| existing != &receipt)
+        {
+            return false;
+        }
+        self.lease = Some(receipt);
+        self.armed = false;
+        self.armed_by = None;
+        self.renewal_error = Some(error.into());
+        true
+    }
+
+    fn retain_unknown_acquire(&mut self, pending: UnknownAcquire) -> bool {
+        if self.lease.is_some()
+            || self
+                .unknown_acquire
+                .as_ref()
+                .is_some_and(|current| !current.same_attempt(&pending))
+        {
+            return false;
+        }
+        self.armed = false;
+        self.armed_by = None;
+        self.renewal_error = Some(pending.last_error.clone());
+        self.unknown_acquire = Some(pending);
+        true
+    }
+
+    fn retain_reconciled_debt(
+        &mut self,
+        pending: &UnknownAcquire,
+        receipt: LeaseReceipt,
+        error: impl Into<String>,
+    ) -> bool {
+        if !self
+            .unknown_acquire
+            .as_ref()
+            .is_some_and(|current| current.same_attempt(pending))
+            || self
+                .lease
+                .as_ref()
+                .is_some_and(|current| current != &receipt)
+        {
+            return false;
+        }
+        self.unknown_acquire = None;
+        self.lease = Some(receipt);
+        self.armed = false;
+        self.armed_by = None;
+        self.renewal_error = Some(error.into());
+        true
+    }
+
+    fn mark_lease_unrenewable(&mut self, receipt: &LeaseReceipt, error: impl Into<String>) -> bool {
         if self.lease.as_ref() != Some(receipt) {
-            return;
+            return false;
         }
         self.armed = false;
         self.armed_by = None;
         self.renewal_error = Some(error.into());
+        true
+    }
+
+    fn mark_terminal_lease_loss(
+        &mut self,
+        receipt: &LeaseReceipt,
+        error: impl Into<String>,
+    ) -> bool {
+        if self.lease.as_ref() != Some(receipt) {
+            return false;
+        }
+        self.armed = false;
+        self.armed_by = None;
+        self.lease = None;
+        self.renewal_error = Some(error.into());
+        self.safety_sleep_pending = true;
+        true
+    }
+
+    fn needs_battery_guard(&self, now: i64) -> bool {
+        (self.lease.is_some()
+            || self.safety_sleep_pending
+            || self
+                .unknown_acquire
+                .as_ref()
+                .is_some_and(|it| it.blocks_blind_retry(now)))
+            && now.saturating_sub(self.last_guard_at) >= GUARD_EVERY_MS
+    }
+
+    fn can_retry_cleanup(&self) -> bool {
+        !self.armed && (self.lease.is_some() || self.unknown_acquire.is_some())
     }
 
     fn has_visible_status(&self) -> bool {
-        self.active || self.busy || self.lease.is_some() || self.renewal_error.is_some()
+        self.active
+            || self.busy
+            || self.transitioning
+            || self.lease.is_some()
+            || self.unknown_acquire.is_some()
+            || self.renewal_error.is_some()
     }
+}
+
+fn clamshell_tray_status(clam: &Clam) -> String {
+    if clam.lease.is_some() && (!clam.armed || clam.renewal_error.is_some()) {
+        "⌒ Крышка: освобождение helper lease не подтверждено".into()
+    } else if clam.unknown_acquire.is_some() {
+        "⌒ Крышка: проверяю неизвестный результат helper".into()
+    } else if clam.armed {
+        "⌒ Крышка: мак не уснёт даже закрытой".into()
+    } else if clam.renewal_error.is_some() {
+        "⌒ Крышка: режим остановлен с ошибкой".into()
+    } else if clam.lid_causes_sleep == Some(false) {
+        "⌒ Крышка: закрытие сейчас не усыпляет".into()
+    } else {
+        "⌒ Крышка: режим не удерживается".into()
+    }
+}
+
+fn clamshell_command_truth(clam: &Clam, mut response: Value) -> Value {
+    let pending_cleanup = clam.can_retry_cleanup();
+    response["helperLease"] = Value::Bool(clam.lease.is_some());
+    response["helperLeaseUnknown"] = Value::Bool(clam.unknown_acquire.is_some());
+    response["pendingCleanup"] = Value::Bool(pending_cleanup);
+    response["renewalError"] = clam
+        .renewal_error
+        .clone()
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    response["retryAction"] = if pending_cleanup {
+        Value::String("retry-cleanup".into())
+    } else {
+        Value::Null
+    };
+    if pending_cleanup && response["ok"] == Value::Bool(true) {
+        response["ok"] = Value::Bool(false);
+        response["error"] = Value::String("exact helper cleanup remains pending".into());
+    }
+    response
 }
 
 pub struct Power {
     /// Some = плагин «Не спать» включён.
     engine: Mutex<Option<Engine<IopmBlocker>>>,
     clam: Mutex<Clam>,
+    clam_transition: tokio::sync::Mutex<()>,
     /// Кэш кандидатов «пока жив процесс» для сабменю трея.
     processes: Mutex<Vec<(i64, String)>>,
     is_air: AtomicBool,
@@ -523,6 +777,7 @@ impl Power {
         Self {
             engine: Mutex::new(None),
             clam: Mutex::new(Clam::default()),
+            clam_transition: tokio::sync::Mutex::new(()),
             processes: Mutex::new(Vec::new()),
             is_air: AtomicBool::new(false),
             last_tick_at: AtomicI64::new(0),
@@ -554,13 +809,15 @@ impl Power {
         let p = &d.power;
         p.last_tick_at.store(now_ms(), Ordering::SeqCst);
 
-        // Оба движка грузим ВСЕГДА. «Выключено» теперь = ассерт/флаг не держится,
-        // а не «плагин выгружен» — это убирает путаницу хост-слоя в настройках.
         // Durable clamshell recovery уже синхронно завершился до Daemon::new,
         // включая headless startup; runtime activation больше не мутирует
         // legacy marker или pmset по недоказанному ownership.
-        Self::activate_keep_awake(d);
-        Self::activate_clamshell(d);
+        if Self::ka_settings(d)["enabled"].as_bool() == Some(true) {
+            Self::activate_keep_awake(d);
+        }
+        if Self::cs_settings(d)["enabled"].as_bool() == Some(true) {
+            Self::activate_clamshell(d);
+        }
         Self::refresh_processes(d);
     }
 
@@ -622,6 +879,139 @@ impl Power {
         println!("[jarvis:clamshell] включён");
     }
 
+    fn persisted_clamshell_enabled(d: &Arc<Daemon>) -> bool {
+        Self::cs_settings(d)["enabled"].as_bool() == Some(true)
+    }
+
+    async fn set_clamshell_enabled(d: &Arc<Daemon>, on: bool) -> Value {
+        // Serializes the complete transition without holding `clam` across
+        // helper I/O. The generation also fences arm/peer-sync callbacks.
+        let _transition = d.power.clam_transition.lock().await;
+        let (generation, was_active) = {
+            let mut clam = d.power.clam.lock().unwrap();
+            let was_active = clam.active;
+            (clam.begin_transition(), was_active)
+        };
+
+        let outcome = if on {
+            let activated = if d.power.operations.accepting() {
+                d.power
+                    .clam
+                    .lock()
+                    .unwrap()
+                    .set_transition_active(generation, true)
+            } else {
+                false
+            };
+            if activated {
+                let mut patch = Map::new();
+                patch.insert("enabled".into(), Value::Bool(true));
+                d.settings.set_plugin("clamshell", patch);
+            }
+            let persisted = Self::persisted_clamshell_enabled(d);
+            if !persisted || !activated {
+                let rollback_active = was_active && d.power.operations.accepting();
+                let _ = d
+                    .power
+                    .clam
+                    .lock()
+                    .unwrap()
+                    .set_transition_active(generation, rollback_active);
+                json!({
+                    "ok": false,
+                    "enabled": rollback_active,
+                    "error": if activated {
+                        "не удалось сохранить включённое состояние Крышки"
+                    } else {
+                        "Jarvis завершает работу"
+                    },
+                })
+            } else {
+                // Refresh only after persistence succeeded; the transition
+                // fence still prevents auto-arm until the final state commits.
+                let d2 = d.clone();
+                tauri::async_runtime::spawn(async move {
+                    if !d2.power.operations.accepting() {
+                        return;
+                    }
+                    d2.power
+                        .is_air
+                        .store(clamshell::detect_is_air().await, Ordering::SeqCst);
+                    refresh_lid(&d2).await;
+                });
+                json!({ "ok": true, "enabled": true })
+            }
+        } else {
+            let _ = d
+                .power
+                .clam
+                .lock()
+                .unwrap()
+                .set_transition_active(generation, false);
+            let cleanup = Self::deactivate_clamshell_async(d).await;
+            let mut patch = Map::new();
+            patch.insert("enabled".into(), Value::Bool(false));
+            d.settings.set_plugin("clamshell", patch);
+            let persisted = Self::persisted_clamshell_enabled(d);
+            if persisted {
+                // The disk/cache remains enabled, so runtime must agree. Debt
+                // remains visible and still blocks arm if cleanup failed.
+                let _ = d
+                    .power
+                    .clam
+                    .lock()
+                    .unwrap()
+                    .set_transition_active(generation, true);
+                json!({
+                    "ok": false,
+                    "enabled": true,
+                    "pendingCleanup": d.power.clam.lock().unwrap().can_retry_cleanup(),
+                    "error": "не удалось сохранить выключённое состояние Крышки",
+                })
+            } else {
+                let mut response = clamshell_disable_response(cleanup);
+                response["enabled"] = Value::Bool(false);
+                response
+            }
+        };
+
+        let _ = d.power.clam.lock().unwrap().finish_transition(generation);
+        changed(d);
+        clamshell_command_truth(&d.power.clam.lock().unwrap(), outcome)
+    }
+
+    async fn retry_clamshell_cleanup(d: &Arc<Daemon>) -> Value {
+        let _transition = d.power.clam_transition.lock().await;
+        let (generation, restore_active) = {
+            let mut clam = d.power.clam.lock().unwrap();
+            if clam.armed {
+                return json!({
+                    "ok": false,
+                    "pendingCleanup": false,
+                    "error": "active helper lease must be disarmed, not cleanup-retried",
+                });
+            }
+            let restore_active = clam.active && Self::persisted_clamshell_enabled(d);
+            let generation = clam.begin_transition();
+            let _ = clam.set_transition_active(generation, false);
+            (generation, restore_active)
+        };
+
+        let cleanup = Self::deactivate_clamshell_async(d).await;
+        {
+            let mut clam = d.power.clam.lock().unwrap();
+            let _ = clam.set_transition_active(generation, restore_active);
+            let _ = clam.finish_transition(generation);
+        }
+        changed(d);
+        let mut response = clamshell_command_truth(
+            &d.power.clam.lock().unwrap(),
+            clamshell_disable_response(cleanup),
+        );
+        response["enabled"] = Value::Bool(restore_active);
+        response
+    }
+
     fn deactivate_clamshell(d: &Arc<Daemon>) -> ClamshellDisposeOutcome {
         let was_active = {
             let mut clam = d.power.clam.lock().unwrap();
@@ -654,20 +1044,44 @@ impl Power {
         outcome
     }
 
+    async fn deactivate_clamshell_async(d: &Arc<Daemon>) -> ClamshellDisposeOutcome {
+        let worker = d.clone();
+        match tauri::async_runtime::spawn_blocking(move || Self::deactivate_clamshell(&worker))
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let message = format!("clamshell cleanup worker failed: {error}");
+                let mut clam = d.power.clam.lock().unwrap();
+                clam.armed = false;
+                clam.armed_by = None;
+                clam.renewal_error = Some(message.clone());
+                ClamshellDisposeOutcome::ReleaseFailed(message)
+            }
+        }
+    }
+
     fn deactivate_clamshell_inner(d: &Arc<Daemon>) -> ClamshellDisposeOutcome {
-        let (was_active, receipt) = {
+        let (was_active, receipt, unknown) = {
             let mut clam = d.power.clam.lock().unwrap();
             let was_active = clam.active;
-            if !was_active && clam.lease.is_none() {
+            if let Some(pending) = clam.unknown_acquire.as_ref() {
+                if !pending.blocks_blind_retry(now_ms()) {
+                    clam.unknown_acquire = None;
+                    clam.renewal_error =
+                        Some("unknown helper acquire reached its fail-closed TTL boundary".into());
+                }
+            }
+            if !was_active && clam.lease.is_none() && clam.unknown_acquire.is_none() {
                 return ClamshellDisposeOutcome::Idle;
             }
             clam.active = false;
             clam.armed = false;
             clam.armed_by = None;
-            (was_active, clam.lease.clone())
+            (was_active, clam.lease.clone(), clam.unknown_acquire.clone())
         };
-        let outcome = match receipt {
-            Some(receipt) => {
+        let outcome = match (receipt, unknown) {
+            (Some(receipt), _) => {
                 match ExactReleaseOutcome::from_result(d.power.lease_client.release(&receipt)) {
                     ExactReleaseOutcome::Confirmed | ExactReleaseOutcome::AlreadyAbsent(_) => {
                         let mut clam = d.power.clam.lock().unwrap();
@@ -692,7 +1106,56 @@ impl Power {
                     }
                 }
             }
-            None => ClamshellDisposeOutcome::Idle,
+            (None, Some(pending)) => {
+                match d
+                    .power
+                    .lease_client
+                    .acquire(&pending.profile, &pending.owner_generation)
+                {
+                    Ok(receipt) => {
+                        match ExactReleaseOutcome::from_result(
+                            d.power.lease_client.release(&receipt),
+                        ) {
+                            ExactReleaseOutcome::Confirmed
+                            | ExactReleaseOutcome::AlreadyAbsent(_) => {
+                                let mut clam = d.power.clam.lock().unwrap();
+                                if clam
+                                    .unknown_acquire
+                                    .as_ref()
+                                    .is_some_and(|current| current.same_attempt(&pending))
+                                {
+                                    clam.unknown_acquire = None;
+                                    clam.renewal_error = None;
+                                }
+                                ClamshellDisposeOutcome::Released
+                            }
+                            ExactReleaseOutcome::Retryable(error) => {
+                                let message = format!(
+                                    "ambiguous acquire reconciled but exact release failed: {error}"
+                                );
+                                d.power.clam.lock().unwrap().retain_reconciled_debt(
+                                    &pending,
+                                    receipt,
+                                    message.clone(),
+                                );
+                                ClamshellDisposeOutcome::ReleaseFailed(message)
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let message = format!("ambiguous acquire reconciliation failed: {error}");
+                        let mut clam = d.power.clam.lock().unwrap();
+                        if let Some(current) = clam.unknown_acquire.as_mut() {
+                            if current.same_attempt(&pending) {
+                                current.record_retry_failure(now_ms(), message.clone());
+                                clam.renewal_error = Some(message.clone());
+                            }
+                        }
+                        ClamshellDisposeOutcome::ReleaseFailed(message)
+                    }
+                }
+            }
+            (None, None) => ClamshellDisposeOutcome::Idle,
         };
         if was_active {
             println!("[jarvis:clamshell] выключен");
@@ -770,11 +1233,10 @@ impl Power {
                                         // The helper proved this exact receipt
                                         // has expired or disappeared. Clear only
                                         // this local debt; never auto-reacquire.
-                                        clam.armed = false;
-                                        clam.armed_by = None;
-                                        clam.lease = None;
-                                        clam.renewal_error =
-                                            Some(format!("helper lease ended: {error}"));
+                                        clam.mark_terminal_lease_loss(
+                                            &worker_receipt,
+                                            format!("helper lease ended: {error}"),
+                                        );
                                     }
                                     ExactReleaseOutcome::Retryable(_) => {
                                         clam.mark_lease_unrenewable(
@@ -981,8 +1443,11 @@ impl Power {
                     "batteryFloor": cs_settings["batteryFloor"],
                     "helper": "xpc",
                     "helperLease": clam.lease.is_some(),
-                    "pendingCleanup": !clam.active && clam.lease.is_some(),
+                    "helperLeaseUnknown": clam.unknown_acquire.is_some(),
+                    "pendingCleanup": clam.can_retry_cleanup(),
                     "renewalError": clam.renewal_error.clone(),
+                    "retryAction": clam.can_retry_cleanup().then_some("retry-cleanup"),
+                    "transitioning": clam.transitioning,
                 })
             });
             (enabled, status)
@@ -1015,6 +1480,9 @@ impl Power {
             if !matches!(id, "keep-awake" | "clamshell") {
                 return json!({ "ok": false, "error": "плагин не найден" });
             }
+            if id == "clamshell" {
+                return Self::set_clamshell_enabled(d, on).await;
+            }
             let mut patch = Map::new();
             patch.insert("enabled".into(), Value::Bool(on));
             match (id, on) {
@@ -1028,19 +1496,7 @@ impl Power {
                     Self::deactivate_keep_awake(d);
                     d.settings.set_plugin(id, patch);
                 }
-                ("clamshell", true) => {
-                    d.settings.set_plugin(id, patch);
-                    Self::activate_clamshell(d);
-                }
-                ("clamshell", false) => {
-                    // Close runtime admission and reconcile the exact helper
-                    // lease before persisting the disabled setting. A failed
-                    // cleanup remains visible and is returned to the caller.
-                    let outcome = Self::deactivate_clamshell(d);
-                    d.settings.set_plugin(id, patch);
-                    changed(d);
-                    return clamshell_disable_response(outcome);
-                }
+                ("clamshell", _) => unreachable!("clamshell is serialized above"),
                 _ => unreachable!(),
             }
             changed(d);
@@ -1126,6 +1582,13 @@ impl Power {
     }
 
     async fn cs_cmd(d: &Arc<Daemon>, name: &str, args: &Value) -> Value {
+        let cleanup_retry = match name {
+            "retry-cleanup" => retry_clamshell_cleanup(d).await,
+            _ => Value::Null,
+        };
+        if !cleanup_retry.is_null() {
+            return cleanup_retry;
+        }
         if !d.power.clam.lock().unwrap().active {
             return json!({ "ok": false, "error": "плагин выключен" });
         }
@@ -1231,43 +1694,48 @@ impl Power {
             });
         }
 
-        let cs_active = self.clam.lock().unwrap().active;
-        if cs_active {
-            let (armed, lid_causes_sleep) = {
-                let clam = self.clam.lock().unwrap();
-                (clam.armed, clam.lid_causes_sleep)
-            };
+        let (cs_visible, cs_active, armed, can_retry_cleanup, tray_status) = {
+            let clam = self.clam.lock().unwrap();
+            (
+                clam.has_visible_status(),
+                clam.active,
+                clam.armed,
+                clam.can_retry_cleanup(),
+                clamshell_tray_status(&clam),
+            )
+        };
+        if cs_visible {
             let s = Self::cs_settings(d);
             if !out.is_empty() {
                 out.push(TrayItem::Separator);
             }
-            out.push(TrayItem::Label {
-                text: if armed {
-                    "⌒ Крышка: мак не уснёт даже закрытой".into()
-                } else if lid_causes_sleep == Some(false) {
-                    "⌒ Крышка: закрытие сейчас не усыпляет".into()
-                } else {
-                    "⌒ Крышка: закроешь — уснёт".into()
-                },
-            });
-            out.push(TrayItem::Check {
-                id: "cs:toggle".into(),
-                text: "Closed-display mode".into(),
-                checked: armed,
-                enabled: true,
-            });
-            out.push(TrayItem::Check {
-                id: "cs:set-autoarm".into(),
-                text: "Авто при работе агентов".into(),
-                checked: s["autoArm"].as_bool().unwrap_or(false),
-                enabled: true,
-            });
-            out.push(TrayItem::Check {
-                id: "cs:set-suggest".into(),
-                text: "Подсказывать после прерванного сна".into(),
-                checked: s["suggest"].as_bool().unwrap_or(false),
-                enabled: true,
-            });
+            out.push(TrayItem::Label { text: tray_status });
+            if can_retry_cleanup {
+                out.push(TrayItem::Action {
+                    id: "cs:retry-cleanup".into(),
+                    text: "Повторить точное освобождение helper lease".into(),
+                });
+            }
+            if cs_active {
+                out.push(TrayItem::Check {
+                    id: "cs:toggle".into(),
+                    text: "Closed-display mode".into(),
+                    checked: armed,
+                    enabled: !can_retry_cleanup,
+                });
+                out.push(TrayItem::Check {
+                    id: "cs:set-autoarm".into(),
+                    text: "Авто при работе агентов".into(),
+                    checked: s["autoArm"].as_bool().unwrap_or(false),
+                    enabled: !can_retry_cleanup,
+                });
+                out.push(TrayItem::Check {
+                    id: "cs:set-suggest".into(),
+                    text: "Подсказывать после прерванного сна".into(),
+                    checked: s["suggest"].as_bool().unwrap_or(false),
+                    enabled: true,
+                });
+            }
         }
         out
     }
@@ -1314,6 +1782,7 @@ impl Power {
                     "set",
                     json!({ "suggest": !cs["suggest"].as_bool().unwrap_or(false) }),
                 ),
+                "cs:retry-cleanup" => ("clamshell", "retry-cleanup", json!({})),
                 "cs:install-sudoers" => ("clamshell", "install-sudoers", json!({})),
                 other => {
                     if let Some(min) = other.strip_prefix("ka:timer:") {
@@ -1383,10 +1852,37 @@ impl Power {
         p.last_working
             .store(working_count(&d.snapshot()), Ordering::SeqCst);
 
+        let (retry_unknown, expired_unknown) = {
+            let mut clam = p.clam.lock().unwrap();
+            let expired = clam
+                .unknown_acquire
+                .as_ref()
+                .is_some_and(|pending| !pending.blocks_blind_retry(now));
+            if expired {
+                clam.unknown_acquire = None;
+                clam.renewal_error =
+                    Some("unknown helper acquire reached its fail-closed TTL boundary".into());
+            }
+            (
+                clam.unknown_acquire
+                    .as_ref()
+                    .is_some_and(|pending| pending.retry_due(now))
+                    && !clam.busy
+                    && !clam.transitioning,
+                expired,
+            )
+        };
+        if expired_unknown {
+            changed(d);
+        }
+        if retry_unknown {
+            reconcile_unknown_acquire(d).await;
+        }
+
         // батарейный сторож «Крышки»
         let needs_guard = {
             let mut clam = p.clam.lock().unwrap();
-            if clam.armed && now - clam.last_guard_at >= GUARD_EVERY_MS {
+            if clam.needs_battery_guard(now) {
                 clam.last_guard_at = now;
                 true
             } else {
@@ -1428,6 +1924,10 @@ impl Power {
             }
         });
     }
+}
+
+async fn retry_clamshell_cleanup(d: &Arc<Daemon>) -> Value {
+    Power::retry_clamshell_cleanup(d).await
 }
 
 fn working_count(list: &[Session]) -> usize {
@@ -1577,6 +2077,120 @@ fn peer_sync(d: &Arc<Daemon>) {
     });
 }
 
+async fn reconcile_unknown_acquire(d: &Arc<Daemon>) {
+    let now = now_ms();
+    let pending = {
+        let mut clam = d.power.clam.lock().unwrap();
+        let Some(pending) = clam.unknown_acquire.clone() else {
+            return;
+        };
+        if !pending.blocks_blind_retry(now) {
+            clam.unknown_acquire = None;
+            clam.renewal_error =
+                Some("unknown helper acquire reached its fail-closed TTL boundary".into());
+            drop(clam);
+            changed(d);
+            return;
+        }
+        if !pending.retry_due(now)
+            || !clam.active
+            || clam.transitioning
+            || clam.busy
+            || clam.armed
+            || clam.lease.is_some()
+        {
+            return;
+        }
+        clam.busy = true;
+        pending
+    };
+
+    let Some(operation) = d.power.operations.begin() else {
+        d.power.clam.lock().unwrap().busy = false;
+        return;
+    };
+    let worker_daemon = d.clone();
+    let commit_daemon = d.clone();
+    let rollback_daemon = d.clone();
+    let lease_client = d.power.lease_client.clone();
+    let rollback_client = lease_client.clone();
+    let worker_pending = pending.clone();
+    let commit_pending = pending.clone();
+    let rollback_pending = pending.clone();
+    let reconciled = tauri::async_runtime::spawn_blocking(move || {
+        let operations = &worker_daemon.power.operations;
+        let epoch = operation.epoch();
+        if !operations.accepts(epoch) {
+            drop(operation);
+            return Ok(AcquireDisposition::RolledBack);
+        }
+        let result =
+            lease_client.acquire(&worker_pending.profile, &worker_pending.owner_generation);
+        operations.finish_acquire(
+            operation,
+            result,
+            move |receipt| {
+                let mut clam = commit_daemon.power.clam.lock().unwrap();
+                if commit_daemon.power.operations.accepts(epoch) {
+                    clam.commit_reconciled_if_active(&commit_pending, receipt)
+                } else {
+                    Err(receipt)
+                }
+            },
+            move |receipt| match ExactReleaseOutcome::from_result(rollback_client.release(&receipt))
+            {
+                ExactReleaseOutcome::Confirmed | ExactReleaseOutcome::AlreadyAbsent(_) => {
+                    rollback_daemon
+                        .power
+                        .clam
+                        .lock()
+                        .unwrap()
+                        .resolve_unknown_after_release(&rollback_pending);
+                    Ok(())
+                }
+                ExactReleaseOutcome::Retryable(error) => {
+                    let message = format!("reconciled acquire exact release failed: {error}");
+                    rollback_daemon
+                        .power
+                        .clam
+                        .lock()
+                        .unwrap()
+                        .retain_reconciled_debt(&rollback_pending, receipt, message);
+                    Err(error)
+                }
+            },
+        )
+    })
+    .await;
+
+    let committed = matches!(&reconciled, Ok(Ok(AcquireDisposition::Committed)));
+    let failure = match &reconciled {
+        Ok(Err(error)) => Some(format!("ambiguous acquire retry failed: {error}")),
+        Err(error) => Some(format!("ambiguous acquire worker failed: {error}")),
+        _ => None,
+    };
+    {
+        let mut clam = d.power.clam.lock().unwrap();
+        clam.busy = false;
+        if let Some(message) = failure {
+            if let Some(current) = clam.unknown_acquire.as_mut() {
+                if current.same_attempt(&pending) {
+                    current.record_retry_failure(now_ms(), message.clone());
+                    clam.renewal_error = Some(message);
+                }
+            }
+        }
+    }
+    if committed {
+        if let Err(error) = Power::start_clamshell_renewal(d) {
+            Power::release_after_renewal_start_failure(d, &error);
+        }
+    }
+    if d.power.operations.accepting() {
+        changed(d);
+    }
+}
+
 async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
     if let Some(error) = arm_recovery_error(&startup_recovery_health()) {
         return json!({
@@ -1592,8 +2206,20 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
     };
     {
         let mut clam = d.power.clam.lock().unwrap();
+        if clam
+            .unknown_acquire
+            .as_ref()
+            .is_some_and(|pending| !pending.blocks_blind_retry(now_ms()))
+        {
+            clam.unknown_acquire = None;
+            clam.renewal_error =
+                Some("unknown helper acquire reached its fail-closed TTL boundary".into());
+        }
         if !clam.active {
             return json!({ "ok": false, "error": "плагин выключен" });
+        }
+        if clam.transitioning {
+            return json!({ "ok": false, "error": "clamshell enable/disable ещё выполняется" });
         }
         if clam.busy {
             return json!({ "ok": false, "error": "операция уже идёт" });
@@ -1607,10 +2233,20 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
                 "error": "предыдущая helper lease ожидает точного release; повторный arm запрещён"
             });
         }
+        if clam.unknown_acquire.is_some() {
+            return json!({
+                "ok": false,
+                "pendingCleanup": true,
+                "retryAction": "retry-cleanup",
+                "error": "результат предыдущего helper acquire неизвестен; повторный arm с новым owner generation запрещён",
+            });
+        }
         clam.busy = true;
     }
     let owner_generation = new_owner_generation();
     let profile = power_profile_id();
+    let attempted_generation = owner_generation.clone();
+    let attempted_profile = profile.clone();
     let worker_daemon = d.clone();
     let commit_daemon = d.clone();
     let rollback_daemon = d.clone();
@@ -1651,7 +2287,26 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
         )
     })
     .await;
-    d.power.clam.lock().unwrap().busy = false;
+    let unknown_error = match &acquired {
+        Ok(Err(error)) if error.acquire_may_have_committed() => Some(error.to_string()),
+        Err(error) => Some(format!("power acquire worker failed: {error}")),
+        _ => None,
+    };
+    {
+        let mut clam = d.power.clam.lock().unwrap();
+        if clam.lease.is_none() {
+            if let Some(error) = unknown_error {
+                clam.retain_unknown_acquire(UnknownAcquire::new(
+                    attempted_profile,
+                    attempted_generation,
+                    by,
+                    now_ms(),
+                    error,
+                ));
+            }
+        }
+        clam.busy = false;
+    }
     let result = match acquired {
         Ok(Ok(AcquireDisposition::Committed)) => match Power::start_clamshell_renewal(d) {
             Ok(()) => {
@@ -1672,27 +2327,45 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
                 Err(error) => format!("power worker failed: {error}"),
                 Ok(Ok(AcquireDisposition::Committed)) => unreachable!(),
             };
-            if d.power.clam.lock().unwrap().lease.is_some() {
+            let (has_lease, pending_cleanup) = {
+                let clam = d.power.clam.lock().unwrap();
+                (clam.lease.is_some(), clam.can_retry_cleanup())
+            };
+            if has_lease {
                 let error = Power::release_after_renewal_start_failure(d, &error);
-                json!({ "ok": false, "error": error })
+                json!({ "ok": false, "error": error, "pendingCleanup": true })
             } else {
-                json!({ "ok": false, "error": error })
+                json!({
+                    "ok": false,
+                    "error": error,
+                    "pendingCleanup": pending_cleanup,
+                    "retryAction": pending_cleanup.then_some("retry-cleanup"),
+                })
             }
         }
     };
-    result
+    clamshell_command_truth(&d.power.clam.lock().unwrap(), result)
 }
 
 async fn disarm(d: &Arc<Daemon>) -> Value {
     let (receipt, renewal) = {
         let mut clam = d.power.clam.lock().unwrap();
+        if clam.transitioning {
+            return clamshell_command_truth(
+                &clam,
+                json!({ "ok": false, "error": "clamshell enable/disable ещё выполняется" }),
+            );
+        }
         if clam.busy {
-            return json!({ "ok": false, "error": "операция уже идёт" });
+            return clamshell_command_truth(
+                &clam,
+                json!({ "ok": false, "error": "операция уже идёт" }),
+            );
         }
         let Some(receipt) = clam.lease.clone() else {
             clam.armed = false;
             clam.armed_by = None;
-            return json!({ "ok": true });
+            return clamshell_command_truth(&clam, json!({ "ok": true }));
         };
         clam.busy = true;
         (receipt, clam.renewal.take())
@@ -1714,7 +2387,10 @@ async fn disarm(d: &Arc<Daemon>) -> Value {
         if d.power.operations.accepting() {
             changed(d);
         }
-        return json!({ "ok": false, "error": error });
+        return clamshell_command_truth(
+            &d.power.clam.lock().unwrap(),
+            json!({ "ok": false, "error": error }),
+        );
     };
     let lease_client = d.power.lease_client.clone();
     let worker_receipt = receipt.clone();
@@ -1735,10 +2411,13 @@ async fn disarm(d: &Arc<Daemon>) -> Value {
             if d.power.operations.accepting() {
                 changed(d);
             }
-            return json!({
-                "ok": false,
-                "error": error,
-            });
+            return clamshell_command_truth(
+                &d.power.clam.lock().unwrap(),
+                json!({
+                    "ok": false,
+                    "error": error,
+                }),
+            );
         }
     };
     let release = ExactReleaseOutcome::from_result(release);
@@ -1776,10 +2455,13 @@ async fn disarm(d: &Arc<Daemon>) -> Value {
             if d.power.operations.accepting() {
                 changed(d);
             }
-            return json!({ "ok": false, "error": error });
+            return clamshell_command_truth(
+                &d.power.clam.lock().unwrap(),
+                json!({ "ok": false, "error": error }),
+            );
         }
     }
-    result
+    clamshell_command_truth(&d.power.clam.lock().unwrap(), result)
 }
 
 async fn refresh_lid(d: &Arc<Daemon>) {
@@ -1801,6 +2483,42 @@ async fn battery_guard(d: &Arc<Daemon>) {
         return;
     };
     if pct > floor {
+        return;
+    }
+    let (has_unknown_acquire, safety_sleep_pending) = {
+        let clam = d.power.clam.lock().unwrap();
+        (clam.unknown_acquire.is_some(), clam.safety_sleep_pending)
+    };
+    if has_unknown_acquire {
+        let cleanup = Power::retry_clamshell_cleanup(d).await;
+        let detail = cleanup["error"]
+            .as_str()
+            .unwrap_or("unknown helper acquire reconciled and released");
+        if d.power.operations.accepting() {
+            d.notify(
+                "⌒ Крышка: батарея садится",
+                &format!("Осталось {pct}% — {detail}; принудительно усыпляю мак"),
+                None,
+                "done",
+            );
+            clamshell::force_sleep_now().await;
+        }
+        return;
+    }
+    if safety_sleep_pending && d.power.clam.lock().unwrap().lease.is_none() {
+        if d.power.operations.accepting() {
+            d.notify(
+                "⌒ Крышка: батарея садится",
+                &format!(
+                    "Осталось {pct}% — helper lease завершена без подтверждения обычного сна; принудительно усыпляю мак"
+                ),
+                None,
+                "done",
+            );
+            clamshell::force_sleep_now().await;
+            d.power.clam.lock().unwrap().safety_sleep_pending = false;
+            changed(d);
+        }
         return;
     }
     let (receipt, renewal) = {
@@ -2178,6 +2896,9 @@ mod tests {
             .0;
         assert!(enable.contains("clam_transition.lock().await"));
         assert!(enable.contains("persisted_clamshell_enabled"));
+        assert!(enable.contains("deactivate_clamshell_async(d).await"));
+        assert!(source.contains("spawn_blocking(move || Self::deactivate_clamshell"));
+        assert!(source.contains("return Self::set_clamshell_enabled(d, on).await"));
     }
 
     #[test]
@@ -2190,15 +2911,25 @@ mod tests {
             armed_by: Some("manual"),
             lease: Some(current.clone()),
             renewal_error: Some("current error".into()),
+            safety_sleep_pending: true,
+            busy: true,
+            last_guard_at: 123,
+            lid_causes_sleep: Some(false),
             ..Clam::default()
         };
 
         assert!(!clam.retain_lease_debt(stale, "stale error"));
+        assert!(!clam.mark_lease_unrenewable(&helper_receipt(), "stale renewal"));
+        assert!(!clam.mark_terminal_lease_loss(&helper_receipt(), "stale terminal"));
         assert!(clam.active);
         assert!(clam.armed);
         assert_eq!(clam.armed_by, Some("manual"));
         assert_eq!(clam.lease.as_ref(), Some(&current));
         assert_eq!(clam.renewal_error.as_deref(), Some("current error"));
+        assert!(clam.safety_sleep_pending);
+        assert!(clam.busy);
+        assert_eq!(clam.last_guard_at, 123);
+        assert_eq!(clam.lid_causes_sleep, Some(false));
     }
 
     #[test]
@@ -2215,6 +2946,17 @@ mod tests {
         assert!(clam.mark_terminal_lease_loss(&receipt, "lease expired"));
         assert!(clam.lease.is_none());
         assert!(clam.safety_sleep_pending);
+        assert!(clam.needs_battery_guard(GUARD_EVERY_MS));
+
+        clam.safety_sleep_pending = false;
+        clam.unknown_acquire = Some(UnknownAcquire::new(
+            "profile".into(),
+            "generation-a".into(),
+            "manual",
+            GUARD_EVERY_MS,
+            "timed out".into(),
+        ));
+        clam.last_guard_at = 0;
         assert!(clam.needs_battery_guard(GUARD_EVERY_MS));
     }
 
@@ -2314,18 +3056,20 @@ mod tests {
 
         let source = include_str!("mod.rs");
         let disable_path = source
-            .split_once("(\"clamshell\", false) =>")
-            .expect("clamshell disable path")
+            .split_once("async fn set_clamshell_enabled")
+            .expect("serialized clamshell disable path")
             .1
-            .split_once("_ => unreachable!()")
+            .split_once("async fn retry_clamshell_cleanup")
             .expect("disable path boundary")
             .0;
+        let cleanup = disable_path.find("deactivate_clamshell_async").unwrap();
+        let persist = cleanup + disable_path[cleanup..].find("settings.set_plugin").unwrap();
         assert!(
-            disable_path.find("deactivate_clamshell").unwrap()
-                < disable_path.find("settings.set_plugin").unwrap(),
+            cleanup < persist,
             "runtime cleanup must run before persisting disabled"
         );
-        assert!(disable_path.contains("clamshell_disable_response(outcome)"));
+        assert!(disable_path.contains("clamshell_disable_response(cleanup)"));
+        assert!(source.contains("return Self::set_clamshell_enabled(d, on).await"));
     }
 
     #[test]

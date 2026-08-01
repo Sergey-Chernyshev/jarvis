@@ -1221,19 +1221,70 @@
     // крышка (clamshell) — Спать / Не спать
     const cs = byId('clamshell');
     if (cs) {
-      const armed = !!(cs.status && cs.status.armed);
+      const csStatus = cs.status || {};
+      const armed = !!csStatus.armed;
+      const showClamshellResult = (result, mode) => {
+        const text = !result
+          ? 'Крышка: helper не вернул результат'
+          : result.pendingCleanup
+            ? (result.error || 'Точное освобождение helper lease ещё не подтверждено')
+            : result.ok === false
+              ? (result.error || 'Команда крышки не выполнена')
+              : mode === 'keep'
+                ? 'Helper lease активна'
+                : 'Helper lease освобождена';
+        if (typeof showToast === 'function') showToast(text);
+      };
       group.appendChild(drow('Работать с закрытой крышкой', 'Не засыпать при закрытии крышки · требует питания от сети.',
         segmented([{ value: 'sleep', label: 'Спать' }, { value: 'keep', label: 'Не спать' }],
           armed ? 'keep' : 'sleep',
           async (val) => {
             if (val === 'keep') {
-              if (cs && cs.enabled === false) await safe(() => window.jarvis.pluginCmd('clamshell', '_enable', { on: true }), null);
-              fire(() => window.jarvis.pluginCmd('clamshell', 'arm'));
+              if (cs.enabled === false) {
+                const enabled = await safe(() => window.jarvis.pluginCmd('clamshell', '_enable', { on: true }), null);
+                if (!enabled || enabled.ok === false) {
+                  showClamshellResult(enabled, val);
+                  return;
+                }
+              }
+              const result = await safe(() => window.jarvis.pluginCmd('clamshell', 'arm'), null);
+              showClamshellResult(result, val);
             } else {
-              fire(() => window.jarvis.pluginCmd('clamshell', 'disarm'));
+              const result = await safe(() => window.jarvis.pluginCmd('clamshell', 'disarm'), null);
+              showClamshellResult(result, val);
             }
             setTimeout(() => reRenderPane('awake'), 300);
           })));
+      if (csStatus.pendingCleanup || csStatus.renewalError) {
+        const helperLease = csStatus.helperLease
+          ? 'helper lease известна'
+          : csStatus.helperLeaseUnknown
+            ? 'результат helper acquire неизвестен'
+            : 'helper lease не удерживается';
+        const retry = button('Повторить cleanup', async () => {
+          const result = await safe(
+            () => window.jarvis.pluginCmd('clamshell', 'retry-cleanup'),
+            null,
+          );
+          showClamshellResult(result, 'sleep');
+          setTimeout(() => reRenderPane('awake'), 100);
+        }, 'sm');
+        retry.disabled = !csStatus.pendingCleanup;
+        group.appendChild(drow(
+          'Состояние helper',
+          csStatus.renewalError ? `${helperLease}: ${csStatus.renewalError}` : helperLease,
+          retry,
+        ));
+      }
+      if (cs.health && cs.health.state === 'blocked' && cs.health.repairAction) {
+        group.appendChild(drow(
+          'Power recovery требует repair',
+          cs.health.message || 'Автоматическое восстановление заблокировано.',
+          button('Как починить', () => {
+            if (typeof showToast === 'function') showToast(cs.health.repairAction);
+          }, 'sm'),
+        ));
+      }
     }
 
     pane.appendChild(group);

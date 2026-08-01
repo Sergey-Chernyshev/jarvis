@@ -7,9 +7,11 @@ const settings = readFileSync(new URL('./settings2.js', import.meta.url), 'utf8'
 
 test('disabled clamshell cleanup debt stays visible and has an exact-release retry', () => {
   for (const source of [renderer, settings]) {
+    assert.match(source, /helperLease/);
     assert.match(source, /pendingCleanup/);
     assert.match(source, /renewalError/);
     assert.match(source, /retry-cleanup/);
+    assert.match(source, /repairAction/);
   }
 });
 

@@ -44,6 +44,21 @@ impl fmt::Display for LeaseError {
 
 impl Error for LeaseError {}
 
+impl LeaseError {
+    /// The helper may have committed an acquire before the host lost or
+    /// rejected its response. Reusing the same owner generation is the only
+    /// safe reconciliation path because acquire is idempotent on that key.
+    pub(crate) const fn acquire_may_have_committed(self) -> bool {
+        matches!(
+            self,
+            Self::HelperUnavailable
+                | Self::HelperUnapproved
+                | Self::UnexpectedResponse
+                | Self::LeaseMismatch
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ExactReleaseOutcome {
     Confirmed,
@@ -423,6 +438,57 @@ mod tests {
             Err(LeaseError::HelperUnavailable)
         );
         assert_eq!(unavailable_requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ambiguous_acquire_failures_require_same_generation_reconciliation() {
+        for error in [
+            LeaseError::HelperUnavailable,
+            LeaseError::HelperUnapproved,
+            LeaseError::UnexpectedResponse,
+            LeaseError::LeaseMismatch,
+        ] {
+            assert!(error.acquire_may_have_committed(), "{error:?}");
+        }
+        assert!(!LeaseError::Rejected(ErrorCode::InvalidRequest).acquire_may_have_committed());
+
+        let (helper, requests) = FakeHelper::new(
+            HelperTrust::ProductionAttested,
+            [
+                Err(HelperClientError::Unavailable),
+                acquired(LEASE_A),
+                reply(Response::Released {
+                    lease_id: LEASE_A.into(),
+                }),
+            ],
+        );
+        let client = LeaseClient::new(helper);
+        assert_eq!(
+            client.acquire("profile-a", "generation-a"),
+            Err(LeaseError::HelperUnavailable)
+        );
+        let receipt = client.acquire("profile-a", "generation-a").unwrap();
+        assert_eq!(receipt.owner_generation, "generation-a");
+        client.release(&receipt).unwrap();
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [
+                Request::AcquireLease {
+                    profile: "profile-a".into(),
+                    owner_generation: "generation-a".into(),
+                    ttl_ms: DEFAULT_TTL_MS,
+                },
+                Request::AcquireLease {
+                    profile: "profile-a".into(),
+                    owner_generation: "generation-a".into(),
+                    ttl_ms: DEFAULT_TTL_MS,
+                },
+                Request::ReleaseLease {
+                    lease_id: LEASE_A.into(),
+                    owner_generation: "generation-a".into(),
+                },
+            ]
+        );
     }
 
     #[test]

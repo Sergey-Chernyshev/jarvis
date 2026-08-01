@@ -2065,7 +2065,8 @@ function powerSuffix() {
   const ka = pluginById('keep-awake');
   if (ka?.enabled) parts.push(ka.status?.active ? `☕ ${ka.status.line || 'вкл'}` : '☕ выкл');
   const cs = pluginById('clamshell');
-  if (cs?.enabled) parts.push(cs.status?.armed ? '⌒ не уснёт закрытым' : '⌒ выкл');
+  if (cs?.status?.pendingCleanup) parts.push('⌒ helper cleanup не завершён');
+  else if (cs?.enabled) parts.push(cs.status?.armed ? '⌒ не уснёт закрытым' : '⌒ выкл');
   return parts.length ? ' · ' + parts.join(' · ') : '';
 }
 
@@ -2191,6 +2192,18 @@ async function pluginCmd(id, cmd, args) {
   renderPluginRows();
   footerLeftEl.textContent = footerText();
   if (view === 'history' && histProject == null) renderAgentVmRuntimeStatus();
+  return res;
+}
+
+function clamshellResultMessage(result, mode) {
+  if (!result) return 'Крышка: helper не вернул результат';
+  if (result.pendingCleanup) {
+    return result.error || 'Крышка: точное освобождение helper lease ещё не подтверждено';
+  }
+  if (result.ok === false) return result.error || 'Крышка: команда не выполнена';
+  return mode === 'keep'
+    ? 'Крышка: helper lease активна — закрытый мак не уснёт'
+    : 'Крышка: helper lease освобождена';
 }
 
 // маленькие глифы для карточки бодрости (через DOM — без innerHTML)
@@ -2293,7 +2306,8 @@ function renderPluginRows() {
 
   // крышка (clamshell) — сегмент Спать / Не спать
   const cs = pluginById('clamshell');
-  const armed = !!(cs && cs.status && cs.status.armed);
+  const csStatus = (cs && cs.status) || {};
+  const armed = !!csStatus.armed;
   const lid = document.createElement('div');
   lid.className = 'arow lid hairtop';
   lid.appendChild(awakeGlyph('lid'));
@@ -2310,16 +2324,49 @@ function renderPluginRows() {
     b.textContent = label;
     b.addEventListener('click', async () => {
       if (val === 'keep') {
-        if (cs && !cs.enabled) await window.jarvis.pluginCmd('clamshell', '_enable', { on: true });
-        pluginCmd('clamshell', 'arm');
+        if (cs && !cs.enabled) {
+          const enabled = await pluginCmd('clamshell', '_enable', { on: true });
+          if (!enabled || enabled.ok === false) return;
+        }
+        const result = await pluginCmd('clamshell', 'arm');
+        showToast(clamshellResultMessage(result, 'keep'));
       } else {
-        pluginCmd('clamshell', 'disarm');
+        const result = await pluginCmd('clamshell', 'disarm');
+        showToast(clamshellResultMessage(result, 'sleep'));
       }
     });
     lidSeg.appendChild(b);
   }
   lid.appendChild(lidSeg);
   box.appendChild(lid);
+
+  if (csStatus.pendingCleanup || csStatus.renewalError) {
+    const helperState = csStatus.helperLease
+      ? 'helper lease требует точного release'
+      : csStatus.helperLeaseUnknown
+        ? 'результат acquire неизвестен'
+        : 'helper lease не удерживается';
+    const retryCleanup = csStatus.pendingCleanup
+      ? async () => {
+        const result = await pluginCmd('clamshell', 'retry-cleanup');
+        showToast(clamshellResultMessage(result, 'sleep'));
+      }
+      : () => {};
+    box.appendChild(actionRow(
+      csStatus.renewalError ? `${helperState}: ${csStatus.renewalError}` : helperState,
+      false,
+      csStatus.pendingCleanup ? 'Повторить cleanup' : 'Понятно',
+      retryCleanup,
+    ));
+  }
+  if (cs && cs.health && cs.health.state === 'blocked' && cs.health.repairAction) {
+    box.appendChild(actionRow(
+      cs.health.message || 'Power recovery заблокирован',
+      false,
+      'Как починить',
+      () => showToast(cs.health.repairAction),
+    ));
+  }
 
   // подсказка
   const hint = document.createElement('div');
@@ -2472,9 +2519,12 @@ function applyAmf(mode) {
 }
 async function applyLid(m) {
   const cs = pluginById('clamshell');
-  if (m === 'keep' && cs && !cs.enabled) await window.jarvis.pluginCmd('clamshell', '_enable', { on: true });
-  pluginCmd('clamshell', m === 'keep' ? 'arm' : 'disarm');
-  showToast(m === 'keep' ? 'Крышка закрыта — не уснёт' : 'Крышка закрыта — обычный сон');
+  if (m === 'keep' && cs && !cs.enabled) {
+    const enabled = await pluginCmd('clamshell', '_enable', { on: true });
+    if (!enabled || enabled.ok === false) return;
+  }
+  const result = await pluginCmd('clamshell', m === 'keep' ? 'arm' : 'disarm');
+  showToast(clamshellResultMessage(result, m));
 }
 async function applyPos(p) {
   await window.jarvis.setSettings({ position: p });

@@ -28,6 +28,7 @@ use crate::watchdog::{
 use crate::{HelperEvent, HelperEventSink, NoopEventSink};
 
 pub const DEV_SOCKET_FILE: &str = "power-helper-dev.sock";
+pub const DEV_CLEANUP_RESIDUE_FILE: &str = ".power-helper-dev.cleanup-residue";
 
 const RUN_DIRECTORY: &CStr = c"run";
 const DEV_SOCKET_COMPONENT: &CStr = c"power-helper-dev.sock";
@@ -46,6 +47,7 @@ pub enum TransportError {
     InvalidEnvironment,
     PeerRejected,
     UnsafeMetadata,
+    CleanupRequired,
     Deadline,
     InvalidFrame,
     Io,
@@ -61,6 +63,9 @@ impl fmt::Display for TransportError {
             Self::InvalidEnvironment => "development power environment is invalid",
             Self::PeerRejected => "development power peer was rejected",
             Self::UnsafeMetadata => "development power socket metadata is unsafe",
+            Self::CleanupRequired => {
+                "development power restart is blocked by $JARVIS_DIR/run/.power-helper-dev.cleanup-residue"
+            }
             Self::Deadline => "development power transport deadline expired",
             Self::InvalidFrame => "development power frame is invalid",
             Self::Io => "development power transport I/O failed",
@@ -406,7 +411,7 @@ where
         return Err(TransportError::UnsafeMetadata);
     }
     if socket_metadata_named(run_directory.as_raw_fd(), QUARANTINE_COMPONENT)?.is_some() {
-        return Err(TransportError::UnsafeMetadata);
+        return Err(TransportError::CleanupRequired);
     }
 
     root.revalidate_child_path(RUN_DIRECTORY, run_directory.as_raw_fd())?;

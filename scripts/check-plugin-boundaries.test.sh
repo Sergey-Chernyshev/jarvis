@@ -89,6 +89,7 @@ write_clean_fixture() {
     '[package]' \
     'name = "jarvis-host"' \
     'version = "0.1.0"' \
+    'edition = "2021"' \
     '[dependencies]' \
     'jarvis-package = { path = "../crates/jarvis-package" }' \
     > "$fixture_root/src-tauri/Cargo.toml"
@@ -115,6 +116,13 @@ expect_cargo_accepts_private_source() {
     CARGO_TARGET_DIR="$fixture_root/cargo-target" \
     "$cargo_bin" check --quiet --offline \
       --manifest-path "$fixture_root/crates/jarvis-package/Cargo.toml"
+}
+
+expect_cargo_accepts_host_source() {
+  RUSTFLAGS="-Awarnings" \
+    CARGO_TARGET_DIR="$fixture_root/cargo-target" \
+    "$cargo_bin" check --quiet --offline \
+      --manifest-path "$fixture_root/src-tauri/Cargo.toml"
 }
 
 expect_cargo_dependency() {
@@ -182,6 +190,15 @@ printf '%s\n' \
 expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
 
 write_clean_fixture
+printf '%s\n' \
+  'use jarvis_package::PackageTrustVerifier as r#VerifierAlias;' \
+  'struct RawAliasedVerifier;' \
+  'impl r#VerifierAlias for RawAliasedVerifier {}' \
+  > "$fixture_root/src-tauri/src/lib.rs"
+expect_cargo_accepts_host_source
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
 mkdir -p "$fixture_root/src-tauri/src/plugins"
 printf '%s\n' \
   'macro_rules! implement_verifier {' \
@@ -206,6 +223,31 @@ expect_rejected "PackageTrustVerifier production implementation outside host tru
 write_clean_fixture
 mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
 printf '%s\n' \
+  'mod plugins;' \
+  > "$fixture_root/src-tauri/src/lib.rs"
+printf '%s\n' \
+  'pub mod trust;' \
+  'mod wrong;' \
+  > "$fixture_root/src-tauri/src/plugins/mod.rs"
+printf '%s\n' \
+  'pub mod package;' \
+  > "$fixture_root/src-tauri/src/plugins/trust/mod.rs"
+printf '%s\n' \
+  '#[macro_export]' \
+  'macro_rules! r#type {' \
+  '    ($target:ty) => { impl jarvis_package::PackageTrustVerifier for $target {} };' \
+  '}' \
+  > "$fixture_root/src-tauri/src/plugins/trust/package.rs"
+printf '%s\n' \
+  'struct RawMacroVerifier;' \
+  'crate::r#type!(RawMacroVerifier);' \
+  > "$fixture_root/src-tauri/src/plugins/wrong.rs"
+expect_cargo_accepts_host_source
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
+printf '%s\n' \
   '#[macro_export]' \
   'macro_rules! cross_root_verifier {' \
   '    ($type:ty) => { impl PackageTrustVerifier for $type {} };' \
@@ -215,6 +257,32 @@ printf '%s\n' \
   'struct CrossRootMacroVerifier;' \
   'cross_root_verifier!(CrossRootMacroVerifier);' \
   > "$fixture_root/plugins/community/src/lib.rs"
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
+printf '%s\n' \
+  'mod plugins;' \
+  > "$fixture_root/src-tauri/src/lib.rs"
+printf '%s\n' \
+  'pub mod trust;' \
+  'mod wrong;' \
+  > "$fixture_root/src-tauri/src/plugins/mod.rs"
+printf '%s\n' \
+  'pub mod package;' \
+  > "$fixture_root/src-tauri/src/plugins/trust/mod.rs"
+printf '%s\n' \
+  '#[macro_export]' \
+  'macro_rules! catalog_verifier {' \
+  '    ($target:ty) => { impl jarvis_package::PackageTrustVerifier for $target {} };' \
+  '}' \
+  > "$fixture_root/src-tauri/src/plugins/trust/package.rs"
+printf '%s\n' \
+  'use crate::catalog_verifier as r#type;' \
+  'struct RawDirectMacroAliasVerifier;' \
+  'r#type!(RawDirectMacroAliasVerifier);' \
+  > "$fixture_root/src-tauri/src/plugins/wrong.rs"
+expect_cargo_accepts_host_source
 expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
 
 write_clean_fixture
@@ -230,6 +298,32 @@ printf '%s\n' \
   'struct DirectMacroAliasVerifier;' \
   'install_verifier!(DirectMacroAliasVerifier);' \
   > "$fixture_root/plugins/community/src/lib.rs"
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
+printf '%s\n' \
+  'mod plugins;' \
+  > "$fixture_root/src-tauri/src/lib.rs"
+printf '%s\n' \
+  'pub mod trust;' \
+  'mod wrong;' \
+  > "$fixture_root/src-tauri/src/plugins/mod.rs"
+printf '%s\n' \
+  'pub mod package;' \
+  > "$fixture_root/src-tauri/src/plugins/trust/mod.rs"
+printf '%s\n' \
+  '#[macro_export]' \
+  'macro_rules! catalog_verifier {' \
+  '    ($target:ty) => { impl jarvis_package::PackageTrustVerifier for $target {} };' \
+  '}' \
+  > "$fixture_root/src-tauri/src/plugins/trust/package.rs"
+printf '%s\n' \
+  'use crate::{catalog_verifier as r#match};' \
+  'struct RawGroupedMacroAliasVerifier;' \
+  'r#match!(RawGroupedMacroAliasVerifier);' \
+  > "$fixture_root/src-tauri/src/plugins/wrong.rs"
+expect_cargo_accepts_host_source
 expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
 
 write_clean_fixture

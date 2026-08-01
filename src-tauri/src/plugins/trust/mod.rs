@@ -1,6 +1,7 @@
 use std::fmt;
 
 pub mod catalog;
+pub mod package;
 pub mod signature;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

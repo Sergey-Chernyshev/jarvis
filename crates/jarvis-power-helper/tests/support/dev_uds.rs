@@ -834,6 +834,31 @@ fn listener_drop_removes_the_public_name_but_retains_an_owned_quarantine_residue
     assert_eq!(metadata.uid(), current_uid());
     assert_eq!(metadata.gid(), current_gid());
     assert_eq!(metadata.nlink(), 1);
+    assert_eq!(
+        bind_listener(
+            &harness.runtime.listener_permit(),
+            &harness.root,
+            current_uid(),
+            harness.sink.clone(),
+        )
+        .err()
+        .unwrap(),
+        TransportError::UnsafeMetadata
+    );
+    assert!(!public_socket.exists());
+    assert_eq!(
+        fs::read_dir(&run)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .ok()
+                    .and_then(|entry| entry.file_name().to_str().map(str::to_owned))
+                    .is_some_and(|name| name.starts_with(".power-helper-dev.cleanup-"))
+            })
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -881,6 +906,39 @@ fn socket_swap_after_bind_never_publishes_or_deletes_the_replacement_sentinel() 
         harness.sink.clone(),
         |stage, socket| {
             if stage == BindStage::AfterSocketPreparedBeforeProof {
+                fs::rename(socket, &owned_socket).unwrap();
+                fs::write(socket, sentinel_bytes).unwrap();
+                fs::set_permissions(socket, fs::Permissions::from_mode(0o640)).unwrap();
+            }
+        },
+    );
+
+    assert!(result.is_err());
+    let socket = harness.jarvis_dir.join("run").join(DEV_SOCKET_FILE);
+    assert_eq!(fs::read(&socket).unwrap(), sentinel_bytes);
+    assert_eq!(fs::metadata(&socket).unwrap().mode() & 0o7777, 0o640);
+    assert!(!harness
+        .sink
+        .events()
+        .contains(&HelperEvent::DevListenerPublished));
+    fs::rename(&socket, sentinel).unwrap();
+    fs::remove_file(owned_socket).unwrap();
+}
+
+#[test]
+fn preidentity_socket_swap_is_not_moved_or_deleted_by_cleanup() {
+    let harness = DevHarness::new();
+    let sentinel = harness.jarvis_dir.join("preidentity-sentinel");
+    let owned_socket = harness.jarvis_dir.join("preidentity-owned-socket");
+    let sentinel_bytes = b"identity-was-never-established";
+
+    let result = bind_listener_with_hook_for_testing(
+        &harness.runtime.listener_permit(),
+        &harness.root,
+        current_uid(),
+        harness.sink.clone(),
+        |stage, socket| {
+            if stage == BindStage::AfterBindBeforeIdentity {
                 fs::rename(socket, &owned_socket).unwrap();
                 fs::write(socket, sentinel_bytes).unwrap();
                 fs::set_permissions(socket, fs::Permissions::from_mode(0o640)).unwrap();

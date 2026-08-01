@@ -193,6 +193,24 @@ fn catalog_signature_and_public_keys_require_canonical_encodings() {
 }
 
 #[test]
+fn root_threshold_cannot_count_the_same_public_key_under_multiple_ids() {
+    let mut duplicate_key = catalog_value();
+    duplicate_key["payload"]["rootRotation"]["threshold"] = json!(2);
+    let mut second = duplicate_key["payload"]["rootRotation"]["keys"][0].clone();
+    second["keyId"] = json!("jarvis.root:3");
+    duplicate_key["payload"]["rootRotation"]["keys"]
+        .as_array_mut()
+        .unwrap()
+        .push(second);
+    assert_eq!(
+        SignedCatalog::parse(&serde_json::to_vec(&duplicate_key).unwrap())
+            .unwrap_err()
+            .code(),
+        "catalog_duplicate"
+    );
+}
+
+#[test]
 fn catalog_public_dtos_keep_exact_wire_names() {
     let parsed = SignedCatalog::parse(&serde_json::to_vec(&catalog_value()).unwrap()).unwrap();
     let CatalogPayload {

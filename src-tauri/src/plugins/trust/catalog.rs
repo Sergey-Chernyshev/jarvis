@@ -748,6 +748,25 @@ mod tests {
     }
 
     #[test]
+    fn rotation_rejects_same_verifying_key_under_different_ids() {
+        let mut state = fixture_state();
+        verify(CATALOG_1, "2026-08-01T00:30:00Z", &mut state).unwrap();
+        let accepted = state.clone();
+        let mut duplicated = catalog_value(CATALOG_2);
+        duplicated["payload"]["rootRotation"]["keys"][0]["publicKey"] =
+            json!(PUBLIC_KEY);
+        let duplicated =
+            signed_catalog(duplicated, &["jarvis.root:1", "jarvis.root:2"]);
+        assert_eq!(
+            verify(&duplicated, "2026-08-01T01:30:00Z", &mut state)
+                .unwrap_err()
+                .code(),
+            "catalog_rotation_key_conflict"
+        );
+        assert_eq!(state, accepted);
+    }
+
+    #[test]
     fn publisher_key_must_be_bound_to_plugin_and_revocation_blocks_release() {
         let mut unbound = catalog_value(CATALOG_1);
         unbound["payload"]["publisherLineages"][0]["pluginIds"] = json!(["dev.example.other"]);
@@ -772,6 +791,36 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "package_revoked"
+        );
+    }
+
+    #[test]
+    fn publisher_revocation_advances_state_and_blocks_retained_release() {
+        let mut state = fixture_state();
+        verify(CATALOG_1, "2026-08-01T00:30:00Z", &mut state).unwrap();
+
+        let mut revoked = catalog_value(CATALOG_1);
+        revoked["sequence"] = json!(2);
+        revoked["issuedAt"] = json!("2026-08-01T01:00:00Z");
+        revoked["expiresAt"] = json!("2026-08-03T00:00:00Z");
+        revoked["previousDigest"] = json!(
+            "sha256:382bdf240eb09eb2b7ba8fa8283ecb3aecb3f5a13b514abdfd36e65f1a7af472"
+        );
+        revoked["payload"]["revokedPublisherKeys"] =
+            json!(["example.release:1"]);
+        let revoked = signed_catalog(revoked, &["jarvis.root:1"]);
+        let verified = verify(&revoked, "2026-08-01T01:30:00Z", &mut state).unwrap();
+        assert_eq!(state.sequence(), 2);
+        assert_eq!(
+            verified
+                .release(
+                    "dev.example.echo",
+                    "1.0.0",
+                    PackageTarget::DarwinArm64,
+                )
+                .unwrap_err()
+                .code(),
+            "publisher_key_revoked"
         );
     }
 

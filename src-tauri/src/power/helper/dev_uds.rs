@@ -5,14 +5,15 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use jarvis_power_core::protocol::{
-    decode_response, encode_request, Request, RequestEnvelope, RequestId, MAX_FRAME_BYTES,
-    PROTOCOL_VERSION,
+    decode_response, encode_request, Request, RequestEnvelope, MAX_FRAME_BYTES, PROTOCOL_VERSION,
 };
 
-use super::client::{map_io_error, HelperClient, HelperClientError, HelperReply, HelperTrust};
+use super::client::{
+    map_io_error, next_request_id, HelperClient, HelperClientError, HelperReply, HelperTrust,
+};
 
 const IO_TIMEOUT: Duration = Duration::from_millis(250);
 const SOCKET_NAME: &str = "power-helper-dev.sock";
@@ -324,46 +325,6 @@ impl HeldDevEndpoint {
         validate_socket_metadata(&path_socket, self.uid, self.gid)?;
         require_identity(path_socket, self.socket_identity)
     }
-}
-
-pub(super) fn next_request_id() -> Result<RequestId, HelperClientError> {
-    let milliseconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| HelperClientError::RequestIdUnavailable)?
-        .as_millis();
-    let milliseconds =
-        u64::try_from(milliseconds).map_err(|_| HelperClientError::RequestIdUnavailable)?;
-    if milliseconds > 0x0000_ffff_ffff_ffff {
-        return Err(HelperClientError::RequestIdUnavailable);
-    }
-
-    let mut bytes = [0_u8; 16];
-    getrandom::getrandom(&mut bytes).map_err(|_| HelperClientError::RandomnessUnavailable)?;
-    let timestamp = milliseconds.to_be_bytes();
-    bytes[..6].copy_from_slice(&timestamp[2..]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x70;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-    RequestId::parse(format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15],
-    ))
-    .map_err(|_| HelperClientError::RequestIdUnavailable)
 }
 
 fn write_frame_until(

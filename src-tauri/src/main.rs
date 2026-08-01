@@ -150,9 +150,10 @@ fn main() {
                 io::Error::new(io::ErrorKind::AlreadyExists, format!("Jarvis profile already running: {err}"))
             })?;
 
-            // Machine-global power ownership must be reconciled before any
-            // headless/UI branch or subsystem construction. Failure is
-            // fail-closed for later arm, but never prevents Jarvis startup.
+            // One-way v1 ownership migration is reconciled before any
+            // headless/UI branch or subsystem construction. After startup,
+            // persistent power mutations belong only to the attested helper.
+            // Failure is fail-closed for later arm, but never blocks startup.
             let power_recovery = power::recover_on_startup();
             crate::log::line(&format!(
                 "[power] startup recovery {}",
@@ -361,7 +362,8 @@ fn spawn_timers(d: &Arc<Daemon>) {
         }
     });
 
-    // секундный пульс плагинов питания (таймеры, сторожа, детект сна)
+    // Секундный пульс UI-сторожей питания. Helper lease renewal lives in its
+    // own cancellable worker so shutdown can stop and join it before release.
     let dd = d.clone();
     tauri::async_runtime::spawn(async move {
         loop {

@@ -1,3 +1,213 @@
+use std::error::Error;
+use std::fmt;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use jarvis_power_core::protocol::{ErrorCode, Request, Response, DEFAULT_TTL_MS};
+
+use super::client::{HelperClient, HelperClientError, ProductionXpcClient};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LeaseReceipt {
+    pub(crate) lease_id: String,
+    pub(crate) owner_generation: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LeaseError {
+    HelperUnavailable,
+    HelperUnapproved,
+    Rejected(ErrorCode),
+    UnexpectedResponse,
+    LeaseMismatch,
+}
+
+impl fmt::Display for LeaseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::HelperUnavailable => formatter.write_str("power-helper is unavailable"),
+            Self::HelperUnapproved => {
+                formatter.write_str("power-helper transport is not production-attested")
+            }
+            Self::Rejected(code) => write!(formatter, "power-helper rejected the lease: {code:?}"),
+            Self::UnexpectedResponse => {
+                formatter.write_str("power-helper returned an unexpected response")
+            }
+            Self::LeaseMismatch => {
+                formatter.write_str("power-helper response does not match the exact lease")
+            }
+        }
+    }
+}
+
+impl Error for LeaseError {}
+
+#[derive(Clone)]
+pub(crate) struct LeaseClient {
+    helper: Arc<dyn HelperClient>,
+}
+
+impl LeaseClient {
+    pub(crate) fn production() -> Self {
+        Self::new(Arc::new(ProductionXpcClient::new()))
+    }
+
+    pub(crate) fn new(helper: Arc<dyn HelperClient>) -> Self {
+        Self { helper }
+    }
+
+    pub(crate) fn acquire(
+        &self,
+        profile: &str,
+        owner_generation: &str,
+    ) -> Result<LeaseReceipt, LeaseError> {
+        let response = self.send(Request::AcquireLease {
+            profile: profile.into(),
+            owner_generation: owner_generation.into(),
+            ttl_ms: DEFAULT_TTL_MS,
+        })?;
+        match response {
+            Response::Acquired { lease_id, .. } => Ok(LeaseReceipt {
+                lease_id,
+                owner_generation: owner_generation.into(),
+            }),
+            Response::Error { code } => Err(LeaseError::Rejected(code)),
+            _ => Err(LeaseError::UnexpectedResponse),
+        }
+    }
+
+    pub(crate) fn renew(&self, receipt: &LeaseReceipt) -> Result<(), LeaseError> {
+        let response = self.send(Request::RenewLease {
+            lease_id: receipt.lease_id.clone(),
+            owner_generation: receipt.owner_generation.clone(),
+            ttl_ms: DEFAULT_TTL_MS,
+        })?;
+        match response {
+            Response::Renewed { lease_id, .. } if lease_id == receipt.lease_id => Ok(()),
+            Response::Renewed { .. } => Err(LeaseError::LeaseMismatch),
+            Response::Error { code } => Err(LeaseError::Rejected(code)),
+            _ => Err(LeaseError::UnexpectedResponse),
+        }
+    }
+
+    pub(crate) fn release(&self, receipt: &LeaseReceipt) -> Result<(), LeaseError> {
+        let response = self.send(Request::ReleaseLease {
+            lease_id: receipt.lease_id.clone(),
+            owner_generation: receipt.owner_generation.clone(),
+        })?;
+        match response {
+            Response::Released { lease_id } if lease_id == receipt.lease_id => Ok(()),
+            Response::Released { .. } => Err(LeaseError::LeaseMismatch),
+            Response::Error { code } => Err(LeaseError::Rejected(code)),
+            _ => Err(LeaseError::UnexpectedResponse),
+        }
+    }
+
+    fn send(&self, request: Request) -> Result<Response, LeaseError> {
+        if !self.helper.trust().authorizes_production() {
+            return Err(LeaseError::HelperUnapproved);
+        }
+        let reply = self.helper.send(request).map_err(map_client_error)?;
+        if !reply.trust.authorizes_production() {
+            return Err(LeaseError::HelperUnapproved);
+        }
+        Ok(reply.response.response)
+    }
+}
+
+fn map_client_error(_error: HelperClientError) -> LeaseError {
+    LeaseError::HelperUnavailable
+}
+
+struct RenewalControl {
+    cancelled: Mutex<bool>,
+    wake: Condvar,
+}
+
+pub(crate) struct RenewalHandle {
+    control: Arc<RenewalControl>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl RenewalHandle {
+    pub(crate) fn try_start(
+        interval: Duration,
+        mut attempt: impl FnMut() -> bool + Send + 'static,
+    ) -> std::io::Result<Self> {
+        let control = Arc::new(RenewalControl {
+            cancelled: Mutex::new(false),
+            wake: Condvar::new(),
+        });
+        let worker_control = control.clone();
+        let worker = std::thread::Builder::new()
+            .name("jarvis-power-renewal".into())
+            .spawn(move || loop {
+                let cancelled = worker_control
+                    .cancelled
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let cancelled = worker_control
+                    .wake
+                    .wait_timeout_while(cancelled, interval, |cancelled| !*cancelled)
+                    .map(|(cancelled, _)| *cancelled)
+                    .unwrap_or(true);
+                if cancelled || !attempt() {
+                    break;
+                }
+            })?;
+        Ok(Self {
+            control,
+            worker: Some(worker),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start(
+        interval: Duration,
+        attempt: impl FnMut() -> bool + Send + 'static,
+    ) -> Self {
+        Self::try_start(interval, attempt).expect("renewal test worker")
+    }
+
+    pub(crate) fn stop(mut self) {
+        self.stop_inner();
+    }
+
+    fn stop_inner(&mut self) {
+        *self
+            .control
+            .cancelled
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = true;
+        self.control.wake.notify_all();
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                crate::log::line("[power-helper] renewal worker panicked during shutdown");
+            }
+        }
+    }
+}
+
+impl Drop for RenewalHandle {
+    fn drop(&mut self) {
+        self.stop_inner();
+    }
+}
+
+pub(crate) fn run_shutdown_sequence<R>(
+    close_admission: impl FnOnce(),
+    stop_renewal: impl FnOnce(),
+    release_lease: impl FnOnce() -> R,
+    dispose_iokit: impl FnOnce(),
+) -> R {
+    close_admission();
+    stop_renewal();
+    let release = release_lease();
+    dispose_iokit();
+    release
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -234,5 +444,32 @@ mod tests {
                 "dispose-iokit",
             ]
         );
+    }
+
+    #[test]
+    fn production_runtime_has_no_app_side_disablesleep_fallback() {
+        let source = include_str!("../mod.rs");
+        let runtime = source
+            .split_once("async fn arm")
+            .expect("arm boundary")
+            .1
+            .split_once("/// Установка sudoers-правила")
+            .expect("legacy installer boundary")
+            .0;
+
+        assert!(runtime.contains("lease_client.acquire"));
+        assert!(runtime.contains("lease_client.release"));
+        assert!(runtime.contains("force_sleep_now"));
+        for forbidden in [
+            "SystemPmset",
+            "acquire_with(",
+            "release_with(",
+            "set_disabled(",
+        ] {
+            assert!(
+                !runtime.contains(forbidden),
+                "runtime app-side power mutation found: {forbidden}"
+            );
+        }
     }
 }

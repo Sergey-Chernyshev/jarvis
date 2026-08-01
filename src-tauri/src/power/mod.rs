@@ -15,6 +15,8 @@ pub mod ownership;
 pub mod ownership_store;
 
 use serde_json::{json, Map, Value};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::Duration;
@@ -23,11 +25,13 @@ use crate::daemon::Daemon;
 use crate::model::{Session, Status};
 use crate::util::{jarvis_dir, now_ms, one_line};
 use assertion::IopmBlocker;
+use helper::renewal::{run_shutdown_sequence, LeaseClient, LeaseReceipt, RenewalHandle};
 use keep_awake::{Engine, Event};
 
 const SUGGEST_GAP_MS: i64 = 60 * 60 * 1000; // подсказка не чаще раза в час
 const GUARD_EVERY_MS: i64 = 60 * 1000;
 const WAKE_GAP_MS: i64 = 90 * 1000;
+#[cfg(test)]
 const CLAMSHELL_LEASE_TTL_MS: i64 = 5 * 60 * 1000;
 const POWER_OPERATION_BARRIER_TIMEOUT: Duration = Duration::from_secs(90);
 const POWER_REPAIR_ACTION: &str = "Открой раздел Power и запусти явный repair";
@@ -39,7 +43,9 @@ pub enum StartupRecoveryHealth {
     #[default]
     NotChecked,
     Ready(clamshell::RecoveryOutcome),
-    Blocked { message: String },
+    Blocked {
+        message: String,
+    },
 }
 
 impl StartupRecoveryHealth {
@@ -295,14 +301,14 @@ impl PowerOperations {
         operation: PowerOperation,
         acquired: Result<T, E>,
         commit: impl FnOnce(T),
-        rollback: impl FnOnce() -> Result<(), E>,
+        rollback: impl FnOnce(T) -> Result<(), E>,
     ) -> Result<AcquireDisposition, E> {
         let acquired = acquired?;
         let disposition = if self.accepts(operation.epoch()) {
             commit(acquired);
             AcquireDisposition::Committed
         } else {
-            rollback()?;
+            rollback(acquired)?;
             AcquireDisposition::RolledBack
         };
         drop(operation);
@@ -335,7 +341,7 @@ pub enum TrayItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClamshellDisposeOutcome {
     Idle,
-    Released(clamshell::ReleaseOutcome),
+    Released,
     BarrierTimeout,
     ReleaseFailed(String),
 }
@@ -348,8 +354,7 @@ pub struct PowerDisposeReport {
 impl PowerDisposeReport {
     pub fn released(&self) -> bool {
         match self.clamshell {
-            ClamshellDisposeOutcome::Idle => true,
-            ClamshellDisposeOutcome::Released(outcome) => release_was_confirmed(outcome),
+            ClamshellDisposeOutcome::Idle | ClamshellDisposeOutcome::Released => true,
             ClamshellDisposeOutcome::BarrierTimeout | ClamshellDisposeOutcome::ReleaseFailed(_) => {
                 false
             }
@@ -357,10 +362,12 @@ impl PowerDisposeReport {
     }
 }
 
+#[cfg(test)]
 fn release_was_confirmed(outcome: clamshell::ReleaseOutcome) -> bool {
     !matches!(outcome, clamshell::ReleaseOutcome::NotOwned)
 }
 
+#[cfg(test)]
 fn release_resolves_obligation(
     obligation: clamshell::AcquireObligation,
     outcome: clamshell::ReleaseOutcome,
@@ -371,10 +378,12 @@ fn release_resolves_obligation(
     }
 }
 
+#[cfg(test)]
 fn battery_release_confirms_normal_sleep(outcome: clamshell::ReleaseOutcome) -> bool {
     outcome.sleep_disabled() == Some(false)
 }
 
+#[cfg(test)]
 fn failed_acquire_needs_owner_retry(
     failure: &clamshell::AcquireFailure,
     cleanup: &Result<clamshell::ReleaseOutcome, clamshell::PowerError>,
@@ -394,8 +403,9 @@ struct Clam {
     active: bool,
     armed: bool,
     armed_by: Option<&'static str>, // 'manual' | 'auto'
-    owner_generation: Option<String>,
-    owner_obligation: Option<clamshell::AcquireObligation>,
+    lease: Option<LeaseReceipt>,
+    renewal: Option<RenewalHandle>,
+    renewal_error: Option<String>,
     busy: bool, // arm/disarm в полёте — не наслаиваем
     last_guard_at: i64,
     lid_causes_sleep: Option<bool>, // кэш для статусной строки меню
@@ -414,6 +424,7 @@ pub struct Power {
     /// Тикер «ещё 47м»: при активном ручном таймере обновляем UI раз в 30с.
     last_countdown_at: AtomicI64,
     operations: PowerOperations,
+    lease_client: LeaseClient,
 }
 
 impl Power {
@@ -428,6 +439,7 @@ impl Power {
             last_suggest_at: AtomicI64::new(0),
             last_countdown_at: AtomicI64::new(0),
             operations: PowerOperations::default(),
+            lease_client: LeaseClient::production(),
         }
     }
 
@@ -520,6 +532,13 @@ impl Power {
     }
 
     fn deactivate_clamshell(d: &Arc<Daemon>) {
+        let was_active = {
+            let mut clam = d.power.clam.lock().unwrap();
+            let was_active = clam.active;
+            clam.active = false;
+            was_active
+        };
+        Self::stop_clamshell_renewal(d);
         let Some(_operation) = d
             .power
             .operations
@@ -529,85 +548,166 @@ impl Power {
             return;
         };
         let _ = Self::deactivate_clamshell_inner(d);
+        if was_active {
+            println!("[jarvis:clamshell] выключен");
+        }
     }
 
     fn deactivate_clamshell_inner(d: &Arc<Daemon>) -> ClamshellDisposeOutcome {
-        let (was_active, owner_generation, owner_obligation) = {
+        let (was_active, receipt) = {
             let mut clam = d.power.clam.lock().unwrap();
             let was_active = clam.active;
-            if !was_active && clam.owner_generation.is_none() {
+            if !was_active && clam.lease.is_none() {
                 return ClamshellDisposeOutcome::Idle;
             }
             clam.active = false;
-            (
-                was_active,
-                clam.owner_generation.clone(),
-                clam.owner_obligation,
-            )
+            clam.armed = false;
+            clam.armed_by = None;
+            (was_active, clam.lease.clone())
         };
-        let mut outcome = ClamshellDisposeOutcome::Idle;
-        if let Some(owner_generation) = owner_generation {
-            let obligation =
-                owner_obligation.unwrap_or(clamshell::AcquireObligation::MutationMayRemain);
-            match clamshell::release_with(
-                &clamshell::SystemPmset,
-                &crate::power::ownership_store::OwnershipStore::global(),
-                &power_profile_id(),
-                &owner_generation,
-            ) {
-                Ok(release) => {
-                    if release_resolves_obligation(obligation, release) {
-                        let mut clam = d.power.clam.lock().unwrap();
-                        if clam.owner_generation.as_deref() == Some(owner_generation.as_str()) {
-                            clam.armed = false;
-                            clam.armed_by = None;
-                            clam.owner_generation = None;
-                            clam.owner_obligation = None;
-                        }
-                        outcome = if release == clamshell::ReleaseOutcome::NotOwned {
-                            ClamshellDisposeOutcome::Idle
-                        } else {
-                            ClamshellDisposeOutcome::Released(release)
-                        };
-                    } else {
-                        let error =
-                            "ownership registry no longer proves the in-memory clamshell lease";
-                        eprintln!("[jarvis:clamshell] release on deactivate ambiguous: {error}");
-                        outcome = ClamshellDisposeOutcome::ReleaseFailed(error.into());
+        let outcome = match receipt {
+            Some(receipt) => match d.power.lease_client.release(&receipt) {
+                Ok(()) => {
+                    let mut clam = d.power.clam.lock().unwrap();
+                    if clam.lease.as_ref() == Some(&receipt) {
+                        clam.lease = None;
+                        clam.renewal_error = None;
                     }
+                    ClamshellDisposeOutcome::Released
                 }
                 Err(error) => {
-                    // Keep the exact identity for a later shutdown/startup
-                    // retry; losing it could strand SleepDisabled=1.
-                    eprintln!("[jarvis:clamshell] release on deactivate failed: {error}");
-                    outcome = ClamshellDisposeOutcome::ReleaseFailed(error.to_string());
+                    // Retain the exact receipt for a later shutdown retry. The
+                    // helper TTL remains the final fail-closed cleanup boundary.
+                    eprintln!("[jarvis:clamshell] helper release on deactivate failed: {error}");
+                    d.power.clam.lock().unwrap().renewal_error = Some(error.to_string());
+                    ClamshellDisposeOutcome::ReleaseFailed(error.to_string())
                 }
-            }
-        }
+            },
+            None => ClamshellDisposeOutcome::Idle,
+        };
         if was_active {
             println!("[jarvis:clamshell] выключен");
         }
         outcome
     }
 
-    /// Выход из приложения: снять assertion и синхронно освободить только
-    /// доказанную Jarvis-owned clamshell lease через non-interactive backend.
-    pub fn dispose(d: &Arc<Daemon>) -> PowerDisposeReport {
-        d.power.operations.close();
-        // IOKit assertions are process-local and cheap to release, so do this
-        // before waiting for a potentially blocked cross-process transaction.
-        Self::deactivate_keep_awake(d);
-        let clamshell = if d
-            .power
-            .operations
-            .wait_for_idle(POWER_OPERATION_BARRIER_TIMEOUT)
-        {
-            // Admission is closed, so no new operation can race this retry.
-            Self::deactivate_clamshell_inner(d)
-        } else {
-            eprintln!("[jarvis:power] timed out waiting for in-flight clamshell rollback");
-            ClamshellDisposeOutcome::BarrierTimeout
+    fn stop_clamshell_renewal(d: &Arc<Daemon>) {
+        let renewal = d.power.clam.lock().unwrap().renewal.take();
+        if let Some(renewal) = renewal {
+            renewal.stop();
+        }
+    }
+
+    fn start_clamshell_renewal(d: &Arc<Daemon>) -> Result<(), String> {
+        let receipt = {
+            let clam = d.power.clam.lock().unwrap();
+            if !d.power.operations.accepting()
+                || !clam.active
+                || clam.busy
+                || !clam.armed
+                || clam.renewal.is_some()
+            {
+                return Err("clamshell renewal is no longer admissible".into());
+            }
+            let Some(receipt) = clam.lease.clone() else {
+                return Err("helper lease receipt is missing".into());
+            };
+            receipt
         };
+        let weak_daemon = Arc::downgrade(d);
+        let worker_receipt = receipt.clone();
+        let renewal = RenewalHandle::try_start(
+            Duration::from_millis(jarvis_power_core::protocol::RENEW_EVERY_MS),
+            move || {
+                let Some(d) = weak_daemon.upgrade() else {
+                    return false;
+                };
+                let Some(operation) = d.power.operations.begin() else {
+                    return d.power.operations.accepting();
+                };
+                let epoch = operation.epoch();
+                let result = d.power.lease_client.renew(&worker_receipt);
+                let accepted = d.power.operations.accepts(epoch);
+                let mut state_changed = false;
+                if accepted {
+                    let mut clam = d.power.clam.lock().unwrap();
+                    if clam.lease.as_ref() == Some(&worker_receipt) {
+                        match &result {
+                            Ok(()) => clam.renewal_error = None,
+                            Err(error) => {
+                                // Do not claim an armed state after renewal
+                                // failed. Keep the receipt solely for exact
+                                // release retry; never auto-acquire a replacement.
+                                clam.armed = false;
+                                clam.armed_by = None;
+                                clam.renewal_error = Some(error.to_string());
+                                state_changed = true;
+                            }
+                        }
+                    }
+                }
+                drop(operation);
+                if accepted && state_changed {
+                    changed(&d);
+                }
+                accepted && result.is_ok()
+            },
+        )
+        .map_err(|error| {
+            let release = d.power.lease_client.release(&receipt);
+            let mut clam = d.power.clam.lock().unwrap();
+            clam.armed = false;
+            clam.armed_by = None;
+            clam.renewal_error = Some(format!("cannot start renewal worker: {error}"));
+            if release.is_ok() && clam.lease.as_ref() == Some(&receipt) {
+                clam.lease = None;
+            }
+            match release {
+                Ok(()) => format!("cannot start renewal worker: {error}"),
+                Err(release) => {
+                    format!("cannot start renewal worker: {error}; exact release failed: {release}")
+                }
+            }
+        })?;
+        let mut clam = d.power.clam.lock().unwrap();
+        if d.power.operations.accepting()
+            && clam.armed
+            && clam.active
+            && !clam.busy
+            && clam.lease.as_ref() == Some(&receipt)
+            && clam.renewal.is_none()
+        {
+            clam.renewal = Some(renewal);
+            Ok(())
+        } else {
+            drop(clam);
+            renewal.stop();
+            Err("clamshell renewal lost admission before installation".into())
+        }
+    }
+
+    /// Выход из приложения: сначала закрыть admission и остановить renewal,
+    /// затем освободить точную helper lease, и только потом снять IOKit.
+    pub fn dispose(d: &Arc<Daemon>) -> PowerDisposeReport {
+        let clamshell = run_shutdown_sequence(
+            || {
+                d.power.operations.close();
+            },
+            || Self::stop_clamshell_renewal(d),
+            || {
+                if d.power
+                    .operations
+                    .wait_for_idle(POWER_OPERATION_BARRIER_TIMEOUT)
+                {
+                    // Admission is closed, so no new operation can race this retry.
+                    Self::deactivate_clamshell_inner(d)
+                } else {
+                    eprintln!("[jarvis:power] timed out waiting for in-flight helper operation");
+                    ClamshellDisposeOutcome::BarrierTimeout
+                }
+            },
+            || Self::deactivate_keep_awake(d),
+        );
         PowerDisposeReport { clamshell }
     }
 
@@ -688,7 +788,9 @@ impl Power {
                 "autoArm": s["autoArm"],
                 "suggest": s["suggest"],
                 "batteryFloor": s["batteryFloor"],
-                "sudoers": clamshell::sudoers_installed(),
+                "helper": "xpc",
+                "helperLease": clam.lease.is_some(),
+                "renewalError": clam.renewal_error.clone(),
             }))
         } else {
             None
@@ -927,7 +1029,6 @@ impl Power {
                 (clam.armed, clam.lid_causes_sleep)
             };
             let s = Self::cs_settings(d);
-            let sudoers = clamshell::sudoers_installed();
             if !out.is_empty() {
                 out.push(TrayItem::Separator);
             }
@@ -948,13 +1049,9 @@ impl Power {
             });
             out.push(TrayItem::Check {
                 id: "cs:set-autoarm".into(),
-                text: if sudoers {
-                    "Авто при работе агентов".into()
-                } else {
-                    "Авто при работе агентов (нужен тихий режим)".into()
-                },
+                text: "Авто при работе агентов".into(),
                 checked: s["autoArm"].as_bool().unwrap_or(false),
-                enabled: sudoers,
+                enabled: true,
             });
             out.push(TrayItem::Check {
                 id: "cs:set-suggest".into(),
@@ -962,12 +1059,6 @@ impl Power {
                 checked: s["suggest"].as_bool().unwrap_or(false),
                 enabled: true,
             });
-            if !sudoers {
-                out.push(TrayItem::Action {
-                    id: "cs:install-sudoers".into(),
-                    text: "Настроить тихий режим (sudoers)…".into(),
-                });
-            }
         }
         out
     }
@@ -1134,12 +1225,20 @@ fn working_count(list: &[Session]) -> usize {
     list.iter().filter(|s| s.status == Status::Working).count()
 }
 
+fn power_profile_id_for(path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // Stable FNV-1a/128 keeps arbitrary filesystem bytes outside the closed
+    // helper identifier grammar while making profile collisions negligible.
+    let mut hash = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d_u128;
+    for byte in canonical.as_os_str().as_bytes() {
+        hash ^= u128::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0000_0100_0000_0000_0000_0000_013b);
+    }
+    format!("jarvis-profile-{hash:032x}")
+}
+
 fn power_profile_id() -> String {
-    let path = jarvis_dir();
-    std::fs::canonicalize(&path)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned()
+    power_profile_id_for(&jarvis_dir())
 }
 
 fn new_owner_generation() -> String {
@@ -1151,6 +1250,7 @@ fn new_owner_generation() -> String {
     )
 }
 
+#[cfg(test)]
 fn power_lease_with<P: clamshell::ProcessInspector>(
     processes: &P,
     profile: &str,
@@ -1179,16 +1279,6 @@ fn power_lease_with<P: clamshell::ProcessInspector>(
         acquired_at_ms,
         expires_at_ms,
     })
-}
-
-fn power_lease(owner_generation: &str) -> Result<ownership::Lease, clamshell::PowerError> {
-    power_lease_with(
-        &clamshell::SystemProcesses,
-        &power_profile_id(),
-        std::process::id(),
-        owner_generation,
-        now_ms(),
-    )
 }
 
 /// Трей/панель обновить (аналог ctx.changed() БЕЗ broadcast: связка с
@@ -1233,18 +1323,24 @@ fn handle_engine_events(d: &Arc<Daemon>, events: Vec<Event>) {
     }
 }
 
-/// Связка clamshell ↔ keep-awake: авто-режим «Крышки» повторяет assertion
-/// (нужен sudoers — admin-диалог из фона недопустим).
+/// Связка clamshell ↔ keep-awake: авто-режим «Крышки» повторяет assertion.
+/// Helper admission is checked by `arm`; an unavailable helper fails closed.
 fn peer_sync(d: &Arc<Daemon>) {
     if !d.power.operations.accepting() {
         return;
     }
     let s = Power::cs_settings(d);
-    let (active, busy, armed, armed_by) = {
+    let (active, busy, armed, armed_by, lease_pending) = {
         let clam = d.power.clam.lock().unwrap();
-        (clam.active, clam.busy, clam.armed, clam.armed_by)
+        (
+            clam.active,
+            clam.busy,
+            clam.armed,
+            clam.armed_by,
+            clam.lease.is_some(),
+        )
     };
-    if !active || busy || s["autoArm"].as_bool() != Some(true) || !clamshell::sudoers_installed() {
+    if !active || busy || (!armed && lease_pending) || s["autoArm"].as_bool() != Some(true) {
         return;
     }
     let ka_active = d
@@ -1287,112 +1383,65 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
         if clam.armed {
             return json!({ "ok": true });
         }
+        if clam.lease.is_some() {
+            return json!({
+                "ok": false,
+                "error": "предыдущая helper lease ожидает точного release; повторный arm запрещён"
+            });
+        }
         clam.busy = true;
     }
     let owner_generation = new_owner_generation();
-    let lease = match power_lease(&owner_generation) {
-        Ok(lease) => lease,
-        Err(error) => {
-            d.power.clam.lock().unwrap().busy = false;
-            return json!({
-                "ok": false,
-                "error": format!("{error}; {POWER_REPAIR_ACTION}"),
-                "repairable": true,
-                "repairAction": POWER_REPAIR_ACTION,
-            });
-        }
-    };
-    let profile = lease.profile.clone();
+    let profile = power_profile_id();
     let worker_daemon = d.clone();
     let commit_daemon = d.clone();
-    let retry_daemon = d.clone();
-    let commit_generation = owner_generation.clone();
-    let rollback_generation = owner_generation.clone();
-    let retry_generation = owner_generation.clone();
+    let rollback_daemon = d.clone();
+    let lease_client = d.power.lease_client.clone();
+    let rollback_client = lease_client.clone();
     let acquired = tauri::async_runtime::spawn_blocking(move || {
         let worker_operations = &worker_daemon.power.operations;
         if !worker_operations.accepts(operation.epoch()) {
             return Ok(AcquireDisposition::RolledBack);
         }
-        let store = crate::power::ownership_store::OwnershipStore::global();
-        let acquire_result = match clamshell::acquire_with(&clamshell::SystemPmset, &store, lease) {
-            Ok(outcome) => Ok(outcome),
-            Err(failure) => {
-                let cleanup = clamshell::release_with(
-                    &clamshell::SystemPmset,
-                    &store,
-                    &profile,
-                    &retry_generation,
-                );
-                if failed_acquire_needs_owner_retry(&failure, &cleanup) {
-                    let mut clam = retry_daemon.power.clam.lock().unwrap();
-                    clam.armed = true;
-                    clam.armed_by = Some(by);
-                    clam.owner_generation = Some(retry_generation.clone());
-                    clam.owner_obligation = Some(failure.obligation);
-                }
-                let message = match cleanup {
-                    Ok(release) if release_resolves_obligation(failure.obligation, release) => {
-                        failure.error.to_string()
-                    }
-                    Ok(release) => format!(
-                        "{}; cleanup retry did not resolve {:?}: {release:?}",
-                        failure.error, failure.obligation
-                    ),
-                    Err(cleanup) => {
-                        format!("{}; cleanup retry failed: {cleanup}", failure.error)
-                    }
-                };
-                Err(message)
-            }
-        };
-        let rollback_daemon = worker_daemon.clone();
-        let rollback_profile = profile.clone();
+        let acquire_result = lease_client.acquire(&profile, &owner_generation);
         worker_operations.finish_acquire(
             operation,
             acquire_result,
-            move |_| {
+            move |receipt| {
                 let mut clam = commit_daemon.power.clam.lock().unwrap();
                 clam.armed = true;
                 clam.armed_by = Some(by);
-                clam.owner_generation = Some(commit_generation);
-                clam.owner_obligation = Some(clamshell::AcquireObligation::MutationMayRemain);
+                clam.lease = Some(receipt);
+                clam.renewal_error = None;
                 clam.last_guard_at = 0;
             },
-            move || match clamshell::release_with(
-                &clamshell::SystemPmset,
-                &store,
-                &rollback_profile,
-                &rollback_generation,
-            ) {
-                Ok(release) if release_was_confirmed(release) => Ok(()),
-                Ok(release) => {
-                    let mut clam = rollback_daemon.power.clam.lock().unwrap();
-                    clam.armed = true;
-                    clam.armed_by = Some(by);
-                    clam.owner_generation = Some(rollback_generation);
-                    clam.owner_obligation = Some(clamshell::AcquireObligation::MutationMayRemain);
-                    Err(format!(
-                        "late rollback was not ownership-confirmed: {release:?}"
-                    ))
-                }
+            move |receipt| match rollback_client.release(&receipt) {
+                Ok(()) => Ok(()),
                 Err(error) => {
                     let mut clam = rollback_daemon.power.clam.lock().unwrap();
-                    clam.armed = true;
-                    clam.armed_by = Some(by);
-                    clam.owner_generation = Some(rollback_generation);
-                    clam.owner_obligation = Some(clamshell::AcquireObligation::MutationMayRemain);
-                    Err(error.to_string())
+                    // Preserve the exact late receipt so a repeated shutdown
+                    // cleanup can retry; never convert it into a new acquire.
+                    clam.armed = false;
+                    clam.armed_by = None;
+                    clam.lease = Some(receipt);
+                    clam.renewal_error = Some(error.to_string());
+                    Err(error)
                 }
             },
         )
     })
     .await;
+    d.power.clam.lock().unwrap().busy = false;
     let result = if matches!(&acquired, Ok(Ok(AcquireDisposition::Committed)))
         && d.power.operations.accepting()
     {
-        changed(d);
-        json!({ "ok": true })
+        match Power::start_clamshell_renewal(d) {
+            Ok(()) => {
+                changed(d);
+                json!({ "ok": true })
+            }
+            Err(error) => json!({ "ok": false, "error": error }),
+        }
     } else {
         let error = match acquired {
             Ok(Ok(AcquireDisposition::RolledBack)) => "Jarvis завершает работу".into(),
@@ -1402,46 +1451,39 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
         };
         json!({ "ok": false, "error": error })
     };
-    d.power.clam.lock().unwrap().busy = false;
     result
 }
 
 async fn disarm(d: &Arc<Daemon>) -> Value {
-    let Some(operation) = d.power.operations.begin() else {
-        return json!({ "ok": false, "error": "Jarvis завершает работу или power занят" });
-    };
-    {
+    let (receipt, renewal) = {
         let mut clam = d.power.clam.lock().unwrap();
         if clam.busy {
             return json!({ "ok": false, "error": "операция уже идёт" });
         }
-        if !clam.armed {
+        let Some(receipt) = clam.lease.clone() else {
+            clam.armed = false;
+            clam.armed_by = None;
             return json!({ "ok": true });
-        }
+        };
         clam.busy = true;
+        (receipt, clam.renewal.take())
+    };
+    if let Some(renewal) = renewal {
+        renewal.stop();
     }
-    let (owner_generation, owner_obligation) = {
-        let clam = d.power.clam.lock().unwrap();
-        (clam.owner_generation.clone(), clam.owner_obligation)
-    };
-    let Some(owner_generation) = owner_generation else {
+    let Some(operation) = d
+        .power
+        .operations
+        .begin_wait(POWER_OPERATION_BARRIER_TIMEOUT)
+    else {
         d.power.clam.lock().unwrap().busy = false;
-        return json!({
-            "ok": false,
-            "error": "старый marker не доказывает владение; нужен явный repair"
-        });
+        return json!({ "ok": false, "error": "Jarvis завершает работу или power занят" });
     };
-    let owner_obligation =
-        owner_obligation.unwrap_or(clamshell::AcquireObligation::MutationMayRemain);
-    let profile = power_profile_id();
+    let lease_client = d.power.lease_client.clone();
+    let worker_receipt = receipt.clone();
     let released = tauri::async_runtime::spawn_blocking(move || {
-        let outcome = clamshell::release_with(
-            &clamshell::SystemPmset,
-            &crate::power::ownership_store::OwnershipStore::global(),
-            &profile,
-            &owner_generation,
-        );
-        (operation, outcome)
+        let result = lease_client.release(&worker_receipt);
+        (operation, result)
     })
     .await;
     let (returned_operation, release) = match released {
@@ -1454,25 +1496,36 @@ async fn disarm(d: &Arc<Daemon>) -> Value {
             });
         }
     };
+    let mut restart_renewal = false;
     let result = match release {
-        Ok(outcome) if release_resolves_obligation(owner_obligation, outcome) => {
+        Ok(()) => {
             let mut clam = d.power.clam.lock().unwrap();
-            clam.armed = false;
-            clam.armed_by = None;
-            clam.owner_generation = None;
-            clam.owner_obligation = None;
+            if clam.lease.as_ref() == Some(&receipt) {
+                clam.armed = false;
+                clam.armed_by = None;
+                clam.lease = None;
+                clam.renewal_error = None;
+            }
             drop(clam);
             changed(d);
             json!({ "ok": true })
         }
-        Ok(outcome) => json!({
-            "ok": false,
-            "error": format!("release was not ownership-confirmed: {outcome:?}")
-        }),
-        Err(error) => json!({ "ok": false, "error": error.to_string() }),
+        Err(error) => {
+            let mut clam = d.power.clam.lock().unwrap();
+            if clam.lease.as_ref() == Some(&receipt) {
+                clam.renewal_error = Some(error.to_string());
+                restart_renewal = clam.armed && d.power.operations.accepting();
+            }
+            json!({ "ok": false, "error": error.to_string() })
+        }
     };
     d.power.clam.lock().unwrap().busy = false;
     drop(returned_operation);
+    if restart_renewal {
+        if let Err(error) = Power::start_clamshell_renewal(d) {
+            d.power.clam.lock().unwrap().renewal_error = Some(error);
+        }
+    }
     result
 }
 
@@ -1497,88 +1550,100 @@ async fn battery_guard(d: &Arc<Daemon>) {
     if pct > floor {
         return;
     }
-    let Some(operation) = d.power.operations.begin() else {
+    let (receipt, renewal) = {
+        let mut clam = d.power.clam.lock().unwrap();
+        if clam.busy {
+            return;
+        }
+        let Some(receipt) = clam.lease.clone() else {
+            return;
+        };
+        clam.busy = true;
+        (receipt, clam.renewal.take())
+    };
+    if let Some(renewal) = renewal {
+        renewal.stop();
+    }
+    let Some(operation) = d
+        .power
+        .operations
+        .begin_wait(POWER_OPERATION_BARRIER_TIMEOUT)
+    else {
+        d.power.clam.lock().unwrap().busy = false;
         return;
     };
     println!("[jarvis:clamshell] батарея {pct}% ≤ {floor}% — освобождаю ownership lease");
-    let (owner_generation, owner_obligation) = {
-        let clam = d.power.clam.lock().unwrap();
-        (
-            clam.owner_generation.clone(),
-            clam.owner_obligation
-                .unwrap_or(clamshell::AcquireObligation::MutationMayRemain),
-        )
-    };
-    let mut operation = Some(operation);
-    let release_outcome = if let Some(owner_generation) = owner_generation {
-        let profile = power_profile_id();
-        let worker_operation = operation.take().unwrap();
-        tauri::async_runtime::spawn_blocking(move || {
-            let outcome = clamshell::release_with(
-                &clamshell::SystemPmset,
-                &crate::power::ownership_store::OwnershipStore::global(),
-                &profile,
-                &owner_generation,
-            );
-            (worker_operation, outcome)
-        })
-        .await
-        .ok()
-        .and_then(|(worker_operation, outcome)| {
-            operation = Some(worker_operation);
-            outcome
-                .ok()
-                .filter(|outcome| release_resolves_obligation(owner_obligation, *outcome))
-        })
-    } else {
-        None
-    };
-    if let Some(outcome) = release_outcome {
-        {
-            let mut clam = d.power.clam.lock().unwrap();
-            clam.armed = false;
-            clam.armed_by = None;
-            clam.owner_generation = None;
-            clam.owner_obligation = None;
-        }
-        changed(d);
-        if !d.power.operations.accepting() {
+    let lease_client = d.power.lease_client.clone();
+    let worker_receipt = receipt.clone();
+    let released = tauri::async_runtime::spawn_blocking(move || {
+        let result = lease_client.release(&worker_receipt);
+        (operation, result)
+    })
+    .await;
+    let (returned_operation, release) = match released {
+        Ok(result) => result,
+        Err(error) => {
+            d.power.clam.lock().unwrap().busy = false;
+            if d.power.operations.accepting() {
+                d.notify(
+                    "⌒ Крышка: батарея садится",
+                    &format!("Осталось {pct}% — helper worker завершился с ошибкой, усыпляю мак"),
+                    None,
+                    "done",
+                );
+                clamshell::force_sleep_now().await;
+            }
+            eprintln!("[jarvis:clamshell] battery helper worker failed: {error}");
             return;
         }
-        if battery_release_confirms_normal_sleep(outcome) {
-            d.notify(
-                "⌒ Крышка: батарея садится",
-                &format!("Осталось {pct}% — вернул нормальный сон"),
-                None,
-                "done",
-            );
-        } else {
-            // Другая profile lease или внешний baseline всё ещё запрещает
-            // автоматический сон. Не мутируем чужой state, но форсируем один
-            // безопасный sleepnow ради батареи.
-            d.notify(
-                "⌒ Крышка: батарея садится",
-                &format!("Осталось {pct}% — другой режим ещё активен, усыпляю мак"),
-                None,
-                "done",
-            );
-            clamshell::force_sleep_now().await;
+    };
+    match release {
+        Ok(()) => {
+            {
+                let mut clam = d.power.clam.lock().unwrap();
+                if clam.lease.as_ref() == Some(&receipt) {
+                    clam.armed = false;
+                    clam.armed_by = None;
+                    clam.lease = None;
+                    clam.renewal_error = None;
+                }
+                clam.busy = false;
+            }
+            if d.power.operations.accepting() {
+                changed(d);
+                d.notify(
+                    "⌒ Крышка: батарея садится",
+                    &format!("Осталось {pct}% — вернул нормальный сон"),
+                    None,
+                    "done",
+                );
+            }
         }
-    } else {
-        if !d.power.operations.accepting() {
-            return;
+        Err(error) => {
+            {
+                let mut clam = d.power.clam.lock().unwrap();
+                if clam.lease.as_ref() == Some(&receipt) {
+                    // Renewal remains stopped, so helper TTL is the backstop.
+                    // Keep the receipt for shutdown release retry.
+                    clam.armed = false;
+                    clam.armed_by = None;
+                    clam.renewal_error = Some(error.to_string());
+                }
+                clam.busy = false;
+            }
+            if d.power.operations.accepting() {
+                d.notify(
+                    "⌒ Крышка: батарея садится",
+                    &format!("Осталось {pct}% — helper недоступен, усыпляю мак"),
+                    None,
+                    "done",
+                );
+                // Non-privileged safety action only; never writes disablesleep.
+                clamshell::force_sleep_now().await;
+            }
         }
-        // тихо не получилось, диалог под закрытой крышкой бессмыслен —
-        // форс-сон (root не нужен) спасает батарею и температуру
-        d.notify(
-            "⌒ Крышка: батарея садится",
-            &format!("Осталось {pct}% — усыпляю мак"),
-            None,
-            "done",
-        );
-        clamshell::force_sleep_now().await;
     }
-    drop(operation);
+    drop(returned_operation);
 }
 
 /// Проснулись после сна, который прервал работу → подсказка про closed-display.
@@ -1842,10 +1907,14 @@ mod tests {
     }
 
     #[test]
-    fn missing_registry_does_not_confirm_an_in_memory_release() {
+    fn helper_release_report_requires_exact_success() {
         assert!(!release_was_confirmed(clamshell::ReleaseOutcome::NotOwned));
+        assert!(PowerDisposeReport {
+            clamshell: ClamshellDisposeOutcome::Released,
+        }
+        .released());
         assert!(!PowerDisposeReport {
-            clamshell: ClamshellDisposeOutcome::Released(clamshell::ReleaseOutcome::NotOwned),
+            clamshell: ClamshellDisposeOutcome::ReleaseFailed("unavailable".into()),
         }
         .released());
         assert!(release_was_confirmed(
@@ -1857,6 +1926,27 @@ mod tests {
         assert!(release_was_confirmed(clamshell::ReleaseOutcome::Restored(
             false
         )));
+    }
+
+    #[test]
+    fn helper_profile_id_is_stable_bounded_and_protocol_safe() {
+        let profile = power_profile_id_for(Path::new("/tmp/jarvis profile/a"));
+        assert_eq!(
+            profile,
+            power_profile_id_for(Path::new("/tmp/jarvis profile/a"))
+        );
+        assert_ne!(
+            profile,
+            power_profile_id_for(Path::new("/tmp/jarvis profile/b"))
+        );
+        assert!(profile.len() <= 128);
+        assert!(jarvis_power_core::protocol::Request::AcquireLease {
+            profile,
+            owner_generation: "g".into(),
+            ttl_ms: jarvis_power_core::protocol::DEFAULT_TTL_MS,
+        }
+        .validate()
+        .is_ok());
     }
 
     #[test]
@@ -1964,9 +2054,14 @@ mod tests {
             let disposition = worker_operations
                 .finish_acquire(
                     operation,
-                    Ok::<_, ()>(()),
+                    Ok::<_, ()>(LeaseReceipt {
+                        lease_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                        owner_generation: "g".into(),
+                    }),
                     |_| panic!("closed acquire must not commit"),
-                    |_| {
+                    |receipt| {
+                        assert_eq!(receipt.lease_id, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+                        assert_eq!(receipt.owner_generation, "g");
                         assert!(worker_lease.swap(false, Ordering::SeqCst));
                         worker_sleep.store(false, Ordering::SeqCst);
                         Ok(())

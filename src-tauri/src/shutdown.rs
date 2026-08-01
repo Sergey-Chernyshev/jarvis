@@ -141,6 +141,8 @@ pub fn cleanup(d: &Arc<Daemon>) -> CleanupReport {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
+    // Power::dispose owns its stricter inner order: close admission, stop and
+    // join renewal, release the exact helper lease, then dispose local IOKit.
     let power = run_phase("power", &mut state.power, || {
         let report = Power::dispose(d);
         if !report.released() {
@@ -198,7 +200,9 @@ pub fn cleanup(d: &Arc<Daemon>) -> CleanupReport {
 pub fn request_exit(d: &Arc<Daemon>, exit_code: i32) {
     let report = cleanup(d);
     if !report.complete() {
-        crate::log::line(&format!("[shutdown] exit cleanup remains incomplete: {report:?}"));
+        crate::log::line(&format!(
+            "[shutdown] exit cleanup remains incomplete: {report:?}"
+        ));
     }
     d.app.exit(exit_code);
 }

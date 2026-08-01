@@ -437,6 +437,11 @@ pub enum LegacyMarkerState {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
+/// Legacy v1 recovery backend.
+///
+/// Runtime arm/disarm/renew/release is owned exclusively by the attested
+/// power-helper. The app may use this backend only while reconciling the v1
+/// ownership registry during startup (and in unit fixtures).
 pub struct SystemPmset;
 
 impl PmsetBackend for SystemPmset {

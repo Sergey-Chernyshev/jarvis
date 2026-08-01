@@ -219,7 +219,10 @@ mod tests {
         ErrorCode, Request, RequestId, Response, ResponseEnvelope, DEFAULT_TTL_MS, PROTOCOL_VERSION,
     };
 
-    use super::{run_shutdown_sequence, LeaseClient, LeaseError, LeaseReceipt, RenewalHandle};
+    use super::{
+        run_shutdown_sequence, ExactReleaseOutcome, LeaseClient, LeaseError, LeaseReceipt,
+        RenewalExit, RenewalHandle,
+    };
     use crate::power::helper::client::{HelperClient, HelperClientError, HelperReply, HelperTrust};
 
     const LEASE_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -385,6 +388,43 @@ mod tests {
     }
 
     #[test]
+    fn terminal_absence_resolves_only_the_exact_receipt_debt() {
+        for code in [ErrorCode::LeaseExpired, ErrorCode::LeaseNotFound] {
+            let outcome =
+                ExactReleaseOutcome::from_result(Err(LeaseError::Rejected(code)));
+            assert_eq!(outcome, ExactReleaseOutcome::AlreadyAbsent(code));
+            assert!(outcome.resolved());
+        }
+
+        for error in [
+            LeaseError::HelperUnavailable,
+            LeaseError::HelperUnapproved,
+            LeaseError::Rejected(ErrorCode::RecoveryRequired),
+            LeaseError::LeaseMismatch,
+        ] {
+            let outcome = ExactReleaseOutcome::from_result(Err(error));
+            assert_eq!(outcome, ExactReleaseOutcome::Retryable(error));
+            assert!(!outcome.resolved());
+        }
+    }
+
+    #[test]
+    fn renewal_worker_panic_is_reported_as_a_terminal_exit() {
+        let (exit_tx, exit_rx) = mpsc::channel();
+        let renewal = RenewalHandle::start_with_exit(
+            Duration::ZERO,
+            || panic!("simulated renewal panic"),
+            move |exit| exit_tx.send(exit).unwrap(),
+        );
+
+        assert_eq!(
+            exit_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            RenewalExit::Panicked
+        );
+        renewal.stop();
+    }
+
+    #[test]
     fn stop_cancels_a_pending_timer_and_waits_for_an_inflight_attempt() {
         let pending_count = Arc::new(AtomicUsize::new(0));
         let worker_count = pending_count.clone();
@@ -447,19 +487,22 @@ mod tests {
     }
 
     #[test]
-    fn production_runtime_has_no_app_side_disablesleep_fallback() {
+    fn task6_runtime_has_no_pmset_fallback_before_tracked_task7_sudoers_boundary() {
         let source = include_str!("../mod.rs");
-        let runtime = source
+        let (runtime, task7_legacy_boundary) = source
             .split_once("async fn arm")
             .expect("arm boundary")
             .1
             .split_once("/// Установка sudoers-правила")
-            .expect("legacy installer boundary")
-            .0;
+            .expect("legacy installer boundary");
 
         assert!(runtime.contains("lease_client.acquire"));
         assert!(runtime.contains("lease_client.release"));
         assert!(runtime.contains("force_sleep_now"));
+        assert!(
+            task7_legacy_boundary.contains("async fn install_sudoers"),
+            "Task 7 must remove the still-tracked legacy sudoers installer"
+        );
         for forbidden in [
             "SystemPmset",
             "acquire_with(",

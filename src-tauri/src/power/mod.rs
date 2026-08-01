@@ -1871,6 +1871,99 @@ mod tests {
         ));
     }
 
+    fn helper_receipt() -> LeaseReceipt {
+        LeaseReceipt {
+            lease_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            owner_generation: "g".into(),
+        }
+    }
+
+    #[test]
+    fn disabled_clamshell_rejects_late_acquire_and_keeps_cleanup_debt_visible() {
+        let receipt = helper_receipt();
+        let mut clam = Clam {
+            active: false,
+            busy: true,
+            ..Clam::default()
+        };
+
+        assert_eq!(
+            clam.commit_acquired_if_active(receipt.clone(), "manual"),
+            Err(receipt.clone())
+        );
+        assert!(!clam.armed);
+        assert!(clam.lease.is_none());
+
+        clam.retain_lease_debt(receipt.clone(), "exact release failed");
+        assert_eq!(clam.lease.as_ref(), Some(&receipt));
+        assert!(!clam.armed);
+        assert!(clam.has_visible_status());
+    }
+
+    #[test]
+    fn stopped_or_dead_renewal_never_leaves_a_truthful_armed_state() {
+        let receipt = helper_receipt();
+        let mut clam = Clam {
+            active: true,
+            armed: true,
+            armed_by: Some("manual"),
+            lease: Some(receipt.clone()),
+            ..Clam::default()
+        };
+
+        clam.mark_lease_unrenewable(&receipt, "renewal worker died");
+
+        assert!(!clam.armed);
+        assert_eq!(clam.armed_by, None);
+        assert_eq!(clam.lease.as_ref(), Some(&receipt));
+        assert_eq!(clam.renewal_error.as_deref(), Some("renewal worker died"));
+        assert!(clam.has_visible_status());
+    }
+
+    #[test]
+    fn disabled_cleanup_failure_is_propagated_instead_of_hidden() {
+        let response = clamshell_disable_response(ClamshellDisposeOutcome::ReleaseFailed(
+            "helper unavailable".into(),
+        ));
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["pendingCleanup"], true);
+        assert!(response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("helper unavailable")));
+    }
+
+    #[test]
+    fn low_battery_forces_nonprivileged_sleep_for_every_release_outcome() {
+        use helper::renewal::{ExactReleaseOutcome, LeaseError};
+        use jarvis_power_core::protocol::ErrorCode;
+
+        for outcome in [
+            ExactReleaseOutcome::Confirmed,
+            ExactReleaseOutcome::AlreadyAbsent(ErrorCode::LeaseExpired),
+            ExactReleaseOutcome::Retryable(LeaseError::HelperUnavailable),
+        ] {
+            let decision = battery_guard_decision(9, &outcome);
+            assert!(decision.force_sleep);
+            assert!(decision.message.contains("принудительно усыпляю"));
+        }
+    }
+
+    #[test]
+    fn arm_reconciles_any_post_acquire_renewal_start_failure() {
+        let source = include_str!("mod.rs");
+        let arm = source
+            .split_once("async fn arm")
+            .expect("arm boundary")
+            .1
+            .split_once("async fn disarm")
+            .expect("disarm boundary")
+            .0;
+
+        assert!(arm.contains("commit_acquired_if_active"));
+        assert!(arm.contains("release_after_renewal_start_failure"));
+    }
+
     #[test]
     fn power_lease_requires_exact_versioned_process_identity() {
         let exact = "darwin-v1:uid=501:start=100.7";

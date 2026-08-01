@@ -10,6 +10,10 @@ mod hash;
 mod jcs;
 #[cfg_attr(not(test), allow(dead_code))]
 mod pack;
+#[cfg(target_os = "macos")]
+mod source;
+#[cfg(target_os = "macos")]
+mod spool;
 
 pub use pack::{PackOptions, PackageDocumentAdapter, PackageError, PackageSignatureSource};
 

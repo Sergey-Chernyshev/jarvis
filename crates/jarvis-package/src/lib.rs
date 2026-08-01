@@ -5,6 +5,8 @@
 mod macos_dir;
 
 mod jcs;
+mod hash;
+mod pack;
 
 #[cfg(test)]
 mod dependency_msrv;

@@ -21,6 +21,10 @@ import {
 const MAX_DISCOVERY_ENTRIES = 200_000;
 const MAX_RUST_FILES = 20_000;
 const MAX_RUST_SOURCE_BYTES = 128 * 1024 * 1024;
+const MAX_CARGO_TARGET_SOURCES = 20_000;
+const MAX_CARGO_TARGET_SOURCE_BYTES = 8 * 1024 * 1024;
+const MAX_DIAGNOSTIC_RECORDS = 1_024;
+const MAX_DIAGNOSTIC_BYTES = 1024 * 1024;
 const EXCLUDED_DIRECTORY_NAMES = new Set([
   '.git',
   '.worktrees',
@@ -29,31 +33,94 @@ const EXCLUDED_DIRECTORY_NAMES = new Set([
 
 const scanArguments = process.argv.slice(2);
 const trustRootsMode = scanArguments[0] === '--trust-roots';
-const targetSourcesOption = trustRootsMode
-  ? scanArguments.indexOf('--target-sources', 1)
-  : -1;
+const targetSourcesOption = scanArguments.indexOf('--target-sources-stdin0');
 const rootArguments = trustRootsMode
   ? scanArguments.slice(
       1,
       targetSourcesOption === -1 ? scanArguments.length : targetSourcesOption,
     )
-  : scanArguments.slice(0, 1);
-if (rootArguments.length === 0) {
+  : scanArguments.slice(0, targetSourcesOption === -1 ? 1 : targetSourcesOption);
+const unexpectedArguments =
+  (trustRootsMode
+    ? targetSourcesOption !== -1 && targetSourcesOption !== scanArguments.length - 1
+    : rootArguments.length !== 1 ||
+      (targetSourcesOption === -1
+        ? scanArguments.length !== 1
+        : targetSourcesOption !== scanArguments.length - 1)) ||
+  scanArguments.includes('--target-sources');
+if (rootArguments.length === 0 || unexpectedArguments) {
   console.error(
-    'usage: scan-rust-unsafe-boundary.mjs <package-root> [target-sources...] | --trust-roots <root>... [--target-sources <source>...]',
+    'usage: scan-rust-unsafe-boundary.mjs <package-root> [--target-sources-stdin0] | --trust-roots <root>... [--target-sources-stdin0]',
   );
   process.exit(2);
 }
-const scanRoots = [...new Set(rootArguments.map((root) => realpathSync(resolve(root))))];
-const explicitTargetSources = [
-  ...new Set(
-    trustRootsMode
-      ? targetSourcesOption === -1
-        ? []
-        : scanArguments.slice(targetSourcesOption + 1)
-      : scanArguments.slice(1),
-  ),
+
+async function readTargetSourcesFromStdin() {
+  const targetSources = [];
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let pending = Buffer.alloc(0);
+  let transportBytes = 0;
+
+  for await (const inputChunk of process.stdin) {
+    const chunk = Buffer.isBuffer(inputChunk)
+      ? inputChunk
+      : Buffer.from(inputChunk);
+    transportBytes += chunk.length;
+    if (transportBytes > MAX_CARGO_TARGET_SOURCE_BYTES) {
+      throw new Error(
+        `Cargo target source transport exceeds ${MAX_CARGO_TARGET_SOURCE_BYTES} bytes`,
+      );
+    }
+    pending =
+      pending.length === 0
+        ? chunk
+        : Buffer.concat([pending, chunk], pending.length + chunk.length);
+    let recordStart = 0;
+    for (
+      let terminator = pending.indexOf(0, recordStart);
+      terminator !== -1;
+      terminator = pending.indexOf(0, recordStart)
+    ) {
+      targetSources.push(decoder.decode(pending.subarray(recordStart, terminator)));
+      if (targetSources.length > MAX_CARGO_TARGET_SOURCES) {
+        throw new Error(
+          `Cargo target source count exceeds ${MAX_CARGO_TARGET_SOURCES}`,
+        );
+      }
+      recordStart = terminator + 1;
+    }
+    pending = Buffer.from(pending.subarray(recordStart));
+  }
+  if (pending.length !== 0) {
+    throw new Error('Cargo target source transport must be NUL terminated');
+  }
+  return targetSources;
+}
+
+const explicitTargetSources =
+  targetSourcesOption === -1 ? [] : await readTargetSourcesFromStdin();
+const scanRoots = [
+  ...new Set(rootArguments.map((root) => realpathSync(resolve(root)))),
 ];
+const diagnosticBudget = { records: 0, bytes: 0 };
+
+function diagnosticRecord(kind, path, line, reason) {
+  const record = `${kind}\t${path}:${line}${reason ? `\t${reason}` : ''}\n`;
+  const recordBytes = Buffer.byteLength(record);
+  if (diagnosticBudget.records >= MAX_DIAGNOSTIC_RECORDS) {
+    throw new Error(
+      `Rust boundary diagnostics exceed ${MAX_DIAGNOSTIC_RECORDS} records`,
+    );
+  }
+  if (diagnosticBudget.bytes + recordBytes > MAX_DIAGNOSTIC_BYTES) {
+    throw new Error(
+      `Rust boundary diagnostics exceed ${MAX_DIAGNOSTIC_BYTES} bytes`,
+    );
+  }
+  diagnosticBudget.records += 1;
+  diagnosticBudget.bytes += recordBytes;
+  return record;
+}
 
 function rustFiles(root, discoveryBudget) {
   const files = new Set();
@@ -73,7 +140,9 @@ function rustFiles(root, discoveryBudget) {
       }
       const path = join(directory, entry.name);
       if (entry.isSymbolicLink()) {
-        sourceEscapes.push({ path, line: 1, reason: 'symlink source entry' });
+        sourceEscapes.push(
+          diagnosticRecord('source', path, 1, 'symlink source entry'),
+        );
       } else if (entry.isDirectory()) {
         if (
           path === rootBuildOutput ||
@@ -144,63 +213,75 @@ function isInsideExcludedDirectory(candidate, roots) {
   return false;
 }
 
-function cargoTargetFiles(targetSources, roots) {
+function cargoTargetFiles(targetSources, roots, discoveryBudget) {
   const files = new Set();
   const sourceEscapes = [];
   for (const targetSourceArgument of targetSources) {
+    discoveryBudget.entries += 1;
+    if (discoveryBudget.entries > MAX_DISCOVERY_ENTRIES) {
+      throw new Error(`Rust source discovery exceeds ${MAX_DISCOVERY_ENTRIES} entries`);
+    }
     const targetSource = resolve(targetSourceArgument);
     let sourceInfo;
     try {
       sourceInfo = lstatSync(targetSource);
     } catch {
-      sourceEscapes.push({
-        path: targetSource,
-        line: 1,
-        reason: 'missing Cargo target source',
-      });
+      sourceEscapes.push(
+        diagnosticRecord('source', targetSource, 1, 'missing Cargo target source'),
+      );
       continue;
     }
     if (sourceInfo.isSymbolicLink()) {
-      sourceEscapes.push({
-        path: targetSource,
-        line: 1,
-        reason: 'symlink Cargo target source',
-      });
+      sourceEscapes.push(
+        diagnosticRecord('source', targetSource, 1, 'symlink Cargo target source'),
+      );
       continue;
     }
     const realSource = realpathSync(targetSource);
     if (!roots.some((root) => isInsideRoot(root, realSource))) {
-      sourceEscapes.push({
-        path: targetSource,
-        line: 1,
-        reason: trustRootsMode
-          ? 'Cargo target source outside trust roots'
-          : 'Cargo target source outside package root',
-      });
+      sourceEscapes.push(
+        diagnosticRecord(
+          'source',
+          targetSource,
+          1,
+          trustRootsMode
+            ? 'Cargo target source outside trust roots'
+            : 'Cargo target source outside package root',
+        ),
+      );
       continue;
     }
     if (isInsideSkippedBuildOutput(realSource, roots)) {
-      sourceEscapes.push({
-        path: targetSource,
-        line: 1,
-        reason: 'Cargo target source inside build output',
-      });
+      sourceEscapes.push(
+        diagnosticRecord(
+          'source',
+          targetSource,
+          1,
+          'Cargo target source inside build output',
+        ),
+      );
       continue;
     }
     if (isInsideExcludedDirectory(realSource, roots)) {
-      sourceEscapes.push({
-        path: targetSource,
-        line: 1,
-        reason: 'Cargo target source inside excluded directory',
-      });
+      sourceEscapes.push(
+        diagnosticRecord(
+          'source',
+          targetSource,
+          1,
+          'Cargo target source inside excluded directory',
+        ),
+      );
       continue;
     }
     if (!sourceInfo.isFile()) {
-      sourceEscapes.push({
-        path: targetSource,
-        line: 1,
-        reason: 'Cargo target source is not a regular file',
-      });
+      sourceEscapes.push(
+        diagnosticRecord(
+          'source',
+          targetSource,
+          1,
+          'Cargo target source is not a regular file',
+        ),
+      );
       continue;
     }
     files.add(realSource);
@@ -766,7 +847,11 @@ for (const root of scanRoots) {
   }
   sourceEscapes.push(...discovery.sourceEscapes);
 }
-const cargoTargets = cargoTargetFiles(explicitTargetSources, scanRoots);
+const cargoTargets = cargoTargetFiles(
+  explicitTargetSources,
+  scanRoots,
+  discoveryBudget,
+);
 for (const file of cargoTargets.files) {
   discoveredFiles.add(file);
   if (discoveredFiles.size > MAX_RUST_FILES) {
@@ -774,8 +859,8 @@ for (const file of cargoTargets.files) {
   }
 }
 sourceEscapes.push(...cargoTargets.sourceEscapes);
-for (const escape of sourceEscapes) {
-  process.stdout.write(`source\t${escape.path}:${escape.line}\t${escape.reason}\n`);
+for (const record of sourceEscapes) {
+  process.stdout.write(record);
 }
 let rustSourceBytes = 0;
 const tokenizedFiles = [...discoveredFiles].sort().map((file) => {
@@ -801,14 +886,16 @@ for (const { file, tokens } of tokenizedFiles) {
     discoveredFiles,
     sourceMacroNames,
   )) {
-    process.stdout.write(`source\t${file}:${violation.line}\t${violation.reason}\n`);
+    process.stdout.write(
+      diagnosticRecord('source', file, violation.line, violation.reason),
+    );
   }
   for (const line of unsafeLintAttributes(tokens)) {
-    process.stdout.write(`allow\t${file}:${line}\n`);
+    process.stdout.write(diagnosticRecord('allow', file, line));
   }
   for (const token of tokens) {
     if (token.kind === 'identifier' && !token.raw && token.value === 'unsafe') {
-      process.stdout.write(`unsafe\t${file}:${token.line}\n`);
+      process.stdout.write(diagnosticRecord('unsafe', file, token.line));
     }
   }
   const verifierSites = [
@@ -825,7 +912,11 @@ for (const { file, tokens } of tokenizedFiles) {
     if (emittedVerifierSites.has(site)) continue;
     emittedVerifierSites.add(site);
     process.stdout.write(
-      `${implementation.testOnly ? 'trust-test' : 'trust'}\t${file}:${implementation.line}\n`,
+      diagnosticRecord(
+        implementation.testOnly ? 'trust-test' : 'trust',
+        file,
+        implementation.line,
+      ),
     );
   }
 }

@@ -5,6 +5,9 @@ repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cargo_bin="${CARGO_BIN:-cargo}"
 failed=0
+max_semantic_target_count=20000
+max_semantic_target_bytes=8388608
+max_semantic_metadata_bytes=16777216
 
 repo_root_resolved="$(cd "$repo_root" && pwd -P)"
 boundary_fixture_mode=0
@@ -32,7 +35,65 @@ semantic_manifest_json() {
       --locked \
       --offline \
       --manifest-path "$manifest"
-  fi
+  fi \
+    | node -e '
+      const limit = Number(process.argv[1]);
+      let bytes = 0;
+      process.stdin.on("data", (chunk) => {
+        bytes += chunk.length;
+        if (bytes > limit) {
+          console.error(`Cargo semantic metadata exceeds ${limit} bytes`);
+          process.exit(2);
+        }
+        process.stdout.write(chunk);
+      });
+    ' "$max_semantic_metadata_bytes"
+}
+
+semantic_target_source_lines() {
+  local manifest="$1"
+  node -e '
+    const { realpathSync } = require("node:fs");
+    const wantedManifest = realpathSync(process.argv[1]);
+    const maxCount = Number(process.argv[2]);
+    const maxBytes = Number(process.argv[3]);
+    let source = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { source += chunk; });
+    process.stdin.on("end", () => {
+      const payload = JSON.parse(source);
+      const packages = payload.packages ?? [payload];
+      const packageRecord = packages.find(
+        (candidate) => realpathSync(candidate.manifest_path) === wantedManifest,
+      );
+      if (!packageRecord || !Array.isArray(packageRecord.targets)) process.exit(2);
+      if (packageRecord.targets.length > maxCount) {
+        console.error(`Cargo target source count exceeds ${maxCount}`);
+        process.exit(2);
+      }
+      let bytes = 0;
+      const targetSources = [];
+      for (const target of packageRecord.targets) {
+        if (
+          typeof target.src_path !== "string" ||
+          target.src_path.length === 0 ||
+          /[\0\r\n]/.test(target.src_path)
+        ) {
+          console.error("Cargo target source path is not transport-safe");
+          process.exit(2);
+        }
+        bytes += Buffer.byteLength(target.src_path) + 1;
+        if (bytes > maxBytes) {
+          console.error(`Cargo target source transport exceeds ${maxBytes} bytes`);
+          process.exit(2);
+        }
+        targetSources.push(target.src_path);
+      }
+      if (targetSources.length > 0) {
+        process.stdout.write(`${targetSources.join("\n")}\n`);
+      }
+    });
+  ' "$manifest" "$max_semantic_target_count" "$max_semantic_target_bytes"
 }
 
 report_matches() {
@@ -120,24 +181,7 @@ if [[ -f "$package_manifest" ]]; then
     package_target_source_lines=""
     if ! package_target_source_lines="$(
       printf '%s\n' "$package_manifest_json" \
-        | node -e '
-          const { realpathSync } = require("node:fs");
-          let source = "";
-          process.stdin.setEncoding("utf8");
-          process.stdin.on("data", (chunk) => { source += chunk; });
-          process.stdin.on("end", () => {
-            const payload = JSON.parse(source);
-            const packages = payload.packages ?? [payload];
-            const wantedManifest = realpathSync(process.argv[1]);
-            const packageRecord = packages.find(
-              (candidate) => realpathSync(candidate.manifest_path) === wantedManifest,
-            );
-            if (!packageRecord) process.exit(2);
-            for (const target of packageRecord.targets) {
-              process.stdout.write(`${target.src_path}\n`);
-            }
-          });
-        ' "$package_manifest"
+        | semantic_target_source_lines "$package_manifest"
     )"; then
       echo "failed to select private package target metadata: $package_manifest" >&2
       failed=1
@@ -149,10 +193,15 @@ if [[ -f "$package_manifest" ]]; then
   fi
   unsafe_scan=""
   if ! unsafe_scan="$(
-    node \
-      "$script_dir/scan-rust-unsafe-boundary.mjs" \
-      "$package_root" \
-      "${package_target_sources[@]}"
+    {
+      if [[ "${#package_target_sources[@]}" -gt 0 ]]; then
+        printf '%s\0' "${package_target_sources[@]}"
+      fi
+    } \
+      | node \
+        "$script_dir/scan-rust-unsafe-boundary.mjs" \
+        "$package_root" \
+        --target-sources-stdin0
   )"; then
     echo "failed to scan jarvis-package Rust syntax: $package_root" >&2
     failed=1
@@ -233,6 +282,7 @@ plugins_root_resolved="$(cd "$repo_root/plugins" && pwd -P)"
 src_tauri_root_resolved="$(cd "$repo_root/src-tauri" && pwd -P)"
 allowed_package_manifest="$src_tauri_root_resolved/Cargo.toml"
 trust_target_sources=()
+trust_target_source_bytes=0
 while IFS= read -r manifest; do
   [[ -z "$manifest" ]] && continue
   manifest_resolved="$(cd "$(dirname "$manifest")" && pwd -P)/$(basename "$manifest")"
@@ -253,31 +303,28 @@ while IFS= read -r manifest; do
       semantic_target_sources=""
       if ! semantic_target_sources="$(
         printf '%s\n' "$manifest_json" \
-          | node -e '
-            const { realpathSync } = require("node:fs");
-            let source = "";
-            process.stdin.setEncoding("utf8");
-            process.stdin.on("data", (chunk) => { source += chunk; });
-            process.stdin.on("end", () => {
-              const payload = JSON.parse(source);
-              const packages = payload.packages ?? [payload];
-              const wantedManifest = realpathSync(process.argv[1]);
-              const packageRecord = packages.find(
-                (candidate) => realpathSync(candidate.manifest_path) === wantedManifest,
-              );
-              if (!packageRecord) process.exit(2);
-              for (const target of packageRecord.targets) {
-                process.stdout.write(`${target.src_path}\n`);
-              }
-            });
-          ' "$manifest_resolved"
+          | semantic_target_source_lines "$manifest_resolved"
       )"; then
         echo "failed to select Cargo target metadata: $manifest" >&2
         failed=1
         continue
       fi
       while IFS= read -r target_source; do
-        [[ -n "$target_source" ]] && trust_target_sources+=("$target_source")
+        [[ -z "$target_source" ]] && continue
+        target_source_bytes="$(
+          LC_ALL=C printf '%s' "$target_source" \
+            | wc -c \
+            | tr -d '[:space:]'
+        )"
+        target_source_bytes=$((target_source_bytes + 1))
+        if [[ "${#trust_target_sources[@]}" -ge "$max_semantic_target_count" ]] \
+          || [[ $((trust_target_source_bytes + target_source_bytes)) -gt "$max_semantic_target_bytes" ]]; then
+          echo "Cargo target source budget exceeded across manifests" >&2
+          failed=1
+          break
+        fi
+        trust_target_sources+=("$target_source")
+        trust_target_source_bytes=$((trust_target_source_bytes + target_source_bytes))
       done <<< "$semantic_target_sources"
       ;;
   esac
@@ -343,9 +390,14 @@ done <<< "$all_manifests"
 
 trust_scan=""
 if [[ "${#trust_roots[@]}" -gt 0 ]] && ! trust_scan="$(
-  node "$script_dir/scan-rust-unsafe-boundary.mjs" \
-    --trust-roots "${trust_roots[@]}" \
-    --target-sources "${trust_target_sources[@]}"
+  {
+    if [[ "${#trust_target_sources[@]}" -gt 0 ]]; then
+      printf '%s\0' "${trust_target_sources[@]}"
+    fi
+  } \
+    | node "$script_dir/scan-rust-unsafe-boundary.mjs" \
+      --trust-roots "${trust_roots[@]}" \
+      --target-sources-stdin0
 )"; then
   echo "failed to scan PackageTrustVerifier ownership roots" >&2
   failed=1

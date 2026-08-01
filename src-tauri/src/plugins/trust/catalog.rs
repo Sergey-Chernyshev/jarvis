@@ -756,6 +756,50 @@ mod tests {
     }
 
     #[test]
+    fn catalog_lifetime_cannot_outlive_the_root_quorum() {
+        let roots = RootTrustConfig::parse(
+            &serde_json::to_vec(&json!({
+                "schemaVersion": 1,
+                "threshold": 1,
+                "keys": [{
+                    "keyId": "jarvis.root:1",
+                    "algorithm": "ed25519",
+                    "publicKey": PUBLIC_KEY,
+                    "validFrom": "2026-01-01T00:00:00Z",
+                    "validUntil": "2026-08-01T01:00:00Z"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut state = CatalogState::new(roots);
+        let initial = state.clone();
+        assert_eq!(
+            verify(CATALOG_1, "2026-08-01T00:30:00Z", &mut state)
+                .unwrap_err()
+                .code(),
+            "catalog_root_expiry"
+        );
+        assert_eq!(state, initial);
+    }
+
+    #[test]
+    fn invalid_signature_is_rejected_before_unsigned_release_semantics() {
+        let mut unsigned = catalog_value(CATALOG_1);
+        unsigned["payload"]["releases"][0]["publisherLineage"] = json!("missing.lineage");
+        let unsigned = serde_json::to_vec(&unsigned).unwrap();
+        let mut state = fixture_state();
+        let initial = state.clone();
+        assert_eq!(
+            verify(&unsigned, "2026-08-01T00:30:00Z", &mut state)
+                .unwrap_err()
+                .code(),
+            "catalog_signature_invalid"
+        );
+        assert_eq!(state, initial);
+    }
+
+    #[test]
     fn rotation_requires_old_and_new_thresholds_before_replacing_roots() {
         let mut state = fixture_state();
         verify(CATALOG_1, "2026-08-01T00:30:00Z", &mut state).unwrap();

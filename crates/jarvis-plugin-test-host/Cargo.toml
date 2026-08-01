@@ -6,11 +6,6 @@ license = "MIT"
 edition = "2021"
 rust-version = "1.77.2"
 
-[features]
-# Reserved for the compatibility test shim; the real validator is isolated in
-# tools/plugin-schema-parity so this MSRV crate has no stable-only dependency.
-schema-parity = []
-
 [dependencies]
 jarvis-plugin-protocol = { version = "0.1.0", path = "../jarvis-plugin-protocol" }
 serde_json = "1"

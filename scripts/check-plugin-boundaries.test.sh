@@ -173,6 +173,26 @@ printf '%s\n' \
 expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
 
 write_clean_fixture
+mkdir -p "$fixture_root/src-tauri/src/plugins"
+printf '%s\n' \
+  'use jarvis_package::PackageTrustVerifier as Trust;' \
+  'struct AliasedVerifier;' \
+  'impl Trust for AliasedVerifier {}' \
+  > "$fixture_root/src-tauri/src/plugins/wrong.rs"
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+mkdir -p "$fixture_root/src-tauri/src/plugins"
+printf '%s\n' \
+  'macro_rules! implement_verifier {' \
+  '    ($trait:path, $type:ty) => { impl $trait for $type {} };' \
+  '}' \
+  'struct MacroVerifier;' \
+  'implement_verifier!(PackageTrustVerifier, MacroVerifier);' \
+  > "$fixture_root/src-tauri/src/plugins/wrong.rs"
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
 mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
 printf '%s\n' \
   'struct CatalogVerifier;' \

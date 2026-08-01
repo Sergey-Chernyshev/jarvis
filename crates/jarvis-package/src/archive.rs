@@ -1205,6 +1205,40 @@ mod tests {
     }
 
     #[test]
+    fn archive_rejects_namespace_shape_that_exceeds_the_memory_budget() {
+        let mut archive = Vec::new();
+        append_raw_entry(&mut archive, b"plugin.json", 0o444, b"{}", b'0');
+        for index in 0..5_000 {
+            let components = (0..5)
+                .map(|level| format!("{index:04}-{level}-{}", "x".repeat(193)))
+                .collect::<Vec<_>>();
+            let path = components.join("/");
+            assert_eq!(path.len(), 1_004);
+            archive.extend_from_slice(&long_name_record(path.as_bytes()));
+            archive.extend_from_slice(&raw_header(b"././@LongFile", 0o444, 0, b'0'));
+        }
+        append_raw_entry(&mut archive, b"package.json", 0o444, b"{}", b'0');
+        append_raw_entry(&mut archive, b"SIGNATURE", 0o444, b"{}", b'0');
+        finish(&mut archive);
+
+        assert_code(&archive, "archive_quota");
+    }
+
+    #[test]
+    fn archive_rejects_executable_generated_metadata_entries() {
+        for header_offset in [BLOCK_SIZE * 2, BLOCK_SIZE * 4] {
+            let mut archive = valid_archive(&[]);
+            let header: &mut [u8; BLOCK_SIZE] = (&mut archive
+                [header_offset..header_offset + BLOCK_SIZE])
+                .try_into()
+                .unwrap();
+            write_octal(&mut header[100..108], 0o555);
+            rewrite_checksum(header);
+            assert_code(&archive, "archive_header");
+        }
+    }
+
+    #[test]
     fn unicode_collision_vectors() {
         assert_eq!(unicode_normalization::UNICODE_VERSION, (16, 0, 0));
         assert_eq!(caseless::UNICODE_VERSION, (16, 0, 0));

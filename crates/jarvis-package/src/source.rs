@@ -493,4 +493,23 @@ mod tests {
         symlink(Path::new("plugin.json"), link).unwrap();
         assert!(snapshot_source(&source).is_err());
     }
+
+    #[test]
+    fn source_quotas_reject_oversized_plugin_before_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let plugin = fs::File::create(source.join("plugin.json")).unwrap();
+        plugin.set_len(256 * 1024 + 1).unwrap();
+        let copied = Cell::new(false);
+        let hook = Hook {
+            after_enumeration: no_action,
+            before_open: no_path_action,
+            after_copy_chunk: |_: &str, _: u64| copied.set(true),
+        };
+
+        let error = snapshot_source_with_hook(&source, &hook).unwrap_err();
+        assert_eq!(error.code(), "archive_quota");
+        assert!(!copied.get(), "oversized source was copied into the spool");
+    }
 }

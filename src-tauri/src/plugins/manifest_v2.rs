@@ -108,19 +108,7 @@ fn validate_manifest(
     let concrete = serde_json::to_vec(&value).map_err(|_| ManifestError::Schema)?;
     let manifest = ManifestV2::parse(&concrete)?;
 
-    let schema: Value =
-        serde_json::from_slice(MANIFEST_SCHEMA_JSON).map_err(|_| ManifestError::Schema)?;
-    validate_schema_references(&schema)?;
-    let mut options = JSONSchema::options();
-    options
-        .with_draft(Draft::Draft202012)
-        .with_resolver(DenyExternalSchemaResolver);
-    let compiled = options
-        .compile(&schema)
-        .map_err(|_| ManifestError::Schema)?;
-    if !compiled.is_valid(&value) {
-        return Err(ManifestError::Schema);
-    }
+    validate_bundled_schema(MANIFEST_SCHEMA_JSON, &value)?;
 
     if host.plugin_api != PLUGIN_API_VERSION
         || manifest.compatibility.plugin_api != host.plugin_api
@@ -129,6 +117,25 @@ fn validate_manifest(
         return Err(ManifestError::Incompatible);
     }
     Ok(manifest)
+}
+
+pub(crate) fn validate_bundled_schema(
+    schema_bytes: &[u8],
+    instance: &Value,
+) -> Result<(), ManifestError> {
+    let schema: Value = serde_json::from_slice(schema_bytes).map_err(|_| ManifestError::Schema)?;
+    validate_schema_references(&schema)?;
+    let mut options = JSONSchema::options();
+    options
+        .with_draft(Draft::Draft202012)
+        .with_resolver(DenyExternalSchemaResolver);
+    let compiled = options
+        .compile(&schema)
+        .map_err(|_| ManifestError::Schema)?;
+    if !compiled.is_valid(instance) {
+        return Err(ManifestError::Schema);
+    }
+    Ok(())
 }
 
 fn substitute_target_entry(value: &mut Value, pointer: &str, target: Target) {

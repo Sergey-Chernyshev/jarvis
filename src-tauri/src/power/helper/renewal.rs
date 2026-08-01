@@ -5,7 +5,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use jarvis_power_core::protocol::{ErrorCode, Request, Response, DEFAULT_TTL_MS};
+use jarvis_power_core::protocol::{
+    ErrorCode, Request, Response, DEFAULT_TTL_MS, MAX_TTL_MS, MIN_TTL_MS, RENEW_EVERY_MS,
+};
 
 use super::client::{HelperClient, HelperClientError, ProductionXpcClient};
 
@@ -13,6 +15,7 @@ use super::client::{HelperClient, HelperClientError, ProductionXpcClient};
 pub(crate) struct LeaseReceipt {
     pub(crate) lease_id: String,
     pub(crate) owner_generation: String,
+    pub(crate) granted_ttl_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,10 +111,15 @@ impl LeaseClient {
             ttl_ms: DEFAULT_TTL_MS,
         })?;
         match response {
-            Response::Acquired { lease_id, .. } => Ok(LeaseReceipt {
+            Response::Acquired {
+                lease_id,
+                granted_ttl_ms,
+            } if (MIN_TTL_MS..=MAX_TTL_MS).contains(&granted_ttl_ms) => Ok(LeaseReceipt {
                 lease_id,
                 owner_generation: owner_generation.into(),
+                granted_ttl_ms,
             }),
+            Response::Acquired { .. } => Err(LeaseError::UnexpectedResponse),
             Response::Error { code } => Err(LeaseError::Rejected(code)),
             _ => Err(LeaseError::UnexpectedResponse),
         }
@@ -188,7 +196,7 @@ impl RenewalHandle {
     }
 
     pub(crate) fn try_start_with_exit(
-        interval: Duration,
+        remaining_ttl: Duration,
         mut attempt: impl FnMut() -> bool + Send + 'static,
         on_exit: impl FnOnce(RenewalExit) + Send + 'static,
     ) -> std::io::Result<Self> {
@@ -200,6 +208,7 @@ impl RenewalHandle {
         let worker = std::thread::Builder::new()
             .name("jarvis-power-renewal".into())
             .spawn(move || {
+                let mut delay = first_renewal_delay(remaining_ttl);
                 let exit = catch_unwind(AssertUnwindSafe(|| loop {
                     let cancelled = worker_control
                         .cancelled
@@ -207,7 +216,7 @@ impl RenewalHandle {
                         .unwrap_or_else(|error| error.into_inner());
                     let cancelled = match worker_control.wake.wait_timeout_while(
                         cancelled,
-                        interval,
+                        delay,
                         |cancelled| !*cancelled,
                     ) {
                         Ok((cancelled, _)) => *cancelled,
@@ -219,6 +228,7 @@ impl RenewalHandle {
                     if !attempt() {
                         return RenewalExit::AttemptStopped;
                     }
+                    delay = Duration::from_millis(RENEW_EVERY_MS);
                 }))
                 .unwrap_or(RenewalExit::Panicked);
                 on_exit(exit);
@@ -273,6 +283,11 @@ impl RenewalHandle {
     }
 }
 
+fn first_renewal_delay(remaining_ttl: Duration) -> Duration {
+    let half_ttl = remaining_ttl / 2;
+    half_ttl.min(Duration::from_millis(RENEW_EVERY_MS))
+}
+
 impl Drop for RenewalHandle {
     fn drop(&mut self) {
         self.stop_inner();
@@ -300,12 +315,13 @@ mod tests {
     use std::time::Duration;
 
     use jarvis_power_core::protocol::{
-        ErrorCode, Request, RequestId, Response, ResponseEnvelope, DEFAULT_TTL_MS, PROTOCOL_VERSION,
+        ErrorCode, Request, RequestId, Response, ResponseEnvelope, DEFAULT_TTL_MS, MIN_TTL_MS,
+        PROTOCOL_VERSION,
     };
 
     use super::{
-        run_shutdown_sequence, ExactReleaseOutcome, LeaseClient, LeaseError, LeaseReceipt,
-        RenewalExit, RenewalHandle,
+        first_renewal_delay, run_shutdown_sequence, ExactReleaseOutcome, LeaseClient, LeaseError,
+        LeaseReceipt, RenewalExit, RenewalHandle,
     };
     use crate::power::helper::client::{HelperClient, HelperClientError, HelperReply, HelperTrust};
 
@@ -383,16 +399,17 @@ mod tests {
             .acquire("profile-a", "generation-a")
             .unwrap();
 
-        assert!(
-            format!("{receipt:?}")
-                .contains(&format!("granted_ttl_ms: {remaining_ttl_ms}")),
-            "the host receipt discarded the helper's remaining TTL: {receipt:?}"
-        );
+        assert_eq!(receipt.granted_ttl_ms, remaining_ttl_ms);
     }
 
     #[test]
     fn renewal_worker_attempts_before_a_short_remaining_ttl_expires() {
-        let remaining_ttl = Duration::from_millis(240);
+        let remaining_ttl = Duration::from_millis(MIN_TTL_MS);
+        assert_eq!(
+            first_renewal_delay(remaining_ttl),
+            Duration::from_millis(MIN_TTL_MS / 2)
+        );
+
         let (attempt_tx, attempt_rx) = mpsc::channel();
         let renewal = RenewalHandle::start(remaining_ttl, move || {
             attempt_tx.send(()).unwrap();
@@ -401,7 +418,7 @@ mod tests {
 
         assert!(
             attempt_rx
-                .recv_timeout(Duration::from_millis(180))
+                .recv_timeout(Duration::from_millis(MIN_TTL_MS - 500))
                 .is_ok(),
             "the first renewal waited for the full remaining TTL"
         );
@@ -431,6 +448,7 @@ mod tests {
             LeaseReceipt {
                 lease_id: LEASE_A.into(),
                 owner_generation: "g".into(),
+                granted_ttl_ms: DEFAULT_TTL_MS,
             }
         );
         client.renew(&receipt).unwrap();
@@ -536,6 +554,7 @@ mod tests {
         let receipt = LeaseReceipt {
             lease_id: LEASE_A.into(),
             owner_generation: "g".into(),
+            granted_ttl_ms: DEFAULT_TTL_MS,
         };
         let (helper, _) = FakeHelper::new(
             HelperTrust::ProductionAttested,

@@ -15,6 +15,7 @@ pub mod ownership;
 pub mod ownership_store;
 
 use serde_json::{json, Map, Value};
+use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
@@ -186,7 +187,9 @@ impl OperationBarrier {
         *active = true;
         Some(PowerOperation {
             epoch,
-            barrier: self.clone(),
+            _permit: Arc::new(PowerOperationPermit {
+                barrier: self.clone(),
+            }),
         })
     }
 
@@ -208,8 +211,13 @@ impl OperationBarrier {
     }
 }
 
+#[derive(Clone)]
 struct PowerOperation {
     epoch: u64,
+    _permit: Arc<PowerOperationPermit>,
+}
+
+struct PowerOperationPermit {
     barrier: Arc<OperationBarrier>,
 }
 
@@ -219,7 +227,7 @@ impl PowerOperation {
     }
 }
 
-impl Drop for PowerOperation {
+impl Drop for PowerOperationPermit {
     fn drop(&mut self) {
         *self
             .barrier
@@ -234,6 +242,34 @@ impl Drop for PowerOperation {
 enum AcquireDisposition {
     Committed,
     RolledBack,
+}
+
+struct AcquireClassificationError<E> {
+    error: E,
+    _operation: PowerOperation,
+}
+
+impl<E: fmt::Debug> fmt::Debug for AcquireClassificationError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AcquireClassificationError")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<E: fmt::Display> fmt::Display for AcquireClassificationError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl<E> std::ops::Deref for AcquireClassificationError<E> {
+    type Target = E;
+
+    fn deref(&self) -> &Self::Target {
+        &self.error
+    }
 }
 
 #[derive(Default)]
@@ -309,18 +345,36 @@ impl PowerOperations {
         acquired: Result<T, E>,
         commit: impl FnOnce(T) -> Result<(), T>,
         rollback: impl FnOnce(T) -> Result<(), E>,
-    ) -> Result<AcquireDisposition, E> {
-        let acquired = acquired?;
+    ) -> Result<AcquireDisposition, AcquireClassificationError<E>> {
+        let acquired = match acquired {
+            Ok(acquired) => acquired,
+            Err(error) => {
+                return Err(AcquireClassificationError {
+                    error,
+                    _operation: operation,
+                });
+            }
+        };
         let disposition = match self.accepts(operation.epoch()) {
             true => match commit(acquired) {
                 Ok(()) => AcquireDisposition::Committed,
                 Err(acquired) => {
-                    rollback(acquired)?;
+                    if let Err(error) = rollback(acquired) {
+                        return Err(AcquireClassificationError {
+                            error,
+                            _operation: operation,
+                        });
+                    }
                     AcquireDisposition::RolledBack
                 }
             },
             false => {
-                rollback(acquired)?;
+                if let Err(error) = rollback(acquired) {
+                    return Err(AcquireClassificationError {
+                        error,
+                        _operation: operation,
+                    });
+                }
                 AcquireDisposition::RolledBack
             }
         };
@@ -546,7 +600,7 @@ impl Clam {
     fn commit_acquired_if_active(
         &mut self,
         receipt: LeaseReceipt,
-        by: &'static str,
+        _by: &'static str,
     ) -> Result<(), LeaseReceipt> {
         if !self.active
             || self.transitioning
@@ -558,8 +612,8 @@ impl Clam {
         {
             return Err(receipt);
         }
-        self.armed = true;
-        self.armed_by = Some(by);
+        self.armed = false;
+        self.armed_by = None;
         self.lease = Some(receipt);
         self.unknown_acquire = None;
         self.renewal_error = None;
@@ -586,8 +640,8 @@ impl Clam {
         {
             return Err(receipt);
         }
-        self.armed = true;
-        self.armed_by = Some(pending.armed_by);
+        self.armed = false;
+        self.armed_by = None;
         self.lease = Some(receipt);
         self.unknown_acquire = None;
         self.renewal_error = None;
@@ -1188,13 +1242,17 @@ impl Power {
         }
     }
 
-    fn start_clamshell_renewal(d: &Arc<Daemon>) -> Result<(), String> {
+    fn start_clamshell_renewal(
+        d: &Arc<Daemon>,
+        pending_arm_by: Option<&'static str>,
+    ) -> Result<(), String> {
         let receipt = {
             let clam = d.power.clam.lock().unwrap();
+            let pending_arm = pending_arm_by.is_some() && clam.busy && !clam.armed;
+            let restart_armed = pending_arm_by.is_none() && !clam.busy && clam.armed;
             if !d.power.operations.accepting()
                 || !clam.active
-                || clam.busy
-                || !clam.armed
+                || !(pending_arm || restart_armed)
                 || clam.renewal.is_some()
             {
                 return Err("clamshell renewal is no longer admissible".into());
@@ -1209,7 +1267,7 @@ impl Power {
         let exit_daemon = Arc::downgrade(d);
         let exit_receipt = receipt.clone();
         let renewal = RenewalHandle::try_start_with_exit(
-            Duration::from_millis(jarvis_power_core::protocol::RENEW_EVERY_MS),
+            Duration::from_millis(receipt.granted_ttl_ms),
             move || {
                 let Some(d) = weak_daemon.upgrade() else {
                     return false;
@@ -1288,14 +1346,22 @@ impl Power {
         )
         .map_err(|error| format!("cannot start renewal worker: {error}"))?;
         let mut clam = d.power.clam.lock().unwrap();
+        let pending_arm = pending_arm_by.is_some() && clam.busy && !clam.armed;
+        let restart_armed = pending_arm_by.is_none() && !clam.busy && clam.armed;
         if d.power.operations.accepting()
-            && clam.armed
             && clam.active
-            && !clam.busy
+            && (pending_arm || restart_armed)
             && clam.lease.as_ref() == Some(&receipt)
             && clam.renewal.is_none()
         {
             clam.renewal = Some(renewal);
+            if let Some(by) = pending_arm_by {
+                clam.armed = true;
+                clam.armed_by = Some(by);
+                clam.renewal_error = None;
+                clam.safety_sleep_pending = false;
+                clam.last_guard_at = 0;
+            }
             Ok(())
         } else {
             drop(clam);
@@ -2109,6 +2175,7 @@ async fn reconcile_unknown_acquire(d: &Arc<Daemon>) {
         d.power.clam.lock().unwrap().busy = false;
         return;
     };
+    let classification_operation = operation.clone();
     let worker_daemon = d.clone();
     let commit_daemon = d.clone();
     let rollback_daemon = d.clone();
@@ -2169,6 +2236,11 @@ async fn reconcile_unknown_acquire(d: &Arc<Daemon>) {
         Err(error) => Some(format!("ambiguous acquire worker failed: {error}")),
         _ => None,
     };
+    if committed {
+        if let Err(error) = Power::start_clamshell_renewal(d, Some(pending.armed_by)) {
+            Power::release_after_renewal_start_failure(d, &error);
+        }
+    }
     {
         let mut clam = d.power.clam.lock().unwrap();
         clam.busy = false;
@@ -2181,11 +2253,7 @@ async fn reconcile_unknown_acquire(d: &Arc<Daemon>) {
             }
         }
     }
-    if committed {
-        if let Err(error) = Power::start_clamshell_renewal(d) {
-            Power::release_after_renewal_start_failure(d, &error);
-        }
-    }
+    drop(classification_operation);
     if d.power.operations.accepting() {
         changed(d);
     }
@@ -2204,6 +2272,7 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
     let Some(operation) = d.power.operations.begin() else {
         return json!({ "ok": false, "error": "Jarvis завершает работу или power занят" });
     };
+    let classification_operation = operation.clone();
     {
         let mut clam = d.power.clam.lock().unwrap();
         if clam
@@ -2305,19 +2374,20 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
                 ));
             }
         }
-        clam.busy = false;
     }
     let result = match acquired {
-        Ok(Ok(AcquireDisposition::Committed)) => match Power::start_clamshell_renewal(d) {
-            Ok(()) => {
-                changed(d);
-                json!({ "ok": true })
+        Ok(Ok(AcquireDisposition::Committed)) => {
+            match Power::start_clamshell_renewal(d, Some(by)) {
+                Ok(()) => {
+                    changed(d);
+                    json!({ "ok": true })
+                }
+                Err(error) => {
+                    let error = Power::release_after_renewal_start_failure(d, &error);
+                    json!({ "ok": false, "error": error })
+                }
             }
-            Err(error) => {
-                let error = Power::release_after_renewal_start_failure(d, &error);
-                json!({ "ok": false, "error": error })
-            }
-        },
+        }
         other => {
             let error = match other {
                 Ok(Ok(AcquireDisposition::RolledBack)) => {
@@ -2344,6 +2414,8 @@ async fn arm(d: &Arc<Daemon>, by: &'static str) -> Value {
             }
         }
     };
+    d.power.clam.lock().unwrap().busy = false;
+    drop(classification_operation);
     clamshell_command_truth(&d.power.clam.lock().unwrap(), result)
 }
 
@@ -2450,7 +2522,7 @@ async fn disarm(d: &Arc<Daemon>) -> Value {
     d.power.clam.lock().unwrap().busy = false;
     drop(returned_operation);
     if restart_renewal {
-        if let Err(error) = Power::start_clamshell_renewal(d) {
+        if let Err(error) = Power::start_clamshell_renewal(d, None) {
             let error = Power::release_after_renewal_start_failure(d, &error);
             if d.power.operations.accepting() {
                 changed(d);
@@ -2855,6 +2927,7 @@ mod tests {
         LeaseReceipt {
             lease_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             owner_generation: "g".into(),
+            granted_ttl_ms: jarvis_power_core::protocol::DEFAULT_TTL_MS,
         }
     }
 
@@ -2862,6 +2935,7 @@ mod tests {
         LeaseReceipt {
             lease_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             owner_generation: "other".into(),
+            granted_ttl_ms: jarvis_power_core::protocol::DEFAULT_TTL_MS,
         }
     }
 
@@ -3310,6 +3384,7 @@ mod tests {
                     Ok::<_, ()>(LeaseReceipt {
                         lease_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                         owner_generation: "g".into(),
+                        granted_ttl_ms: jarvis_power_core::protocol::DEFAULT_TTL_MS,
                     }),
                     |_| panic!("closed acquire must not commit"),
                     |receipt| {
@@ -3397,7 +3472,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_late_rollback_still_opens_operation_barrier() {
+    fn failed_late_rollback_holds_operation_barrier_until_classified() {
         let operations = PowerOperations::default();
         let operation = operations.begin().unwrap();
         assert!(operations.close());
@@ -3409,7 +3484,12 @@ mod tests {
             |_| Err("rollback failed"),
         );
 
-        assert_eq!(result, Err("rollback failed"));
+        assert_eq!(result.as_ref().unwrap_err().error, "rollback failed");
+        assert!(
+            !operations.wait_for_idle(Duration::ZERO),
+            "failed rollback still requires caller-side classification"
+        );
+        drop(result);
         assert!(operations.wait_for_idle(Duration::ZERO));
     }
 

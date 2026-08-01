@@ -195,6 +195,31 @@ expect_rejected "PackageTrustVerifier production implementation outside host tru
 write_clean_fixture
 mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
 printf '%s\n' \
+  'pub use jarvis_package::PackageTrustVerifier as CrossRootTrust;' \
+  > "$fixture_root/src-tauri/src/plugins/trust/package.rs"
+printf '%s\n' \
+  'struct CrossRootAliasedVerifier;' \
+  'impl CrossRootTrust for CrossRootAliasedVerifier {}' \
+  > "$fixture_root/plugins/community/src/lib.rs"
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
+printf '%s\n' \
+  '#[macro_export]' \
+  'macro_rules! cross_root_verifier {' \
+  '    ($type:ty) => { impl PackageTrustVerifier for $type {} };' \
+  '}' \
+  > "$fixture_root/src-tauri/src/plugins/trust/package.rs"
+printf '%s\n' \
+  'struct CrossRootMacroVerifier;' \
+  'cross_root_verifier!(CrossRootMacroVerifier);' \
+  > "$fixture_root/plugins/community/src/lib.rs"
+expect_rejected "PackageTrustVerifier production implementation outside host trust adapter"
+
+write_clean_fixture
+mkdir -p "$fixture_root/src-tauri/src/plugins/trust"
+printf '%s\n' \
   'struct CatalogVerifier;' \
   'impl PackageTrustVerifier for CatalogVerifier {}' \
   > "$fixture_root/src-tauri/src/plugins/trust/package.rs"

@@ -11,8 +11,10 @@ mod jcs;
 #[cfg_attr(not(test), allow(dead_code))]
 mod pack;
 #[cfg(target_os = "macos")]
+#[cfg_attr(not(test), allow(dead_code))]
 mod source;
 #[cfg(target_os = "macos")]
+#[cfg_attr(not(test), allow(dead_code))]
 mod spool;
 
 pub use pack::{PackOptions, PackageDocumentAdapter, PackageError, PackageSignatureSource};

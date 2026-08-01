@@ -44,6 +44,18 @@ impl PackageError {
         }
     }
 
+    pub(crate) fn source_invalid() -> Self {
+        Self {
+            code: "source_invalid",
+        }
+    }
+
+    pub(crate) fn source_raced() -> Self {
+        Self {
+            code: "source_raced",
+        }
+    }
+
     pub fn code(&self) -> &'static str {
         self.code
     }

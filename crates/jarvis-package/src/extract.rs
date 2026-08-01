@@ -212,7 +212,7 @@ where
     };
     verifier
         .verify(&observation)
-        .map_err(|_| PackageError::package_trust())?;
+        .map_err(|error| PackageError::package_trust(error.code()))?;
     if FileIdentity::archive(&archive)? != identity {
         return Err(PackageError::archive_changed_after_verification());
     }

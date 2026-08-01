@@ -124,10 +124,8 @@ impl PackageError {
         }
     }
 
-    pub(crate) fn package_trust() -> Self {
-        Self {
-            code: "package_trust",
-        }
+    pub(crate) fn package_trust(code: &'static str) -> Self {
+        Self { code }
     }
 
     pub(crate) fn archive_changed_after_verification() -> Self {

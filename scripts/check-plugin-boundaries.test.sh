@@ -29,6 +29,14 @@ run_fixture_trust_scan() {
       --target-sources-stdin0
 }
 
+run_fixture_source_scan() {
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    --trust-roots \
+    "$fixture_root/crates" \
+    "$fixture_root/plugins" \
+    "$fixture_root/src-tauri"
+}
+
 write_clean_fixture() {
   rm -rf -- \
     "$fixture_root/cargo-target" \
@@ -1128,6 +1136,114 @@ printf '%s\n' \
   >> "$fixture_root/crates/jarvis-package/src/lib.rs"
 expect_cargo_accepts_private_source
 expect_rejected "jarvis-package source discovery escape"
+
+write_clean_fixture
+printf '%s\n' \
+  '#[allow(unsafe_code)]' \
+  'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/src/escaped.inc"
+printf '%s\n' \
+  'macro_rules! alias {' \
+  '    ($macro_name:ident, $alias_name:ident) => {' \
+  '        use std::$macro_name as $alias_name;' \
+  '    };' \
+  '}' \
+  'alias!(include, hidden_source);' \
+  'hidden_source!("escaped.inc");' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+expect_cargo_accepts_private_source
+expect_rejected "jarvis-package source discovery escape"
+
+write_clean_fixture
+mkdir -p "$fixture_root/external-source/src"
+printf '%s\n' \
+  '[package]' \
+  'name = "source-alias"' \
+  'version = "0.1.0"' \
+  'edition = "2021"' \
+  > "$fixture_root/external-source/Cargo.toml"
+printf '%s\n' \
+  'pub use std::include as hidden_source;' \
+  > "$fixture_root/external-source/src/lib.rs"
+printf '%s\n' \
+  '#[allow(unsafe_code)]' \
+  'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/src/escaped.inc"
+printf '%s\n' \
+  '' \
+  '[dependencies]' \
+  'source-alias = { path = "../../external-source" }' \
+  >> "$fixture_root/crates/jarvis-package/Cargo.toml"
+printf '%s\n' \
+  'use source_alias::hidden_source;' \
+  'hidden_source!("escaped.inc");' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+expect_cargo_accepts_private_source
+expect_rejected "jarvis-package source discovery escape"
+
+write_clean_fixture
+printf '%s\n' \
+  '#[allow(unsafe_code)]' \
+  'pub fn escaped() { unsafe { std::ptr::read_volatile(&0_u8); } }' \
+  > "$fixture_root/crates/jarvis-package/src/escaped.inc"
+for ((alias_index = 2999; alias_index > 0; alias_index -= 1)); do
+  printf 'use alias_%d as alias_%d;\n' \
+    "$((alias_index - 1))" \
+    "$alias_index" \
+    >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+done
+printf '%s\n' \
+  'use std::include as alias_0;' \
+  'alias_2999!("escaped.inc");' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+reverse_alias_scan="$(run_fixture_source_scan)"
+reverse_alias_path="$(
+  node -e 'console.log(require("node:path").resolve(process.argv[1]))' \
+    "$fixture_root/crates/jarvis-package/src/lib.rs"
+)"
+if [[ "$reverse_alias_scan" != *$'source\t'"$reverse_alias_path:"*$'\tinclude! source expansion'* ]]; then
+  echo "trust scanner missed the bounded reverse alias stress chain" >&2
+  echo "$reverse_alias_scan" >&2
+  exit 1
+fi
+
+write_clean_fixture
+for ((alias_index = 0; alias_index <= 4096; alias_index += 1)); do
+  printf 'use source_%d as alias_%d;\n' \
+    "$alias_index" \
+    "$alias_index" \
+    >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+done
+alias_edge_budget_output=""
+if alias_edge_budget_output="$(run_fixture_source_scan 2>&1)"; then
+  echo "trust scanner accepted an oversized use-alias graph" >&2
+  exit 1
+fi
+if [[ "$alias_edge_budget_output" != *"Rust use-alias graph exceeds 4096 edges"* ]]; then
+  echo "trust scanner did not fail closed at the use-alias edge budget" >&2
+  echo "$alias_edge_budget_output" >&2
+  exit 1
+fi
+
+write_clean_fixture
+for ((alias_index = 4094; alias_index >= 0; alias_index -= 1)); do
+  printf 'use alias_%d as alias_%d;\n' \
+    "$alias_index" \
+    "$((alias_index + 1))" \
+    >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+done
+printf '%s\n' 'use std::include as alias_0;' \
+  >> "$fixture_root/crates/jarvis-package/src/lib.rs"
+alias_work_budget_output=""
+if alias_work_budget_output="$(run_fixture_source_scan 2>&1)"; then
+  echo "trust scanner accepted an oversized use-alias closure" >&2
+  exit 1
+fi
+if [[ "$alias_work_budget_output" != *"Rust use-alias closure exceeds 8192 work units"* ]]; then
+  echo "trust scanner did not fail closed at the use-alias work budget" >&2
+  echo "$alias_work_budget_output" >&2
+  exit 1
+fi
 
 write_clean_fixture
 printf '%s\n' \

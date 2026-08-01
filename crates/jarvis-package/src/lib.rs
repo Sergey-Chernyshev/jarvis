@@ -4,5 +4,7 @@
 #[allow(unsafe_code)]
 mod macos_dir;
 
+mod jcs;
+
 #[cfg(test)]
 mod dependency_msrv;

@@ -120,6 +120,39 @@ run_mock_production() {
     bash "$build_script" --production
 }
 
+assert_rejected_preserves_final() {
+  local case_name="$1"
+  local identity="$2"
+  local signed_team="$3"
+  local mode="$4"
+  local accepted_message="$5"
+  local output="$test_root/$case_name-helper"
+  local expected_output="$test_root/$case_name.expected"
+  local log_file="$test_root/$case_name.log"
+
+  printf 'existing verified artifact\0case=%s\n' "$case_name" >"$expected_output"
+  cp "$expected_output" "$output"
+  if run_mock_production \
+    "$output" \
+    "$identity" \
+    "$signed_team" \
+    "$mode" \
+    "$log_file"; then
+    record_failure "$accepted_message"
+  fi
+  if ! cmp -s "$expected_output" "$output"; then
+    record_failure "$case_name rejection changed the previous final output"
+  fi
+  if find "$test_root" \
+    -maxdepth 1 \
+    -name ".$case_name-helper.stage.*" \
+    -print \
+    -quit |
+    rg -q .; then
+    record_failure "$case_name rejection left staging or requirement residue"
+  fi
+}
+
 adhoc_log="$test_root/adhoc.log"
 if run_mock_production \
   "$test_root/adhoc-helper" \
@@ -130,15 +163,33 @@ if run_mock_production \
   record_failure "production signing accepted the ad-hoc identity"
 fi
 
-wrong_team_log="$test_root/wrong-team.log"
-if run_mock_production \
-  "$test_root/wrong-team-helper" \
+assert_rejected_preserves_final \
+  "wrong-team" \
   "Developer ID Application: Wrong Team (ZZZZZZZZZZ)" \
   ZZZZZZZZZZ \
-  valid \
-  "$wrong_team_log"; then
-  record_failure "production signing accepted a different TeamIdentifier"
-fi
+  "valid" \
+  "production signing accepted a different TeamIdentifier"
+
+assert_rejected_preserves_final \
+  "wrong-chain" \
+  "Developer ID Application: Jarvis Test ($expected_team)" \
+  "$expected_team" \
+  "wrong-chain" \
+  "production signing accepted a helper with the wrong certificate chain"
+
+assert_rejected_preserves_final \
+  "requirement-mismatch" \
+  "Developer ID Application: Jarvis Test ($expected_team)" \
+  "$expected_team" \
+  "requirement-mismatch" \
+  "production signing accepted a mismatched embedded designated requirement"
+
+assert_rejected_preserves_final \
+  "post-sign-adhoc" \
+  "Developer ID Application: Jarvis Test ($expected_team)" \
+  "$expected_team" \
+  "adhoc-display" \
+  "production signing accepted post-sign ad-hoc evidence"
 
 preserved_output="$test_root/preserved-helper"
 printf 'existing verified artifact\n' >"$preserved_output"

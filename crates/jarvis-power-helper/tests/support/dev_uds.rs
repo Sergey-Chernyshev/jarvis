@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -800,6 +800,40 @@ fn listener_publication_follows_recovery_and_scheduler_acknowledgement() {
     assert!(startup < armed);
     assert!(armed < published);
     drop(listener);
+}
+
+#[test]
+fn listener_drop_removes_the_public_name_but_retains_an_owned_quarantine_residue() {
+    let harness = DevHarness::new();
+    let listener = bind_listener(
+        &harness.runtime.listener_permit(),
+        &harness.root,
+        current_uid(),
+        harness.sink.clone(),
+    )
+    .unwrap();
+    let run = harness.jarvis_dir.join("run");
+    let public_socket = run.join(DEV_SOCKET_FILE);
+    assert!(public_socket.exists());
+    drop(listener);
+    assert!(!public_socket.exists());
+
+    let residues = fs::read_dir(&run)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".power-helper-dev.cleanup-"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(residues.len(), 1);
+    let metadata = fs::symlink_metadata(&residues[0]).unwrap();
+    assert!(metadata.file_type().is_socket());
+    assert_eq!(metadata.mode() & 0o7777, 0o600);
+    assert_eq!(metadata.uid(), current_uid());
+    assert_eq!(metadata.gid(), current_gid());
+    assert_eq!(metadata.nlink(), 1);
 }
 
 #[test]

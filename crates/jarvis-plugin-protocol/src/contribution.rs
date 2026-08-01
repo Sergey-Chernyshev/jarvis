@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::manifest::{
     ActionLocation, CommandPlacement, HotkeyScope, InstancePolicy, PagePlacement, Risk,
 };
-use crate::validation::is_safe_opaque_identifier;
+use crate::validation::{is_canonical_dotted_id, is_safe_opaque_identifier};
 
 const MAX_CONTRIBUTION_ID_BYTES: usize = 128;
 const MAX_TITLE_BYTES: usize = 256;
@@ -23,8 +23,7 @@ impl ContributionId {
         let value = value.into();
         if value.is_empty()
             || value.len() > MAX_CONTRIBUTION_ID_BYTES
-            || !value.contains('.')
-            || !value.split('.').all(valid_segment)
+            || !is_canonical_dotted_id(&value, false)
         {
             return Err("invalid contribution id");
         }
@@ -169,9 +168,9 @@ where
     if value.is_empty()
         || value.len() > MAX_CONTRIBUTION_ID_BYTES
         || !is_safe_opaque_identifier(&value)
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
-        })
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'/' | b'-'))
     {
         return Err(de::Error::custom("invalid context reference"));
     }
@@ -222,15 +221,4 @@ where
         return Err(de::Error::custom("invalid contribution placements"));
     }
     Ok(values)
-}
-
-fn valid_segment(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    let Some(first) = bytes.next() else {
-        return false;
-    };
-    first.is_ascii_lowercase()
-        && bytes.all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-        })
 }

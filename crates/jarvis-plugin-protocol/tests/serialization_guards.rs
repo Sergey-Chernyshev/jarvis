@@ -1,12 +1,9 @@
-use jarvis_plugin_protocol::bridge::{
-    BridgeError, BridgeRequest, Hello, Welcome, BRIDGE_PROTOCOL_V1,
-};
+use jarvis_plugin_protocol::bridge::{BridgeRequest, Hello, Welcome, BRIDGE_PROTOCOL_V1};
 use jarvis_plugin_protocol::broker::{ContractRef, EntityQuery};
 use jarvis_plugin_protocol::contribution::{
     ContributionId, ResolvedContributions, ResolvedPageContribution,
 };
 use jarvis_plugin_protocol::manifest::{InstancePolicy, PagePlacement};
-use jarvis_plugin_protocol::settings::{SettingKey, SettingRecord, SettingScope, SettingValue};
 use semver::Version;
 use serde::Serialize;
 use serde_json::json;
@@ -36,14 +33,6 @@ fn public_dtos_refuse_to_serialize_values_that_the_wire_rejects() {
         generation: 1,
         grants: Vec::new(),
     });
-    assert_serialize_rejected(&BridgeError {
-        v: BRIDGE_PROTOCOL_V1,
-        id: Some("request/01".to_owned()),
-        generation: 1,
-        code: "sql_error".to_owned(),
-        message: Some("SELECT * FROM secrets at /Users/alice/private.db".to_owned()),
-        correlation_id: None,
-    });
     assert_serialize_rejected(&ContractRef {
         id: "dev_example.plugin/runtime".to_owned(),
         version: Version::parse("1.0.0").unwrap(),
@@ -72,16 +61,7 @@ fn public_dtos_refuse_to_serialize_values_that_the_wire_rejects() {
         ],
         ..ResolvedContributions::default()
     });
-    assert_serialize_rejected(&SettingValue::String {
-        value: "x".repeat(65_537),
-    });
-    assert_serialize_rejected(&SettingRecord {
-        key: SettingKey::new("dev.example.theme").unwrap(),
-        scope: SettingScope::User,
-        project_id: Some("project/01".to_owned()),
-        value: SettingValue::Boolean { value: true },
-        revision: 1,
-    });
+    assert!(jarvis_plugin_protocol::settings::SettingValue::string("x".repeat(65_537)).is_err());
 }
 
 fn assert_serialize_rejected(value: &impl Serialize) {

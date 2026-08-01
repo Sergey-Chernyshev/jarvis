@@ -19,7 +19,7 @@ impl OperationRef {
             || value.len() > MAX_OPERATION_REF_BYTES
             || !is_safe_opaque_identifier(&value)
             || !value.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'/' | b'-')
             })
         {
             return Err("invalid operation ref");

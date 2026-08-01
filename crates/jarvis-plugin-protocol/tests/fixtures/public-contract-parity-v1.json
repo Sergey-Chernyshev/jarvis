@@ -92,17 +92,6 @@
       }
     },
     {
-      "name": "contract ref accepts an A2 single-segment plugin namespace",
-      "schema": "broker",
-      "target": "ContractRef",
-      "valid": true,
-      "value": {
-        "id": "example/runtime",
-        "version": "1.2.3",
-        "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-      }
-    },
-    {
       "name": "contract ref rejects an underscore that A2 rejects",
       "schema": "broker",
       "target": "ContractRef",

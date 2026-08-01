@@ -9,13 +9,12 @@ fn user_and_project_settings_bind_scope_revision_and_expected_revision() {
     let user: SettingRecord = serde_json::from_value(json!({
         "key": "dev.example.owner.theme",
         "scope": "user",
-        "projectId": null,
         "value": {"type": "string", "value": "dark"},
         "revision": 3
     }))
     .unwrap();
-    assert_eq!(user.scope, SettingScope::User);
-    assert_eq!(user.revision, 3);
+    assert_eq!(user.scope(), SettingScope::User);
+    assert_eq!(user.revision(), 3);
 
     let project: SettingWrite = serde_json::from_value(json!({
         "key": "dev.example.owner.runtime-token",
@@ -28,8 +27,8 @@ fn user_and_project_settings_bind_scope_revision_and_expected_revision() {
         "expectedRevision": 4
     }))
     .unwrap();
-    assert_eq!(project.scope, SettingScope::Project);
-    assert_eq!(project.expected_revision, 4);
+    assert_eq!(project.scope(), SettingScope::Project);
+    assert_eq!(project.expected_revision(), 4);
 
     let change = SettingChange {
         cursor: 9,
@@ -75,7 +74,6 @@ fn setting_key_is_namespaced_bounded_and_unknown_identity_is_rejected() {
     let error = serde_json::from_value::<SettingWrite>(json!({
         "key": "dev.example.owner.theme",
         "scope": "user",
-        "projectId": null,
         "value": {"type": "string", "value": "dark"},
         "expectedRevision": 4,
         "pluginId": "dev.victim"

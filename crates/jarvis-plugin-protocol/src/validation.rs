@@ -2,17 +2,21 @@ use schemars::r#gen::SchemaGenerator;
 use schemars::schema::{ArrayValidation, Schema, SchemaObject, SingleOrVec, StringValidation};
 use schemars::JsonSchema;
 
-const OPAQUE_ID_PATTERN: &str = r"^(?!/)(?!~/)(?![A-Za-z]:[/\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\.|\.\.)(?:/|$))[A-Za-z0-9._:/@-]+$";
-const OPAQUE_ID_NO_AT_PATTERN: &str = r"^(?!/)(?!~/)(?![A-Za-z]:[/\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\.|\.\.)(?:/|$))[A-Za-z0-9._:/-]+$";
-const CONTRACT_ID_PATTERN: &str = r"^(?!/)(?!~/)(?![A-Za-z]:[/\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\.|\.\.)(?:/|$))(?=[^/]*\.)[a-z0-9._-]+/[a-z0-9._-]+$";
-const NAMESPACED_KEY_PATTERN: &str = r"^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)+$";
+const OPAQUE_ID_PATTERN: &str = r"^(?!/)(?!~/)(?![A-Za-z]:[/\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\.|\.\.)(?:/|$))(?!.*\/$)[A-Za-z0-9._/@-]+$";
+const OPAQUE_ID_NO_AT_PATTERN: &str = r"^(?!/)(?!~/)(?![A-Za-z]:[/\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\.|\.\.)(?:/|$))(?!.*\/$)[A-Za-z0-9._/-]+$";
+const CONTRACT_ID_PATTERN: &str = r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$";
+const NAMESPACED_KEY_PATTERN: &str =
+    r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$";
 const BRIDGE_NAMESPACE_PATTERN: &str = r"^[a-z0-9._-]+$";
-const PLUGIN_ID_PATTERN: &str = r"^(?=.*\.)[a-z0-9._-]+$";
+const PLUGIN_ID_PATTERN: &str =
+    r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$";
 const SHA256_DIGEST_PATTERN: &str = r"^sha256:[0-9a-f]{64}$";
 
 pub(crate) fn is_safe_opaque_identifier(value: &str) -> bool {
     if value.starts_with('/')
         || value.starts_with("~/")
+        || value.ends_with('/')
+        || value.contains(':')
         || value.contains("//")
         || has_windows_drive_prefix(value)
         || has_path_uri_scheme(value)
@@ -25,6 +29,35 @@ pub(crate) fn is_safe_opaque_identifier(value: &str) -> bool {
         .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
 }
 
+pub(crate) fn is_canonical_segment(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit()
+        || !bytes[bytes.len() - 1].is_ascii_lowercase() && !bytes[bytes.len() - 1].is_ascii_digit()
+    {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
+pub(crate) fn is_canonical_dotted_id(value: &str, allow_single: bool) -> bool {
+    if value.is_empty() || (!allow_single && !value.contains('.')) {
+        return false;
+    }
+    value.split('.').all(is_canonical_segment)
+}
+
+pub(crate) fn is_canonical_contract_name(value: &str) -> bool {
+    let Some((namespace, contract)) = value.split_once('/') else {
+        return false;
+    };
+    !contract.contains('/')
+        && is_canonical_dotted_id(namespace, false)
+        && is_canonical_dotted_id(contract, true)
+}
+
 pub(crate) fn opaque_id_128_schema(generator: &mut SchemaGenerator) -> Schema {
     string_schema(generator, 128, OPAQUE_ID_PATTERN)
 }
@@ -35,10 +68,6 @@ pub(crate) fn opaque_id_128_no_at_schema(generator: &mut SchemaGenerator) -> Sch
 
 pub(crate) fn optional_opaque_id_128_schema(generator: &mut SchemaGenerator) -> Schema {
     optional_string_schema(generator, 128, OPAQUE_ID_PATTERN)
-}
-
-pub(crate) fn optional_opaque_id_128_no_at_schema(generator: &mut SchemaGenerator) -> Schema {
-    optional_string_schema(generator, 128, OPAQUE_ID_NO_AT_PATTERN)
 }
 
 pub(crate) fn opaque_id_256_schema(generator: &mut SchemaGenerator) -> Schema {
@@ -67,6 +96,15 @@ pub(crate) fn plugin_id_128_schema(generator: &mut SchemaGenerator) -> Schema {
 
 pub(crate) fn sha256_digest_schema(generator: &mut SchemaGenerator) -> Schema {
     string_schema(generator, 71, SHA256_DIGEST_PATTERN)
+}
+
+pub(crate) fn setting_string_65536_schema(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema: SchemaObject = <String>::json_schema(generator).into();
+    let validation = schema
+        .string
+        .get_or_insert_with(|| Box::new(StringValidation::default()));
+    validation.max_length = Some(65_536);
+    schema.into()
 }
 
 pub(crate) fn opaque_ids_256_schema(generator: &mut SchemaGenerator) -> Schema {

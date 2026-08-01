@@ -30,7 +30,6 @@ export const bridgeError: BridgeHostFrame = {
   correlationId: "correlation/01",
   generation: 7,
   id: "request/01",
-  message: "request denied",
   type: "error",
   v: 1,
 };

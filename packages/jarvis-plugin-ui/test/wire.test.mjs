@@ -34,7 +34,6 @@ test("Rust and Node consume the same exact bridge golden frames", async () => {
     "correlationId",
     "generation",
     "id",
-    "message",
     "type",
     "v",
   ]);

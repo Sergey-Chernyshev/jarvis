@@ -1,12 +1,14 @@
 use schemars::JsonSchema;
 use semver::Version;
 use serde::de;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::ser;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
+use crate::error::PublicErrorCode;
 use crate::manifest::Risk;
 use crate::operation::OperationRef;
-use crate::validation::is_safe_opaque_identifier;
+use crate::validation::{is_canonical_contract_name, is_safe_opaque_identifier};
 
 pub const MAX_ENTITY_BYTES: usize = 256 * 1024;
 pub const MAX_EVENT_BYTES: usize = 128 * 1024;
@@ -16,16 +18,20 @@ pub const MAX_PROJECTION_FIELDS: usize = 64;
 const MAX_CONTRACT_ID_BYTES: usize = 256;
 const MAX_ID_BYTES: usize = 256;
 const MAX_PHASE_BYTES: usize = 128;
-const MAX_ERROR_MESSAGE_BYTES: usize = 1024;
-
 #[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContractRef {
-    #[serde(deserialize_with = "deserialize_contract_id")]
+    #[serde(
+        deserialize_with = "deserialize_contract_id",
+        serialize_with = "serialize_contract_id"
+    )]
     #[schemars(schema_with = "crate::validation::contract_id_256_schema")]
     pub id: String,
     pub version: Version,
-    #[serde(deserialize_with = "deserialize_digest")]
+    #[serde(
+        deserialize_with = "deserialize_digest",
+        serialize_with = "serialize_digest"
+    )]
     #[schemars(schema_with = "crate::validation::sha256_digest_schema")]
     pub schema_digest: String,
 }
@@ -210,11 +216,7 @@ pub enum RuntimeOperationState {
 #[derive(Clone, Debug, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeOperationError {
-    #[serde(deserialize_with = "deserialize_state")]
-    #[schemars(schema_with = "crate::validation::opaque_id_128_schema")]
-    pub code: String,
-    #[serde(default, deserialize_with = "deserialize_optional_error_message")]
-    pub message: Option<String>,
+    pub code: PublicErrorCode,
 }
 
 #[derive(Clone, Debug, PartialEq, JsonSchema, Serialize, Deserialize)]
@@ -384,23 +386,7 @@ where
     D: Deserializer<'de>,
 {
     let value = String::deserialize(deserializer)?;
-    if value.is_empty() || value.len() > MAX_CONTRACT_ID_BYTES || !is_safe_opaque_identifier(&value)
-    {
-        return Err(de::Error::custom("invalid contract id"));
-    }
-    let Some((namespace, name)) = value.split_once('/') else {
-        return Err(de::Error::custom("invalid contract id"));
-    };
-    if namespace.is_empty()
-        || name.is_empty()
-        || name.contains('/')
-        || !namespace.contains('.')
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'_' | b'/' | b'-')
-        })
-    {
+    if value.len() > MAX_CONTRACT_ID_BYTES || !is_canonical_contract_name(&value) {
         return Err(de::Error::custom("invalid contract id"));
     }
     Ok(value)
@@ -617,20 +603,33 @@ where
     Ok(value)
 }
 
-fn deserialize_optional_error_message<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+fn serialize_contract_id<S>(value: &String, serializer: S) -> Result<S::Ok, S::Error>
 where
-    D: Deserializer<'de>,
+    S: Serializer,
 {
-    Option::<String>::deserialize(deserializer)?
-        .map(|value| {
-            if value.len() <= MAX_ERROR_MESSAGE_BYTES && !value.chars().any(char::is_control) {
-                Ok(value)
-            } else {
-                Err("invalid operation error message")
-            }
+    if value.len() > MAX_CONTRACT_ID_BYTES || !is_canonical_contract_name(value) {
+        return Err(ser::Error::custom("invalid contract id"));
+    }
+    value.serialize(serializer)
+}
+
+fn serialize_digest<S>(value: &String, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let valid = value
+        .strip_prefix("sha256:")
+        .map(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         })
-        .transpose()
-        .map_err(de::Error::custom)
+        .unwrap_or(false);
+    if !valid {
+        return Err(ser::Error::custom("invalid schema digest"));
+    }
+    value.serialize(serializer)
 }
 
 fn validate_token(value: String, maximum_bytes: usize) -> Result<String, &'static str> {
@@ -638,7 +637,7 @@ fn validate_token(value: String, maximum_bytes: usize) -> Result<String, &'stati
         || value.len() > maximum_bytes
         || !is_safe_opaque_identifier(&value)
         || !value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-' | b'@')
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'/' | b'-' | b'@')
         })
     {
         return Err("invalid broker token");

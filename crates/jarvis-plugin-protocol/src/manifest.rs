@@ -9,6 +9,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use unicode_normalization::UnicodeNormalization;
 
+use crate::validation::{
+    is_canonical_dotted_id as valid_dotted_id, is_canonical_segment as valid_segment,
+};
+
 pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
 pub const PLUGIN_API_VERSION: u32 = 2;
 pub const MANIFEST_PROCESS_PROTOCOL: u32 = 2;
@@ -162,7 +166,7 @@ impl ContractId {
         };
         if value.len() > 256
             || !valid_dotted_id(namespace, false)
-            || !contract.split('.').all(valid_segment)
+            || !valid_dotted_id(contract, true)
             || Version::parse(version).is_err()
         {
             return Err(ManifestError::Schema);
@@ -1375,26 +1379,6 @@ where
         return Err(ManifestError::Schema);
     }
     Ok(())
-}
-
-fn valid_dotted_id(value: &str, allow_single: bool) -> bool {
-    if value.is_empty() || (!allow_single && !value.contains('.')) {
-        return false;
-    }
-    value.split('.').all(valid_segment)
-}
-
-fn valid_segment(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.is_empty()
-        || !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit()
-        || !bytes[bytes.len() - 1].is_ascii_lowercase() && !bytes[bytes.len() - 1].is_ascii_digit()
-    {
-        return false;
-    }
-    bytes
-        .iter()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
 fn valid_relative_path(value: &str) -> bool {

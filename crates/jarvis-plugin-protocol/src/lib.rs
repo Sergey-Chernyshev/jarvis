@@ -3,6 +3,7 @@
 pub mod bridge;
 pub mod broker;
 pub mod contribution;
+pub mod error;
 pub mod manifest;
 pub mod operation;
 pub mod process;

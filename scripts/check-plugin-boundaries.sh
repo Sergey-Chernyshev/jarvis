@@ -203,15 +203,24 @@ done
 trust_scan=""
 if [[ "${#trust_roots[@]}" -gt 0 ]] && ! trust_scan="$(
   node "$script_dir/scan-rust-unsafe-boundary.mjs" \
-    --trust-roots "${trust_roots[@]}" \
-    | awk -F '\t' '$1 == "trust" || $1 == "trust-test" { print }'
+    --trust-roots "${trust_roots[@]}"
 )"; then
   echo "failed to scan PackageTrustVerifier ownership roots" >&2
   failed=1
   trust_scan=""
 fi
+trust_source_escapes="$(
+  printf '%s\n' "$trust_scan" \
+    | awk -F '\t' '$1 == "source" { print $2 " (" $3 ")" }'
+)"
+report_matches \
+  "PackageTrustVerifier source discovery escape:" \
+  "$trust_source_escapes"
 disallowed_trust=""
 while IFS=$'\t' read -r kind match; do
+  if [[ "$kind" != "trust" && "$kind" != "trust-test" ]]; then
+    continue
+  fi
   [[ -z "$match" ]] && continue
   match_path="${match%%:*}"
   if [[ "$match_path" == "$allowed_trust_verifier" ]]; then

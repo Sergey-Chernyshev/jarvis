@@ -8,7 +8,7 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 const MAX_DISCOVERY_ENTRIES = 200_000;
 const MAX_RUST_FILES = 20_000;
@@ -232,8 +232,21 @@ function lexRust(source) {
       character === '"' ||
       ((character === 'b' || character === 'c') && next === '"')
     ) {
+      const tokenLine = line;
       const quoteOffset = character === '"' ? offset : offset + 1;
       const skipped = skipQuoted(source, quoteOffset, '"', line);
+      if (
+        character === '"' &&
+        skipped.offset > quoteOffset &&
+        source[skipped.offset - 1] === '"'
+      ) {
+        tokens.push({
+          kind: 'string',
+          value: source.slice(quoteOffset + 1, skipped.offset - 1),
+          raw: false,
+          line: tokenLine,
+        });
+      }
       offset = skipped.offset;
       line = skipped.line;
       continue;
@@ -343,16 +356,42 @@ function unsafeLintAttributes(tokens) {
   return lines;
 }
 
-function sourceDiscoveryViolations(tokens) {
+function isCoveredTrustSource(file, literal, discoveredFiles) {
+  if (
+    !trustRootsMode ||
+    literal?.kind !== 'string' ||
+    literal.value.includes('\\')
+  ) {
+    return false;
+  }
+  const candidate = resolve(dirname(file), literal.value);
+  let candidateInfo;
+  try {
+    candidateInfo = lstatSync(candidate);
+  } catch {
+    return false;
+  }
+  return (
+    !candidateInfo.isSymbolicLink() &&
+    candidateInfo.isFile() &&
+    discoveredFiles.has(realpathSync(candidate))
+  );
+}
+
+function sourceDiscoveryViolations(tokens, file, discoveredFiles) {
   const violations = [];
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (
       token.kind === 'identifier' &&
-      !token.raw &&
       token.value === 'include' &&
       tokens[index + 1]?.value === '!'
     ) {
+      const opener = tokens[index + 2]?.value;
+      const literal = ['(', '[', '{'].includes(opener)
+        ? tokens[index + 3]
+        : undefined;
+      if (isCoveredTrustSource(file, literal, discoveredFiles)) continue;
       violations.push({ line: token.line, reason: 'include! source expansion' });
     }
   }
@@ -361,10 +400,14 @@ function sourceDiscoveryViolations(tokens) {
       const token = tokens[index];
       if (
         token.kind === 'identifier' &&
-        !token.raw &&
         token.value === 'path' &&
         tokens[index + 1]?.value === '='
       ) {
+        if (
+          isCoveredTrustSource(file, tokens[index + 2], discoveredFiles)
+        ) {
+          continue;
+        }
         violations.push({ line: token.line, reason: 'custom #[path] source' });
       }
     }
@@ -650,7 +693,11 @@ const verifierMacroNames = packageTrustVerifierMacroNames(
   verifierNames,
 );
 for (const { file, tokens } of tokenizedFiles) {
-  for (const violation of sourceDiscoveryViolations(tokens)) {
+  for (const violation of sourceDiscoveryViolations(
+    tokens,
+    file,
+    discoveredFiles,
+  )) {
     process.stdout.write(`source\t${file}:${violation.line}\t${violation.reason}\n`);
   }
   for (const line of unsafeLintAttributes(tokens)) {

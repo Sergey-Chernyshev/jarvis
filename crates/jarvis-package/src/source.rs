@@ -77,6 +77,12 @@ struct SourceDirectory {
     identity: SourceIdentity,
 }
 
+struct PendingDirectory {
+    name: OsString,
+    path: String,
+    identity: SourceIdentity,
+}
+
 struct SourceBudget {
     limits: ArchiveLimits,
     payload_files: u64,
@@ -84,6 +90,7 @@ struct SourceBudget {
     projected_physical_bytes: u64,
     namespace_nodes: u64,
     namespace_stored_bytes: u64,
+    retained_listing_bytes: u64,
     plugin_json_present: bool,
 }
 
@@ -109,6 +116,7 @@ impl SourceBudget {
             projected_physical_bytes,
             namespace_nodes: 0,
             namespace_stored_bytes: 0,
+            retained_listing_bytes: 0,
             plugin_json_present: false,
         })
     }
@@ -120,9 +128,57 @@ impl SourceBudget {
     }
 
     fn remaining_namespace_stored_bytes(&self) -> u64 {
-        self.limits
-            .max_namespace_stored_bytes
-            .saturating_sub(self.namespace_stored_bytes)
+        self.limits.max_namespace_stored_bytes.saturating_sub(
+            self.namespace_stored_bytes
+                .saturating_add(self.retained_listing_bytes),
+        )
+    }
+
+    fn directory_name_charge(name: &OsStr) -> Result<u64, PackageError> {
+        u64::try_from(name.as_encoded_bytes().len())
+            .map_err(|_| PackageError::archive_quota())?
+            .checked_add(SOURCE_NAMESPACE_NODE_ALLOCATION_CHARGE)
+            .ok_or_else(PackageError::archive_quota)
+    }
+
+    fn retain_directory_names(&mut self, names: &[OsString]) -> Result<(), PackageError> {
+        let listing_bytes = names.iter().try_fold(0_u64, |total, name| {
+            total
+                .checked_add(Self::directory_name_charge(name)?)
+                .ok_or_else(PackageError::archive_quota)
+        })?;
+        let retained_listing_bytes = self
+            .retained_listing_bytes
+            .checked_add(listing_bytes)
+            .ok_or_else(PackageError::archive_quota)?;
+        let retained_bytes = self
+            .namespace_stored_bytes
+            .checked_add(retained_listing_bytes)
+            .ok_or_else(PackageError::archive_quota)?;
+        if retained_bytes > self.limits.max_namespace_stored_bytes {
+            return Err(PackageError::archive_quota());
+        }
+        self.retained_listing_bytes = retained_listing_bytes;
+        Ok(())
+    }
+
+    fn release_directory_name(&mut self, name: &OsStr) -> Result<(), PackageError> {
+        self.retained_listing_bytes = self
+            .retained_listing_bytes
+            .checked_sub(Self::directory_name_charge(name)?)
+            .ok_or_else(PackageError::source_invalid)?;
+        Ok(())
+    }
+
+    fn ensure_namespace_storage(&self) -> Result<(), PackageError> {
+        let retained_bytes = self
+            .namespace_stored_bytes
+            .checked_add(self.retained_listing_bytes)
+            .ok_or_else(PackageError::archive_quota)?;
+        if retained_bytes > self.limits.max_namespace_stored_bytes {
+            return Err(PackageError::archive_quota());
+        }
+        Ok(())
     }
 
     fn record_file(&mut self, path: &PackagePath, size: u64) -> Result<(), PackageError> {
@@ -191,13 +247,13 @@ impl SourceBudget {
             .namespace_stored_bytes
             .checked_add(charge)
             .ok_or_else(PackageError::archive_quota)?;
-        if self.namespace_stored_bytes > self.limits.max_namespace_stored_bytes {
-            return Err(PackageError::archive_quota());
-        }
-        Ok(())
+        self.ensure_namespace_storage()
     }
 
     fn finish(&self) -> Result<(), PackageError> {
+        if self.retained_listing_bytes != 0 {
+            return Err(PackageError::source_invalid());
+        }
         if !self.plugin_json_present {
             return Err(PackageError::source_invalid());
         }
@@ -312,9 +368,11 @@ fn enumerate_directory(
     else {
         return Err(PackageError::archive_quota());
     };
+    budget.retain_directory_names(&names)?;
     names.sort_by(|left, right| left.as_encoded_bytes().cmp(right.as_encoded_bytes()));
 
-    for name in names {
+    let mut child_directories = Vec::new();
+    for name in names.drain(..) {
         let name_text = unicode_name(&name)?;
         let path_text = if prefix.is_empty() {
             name_text.to_owned()
@@ -331,27 +389,16 @@ fn enumerate_directory(
                 let identity = identity.validate_regular()?;
                 let size =
                     u64::try_from(identity.size).map_err(|_| PackageError::source_invalid())?;
+                drop(path_text);
+                budget.release_directory_name(&name)?;
+                drop(name);
                 budget.record_file(&path, size)?;
                 files.push(SourceFile { path, identity });
             }
             FileType::Directory => {
                 let identity = identity.validate_directory()?;
+                drop(path);
                 budget.record_directory(&path_text)?;
-                let child = openat(
-                    directory_fd,
-                    &name,
-                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-                .map_err(|_| PackageError::source_raced())?;
-                let opened_identity = SourceIdentity::from_stat(
-                    &fstat(&child).map_err(|_| PackageError::source_raced())?,
-                )
-                .validate_directory()
-                .map_err(|_| PackageError::source_raced())?;
-                if opened_identity != identity {
-                    return Err(PackageError::source_raced());
-                }
                 directories.insert(
                     path_text.clone(),
                     SourceDirectory {
@@ -359,10 +406,40 @@ fn enumerate_directory(
                         identity,
                     },
                 );
-                enumerate_directory(&child, &path_text, depth + 1, files, directories, budget)?;
+                child_directories.push(PendingDirectory {
+                    name,
+                    path: path_text,
+                    identity,
+                });
             }
             _ => return Err(PackageError::source_invalid()),
         }
+    }
+    drop(names);
+
+    for child_directory in child_directories {
+        let PendingDirectory {
+            name,
+            path,
+            identity,
+        } = child_directory;
+        let child = openat(
+            directory_fd,
+            &name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| PackageError::source_raced())?;
+        let opened_identity =
+            SourceIdentity::from_stat(&fstat(&child).map_err(|_| PackageError::source_raced())?)
+                .validate_directory()
+                .map_err(|_| PackageError::source_raced())?;
+        if opened_identity != identity {
+            return Err(PackageError::source_raced());
+        }
+        budget.release_directory_name(&name)?;
+        drop(name);
+        enumerate_directory(&child, &path, depth + 1, files, directories, budget)?;
     }
     Ok(())
 }
@@ -473,11 +550,12 @@ fn unicode_name(name: &OsString) -> Result<&str, PackageError> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::ffi::OsString;
     use std::fs;
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::path::{Path, PathBuf};
 
-    use super::{snapshot_source, snapshot_source_with_hook, SnapshotHook};
+    use super::{snapshot_source, snapshot_source_with_hook, SnapshotHook, SourceBudget};
 
     struct Hook<F, G, H> {
         after_enumeration: F,
@@ -709,5 +787,35 @@ mod tests {
             .unwrap()
             .0;
         assert!(remaining_budget.contains("self.retained_listing_bytes"));
+    }
+
+    #[test]
+    fn retained_directory_names_are_globally_bounded_and_released() {
+        let mut budget = SourceBudget::production().unwrap();
+        budget.limits.max_namespace_stored_bytes = 1_024;
+        let parent = OsString::from("p".repeat(200));
+        let sibling = OsString::from("s".repeat(200));
+        let child = OsString::from("c");
+
+        budget
+            .retain_directory_names(&[parent.clone(), sibling.clone()])
+            .unwrap();
+        assert_eq!(budget.remaining_namespace_stored_bytes(), 112);
+        assert_eq!(
+            budget
+                .retain_directory_names(std::slice::from_ref(&child))
+                .unwrap_err()
+                .code(),
+            "archive_quota"
+        );
+
+        budget.release_directory_name(&parent).unwrap();
+        budget
+            .retain_directory_names(std::slice::from_ref(&child))
+            .unwrap();
+        assert_eq!(budget.remaining_namespace_stored_bytes(), 311);
+        budget.release_directory_name(&sibling).unwrap();
+        budget.release_directory_name(&child).unwrap();
+        assert_eq!(budget.remaining_namespace_stored_bytes(), 1_024);
     }
 }

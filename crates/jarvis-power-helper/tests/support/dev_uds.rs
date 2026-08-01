@@ -26,7 +26,8 @@ use jarvis_power_helper::dev_uds::{
     bind_listener, bind_listener_with_hook_for_testing, development_runtime_enabled,
     handle_connection_for_testing, read_frame_for_testing, read_frame_with_timeout_for_testing,
     BindStage, ConnectionEvent, ConnectionObserver, PeerIdentityProbe, PeerSnapshot,
-    RequestDispatcher, RuntimeDispatcher, TransportError, DEV_SOCKET_FILE,
+    RequestDispatcher, RuntimeDispatcher, TransportError, DEV_CLEANUP_RESIDUE_FILE,
+    DEV_SOCKET_FILE,
 };
 use jarvis_power_helper::pmset::{DevSudoPmset, PmsetBackend, PmsetError};
 use jarvis_power_helper::root_store::DevRoot;
@@ -533,7 +534,7 @@ fn socket_and_dev_state_are_private_without_following_or_overwriting() {
         [0o600, 0o600]
     );
     drop(listener);
-    let cleanup_residue = run.join(".power-helper-dev.cleanup-residue");
+    let cleanup_residue = run.join(DEV_CLEANUP_RESIDUE_FILE);
     assert!(cleanup_residue.exists());
     fs::remove_file(&cleanup_residue).unwrap();
 
@@ -827,7 +828,7 @@ fn listener_drop_removes_the_public_name_but_retains_an_owned_quarantine_residue
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(".power-helper-dev.cleanup-"))
+                .is_some_and(|name| name == DEV_CLEANUP_RESIDUE_FILE)
         })
         .collect::<Vec<_>>();
     assert_eq!(residues.len(), 1);
@@ -846,8 +847,11 @@ fn listener_drop_removes_the_public_name_but_retains_an_owned_quarantine_residue
         )
         .err()
         .unwrap(),
-        TransportError::UnsafeMetadata
+        TransportError::CleanupRequired
     );
+    assert!(TransportError::CleanupRequired
+        .to_string()
+        .contains(DEV_CLEANUP_RESIDUE_FILE));
     assert!(!public_socket.exists());
     assert_eq!(
         fs::read_dir(&run)
@@ -857,7 +861,7 @@ fn listener_drop_removes_the_public_name_but_retains_an_owned_quarantine_residue
                     .as_ref()
                     .ok()
                     .and_then(|entry| entry.file_name().to_str().map(str::to_owned))
-                    .is_some_and(|name| name.starts_with(".power-helper-dev.cleanup-"))
+                    .is_some_and(|name| name == DEV_CLEANUP_RESIDUE_FILE)
             })
             .count(),
         1

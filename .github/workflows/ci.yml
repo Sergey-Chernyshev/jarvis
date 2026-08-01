@@ -57,6 +57,7 @@ jobs:
         run: |
           npm run check:plugin-contracts
           npm run test:plugin-ui-sdk
+          npm run test:plugin-schema-parity
           cargo test --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
           cargo test --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
           cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml

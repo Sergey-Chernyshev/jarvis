@@ -1,4 +1,10 @@
-#![allow(clippy::result_large_err)]
+// The real Draft 7 validator lives in tools/plugin-schema-parity. Keeping this
+// source as a disabled compatibility shim avoids duplicating the corpus while
+// ensuring the public MSRV test-host never resolves jsonschema's stable-only
+// dependency graph.
+#[cfg(feature = "schema-parity")]
+#[allow(clippy::result_large_err)]
+mod schema_parity {
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -290,4 +296,5 @@ fn expanded_value(case: &Case) -> Value {
             Value::String(repeat.value.repeat(repeat.count));
     }
     value
+}
 }

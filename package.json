@@ -14,6 +14,7 @@
     "generate:plugin-contracts": "cargo run --quiet --manifest-path crates/jarvis-plugin-protocol/Cargo.toml --bin export_ui_contracts && node scripts/generate-plugin-ui-contracts.mjs",
     "check:plugin-contracts": "bash scripts/check-plugin-contract-generation.sh",
     "test:plugin-ui-sdk": "node --test packages/jarvis-plugin-ui/test/*.test.mjs",
+    "test:plugin-schema-parity": "cargo test --locked --manifest-path tools/plugin-schema-parity/Cargo.toml",
     "check:public": "bash scripts/check-public-repo-secrets.sh",
     "test:plugin-boundaries": "bash scripts/check-plugin-boundaries.test.sh",
     "check:plugin-boundaries": "bash scripts/check-plugin-boundaries.sh",

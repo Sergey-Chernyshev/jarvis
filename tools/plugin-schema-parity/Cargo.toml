@@ -1,0 +1,16 @@
+[package]
+name = "jarvis-plugin-schema-parity"
+version = "0.1.0"
+description = "Stable-toolchain JSON Schema parity harness for Jarvis plugin contracts"
+license = "MIT"
+edition = "2021"
+rust-version = "1.86.0"
+
+[features]
+default = ["schema-parity"]
+schema-parity = []
+
+[dev-dependencies]
+jsonschema = { version = "=0.18.3", default-features = false, features = ["draft202012"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

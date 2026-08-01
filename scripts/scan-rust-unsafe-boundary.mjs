@@ -409,8 +409,8 @@ function cfgTestModuleRanges(tokens) {
   return ranges;
 }
 
-function packageTrustVerifierNames(tokenizedFiles) {
-  const names = new Set(['PackageTrustVerifier']);
+function addUseAliases(tokenizedFiles, names) {
+  let added = false;
   let changed = true;
   while (changed) {
     changed = false;
@@ -465,10 +465,17 @@ function packageTrustVerifierNames(tokenizedFiles) {
         if (!names.has(tokens[index + 1].value)) {
           names.add(tokens[index + 1].value);
           changed = true;
+          added = true;
         }
       }
     }
   }
+  return added;
+}
+
+function packageTrustVerifierNames(tokenizedFiles) {
+  const names = new Set(['PackageTrustVerifier']);
+  addUseAliases(tokenizedFiles, names);
   return names;
 }
 
@@ -525,7 +532,7 @@ function packageTrustVerifierMacroNames(tokenizedFiles, verifierNames) {
   const macroNames = new Set();
   let changed = true;
   while (changed) {
-    changed = false;
+    changed = addUseAliases(tokenizedFiles, macroNames);
     for (const { tokens } of tokenizedFiles) {
       for (let index = 0; index < tokens.length - 3; index += 1) {
         if (

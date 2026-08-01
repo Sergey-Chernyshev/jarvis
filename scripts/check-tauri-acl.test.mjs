@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -339,6 +339,63 @@ test('rejects trusted HTML CSP, remote assets and bootstrap order drift', async 
       ),
     );
   }, 'tauri_acl_transport_order_invalid');
+});
+
+test('rejects execution-changing and malformed trusted script tags', async () => {
+  const transport = './generated/tauri-transport.js';
+  const consumer = './bridge.js';
+  const attributes = [
+    ' async',
+    ' AsYnC="false"',
+    ' defer',
+    " DeFeR='defer'",
+    ' type="module"',
+    " TYPE='text/javascript'",
+    ' nomodule',
+    ' NoMoDuLe="false"',
+    ' integrity="sha256-test"',
+  ];
+
+  for (const src of [transport, consumer]) {
+    for (const attribute of attributes) {
+      await expectCode(async (root) => {
+        const file = path.join(root, 'ui/index.html');
+        const html = await readFile(file, 'utf8');
+        await writeFile(
+          file,
+          html.replace(
+            `<script src="${src}">`,
+            `<script src="${src}"${attribute}>`,
+          ),
+        );
+      }, 'tauri_acl_script_tag_invalid');
+    }
+
+    for (const tag of [
+      `<script src="${src}" SRC="${src}">`,
+      `<script src=${src}>`,
+      '<script src>',
+      `<script src="${src}>`,
+    ]) {
+      await expectCode(async (root) => {
+        const file = path.join(root, 'ui/index.html');
+        const html = await readFile(file, 'utf8');
+        await writeFile(file, html.replace(`<script src="${src}">`, tag));
+      }, 'tauri_acl_script_tag_invalid');
+    }
+  }
+
+  await expectCode(async (root) => {
+    const file = path.join(root, 'ui/onboarding.html');
+    const html = await readFile(file, 'utf8');
+    await writeFile(
+      file,
+      html.replace(
+        '<script src="onboarding-state.js">',
+        '<script src="onboarding-state.js" defer>',
+      ),
+    );
+  }, 'tauri_acl_script_tag_invalid');
 });
 
 test('rejects broad core permissions and unsafe Tauri config', async () => {

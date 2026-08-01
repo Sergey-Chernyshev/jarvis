@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
 
+import { parseClassicExternalScripts } from '../scripts/check-tauri-acl.mjs';
+
 const root = new URL('../', import.meta.url);
 const expectedCsp =
   "default-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost";
@@ -18,11 +20,8 @@ async function source(relative) {
 }
 
 function scriptSources(html) {
-  return [...html.matchAll(/<script\b([^>]*)>[\s\S]*?<\/script\s*>/gi)].map(
-    ([, attributes]) => {
-      const src = attributes.match(/\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
-      return src ? (src[1] ?? src[2]) : null;
-    },
+  return parseClassicExternalScripts(html, 'core transport test').map(
+    (script) => script.src,
   );
 }
 
@@ -90,6 +89,60 @@ test('all trusted documents load one transport immediately before its consumer',
       );
     }
   }
+});
+
+test('transport and consumer reject execution-changing or malformed attributes', () => {
+  const transport = './generated/tauri-transport.js';
+  const consumer = './bridge.js';
+  const base = `<script src="${transport}"></script>
+<script src="${consumer}"></script>`;
+  const attributes = [
+    ' async',
+    ' AsYnC="false"',
+    ' defer',
+    " DeFeR='defer'",
+    ' type="module"',
+    " TYPE='text/javascript'",
+    ' nomodule',
+    ' NoMoDuLe="false"',
+    ' integrity="sha256-test"',
+  ];
+
+  for (const src of [transport, consumer]) {
+    for (const attribute of attributes) {
+      const unsafe = base.replace(
+        `<script src="${src}">`,
+        `<script src="${src}"${attribute}>`,
+      );
+      assert.throws(
+        () => parseClassicExternalScripts(unsafe, src),
+        (error) => error.code === 'tauri_acl_script_tag_invalid',
+        `${src}${attribute}`,
+      );
+    }
+
+    for (const tag of [
+      `<script src="${src}" SRC="${src}">`,
+      `<script src=${src}>`,
+      '<script src>',
+      `<script src="${src}>`,
+    ]) {
+      const malformed = base.replace(`<script src="${src}">`, tag);
+      assert.throws(
+        () => parseClassicExternalScripts(malformed, src),
+        (error) => error.code === 'tauri_acl_script_tag_invalid',
+        tag,
+      );
+    }
+  }
+
+  const onboardingState = `<script src="onboarding-state.js" defer></script>
+<script src="${transport}"></script>
+<script src="onboarding.js"></script>`;
+  assert.throws(
+    () => parseClassicExternalScripts(onboardingState, 'onboarding-state'),
+    (error) => error.code === 'tauri_acl_script_tag_invalid',
+  );
 });
 
 test('all trusted documents use the same explicit IPC-capable CSP', async () => {

@@ -34,6 +34,116 @@ function fail(code, detail) {
   throw new TauriAclError(code, detail);
 }
 
+function isHtmlWhitespace(character) {
+  return (
+    character === ' ' ||
+    character === '\t' ||
+    character === '\n' ||
+    character === '\r' ||
+    character === '\f'
+  );
+}
+
+export function parseClassicExternalScripts(
+  source,
+  relative = 'trusted document',
+) {
+  const invalid = (detail) =>
+    fail('tauri_acl_script_tag_invalid', `${relative}: ${detail}`);
+  const lower = source.toLowerCase();
+  const scripts = [];
+  let cursor = 0;
+
+  while (cursor < source.length) {
+    const start = lower.indexOf('<script', cursor);
+    if (start === -1) break;
+
+    let offset = start + '<script'.length;
+    if (
+      offset >= source.length ||
+      (!isHtmlWhitespace(source[offset]) && source[offset] !== '>')
+    ) {
+      invalid('malformed opening tag');
+    }
+
+    let src;
+    while (offset < source.length) {
+      while (isHtmlWhitespace(source[offset])) offset += 1;
+      if (source[offset] === '>') {
+        offset += 1;
+        break;
+      }
+      if (
+        offset >= source.length ||
+        source[offset] === '/' ||
+        source[offset] === '<' ||
+        source[offset] === '"' ||
+        source[offset] === "'"
+      ) {
+        invalid('malformed attribute');
+      }
+
+      const nameStart = offset;
+      while (
+        offset < source.length &&
+        !isHtmlWhitespace(source[offset]) &&
+        !['=', '>', '/', '<', '"', "'"].includes(source[offset])
+      ) {
+        offset += 1;
+      }
+      if (offset === nameStart) invalid('empty attribute');
+      const name = source.slice(nameStart, offset).toLowerCase();
+      if (name !== 'src' || src !== undefined) {
+        invalid(`forbidden or duplicate attribute ${name}`);
+      }
+
+      while (isHtmlWhitespace(source[offset])) offset += 1;
+      if (source[offset] !== '=') invalid('src must have a value');
+      offset += 1;
+      while (isHtmlWhitespace(source[offset])) offset += 1;
+      const quote = source[offset];
+      if (quote !== '"' && quote !== "'") {
+        invalid('src must be quoted');
+      }
+      offset += 1;
+      const valueStart = offset;
+      while (offset < source.length && source[offset] !== quote) offset += 1;
+      if (offset >= source.length) invalid('unterminated src');
+      src = source.slice(valueStart, offset);
+      if (!src) invalid('empty src');
+      offset += 1;
+      if (
+        offset < source.length &&
+        !isHtmlWhitespace(source[offset]) &&
+        source[offset] !== '>'
+      ) {
+        invalid('missing attribute separator');
+      }
+    }
+
+    if (src === undefined) invalid('missing src');
+    const closeStart = lower.indexOf('</script', offset);
+    if (closeStart === -1) invalid('missing closing tag');
+    if (source.slice(offset, closeStart).trim()) {
+      invalid('inline script body');
+    }
+    let closeOffset = closeStart + '</script'.length;
+    if (
+      closeOffset >= source.length ||
+      (!isHtmlWhitespace(source[closeOffset]) && source[closeOffset] !== '>')
+    ) {
+      invalid('malformed closing tag');
+    }
+    while (isHtmlWhitespace(source[closeOffset])) closeOffset += 1;
+    if (source[closeOffset] !== '>') invalid('malformed closing tag');
+
+    scripts.push(Object.freeze({ src }));
+    cursor = closeOffset + 1;
+  }
+
+  return Object.freeze(scripts);
+}
+
 function readJson(root, relative) {
   const file = path.join(root, relative);
   try {
@@ -203,6 +313,9 @@ function checkTrustedDocuments(root) {
       fail('tauri_acl_trusted_html_csp_invalid', relative);
     }
 
+    const scripts = parseClassicExternalScripts(source, relative).map(
+      (script) => script.src,
+    );
     for (const [, , attributes] of source.matchAll(
       /<(script|link|img|iframe|source|audio|video)\b([^>]*)>/gi,
     )) {
@@ -214,9 +327,6 @@ function checkTrustedDocuments(root) {
       }
     }
 
-    const scripts = [
-      ...source.matchAll(/<script\b([^>]*)>[\s\S]*?<\/script\s*>/gi),
-    ].map(([, attributes]) => attributeValue(attributes, 'src') ?? null);
     if (
       scripts.filter((src) => src === TRANSPORT_SCRIPT).length !== 1 ||
       scripts.filter((src) => src === document.consumer).length !== 1

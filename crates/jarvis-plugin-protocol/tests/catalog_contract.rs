@@ -211,6 +211,22 @@ fn root_threshold_cannot_count_the_same_public_key_under_multiple_ids() {
 }
 
 #[test]
+fn catalog_sequence_stays_within_the_jcs_exact_integer_range() {
+    let mut maximum = catalog_value();
+    maximum["sequence"] = json!(9_007_199_254_740_991_u64);
+    assert!(SignedCatalog::parse(&serde_json::to_vec(&maximum).unwrap()).is_ok());
+
+    let mut aliased = maximum;
+    aliased["sequence"] = json!(9_007_199_254_740_992_u64);
+    assert_eq!(
+        SignedCatalog::parse(&serde_json::to_vec(&aliased).unwrap())
+            .unwrap_err()
+            .code(),
+        "catalog_schema"
+    );
+}
+
+#[test]
 fn catalog_public_dtos_keep_exact_wire_names() {
     let parsed = SignedCatalog::parse(&serde_json::to_vec(&catalog_value()).unwrap()).unwrap();
     let CatalogPayload {

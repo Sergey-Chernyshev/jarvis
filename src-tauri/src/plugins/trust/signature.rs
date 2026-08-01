@@ -222,4 +222,14 @@ mod tests {
             "sha256:f725b883273d682a43dea9470f2ff74f3ef843fe52f68699d9897d53d99882ae"
         );
     }
+
+    #[test]
+    fn catalog_message_rejects_sequence_above_the_jcs_exact_integer_range() {
+        let mut catalog = minimal_catalog();
+        catalog.sequence = 9_007_199_254_740_992;
+        assert_eq!(
+            catalog_signature_message(&catalog).unwrap_err().code(),
+            "catalog_schema"
+        );
+    }
 }

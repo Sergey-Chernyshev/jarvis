@@ -22,6 +22,8 @@ impl HelperTrust {
     }
 }
 
+const _: () = assert!(!HelperTrust::DevelopmentOnly.authorizes_production());
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct HelperReply {
     pub(crate) response: ResponseEnvelope,

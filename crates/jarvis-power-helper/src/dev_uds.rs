@@ -505,6 +505,16 @@ pub(crate) fn read_frame_with_timeout_for_testing(
     read_frame_until(stream, Deadline::after(timeout))
 }
 
+#[cfg(test)]
+pub(crate) fn write_frame_with_timeout_for_testing(
+    stream: &mut UnixStream,
+    body: &[u8],
+    timeout: Duration,
+) -> Result<(), TransportError> {
+    set_nonblocking(stream.as_raw_fd())?;
+    write_frame_until(stream, body, Deadline::after(timeout))
+}
+
 fn handle_connection<P, D, O>(
     mut stream: UnixStream,
     expected_uid: u32,

@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -27,7 +27,7 @@ use jarvis_power_helper::dev_uds::{
     handle_connection_for_testing, read_frame_for_testing, read_frame_with_timeout_for_testing,
     BindStage, ConnectionEvent, ConnectionObserver, PeerIdentityProbe, PeerSnapshot,
     RequestDispatcher, RuntimeDispatcher, TransportError, DEV_CLEANUP_RESIDUE_FILE,
-    DEV_SOCKET_FILE,
+    DEV_SOCKET_FILE, write_frame_with_timeout_for_testing,
 };
 use jarvis_power_helper::pmset::{DevSudoPmset, PmsetBackend, PmsetError};
 use jarvis_power_helper::root_store::DevRoot;
@@ -807,7 +807,7 @@ fn listener_publication_follows_recovery_and_scheduler_acknowledgement() {
 }
 
 #[test]
-fn listener_drop_removes_the_public_name_but_retains_an_owned_quarantine_residue() {
+fn listener_drop_removes_the_public_name_and_restart_cleans_owned_residue_automatically() {
     let harness = DevHarness::new();
     let listener = bind_listener(
         &harness.runtime.listener_permit(),
@@ -831,41 +831,41 @@ fn listener_drop_removes_the_public_name_but_retains_an_owned_quarantine_residue
                 .is_some_and(|name| name == DEV_CLEANUP_RESIDUE_FILE)
         })
         .collect::<Vec<_>>();
-    assert_eq!(residues.len(), 1);
-    let metadata = fs::symlink_metadata(&residues[0]).unwrap();
-    assert!(metadata.file_type().is_socket());
-    assert_eq!(metadata.mode() & 0o7777, 0o600);
-    assert_eq!(metadata.uid(), current_uid());
-    assert_eq!(metadata.gid(), current_gid());
-    assert_eq!(metadata.nlink(), 1);
+    assert!(residues.is_empty(), "normal dev stop must not leave residue");
+
+    let restarted = bind_listener(
+        &harness.runtime.listener_permit(),
+        &harness.root,
+        current_uid(),
+        harness.sink.clone(),
+    )
+    .expect("normal dev restart should be automatic");
+    drop(restarted);
+}
+
+#[test]
+fn already_expired_deadline_rejects_buffered_read_before_success() {
+    let (mut writer, mut reader) = UnixStream::pair().unwrap();
+    let mut frame = Vec::from(4_u32.to_be_bytes());
+    frame.extend_from_slice(b"done");
+    writer.write_all(&frame).unwrap();
+    writer.shutdown(std::net::Shutdown::Write).unwrap();
+
     assert_eq!(
-        bind_listener(
-            &harness.runtime.listener_permit(),
-            &harness.root,
-            current_uid(),
-            harness.sink.clone(),
-        )
-        .err()
-        .unwrap(),
-        TransportError::CleanupRequired
+        read_frame_with_timeout_for_testing(&mut reader, Duration::ZERO),
+        Err(TransportError::Deadline)
     );
-    assert!(TransportError::CleanupRequired
-        .to_string()
-        .contains(DEV_CLEANUP_RESIDUE_FILE));
-    assert!(!public_socket.exists());
+}
+
+#[test]
+fn already_expired_deadline_rejects_buffered_write_before_success() {
+    let (mut writer, mut reader) = UnixStream::pair().unwrap();
     assert_eq!(
-        fs::read_dir(&run)
-            .unwrap()
-            .filter(|entry| {
-                entry
-                    .as_ref()
-                    .ok()
-                    .and_then(|entry| entry.file_name().to_str().map(str::to_owned))
-                    .is_some_and(|name| name == DEV_CLEANUP_RESIDUE_FILE)
-            })
-            .count(),
-        1
+        write_frame_with_timeout_for_testing(&mut writer, b"done", Duration::ZERO),
+        Err(TransportError::Deadline)
     );
+    let mut bytes = [0_u8; 32];
+    assert_eq!(reader.read(&mut bytes).unwrap(), 0);
 }
 
 #[test]

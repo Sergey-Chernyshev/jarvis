@@ -9,6 +9,7 @@
 mod agent;
 mod agent_vm;
 mod agent_vm_terminal;
+mod app_command_inventory;
 #[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
 mod backend;
 #[allow(dead_code)] // проекции/фасады подключаются по фазам (инкр. 8)
@@ -62,6 +63,12 @@ use std::time::Duration;
 use tauri::Manager;
 
 use daemon::Daemon;
+
+macro_rules! build_app_invoke_handler {
+    ($(($name:literal, $handler:path, $webviews:expr)),* $(,)?) => {
+        tauri::generate_handler![$($handler),*]
+    };
+}
 
 fn headless_from(value: Option<&std::ffi::OsStr>) -> bool {
     value
@@ -133,133 +140,9 @@ fn main() {
         ))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![
-            ipc::state_get,
-            ipc::state_clear,
-            ipc::panel_hide,
-            ipc::settings_get,
-            ipc::settings_set,
-            ipc::settings_health,
-            ipc::settings_repair,
-            ipc::chat_open,
-            ipc::chat_summarize,
-            ipc::file_open,
-            ipc::file_read,
-            ipc::file_diff,
-            ipc::agent_vm_file_open,
-            ipc::agent_vm_file_read,
-            ipc::agent_vm_file_diff,
-            ipc::url_open,
-            ipc::chat_close,
-            ipc::commands_get,
-            ipc::app_meta,
-            ipc::update_check_install,
-            ipc::app_relaunch,
-            ipc::plugins_status,
-            ipc::plugins_cmd,
-            ipc::entities_get,
-            ipc::agent_vm_profiles_get,
-            ipc::agent_vm_profile_set,
-            ipc::project_manager_state_get,
-            ipc::project_manager_folder_pick,
-            ipc::project_manager_favorite_set,
-            ipc::project_manager_favorite_move,
-            ipc::project_manager_view_set,
-            ipc::agent_vm_focus,
-            ipc::agent_vm_operation_ack,
-            ipc::agent_vm_commands_get,
-            ipc::agent_vm_terminal_ensure,
-            ipc::agent_vm_terminal_snapshot,
-            ipc::agent_vm_terminal_input,
-            ipc::agent_vm_terminal_key,
-            ipc::agent_vm_terminal_upload,
-            ipc::agent_vm_terminal_resize,
-            ipc::agent_vm_terminal_stop,
-            ipc::usage_summary,
-            ipc::limit_get,
-            ipc::history_get,
-            ipc::usage_session,
-            ipc::session_set_pin,
-            ipc::session_set_model,
-            ipc::session_set_effort,
-            ipc::terminal_ping,
-            ipc::question_answer,
-            ipc::task_action,
-            ipc::voice_get,
-            ipc::voice_set_speaker,
-            ipc::voice_set_rate,
-            ipc::voice_test,
-            ipc::voice_set_mute,
-            ipc::voice_set_duck,
-            ipc::voice_set_bluetooth_only,
-            ipc::session_reply,
-            ipc::session_save_image,
-            ipc::session_continue,
-            ipc::agent_confirm,
-            ipc::voice_pick_resolve,
-            ipc::voice_stage_cancel,
-            ipc::voice_audio_state,
-            ipc::voice_confirm_resolve,
-            ipc::voice_abort,
-            ipc::agent_chat_open,
-            ipc::terminal_focus,
-            ipc::session_launch,
-            ipc::toast_resize,
-            ipc::toast_ready,
-            ipc::toast_click,
-            onboarding::onboarding_status,
-            onboarding::onboarding_get,
-            onboarding::onboarding_run,
-            onboarding::onboarding_open,
-            onboarding::onboarding_close,
-            onboarding::onboarding_open_panel,
-            onboarding::onboarding_open_settings,
-            onboarding::integration_get,
-            onboarding::integration_remove,
-            onboarding::model_delete,
-            onboarding::quiet_set,
-            ipc::agent_send,
-            ipc::stt_get,
-            ipc::models_get,
-            ipc::transcripts_get,
-            ipc::transcripts_clear,
-            ipc::transcript_delete,
-            ipc::transcript_retranscribe,
-            ipc::transcript_enhance,
-            ipc::prompts_get_settings,
-            ipc::prompts_set_smart,
-            ipc::prompts_get,
-            ipc::stt_set_engine,
-            ipc::stt_set_hotkey,
-            ipc::hotkey_bindings,
-            ipc::hotkey_assign,
-            ipc::hotkeys_suspend,
-            ipc::stt_set_noise_gate,
-            ipc::stt_test,
-            ipc::voice_history_open,
-            ipc::stt_input_devices,
-            ipc::stt_set_input_device,
-            ipc::service_get,
-            ipc::service_set_backend,
-            ipc::service_set_model,
-            ipc::service_set_effort,
-            ipc::service_set_proxy,
-            ipc::service_test,
-            ipc::claude_auth_get,
-            ipc::claude_auth_connect,
-            ipc::claude_auth_disconnect,
-            onboarding::codex_install_sidecar,
-            onboarding::stt_install_whisper,
-            onboarding::stt_install_sidecar,
-            onboarding::stt_install_qwen,
-            ipc::wake_get,
-            ipc::wake_set_enabled,
-            ipc::wake_set_threshold,
-            ipc::audio_set_mute,
-            onboarding::wake_install_models,
-            onboarding::voice_install_silero,
-            onboarding::models_install,
-        ])
+        .invoke_handler(app_command_inventory::with_app_commands!(
+            build_app_invoke_handler
+        ))
         .setup(|app| {
             // Профильный lock ДО Daemon::new: второй процесс того же JARVIS_DIR
             // не стартует, но prod/dev и чужие listeners больше не убиваются.

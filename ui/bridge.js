@@ -1,16 +1,16 @@
 /* Мост window.jarvis: тот же контракт, что у Electron-preload, но поверх
- * Tauri IPC. renderer.js не знает, что под ним сменился рантайм.
- *
- * Каналы 'ns:method' стали командами 'ns_method'; payload событий — без
- * изменений. Требует withGlobalTauri (см. tauri.conf.json). */
+ * явного bundled Tauri transport. renderer.js не знает, что под ним сменился
+ * рантайм; raw invoke после bootstrap наружу не публикуется. */
 
 (() => {
-  const { invoke } = window.__TAURI__.core;
-  const { listen } = window.__TAURI__.event;
+  const transport = globalThis.__JARVIS_CORE_TRANSPORT__;
+  if (!transport) throw new Error('jarvis_core_transport_missing');
+  const { invoke, listen } = transport;
+  delete globalThis.__JARVIS_CORE_TRANSPORT__;
 
   const on = (event, cb) => { listen(event, (e) => cb(e.payload)); };
 
-  window.jarvis = {
+  window.jarvis = Object.freeze({
     onState: (cb) => on('state', cb),
     onShown: (cb) => on('panel-shown', () => cb()),
     onOpenSession: (cb) => on('open-session', cb),
@@ -171,7 +171,7 @@
     onAudioState: (cb) => on('audio_state', cb),
     onWake: (cb) => on('wake', cb),
     onWakeInstallDone: (cb) => on('wake_install_done', cb),
-  };
+  });
 
   // navigator.clipboard в WKWebView капризен (secure context, жесты) —
   // подменяем на надёжный плагин Tauri, API тот же.

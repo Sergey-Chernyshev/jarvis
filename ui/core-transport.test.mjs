@@ -4,6 +4,8 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const root = new URL('../', import.meta.url);
+const expectedCsp =
+  "default-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost";
 
 async function source(relative) {
   return readFile(new URL(relative, root), 'utf8');
@@ -66,6 +68,27 @@ test('all trusted documents load the deterministic transport before their bridge
   }
 });
 
+test('all trusted documents use the same explicit IPC-capable CSP', async () => {
+  for (const document of [
+    'ui/index.html',
+    'ui/toast.html',
+    'ui/onboarding.html',
+    'ui/agent-chat.html',
+  ]) {
+    const html = await source(document);
+    assert.match(
+      html,
+      new RegExp(
+        `<meta http-equiv="Content-Security-Policy" content="${expectedCsp.replaceAll(
+          /[.*+?^${}()|[\]\\]/g,
+          '\\$&',
+        )}"\\s*/?>`,
+      ),
+      document,
+    );
+  }
+});
+
 test('production UI contains no global Tauri fallback', async () => {
   for (const file of [
     'ui/bridge.js',
@@ -77,7 +100,7 @@ test('production UI contains no global Tauri fallback', async () => {
   }
 });
 
-test('generated transport is committed and byte-stable across builds', async () => {
+test('generated transport is committed without an inline sourcemap', async () => {
   const generated = await source('ui/generated/tauri-transport.js');
   assert.match(generated, /__JARVIS_CORE_TRANSPORT__/);
   assert.match(generated, /Object\.freeze/);

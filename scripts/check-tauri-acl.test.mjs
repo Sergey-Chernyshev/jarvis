@@ -6,6 +6,9 @@ import test from 'node:test';
 
 import { checkTauriAcl } from './check-tauri-acl.mjs';
 
+const EXPECTED_CSP =
+  "default-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost";
+
 async function writeJson(root, relative, value) {
   const destination = path.join(root, relative);
   await mkdir(path.dirname(destination), { recursive: true });
@@ -43,8 +46,9 @@ async function safeFixture() {
     app: {
       withGlobalTauri: false,
       security: {
+        freezePrototype: true,
         capabilities: ['main', 'toast', 'onboarding', 'agent-chat'],
-        csp: "default-src 'self'; object-src 'none'",
+        csp: EXPECTED_CSP,
       },
     },
   });
@@ -52,10 +56,13 @@ async function safeFixture() {
     await writeJson(root, `src-tauri/capabilities/${identifier}.json`, {
       identifier,
       webviews: [identifier],
-      permissions:
-        identifier === 'main'
-          ? ['core:event:allow-listen', 'allow-state-get']
-          : ['core:event:allow-listen'],
+      permissions: [
+        'core:event:allow-listen',
+        ...(['main', 'toast'].includes(identifier)
+          ? ['clipboard-manager:allow-write-text']
+          : []),
+        ...(identifier === 'main' ? ['allow-state-get'] : []),
+      ],
     });
   }
   return root;
@@ -112,7 +119,10 @@ test('rejects implicit capability and command grant drift', async () => {
     await writeJson(root, 'src-tauri/capabilities/main.json', {
       identifier: 'main',
       webviews: ['main'],
-      permissions: ['core:event:allow-listen'],
+      permissions: [
+        'core:event:allow-listen',
+        'clipboard-manager:allow-write-text',
+      ],
     });
   }, 'tauri_acl_command_grant_drift');
 });

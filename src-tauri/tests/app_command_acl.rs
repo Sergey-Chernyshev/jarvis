@@ -131,7 +131,9 @@ fn exact_webview_capabilities_match_the_inventory_grants() {
     let known_webviews = CORE_WEBVIEWS.into_iter().collect::<BTreeSet<_>>();
     for (command, webviews) in &inventory {
         assert!(
-            webviews.iter().all(|label| known_webviews.contains(label.as_str())),
+            webviews
+                .iter()
+                .all(|label| known_webviews.contains(label.as_str())),
             "{command} names an unknown or plugin webview: {webviews:?}"
         );
     }
@@ -180,6 +182,10 @@ fn tauri_config_enables_only_the_four_scoped_capabilities() {
     let config: Value =
         serde_json::from_str(&read(repo_root().join("src-tauri/tauri.conf.json"))).unwrap();
     let app = config.get("app").expect("app config");
+    assert!(
+        app.get("windows").is_none(),
+        "trusted windows are created programmatically; static window config is forbidden"
+    );
     assert_eq!(
         app.get("withGlobalTauri").and_then(Value::as_bool),
         Some(false)

@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "agent-chat",
+  "description": "Trusted Jarvis agent chat with exact app-command grants",
+  "webviews": ["agent-chat"],
+  "permissions": [
+    "core:event:allow-listen",
+    "allow-agent-confirm",
+    "allow-agent-send"
+  ]
+}

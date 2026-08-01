@@ -1,0 +1,21 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "toast",
+  "description": "Trusted Jarvis toast surface with exact app-command grants",
+  "webviews": ["toast"],
+  "permissions": [
+    "core:event:allow-listen",
+    "clipboard-manager:allow-write-text",
+    "allow-question-answer",
+    "allow-session-continue",
+    "allow-voice-pick-resolve",
+    "allow-voice-stage-cancel",
+    "allow-voice-audio-state",
+    "allow-voice-confirm-resolve",
+    "allow-voice-abort",
+    "allow-toast-resize",
+    "allow-toast-ready",
+    "allow-toast-click",
+    "allow-voice-history-open"
+  ]
+}

@@ -1,8 +1,10 @@
 /* Мост window.toast для окна тостов — контракт Electron-preload поверх Tauri. */
 
 (() => {
-  const { invoke } = window.__TAURI__.core;
-  const { listen } = window.__TAURI__.event;
+  const transport = globalThis.__JARVIS_CORE_TRANSPORT__;
+  if (!transport) throw new Error('jarvis_core_transport_missing');
+  const { invoke, listen } = transport;
+  delete globalThis.__JARVIS_CORE_TRANSPORT__;
 
   let listeners = 0;
   const armed = () => {
@@ -10,7 +12,7 @@
     if (++listeners === 2) invoke('toast_ready');
   };
 
-  window.toast = {
+  window.toast = Object.freeze({
     onAdd: (cb) => { listen('toast-add', (e) => cb(e.payload)).then(armed); },
     onUpdate: (cb) => { listen('toast-update', (e) => cb(e.payload)).then(armed); },
     // нативный hover (курсор над окном тостов): WKWebView не шлёт mouseenter,
@@ -49,5 +51,5 @@
     // копировать текст в буфер (надёжный путь через плагин Tauri — навигаторный
     // clipboard в неактивном окне тостов WKWebView капризен)
     copy: (text) => invoke('plugin:clipboard-manager|write_text', { text: String(text) }),
-  };
+  });
 })();

@@ -3,9 +3,10 @@
   'use strict';
 
   const State = window.JarvisOnboardingState;
-  const tauri = window.__TAURI__;
-  const invoke = tauri && tauri.core ? tauri.core.invoke : async () => null;
-  const listen = tauri && tauri.event ? tauri.event.listen : async () => () => {};
+  const transport = globalThis.__JARVIS_CORE_TRANSPORT__;
+  if (!transport) throw new Error('jarvis_core_transport_missing');
+  const { invoke, listen } = transport;
+  delete globalThis.__JARVIS_CORE_TRANSPORT__;
   const content = document.getElementById('content');
   const primary = document.getElementById('primary');
   const secondary = document.getElementById('secondary');

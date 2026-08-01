@@ -1,3 +1,14 @@
+#[path = "src/app_command_inventory.rs"]
+mod app_command_inventory;
+
+macro_rules! define_app_command_names {
+    ($(($name:literal, $handler:path, $webviews:expr)),* $(,)?) => {
+        const APP_COMMAND_NAMES: &[&str] = &[$($name),*];
+    };
+}
+
+app_command_inventory::with_app_commands!(define_app_command_names);
+
 fn main() {
     ensure_external_bin_placeholder();
 
@@ -14,7 +25,11 @@ fn main() {
             "cargo:rustc-link-arg-bin=jarvis=-Wl,-sectcreate,__TEXT,__info_plist,{manifest}/dev-Info.plist"
         );
     }
-    tauri_build::build()
+    tauri_build::try_build(
+        tauri_build::Attributes::new()
+            .app_manifest(tauri_build::AppManifest::new().commands(APP_COMMAND_NAMES)),
+    )
+    .expect("tauri build with explicit app command manifest");
 }
 
 /// `tauri-build` валидирует externalBin даже для `cargo test`. Release/dev

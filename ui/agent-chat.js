@@ -3,8 +3,10 @@
  * и карточки подтверждения agent:confirm (резолв через agent_confirm). */
 
 (() => {
-  const { invoke } = window.__TAURI__.core;
-  const { listen } = window.__TAURI__.event;
+  const transport = globalThis.__JARVIS_CORE_TRANSPORT__;
+  if (!transport) throw new Error('jarvis_core_transport_missing');
+  const { invoke, listen } = transport;
+  delete globalThis.__JARVIS_CORE_TRANSPORT__;
 
   const msgs = document.getElementById('msgs');
   const input = document.getElementById('input');

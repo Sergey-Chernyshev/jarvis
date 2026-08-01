@@ -3043,6 +3043,27 @@ mod tests {
     }
 
     #[test]
+    fn acquired_receipt_is_not_armed_before_renewal_is_installed() {
+        let receipt = helper_receipt();
+        let mut clam = Clam {
+            active: true,
+            busy: true,
+            ..Clam::default()
+        };
+
+        assert_eq!(
+            clam.commit_acquired_if_active(receipt.clone(), "manual"),
+            Ok(())
+        );
+        assert_eq!(clam.lease.as_ref(), Some(&receipt));
+        assert!(
+            !clam.armed,
+            "armed truth must be committed atomically with a live renewal worker"
+        );
+        assert!(clam.renewal.is_none());
+    }
+
+    #[test]
     fn disabled_cleanup_failure_is_propagated_instead_of_hidden() {
         let response = clamshell_disable_response(ClamshellDisposeOutcome::ReleaseFailed(
             "helper unavailable".into(),
@@ -3336,6 +3357,42 @@ mod tests {
 
         assert_eq!(disposition, AcquireDisposition::Committed);
         assert!(committed);
+        assert!(operations.wait_for_idle(Duration::ZERO));
+    }
+
+    #[test]
+    fn ambiguous_acquire_classification_finishes_before_operation_barrier_opens() {
+        let operations = Arc::new(PowerOperations::default());
+        let operation = operations.begin().unwrap();
+        let debt_recorded = Arc::new(AtomicBool::new(false));
+        let (classification_started_tx, classification_started_rx) = mpsc::channel();
+        let (finish_classification_tx, finish_classification_rx) = mpsc::channel();
+
+        let worker_operations = operations.clone();
+        let worker_debt = debt_recorded.clone();
+        let worker = std::thread::spawn(move || {
+            let result = worker_operations.finish_acquire(
+                operation,
+                Err::<LeaseReceipt, _>(helper::renewal::LeaseError::HelperUnavailable),
+                |_| panic!("failed acquire must not commit"),
+                |_| panic!("failed acquire has no receipt to roll back"),
+            );
+            assert!(result.is_err());
+            classification_started_tx.send(()).unwrap();
+            finish_classification_rx.recv().unwrap();
+            worker_debt.store(true, Ordering::SeqCst);
+            drop(result);
+        });
+
+        classification_started_rx.recv().unwrap();
+        assert!(
+            !operations.wait_for_idle(Duration::ZERO),
+            "disable/shutdown barrier opened before ambiguous acquire classification"
+        );
+        finish_classification_tx.send(()).unwrap();
+        worker.join().unwrap();
+
+        assert!(debt_recorded.load(Ordering::SeqCst));
         assert!(operations.wait_for_idle(Duration::ZERO));
     }
 

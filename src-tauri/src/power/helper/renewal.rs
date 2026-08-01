@@ -369,6 +369,46 @@ mod tests {
     }
 
     #[test]
+    fn acquire_preserves_remaining_ttl_for_the_first_renewal_deadline() {
+        let remaining_ttl_ms = jarvis_power_core::protocol::MIN_TTL_MS;
+        let (helper, _) = FakeHelper::new(
+            HelperTrust::ProductionAttested,
+            [reply(Response::Acquired {
+                lease_id: LEASE_A.into(),
+                granted_ttl_ms: remaining_ttl_ms,
+            })],
+        );
+
+        let receipt = LeaseClient::new(helper)
+            .acquire("profile-a", "generation-a")
+            .unwrap();
+
+        assert!(
+            format!("{receipt:?}")
+                .contains(&format!("granted_ttl_ms: {remaining_ttl_ms}")),
+            "the host receipt discarded the helper's remaining TTL: {receipt:?}"
+        );
+    }
+
+    #[test]
+    fn renewal_worker_attempts_before_a_short_remaining_ttl_expires() {
+        let remaining_ttl = Duration::from_millis(240);
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let renewal = RenewalHandle::start(remaining_ttl, move || {
+            attempt_tx.send(()).unwrap();
+            false
+        });
+
+        assert!(
+            attempt_rx
+                .recv_timeout(Duration::from_millis(180))
+                .is_ok(),
+            "the first renewal waited for the full remaining TTL"
+        );
+        renewal.stop();
+    }
+
+    #[test]
     fn acquire_renew_release_use_the_exact_receipt_and_default_ttl() {
         let (helper, requests) = FakeHelper::new(
             HelperTrust::ProductionAttested,

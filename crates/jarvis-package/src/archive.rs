@@ -1,7 +1,13 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read, Write};
 
+use caseless::Caseless;
+use jarvis_plugin_protocol::manifest::Digest;
+use jarvis_plugin_protocol::package::PackageFileMode;
 use jarvis_plugin_protocol::package::PackagePath;
+use sha2::{Digest as _, Sha256};
 use tar::{Builder, Header};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::PackageError;
 
@@ -117,6 +123,824 @@ fn encode_checksum(field: &mut [u8], value: u64) -> Result<(), PackageError> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ArchiveLimits {
+    pub(crate) max_physical_bytes: u64,
+    pub(crate) max_unpacked_payload_bytes: u64,
+    pub(crate) max_single_payload_file: u64,
+    pub(crate) max_payload_files: u64,
+    pub(crate) max_logical_entries: u64,
+    pub(crate) max_raw_records: u64,
+    pub(crate) max_path_bytes: u64,
+    pub(crate) max_component_bytes: u64,
+    pub(crate) max_path_depth: u64,
+    pub(crate) max_namespace_nodes: u64,
+    pub(crate) max_collision_key_bytes: u64,
+    pub(crate) max_long_name_body: u64,
+    pub(crate) max_package_json_bytes: u64,
+    pub(crate) max_signature_bytes: u64,
+    pub(crate) max_plugin_json_bytes: u64,
+    pub(crate) max_json_depth: usize,
+    pub(crate) max_json_nodes: usize,
+    pub(crate) max_json_string_bytes: usize,
+}
+
+impl ArchiveLimits {
+    pub(crate) const fn production() -> Self {
+        Self {
+            max_physical_bytes: 2 * 1024 * 1024 * 1024,
+            max_unpacked_payload_bytes: 2 * 1024 * 1024 * 1024,
+            max_single_payload_file: 512 * 1024 * 1024,
+            max_payload_files: 20_000,
+            max_logical_entries: 20_002,
+            max_raw_records: 40_002,
+            max_path_bytes: 1_024,
+            max_component_bytes: 255,
+            max_path_depth: 64,
+            max_namespace_nodes: 100_000,
+            max_collision_key_bytes: 4_096,
+            max_long_name_body: 1_025,
+            max_package_json_bytes: 16 * 1024 * 1024,
+            max_signature_bytes: 4 * 1024,
+            max_plugin_json_bytes: 256 * 1024,
+            max_json_depth: 64,
+            max_json_nodes: 250_000,
+            max_json_string_bytes: 64 * 1024,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ObservedArchiveEntry {
+    path: PackagePath,
+    mode: PackageFileMode,
+    size: u64,
+    digest: Digest,
+    body_offset: u64,
+}
+
+impl ObservedArchiveEntry {
+    pub(crate) fn path(&self) -> &PackagePath {
+        &self.path
+    }
+
+    pub(crate) fn mode(&self) -> PackageFileMode {
+        self.mode
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub(crate) fn digest(&self) -> &Digest {
+        &self.digest
+    }
+
+    pub(crate) fn body_offset(&self) -> u64 {
+        self.body_offset
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ArchiveInspection {
+    entries: Vec<ObservedArchiveEntry>,
+    plugin_json: Vec<u8>,
+    package_json: Vec<u8>,
+    signature: Vec<u8>,
+    physical_digest: Digest,
+    physical_bytes: u64,
+}
+
+impl ArchiveInspection {
+    pub(crate) fn entries(&self) -> &[ObservedArchiveEntry] {
+        &self.entries
+    }
+
+    pub(crate) fn payload_entries(&self) -> &[ObservedArchiveEntry] {
+        let end = self.entries.len().saturating_sub(2);
+        &self.entries[..end]
+    }
+
+    pub(crate) fn plugin_json(&self) -> &[u8] {
+        &self.plugin_json
+    }
+
+    pub(crate) fn package_json(&self) -> &[u8] {
+        &self.package_json
+    }
+
+    pub(crate) fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+
+    pub(crate) fn physical_digest(&self) -> &Digest {
+        &self.physical_digest
+    }
+
+    pub(crate) fn physical_bytes(&self) -> u64 {
+        self.physical_bytes
+    }
+
+    #[cfg(test)]
+    fn retained_body_bytes(&self) -> usize {
+        self.plugin_json.len() + self.package_json.len() + self.signature.len()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArchivePhase {
+    Start,
+    Payload,
+    Package,
+    Signature,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NamespaceKind {
+    Directory,
+    File,
+}
+
+#[derive(Clone, Debug)]
+struct NamespaceNode {
+    spelling: String,
+    kind: NamespaceKind,
+}
+
+struct ParserContext {
+    limits: ArchiveLimits,
+    phase: ArchivePhase,
+    previous_payload: Option<String>,
+    exact_paths: BTreeSet<String>,
+    namespace: BTreeMap<String, NamespaceNode>,
+    namespace_nodes: u64,
+    logical_entries: u64,
+    payload_files: u64,
+    unpacked_payload_bytes: u64,
+    entries: Vec<ObservedArchiveEntry>,
+    plugin_json: Vec<u8>,
+    package_json: Vec<u8>,
+    signature: Vec<u8>,
+}
+
+impl ParserContext {
+    fn new(limits: ArchiveLimits) -> Result<Self, PackageError> {
+        let mut context = Self {
+            limits,
+            phase: ArchivePhase::Start,
+            previous_payload: None,
+            exact_paths: BTreeSet::new(),
+            namespace: BTreeMap::new(),
+            namespace_nodes: 0,
+            logical_entries: 0,
+            payload_files: 0,
+            unpacked_payload_bytes: 0,
+            entries: Vec::new(),
+            plugin_json: Vec::new(),
+            package_json: Vec::new(),
+            signature: Vec::new(),
+        };
+        context.insert_namespace_path("package.json", NamespaceKind::File)?;
+        context.insert_namespace_path("SIGNATURE", NamespaceKind::File)?;
+        Ok(context)
+    }
+
+    fn accept_entry(&mut self, path: &PackagePath, size: u64) -> Result<EntryClass, PackageError> {
+        let path_text = path.as_str();
+        validate_path_limits(path_text, self.limits)?;
+        if !self.exact_paths.insert(path_text.to_owned()) {
+            return Err(PackageError::archive_duplicate());
+        }
+        self.logical_entries = checked_increment(self.logical_entries)?;
+        if self.logical_entries > self.limits.max_logical_entries {
+            return Err(PackageError::archive_quota());
+        }
+
+        let entry_class = match self.phase {
+            ArchivePhase::Start => {
+                if path_text != "plugin.json" {
+                    return Err(PackageError::archive_order());
+                }
+                self.insert_namespace_path(path_text, NamespaceKind::File)?;
+                self.phase = ArchivePhase::Payload;
+                EntryClass::Plugin
+            }
+            ArchivePhase::Payload if path_text == "package.json" => {
+                self.phase = ArchivePhase::Package;
+                EntryClass::Package
+            }
+            ArchivePhase::Payload if path_text == "SIGNATURE" => {
+                return Err(PackageError::archive_order());
+            }
+            ArchivePhase::Payload => {
+                if self
+                    .previous_payload
+                    .as_deref()
+                    .map(|previous| path_text <= previous)
+                    .unwrap_or(false)
+                {
+                    return Err(PackageError::archive_order());
+                }
+                self.insert_namespace_path(path_text, NamespaceKind::File)?;
+                self.previous_payload = Some(path_text.to_owned());
+                EntryClass::Payload
+            }
+            ArchivePhase::Package => {
+                if path_text != "SIGNATURE" {
+                    return Err(PackageError::archive_order());
+                }
+                self.phase = ArchivePhase::Signature;
+                EntryClass::Signature
+            }
+            ArchivePhase::Signature => return Err(PackageError::archive_order()),
+        };
+
+        match entry_class {
+            EntryClass::Plugin | EntryClass::Payload => {
+                self.payload_files = checked_increment(self.payload_files)?;
+                if self.payload_files > self.limits.max_payload_files
+                    || size > self.limits.max_single_payload_file
+                {
+                    return Err(PackageError::archive_quota());
+                }
+                self.unpacked_payload_bytes = self
+                    .unpacked_payload_bytes
+                    .checked_add(size)
+                    .ok_or_else(PackageError::archive_quota)?;
+                if self.unpacked_payload_bytes > self.limits.max_unpacked_payload_bytes {
+                    return Err(PackageError::archive_quota());
+                }
+                if entry_class == EntryClass::Plugin && size > self.limits.max_plugin_json_bytes {
+                    return Err(PackageError::archive_quota());
+                }
+            }
+            EntryClass::Package if size > self.limits.max_package_json_bytes => {
+                return Err(PackageError::archive_quota());
+            }
+            EntryClass::Signature if size > self.limits.max_signature_bytes => {
+                return Err(PackageError::archive_quota());
+            }
+            _ => {}
+        }
+        Ok(entry_class)
+    }
+
+    fn insert_namespace_path(
+        &mut self,
+        path: &str,
+        final_kind: NamespaceKind,
+    ) -> Result<(), PackageError> {
+        let mut prefix = String::new();
+        let mut components = path.split('/').peekable();
+        while let Some(component) = components.next() {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(component);
+            let kind = if components.peek().is_some() {
+                NamespaceKind::Directory
+            } else {
+                final_kind
+            };
+            let key = collision_key(&prefix, self.limits.max_collision_key_bytes)?;
+            if let Some(existing) = self.namespace.get(&key) {
+                if existing.spelling != prefix || existing.kind != kind {
+                    return Err(PackageError::archive_case_collision());
+                }
+                continue;
+            }
+            self.namespace_nodes = checked_increment(self.namespace_nodes)?;
+            if self.namespace_nodes > self.limits.max_namespace_nodes {
+                return Err(PackageError::archive_quota());
+            }
+            self.namespace.insert(
+                key,
+                NamespaceNode {
+                    spelling: prefix.clone(),
+                    kind,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn store_entry(
+        &mut self,
+        plan: RegularPlan,
+        digest: Digest,
+        retained: Vec<u8>,
+    ) -> Result<(), PackageError> {
+        match plan.entry_class {
+            EntryClass::Plugin => self.plugin_json = retained,
+            EntryClass::Package => self.package_json = retained,
+            EntryClass::Signature => self.signature = retained,
+            EntryClass::Payload => {
+                if !retained.is_empty() {
+                    return Err(PackageError::archive_header());
+                }
+            }
+        }
+        self.entries.push(ObservedArchiveEntry {
+            path: plan.path,
+            mode: plan.mode,
+            size: plan.size,
+            digest,
+            body_offset: plan.body_offset,
+        });
+        Ok(())
+    }
+
+    fn finish(
+        self,
+        physical_digest: Digest,
+        physical_bytes: u64,
+    ) -> Result<ArchiveInspection, PackageError> {
+        if self.phase != ArchivePhase::Signature {
+            return Err(PackageError::archive_order());
+        }
+        Ok(ArchiveInspection {
+            entries: self.entries,
+            plugin_json: self.plugin_json,
+            package_json: self.package_json,
+            signature: self.signature,
+            physical_digest,
+            physical_bytes,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntryClass {
+    Plugin,
+    Payload,
+    Package,
+    Signature,
+}
+
+#[derive(Debug)]
+struct RawHeader {
+    name: [u8; 100],
+    mode: u64,
+    size: u64,
+    entry_type: u8,
+}
+
+#[derive(Debug)]
+struct RegularPlan {
+    path: PackagePath,
+    mode: PackageFileMode,
+    size: u64,
+    body_offset: u64,
+    entry_class: EntryClass,
+}
+
+enum ParserState {
+    ExpectHeader,
+    ExpectLongNameBody { size: u64 },
+    ExpectLongNameTarget { path: PackagePath },
+    ReadRegularBody(RegularPlan),
+    ExpectSecondZeroBlock,
+    ExpectEof,
+}
+
+struct RawStream<'a, R> {
+    reader: &'a mut R,
+    hasher: Sha256,
+    position: u64,
+    maximum: u64,
+}
+
+impl<'a, R: Read> RawStream<'a, R> {
+    fn new(reader: &'a mut R, maximum: u64) -> Self {
+        Self {
+            reader,
+            hasher: Sha256::new(),
+            position: 0,
+            maximum,
+        }
+    }
+
+    fn read_exact(&mut self, mut output: &mut [u8]) -> Result<(), PackageError> {
+        let requested = u64::try_from(output.len()).map_err(|_| PackageError::archive_quota())?;
+        let end = self
+            .position
+            .checked_add(requested)
+            .ok_or_else(PackageError::archive_quota)?;
+        if end > self.maximum {
+            return Err(PackageError::archive_quota());
+        }
+        while !output.is_empty() {
+            let read = self
+                .reader
+                .read(output)
+                .map_err(|_| PackageError::archive_truncated())?;
+            if read == 0 {
+                return Err(PackageError::archive_truncated());
+            }
+            self.hasher.update(&output[..read]);
+            self.position = self
+                .position
+                .checked_add(u64::try_from(read).map_err(|_| PackageError::archive_quota())?)
+                .ok_or_else(PackageError::archive_quota)?;
+            output = &mut output[read..];
+        }
+        Ok(())
+    }
+
+    fn prove_eof(&mut self) -> Result<(), PackageError> {
+        let mut byte = [0_u8; 1];
+        match self.reader.read(&mut byte) {
+            Ok(0) => Ok(()),
+            Ok(_) => {
+                self.position = self
+                    .position
+                    .checked_add(1)
+                    .ok_or_else(PackageError::archive_quota)?;
+                if self.position > self.maximum {
+                    Err(PackageError::archive_quota())
+                } else {
+                    Err(PackageError::archive_trailing())
+                }
+            }
+            Err(_) => Err(PackageError::archive_trailing()),
+        }
+    }
+
+    fn digest(self) -> Digest {
+        digest_from_bytes(self.hasher.finalize().into())
+    }
+}
+
+pub(crate) fn inspect_reader_with_limits<R: Read>(
+    reader: &mut R,
+    limits: ArchiveLimits,
+) -> Result<ArchiveInspection, PackageError> {
+    let mut raw = RawStream::new(reader, limits.max_physical_bytes);
+    let mut context = ParserContext::new(limits)?;
+    let mut raw_records = 0_u64;
+    let mut state = ParserState::ExpectHeader;
+
+    loop {
+        state = match state {
+            ParserState::ExpectHeader => {
+                let mut block = [0_u8; BLOCK_SIZE];
+                raw.read_exact(&mut block)?;
+                if is_zero_block(&block) {
+                    ParserState::ExpectSecondZeroBlock
+                } else {
+                    raw_records = increment_raw_record(raw_records, limits)?;
+                    let header = parse_header(&block)?;
+                    match header.entry_type {
+                        LONG_NAME_TYPE => {
+                            validate_long_header(&header)?;
+                            ParserState::ExpectLongNameBody { size: header.size }
+                        }
+                        REGULAR_TYPE => {
+                            let path = parse_short_path(&header.name, limits)?;
+                            let plan = regular_plan(header, path, raw.position, &mut context)?;
+                            ParserState::ReadRegularBody(plan)
+                        }
+                        _ => return Err(PackageError::archive_entry_type()),
+                    }
+                }
+            }
+            ParserState::ExpectLongNameBody { size } => {
+                let path = read_long_name(&mut raw, size, limits)?;
+                ParserState::ExpectLongNameTarget { path }
+            }
+            ParserState::ExpectLongNameTarget { path } => {
+                let mut block = [0_u8; BLOCK_SIZE];
+                raw.read_exact(&mut block)?;
+                if is_zero_block(&block) {
+                    return Err(PackageError::archive_entry_type());
+                }
+                raw_records = increment_raw_record(raw_records, limits)?;
+                let header = parse_header(&block)?;
+                if header.entry_type != REGULAR_TYPE
+                    || parse_header_name(&header.name)? != GNU_LONG_FILE
+                    || path.as_str() == "package.json"
+                    || path.as_str() == "SIGNATURE"
+                {
+                    return Err(PackageError::archive_entry_type());
+                }
+                let plan = regular_plan(header, path, raw.position, &mut context)?;
+                ParserState::ReadRegularBody(plan)
+            }
+            ParserState::ReadRegularBody(plan) => {
+                let retain = plan.entry_class != EntryClass::Payload;
+                let (digest, retained) = read_regular_body(&mut raw, plan.size, retain)?;
+                context.store_entry(plan, digest, retained)?;
+                ParserState::ExpectHeader
+            }
+            ParserState::ExpectSecondZeroBlock => {
+                let mut block = [0_u8; BLOCK_SIZE];
+                raw.read_exact(&mut block)?;
+                if !is_zero_block(&block) {
+                    return Err(PackageError::archive_truncated());
+                }
+                ParserState::ExpectEof
+            }
+            ParserState::ExpectEof => {
+                raw.prove_eof()?;
+                let physical_bytes = raw.position;
+                let physical_digest = raw.digest();
+                return context.finish(physical_digest, physical_bytes);
+            }
+        };
+    }
+}
+
+#[cfg(test)]
+fn inspect_bytes(bytes: &[u8]) -> Result<ArchiveInspection, PackageError> {
+    inspect_bytes_with_limits(bytes, ArchiveLimits::production())
+}
+
+#[cfg(test)]
+fn inspect_bytes_with_limits(
+    bytes: &[u8],
+    limits: ArchiveLimits,
+) -> Result<ArchiveInspection, PackageError> {
+    inspect_reader_with_limits(&mut Cursor::new(bytes), limits)
+}
+
+fn regular_plan(
+    header: RawHeader,
+    path: PackagePath,
+    body_offset: u64,
+    context: &mut ParserContext,
+) -> Result<RegularPlan, PackageError> {
+    let mode = match header.mode {
+        0o444 => PackageFileMode::ReadOnly,
+        0o555 => PackageFileMode::Executable,
+        _ => return Err(PackageError::archive_header()),
+    };
+    let entry_class = context.accept_entry(&path, header.size)?;
+    Ok(RegularPlan {
+        path,
+        mode,
+        size: header.size,
+        body_offset,
+        entry_class,
+    })
+}
+
+fn parse_header(block: &[u8; BLOCK_SIZE]) -> Result<RawHeader, PackageError> {
+    let mode = decode_number(&block[100..108])?;
+    let uid = decode_number(&block[108..116])?;
+    let gid = decode_number(&block[116..124])?;
+    let size = decode_number(&block[124..136])?;
+    let mtime = decode_number(&block[136..148])?;
+    let checksum = decode_checksum(&block[148..156])?;
+    let devmajor = decode_number(&block[329..337])?;
+    let devminor = decode_number(&block[337..345])?;
+    let calculated = block
+        .iter()
+        .enumerate()
+        .try_fold(0_u64, |sum, (index, byte)| {
+            let value = if (148..156).contains(&index) {
+                u64::from(b' ')
+            } else {
+                u64::from(*byte)
+            };
+            sum.checked_add(value)
+        })
+        .ok_or_else(PackageError::archive_header)?;
+    if checksum != calculated
+        || uid != 0
+        || gid != 0
+        || mtime != 0
+        || devmajor != 0
+        || devminor != 0
+        || &block[257..263] != b"ustar "
+        || &block[263..265] != b" \0"
+        || block[157..257].iter().any(|byte| *byte != 0)
+        || block[265..329].iter().any(|byte| *byte != 0)
+        || block[345..].iter().any(|byte| *byte != 0)
+    {
+        return Err(PackageError::archive_header());
+    }
+
+    let entry_type = block[156];
+    match entry_type {
+        REGULAR_TYPE if matches!(mode, 0o444 | 0o555) => {}
+        LONG_NAME_TYPE if mode == 0o644 => {}
+        REGULAR_TYPE | LONG_NAME_TYPE => return Err(PackageError::archive_header()),
+        _ => return Err(PackageError::archive_entry_type()),
+    }
+    let mut name = [0_u8; 100];
+    name.copy_from_slice(&block[..100]);
+    Ok(RawHeader {
+        name,
+        mode,
+        size,
+        entry_type,
+    })
+}
+
+fn decode_number(field: &[u8]) -> Result<u64, PackageError> {
+    if !matches!(field.len(), 8 | 12)
+        || field[0] & 0x80 != 0
+        || field.last() != Some(&0)
+        || field[..field.len() - 1]
+            .iter()
+            .any(|byte| !(b'0'..=b'7').contains(byte))
+    {
+        return Err(PackageError::archive_header());
+    }
+    let digits = std::str::from_utf8(&field[..field.len() - 1])
+        .map_err(|_| PackageError::archive_header())?;
+    let value = u64::from_str_radix(digits, 8).map_err(|_| PackageError::archive_header())?;
+    let canonical = format!("{value:0width$o}", width = field.len() - 1);
+    if canonical.as_bytes() != &field[..field.len() - 1] {
+        return Err(PackageError::archive_header());
+    }
+    Ok(value)
+}
+
+fn decode_checksum(field: &[u8]) -> Result<u64, PackageError> {
+    if field.len() != 8
+        || field[0] & 0x80 != 0
+        || field[6] != 0
+        || field[7] != b' '
+        || field[..6].iter().any(|byte| !(b'0'..=b'7').contains(byte))
+    {
+        return Err(PackageError::archive_header());
+    }
+    let digits = std::str::from_utf8(&field[..6]).map_err(|_| PackageError::archive_header())?;
+    let value = u64::from_str_radix(digits, 8).map_err(|_| PackageError::archive_header())?;
+    if format!("{value:06o}").as_bytes() != &field[..6] {
+        return Err(PackageError::archive_header());
+    }
+    Ok(value)
+}
+
+fn validate_long_header(header: &RawHeader) -> Result<(), PackageError> {
+    if parse_header_name(&header.name)? != GNU_LONG_LINK || header.mode != 0o644 {
+        return Err(PackageError::archive_entry_type());
+    }
+    Ok(())
+}
+
+fn parse_short_path(name: &[u8; 100], limits: ArchiveLimits) -> Result<PackagePath, PackageError> {
+    let bytes = parse_header_name(name)?;
+    if bytes.is_empty() {
+        return Err(PackageError::archive_path());
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| PackageError::archive_path())?;
+    validate_path_limits(text, limits)?;
+    PackagePath::new(text).map_err(|_| PackageError::archive_path())
+}
+
+fn parse_header_name(name: &[u8; 100]) -> Result<&[u8], PackageError> {
+    let end = name
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(name.len());
+    if name[end..].iter().any(|byte| *byte != 0) {
+        return Err(PackageError::archive_path());
+    }
+    Ok(&name[..end])
+}
+
+fn read_long_name<R: Read>(
+    raw: &mut RawStream<'_, R>,
+    size: u64,
+    limits: ArchiveLimits,
+) -> Result<PackagePath, PackageError> {
+    if size > limits.max_long_name_body || size < 102 {
+        return Err(if size > limits.max_long_name_body {
+            PackageError::archive_quota()
+        } else {
+            PackageError::archive_path()
+        });
+    }
+    let length = usize::try_from(size).map_err(|_| PackageError::archive_quota())?;
+    let mut body = vec![0_u8; length];
+    raw.read_exact(&mut body)?;
+    read_padding(raw, size)?;
+    if body.last() != Some(&0) || body[..body.len() - 1].contains(&0) {
+        return Err(PackageError::archive_path());
+    }
+    let path_bytes = &body[..body.len() - 1];
+    if path_bytes.len() <= 100 {
+        return Err(PackageError::archive_path());
+    }
+    let path = std::str::from_utf8(path_bytes).map_err(|_| PackageError::archive_path())?;
+    validate_path_limits(path, limits)?;
+    PackagePath::new(path).map_err(|_| PackageError::archive_path())
+}
+
+fn read_regular_body<R: Read>(
+    raw: &mut RawStream<'_, R>,
+    size: u64,
+    retain: bool,
+) -> Result<(Digest, Vec<u8>), PackageError> {
+    let mut retained = Vec::new();
+    if retain {
+        retained
+            .try_reserve_exact(usize::try_from(size).map_err(|_| PackageError::archive_quota())?)
+            .map_err(|_| PackageError::archive_quota())?;
+    }
+    let mut remaining = size;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    while remaining > 0 {
+        let chunk = usize::try_from(
+            remaining.min(u64::try_from(buffer.len()).map_err(|_| PackageError::archive_quota())?),
+        )
+        .map_err(|_| PackageError::archive_quota())?;
+        raw.read_exact(&mut buffer[..chunk])?;
+        hasher.update(&buffer[..chunk]);
+        if retain {
+            retained.extend_from_slice(&buffer[..chunk]);
+        }
+        remaining -= u64::try_from(chunk).map_err(|_| PackageError::archive_quota())?;
+    }
+    read_padding(raw, size)?;
+    Ok((digest_from_bytes(hasher.finalize().into()), retained))
+}
+
+fn read_padding<R: Read>(raw: &mut RawStream<'_, R>, size: u64) -> Result<(), PackageError> {
+    let remainder = size % BLOCK_SIZE as u64;
+    let padding = if remainder == 0 {
+        0
+    } else {
+        BLOCK_SIZE as u64 - remainder
+    };
+    let mut bytes = [0_u8; BLOCK_SIZE];
+    let length = usize::try_from(padding).map_err(|_| PackageError::archive_quota())?;
+    raw.read_exact(&mut bytes[..length])?;
+    if bytes[..length].iter().any(|byte| *byte != 0) {
+        return Err(PackageError::archive_header());
+    }
+    Ok(())
+}
+
+fn validate_path_limits(path: &str, limits: ArchiveLimits) -> Result<(), PackageError> {
+    let path_bytes = u64::try_from(path.len()).map_err(|_| PackageError::archive_quota())?;
+    if path_bytes > limits.max_path_bytes {
+        return Err(PackageError::archive_quota());
+    }
+    let mut depth = 0_u64;
+    for component in path.split('/') {
+        depth = checked_increment(depth)?;
+        if u64::try_from(component.len()).map_err(|_| PackageError::archive_quota())?
+            > limits.max_component_bytes
+            || depth > limits.max_path_depth
+        {
+            return Err(PackageError::archive_quota());
+        }
+    }
+    Ok(())
+}
+
+fn collision_key(path: &str, maximum_bytes: u64) -> Result<String, PackageError> {
+    // Both pinned crates expose Unicode 16.0 tables. This is exactly:
+    // NFD -> full default non-Turkic case fold -> NFD.
+    let key = path
+        .chars()
+        .nfd()
+        .default_case_fold()
+        .nfd()
+        .collect::<String>();
+    if u64::try_from(key.len()).map_err(|_| PackageError::archive_quota())? > maximum_bytes {
+        return Err(PackageError::archive_quota());
+    }
+    Ok(key)
+}
+
+#[cfg(test)]
+fn collision_key_for_test(path: &str) -> Result<String, PackageError> {
+    collision_key(path, ArchiveLimits::production().max_collision_key_bytes)
+}
+
+fn increment_raw_record(current: u64, limits: ArchiveLimits) -> Result<u64, PackageError> {
+    let next = checked_increment(current)?;
+    if next > limits.max_raw_records {
+        return Err(PackageError::archive_quota());
+    }
+    Ok(next)
+}
+
+fn checked_increment(value: u64) -> Result<u64, PackageError> {
+    value.checked_add(1).ok_or_else(PackageError::archive_quota)
+}
+
+fn is_zero_block(block: &[u8; BLOCK_SIZE]) -> bool {
+    block.iter().all(|byte| *byte == 0)
+}
+
+fn digest_from_bytes(bytes: [u8; 32]) -> Digest {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(71);
+    value.push_str("sha256:");
+    for byte in bytes {
+        value.push(char::from(HEX[usize::from(byte >> 4)]));
+        value.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Digest::new(value).expect("lowercase SHA-256 bytes always form a valid digest")
+}
+
 #[cfg(test)]
 pub(crate) fn entry_bytes_for_test(
     path: &str,
@@ -217,6 +1041,17 @@ mod tests {
         for (path, mode, body) in payload {
             append_raw_entry(&mut archive, path, *mode, body, b'0');
         }
+        append_raw_entry(&mut archive, b"package.json", 0o444, b"{}", b'0');
+        append_raw_entry(&mut archive, b"SIGNATURE", 0o444, b"{}", b'0');
+        finish(&mut archive);
+        archive
+    }
+
+    fn valid_long_archive(path: &[u8]) -> Vec<u8> {
+        let mut archive = Vec::new();
+        append_raw_entry(&mut archive, b"plugin.json", 0o444, b"{}", b'0');
+        archive.extend_from_slice(&long_name_record(path));
+        archive.extend_from_slice(&raw_header(b"././@LongFile", 0o444, 0, b'0'));
         append_raw_entry(&mut archive, b"package.json", 0o444, b"{}", b'0');
         append_raw_entry(&mut archive, b"SIGNATURE", 0o444, b"{}", b'0');
         finish(&mut archive);
@@ -395,6 +1230,27 @@ mod tests {
         let collision =
             valid_archive(&[(b"STRASSE", 0o444, b""), ("Straße".as_bytes(), 0o444, b"")]);
         assert_code(&collision, "archive_case_collision");
+        assert_code(
+            &valid_archive(&[(b"K", 0o444, b""), (b"k", 0o444, b"")]),
+            "archive_case_collision",
+        );
+        assert_code(
+            &valid_archive(&[("Σ".as_bytes(), 0o444, b""), ("ς".as_bytes(), 0o444, b"")]),
+            "archive_case_collision",
+        );
+        assert!(inspect_bytes(&valid_archive(&[
+            (b"i", 0o444, b""),
+            ("İ".as_bytes(), 0o444, b""),
+        ]))
+        .is_ok());
+        assert_code(
+            &valid_archive(&[(b"A/b", 0o444, b""), (b"a", 0o444, b"")]),
+            "archive_case_collision",
+        );
+        assert_code(
+            &valid_archive(&[(b"PACKAGE.json", 0o444, b"")]),
+            "archive_case_collision",
+        );
         let reserved = valid_archive(&[(b"signature/payload", 0o444, b"")]);
         assert_code(&reserved, "archive_case_collision");
     }
@@ -425,26 +1281,30 @@ mod tests {
         assert_eq!(production.max_json_string_bytes, 64 * 1024);
 
         let archive = valid_archive(&[]);
-        for mutate in [
-            |limits: &mut ArchiveLimits| limits.max_physical_bytes = archive.len() as u64,
-            |limits: &mut ArchiveLimits| limits.max_unpacked_payload_bytes = 2,
-            |limits: &mut ArchiveLimits| limits.max_single_payload_file = 2,
-            |limits: &mut ArchiveLimits| limits.max_payload_files = 1,
-            |limits: &mut ArchiveLimits| limits.max_logical_entries = 3,
-            |limits: &mut ArchiveLimits| limits.max_raw_records = 3,
-            |limits: &mut ArchiveLimits| limits.max_path_bytes = 12,
-            |limits: &mut ArchiveLimits| limits.max_component_bytes = 12,
-            |limits: &mut ArchiveLimits| limits.max_path_depth = 1,
-            |limits: &mut ArchiveLimits| limits.max_namespace_nodes = 3,
-            |limits: &mut ArchiveLimits| limits.max_collision_key_bytes = 12,
-            |limits: &mut ArchiveLimits| limits.max_package_json_bytes = 2,
-            |limits: &mut ArchiveLimits| limits.max_signature_bytes = 2,
-            |limits: &mut ArchiveLimits| limits.max_plugin_json_bytes = 2,
-        ] {
-            let mut exact = production;
-            mutate(&mut exact);
-            assert!(inspect_bytes_with_limits(&archive, exact).is_ok());
+        macro_rules! assert_exact {
+            ($field:ident, $value:expr) => {{
+                let mut exact = production;
+                exact.$field = $value;
+                assert!(
+                    inspect_bytes_with_limits(&archive, exact).is_ok(),
+                    stringify!($field)
+                );
+            }};
         }
+        assert_exact!(max_physical_bytes, archive.len() as u64);
+        assert_exact!(max_unpacked_payload_bytes, 2);
+        assert_exact!(max_single_payload_file, 2);
+        assert_exact!(max_payload_files, 1);
+        assert_exact!(max_logical_entries, 3);
+        assert_exact!(max_raw_records, 3);
+        assert_exact!(max_path_bytes, 12);
+        assert_exact!(max_component_bytes, 12);
+        assert_exact!(max_path_depth, 1);
+        assert_exact!(max_namespace_nodes, 3);
+        assert_exact!(max_collision_key_bytes, 12);
+        assert_exact!(max_package_json_bytes, 2);
+        assert_exact!(max_signature_bytes, 2);
+        assert_exact!(max_plugin_json_bytes, 2);
 
         let mut physical = production;
         physical.max_physical_bytes = archive.len() as u64 - 1;
@@ -467,6 +1327,46 @@ mod tests {
         let mut plugin = production;
         plugin.max_plugin_json_bytes = 1;
         assert_code_with_limits(&archive, plugin, "archive_quota");
+
+        let path_archive = valid_archive(&[(b"payload-pathx", 0o444, b"")]);
+        let mut path_exact = production;
+        path_exact.max_path_bytes = 13;
+        assert!(inspect_bytes_with_limits(&path_archive, path_exact).is_ok());
+        path_exact.max_path_bytes = 12;
+        assert_code_with_limits(&path_archive, path_exact, "archive_quota");
+
+        let component_archive = valid_archive(&[(b"abcdefghijklmn", 0o444, b"")]);
+        let mut component_exact = production;
+        component_exact.max_component_bytes = 14;
+        assert!(inspect_bytes_with_limits(&component_archive, component_exact).is_ok());
+        component_exact.max_component_bytes = 13;
+        assert_code_with_limits(&component_archive, component_exact, "archive_quota");
+
+        let depth_archive = valid_archive(&[(b"a/b", 0o444, b"")]);
+        let mut depth_exact = production;
+        depth_exact.max_path_depth = 2;
+        assert!(inspect_bytes_with_limits(&depth_archive, depth_exact).is_ok());
+        depth_exact.max_path_depth = 1;
+        assert_code_with_limits(&depth_archive, depth_exact, "archive_quota");
+
+        let mut namespace = production;
+        namespace.max_namespace_nodes = 2;
+        assert_code_with_limits(&archive, namespace, "archive_quota");
+        let mut collision_key = production;
+        collision_key.max_collision_key_bytes = 11;
+        assert_code_with_limits(&archive, collision_key, "archive_quota");
+
+        let long_archive = valid_long_archive(&[b'l'; 101]);
+        let mut long_exact = production;
+        long_exact.max_long_name_body = 102;
+        assert!(inspect_bytes_with_limits(&long_archive, long_exact).is_ok());
+        long_exact.max_long_name_body = 101;
+        assert_code_with_limits(&long_archive, long_exact, "archive_quota");
+
+        let mut huge_size = valid_archive(&[]);
+        huge_size[124..136].copy_from_slice(b"77777777777\0");
+        rewrite_checksum((&mut huge_size[..BLOCK_SIZE]).try_into().unwrap());
+        assert_code(&huge_size, "archive_quota");
     }
 
     #[test]
@@ -486,6 +1386,15 @@ mod tests {
         let inspection = inspect_bytes(&archive).unwrap();
         assert_eq!(inspection.payload_entries().len(), 257);
         assert_eq!(inspection.retained_body_bytes(), 6);
+        assert_eq!(
+            inspection.physical_digest(),
+            &crate::hash::sha256_digest(&archive)
+        );
+        assert_eq!(inspection.physical_bytes(), archive.len() as u64);
+        assert!(inspection
+            .entries()
+            .windows(2)
+            .all(|entries| entries[0].body_offset() < entries[1].body_offset()));
 
         let mut chunked = ChunkedReader {
             bytes: &archive,
@@ -499,6 +1408,67 @@ mod tests {
                 .len(),
             257
         );
+
+        let first_terminator = archive.len() - BLOCK_SIZE * 2;
+        let mut body_error = ErrorReader {
+            bytes: &archive,
+            offset: 0,
+            fail_at: BLOCK_SIZE + 1,
+        };
+        assert_eq!(
+            super::inspect_reader_with_limits(&mut body_error, ArchiveLimits::production())
+                .unwrap_err()
+                .code(),
+            "archive_truncated"
+        );
+        let mut eof_error = ErrorReader {
+            bytes: &archive,
+            offset: 0,
+            fail_at: first_terminator + BLOCK_SIZE * 2,
+        };
+        assert_eq!(
+            super::inspect_reader_with_limits(&mut eof_error, ArchiveLimits::production())
+                .unwrap_err()
+                .code(),
+            "archive_trailing"
+        );
+    }
+
+    #[test]
+    #[ignore = "streams a synthetic near-2-GiB archive and checks process RSS"]
+    fn inspection_near_two_gib_stays_below_rss_budget() {
+        let mut segments = Vec::new();
+        append_sparse_entry(&mut segments, b"plugin.json", 2);
+        for index in 0..4 {
+            append_sparse_entry(
+                &mut segments,
+                format!("payload/{index}").as_bytes(),
+                500 * 1024 * 1024,
+            );
+        }
+        append_sparse_entry(&mut segments, b"package.json", 2);
+        append_sparse_entry(&mut segments, b"SIGNATURE", 2);
+        segments.push(SparseSegment::Zeros((BLOCK_SIZE * 2) as u64));
+
+        let mut reader = SparseReader {
+            segments,
+            segment: 0,
+            offset: 0,
+        };
+        let inspection =
+            super::inspect_reader_with_limits(&mut reader, ArchiveLimits::production()).unwrap();
+        assert!(inspection.physical_bytes() > 1_900 * 1024 * 1024);
+        let rss_output = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .unwrap();
+        assert!(rss_output.status.success());
+        let rss_kib = std::str::from_utf8(&rss_output.stdout)
+            .unwrap()
+            .trim()
+            .parse::<u64>()
+            .unwrap();
+        assert!(rss_kib < 128 * 1024, "RSS was {rss_kib} KiB");
     }
 
     fn assert_code_with_limits(bytes: &[u8], limits: ArchiveLimits, expected: &str) {
@@ -526,6 +1496,84 @@ mod tests {
             output[..count].copy_from_slice(&self.bytes[self.offset..self.offset + count]);
             self.offset += count;
             Ok(count)
+        }
+    }
+
+    struct ErrorReader<'a> {
+        bytes: &'a [u8],
+        offset: usize,
+        fail_at: usize,
+    }
+
+    impl Read for ErrorReader<'_> {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            if self.offset >= self.fail_at {
+                return Err(io::Error::other("injected read error"));
+            }
+            if self.offset == self.bytes.len() {
+                return Ok(0);
+            }
+            let count = output
+                .len()
+                .min(self.bytes.len() - self.offset)
+                .min(self.fail_at - self.offset);
+            output[..count].copy_from_slice(&self.bytes[self.offset..self.offset + count]);
+            self.offset += count;
+            Ok(count)
+        }
+    }
+
+    enum SparseSegment {
+        Bytes(Vec<u8>),
+        Zeros(u64),
+    }
+
+    fn append_sparse_entry(segments: &mut Vec<SparseSegment>, name: &[u8], size: u64) {
+        segments.push(SparseSegment::Bytes(
+            raw_header(name, 0o444, size, b'0').to_vec(),
+        ));
+        if size == 2 {
+            segments.push(SparseSegment::Bytes(b"{}".to_vec()));
+        } else {
+            segments.push(SparseSegment::Zeros(size));
+        }
+        let remainder = size % BLOCK_SIZE as u64;
+        if remainder != 0 {
+            segments.push(SparseSegment::Zeros(BLOCK_SIZE as u64 - remainder));
+        }
+    }
+
+    struct SparseReader {
+        segments: Vec<SparseSegment>,
+        segment: usize,
+        offset: u64,
+    }
+
+    impl Read for SparseReader {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            while let Some(segment) = self.segments.get(self.segment) {
+                let length = match segment {
+                    SparseSegment::Bytes(bytes) => bytes.len() as u64,
+                    SparseSegment::Zeros(length) => *length,
+                };
+                if self.offset == length {
+                    self.segment += 1;
+                    self.offset = 0;
+                    continue;
+                }
+                let count =
+                    usize::try_from((length - self.offset).min(output.len() as u64)).unwrap();
+                match segment {
+                    SparseSegment::Bytes(bytes) => {
+                        let start = usize::try_from(self.offset).unwrap();
+                        output[..count].copy_from_slice(&bytes[start..start + count]);
+                    }
+                    SparseSegment::Zeros(_) => output[..count].fill(0),
+                }
+                self.offset += count as u64;
+                return Ok(count);
+            }
+            Ok(0)
         }
     }
 }

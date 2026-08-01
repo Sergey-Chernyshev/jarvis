@@ -70,6 +70,60 @@ impl PackageError {
         }
     }
 
+    pub(crate) fn archive_header() -> Self {
+        Self {
+            code: "archive_header",
+        }
+    }
+
+    pub(crate) fn archive_entry_type() -> Self {
+        Self {
+            code: "archive_entry_type",
+        }
+    }
+
+    pub(crate) fn archive_path() -> Self {
+        Self {
+            code: "archive_path",
+        }
+    }
+
+    pub(crate) fn archive_duplicate() -> Self {
+        Self {
+            code: "archive_duplicate",
+        }
+    }
+
+    pub(crate) fn archive_case_collision() -> Self {
+        Self {
+            code: "archive_case_collision",
+        }
+    }
+
+    pub(crate) fn archive_order() -> Self {
+        Self {
+            code: "archive_order",
+        }
+    }
+
+    pub(crate) fn archive_truncated() -> Self {
+        Self {
+            code: "archive_truncated",
+        }
+    }
+
+    pub(crate) fn archive_trailing() -> Self {
+        Self {
+            code: "archive_trailing",
+        }
+    }
+
+    pub(crate) fn archive_quota() -> Self {
+        Self {
+            code: "archive_quota",
+        }
+    }
+
     pub fn code(&self) -> &'static str {
         self.code
     }
@@ -328,7 +382,7 @@ pub fn pack_plugin<A, S, W>(
     adapter: &A,
     signature_source: &S,
     mut output: W,
-) -> Result<(), PackageError>
+) -> Result<jarvis_plugin_protocol::manifest::Digest, PackageError>
 where
     A: PackageDocumentAdapter,
     S: PackageSignatureSource,
@@ -413,8 +467,64 @@ where
     archive_file
         .seek(SeekFrom::Start(0))
         .map_err(|_| PackageError::archive_write())?;
+    let inspection = crate::archive::inspect_reader_with_limits(
+        &mut archive_file,
+        crate::archive::ArchiveLimits::production(),
+    )?;
+    validate_packed_archive(&archive_file, &inspection, &prepared)?;
+    archive_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| PackageError::archive_write())?;
     std::io::copy(&mut archive_file, &mut output).map_err(|_| PackageError::archive_write())?;
     output.flush().map_err(|_| PackageError::archive_write())?;
+    Ok(inspection.physical_digest().clone())
+}
+
+#[cfg(target_os = "macos")]
+fn validate_packed_archive(
+    archive_file: &File,
+    inspection: &crate::archive::ArchiveInspection,
+    prepared: &PreparedPackageDocuments,
+) -> Result<(), PackageError> {
+    let stat = rustix::fs::fstat(archive_file).map_err(|_| PackageError::archive_write())?;
+    if stat.st_size < 0
+        || u64::try_from(stat.st_size).map_err(|_| PackageError::archive_write())?
+            != inspection.physical_bytes()
+        || inspection.plugin_json() != prepared.manifest_bytes()
+        || inspection.package_json() != prepared.metadata_bytes()
+        || inspection.signature() != prepared.signature_bytes()
+        || inspection.payload_entries().len() != prepared.metadata().files.len()
+        || !inspection
+            .entries()
+            .windows(2)
+            .all(|entries| entries[0].body_offset() < entries[1].body_offset())
+    {
+        return Err(PackageError::package_metadata());
+    }
+    for (observed, expected) in inspection
+        .payload_entries()
+        .iter()
+        .zip(&prepared.metadata().files)
+    {
+        if observed.path() != &expected.path
+            || observed.mode() != expected.mode
+            || observed.size() != expected.size
+            || observed.digest() != &expected.digest
+        {
+            return Err(PackageError::package_metadata());
+        }
+    }
+    let generated = &inspection.entries()[inspection.payload_entries().len()..];
+    if generated.len() != 2
+        || generated[0].path().as_str() != "package.json"
+        || generated[0].mode() != PackageFileMode::ReadOnly
+        || generated[0].digest() != &sha256_digest(prepared.metadata_bytes())
+        || generated[1].path().as_str() != "SIGNATURE"
+        || generated[1].mode() != PackageFileMode::ReadOnly
+        || generated[1].digest() != &sha256_digest(prepared.signature_bytes())
+    {
+        return Err(PackageError::package_metadata());
+    }
     Ok(())
 }
 

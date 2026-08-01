@@ -1,3 +1,88 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
+use chrono::{DateTime, Utc};
+use jarvis_package::{PackageTrustError, PackageTrustVerifier, UntrustedPackageObservation};
+
+use super::catalog::VerifiedCatalogRelease;
+use super::signature::verify_package_signature;
+use super::TrustError;
+
+pub struct CatalogPackageVerifier {
+    release: VerifiedCatalogRelease,
+    now: DateTime<Utc>,
+}
+
+impl CatalogPackageVerifier {
+    pub fn new(release: VerifiedCatalogRelease, now: DateTime<Utc>) -> Self {
+        Self { release, now }
+    }
+
+    fn verify_observation(
+        &self,
+        observation: &UntrustedPackageObservation<'_>,
+    ) -> Result<(), TrustError> {
+        if self.now < self.release.catalog_issued_at() {
+            return Err(TrustError::new("catalog_not_yet_valid"));
+        }
+        if self.now >= self.release.catalog_expires_at() {
+            return Err(TrustError::new("catalog_expired"));
+        }
+        if self.release.is_revoked() {
+            return Err(TrustError::new("package_revoked"));
+        }
+
+        let expected = self.release.release_record();
+        let publisher_key = self.release.publisher_key();
+        if publisher_key.key_id != expected.publisher_key_id
+            || expected.package_signature.key_id != expected.publisher_key_id
+            || publisher_key.algorithm != expected.package_signature.algorithm
+        {
+            return Err(TrustError::new("publisher_key_not_bound"));
+        }
+        let valid_from = parse_timestamp(&publisher_key.valid_from)?;
+        let valid_until = parse_timestamp(&publisher_key.valid_until)?;
+        if valid_from >= valid_until || self.now < valid_from || self.now >= valid_until {
+            return Err(TrustError::new("publisher_key_not_valid"));
+        }
+
+        let observed = observation.metadata();
+        if observed.plugin_id != expected.plugin_id
+            || observed.publisher != expected.publisher
+            || observed.version != expected.version
+            || observed.target != expected.target
+            || observed.minimum_macos != expected.minimum_macos
+            || observed.jarvis_range != expected.jarvis_range
+            || observed.plugin_api != expected.plugin_api
+            || observation.archive_digest() != &expected.archive_digest
+            || observation.signature() != &expected.package_signature
+        {
+            return Err(TrustError::new("package_catalog_mismatch"));
+        }
+
+        verify_package_signature(
+            &publisher_key.public_key,
+            observation.signature_message(),
+            observation.signature().value(),
+        )
+    }
+}
+
+impl PackageTrustVerifier for CatalogPackageVerifier {
+    fn verify(
+        &self,
+        observation: &UntrustedPackageObservation<'_>,
+    ) -> Result<(), PackageTrustError> {
+        self.verify_observation(observation)
+            .map_err(|error| PackageTrustError::new(error.code()))
+    }
+}
+
+fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, TrustError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|_| TrustError::new("publisher_key_not_valid"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs::{self, File};

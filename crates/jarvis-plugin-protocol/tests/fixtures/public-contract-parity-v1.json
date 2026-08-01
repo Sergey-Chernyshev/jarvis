@@ -1,0 +1,1791 @@
+{
+  "cases": [
+    {
+      "name": "welcome accepts an A2 single-segment plugin id",
+      "schema": "bridge",
+      "target": "BridgeHostFrame",
+      "valid": true,
+      "value": {
+        "v": 1,
+        "type": "welcome",
+        "pluginId": "example",
+        "packageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "pageId": "home",
+        "generation": 1,
+        "grants": []
+      }
+    },
+    {
+      "name": "welcome rejects an identifier grammar that A2 rejects",
+      "schema": "bridge",
+      "target": "BridgeHostFrame",
+      "valid": false,
+      "value": {
+        "v": 1,
+        "type": "welcome",
+        "pluginId": "dev_example.plugin",
+        "packageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "pageId": "home",
+        "generation": 1,
+        "grants": []
+      }
+    },
+    {
+      "name": "resolved command accepts an A2 digit-first identifier",
+      "schema": "contributions",
+      "target": "ResolvedCommandContribution",
+      "valid": true,
+      "value": {
+        "id": "3d.example.open",
+        "title": "Open",
+        "placements": ["globalPalette"],
+        "riskFloor": "read",
+        "context": []
+      }
+    },
+    {
+      "name": "resolved command rejects an underscore that A2 rejects",
+      "schema": "contributions",
+      "target": "ResolvedCommandContribution",
+      "valid": false,
+      "value": {
+        "id": "dev.example.open_",
+        "title": "Open",
+        "placements": ["globalPalette"],
+        "riskFloor": "read",
+        "context": []
+      }
+    },
+    {
+      "name": "setting key accepts an A2 digit-first identifier",
+      "schema": "settings",
+      "target": "SettingRecord",
+      "valid": true,
+      "value": {
+        "key": "3d.example.theme",
+        "scope": "user",
+        "value": {"type": "string", "value": "dark"},
+        "revision": 1
+      }
+    },
+    {
+      "name": "setting key rejects an underscore that A2 rejects",
+      "schema": "settings",
+      "target": "SettingRecord",
+      "valid": false,
+      "value": {
+        "key": "dev.example.theme_",
+        "scope": "user",
+        "value": {"type": "string", "value": "dark"},
+        "revision": 1
+      }
+    },
+    {
+      "name": "contract ref accepts an A2 digit-first canonical name and full semver",
+      "schema": "broker",
+      "target": "ContractRef",
+      "valid": true,
+      "value": {
+        "id": "3d.example/runtime",
+        "version": "1.2.3-alpha.1+build.7",
+        "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    {
+      "name": "contract ref accepts an A2 single-segment plugin namespace",
+      "schema": "broker",
+      "target": "ContractRef",
+      "valid": true,
+      "value": {
+        "id": "example/runtime",
+        "version": "1.2.3",
+        "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    {
+      "name": "contract ref rejects an underscore that A2 rejects",
+      "schema": "broker",
+      "target": "ContractRef",
+      "valid": false,
+      "value": {
+        "id": "dev_example.plugin/runtime",
+        "version": "1.2.3",
+        "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    {
+      "name": "contract ref rejects trailing punctuation that A2 rejects",
+      "schema": "broker",
+      "target": "ContractRef",
+      "valid": false,
+      "value": {
+        "id": "dev.example/runtime-",
+        "version": "1.2.3",
+        "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    {
+      "name": "bridge protocol version one is valid",
+      "schema": "bridge",
+      "target": "BridgeClientFrame",
+      "valid": true,
+      "value": {"v": 1, "type": "hello", "generation": 1}
+    },
+    {
+      "name": "bridge protocol version two is invalid",
+      "schema": "bridge",
+      "target": "BridgeClientFrame",
+      "valid": false,
+      "value": {"v": 2, "type": "hello", "generation": 1}
+    },
+    {
+      "name": "bridge deadline lower boundary is valid",
+      "schema": "bridge",
+      "target": "BridgeClientFrame",
+      "valid": true,
+      "value": {
+        "v": 1,
+        "type": "request",
+        "id": "request/01",
+        "generation": 1,
+        "namespace": "broker",
+        "method": "entities.query",
+        "params": {},
+        "deadlineMs": 1
+      }
+    },
+    {
+      "name": "bridge deadline zero is invalid",
+      "schema": "bridge",
+      "target": "BridgeClientFrame",
+      "valid": false,
+      "value": {
+        "v": 1,
+        "type": "request",
+        "id": "request/01",
+        "generation": 1,
+        "namespace": "broker",
+        "method": "entities.query",
+        "params": {},
+        "deadlineMs": 0
+      }
+    },
+    {
+      "name": "bridge deadline upper boundary is valid",
+      "schema": "bridge",
+      "target": "BridgeClientFrame",
+      "valid": true,
+      "value": {
+        "v": 1,
+        "type": "request",
+        "id": "request/01",
+        "generation": 1,
+        "namespace": "broker",
+        "method": "entities.query",
+        "params": {},
+        "deadlineMs": 30000
+      }
+    },
+    {
+      "name": "bridge deadline one over is invalid",
+      "schema": "bridge",
+      "target": "BridgeClientFrame",
+      "valid": false,
+      "value": {
+        "v": 1,
+        "type": "request",
+        "id": "request/01",
+        "generation": 1,
+        "namespace": "broker",
+        "method": "entities.query",
+        "params": {},
+        "deadlineMs": 30001
+      }
+    },
+    {
+      "name": "bridge rejects an opaque https URI",
+      "schema": "bridge",
+      "target": "BridgeClientFrame",
+      "valid": false,
+      "value": {
+        "v": 1,
+        "type": "request",
+        "id": "https:opaque",
+        "generation": 1,
+        "namespace": "broker",
+        "method": "entities.query",
+        "params": {},
+        "deadlineMs": 10000
+      }
+    },
+    {
+      "name": "bridge rejects an opaque urn URI",
+      "schema": "bridge",
+      "target": "BridgeClientFrame",
+      "valid": false,
+      "value": {
+        "v": 1,
+        "type": "request",
+        "id": "urn:secret",
+        "generation": 1,
+        "namespace": "broker",
+        "method": "entities.query",
+        "params": {},
+        "deadlineMs": 10000
+      }
+    },
+    {
+      "name": "bridge rejects a Windows drive-relative path",
+      "schema": "bridge",
+      "target": "BridgeClientFrame",
+      "valid": false,
+      "value": {
+        "v": 1,
+        "type": "request",
+        "id": "C:repo",
+        "generation": 1,
+        "namespace": "broker",
+        "method": "entities.query",
+        "params": {},
+        "deadlineMs": 10000
+      }
+    },
+    {
+      "name": "bridge rejects a trailing path separator",
+      "schema": "bridge",
+      "target": "BridgeClientFrame",
+      "valid": false,
+      "value": {
+        "v": 1,
+        "type": "request",
+        "id": "project/",
+        "generation": 1,
+        "namespace": "broker",
+        "method": "entities.query",
+        "params": {},
+        "deadlineMs": 10000
+      }
+    },
+    {
+      "name": "broker limit lower boundary is valid",
+      "schema": "broker",
+      "target": "EntityQuery",
+      "valid": true,
+      "value": {
+        "selectors": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "ids": [],
+          "states": []
+        }],
+        "projection": null,
+        "limit": 1
+      }
+    },
+    {
+      "name": "broker limit zero is invalid",
+      "schema": "broker",
+      "target": "EntityQuery",
+      "valid": false,
+      "value": {
+        "selectors": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "ids": [],
+          "states": []
+        }],
+        "projection": null,
+        "limit": 0
+      }
+    },
+    {
+      "name": "broker limit upper boundary is valid",
+      "schema": "broker",
+      "target": "EntityQuery",
+      "valid": true,
+      "value": {
+        "selectors": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "ids": [],
+          "states": []
+        }],
+        "projection": null,
+        "limit": 128
+      }
+    },
+    {
+      "name": "broker limit one over is invalid",
+      "schema": "broker",
+      "target": "EntityQuery",
+      "valid": false,
+      "value": {
+        "selectors": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "ids": [],
+          "states": []
+        }],
+        "projection": null,
+        "limit": 129
+      }
+    },
+    {
+      "name": "broker selectors exact boundary is valid",
+      "schema": "broker",
+      "target": "EntityQuery",
+      "valid": true,
+      "repeat": {"pointer": "/selectors", "count": 128},
+      "value": {
+        "selectors": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "ids": [],
+          "states": []
+        }],
+        "projection": null,
+        "limit": 128
+      }
+    },
+    {
+      "name": "broker selectors one over is invalid",
+      "schema": "broker",
+      "target": "EntityQuery",
+      "valid": false,
+      "repeat": {"pointer": "/selectors", "count": 129},
+      "value": {
+        "selectors": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "ids": [],
+          "states": []
+        }],
+        "projection": null,
+        "limit": 128
+      }
+    },
+    {
+      "name": "typed command deadline lower boundary is valid",
+      "schema": "broker",
+      "target": "TypedCommandInvocation",
+      "valid": true,
+      "value": {
+        "command": {
+          "id": "dev.example/runtime-command",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "subject": {
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "subject/01"
+        },
+        "args": {},
+        "deadlineMs": 1
+      }
+    },
+    {
+      "name": "typed command deadline zero is invalid",
+      "schema": "broker",
+      "target": "TypedCommandInvocation",
+      "valid": false,
+      "value": {
+        "command": {
+          "id": "dev.example/runtime-command",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "subject": {
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "subject/01"
+        },
+        "args": {},
+        "deadlineMs": 0
+      }
+    },
+    {
+      "name": "typed command deadline upper boundary is valid",
+      "schema": "broker",
+      "target": "TypedCommandInvocation",
+      "valid": true,
+      "value": {
+        "command": {
+          "id": "dev.example/runtime-command",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "subject": {
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "subject/01"
+        },
+        "args": {},
+        "deadlineMs": 30000
+      }
+    },
+    {
+      "name": "typed command deadline one over is invalid",
+      "schema": "broker",
+      "target": "TypedCommandInvocation",
+      "valid": false,
+      "value": {
+        "command": {
+          "id": "dev.example/runtime-command",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "subject": {
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "subject/01"
+        },
+        "args": {},
+        "deadlineMs": 30001
+      }
+    },
+    {
+      "name": "broker selector ids exact boundary is valid",
+      "schema": "broker",
+      "target": "EntitySelector",
+      "valid": true,
+      "repeat": {"pointer": "/ids", "count": 128},
+      "value": {
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "ids": ["entity/01"],
+        "states": []
+      }
+    },
+    {
+      "name": "broker selector ids one over is invalid",
+      "schema": "broker",
+      "target": "EntitySelector",
+      "valid": false,
+      "repeat": {"pointer": "/ids", "count": 129},
+      "value": {
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "ids": ["entity/01"],
+        "states": []
+      }
+    },
+    {
+      "name": "broker selector states exact boundary is valid",
+      "schema": "broker",
+      "target": "EntitySelector",
+      "valid": true,
+      "repeat": {"pointer": "/states", "count": 128},
+      "value": {
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "ids": [],
+        "states": ["ready"]
+      }
+    },
+    {
+      "name": "broker selector states one over is invalid",
+      "schema": "broker",
+      "target": "EntitySelector",
+      "valid": false,
+      "repeat": {"pointer": "/states", "count": 129},
+      "value": {
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "ids": [],
+        "states": ["ready"]
+      }
+    },
+    {
+      "name": "broker projection fields exact boundary is valid",
+      "schema": "broker",
+      "target": "FieldProjection",
+      "valid": true,
+      "repeat": {"pointer": "/fields", "count": 64},
+      "value": {"fields": ["summary"]}
+    },
+    {
+      "name": "broker projection fields one over is invalid",
+      "schema": "broker",
+      "target": "FieldProjection",
+      "valid": false,
+      "repeat": {"pointer": "/fields", "count": 65},
+      "value": {"fields": ["summary"]}
+    },
+    {
+      "name": "broker projection fields must be nonempty",
+      "schema": "broker",
+      "target": "FieldProjection",
+      "valid": false,
+      "value": {"fields": []}
+    },
+    {
+      "name": "broker query snapshot entities exact boundary is valid",
+      "schema": "broker",
+      "target": "EntityQuerySnapshot",
+      "valid": true,
+      "repeat": {"pointer": "/entities", "count": 128},
+      "value": {
+        "snapshotRevision": 1,
+        "entities": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "id": "entity/01",
+          "revision": 1,
+          "brokerRevision": 1,
+          "state": "ready",
+          "data": {},
+          "updatedAtMs": 1,
+          "stale": false
+        }]
+      }
+    },
+    {
+      "name": "broker query snapshot entities one over is invalid",
+      "schema": "broker",
+      "target": "EntityQuerySnapshot",
+      "valid": false,
+      "repeat": {"pointer": "/entities", "count": 129},
+      "value": {
+        "snapshotRevision": 1,
+        "entities": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "id": "entity/01",
+          "revision": 1,
+          "brokerRevision": 1,
+          "state": "ready",
+          "data": {},
+          "updatedAtMs": 1,
+          "stale": false
+        }]
+      }
+    },
+    {
+      "name": "entity watch selectors exact boundary is valid",
+      "schema": "broker",
+      "target": "EntityWatchRequest",
+      "valid": true,
+      "repeat": {"pointer": "/selectors", "count": 128},
+      "value": {
+        "cursor": 0,
+        "selectors": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "ids": [],
+          "states": []
+        }],
+        "projection": null,
+        "limit": 128
+      }
+    },
+    {
+      "name": "entity watch selectors one over is invalid",
+      "schema": "broker",
+      "target": "EntityWatchRequest",
+      "valid": false,
+      "repeat": {"pointer": "/selectors", "count": 129},
+      "value": {
+        "cursor": 0,
+        "selectors": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "ids": [],
+          "states": []
+        }],
+        "projection": null,
+        "limit": 128
+      }
+    },
+    {
+      "name": "entity watch limit zero is invalid",
+      "schema": "broker",
+      "target": "EntityWatchRequest",
+      "valid": false,
+      "value": {
+        "cursor": 0,
+        "selectors": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "ids": [],
+          "states": []
+        }],
+        "projection": null,
+        "limit": 0
+      }
+    },
+    {
+      "name": "entity watch limit one over is invalid",
+      "schema": "broker",
+      "target": "EntityWatchRequest",
+      "valid": false,
+      "value": {
+        "cursor": 0,
+        "selectors": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "ids": [],
+          "states": []
+        }],
+        "projection": null,
+        "limit": 129
+      }
+    },
+    {
+      "name": "event watch subjects exact boundary is valid",
+      "schema": "broker",
+      "target": "EventWatchRequest",
+      "valid": true,
+      "repeat": {"pointer": "/subjects", "count": 128},
+      "value": {
+        "cursor": 0,
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "subjects": ["subject/01"],
+        "limit": 128
+      }
+    },
+    {
+      "name": "event watch subjects one over is invalid",
+      "schema": "broker",
+      "target": "EventWatchRequest",
+      "valid": false,
+      "repeat": {"pointer": "/subjects", "count": 129},
+      "value": {
+        "cursor": 0,
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "subjects": ["subject/01"],
+        "limit": 128
+      }
+    },
+    {
+      "name": "event watch limit zero is invalid",
+      "schema": "broker",
+      "target": "EventWatchRequest",
+      "valid": false,
+      "value": {
+        "cursor": 0,
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "subjects": [],
+        "limit": 0
+      }
+    },
+    {
+      "name": "event watch limit one over is invalid",
+      "schema": "broker",
+      "target": "EventWatchRequest",
+      "valid": false,
+      "value": {
+        "cursor": 0,
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "subjects": [],
+        "limit": 129
+      }
+    },
+    {
+      "name": "runtime operation query subjects exact boundary is valid",
+      "schema": "broker",
+      "target": "RuntimeOperationQuery",
+      "valid": true,
+      "repeat": {"pointer": "/subjects", "count": 128},
+      "value": {
+        "subjects": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "subject/01"
+        }],
+        "includeTerminalSince": null,
+        "limit": 128
+      }
+    },
+    {
+      "name": "runtime operation query subjects one over is invalid",
+      "schema": "broker",
+      "target": "RuntimeOperationQuery",
+      "valid": false,
+      "repeat": {"pointer": "/subjects", "count": 129},
+      "value": {
+        "subjects": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "subject/01"
+        }],
+        "includeTerminalSince": null,
+        "limit": 128
+      }
+    },
+    {
+      "name": "runtime operation query limit zero is invalid",
+      "schema": "broker",
+      "target": "RuntimeOperationQuery",
+      "valid": false,
+      "value": {
+        "subjects": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "subject/01"
+        }],
+        "includeTerminalSince": null,
+        "limit": 0
+      }
+    },
+    {
+      "name": "runtime operation query limit one over is invalid",
+      "schema": "broker",
+      "target": "RuntimeOperationQuery",
+      "valid": false,
+      "value": {
+        "subjects": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "subject/01"
+        }],
+        "includeTerminalSince": null,
+        "limit": 129
+      }
+    },
+    {
+      "name": "runtime operation watch subjects exact boundary is valid",
+      "schema": "broker",
+      "target": "RuntimeOperationWatch",
+      "valid": true,
+      "repeat": {"pointer": "/subjects", "count": 128},
+      "value": {
+        "cursor": 0,
+        "subjects": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "subject/01"
+        }],
+        "limit": 128
+      }
+    },
+    {
+      "name": "runtime operation watch subjects one over is invalid",
+      "schema": "broker",
+      "target": "RuntimeOperationWatch",
+      "valid": false,
+      "repeat": {"pointer": "/subjects", "count": 129},
+      "value": {
+        "cursor": 0,
+        "subjects": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "subject/01"
+        }],
+        "limit": 128
+      }
+    },
+    {
+      "name": "runtime operation watch limit zero is invalid",
+      "schema": "broker",
+      "target": "RuntimeOperationWatch",
+      "valid": false,
+      "value": {
+        "cursor": 0,
+        "subjects": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "subject/01"
+        }],
+        "limit": 0
+      }
+    },
+    {
+      "name": "runtime operation watch limit one over is invalid",
+      "schema": "broker",
+      "target": "RuntimeOperationWatch",
+      "valid": false,
+      "value": {
+        "cursor": 0,
+        "subjects": [{
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "subject/01"
+        }],
+        "limit": 129
+      }
+    },
+    {
+      "name": "outbox mutations exact boundary is valid",
+      "schema": "broker",
+      "target": "OutboxBatch",
+      "valid": true,
+      "repeat": {"pointer": "/mutations", "count": 128},
+      "value": {
+        "sourceInstanceId": "source/01",
+        "outboxId": "outbox/01",
+        "mutations": [{
+          "kind": "entity",
+          "mutation": {
+            "type": "delete",
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "id": "entity/01",
+            "expectedRevision": 1
+          }
+        }]
+      }
+    },
+    {
+      "name": "outbox mutations one over is invalid",
+      "schema": "broker",
+      "target": "OutboxBatch",
+      "valid": false,
+      "repeat": {"pointer": "/mutations", "count": 129},
+      "value": {
+        "sourceInstanceId": "source/01",
+        "outboxId": "outbox/01",
+        "mutations": [{
+          "kind": "entity",
+          "mutation": {
+            "type": "delete",
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "id": "entity/01",
+            "expectedRevision": 1
+          }
+        }]
+      }
+    },
+    {
+      "name": "outbox accepted operation refs exact boundary is valid",
+      "schema": "broker",
+      "target": "OutboxAck",
+      "valid": true,
+      "repeat": {"pointer": "/acceptedOperationRefs", "count": 128},
+      "value": {
+        "sourceInstanceId": "source/01",
+        "outboxId": "outbox/01",
+        "payloadDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "appliedBrokerRevision": 1,
+        "acceptedOperationRefs": ["runtime-operation/01"]
+      }
+    },
+    {
+      "name": "outbox accepted operation refs one over is invalid",
+      "schema": "broker",
+      "target": "OutboxAck",
+      "valid": false,
+      "repeat": {"pointer": "/acceptedOperationRefs", "count": 129},
+      "value": {
+        "sourceInstanceId": "source/01",
+        "outboxId": "outbox/01",
+        "payloadDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "appliedBrokerRevision": 1,
+        "acceptedOperationRefs": ["runtime-operation/01"]
+      }
+    },
+    {
+      "name": "entity value exact serialized byte boundary is valid",
+      "schema": "broker",
+      "target": "EntityEnvelope",
+      "valid": true,
+      "repeatString": {"pointer": "/data", "value": "x", "count": 262142},
+      "value": {
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "id": "entity/01",
+        "revision": 1,
+        "brokerRevision": 1,
+        "state": "ready",
+        "data": "x",
+        "updatedAtMs": 1,
+        "stale": false
+      }
+    },
+    {
+      "name": "entity value one serialized byte over is invalid",
+      "schema": "broker",
+      "target": "EntityEnvelope",
+      "valid": false,
+      "repeatString": {"pointer": "/data", "value": "x", "count": 262143},
+      "value": {
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "id": "entity/01",
+        "revision": 1,
+        "brokerRevision": 1,
+        "state": "ready",
+        "data": "x",
+        "updatedAtMs": 1,
+        "stale": false
+      }
+    },
+    {
+      "name": "entity value exact multibyte serialized boundary is valid",
+      "schema": "broker",
+      "target": "EntityEnvelope",
+      "valid": true,
+      "repeatString": {"pointer": "/data", "value": "é", "count": 131071},
+      "value": {
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "id": "entity/01",
+        "revision": 1,
+        "brokerRevision": 1,
+        "state": "ready",
+        "data": "é",
+        "updatedAtMs": 1,
+        "stale": false
+      }
+    },
+    {
+      "name": "entity value one multibyte scalar over is invalid",
+      "schema": "broker",
+      "target": "EntityEnvelope",
+      "valid": false,
+      "repeatString": {"pointer": "/data", "value": "é", "count": 131072},
+      "value": {
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "id": "entity/01",
+        "revision": 1,
+        "brokerRevision": 1,
+        "state": "ready",
+        "data": "é",
+        "updatedAtMs": 1,
+        "stale": false
+      }
+    },
+    {
+      "name": "entity mutation value exact serialized byte boundary is valid",
+      "schema": "broker",
+      "target": "EntityMutation",
+      "valid": true,
+      "repeatString": {"pointer": "/data", "value": "x", "count": 262142},
+      "value": {
+        "type": "put",
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "id": "entity/01",
+        "expectedRevision": 1,
+        "data": "x"
+      }
+    },
+    {
+      "name": "entity mutation value one serialized byte over is invalid",
+      "schema": "broker",
+      "target": "EntityMutation",
+      "valid": false,
+      "repeatString": {"pointer": "/data", "value": "x", "count": 262143},
+      "value": {
+        "type": "put",
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "id": "entity/01",
+        "expectedRevision": 1,
+        "data": "x"
+      }
+    },
+    {
+      "name": "event envelope value exact serialized byte boundary is valid",
+      "schema": "broker",
+      "target": "EventEnvelope",
+      "valid": true,
+      "repeatString": {"pointer": "/data", "value": "x", "count": 131070},
+      "value": {
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "streamId": "stream/01",
+        "eventId": "event/01",
+        "seq": 1,
+        "subject": "subject/01",
+        "kind": "changed",
+        "correlationId": null,
+        "data": "x",
+        "atMs": 1
+      }
+    },
+    {
+      "name": "event envelope value one serialized byte over is invalid",
+      "schema": "broker",
+      "target": "EventEnvelope",
+      "valid": false,
+      "repeatString": {"pointer": "/data", "value": "x", "count": 131071},
+      "value": {
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "streamId": "stream/01",
+        "eventId": "event/01",
+        "seq": 1,
+        "subject": "subject/01",
+        "kind": "changed",
+        "correlationId": null,
+        "data": "x",
+        "atMs": 1
+      }
+    },
+    {
+      "name": "event mutation value exact serialized byte boundary is valid",
+      "schema": "broker",
+      "target": "EventMutation",
+      "valid": true,
+      "repeatString": {"pointer": "/data", "value": "x", "count": 131070},
+      "value": {
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "streamId": "stream/01",
+        "eventId": "event/01",
+        "subject": "subject/01",
+        "kind": "changed",
+        "correlationId": null,
+        "data": "x",
+        "atMs": 1
+      }
+    },
+    {
+      "name": "event mutation value one serialized byte over is invalid",
+      "schema": "broker",
+      "target": "EventMutation",
+      "valid": false,
+      "repeatString": {"pointer": "/data", "value": "x", "count": 131071},
+      "value": {
+        "contract": {
+          "id": "dev.example/runtime",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "streamId": "stream/01",
+        "eventId": "event/01",
+        "subject": "subject/01",
+        "kind": "changed",
+        "correlationId": null,
+        "data": "x",
+        "atMs": 1
+      }
+    },
+    {
+      "name": "typed command args exact serialized byte boundary is valid",
+      "schema": "broker",
+      "target": "TypedCommandInvocation",
+      "valid": true,
+      "repeatString": {"pointer": "/args", "value": "x", "count": 262142},
+      "value": {
+        "command": {
+          "id": "dev.example/runtime-command",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "subject": {
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "subject/01"
+        },
+        "args": "x",
+        "deadlineMs": 10000
+      }
+    },
+    {
+      "name": "typed command args one serialized byte over is invalid",
+      "schema": "broker",
+      "target": "TypedCommandInvocation",
+      "valid": false,
+      "repeatString": {"pointer": "/args", "value": "x", "count": 262143},
+      "value": {
+        "command": {
+          "id": "dev.example/runtime-command",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "subject": {
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "subject/01"
+        },
+        "args": "x",
+        "deadlineMs": 10000
+      }
+    },
+    {
+      "name": "completed command result exact serialized byte boundary is valid",
+      "schema": "broker",
+      "target": "CommandResult",
+      "valid": true,
+      "repeatString": {"pointer": "/result", "value": "x", "count": 262142},
+      "value": {"type": "completed", "result": "x"}
+    },
+    {
+      "name": "completed command result one serialized byte over is invalid",
+      "schema": "broker",
+      "target": "CommandResult",
+      "valid": false,
+      "repeatString": {"pointer": "/result", "value": "x", "count": 262143},
+      "value": {"type": "completed", "result": "x"}
+    },
+    {
+      "name": "resolved pages exact boundary is valid",
+      "schema": "contributions",
+      "target": "ResolvedContributions",
+      "valid": true,
+      "repeat": {
+        "pointer": "/pages",
+        "count": 512,
+        "indexPointer": "/id",
+        "prefix": "dev.example.page"
+      },
+      "value": {
+        "pages": [{
+          "id": "dev.example.page0",
+          "title": "Page",
+          "placements": ["sidebar"],
+          "instancePolicy": "singleton"
+        }],
+        "commands": [],
+        "actions": [],
+        "hotkeys": []
+      }
+    },
+    {
+      "name": "resolved pages one over is invalid",
+      "schema": "contributions",
+      "target": "ResolvedContributions",
+      "valid": false,
+      "repeat": {
+        "pointer": "/pages",
+        "count": 513,
+        "indexPointer": "/id",
+        "prefix": "dev.example.page"
+      },
+      "value": {
+        "pages": [{
+          "id": "dev.example.page0",
+          "title": "Page",
+          "placements": ["sidebar"],
+          "instancePolicy": "singleton"
+        }],
+        "commands": [],
+        "actions": [],
+        "hotkeys": []
+      }
+    },
+    {
+      "name": "resolved commands exact boundary is valid",
+      "schema": "contributions",
+      "target": "ResolvedContributions",
+      "valid": true,
+      "repeat": {
+        "pointer": "/commands",
+        "count": 512,
+        "indexPointer": "/id",
+        "prefix": "dev.example.command"
+      },
+      "value": {
+        "pages": [],
+        "commands": [{
+          "id": "dev.example.command0",
+          "title": "Command",
+          "placements": ["globalPalette"],
+          "riskFloor": "read",
+          "context": []
+        }],
+        "actions": [],
+        "hotkeys": []
+      }
+    },
+    {
+      "name": "resolved commands one over is invalid",
+      "schema": "contributions",
+      "target": "ResolvedContributions",
+      "valid": false,
+      "repeat": {
+        "pointer": "/commands",
+        "count": 513,
+        "indexPointer": "/id",
+        "prefix": "dev.example.command"
+      },
+      "value": {
+        "pages": [],
+        "commands": [{
+          "id": "dev.example.command0",
+          "title": "Command",
+          "placements": ["globalPalette"],
+          "riskFloor": "read",
+          "context": []
+        }],
+        "actions": [],
+        "hotkeys": []
+      }
+    },
+    {
+      "name": "resolved actions exact boundary is valid",
+      "schema": "contributions",
+      "target": "ResolvedContributions",
+      "valid": true,
+      "repeat": {
+        "pointer": "/actions",
+        "count": 512,
+        "indexPointer": "/id",
+        "prefix": "dev.example.action"
+      },
+      "value": {
+        "pages": [],
+        "commands": [],
+        "actions": [{
+          "id": "dev.example.action0",
+          "title": "Action",
+          "locations": ["project.actions"],
+          "command": "dev.example.command",
+          "riskFloor": "read",
+          "context": []
+        }],
+        "hotkeys": []
+      }
+    },
+    {
+      "name": "resolved actions one over is invalid",
+      "schema": "contributions",
+      "target": "ResolvedContributions",
+      "valid": false,
+      "repeat": {
+        "pointer": "/actions",
+        "count": 513,
+        "indexPointer": "/id",
+        "prefix": "dev.example.action"
+      },
+      "value": {
+        "pages": [],
+        "commands": [],
+        "actions": [{
+          "id": "dev.example.action0",
+          "title": "Action",
+          "locations": ["project.actions"],
+          "command": "dev.example.command",
+          "riskFloor": "read",
+          "context": []
+        }],
+        "hotkeys": []
+      }
+    },
+    {
+      "name": "resolved hotkeys exact boundary is valid",
+      "schema": "contributions",
+      "target": "ResolvedContributions",
+      "valid": true,
+      "repeat": {"pointer": "/hotkeys", "count": 512},
+      "value": {
+        "pages": [],
+        "commands": [],
+        "actions": [],
+        "hotkeys": [{
+          "command": "dev.example.command",
+          "shortcut": "CommandOrControl+K",
+          "scope": "global"
+        }]
+      }
+    },
+    {
+      "name": "resolved hotkeys one over is invalid",
+      "schema": "contributions",
+      "target": "ResolvedContributions",
+      "valid": false,
+      "repeat": {"pointer": "/hotkeys", "count": 513},
+      "value": {
+        "pages": [],
+        "commands": [],
+        "actions": [],
+        "hotkeys": [{
+          "command": "dev.example.command",
+          "shortcut": "CommandOrControl+K",
+          "scope": "global"
+        }]
+      }
+    },
+    {
+      "name": "contribution title exact byte boundary is valid",
+      "schema": "contributions",
+      "target": "ResolvedPageContribution",
+      "valid": true,
+      "repeatString": {"pointer": "/title", "value": "x", "count": 256},
+      "value": {
+        "id": "dev.example.page",
+        "title": "x",
+        "placements": ["sidebar"],
+        "instancePolicy": "singleton"
+      }
+    },
+    {
+      "name": "contribution title one byte over is invalid",
+      "schema": "contributions",
+      "target": "ResolvedPageContribution",
+      "valid": false,
+      "repeatString": {"pointer": "/title", "value": "x", "count": 257},
+      "value": {
+        "id": "dev.example.page",
+        "title": "x",
+        "placements": ["sidebar"],
+        "instancePolicy": "singleton"
+      }
+    },
+    {
+      "name": "contribution title exact multibyte boundary is valid",
+      "schema": "contributions",
+      "target": "ResolvedPageContribution",
+      "valid": true,
+      "repeatString": {"pointer": "/title", "value": "é", "count": 128},
+      "value": {
+        "id": "dev.example.page",
+        "title": "é",
+        "placements": ["sidebar"],
+        "instancePolicy": "singleton"
+      }
+    },
+    {
+      "name": "contribution title one multibyte scalar over is invalid",
+      "schema": "contributions",
+      "target": "ResolvedPageContribution",
+      "valid": false,
+      "repeatString": {"pointer": "/title", "value": "é", "count": 129},
+      "value": {
+        "id": "dev.example.page",
+        "title": "é",
+        "placements": ["sidebar"],
+        "instancePolicy": "singleton"
+      }
+    },
+    {
+      "name": "contribution context exact boundary is valid",
+      "schema": "contributions",
+      "target": "ResolvedCommandContribution",
+      "valid": true,
+      "repeat": {"pointer": "/context", "count": 16},
+      "value": {
+        "id": "dev.example.command",
+        "title": "Command",
+        "placements": ["globalPalette"],
+        "riskFloor": "read",
+        "context": [{"type": "project", "id": "project/01"}]
+      }
+    },
+    {
+      "name": "contribution context one over is invalid",
+      "schema": "contributions",
+      "target": "ResolvedCommandContribution",
+      "valid": false,
+      "repeat": {"pointer": "/context", "count": 17},
+      "value": {
+        "id": "dev.example.command",
+        "title": "Command",
+        "placements": ["globalPalette"],
+        "riskFloor": "read",
+        "context": [{"type": "project", "id": "project/01"}]
+      }
+    },
+    {
+      "name": "contribution placements exact boundary is valid",
+      "schema": "contributions",
+      "target": "ResolvedPageContribution",
+      "valid": true,
+      "repeat": {"pointer": "/placements", "count": 16},
+      "value": {
+        "id": "dev.example.page",
+        "title": "Page",
+        "placements": ["sidebar"],
+        "instancePolicy": "singleton"
+      }
+    },
+    {
+      "name": "contribution placements one over is invalid",
+      "schema": "contributions",
+      "target": "ResolvedPageContribution",
+      "valid": false,
+      "repeat": {"pointer": "/placements", "count": 17},
+      "value": {
+        "id": "dev.example.page",
+        "title": "Page",
+        "placements": ["sidebar"],
+        "instancePolicy": "singleton"
+      }
+    },
+    {
+      "name": "contribution shortcut exact byte boundary is valid",
+      "schema": "contributions",
+      "target": "ResolvedHotkeyContribution",
+      "valid": true,
+      "repeatString": {"pointer": "/shortcut", "value": "x", "count": 128},
+      "value": {
+        "command": "dev.example.command",
+        "shortcut": "x",
+        "scope": "global"
+      }
+    },
+    {
+      "name": "contribution shortcut one byte over is invalid",
+      "schema": "contributions",
+      "target": "ResolvedHotkeyContribution",
+      "valid": false,
+      "repeatString": {"pointer": "/shortcut", "value": "x", "count": 129},
+      "value": {
+        "command": "dev.example.command",
+        "shortcut": "x",
+        "scope": "global"
+      }
+    },
+    {
+      "name": "setting string exact byte boundary is valid",
+      "schema": "settings",
+      "target": "SettingRecord",
+      "valid": true,
+      "repeatString": {"pointer": "/value/value", "value": "x", "count": 65536},
+      "value": {
+        "key": "dev.example.value",
+        "scope": "user",
+        "value": {"type": "string", "value": "x"},
+        "revision": 1
+      }
+    },
+    {
+      "name": "setting string one byte over is invalid",
+      "schema": "settings",
+      "target": "SettingRecord",
+      "valid": false,
+      "repeatString": {"pointer": "/value/value", "value": "x", "count": 65537},
+      "value": {
+        "key": "dev.example.value",
+        "scope": "user",
+        "value": {"type": "string", "value": "x"},
+        "revision": 1
+      }
+    },
+    {
+      "name": "setting string exact multibyte boundary is valid",
+      "schema": "settings",
+      "target": "SettingRecord",
+      "valid": true,
+      "repeatString": {"pointer": "/value/value", "value": "é", "count": 32768},
+      "value": {
+        "key": "dev.example.value",
+        "scope": "user",
+        "value": {"type": "string", "value": "é"},
+        "revision": 1
+      }
+    },
+    {
+      "name": "setting string one multibyte scalar over is invalid",
+      "schema": "settings",
+      "target": "SettingRecord",
+      "valid": false,
+      "repeatString": {"pointer": "/value/value", "value": "é", "count": 32769},
+      "value": {
+        "key": "dev.example.value",
+        "scope": "user",
+        "value": {"type": "string", "value": "é"},
+        "revision": 1
+      }
+    },
+    {
+      "name": "user setting omits project id",
+      "schema": "settings",
+      "target": "SettingRecord",
+      "valid": true,
+      "value": {
+        "key": "dev.example.theme",
+        "scope": "user",
+        "value": {"type": "string", "value": "dark"},
+        "revision": 1
+      }
+    },
+    {
+      "name": "user setting rejects project id",
+      "schema": "settings",
+      "target": "SettingRecord",
+      "valid": false,
+      "value": {
+        "key": "dev.example.theme",
+        "scope": "user",
+        "projectId": "project/01",
+        "value": {"type": "string", "value": "dark"},
+        "revision": 1
+      }
+    },
+    {
+      "name": "project setting requires project id",
+      "schema": "settings",
+      "target": "SettingRecord",
+      "valid": false,
+      "value": {
+        "key": "dev.example.theme",
+        "scope": "project",
+        "value": {"type": "string", "value": "dark"},
+        "revision": 1
+      }
+    },
+    {
+      "name": "project setting with project id is valid",
+      "schema": "settings",
+      "target": "SettingRecord",
+      "valid": true,
+      "value": {
+        "key": "dev.example.theme",
+        "scope": "project",
+        "projectId": "project/01",
+        "value": {"type": "string", "value": "dark"},
+        "revision": 1
+      }
+    },
+    {
+      "name": "project setting rejects URI project id",
+      "schema": "settings",
+      "target": "SettingRecord",
+      "valid": false,
+      "value": {
+        "key": "dev.example.theme",
+        "scope": "project",
+        "projectId": "https:opaque",
+        "value": {"type": "string", "value": "dark"},
+        "revision": 1
+      }
+    },
+    {
+      "name": "stable public bridge error is valid",
+      "schema": "bridge",
+      "target": "BridgeHostFrame",
+      "valid": true,
+      "value": {
+        "v": 1,
+        "type": "error",
+        "id": "request/01",
+        "generation": 1,
+        "code": "grant_scope_denied",
+        "correlationId": "correlation/01"
+      }
+    },
+    {
+      "name": "stable runtime operation error is valid",
+      "schema": "broker",
+      "target": "RuntimeOperationView",
+      "valid": true,
+      "value": {
+        "operationRef": "runtime-operation/01",
+        "subject": {
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "runtime/01"
+        },
+        "exactCommand": {
+          "id": "dev.example/runtime-command",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "state": "failed",
+        "phase": "failed",
+        "providerGeneration": 1,
+        "createdAt": 1,
+        "updatedAt": 2,
+        "deadlineAt": 3,
+        "error": {"code": "provider_unavailable"}
+      }
+    },
+    {
+      "name": "unknown runtime operation error is invalid",
+      "schema": "broker",
+      "target": "RuntimeOperationView",
+      "valid": false,
+      "value": {
+        "operationRef": "runtime-operation/01",
+        "subject": {
+          "contract": {
+            "id": "dev.example/runtime",
+            "version": "1.0.0",
+            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "subjectId": "runtime/01"
+        },
+        "exactCommand": {
+          "id": "dev.example/runtime-command",
+          "version": "1.0.0",
+          "schemaDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "state": "failed",
+        "phase": "failed",
+        "providerGeneration": 1,
+        "createdAt": 1,
+        "updatedAt": 2,
+        "deadlineAt": 3,
+        "error": {"code": "sql_error"}
+      }
+    },
+    {
+      "name": "unknown public bridge error is invalid",
+      "schema": "bridge",
+      "target": "BridgeHostFrame",
+      "valid": false,
+      "value": {
+        "v": 1,
+        "type": "error",
+        "id": "request/01",
+        "generation": 1,
+        "code": "sql_error",
+        "correlationId": "correlation/01"
+      }
+    },
+    {
+      "name": "public bridge error rejects a free-form diagnostic",
+      "schema": "bridge",
+      "target": "BridgeHostFrame",
+      "valid": false,
+      "value": {
+        "v": 1,
+        "type": "error",
+        "id": "request/01",
+        "generation": 1,
+        "code": "schema_invalid",
+        "message": "SELECT * FROM secrets at /Users/alice/private.db",
+        "correlationId": "correlation/01"
+      }
+    },
+    {
+      "name": "unknown public close code is invalid",
+      "schema": "bridge",
+      "target": "BridgeHostFrame",
+      "valid": false,
+      "value": {
+        "v": 1,
+        "type": "close",
+        "generation": 1,
+        "code": "sql_error"
+      }
+    }
+  ]
+}

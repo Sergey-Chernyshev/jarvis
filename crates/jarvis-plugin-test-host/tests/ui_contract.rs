@@ -75,6 +75,36 @@ fn subscription_limit_is_enforced() {
     );
 }
 
+#[test]
+fn every_fake_host_output_round_trips_at_the_maximum_request_id_boundary() {
+    let host = UiTestHost::new(BoundPage::fixture("dev.example.owner", DIGEST, 9));
+    assert_host_frame_round_trips(host.welcome_fixture());
+
+    let maximum_id = "a".repeat(128);
+    let response = host
+        .request_fixture(&request_json(&maximum_id, "entities.query", 9))
+        .unwrap();
+    assert_host_frame_round_trips(response);
+
+    let subscription = host
+        .request_fixture(&request_json(&maximum_id, "entities.watch", 9))
+        .unwrap();
+    let BridgeHostFrame::SubscribeResult(result) = &subscription else {
+        panic!("subscribe-result frame expected");
+    };
+    assert!(
+        result.subscription_id.len() <= 128,
+        "fake-host subscription id exceeded the public 128-byte identifier bound"
+    );
+    assert_host_frame_round_trips(subscription);
+}
+
+fn assert_host_frame_round_trips(frame: BridgeHostFrame) {
+    let value = serde_json::to_value(frame).unwrap();
+    serde_json::from_value::<BridgeHostFrame>(value)
+        .expect("fake-host output must be valid public wire");
+}
+
 fn request_json(id: &str, method: &str, generation: u64) -> String {
     format!(
         r#"{{"v":1,"type":"request","id":"{id}","generation":{generation},"namespace":"broker","method":"{method}","params":{{}},"deadlineMs":10000}}"#

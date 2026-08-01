@@ -8,25 +8,54 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 
 const MAX_DISCOVERY_ENTRIES = 200_000;
 const MAX_RUST_FILES = 20_000;
 const MAX_RUST_SOURCE_BYTES = 128 * 1024 * 1024;
+const EXCLUDED_DIRECTORY_NAMES = new Set([
+  '.git',
+  '.worktrees',
+  'node_modules',
+]);
 
 const scanArguments = process.argv.slice(2);
 const trustRootsMode = scanArguments[0] === '--trust-roots';
-const rootArguments = trustRootsMode ? scanArguments.slice(1) : scanArguments.slice(0, 1);
+const targetSourcesOption = trustRootsMode
+  ? scanArguments.indexOf('--target-sources', 1)
+  : -1;
+const rootArguments = trustRootsMode
+  ? scanArguments.slice(
+      1,
+      targetSourcesOption === -1 ? scanArguments.length : targetSourcesOption,
+    )
+  : scanArguments.slice(0, 1);
 if (rootArguments.length === 0) {
   console.error(
-    'usage: scan-rust-unsafe-boundary.mjs <package-root> [target-sources...] | --trust-roots <root>...',
+    'usage: scan-rust-unsafe-boundary.mjs <package-root> [target-sources...] | --trust-roots <root>... [--target-sources <source>...]',
   );
   process.exit(2);
 }
 const scanRoots = [...new Set(rootArguments.map((root) => realpathSync(resolve(root))))];
-const explicitTargetSources = trustRootsMode ? [] : scanArguments.slice(1);
+const explicitTargetSources = [
+  ...new Set(
+    trustRootsMode
+      ? targetSourcesOption === -1
+        ? []
+        : scanArguments.slice(targetSourcesOption + 1)
+      : scanArguments.slice(1),
+  ),
+];
 
-function rustFiles(root, targetSources, discoveryBudget) {
+function rustFiles(root, discoveryBudget) {
   const files = new Set();
   const sourceEscapes = [];
   const rootBuildOutput = join(root, 'target');
@@ -39,11 +68,7 @@ function rustFiles(root, targetSources, discoveryBudget) {
       if (discoveryBudget.entries > MAX_DISCOVERY_ENTRIES) {
         throw new Error(`Rust source discovery exceeds ${MAX_DISCOVERY_ENTRIES} entries`);
       }
-      if (
-        entry.name === '.git' ||
-        entry.name === '.worktrees' ||
-        entry.name === 'node_modules'
-      ) {
+      if (EXCLUDED_DIRECTORY_NAMES.has(entry.name)) {
         continue;
       }
       const path = join(directory, entry.name);
@@ -67,7 +92,63 @@ function rustFiles(root, targetSources, discoveryBudget) {
   }
 
   visit(root);
-  for (const targetSource of targetSources) {
+  return { files: [...files].sort(), sourceEscapes };
+}
+
+function isInsideRoot(root, candidate) {
+  const relativeCandidate = relative(root, candidate);
+  return (
+    relativeCandidate !== '..' &&
+    !relativeCandidate.startsWith(`..${sep}`) &&
+    !isAbsolute(relativeCandidate)
+  );
+}
+
+function isInsideSkippedBuildOutput(candidate, roots) {
+  for (const root of roots) {
+    if (!isInsideRoot(root, candidate)) continue;
+    const rootBuildOutput = join(root, 'target');
+    if (
+      candidate === rootBuildOutput ||
+      candidate.startsWith(`${rootBuildOutput}${sep}`)
+    ) {
+      return true;
+    }
+    let directory = dirname(candidate);
+    while (directory !== root && isInsideRoot(root, directory)) {
+      if (
+        basename(directory) === 'target' &&
+        existsSync(join(dirname(directory), 'Cargo.toml'))
+      ) {
+        return true;
+      }
+      const parent = dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
+  return false;
+}
+
+function isInsideExcludedDirectory(candidate, roots) {
+  for (const root of roots) {
+    if (!isInsideRoot(root, candidate)) continue;
+    let directory = dirname(candidate);
+    while (directory !== root && isInsideRoot(root, directory)) {
+      if (EXCLUDED_DIRECTORY_NAMES.has(basename(directory))) return true;
+      const parent = dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
+  return false;
+}
+
+function cargoTargetFiles(targetSources, roots) {
+  const files = new Set();
+  const sourceEscapes = [];
+  for (const targetSourceArgument of targetSources) {
+    const targetSource = resolve(targetSourceArgument);
     let sourceInfo;
     try {
       sourceInfo = lstatSync(targetSource);
@@ -88,27 +169,29 @@ function rustFiles(root, targetSources, discoveryBudget) {
       continue;
     }
     const realSource = realpathSync(targetSource);
-    const relativeSource = relative(root, realSource);
-    if (
-      relativeSource === '..' ||
-      relativeSource.startsWith(`..${sep}`) ||
-      isAbsolute(relativeSource)
-    ) {
+    if (!roots.some((root) => isInsideRoot(root, realSource))) {
       sourceEscapes.push({
         path: targetSource,
         line: 1,
-        reason: 'Cargo target source outside package root',
+        reason: trustRootsMode
+          ? 'Cargo target source outside trust roots'
+          : 'Cargo target source outside package root',
       });
       continue;
     }
-    if (
-      realSource === rootBuildOutput ||
-      realSource.startsWith(`${rootBuildOutput}${sep}`)
-    ) {
+    if (isInsideSkippedBuildOutput(realSource, roots)) {
       sourceEscapes.push({
         path: targetSource,
         line: 1,
         reason: 'Cargo target source inside build output',
+      });
+      continue;
+    }
+    if (isInsideExcludedDirectory(realSource, roots)) {
+      sourceEscapes.push({
+        path: targetSource,
+        line: 1,
+        reason: 'Cargo target source inside excluded directory',
       });
       continue;
     }
@@ -664,7 +747,7 @@ const discoveryBudget = { entries: 0 };
 const discoveredFiles = new Set();
 const sourceEscapes = [];
 for (const root of scanRoots) {
-  const discovery = rustFiles(root, explicitTargetSources, discoveryBudget);
+  const discovery = rustFiles(root, discoveryBudget);
   for (const file of discovery.files) {
     discoveredFiles.add(file);
     if (discoveredFiles.size > MAX_RUST_FILES) {
@@ -673,6 +756,14 @@ for (const root of scanRoots) {
   }
   sourceEscapes.push(...discovery.sourceEscapes);
 }
+const cargoTargets = cargoTargetFiles(explicitTargetSources, scanRoots);
+for (const file of cargoTargets.files) {
+  discoveredFiles.add(file);
+  if (discoveredFiles.size > MAX_RUST_FILES) {
+    throw new Error(`Rust source discovery exceeds ${MAX_RUST_FILES} files`);
+  }
+}
+sourceEscapes.push(...cargoTargets.sourceEscapes);
 for (const escape of sourceEscapes) {
   process.stdout.write(`source\t${escape.path}:${escape.line}\t${escape.reason}\n`);
 }

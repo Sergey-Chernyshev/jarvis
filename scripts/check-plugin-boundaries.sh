@@ -87,8 +87,13 @@ package_manifest="$package_root/Cargo.toml"
 package_lib="$package_root/src/lib.rs"
 allowed_trust_verifier="$repo_root_resolved/src-tauri/src/plugins/trust/package.rs"
 allowed_private_test_verifier_root="$repo_root_resolved/crates/jarvis-package"
+package_manifest_json=""
+package_manifest_resolved=""
 
 if [[ -f "$package_manifest" ]]; then
+  package_manifest_resolved="$(
+    cd "$(dirname "$package_manifest")" && pwd -P
+  )/$(basename "$package_manifest")"
   if ! rg -q '^\s*publish\s*=\s*false\s*$' "$package_manifest"; then
     echo "jarvis-package must set publish = false: $package_manifest" >&2
     failed=1
@@ -106,7 +111,6 @@ if [[ -f "$package_manifest" ]]; then
     failed=1
   fi
 
-  package_manifest_json=""
   if ! package_manifest_json="$(semantic_manifest_json "$package_manifest")"; then
     echo "failed to parse private package targets semantically: $package_manifest" >&2
     failed=1
@@ -200,40 +204,6 @@ trust_roots=()
 for trust_root in "$repo_root/crates" "$repo_root/plugins" "$repo_root/src-tauri"; do
   [[ -d "$trust_root" ]] && trust_roots+=("$trust_root")
 done
-trust_scan=""
-if [[ "${#trust_roots[@]}" -gt 0 ]] && ! trust_scan="$(
-  node "$script_dir/scan-rust-unsafe-boundary.mjs" \
-    --trust-roots "${trust_roots[@]}"
-)"; then
-  echo "failed to scan PackageTrustVerifier ownership roots" >&2
-  failed=1
-  trust_scan=""
-fi
-trust_source_escapes="$(
-  printf '%s\n' "$trust_scan" \
-    | awk -F '\t' '$1 == "source" { print $2 " (" $3 ")" }'
-)"
-report_matches \
-  "PackageTrustVerifier source discovery escape:" \
-  "$trust_source_escapes"
-disallowed_trust=""
-while IFS=$'\t' read -r kind match; do
-  if [[ "$kind" != "trust" && "$kind" != "trust-test" ]]; then
-    continue
-  fi
-  [[ -z "$match" ]] && continue
-  match_path="${match%%:*}"
-  if [[ "$match_path" == "$allowed_trust_verifier" ]]; then
-    continue
-  fi
-  if [[ "$kind" == "trust-test" && "$match_path" == "$allowed_private_test_verifier_root"/* ]]; then
-    continue
-  fi
-  disallowed_trust+="${disallowed_trust:+$'\n'}$match"
-done <<< "$trust_scan"
-report_matches \
-  "PackageTrustVerifier production implementation outside host trust adapter:" \
-  "$disallowed_trust"
 
 package_root_resolved=""
 if [[ -d "$package_root" ]]; then
@@ -260,16 +230,57 @@ else
 fi
 crates_root_resolved="$(cd "$repo_root/crates" && pwd -P)"
 plugins_root_resolved="$(cd "$repo_root/plugins" && pwd -P)"
-allowed_package_manifest="$(cd "$repo_root/src-tauri" && pwd -P)/Cargo.toml"
+src_tauri_root_resolved="$(cd "$repo_root/src-tauri" && pwd -P)"
+allowed_package_manifest="$src_tauri_root_resolved/Cargo.toml"
+trust_target_sources=()
 while IFS= read -r manifest; do
   [[ -z "$manifest" ]] && continue
   manifest_resolved="$(cd "$(dirname "$manifest")" && pwd -P)/$(basename "$manifest")"
   manifest_json=""
-  if ! manifest_json="$(semantic_manifest_json "$manifest")"; then
+  if [[ -n "$package_manifest_resolved" \
+    && "$manifest_resolved" == "$package_manifest_resolved" \
+    && -n "$package_manifest_json" ]]; then
+    manifest_json="$package_manifest_json"
+  elif ! manifest_json="$(semantic_manifest_json "$manifest")"; then
     echo "failed to parse Cargo manifest semantically: $manifest" >&2
     failed=1
     continue
   fi
+  case "$manifest_resolved" in
+    "$crates_root_resolved"/* \
+      | "$plugins_root_resolved"/* \
+      | "$src_tauri_root_resolved"/*)
+      semantic_target_sources=""
+      if ! semantic_target_sources="$(
+        printf '%s\n' "$manifest_json" \
+          | node -e '
+            const { realpathSync } = require("node:fs");
+            let source = "";
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", (chunk) => { source += chunk; });
+            process.stdin.on("end", () => {
+              const payload = JSON.parse(source);
+              const packages = payload.packages ?? [payload];
+              const wantedManifest = realpathSync(process.argv[1]);
+              const packageRecord = packages.find(
+                (candidate) => realpathSync(candidate.manifest_path) === wantedManifest,
+              );
+              if (!packageRecord) process.exit(2);
+              for (const target of packageRecord.targets) {
+                process.stdout.write(`${target.src_path}\n`);
+              }
+            });
+          ' "$manifest_resolved"
+      )"; then
+        echo "failed to select Cargo target metadata: $manifest" >&2
+        failed=1
+        continue
+      fi
+      while IFS= read -r target_source; do
+        [[ -n "$target_source" ]] && trust_target_sources+=("$target_source")
+      done <<< "$semantic_target_sources"
+      ;;
+  esac
   semantic_dependencies=""
   if ! semantic_dependencies="$(
     printf '%s\n' "$manifest_json" \
@@ -329,6 +340,42 @@ while IFS= read -r manifest; do
     fi
   fi
 done <<< "$all_manifests"
+
+trust_scan=""
+if [[ "${#trust_roots[@]}" -gt 0 ]] && ! trust_scan="$(
+  node "$script_dir/scan-rust-unsafe-boundary.mjs" \
+    --trust-roots "${trust_roots[@]}" \
+    --target-sources "${trust_target_sources[@]}"
+)"; then
+  echo "failed to scan PackageTrustVerifier ownership roots" >&2
+  failed=1
+  trust_scan=""
+fi
+trust_source_escapes="$(
+  printf '%s\n' "$trust_scan" \
+    | awk -F '\t' '$1 == "source" { print $2 " (" $3 ")" }'
+)"
+report_matches \
+  "PackageTrustVerifier source discovery escape:" \
+  "$trust_source_escapes"
+disallowed_trust=""
+while IFS=$'\t' read -r kind match; do
+  if [[ "$kind" != "trust" && "$kind" != "trust-test" ]]; then
+    continue
+  fi
+  [[ -z "$match" ]] && continue
+  match_path="${match%%:*}"
+  if [[ "$match_path" == "$allowed_trust_verifier" ]]; then
+    continue
+  fi
+  if [[ "$kind" == "trust-test" && "$match_path" == "$allowed_private_test_verifier_root"/* ]]; then
+    continue
+  fi
+  disallowed_trust+="${disallowed_trust:+$'\n'}$match"
+done <<< "$trust_scan"
+report_matches \
+  "PackageTrustVerifier production implementation outside host trust adapter:" \
+  "$disallowed_trust"
 
 public_schemas="$(
   rg --files "$repo_root/schemas" 2>/dev/null \

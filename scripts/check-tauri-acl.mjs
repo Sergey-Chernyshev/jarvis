@@ -44,18 +44,49 @@ function isHtmlWhitespace(character) {
   );
 }
 
+function foldAsciiCodeUnit(codeUnit) {
+  return codeUnit >= 65 && codeUnit <= 90 ? codeUnit + 32 : codeUnit;
+}
+
+function asciiCaseInsensitiveEqualAt(source, offset, token) {
+  if (offset < 0 || offset + token.length > source.length) return false;
+  for (let index = 0; index < token.length; index += 1) {
+    if (
+      foldAsciiCodeUnit(source.charCodeAt(offset + index)) !==
+      foldAsciiCodeUnit(token.charCodeAt(index))
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function asciiCaseInsensitiveEquals(left, right) {
+  return (
+    left.length === right.length &&
+    asciiCaseInsensitiveEqualAt(left, 0, right)
+  );
+}
+
+function indexOfAsciiCaseInsensitive(source, token, fromIndex) {
+  const lastStart = source.length - token.length;
+  for (let offset = Math.max(0, fromIndex); offset <= lastStart; offset += 1) {
+    if (asciiCaseInsensitiveEqualAt(source, offset, token)) return offset;
+  }
+  return -1;
+}
+
 export function parseClassicExternalScripts(
   source,
   relative = 'trusted document',
 ) {
   const invalid = (detail) =>
     fail('tauri_acl_script_tag_invalid', `${relative}: ${detail}`);
-  const lower = source.toLowerCase();
   const scripts = [];
   let cursor = 0;
 
   while (cursor < source.length) {
-    const start = lower.indexOf('<script', cursor);
+    const start = indexOfAsciiCaseInsensitive(source, '<script', cursor);
     if (start === -1) break;
 
     let offset = start + '<script'.length;
@@ -92,8 +123,8 @@ export function parseClassicExternalScripts(
         offset += 1;
       }
       if (offset === nameStart) invalid('empty attribute');
-      const name = source.slice(nameStart, offset).toLowerCase();
-      if (name !== 'src' || src !== undefined) {
+      const name = source.slice(nameStart, offset);
+      if (!asciiCaseInsensitiveEquals(name, 'src') || src !== undefined) {
         invalid(`forbidden or duplicate attribute ${name}`);
       }
 
@@ -122,7 +153,7 @@ export function parseClassicExternalScripts(
     }
 
     if (src === undefined) invalid('missing src');
-    const closeStart = lower.indexOf('</script', offset);
+    const closeStart = indexOfAsciiCaseInsensitive(source, '</script', offset);
     if (closeStart === -1) invalid('missing closing tag');
     if (source.slice(offset, closeStart).trim()) {
       invalid('inline script body');

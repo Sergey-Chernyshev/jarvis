@@ -128,6 +128,25 @@ test('accepts the exact local trusted fixture', async () => {
   });
 });
 
+test('accepts non-ASCII text before and between trusted scripts', async () => {
+  for (const mutate of [
+    (html) => html.replace('<body>', '<body>İ Привет 🙂'),
+    (html) =>
+      html.replace(
+        '  <script src="./generated/tauri-transport.js"></script>\n  <script src="./bridge.js"></script>',
+        '  <script src="./generated/tauri-transport.js"></script>\n  İ 世界 🙂\n  <ScRiPt SRC = "./bridge.js"></sCrIpT>',
+      ),
+  ]) {
+    const root = await safeFixture();
+    const file = path.join(root, 'ui/index.html');
+    await writeFile(file, mutate(await readFile(file, 'utf8')));
+    assert.deepEqual(checkTauriAcl(root), {
+      commands: 1,
+      capabilities: 4,
+    });
+  }
+});
+
 test('rejects broad generated-permission ignores and handwritten ACL files', async () => {
   await expectCode(async (root) => {
     await writeFile(

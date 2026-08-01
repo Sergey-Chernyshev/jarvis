@@ -91,6 +91,50 @@ test('all trusted documents load one transport immediately before its consumer',
   }
 });
 
+test('script scan preserves Unicode indices while folding ASCII tag names only', () => {
+  const fixtures = [
+    [
+      'İ<script src="./first.js"></script>',
+      ['./first.js'],
+    ],
+    [
+      '<script src="./first.js"></script>İ<script src="./second.js"></script>',
+      ['./first.js', './second.js'],
+    ],
+    [
+      'Привет🙂<ScRiPt SRC = "./first.js"></sCrIpT>世界<script src="./second.js"></script>',
+      ['./first.js', './second.js'],
+    ],
+  ];
+
+  for (const [html, expected] of fixtures) {
+    assert.deepEqual(
+      parseClassicExternalScripts(html, 'unicode fixture').map(
+        (script) => script.src,
+      ),
+      expected,
+    );
+  }
+
+  assert.deepEqual(
+    parseClassicExternalScripts(
+      '<ѕcript src="./lookalike.js"></ѕcript>',
+      'unicode lookalike',
+    ),
+    [],
+  );
+  assert.throws(
+    () =>
+      parseClassicExternalScripts(
+        'İ<ScRiPt src="./unsafe.js" AsYnC="false"></sCrIpT>',
+        'unicode unsafe attribute',
+      ),
+    (error) =>
+      error.code === 'tauri_acl_script_tag_invalid' &&
+      error.message.includes('forbidden or duplicate attribute AsYnC'),
+  );
+});
+
 test('transport and consumer reject execution-changing or malformed attributes', () => {
   const transport = './generated/tauri-transport.js';
   const consumer = './bridge.js';

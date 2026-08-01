@@ -533,6 +533,9 @@ fn socket_and_dev_state_are_private_without_following_or_overwriting() {
         [0o600, 0o600]
     );
     drop(listener);
+    let cleanup_residue = run.join(".power-helper-dev.cleanup-residue");
+    assert!(cleanup_residue.exists());
+    fs::remove_file(&cleanup_residue).unwrap();
 
     let stale_path = run.join(DEV_SOCKET_FILE);
     let stale = UnixListener::bind(&stale_path).unwrap();

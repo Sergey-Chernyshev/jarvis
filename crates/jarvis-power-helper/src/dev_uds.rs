@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString, OsStr};
+use std::ffi::{CStr, OsStr};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
@@ -31,10 +31,10 @@ pub const DEV_SOCKET_FILE: &str = "power-helper-dev.sock";
 
 const RUN_DIRECTORY: &CStr = c"run";
 const DEV_SOCKET_COMPONENT: &CStr = c"power-helper-dev.sock";
+const QUARANTINE_COMPONENT: &CStr = c".power-helper-dev.cleanup-residue";
 const DIRECTORY_MODE: u32 = 0o700;
 const SOCKET_MODE: u32 = 0o600;
 const IO_TIMEOUT: Duration = Duration::from_millis(250);
-const QUARANTINE_PREFIX: &str = ".power-helper-dev.cleanup-";
 const DEV_BUNDLE_ID: &str = "app.jarvis.dev";
 const DEV_TEAM_ID: &str = "JARVISDEV1";
 const DEV_REQUIREMENT_DIGEST: [u8; 32] = [0x44; 32];
@@ -312,7 +312,6 @@ struct SocketCleanup {
     identity: Option<SocketIdentity>,
     uid: u32,
     gid: u32,
-    quarantine: CString,
 }
 
 impl Drop for SocketCleanup {
@@ -322,7 +321,6 @@ impl Drop for SocketCleanup {
             self.identity,
             self.uid,
             self.gid,
-            &self.quarantine,
         );
     }
 }
@@ -354,12 +352,14 @@ pub(crate) fn bind_listener(
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BindStage {
+    AfterBindBeforeIdentity,
     AfterSocketPreparedBeforeProof,
 }
 
 #[cfg(not(test))]
 #[derive(Clone, Copy)]
 enum BindStage {
+    AfterBindBeforeIdentity,
     AfterSocketPreparedBeforeProof,
 }
 
@@ -372,7 +372,7 @@ pub(crate) fn bind_listener_with_hook_for_testing<F>(
     hook: F,
 ) -> Result<DevListener, TransportError>
 where
-    F: FnOnce(BindStage, &Path),
+    F: FnMut(BindStage, &Path),
 {
     bind_listener_inner(root, expected_uid, events, hook)
 }
@@ -381,10 +381,10 @@ fn bind_listener_inner<F>(
     root: &DevRoot,
     expected_uid: u32,
     events: Arc<dyn HelperEventSink>,
-    hook: F,
+    mut hook: F,
 ) -> Result<DevListener, TransportError>
 where
-    F: FnOnce(BindStage, &Path),
+    F: FnMut(BindStage, &Path),
 {
     // SAFETY: these calls only read the current process identity.
     let actual_uid = unsafe { libc::geteuid() };
@@ -405,18 +405,20 @@ where
     if socket_metadata(run_directory.as_raw_fd())?.is_some() {
         return Err(TransportError::UnsafeMetadata);
     }
+    if socket_metadata_named(run_directory.as_raw_fd(), QUARANTINE_COMPONENT)?.is_some() {
+        return Err(TransportError::UnsafeMetadata);
+    }
 
     root.revalidate_child_path(RUN_DIRECTORY, run_directory.as_raw_fd())?;
     let path = root.path().join("run").join(DEV_SOCKET_FILE);
-    let quarantine = new_quarantine_name()?;
     let listener = UnixListener::bind(&path).map_err(|_| TransportError::Io)?;
     let mut cleanup = SocketCleanup {
         run_directory,
         identity: None,
         uid: expected_uid,
         gid,
-        quarantine,
     };
+    hook(BindStage::AfterBindBeforeIdentity, &path);
     let initial = socket_metadata(cleanup.run_directory.as_raw_fd())?
         .ok_or(TransportError::UnsafeMetadata)?;
     validate_socket_owner_kind(&initial, expected_uid, gid)?;
@@ -861,35 +863,22 @@ fn validate_owned_socket_entry(
     }
 }
 
-fn new_quarantine_name() -> Result<CString, TransportError> {
-    let mut randomness = [0_u8; 16];
-    getrandom::getrandom(&mut randomness).map_err(|_| TransportError::Io)?;
-    let mut name = String::with_capacity(QUARANTINE_PREFIX.len() + randomness.len() * 2);
-    name.push_str(QUARANTINE_PREFIX);
-    for byte in randomness {
-        use std::fmt::Write as _;
-        write!(&mut name, "{byte:02x}").map_err(|_| TransportError::Io)?;
-    }
-    CString::new(name).map_err(|_| TransportError::Io)
-}
-
 #[cfg(target_os = "macos")]
-fn quarantine_owned_socket(
-    directory: RawFd,
-    identity: Option<SocketIdentity>,
-    uid: u32,
-    gid: u32,
-    quarantine: &CStr,
-) {
+fn quarantine_owned_socket(directory: RawFd, identity: Option<SocketIdentity>, uid: u32, gid: u32) {
+    let Some(identity) = identity else {
+        // Without an established inode identity, even renaming the public name
+        // could move a raced sentinel. Close the listener fd and retain the
+        // pathname as fail-closed evidence.
+        return;
+    };
     // SAFETY: both names are single NUL-terminated components beneath the
-    // same held directory. RENAME_EXCL prevents overwriting any quarantine
-    // collision.
+    // same held directory. RENAME_EXCL refuses an existing bounded residue.
     if unsafe {
         libc::renameatx_np(
             directory,
             DEV_SOCKET_COMPONENT.as_ptr(),
             directory,
-            quarantine.as_ptr(),
+            QUARANTINE_COMPONENT.as_ptr(),
             libc::RENAME_EXCL,
         )
     } != 0
@@ -897,19 +886,19 @@ fn quarantine_owned_socket(
         return;
     }
 
-    let retained_owned_socket = socket_metadata_named(directory, quarantine)
+    let retained_owned_socket = socket_metadata_named(directory, QUARANTINE_COMPONENT)
         .ok()
         .flatten()
         .filter(|metadata| validate_socket_metadata(metadata, uid, gid).is_ok())
-        .is_some_and(|metadata| Some(SocketIdentity::from(metadata)) == identity);
-    if identity.is_some() && !retained_owned_socket {
+        .is_some_and(|metadata| SocketIdentity::from(metadata) == identity);
+    if !retained_owned_socket {
         // A raced sentinel is never deleted. Best effort restores its original
         // public name, but RENAME_EXCL also refuses to overwrite a new entry.
         // SAFETY: same held directory and fixed single components as above.
         let _ = unsafe {
             libc::renameatx_np(
                 directory,
-                quarantine.as_ptr(),
+                QUARANTINE_COMPONENT.as_ptr(),
                 directory,
                 DEV_SOCKET_COMPONENT.as_ptr(),
                 libc::RENAME_EXCL,
@@ -917,9 +906,9 @@ fn quarantine_owned_socket(
         };
     }
     // There is no Darwin primitive for "unlink this name only if it still has
-    // the inode just validated". Retaining our random quarantine entry is the
-    // fail-safe alternative to a stat/unlink swap race. With no validated
-    // identity, retain the isolated entry as evidence instead of guessing.
+    // the inode just validated". Retaining one fixed quarantine entry is the
+    // fail-safe alternative. A later bind rejects this residue instead of
+    // performing unsafe garbage collection or accumulating more entries.
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -928,7 +917,6 @@ fn quarantine_owned_socket(
     _identity: Option<SocketIdentity>,
     _uid: u32,
     _gid: u32,
-    _quarantine: &CStr,
 ) {
 }
 

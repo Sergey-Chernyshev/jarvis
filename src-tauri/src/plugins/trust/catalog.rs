@@ -186,19 +186,9 @@ impl VerifiedCatalog {
         version: &str,
         target: PackageTarget,
     ) -> Result<&VerifiedCatalogRelease, TrustError> {
-        let version = Version::parse(version).map_err(|_| TrustError::new("package_not_found"))?;
-        let release = self
-            .releases
-            .iter()
-            .find(|candidate| {
-                candidate.release.plugin_id.as_str() == plugin_id
-                    && candidate.release.version == version
-                    && candidate.release.target == target
-            })
-            .ok_or_else(|| TrustError::new("package_not_found"))?;
-
-        if release.revoked {
-            return Err(TrustError::new("package_revoked"));
+        let release = self.release_candidate(plugin_id, version, target)?;
+        if let Some(error) = release.availability_error() {
+            return Err(error);
         }
         if !release
             .release
@@ -216,6 +206,23 @@ impl VerifiedCatalog {
         }
         Ok(release)
     }
+
+    pub(super) fn release_candidate(
+        &self,
+        plugin_id: &str,
+        version: &str,
+        target: PackageTarget,
+    ) -> Result<&VerifiedCatalogRelease, TrustError> {
+        let version = Version::parse(version).map_err(|_| TrustError::new("package_not_found"))?;
+        self.releases
+            .iter()
+            .find(|candidate| {
+                candidate.release.plugin_id.as_str() == plugin_id
+                    && candidate.release.version == version
+                    && candidate.release.target == target
+            })
+            .ok_or_else(|| TrustError::new("package_not_found"))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -224,7 +231,9 @@ pub struct VerifiedCatalogRelease {
     publisher_key: PublisherKey,
     catalog_issued_at: DateTime<Utc>,
     catalog_expires_at: DateTime<Utc>,
-    revoked: bool,
+    package_revoked: bool,
+    publisher_key_revoked: bool,
+    publisher_key_valid_at_catalog: bool,
 }
 
 impl VerifiedCatalogRelease {
@@ -248,8 +257,16 @@ impl VerifiedCatalogRelease {
         self.catalog_expires_at
     }
 
-    pub(crate) fn is_revoked(&self) -> bool {
-        self.revoked
+    pub(crate) fn availability_error(&self) -> Option<TrustError> {
+        if self.publisher_key_revoked {
+            Some(TrustError::new("publisher_key_revoked"))
+        } else if self.package_revoked {
+            Some(TrustError::new("package_revoked"))
+        } else if !self.publisher_key_valid_at_catalog {
+            Some(TrustError::new("publisher_key_not_valid"))
+        } else {
+            None
+        }
     }
 }
 
@@ -343,6 +360,16 @@ fn verify_root_signatures(
         .as_ref()
         .map(RootTrustConfig::from_rotation)
         .transpose()?;
+    if let Some(proposed) = &proposed {
+        for current_key in &current.keys {
+            for proposed_key in &proposed.keys {
+                if current_key.public_key == proposed_key.public_key && current_key != proposed_key
+                {
+                    return Err(TrustError::new("catalog_rotation_key_conflict"));
+                }
+            }
+        }
+    }
     let message = catalog_signature_message(catalog)?;
     let mut current_valid = BTreeSet::new();
     let mut proposed_valid = BTreeSet::new();
@@ -364,17 +391,17 @@ fn verify_root_signatures(
         }
         verify_catalog_signature(&key.public_key, &message, &signature.value)?;
         if current_key.is_some() {
-            current_valid.insert(signature.key_id.as_str());
+            current_valid.insert(key.public_key.as_str());
         }
         if proposed_key.is_some() {
-            proposed_valid.insert(signature.key_id.as_str());
+            proposed_valid.insert(key.public_key.as_str());
         }
     }
 
     if current_valid.len() < usize::try_from(current.threshold).unwrap_or(usize::MAX) {
         return Err(TrustError::new("catalog_threshold"));
     }
-    if let Some(proposed) = proposed {
+    if let Some(proposed) = &proposed {
         if proposed_valid.len() < usize::try_from(proposed.threshold).unwrap_or(usize::MAX) {
             return Err(TrustError::new("catalog_rotation_threshold"));
         }
@@ -430,19 +457,18 @@ fn validate_releases(
         if release.package_signature.key_id != release.publisher_key_id {
             return Err(TrustError::new("publisher_key_not_bound"));
         }
-        if revoked_keys.contains(release.publisher_key_id.as_str()) {
-            return Err(TrustError::new("publisher_key_revoked"));
-        }
-        if !key_is_valid(&key.valid_from, &key.valid_until, now)? {
-            return Err(TrustError::new("publisher_key_not_valid"));
-        }
+        let publisher_key_revoked = revoked_keys.contains(release.publisher_key_id.as_str());
+        let publisher_key_valid_at_catalog = key_is_valid(&key.valid_from, &key.valid_until, now)?;
         validate_release_url(&release.url)?;
         verified.push(VerifiedCatalogRelease {
             release: release.clone(),
             publisher_key: key.clone(),
             catalog_issued_at: issued_at,
             catalog_expires_at: expires_at,
-            revoked: release.revoked || revoked_digests.contains(release.archive_digest.as_str()),
+            package_revoked: release.revoked
+                || revoked_digests.contains(release.archive_digest.as_str()),
+            publisher_key_revoked,
+            publisher_key_valid_at_catalog,
         });
     }
     Ok(verified)
@@ -520,6 +546,8 @@ mod tests {
     const SEED_HEX: &str =
         include_str!("../../../tests/fixtures/plugin-trust/package-test-signing-seed.hex");
     const PUBLIC_KEY: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+    const ROOT_2_PUBLIC_KEY: &str =
+        "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
 
     fn at(value: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(value)
@@ -580,6 +608,15 @@ mod tests {
                 })
                 .collect(),
         );
+        serde_json::to_vec(&value).unwrap()
+    }
+
+    fn fixture_signatures(bytes: &[u8], key_ids: &[&str]) -> Vec<u8> {
+        let mut value = catalog_value(bytes);
+        value["signatures"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|signature| key_ids.contains(&signature["keyId"].as_str().unwrap()));
         serde_json::to_vec(&value).unwrap()
     }
 
@@ -663,7 +700,7 @@ mod tests {
         let mut wrong_previous = catalog_value(CATALOG_2);
         wrong_previous["previousDigest"] =
             json!("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-        let wrong_previous = signed_catalog(wrong_previous, &["jarvis.root:1", "jarvis.root:2"]);
+        let wrong_previous = serde_json::to_vec(&wrong_previous).unwrap();
         assert_eq!(
             verify(&wrong_previous, "2026-08-01T01:30:00Z", &mut conflict_state,)
                 .unwrap_err()
@@ -700,7 +737,7 @@ mod tests {
                     {
                         "keyId": "jarvis.root:2",
                         "algorithm": "ed25519",
-                        "publicKey": PUBLIC_KEY,
+                        "publicKey": ROOT_2_PUBLIC_KEY,
                         "validFrom": "2026-01-01T00:00:00Z",
                         "validUntil": "2027-08-01T00:00:00Z"
                     }
@@ -724,7 +761,7 @@ mod tests {
         verify(CATALOG_1, "2026-08-01T00:30:00Z", &mut state).unwrap();
         let accepted = state.clone();
 
-        let old_only = signed_catalog(catalog_value(CATALOG_2), &["jarvis.root:1"]);
+        let old_only = fixture_signatures(CATALOG_2, &["jarvis.root:1"]);
         assert_eq!(
             verify(&old_only, "2026-08-01T01:30:00Z", &mut state)
                 .unwrap_err()
@@ -733,7 +770,7 @@ mod tests {
         );
         assert_eq!(state, accepted);
 
-        let new_only = signed_catalog(catalog_value(CATALOG_2), &["jarvis.root:2"]);
+        let new_only = fixture_signatures(CATALOG_2, &["jarvis.root:2"]);
         assert_eq!(
             verify(&new_only, "2026-08-01T01:30:00Z", &mut state)
                 .unwrap_err()
@@ -753,10 +790,8 @@ mod tests {
         verify(CATALOG_1, "2026-08-01T00:30:00Z", &mut state).unwrap();
         let accepted = state.clone();
         let mut duplicated = catalog_value(CATALOG_2);
-        duplicated["payload"]["rootRotation"]["keys"][0]["publicKey"] =
-            json!(PUBLIC_KEY);
-        let duplicated =
-            signed_catalog(duplicated, &["jarvis.root:1", "jarvis.root:2"]);
+        duplicated["payload"]["rootRotation"]["keys"][0]["publicKey"] = json!(PUBLIC_KEY);
+        let duplicated = serde_json::to_vec(&duplicated).unwrap();
         assert_eq!(
             verify(&duplicated, "2026-08-01T01:30:00Z", &mut state)
                 .unwrap_err()
@@ -803,21 +838,15 @@ mod tests {
         revoked["sequence"] = json!(2);
         revoked["issuedAt"] = json!("2026-08-01T01:00:00Z");
         revoked["expiresAt"] = json!("2026-08-03T00:00:00Z");
-        revoked["previousDigest"] = json!(
-            "sha256:382bdf240eb09eb2b7ba8fa8283ecb3aecb3f5a13b514abdfd36e65f1a7af472"
-        );
-        revoked["payload"]["revokedPublisherKeys"] =
-            json!(["example.release:1"]);
+        revoked["previousDigest"] =
+            json!("sha256:382bdf240eb09eb2b7ba8fa8283ecb3aecb3f5a13b514abdfd36e65f1a7af472");
+        revoked["payload"]["revokedPublisherKeys"] = json!(["example.release:1"]);
         let revoked = signed_catalog(revoked, &["jarvis.root:1"]);
         let verified = verify(&revoked, "2026-08-01T01:30:00Z", &mut state).unwrap();
         assert_eq!(state.sequence(), 2);
         assert_eq!(
             verified
-                .release(
-                    "dev.example.echo",
-                    "1.0.0",
-                    PackageTarget::DarwinArm64,
-                )
+                .release("dev.example.echo", "1.0.0", PackageTarget::DarwinArm64,)
                 .unwrap_err()
                 .code(),
             "publisher_key_revoked"
@@ -827,18 +856,13 @@ mod tests {
     #[test]
     fn oversized_numeric_macos_component_is_incompatible_without_panicking() {
         let mut catalog = catalog_value(CATALOG_1);
-        catalog["payload"]["releases"][0]["minimumMacos"] =
-            json!("18446744073709551616.0.0");
+        catalog["payload"]["releases"][0]["minimumMacos"] = json!("18446744073709551616.0.0");
         let catalog = signed_catalog(catalog, &["jarvis.root:1"]);
         let mut state = fixture_state();
         let verified = verify(&catalog, "2026-08-01T00:30:00Z", &mut state).unwrap();
         assert_eq!(
             verified
-                .release(
-                    "dev.example.echo",
-                    "1.0.0",
-                    PackageTarget::DarwinArm64,
-                )
+                .release("dev.example.echo", "1.0.0", PackageTarget::DarwinArm64,)
                 .unwrap_err()
                 .code(),
             "package_incompatible"

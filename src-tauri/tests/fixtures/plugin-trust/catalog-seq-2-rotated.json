@@ -50,7 +50,7 @@
         {
           "keyId": "jarvis.root:2",
           "algorithm": "ed25519",
-          "publicKey": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+          "publicKey": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
           "validFrom": "2026-01-01T00:00:00Z",
           "validUntil": "2027-08-01T00:00:00Z"
         }
@@ -63,12 +63,12 @@
     {
       "algorithm": "ed25519",
       "keyId": "jarvis.root:1",
-      "value": "YMCdnO9AG9pCV4l0V4ZmyuS/FnHPdrUqpOg8nJLBS7LyIHjlTldwjXb6gbz+PiDc7Vb00h7yR95JAnkK8PAGBA=="
+      "value": "GdG/zwkwY4Qrgd/ap//d18GGT4NYVhC3CAanQYfOh5R4CWmlLMjXXGlBnnDjeDg2L9m2FHgwZj6nb2nl3x7JBw=="
     },
     {
       "algorithm": "ed25519",
       "keyId": "jarvis.root:2",
-      "value": "YMCdnO9AG9pCV4l0V4ZmyuS/FnHPdrUqpOg8nJLBS7LyIHjlTldwjXb6gbz+PiDc7Vb00h7yR95JAnkK8PAGBA=="
+      "value": "jY9Vo8Nv9qmLNEFmKmfnAKmjJqTCU/e93qsEeY9XuMFc5pilmwPXrfsTJmDhJOTr/fCjBdq5KYSDURLlmJ4XAA=="
     }
   ]
 }

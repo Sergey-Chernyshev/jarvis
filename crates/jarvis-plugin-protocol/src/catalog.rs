@@ -164,13 +164,16 @@ impl CatalogPayload {
 
         let mut lineage_ids = BTreeSet::new();
         let mut publisher_key_ids = BTreeSet::new();
+        let mut publisher_public_keys = BTreeSet::new();
         for lineage in &self.publisher_lineages {
             lineage.validate()?;
             if !lineage_ids.insert(lineage.id.as_str()) {
                 return Err(CatalogContractError::duplicate());
             }
             for key in &lineage.keys {
-                if !publisher_key_ids.insert(key.key_id.as_str()) {
+                if !publisher_key_ids.insert(key.key_id.as_str())
+                    || !publisher_public_keys.insert(key.public_key.as_str())
+                {
                     return Err(CatalogContractError::duplicate());
                 }
             }
@@ -236,9 +239,11 @@ impl PublisherKeyLineage {
             return Err(CatalogContractError::duplicate());
         }
         let mut key_ids = BTreeSet::new();
+        let mut public_keys = BTreeSet::new();
         for key in &self.keys {
             key.validate()?;
-            if !key_ids.insert(key.key_id.as_str()) {
+            if !key_ids.insert(key.key_id.as_str()) || !public_keys.insert(key.public_key.as_str())
+            {
                 return Err(CatalogContractError::duplicate());
             }
         }
@@ -283,9 +288,11 @@ impl RootRotationProposal {
             return Err(CatalogContractError::cardinality());
         }
         let mut key_ids = BTreeSet::new();
+        let mut public_keys = BTreeSet::new();
         for key in &self.keys {
             key.validate()?;
-            if !key_ids.insert(key.key_id.as_str()) {
+            if !key_ids.insert(key.key_id.as_str()) || !public_keys.insert(key.public_key.as_str())
+            {
                 return Err(CatalogContractError::duplicate());
             }
         }

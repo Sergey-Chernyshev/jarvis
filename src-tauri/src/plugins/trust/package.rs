@@ -27,8 +27,8 @@ impl CatalogPackageVerifier {
         if self.now >= self.release.catalog_expires_at() {
             return Err(TrustError::new("catalog_expired"));
         }
-        if self.release.is_revoked() {
-            return Err(TrustError::new("package_revoked"));
+        if let Some(error) = self.release.availability_error() {
+            return Err(error);
         }
 
         let expected = self.release.release_record();
@@ -112,7 +112,7 @@ mod tests {
     use crate::plugins::manifest_v2::HostCompatibility;
     use crate::plugins::package::HostPackageDocumentAdapter;
     use crate::plugins::trust::catalog::{
-        verify_catalog_bytes, CatalogCompatibility, CatalogState, RootTrustConfig,
+        verify_catalog_bytes, CatalogCompatibility, CatalogState, RootTrustConfig, VerifiedCatalog,
         VerifiedCatalogRelease,
     };
     use crate::plugins::trust::signature::catalog_signature_message;
@@ -403,10 +403,10 @@ mod tests {
         serde_json::to_vec(&value).unwrap()
     }
 
-    fn verified_release(
+    fn verified_catalog(
         catalog: Value,
         selection: &CatalogSelection,
-    ) -> Result<VerifiedCatalogRelease, crate::plugins::trust::TrustError> {
+    ) -> Result<VerifiedCatalog, crate::plugins::trust::TrustError> {
         let compatibility = CatalogCompatibility::parse(
             &selection.jarvis_version,
             selection.plugin_api,
@@ -415,8 +415,14 @@ mod tests {
         )
         .unwrap();
         let mut state = CatalogState::new(RootTrustConfig::parse(ROOTS).unwrap());
-        let verified =
-            verify_catalog_bytes(&sign_catalog(catalog), at(NOW), &compatibility, &mut state)?;
+        verify_catalog_bytes(&sign_catalog(catalog), at(NOW), &compatibility, &mut state)
+    }
+
+    fn verified_release(
+        catalog: Value,
+        selection: &CatalogSelection,
+    ) -> Result<VerifiedCatalogRelease, crate::plugins::trust::TrustError> {
+        let verified = verified_catalog(catalog, selection)?;
         verified
             .release(&selection.plugin_id, &selection.version, selection.target)
             .cloned()
@@ -599,12 +605,24 @@ mod tests {
         let output = TestDirectory::new();
         let mut catalog = base_catalog(&fixture.observation);
         catalog["payload"]["releases"][0]["revoked"] = json!(true);
+        let selection = CatalogSelection::default();
+        let verified = verified_catalog(catalog, &selection).unwrap();
+        let release = verified
+            .release_candidate(&selection.plugin_id, &selection.version, selection.target)
+            .unwrap()
+            .clone();
+        let recorder = RecordingVerifier::new(CatalogPackageVerifier::new(release, at(NOW)));
         assert_eq!(
-            verified_release(catalog, &CatalogSelection::default())
-                .unwrap_err()
-                .code(),
-            "package_revoked"
+            inspect_and_verify_package(
+                File::open(&fixture.archive_path).unwrap(),
+                &adapter(),
+                &recorder,
+            )
+            .unwrap_err()
+            .code(),
+            "package_trust"
         );
+        assert_eq!(recorder.error_code(), Some("package_revoked"));
         assert!(!output.path().join("quarantine").exists());
     }
 

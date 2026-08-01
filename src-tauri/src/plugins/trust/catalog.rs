@@ -299,6 +299,13 @@ pub fn verify_catalog_bytes(
     let digest = catalog_digest(&catalog)?;
     validate_sequence(&catalog, &digest, state)?;
 
+    if catalog.sequence != state.sequence {
+        let root_horizon = verify_root_signatures(&catalog, now, &state.accepted_roots)?;
+        if expires_at > root_horizon {
+            return Err(TrustError::new("catalog_root_expiry"));
+        }
+    }
+
     let releases = validate_releases(&catalog, issued_at, expires_at, now)?;
     let verified = VerifiedCatalog {
         sequence: catalog.sequence,
@@ -311,7 +318,6 @@ pub fn verify_catalog_bytes(
         return Ok(verified);
     }
 
-    verify_root_signatures(&catalog, now, &state.accepted_roots)?;
     let accepted_roots = match &catalog.payload.root_rotation {
         Some(rotation) => RootTrustConfig::from_rotation(rotation)?,
         None => state.accepted_roots.clone(),
@@ -353,7 +359,7 @@ fn verify_root_signatures(
     catalog: &SignedCatalog,
     now: DateTime<Utc>,
     current: &RootTrustConfig,
-) -> Result<(), TrustError> {
+) -> Result<DateTime<Utc>, TrustError> {
     let proposed = catalog
         .payload
         .root_rotation
@@ -371,8 +377,8 @@ fn verify_root_signatures(
         }
     }
     let message = catalog_signature_message(catalog)?;
-    let mut current_valid = BTreeSet::new();
-    let mut proposed_valid = BTreeSet::new();
+    let mut current_valid = BTreeMap::new();
+    let mut proposed_valid = BTreeMap::new();
 
     for signature in &catalog.signatures {
         let current_key = current.key(&signature.key_id);
@@ -386,27 +392,49 @@ fn verify_root_signatures(
             (Some(key), _) | (_, Some(key)) => key,
             (None, None) => return Err(TrustError::new("catalog_unknown_root")),
         };
-        if !key_is_valid(&key.valid_from, &key.valid_until, now)? {
+        let (valid_from, valid_until) =
+            validate_key_window(&key.valid_from, &key.valid_until, "catalog_key_time")?;
+        if now < valid_from || now >= valid_until {
             return Err(TrustError::new("catalog_root_not_valid"));
         }
         verify_catalog_signature(&key.public_key, &message, &signature.value)?;
         if current_key.is_some() {
-            current_valid.insert(key.public_key.as_str());
+            current_valid.insert(key.public_key.as_str(), valid_until);
         }
         if proposed_key.is_some() {
-            proposed_valid.insert(key.public_key.as_str());
+            proposed_valid.insert(key.public_key.as_str(), valid_until);
         }
     }
 
-    if current_valid.len() < usize::try_from(current.threshold).unwrap_or(usize::MAX) {
-        return Err(TrustError::new("catalog_threshold"));
+    let current_horizon = quorum_horizon(&current_valid, current.threshold, "catalog_threshold")?;
+    proposed
+        .as_ref()
+        .map(|proposed| {
+            quorum_horizon(
+                &proposed_valid,
+                proposed.threshold,
+                "catalog_rotation_threshold",
+            )
+            .map(|proposed_horizon| current_horizon.min(proposed_horizon))
+        })
+        .unwrap_or(Ok(current_horizon))
+}
+
+fn quorum_horizon(
+    valid: &BTreeMap<&str, DateTime<Utc>>,
+    threshold: u32,
+    error_code: &'static str,
+) -> Result<DateTime<Utc>, TrustError> {
+    let threshold = usize::try_from(threshold).map_err(|_| TrustError::new(error_code))?;
+    if threshold == 0 || valid.len() < threshold {
+        return Err(TrustError::new(error_code));
     }
-    if let Some(proposed) = &proposed {
-        if proposed_valid.len() < usize::try_from(proposed.threshold).unwrap_or(usize::MAX) {
-            return Err(TrustError::new("catalog_rotation_threshold"));
-        }
-    }
-    Ok(())
+    let mut horizons = valid.values().copied().collect::<Vec<_>>();
+    horizons.sort_unstable_by(|left, right| right.cmp(left));
+    horizons
+        .get(threshold - 1)
+        .copied()
+        .ok_or_else(|| TrustError::new(error_code))
 }
 
 fn validate_releases(

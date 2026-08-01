@@ -386,8 +386,11 @@ pub struct Compatibility {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeDeclaration {
     pub kind: RuntimeKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<RuntimeLifecycle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bridge_entry: Option<RelativePackagePath>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub service: Option<ServiceDeclaration>,
     pub protocol: u32,
     pub activation_events: Vec<String>,
@@ -456,7 +459,9 @@ pub enum ServiceManager {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PermissionDeclaration {
     pub id: PermissionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<PermissionScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub modes: Option<Vec<MountMode>>,
 }
 
@@ -693,6 +698,7 @@ pub struct PageContribution {
     pub title: String,
     pub entry: RelativePackagePath,
     pub placements: Vec<PagePlacement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub params_schema: Option<RelativePackagePath>,
     pub instance_policy: InstancePolicy,
 }
@@ -723,9 +729,11 @@ pub struct CommandContribution {
     pub title: String,
     pub risk: Risk,
     pub placements: Vec<CommandPlacement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub args_schema: Option<RelativePackagePath>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result_schema: Option<RelativePackagePath>,
-    #[serde(rename = "invocationUI")]
+    #[serde(rename = "invocationUI", skip_serializing_if = "Option::is_none")]
     pub invocation_ui: Option<InvocationUi>,
     pub handler: CommandHandler,
 }
@@ -837,14 +845,18 @@ pub enum SettingContribution {
         id: String,
         title: String,
         default: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
         minimum: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         maximum: Option<i64>,
     },
     Number {
         id: String,
         title: String,
         default: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
         minimum: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         maximum: Option<f64>,
     },
     Boolean {
@@ -856,9 +868,11 @@ pub enum SettingContribution {
         id: String,
         title: String,
         default: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         minimum_length: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         maximum_length: Option<usize>,
-        #[serde(rename = "enum")]
+        #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
         allowed_values: Option<Vec<String>>,
     },
 }

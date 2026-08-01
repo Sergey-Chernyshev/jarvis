@@ -200,35 +200,6 @@ mod tests {
         }
     }
 
-    struct RecordingVerifier {
-        inner: CatalogPackageVerifier,
-        error: Mutex<Option<&'static str>>,
-    }
-
-    impl RecordingVerifier {
-        fn new(inner: CatalogPackageVerifier) -> Self {
-            Self {
-                inner,
-                error: Mutex::new(None),
-            }
-        }
-
-        fn error_code(&self) -> Option<&'static str> {
-            *self.error.lock().unwrap()
-        }
-    }
-
-    impl PackageTrustVerifier for RecordingVerifier {
-        fn verify(
-            &self,
-            observation: &UntrustedPackageObservation<'_>,
-        ) -> Result<(), PackageTrustError> {
-            let result = self.inner.verify(observation);
-            *self.error.lock().unwrap() = result.as_ref().err().map(PackageTrustError::code);
-            result
-        }
-    }
-
     struct PackedFixture {
         _root: TestDirectory,
         archive_path: PathBuf,
@@ -261,7 +232,7 @@ mod tests {
                 inspect_and_verify_package(File::open(&archive_path).unwrap(), &adapter, &capture,)
                     .unwrap_err()
                     .code(),
-                "package_trust"
+                "test_observation_captured"
             );
             let observation = capture.observation.lock().unwrap().take().unwrap();
             assert_eq!(observation.archive_digest, digest);
@@ -532,21 +503,16 @@ mod tests {
             let mut selection = CatalogSelection::default();
             apply_mismatch(mismatch, &mut catalog, &mut selection);
             let release = verified_release(catalog, &selection).unwrap();
-            let recorder = RecordingVerifier::new(CatalogPackageVerifier::new(release, at(NOW)));
+            let verifier = CatalogPackageVerifier::new(release, at(NOW));
             assert_eq!(
                 inspect_and_verify_package(
                     File::open(&fixture.archive_path).unwrap(),
                     &adapter(),
-                    &recorder,
+                    &verifier,
                 )
                 .unwrap_err()
                 .code(),
-                "package_trust",
-                "{mismatch:?}"
-            );
-            assert_eq!(
-                recorder.error_code(),
-                Some("package_catalog_mismatch"),
+                "package_catalog_mismatch",
                 "{mismatch:?}"
             );
             assert!(!output.path().join("quarantine").exists());
@@ -584,18 +550,17 @@ mod tests {
     fn catalog_package_verifier_rejects_bad_signature_before_extraction() {
         let fixture = PackedFixture::signed_with([7u8; 32]);
         let output = TestDirectory::new();
-        let recorder = RecordingVerifier::new(verifier_for(&fixture.observation));
+        let verifier = verifier_for(&fixture.observation);
         assert_eq!(
             inspect_and_verify_package(
                 File::open(&fixture.archive_path).unwrap(),
                 &adapter(),
-                &recorder,
+                &verifier,
             )
             .unwrap_err()
             .code(),
-            "package_trust"
+            "package_signature_invalid"
         );
-        assert_eq!(recorder.error_code(), Some("package_signature_invalid"));
         assert!(!output.path().join("quarantine").exists());
     }
 
@@ -611,18 +576,17 @@ mod tests {
             .release_candidate(&selection.plugin_id, &selection.version, selection.target)
             .unwrap()
             .clone();
-        let recorder = RecordingVerifier::new(CatalogPackageVerifier::new(release, at(NOW)));
+        let verifier = CatalogPackageVerifier::new(release, at(NOW));
         assert_eq!(
             inspect_and_verify_package(
                 File::open(&fixture.archive_path).unwrap(),
                 &adapter(),
-                &recorder,
+                &verifier,
             )
             .unwrap_err()
             .code(),
-            "package_trust"
+            "package_revoked"
         );
-        assert_eq!(recorder.error_code(), Some("package_revoked"));
         assert!(!output.path().join("quarantine").exists());
     }
 

@@ -899,7 +899,7 @@ mod tests {
             inspect_and_verify_package(file, &FixtureAdapter, &ExactVerifier::from_golden())
                 .unwrap_err()
                 .code(),
-            "package_trust"
+            "fixture_mismatch"
         );
         assert!(!parent.path().join("quarantine").exists());
         drop(parent_fd);
@@ -913,7 +913,7 @@ mod tests {
             inspect_and_verify_package(archive_file(), &FixtureAdapter, &RejectVerifier)
                 .unwrap_err()
                 .code(),
-            "package_trust"
+            "catalog_digest_mismatch"
         );
         assert!(!parent.path().join("quarantine").exists());
         drop(parent_fd);

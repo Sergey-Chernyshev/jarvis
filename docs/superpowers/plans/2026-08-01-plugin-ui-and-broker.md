@@ -16,9 +16,11 @@ child webview.
 
 **Tech Stack:** Rust 2021; Rust 1.77.2 is an MSRV claim only for the
 public/pure protocol, SDK and test-host crates whose complete locked graphs run
-in the dedicated `plugin-msrv` job. The Tauri host and its Wry/objc2/SQLite
-graph use the current stable toolchain from CI unless that complete graph is
-separately pinned and tested. Tauri `2.11.2`, `tauri-build` `2.6.2`, direct Wry
+in the dedicated `plugin-msrv` job. The real JSON Schema parity harness in
+`tools/plugin-schema-parity` intentionally uses current stable because its
+validator dependency graph is newer than that MSRV. The Tauri host and its
+Wry/objc2/SQLite graph use the current stable toolchain from CI unless that
+complete graph is separately pinned and tested. Tauri `2.11.2`, `tauri-build` `2.6.2`, direct Wry
 `0.55.1`, `objc2` `0.6.4`, `objc2-foundation`/`objc2-web-kit` `0.3.2`, Tokio,
 SQLite/WAL, JSON Schema, TypeScript/ES modules, Node test runner, macOS
 WKWebView, Tauri official Figma workflow at the mandatory design checkpoint.
@@ -491,11 +493,13 @@ npm run check:plugin-boundaries
 cargo test --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
 cargo test --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
 cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
+cargo test --locked --manifest-path tools/plugin-schema-parity/Cargo.toml
 cargo +1.77.2 test --locked --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
 git diff --check
 ```
 
-Expected: all commands exit `0`; generation produces no diff; public crates pass on Rust 1.77.2.
+Expected: all commands exit `0`; generation produces no diff; public protocol, SDK and test-host crates pass on
+Rust 1.77.2 in `plugin-msrv`, while the real JSON Schema parity harness passes on current stable.
 
 - [ ] **Step 9: Commit B1**
 
@@ -3322,8 +3326,8 @@ git commit -m "test(plugins): certify ui host and data broker"
 - [ ] Adapter-private provenance bindings are transactionally stored outside
   Broker query/Bridge surfaces and public projections contain no private
   canaries.
-- [ ] Rust 1.77.2 is tested only for public/pure locked graphs; host tests use
-  current stable unless the complete Tauri graph is pinned.
+- [ ] Rust 1.77.2 covers the complete locked protocol, SDK and test-host graphs;
+  only `tools/plugin-schema-parity` uses current stable for its JSON Schema validator graph.
 - [ ] Figma evidence and four independent review reports have no unresolved high/critical finding.
 - [ ] Final documentation says Projects ↔ Agent VM synchronization remains contingent on C and E.
 

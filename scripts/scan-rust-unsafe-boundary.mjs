@@ -25,6 +25,9 @@ const MAX_CARGO_TARGET_SOURCES = 20_000;
 const MAX_CARGO_TARGET_SOURCE_BYTES = 8 * 1024 * 1024;
 const MAX_DIAGNOSTIC_RECORDS = 1_024;
 const MAX_DIAGNOSTIC_BYTES = 1024 * 1024;
+const MAX_USE_ALIAS_EDGES = 4_096;
+const MAX_USE_ALIAS_CLOSURE_WORK = 8_192;
+const MAX_MACRO_DEPENDENCY_EDGES = 4_096;
 const EXCLUDED_DIRECTORY_NAMES = new Set([
   '.git',
   '.worktrees',
@@ -547,8 +550,12 @@ function sourceDiscoveryViolations(
   file,
   discoveredFiles,
   sourceMacroNames,
+  macroBoundary,
 ) {
-  const violations = [];
+  const violations = [
+    ...(macroBoundary.definitionViolations.get(file) ?? []),
+  ];
+  const imports = macroBoundary.importsByFile.get(file) ?? new Map();
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (
@@ -561,11 +568,78 @@ function sourceDiscoveryViolations(
         : undefined;
       if (isCoveredTrustSource(file, literal, discoveredFiles)) continue;
       violations.push({ line: token.line, reason: 'include! source expansion' });
+      continue;
+    }
+    if (
+      token.kind !== 'identifier' ||
+      tokens[index + 1]?.value !== '!' ||
+      !['(', '[', '{'].includes(tokens[index + 2]?.value) ||
+      (!token.raw && token.value === 'macro_rules') ||
+      (!token.raw && RUST_KEYWORDS.has(token.value)) ||
+      tokens[index - 1]?.value === '$'
+    ) {
+      continue;
+    }
+    const opener = tokens[index + 2].value;
+    const closer = opener === '(' ? ')' : opener === '[' ? ']' : '}';
+    const argumentsEnd = matchingToken(tokens, index + 2, opener, closer);
+    const macroName = canonicalSymbolName(token.value);
+    if (
+      argumentsEnd === -1 ||
+      !macroInvocationIsAudited(
+        tokens,
+        index,
+        imports,
+        macroBoundary.safeLocalMacroNames,
+      )
+    ) {
+      violations.push({
+        line: token.line,
+        reason: 'unaudited macro invocation may expand Rust source',
+      });
+      continue;
+    }
+    const usesLocalDefinition = macroInvocationUsesLocalDefinition(
+      tokens,
+      index,
+      imports,
+      macroBoundary.safeLocalMacroNames,
+    );
+    const argumentsContainBang = tokens
+      .slice(index + 3, argumentsEnd)
+      .some((argument) => argument.value === '!');
+    if (
+      usesLocalDefinition &&
+      !localMacroArgumentsAreAudited(
+        tokens,
+        index + 3,
+        argumentsEnd,
+        imports,
+        sourceMacroNames,
+        macroBoundary.safeLocalMacroNames,
+        macroBoundary.dynamicLocalMacroNames.has(macroName) ||
+          argumentsContainBang,
+      )
+    ) {
+      violations.push({
+        line: token.line,
+        reason: 'local macro invocation may expand Rust source',
+      });
     }
   }
   for (const attribute of attributes(tokens)) {
     for (let index = attribute.start; index < attribute.end; index += 1) {
       const token = tokens[index];
+      if (
+        token.kind === 'identifier' &&
+        !token.raw &&
+        token.value === 'macro_use'
+      ) {
+        violations.push({
+          line: token.line,
+          reason: 'unaudited macro import may expand Rust source',
+        });
+      }
       if (
         token.kind === 'identifier' &&
         token.value === 'path' &&
@@ -634,74 +708,553 @@ function isNamedSymbol(token, names) {
   );
 }
 
-function addUseAliases(tokenizedFiles, names) {
-  let added = false;
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const { tokens } of tokenizedFiles) {
-      for (let index = 0; index < tokens.length; index += 1) {
-        if (
-          tokens[index].kind !== 'identifier' ||
-          tokens[index].raw ||
-          tokens[index].value !== 'as' ||
-          tokens[index + 1]?.kind !== 'identifier'
-        ) {
-          continue;
-        }
-        let statementStart = index - 1;
-        while (
-          statementStart >= 0 &&
-          tokens[statementStart].value !== ';'
-        ) {
-          statementStart -= 1;
-        }
-        const useIndex = tokens
-          .slice(statementStart + 1, index)
-          .findIndex(
-            (token) =>
-              token.kind === 'identifier' &&
-              !token.raw &&
-              token.value === 'use',
-          );
-        if (useIndex === -1) continue;
+const SOURCE_INERT_BUILTIN_MACROS = new Set([
+  'assert',
+  'assert_eq',
+  'assert_ne',
+  'cfg',
+  'concat',
+  'debug_assert',
+  'debug_assert_eq',
+  'env',
+  'eprint',
+  'eprintln',
+  'format',
+  'format_args',
+  'include_bytes',
+  'include_str',
+  'matches',
+  'module_path',
+  'option_env',
+  'panic',
+  'print',
+  'println',
+  'stringify',
+  'thread_local',
+  'todo',
+  'unreachable',
+  'vec',
+  'write',
+  'writeln',
+].map(canonicalSymbolName));
+const AUDITED_SOURCE_INERT_MACRO_PATHS = new Set([
+  'objc2::class',
+  'objc2::msg_send',
+  'ort::inputs',
+  'schemars::schema_for',
+  'serde_json::json',
+  'tauri::generate_context',
+  'tauri::generate_handler',
+  'tokio::join',
+  'tokio::pin',
+  'tokio::select',
+]);
+const LOCAL_MACRO_PATH_PREFIXES = new Set(['crate', 'self', 'super']);
+const RUST_KEYWORDS = new Set([
+  'as',
+  'async',
+  'await',
+  'break',
+  'const',
+  'continue',
+  'crate',
+  'dyn',
+  'else',
+  'enum',
+  'extern',
+  'false',
+  'fn',
+  'for',
+  'if',
+  'impl',
+  'in',
+  'let',
+  'loop',
+  'match',
+  'mod',
+  'move',
+  'mut',
+  'pub',
+  'ref',
+  'return',
+  'self',
+  'Self',
+  'static',
+  'struct',
+  'super',
+  'trait',
+  'true',
+  'type',
+  'union',
+  'unsafe',
+  'use',
+  'where',
+  'while',
+]);
 
-        let branchStart = index - 1;
-        while (
-          branchStart > statementStart &&
-          tokens[branchStart].value !== ',' &&
-          tokens[branchStart].value !== '{'
-        ) {
-          branchStart -= 1;
-        }
-        if (
-          !tokens
-            .slice(branchStart + 1, index)
-            .some((token) => isNamedSymbol(token, names))
-        ) {
-          continue;
-        }
-        const aliasName = canonicalSymbolName(tokens[index + 1].value);
-        if (!names.has(aliasName)) {
-          names.add(aliasName);
-          changed = true;
-          added = true;
-        }
+function identifierPath(tokens, start, end) {
+  const parts = [];
+  let cursor = start;
+  while (
+    cursor + 1 < end &&
+    tokens[cursor].value === ':' &&
+    tokens[cursor + 1].value === ':'
+  ) {
+    cursor += 2;
+  }
+  let expectsIdentifier = true;
+  while (cursor < end) {
+    if (expectsIdentifier) {
+      if (tokens[cursor].kind !== 'identifier') return null;
+      parts.push(canonicalSymbolName(tokens[cursor].value));
+      cursor += 1;
+      expectsIdentifier = false;
+      continue;
+    }
+    if (
+      cursor + 1 >= end ||
+      tokens[cursor].value !== ':' ||
+      tokens[cursor + 1].value !== ':'
+    ) {
+      return null;
+    }
+    cursor += 2;
+    expectsIdentifier = true;
+  }
+  return parts.length > 0 && !expectsIdentifier ? parts : null;
+}
+
+function topLevelToken(tokens, start, end, wanted) {
+  const closing = new Map([
+    ['(', ')'],
+    ['[', ']'],
+    ['{', '}'],
+  ]);
+  const stack = [];
+  for (let index = start; index < end; index += 1) {
+    const value = tokens[index].value;
+    if (stack.length === 0 && value === wanted) return index;
+    if (closing.has(value)) {
+      stack.push(closing.get(value));
+    } else if (stack.at(-1) === value) {
+      stack.pop();
+    }
+  }
+  return -1;
+}
+
+function addUseTreeImports(tokens, start, end, prefix, imports) {
+  while (start < end && tokens[start].value === ',') start += 1;
+  while (end > start && tokens[end - 1].value === ',') end -= 1;
+  if (start >= end) return;
+
+  const groupStart = topLevelToken(tokens, start, end, '{');
+  if (groupStart !== -1) {
+    const groupEnd = matchingToken(tokens, groupStart, '{', '}', end);
+    if (groupEnd === -1) return;
+    let prefixEnd = groupStart;
+    while (prefixEnd > start && tokens[prefixEnd - 1].value === ':') {
+      prefixEnd -= 1;
+    }
+    const branchPrefix =
+      prefixEnd === start
+        ? prefix
+        : identifierPath(tokens, start, prefixEnd);
+    if (!branchPrefix) return;
+    const nestedPrefix =
+      prefixEnd === start ? prefix : [...prefix, ...branchPrefix];
+    let branchStart = groupStart + 1;
+    const closing = new Map([
+      ['(', ')'],
+      ['[', ']'],
+      ['{', '}'],
+    ]);
+    const stack = [];
+    for (let index = branchStart; index < groupEnd; index += 1) {
+      const value = tokens[index].value;
+      if (stack.length === 0 && value === ',') {
+        addUseTreeImports(tokens, branchStart, index, nestedPrefix, imports);
+        branchStart = index + 1;
+        continue;
+      }
+      if (closing.has(value)) {
+        stack.push(closing.get(value));
+      } else if (stack.at(-1) === value) {
+        stack.pop();
+      }
+    }
+    addUseTreeImports(tokens, branchStart, groupEnd, nestedPrefix, imports);
+    return;
+  }
+
+  const aliasIndex = topLevelToken(tokens, start, end, 'as');
+  const sourceEnd = aliasIndex === -1 ? end : aliasIndex;
+  const suffix = identifierPath(tokens, start, sourceEnd);
+  if (!suffix) return;
+  let sourceParts = [...prefix, ...suffix];
+  let localName;
+  if (aliasIndex !== -1) {
+    const alias = tokens[aliasIndex + 1];
+    if (alias?.kind !== 'identifier' || aliasIndex + 2 !== end) return;
+    localName = canonicalSymbolName(alias.value);
+  } else if (sourceParts.at(-1) === 'self') {
+    // A `self` leaf imports its containing module, not a macro item.
+    return;
+  } else {
+    localName = sourceParts.at(-1);
+  }
+  if (!localName || sourceParts.length === 0) return;
+  let paths = imports.get(localName);
+  if (!paths) {
+    paths = new Set();
+    imports.set(localName, paths);
+  }
+  paths.add(sourceParts.join('::'));
+}
+
+function useImports(tokens) {
+  const imports = new Map();
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (
+      tokens[index].kind !== 'identifier' ||
+      tokens[index].raw ||
+      tokens[index].value !== 'use'
+    ) {
+      continue;
+    }
+    let statementEnd = index + 1;
+    while (
+      statementEnd < tokens.length &&
+      tokens[statementEnd].value !== ';'
+    ) {
+      statementEnd += 1;
+    }
+    if (statementEnd >= tokens.length) continue;
+    addUseTreeImports(tokens, index + 1, statementEnd, [], imports);
+    index = statementEnd;
+  }
+  return imports;
+}
+
+function macroInvocationPath(tokens, macroIndex) {
+  const parts = [canonicalSymbolName(tokens[macroIndex].value)];
+  let start = macroIndex;
+  while (
+    start >= 3 &&
+    tokens[start - 1].value === ':' &&
+    tokens[start - 2].value === ':' &&
+    tokens[start - 3].kind === 'identifier'
+  ) {
+    parts.unshift(canonicalSymbolName(tokens[start - 3].value));
+    start -= 3;
+  }
+  return { parts, start };
+}
+
+function isAuditedLocalMacroPath(parts, safeLocalMacroNames) {
+  return (
+    parts.length >= 2 &&
+    LOCAL_MACRO_PATH_PREFIXES.has(parts[0]) &&
+    safeLocalMacroNames.has(parts.at(-1))
+  );
+}
+
+function importedMacroPathsAreAudited(paths, safeLocalMacroNames) {
+  return [...paths].every((path) => {
+    if (AUDITED_SOURCE_INERT_MACRO_PATHS.has(path)) return true;
+    const parts = path.split('::');
+    return isAuditedLocalMacroPath(parts, safeLocalMacroNames);
+  });
+}
+
+function macroInvocationUsesLocalDefinition(
+  tokens,
+  macroIndex,
+  imports,
+  safeLocalMacroNames,
+) {
+  const { parts } = macroInvocationPath(tokens, macroIndex);
+  if (parts.length > 1) {
+    return isAuditedLocalMacroPath(parts, safeLocalMacroNames);
+  }
+  if (safeLocalMacroNames.has(parts[0])) return true;
+  return [...(imports.get(parts[0]) ?? [])].some((path) =>
+    isAuditedLocalMacroPath(path.split('::'), safeLocalMacroNames),
+  );
+}
+
+function macroBoundaryModel(tokenizedFiles, sourceMacroNames) {
+  const macroDefinitionSafety = new Map();
+  const dynamicLocalMacroNames = new Set();
+  const definitionViolations = new Map();
+  const importsByFile = new Map();
+
+  for (const { file, tokens } of tokenizedFiles) {
+    importsByFile.set(file, useImports(tokens));
+    const fileViolations = [];
+    for (let index = 0; index < tokens.length - 3; index += 1) {
+      if (
+        tokens[index].kind !== 'identifier' ||
+        tokens[index].raw ||
+        tokens[index].value !== 'macro_rules' ||
+        tokens[index + 1]?.value !== '!' ||
+        tokens[index + 2]?.kind !== 'identifier' ||
+        !['(', '[', '{'].includes(tokens[index + 3]?.value)
+      ) {
+        continue;
+      }
+      const opener = tokens[index + 3].value;
+      const closer = opener === '(' ? ')' : opener === '[' ? ']' : '}';
+      const bodyEnd = matchingToken(tokens, index + 3, opener, closer);
+      if (bodyEnd === -1) continue;
+      const body = tokens.slice(index + 4, bodyEnd);
+      const macroName = canonicalSymbolName(tokens[index + 2].value);
+      // macro_rules! cannot invent identifier or keyword tokens: every
+      // source-discovery token must occur in this definition or in one of its
+      // invocation token trees. Keep that provenance boundary lexical and
+      // reject unknown external/procedural macro calls instead of guessing at
+      // their expansion.
+      const sourceSensitive =
+        body.some(
+          (token) =>
+            token.kind === 'identifier' &&
+            !token.raw &&
+            token.value === 'use',
+        ) ||
+        body.some((token) => isNamedSymbol(token, sourceMacroNames));
+      if (
+        body.some(
+          (token, bodyIndex) =>
+            token.value === '$' &&
+            body[bodyIndex + 1]?.kind === 'identifier' &&
+            body[bodyIndex + 2]?.value === '!',
+        )
+      ) {
+        dynamicLocalMacroNames.add(macroName);
+      }
+      macroDefinitionSafety.set(
+        macroName,
+        (macroDefinitionSafety.get(macroName) ?? true) && !sourceSensitive,
+      );
+      if (sourceSensitive) {
+        fileViolations.push({
+          line: tokens[index].line,
+          reason: 'source-sensitive declarative macro definition',
+        });
+      }
+      index = bodyEnd;
+    }
+    definitionViolations.set(file, fileViolations);
+  }
+
+  return {
+    definitionViolations,
+    dynamicLocalMacroNames,
+    importsByFile,
+    safeLocalMacroNames: new Set(
+      [...macroDefinitionSafety]
+        .filter(([, safe]) => safe)
+        .map(([name]) => name),
+    ),
+  };
+}
+
+function localMacroArgumentsAreAudited(
+  tokens,
+  start,
+  end,
+  imports,
+  sourceMacroNames,
+  safeLocalMacroNames,
+  auditQualifiedMacroPaths,
+) {
+  for (let index = start; index < end; index += 1) {
+    const token = tokens[index];
+    if (
+      token.kind === 'identifier' &&
+      ((!token.raw && token.value === 'use') ||
+        isNamedSymbol(token, sourceMacroNames))
+    ) {
+      return false;
+    }
+    if (token.kind !== 'identifier') continue;
+    const name = canonicalSymbolName(token.value);
+    const importedPaths = imports.get(name);
+    if (
+      importedPaths &&
+      !importedMacroPathsAreAudited(importedPaths, safeLocalMacroNames)
+    ) {
+      return false;
+    }
+    if (
+      auditQualifiedMacroPaths &&
+      tokens[index + 1]?.value === ':' &&
+      tokens[index + 2]?.value === ':' &&
+      tokens[index + 3]?.kind === 'identifier'
+    ) {
+      let pathEnd = index + 3;
+      while (
+        tokens[pathEnd + 1]?.value === ':' &&
+        tokens[pathEnd + 2]?.value === ':' &&
+        tokens[pathEnd + 3]?.kind === 'identifier'
+      ) {
+        pathEnd += 3;
+      }
+      const parts = [];
+      for (let cursor = index; cursor <= pathEnd; cursor += 3) {
+        parts.push(canonicalSymbolName(tokens[cursor].value));
+      }
+      const path = parts.join('::');
+      if (
+        !AUDITED_SOURCE_INERT_MACRO_PATHS.has(path) &&
+        !isAuditedLocalMacroPath(parts, safeLocalMacroNames)
+      ) {
+        return false;
+      }
+      index = pathEnd;
+    }
+  }
+  return true;
+}
+
+function macroInvocationIsAudited(
+  tokens,
+  macroIndex,
+  imports,
+  safeLocalMacroNames,
+) {
+  const { parts } = macroInvocationPath(tokens, macroIndex);
+  if (parts.length > 1) {
+    return (
+      AUDITED_SOURCE_INERT_MACRO_PATHS.has(parts.join('::')) ||
+      isAuditedLocalMacroPath(parts, safeLocalMacroNames)
+    );
+  }
+  const name = parts[0];
+  const importedPaths = imports.get(name);
+  if (importedPaths) {
+    return importedMacroPathsAreAudited(importedPaths, safeLocalMacroNames);
+  }
+  return (
+    SOURCE_INERT_BUILTIN_MACROS.has(name) ||
+    safeLocalMacroNames.has(name)
+  );
+}
+
+function buildUseAliasGraph(tokenizedFiles) {
+  const aliases = new Map();
+  let edgeCount = 0;
+
+  for (const { tokens } of tokenizedFiles) {
+    let inUseStatement = false;
+    let branchStart = 0;
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (token.value === ';') {
+        inUseStatement = false;
+        branchStart = index + 1;
+        continue;
+      }
+      if (
+        token.kind === 'identifier' &&
+        !token.raw &&
+        token.value === 'use'
+      ) {
+        inUseStatement = true;
+        branchStart = index + 1;
+        continue;
+      }
+      if (!inUseStatement) continue;
+      if (token.value === '{' || token.value === ',') {
+        branchStart = index + 1;
+        continue;
+      }
+      if (
+        token.kind !== 'identifier' ||
+        token.raw ||
+        token.value !== 'as' ||
+        tokens[index + 1]?.kind !== 'identifier'
+      ) {
+        continue;
+      }
+
+      let sourceIndex = index - 1;
+      while (
+        sourceIndex >= branchStart &&
+        tokens[sourceIndex].kind !== 'identifier'
+      ) {
+        sourceIndex -= 1;
+      }
+      if (sourceIndex < branchStart) continue;
+
+      edgeCount += 1;
+      if (edgeCount > MAX_USE_ALIAS_EDGES) {
+        throw new Error(
+          `Rust use-alias graph exceeds ${MAX_USE_ALIAS_EDGES} edges`,
+        );
+      }
+      const sourceName = canonicalSymbolName(tokens[sourceIndex].value);
+      const aliasName = canonicalSymbolName(tokens[index + 1].value);
+      let targets = aliases.get(sourceName);
+      if (!targets) {
+        targets = new Set();
+        aliases.set(sourceName, targets);
+      }
+      targets.add(aliasName);
+    }
+  }
+
+  return aliases;
+}
+
+function expandNameGraph(graphs, names, budgetReason) {
+  const queue = [...names];
+  let cursor = 0;
+  let work = 0;
+  let added = false;
+  const chargeWork = () => {
+    work += 1;
+    if (work > MAX_USE_ALIAS_CLOSURE_WORK) {
+      throw new Error(
+        `${budgetReason} exceeds ${MAX_USE_ALIAS_CLOSURE_WORK} work units`,
+      );
+    }
+  };
+
+  while (cursor < queue.length) {
+    chargeWork();
+    const sourceName = queue[cursor];
+    cursor += 1;
+    for (const graph of graphs) {
+      for (const aliasName of graph.get(sourceName) ?? []) {
+        chargeWork();
+        if (names.has(aliasName)) continue;
+        names.add(aliasName);
+        queue.push(aliasName);
+        added = true;
       }
     }
   }
   return added;
 }
 
-function packageTrustVerifierNames(tokenizedFiles) {
+function addUseAliases(useAliasGraph, names) {
+  return expandNameGraph(
+    [useAliasGraph],
+    names,
+    'Rust use-alias closure',
+  );
+}
+
+function packageTrustVerifierNames(useAliasGraph) {
   const names = new Set([canonicalSymbolName('PackageTrustVerifier')]);
-  addUseAliases(tokenizedFiles, names);
+  addUseAliases(useAliasGraph, names);
   return names;
 }
 
-function sourceExpandingMacroNames(tokenizedFiles) {
+function sourceExpandingMacroNames(useAliasGraph) {
   const names = new Set([canonicalSymbolName('include')]);
-  addUseAliases(tokenizedFiles, names);
+  addUseAliases(useAliasGraph, names);
   return names;
 }
 
@@ -750,44 +1303,65 @@ function packageTrustVerifierImplementations(tokens, verifierNames) {
   return implementations;
 }
 
-function packageTrustVerifierMacroNames(tokenizedFiles, verifierNames) {
+function packageTrustVerifierMacroNames(
+  tokenizedFiles,
+  verifierNames,
+  useAliasGraph,
+) {
   const macroNames = new Set();
-  let changed = true;
-  while (changed) {
-    changed = addUseAliases(tokenizedFiles, macroNames);
-    for (const { tokens } of tokenizedFiles) {
-      for (let index = 0; index < tokens.length - 3; index += 1) {
+  const macroDependencies = new Map();
+  let dependencyEdges = 0;
+
+  for (const { tokens } of tokenizedFiles) {
+    for (let index = 0; index < tokens.length - 3; index += 1) {
+      if (
+        tokens[index].kind !== 'identifier' ||
+        tokens[index].raw ||
+        tokens[index].value !== 'macro_rules' ||
+        tokens[index + 1]?.value !== '!' ||
+        tokens[index + 2]?.kind !== 'identifier' ||
+        !['(', '[', '{'].includes(tokens[index + 3]?.value)
+      ) {
+        continue;
+      }
+      const opener = tokens[index + 3].value;
+      const closer = opener === '(' ? ')' : opener === '[' ? ']' : '}';
+      const bodyEnd = matchingToken(tokens, index + 3, opener, closer);
+      if (bodyEnd === -1) continue;
+      const body = tokens.slice(index + 4, bodyEnd);
+      const macroName = canonicalSymbolName(tokens[index + 2].value);
+      if (body.some((token) => isNamedSymbol(token, verifierNames))) {
+        macroNames.add(macroName);
+      }
+      for (let bodyIndex = 0; bodyIndex < body.length - 1; bodyIndex += 1) {
         if (
-          tokens[index].kind !== 'identifier' ||
-          tokens[index].raw ||
-          tokens[index].value !== 'macro_rules' ||
-          tokens[index + 1]?.value !== '!' ||
-          tokens[index + 2]?.kind !== 'identifier' ||
-          !['(', '[', '{'].includes(tokens[index + 3]?.value)
+          body[bodyIndex].kind !== 'identifier' ||
+          body[bodyIndex + 1]?.value !== '!'
         ) {
           continue;
         }
-        const opener = tokens[index + 3].value;
-        const closer = opener === '(' ? ')' : opener === '[' ? ']' : '}';
-        const bodyEnd = matchingToken(tokens, index + 3, opener, closer);
-        if (bodyEnd === -1) continue;
-        const body = tokens.slice(index + 4, bodyEnd);
-        const namesVerifier =
-          body.some((token) => isNamedSymbol(token, verifierNames)) ||
-          body.some(
-            (token, bodyIndex) =>
-              isNamedSymbol(token, macroNames) &&
-              body[bodyIndex + 1]?.value === '!',
+        dependencyEdges += 1;
+        if (dependencyEdges > MAX_MACRO_DEPENDENCY_EDGES) {
+          throw new Error(
+            `Rust macro dependency graph exceeds ${MAX_MACRO_DEPENDENCY_EDGES} edges`,
           );
-        const macroName = canonicalSymbolName(tokens[index + 2].value);
-        if (namesVerifier && !macroNames.has(macroName)) {
-          macroNames.add(macroName);
-          changed = true;
         }
-        index = bodyEnd;
+        const dependencyName = canonicalSymbolName(body[bodyIndex].value);
+        let dependents = macroDependencies.get(dependencyName);
+        if (!dependents) {
+          dependents = new Set();
+          macroDependencies.set(dependencyName, dependents);
+        }
+        dependents.add(macroName);
       }
+      index = bodyEnd;
     }
   }
+  expandNameGraph(
+    [useAliasGraph, macroDependencies],
+    macroNames,
+    'Rust verifier-macro closure',
+  );
   return macroNames;
 }
 
@@ -873,11 +1447,14 @@ const tokenizedFiles = [...discoveredFiles].sort().map((file) => {
     tokens: lexRust(readFileSync(file, 'utf8')),
   };
 });
-const sourceMacroNames = sourceExpandingMacroNames(tokenizedFiles);
-const verifierNames = packageTrustVerifierNames(tokenizedFiles);
+const useAliasGraph = buildUseAliasGraph(tokenizedFiles);
+const sourceMacroNames = sourceExpandingMacroNames(useAliasGraph);
+const macroBoundary = macroBoundaryModel(tokenizedFiles, sourceMacroNames);
+const verifierNames = packageTrustVerifierNames(useAliasGraph);
 const verifierMacroNames = packageTrustVerifierMacroNames(
   tokenizedFiles,
   verifierNames,
+  useAliasGraph,
 );
 for (const { file, tokens } of tokenizedFiles) {
   for (const violation of sourceDiscoveryViolations(
@@ -885,6 +1462,7 @@ for (const { file, tokens } of tokenizedFiles) {
     file,
     discoveredFiles,
     sourceMacroNames,
+    macroBoundary,
   )) {
     process.stdout.write(
       diagnosticRecord('source', file, violation.line, violation.reason),

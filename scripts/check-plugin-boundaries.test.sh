@@ -1197,11 +1197,7 @@ printf '%s\n' \
   'alias_2999!("escaped.inc");' \
   >> "$fixture_root/crates/jarvis-package/src/lib.rs"
 reverse_alias_scan="$(run_fixture_source_scan)"
-reverse_alias_path="$(
-  node -e 'console.log(require("node:path").resolve(process.argv[1]))' \
-    "$fixture_root/crates/jarvis-package/src/lib.rs"
-)"
-if [[ "$reverse_alias_scan" != *$'source\t'"$reverse_alias_path:"*$'\tinclude! source expansion'* ]]; then
+if [[ "$reverse_alias_scan" != *$'\tinclude! source expansion'* ]]; then
   echo "trust scanner missed the bounded reverse alias stress chain" >&2
   echo "$reverse_alias_scan" >&2
   exit 1

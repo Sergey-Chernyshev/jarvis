@@ -18,6 +18,8 @@
   let docClickBound = false;  // глобальный «клик мимо» для закрытия селектов
   let currentRoot = null;     // активный rootEl (для live-перерисовок)
   let activePane = 'general'; // выбранная вкладка сайдбара
+  let selectPaneLive = null;  // controller текущего settings DOM
+  let pendingFocusSelector = null; // focus после async-рендера целевой панели
   const renderingPane = {};   // pane → идёт ли сейчас рендер (анти-гонка)
   const renderPending = {};   // pane → запрошен ли повторный рендер во время текущего
   // Состояние загрузок моделей. `activeDownload` — id модели, что качается СЕЙЧАС
@@ -469,6 +471,21 @@
     const n = el('div.s2err');
     n.appendChild(el('span.s2err-ic', icon('alert-triangle')));
     n.appendChild(el('span.s2err-txt', { text: msg }));
+    const repair = window.JarvisDownloadRepair
+      && window.JarvisDownloadRepair.actionFor(msg);
+    if (repair === 'proxy') {
+      const action = el('button.s2err-action', {
+        type: 'button',
+        text: 'Настроить прокси',
+        'aria-label': 'Открыть настройку egress-прокси',
+      });
+      action.addEventListener('click', (event) => {
+        event.stopPropagation();
+        pendingFocusSelector = '#s2-egress-proxy';
+        if (selectPaneLive) selectPaneLive('service');
+      });
+      n.appendChild(action);
+    }
     return n;
   }
 
@@ -685,9 +702,13 @@
 
 /* ── ошибка загрузки модели (инлайн, красная) ────────────────────────── */
 #settings2 .s2err { display:flex; align-items:center; gap:6px; margin-top:6px; font-size:11.5px;
-  color:var(--danger,#f2615c); max-width:340px; line-height:1.35; }
+  color:var(--danger,#f2615c); max-width:420px; line-height:1.35; flex-wrap:wrap; }
 #settings2 .s2err .s2err-ic svg.lucide { width:13px; height:13px; }
-#settings2 .s2err-txt { word-break:break-word; }
+#settings2 .s2err-txt { word-break:break-word; flex:1; min-width:220px; }
+#settings2 .s2err-action { appearance:none; border:1px solid rgba(108,160,255,.28);
+  border-radius:6px; padding:5px 8px; background:rgba(108,160,255,.12);
+  color:var(--working,#6ca0ff); font:500 11px/1 var(--s2-font); cursor:default; }
+#settings2 .s2err-action:hover { background:rgba(108,160,255,.2); }
 
 /* ── lucide общая геометрия ──────────────────────────────────────────── */
 #settings2 svg.lucide { width:15px; height:15px; stroke-width:2; vertical-align:middle; flex:none; }
@@ -1580,10 +1601,11 @@
 
     // 2b. Сеть: egress-прокси служебных вызовов. Ключевая причина, по которой Codex
     // молча уходил в таймаут — он ходит к OpenAI по HTTPS, а в окружении был только
-    // HTTP_PROXY. Здесь можно задать прокси отдельно (применяется к Claude и Codex).
+    // HTTP_PROXY. Здесь можно задать прокси отдельно для агентных вызовов и загрузок.
     pane.appendChild(el('div.dsection', { text: 'Сеть' }));
     const ng = el('div.dgroup');
     const proxyInput = el('input.s2-secret', {
+      id: 's2-egress-proxy',
       type: 'text', placeholder: 'http://user:pass@host:port  (пусто — из окружения)',
       autocomplete: 'off', spellcheck: 'false', value: v.proxy || '',
     });
@@ -1609,7 +1631,8 @@
         el('div.dt', { text: 'Egress-прокси' }),
         el('div.dd', {
           text: 'Codex общается с OpenAI по HTTPS — на прокси-сети без HTTPS_PROXY запрос висит до таймаута. '
-            + 'Задай прокси здесь, и он применится и к Claude, и к Codex. Пусто → берётся из окружения процесса.',
+            + 'Задай прокси здесь: он применится к Claude, Codex и загрузкам моделей. '
+            + 'Пусто → берётся из окружения процесса.',
         }),
         proxyInput, proxyCap,
       ]),
@@ -1764,6 +1787,14 @@
     about: renderAbout,
   };
 
+  function focusPendingInActivePane() {
+    if (!currentRoot || !pendingFocusSelector) return;
+    const focusTarget = currentRoot.querySelector(pendingFocusSelector);
+    if (!focusTarget) return;
+    pendingFocusSelector = null;
+    focusTarget.focus();
+  }
+
   /* ========================================================================
    * Перерисовать конкретную панель на месте (для live-событий и after-action).
    * ====================================================================== */
@@ -1784,6 +1815,7 @@
         node.textContent = '';
         const fn = RENDERERS[pane];
         if (fn) { try { await fn(node); } catch (e) {} }
+        if (pane === activePane) focusPendingInActivePane();
       } while (renderPending[pane]);
     } finally {
       renderingPane[pane] = false;
@@ -1933,7 +1965,9 @@
       // через reRenderPane (сериализованный) — чтобы прямой рендер не гонялся с
       // live-перерисовкой (onAudioState и т.п.) и не задваивал контент вкладки.
       if (node && !node.childNodes.length) reRenderPane(pane);
+      focusPendingInActivePane();
     }
+    selectPaneLive = selectPane;
 
     // глобальный «клик мимо» закрывает открытые селекты (ставим один раз)
     if (!docClickBound) {

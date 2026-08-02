@@ -238,6 +238,7 @@ run_provenance_contract() {
       const packages = [{
         name: "provenance-fixture",
         version: "0.1.0",
+        edition: scenario === "edition-2015" ? "2015" : "2021",
         id: rootId,
         source: null,
         manifest_path: manifestPath,
@@ -573,6 +574,16 @@ expect_provenance_rejected \
   "$registry_source" \
   "null-resolve"
 
+expect_provenance_rejected \
+  "audited Cargo macro provenance requires Rust edition 2018 or newer" \
+  "serde_json" \
+  "serde_json" \
+  "$registry_source" \
+  "serde_json" \
+  "1.0.151" \
+  "$registry_source" \
+  "edition-2015"
+
 substituted_registry="$provenance_root/substituted/registry"
 substituted_index="index.crates.io-1949cf8c6b5b557f"
 substituted_artifact="serde_json-1.0.151"
@@ -669,6 +680,7 @@ run_tauri_provenance_contract() {
       packages: [{
         name: "provenance-fixture",
         version: "0.1.0",
+        edition: "2021",
         id: rootId,
         source: null,
         manifest_path: manifestPath,

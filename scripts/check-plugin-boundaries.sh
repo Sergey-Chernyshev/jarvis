@@ -10,16 +10,10 @@ max_semantic_target_bytes=8388608
 max_semantic_metadata_bytes=16777216
 max_resolved_metadata_bytes=33554432
 
-cargo_provenance_file="$(
-  mktemp "${TMPDIR:-/tmp}/jarvis-cargo-provenance.XXXXXX"
-)"
-cleanup_cargo_provenance() {
-  exec 9>&- || true
-  rm -f -- "$cargo_provenance_file"
+cargo_provenance_records=()
+cargo_provenance_snapshot() {
+  printf '%s\n' "${cargo_provenance_records[@]}"
 }
-trap cleanup_cargo_provenance EXIT
-exec 9<>"$cargo_provenance_file"
-rm -f -- "$cargo_provenance_file"
 
 repo_root_resolved="$(cd "$repo_root" && pwd -P)"
 boundary_fixture_mode=0
@@ -113,7 +107,7 @@ append_cargo_macro_provenance() {
       return 1
     fi
   fi
-  printf '%s\n' "$record" >&9
+  cargo_provenance_records+=("$record")
 }
 
 semantic_target_source_lines() {
@@ -304,7 +298,8 @@ if [[ -f "$package_manifest" ]]; then
         "$script_dir/scan-rust-unsafe-boundary.mjs" \
         "$package_root" \
         --cargo-provenance-fd 9 \
-        --target-sources-stdin0
+        --target-sources-stdin0 \
+        9< <(cargo_provenance_snapshot)
   )"; then
     echo "failed to scan jarvis-package Rust syntax: $package_root" >&2
     failed=1
@@ -508,7 +503,8 @@ if [[ "${#trust_roots[@]}" -gt 0 ]] && ! trust_scan="$(
     | node "$script_dir/scan-rust-unsafe-boundary.mjs" \
       --trust-roots "${trust_roots[@]}" \
       --cargo-provenance-fd 9 \
-      --target-sources-stdin0
+      --target-sources-stdin0 \
+      9< <(cargo_provenance_snapshot)
 )"; then
   echo "failed to scan PackageTrustVerifier ownership roots" >&2
   failed=1

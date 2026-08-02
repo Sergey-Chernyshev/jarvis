@@ -2,6 +2,8 @@
   "registrySource": "registry+https://github.com/rust-lang/crates.io-index",
   "packages": {
     "objc2": {
+      "attributes": {},
+      "derives": {},
       "macros": {
         "class": null,
         "msg_send": null
@@ -11,6 +13,8 @@
       }
     },
     "ort": {
+      "attributes": {},
+      "derives": {},
       "macros": {
         "inputs": null
       },
@@ -19,6 +23,10 @@
       }
     },
     "schemars": {
+      "attributes": {},
+      "derives": {
+        "JsonSchema": "schemars_derive"
+      },
       "macros": {
         "schema_for": null
       },
@@ -27,6 +35,8 @@
       }
     },
     "serde_json": {
+      "attributes": {},
+      "derives": {},
       "macros": {
         "json": null
       },
@@ -36,6 +46,10 @@
       }
     },
     "tauri": {
+      "attributes": {
+        "command": "tauri-macros"
+      },
+      "derives": {},
       "macros": {
         "generate_context": "tauri-macros",
         "generate_handler": "tauri-macros"
@@ -45,6 +59,10 @@
       }
     },
     "tokio": {
+      "attributes": {
+        "test": "tokio-macros"
+      },
+      "derives": {},
       "macros": {
         "join": null,
         "pin": null,
@@ -53,12 +71,40 @@
       "versions": {
         "1.52.3": "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
       }
+    },
+    "serde": {
+      "attributes": {},
+      "derives": {
+        "Deserialize": "serde_derive",
+        "Serialize": "serde_derive"
+      },
+      "macros": {},
+      "versions": {
+        "1.0.228": "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e",
+        "1.0.229": "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+      }
     }
   },
   "providers": {
+    "schemars_derive": {
+      "versions": {
+        "0.8.22": "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d"
+      }
+    },
+    "serde_derive": {
+      "versions": {
+        "1.0.228": "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79",
+        "1.0.229": "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+      }
+    },
     "tauri-macros": {
       "versions": {
         "2.6.2": "ae6cb4e3896c21d2f6da5b31251d2faea0153bba56ed0e970f918115dbee4924"
+      }
+    },
+    "tokio-macros": {
+      "versions": {
+        "2.7.0": "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496"
       }
     }
   }

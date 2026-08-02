@@ -55,6 +55,26 @@ function validateVersions(versions, label) {
   }
 }
 
+function validateExpansions(expansions, label) {
+  if (
+    !expansions ||
+    typeof expansions !== "object" ||
+    Array.isArray(expansions)
+  ) {
+    throw new Error(`${label} expansions are malformed`);
+  }
+  for (const [expansionName, providerName] of Object.entries(expansions)) {
+    if (
+      !RUST_CRATE_NAME.test(expansionName) ||
+      (providerName !== null &&
+        (typeof providerName !== "string" ||
+          !Object.hasOwn(audit.providers, providerName)))
+    ) {
+      throw new Error(`${label} expansion ${expansionName} is malformed`);
+    }
+  }
+}
+
 const auditFile = readStableFile(
   fileURLToPath(new URL("./audited-cargo-macros.json", import.meta.url)),
   "Cargo macro audit",
@@ -102,29 +122,23 @@ for (const [packageName, policy] of Object.entries(audit.packages)) {
   }
   exactObject(
     policy,
-    ["macros", "versions"],
+    ["attributes", "derives", "macros", "versions"],
     `Cargo macro audit ${packageName}`,
   );
   validateVersions(policy.versions, `Cargo macro audit ${packageName}`);
   if (
-    !policy.macros ||
-    typeof policy.macros !== "object" ||
-    Array.isArray(policy.macros) ||
-    Object.keys(policy.macros).length === 0
+    Object.keys(policy.attributes).length +
+      Object.keys(policy.derives).length +
+      Object.keys(policy.macros).length ===
+    0
   ) {
-    throw new Error(`Cargo macro audit ${packageName} macros are malformed`);
+    throw new Error(`Cargo macro audit ${packageName} has no expansions`);
   }
-  for (const [macroName, providerName] of Object.entries(policy.macros)) {
-    if (
-      !RUST_CRATE_NAME.test(macroName) ||
-      (providerName !== null &&
-        (typeof providerName !== "string" ||
-          !Object.hasOwn(audit.providers, providerName)))
-    ) {
-      throw new Error(
-        `Cargo macro audit ${packageName} macro ${macroName} is malformed`,
-      );
-    }
+  for (const field of ["attributes", "derives", "macros"]) {
+    validateExpansions(
+      policy[field],
+      `Cargo macro audit ${packageName} ${field}`,
+    );
   }
 }
 
@@ -352,13 +366,9 @@ for (const dependency of packageRecord.dependencies) {
   declaredAuditedAliases.set(localAlias, dependency.name);
 }
 
-function lockIdentity(name, version, source, versions, label) {
+function lockedRegistryIdentity(name, version, source, label) {
   if (source !== audit.registrySource) {
     throw new Error(`${label} must use the crates.io registry`);
-  }
-  const checksum = versions[version];
-  if (typeof checksum !== "string") {
-    throw new Error(`${label} ${version} is not audited`);
   }
   const locked = lockPackages.filter(
     (candidate) =>
@@ -374,15 +384,24 @@ function lockIdentity(name, version, source, versions, label) {
   if (!CHECKSUM.test(locked[0].checksum ?? "")) {
     throw new Error(`${name} ${version} has no valid locked checksum`);
   }
-  if (locked[0].checksum !== checksum) {
-    throw new Error(`${name} ${version} does not match an audited checksum`);
-  }
   return {
     package: name,
     version,
     source,
-    checksum,
+    checksum: locked[0].checksum,
   };
+}
+
+function lockIdentity(name, version, source, versions, label) {
+  const identity = lockedRegistryIdentity(name, version, source, label);
+  const checksum = versions[version];
+  if (typeof checksum !== "string") {
+    throw new Error(`${label} ${version} is not audited`);
+  }
+  if (identity.checksum !== checksum) {
+    throw new Error(`${name} ${version} does not match an audited checksum`);
+  }
+  return identity;
 }
 
 function resolvedPackage(packageId, label) {
@@ -409,10 +428,57 @@ function verifyPhysicalPackage(packageIdentity, identity) {
   verifiedPhysicalPackages.add(key);
 }
 
+function verifyProviderDependencyClosure(provider) {
+  const pending = [provider.id];
+  const visited = new Set();
+  while (pending.length > 0) {
+    const packageId = pending.pop();
+    if (visited.has(packageId)) continue;
+    visited.add(packageId);
+    if (visited.size > MAX_METADATA_PACKAGES) {
+      throw new Error(
+        `Cargo macro provider closure exceeds ${MAX_METADATA_PACKAGES} packages`,
+      );
+    }
+    const dependency = resolvedPackage(
+      packageId,
+      `macro provider dependency ${packageId}`,
+    );
+    const identity = lockedRegistryIdentity(
+      dependency.name,
+      dependency.version,
+      dependency.source,
+      `Cargo macro provider dependency ${dependency.name}`,
+    );
+    verifyPhysicalPackage(dependency, identity);
+    const node = nodesById.get(packageId);
+    if (!node || !Array.isArray(node.deps)) {
+      throw new Error(
+        `Cargo macro provider dependency ${dependency.name} resolve node is missing`,
+      );
+    }
+    if (node.deps.length > MAX_DIRECT_DEPENDENCIES) {
+      throw new Error(
+        `Cargo macro provider dependency ${dependency.name} exceeds ${MAX_DIRECT_DEPENDENCIES} dependencies`,
+      );
+    }
+    for (const edge of node.deps) {
+      if (!edge || typeof edge.pkg !== "string") {
+        throw new Error(
+          `Cargo macro provider dependency ${dependency.name} has a malformed edge`,
+        );
+      }
+      pending.push(edge.pkg);
+    }
+  }
+}
+
 function providerIdentities(packageIdentity, policy) {
   const expectedProviders = new Set(
-    Object.values(policy.macros).filter(
-      (providerName) => providerName !== null,
+    ["attributes", "derives", "macros"].flatMap((field) =>
+      Object.values(policy[field]).filter(
+        (providerName) => providerName !== null,
+      ),
     ),
   );
   const providers = Object.create(null);
@@ -455,6 +521,7 @@ function providerIdentities(packageIdentity, policy) {
       `Cargo macro provider ${providerName}`,
     );
     verifyPhysicalPackage(provider, providerIdentity);
+    verifyProviderDependencyClosure(provider);
     providers[providerName] = providerIdentity;
   }
   return providers;

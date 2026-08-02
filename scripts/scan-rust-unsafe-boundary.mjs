@@ -259,6 +259,26 @@ function validateAuditVersions(versions, label) {
   }
 }
 
+function validateAuditExpansions(expansions, audit, label) {
+  if (
+    !expansions ||
+    typeof expansions !== "object" ||
+    Array.isArray(expansions)
+  ) {
+    throw new Error(`${label} expansions are malformed`);
+  }
+  for (const [expansionName, providerName] of Object.entries(expansions)) {
+    if (
+      !RUST_CRATE_NAME.test(expansionName) ||
+      (providerName !== null &&
+        (typeof providerName !== "string" ||
+          !Object.hasOwn(audit.providers, providerName)))
+    ) {
+      throw new Error(`${label} expansion ${expansionName} is malformed`);
+    }
+  }
+}
+
 function loadCargoMacroAudit() {
   const auditFile = readStableFile(
     fileURLToPath(new URL("./audited-cargo-macros.json", import.meta.url)),
@@ -299,29 +319,24 @@ function loadCargoMacroAudit() {
   for (const [packageName, policy] of Object.entries(audit.packages)) {
     exactObject(
       policy,
-      ["macros", "versions"],
+      ["attributes", "derives", "macros", "versions"],
       `Cargo macro audit ${packageName}`,
     );
     validateAuditVersions(policy.versions, `Cargo macro audit ${packageName}`);
     if (
-      !policy.macros ||
-      typeof policy.macros !== "object" ||
-      Array.isArray(policy.macros) ||
-      Object.keys(policy.macros).length === 0
+      Object.keys(policy.attributes).length +
+        Object.keys(policy.derives).length +
+        Object.keys(policy.macros).length ===
+      0
     ) {
-      throw new Error(`Cargo macro audit ${packageName} macros are malformed`);
+      throw new Error(`Cargo macro audit ${packageName} has no expansions`);
     }
-    for (const [macroName, providerName] of Object.entries(policy.macros)) {
-      if (
-        !RUST_CRATE_NAME.test(macroName) ||
-        (providerName !== null &&
-          (typeof providerName !== "string" ||
-            !Object.hasOwn(audit.providers, providerName)))
-      ) {
-        throw new Error(
-          `Cargo macro audit ${packageName} macro ${macroName} is malformed`,
-        );
-      }
+    for (const field of ["attributes", "derives", "macros"]) {
+      validateAuditExpansions(
+        policy[field],
+        audit,
+        `Cargo macro audit ${packageName} ${field}`,
+      );
     }
   }
   return audit;
@@ -348,8 +363,10 @@ function verifiedCargoIdentity(identity, policy, label) {
     throw new Error(`${label} is not an audited Cargo identity`);
   }
   const expectedProviders = new Set(
-    Object.values(policy.macros).filter(
-      (providerName) => providerName !== null,
+    ["attributes", "derives", "macros"].flatMap((field) =>
+      Object.values(policy[field]).filter(
+        (providerName) => providerName !== null,
+      ),
     ),
   );
   const actualProviders = Object.keys(identity.providers);
@@ -459,6 +476,8 @@ function loadCargoProvenance(argument, fd) {
       }
       verifiedCargoIdentity(identity, policy, `${label} alias ${localAlias}`);
       aliases.set(localAlias, {
+        attributes: new Set(Object.keys(policy.attributes)),
+        derives: new Set(Object.keys(policy.derives)),
         identity,
         macros: new Set(Object.keys(policy.macros)),
       });
@@ -1011,28 +1030,21 @@ function sourceDiscoveryViolations(
     }
   }
   for (const attribute of attributes(tokens)) {
-    for (let index = attribute.start; index < attribute.end; index += 1) {
-      const token = tokens[index];
-      if (
-        token.kind === "identifier" &&
-        !token.raw &&
-        token.value === "macro_use"
-      ) {
-        violations.push({
-          line: token.line,
-          reason: "unaudited macro import may expand Rust source",
-        });
-      }
-      if (
-        token.kind === "identifier" &&
-        token.value === "path" &&
-        tokens[index + 1]?.value === "="
-      ) {
-        if (isCoveredTrustSource(file, tokens[index + 2], discoveredFiles)) {
-          continue;
-        }
-        violations.push({ line: token.line, reason: "custom #[path] source" });
-      }
+    if (
+      !attributeSourceExpansionIsAudited(
+        tokens,
+        attribute.start,
+        attribute.end,
+        file,
+        imports,
+        discoveredFiles,
+        packageAuthorization,
+      )
+    ) {
+      violations.push({
+        line: tokens[attribute.start]?.line ?? 1,
+        reason: "unaudited attribute may expand Rust source",
+      });
     }
   }
   return violations;
@@ -1120,6 +1132,42 @@ const SOURCE_INERT_BUILTIN_MACROS = new Set(
   ].map(canonicalSymbolName),
 );
 const LOCAL_MACRO_PATH_PREFIXES = new Set(["crate", "self", "super"]);
+const BUILTIN_SOURCE_ATTRIBUTES = new Set([
+  "allow",
+  "cfg",
+  "cold",
+  "default",
+  "deny",
+  "deprecated",
+  "doc",
+  "expect",
+  "forbid",
+  "ignore",
+  "inline",
+  "link",
+  "macro_export",
+  "must_use",
+  "non_exhaustive",
+  "repr",
+  "should_panic",
+  "target_feature",
+  "test",
+  "track_caller",
+  "warn",
+  "windows_subsystem",
+]);
+const BUILTIN_DERIVES = new Set([
+  "Clone",
+  "Copy",
+  "Debug",
+  "Default",
+  "Eq",
+  "Hash",
+  "Ord",
+  "PartialEq",
+  "PartialOrd",
+]);
+const AUDITED_DERIVE_HELPER_ATTRIBUTES = new Set(["schemars", "serde"]);
 const RUST_KEYWORDS = new Set([
   "as",
   "async",
@@ -1300,6 +1348,35 @@ function useImports(tokens) {
     if (statementEnd >= tokens.length) continue;
     addUseTreeImports(tokens, index + 1, statementEnd, [], imports);
     index = statementEnd;
+  }
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (
+      tokens[index].kind !== "identifier" ||
+      tokens[index].raw ||
+      tokens[index].value !== "extern" ||
+      tokens[index + 1]?.kind !== "identifier" ||
+      tokens[index + 1].raw ||
+      tokens[index + 1].value !== "crate" ||
+      tokens[index + 2]?.kind !== "identifier"
+    ) {
+      continue;
+    }
+    const source = canonicalSymbolName(tokens[index + 2].value);
+    let binding = source;
+    if (
+      tokens[index + 3]?.kind === "identifier" &&
+      !tokens[index + 3].raw &&
+      tokens[index + 3].value === "as" &&
+      tokens[index + 4]?.kind === "identifier"
+    ) {
+      binding = canonicalSymbolName(tokens[index + 4].value);
+    }
+    let paths = imports.get(binding);
+    if (!paths) {
+      paths = new Set();
+      imports.set(binding, paths);
+    }
+    paths.add(source);
   }
   return imports;
 }
@@ -1527,15 +1604,48 @@ function isAuditedLocalMacroPath(parts, safeLocalMacroNames) {
   );
 }
 
-function auditedExternalMacroPath(parts, absolute, packageAuthorization) {
+function auditedExternalExpansionPath(
+  parts,
+  absolute,
+  packageAuthorization,
+  expansionField,
+) {
   if (parts.length !== 2 || !packageAuthorization) return false;
   const alias = parts[0];
-  const macro = parts[1];
+  const expansion = parts[1];
   const authorization = packageAuthorization.aliases.get(alias);
-  if (!authorization || !authorization.macros.has(macro)) return false;
+  if (!authorization || !authorization[expansionField].has(expansion)) {
+    return false;
+  }
   return absolute
     ? !packageAuthorization.absoluteShadowedAliases.has(alias)
     : !packageAuthorization.shadowedAliases.has(alias);
+}
+
+function importedExpansionPathsAreAudited(
+  paths,
+  safeLocalMacroNames,
+  packageAuthorization,
+  expansionField,
+) {
+  return [...paths].every((path) => {
+    const absolute = path.startsWith("::");
+    const parts = path.split("::").filter((part) => part.length > 0);
+    if (
+      auditedExternalExpansionPath(
+        parts,
+        absolute,
+        packageAuthorization,
+        expansionField,
+      )
+    ) {
+      return true;
+    }
+    return (
+      expansionField === "macros" &&
+      isAuditedLocalMacroPath(parts, safeLocalMacroNames)
+    );
+  });
 }
 
 function importedMacroPathsAreAudited(
@@ -1543,14 +1653,219 @@ function importedMacroPathsAreAudited(
   safeLocalMacroNames,
   packageAuthorization,
 ) {
-  return [...paths].every((path) => {
-    const absolute = path.startsWith("::");
-    const parts = path.split("::").filter((part) => part.length > 0);
-    if (auditedExternalMacroPath(parts, absolute, packageAuthorization)) {
-      return true;
+  return importedExpansionPathsAreAudited(
+    paths,
+    safeLocalMacroNames,
+    packageAuthorization,
+    "macros",
+  );
+}
+
+function auditedExternalMacroPath(parts, absolute, packageAuthorization) {
+  return auditedExternalExpansionPath(
+    parts,
+    absolute,
+    packageAuthorization,
+    "macros",
+  );
+}
+
+function topLevelSegments(tokens, start, end) {
+  const segments = [];
+  const closing = new Map([
+    ["(", ")"],
+    ["[", "]"],
+    ["{", "}"],
+  ]);
+  const stack = [];
+  let segmentStart = start;
+  for (let index = start; index < end; index += 1) {
+    const value = tokens[index].value;
+    if (stack.length === 0 && value === ",") {
+      segments.push([segmentStart, index]);
+      segmentStart = index + 1;
+      continue;
     }
-    return isAuditedLocalMacroPath(parts, safeLocalMacroNames);
-  });
+    if (closing.has(value)) {
+      stack.push(closing.get(value));
+    } else if (stack.at(-1) === value) {
+      stack.pop();
+    }
+  }
+  segments.push([segmentStart, end]);
+  return segments.filter(([left, right]) => left < right);
+}
+
+function attributePathAndArguments(tokens, start, end) {
+  let pathEnd = start;
+  while (
+    pathEnd < end &&
+    tokens[pathEnd].value !== "(" &&
+    tokens[pathEnd].value !== "="
+  ) {
+    pathEnd += 1;
+  }
+  const path = identifierPath(tokens, start, pathEnd);
+  return path === null ? null : { argumentsStart: pathEnd, path };
+}
+
+function derivePathIsAudited(path, imports, packageAuthorization) {
+  const absolute = path[0] === "";
+  const parts = path.filter((part) => part.length > 0);
+  if (!absolute && parts.length === 1 && BUILTIN_DERIVES.has(parts[0])) {
+    return !imports.has(parts[0]);
+  }
+  if (
+    auditedExternalExpansionPath(
+      parts,
+      absolute,
+      packageAuthorization,
+      "derives",
+    )
+  ) {
+    return true;
+  }
+  if (parts.length !== 1) return false;
+  const importedPaths = imports.get(parts[0]);
+  return (
+    importedPaths !== undefined &&
+    importedExpansionPathsAreAudited(
+      importedPaths,
+      new Set(),
+      packageAuthorization,
+      "derives",
+    )
+  );
+}
+
+function deriveArgumentsAreAudited(
+  tokens,
+  argumentsStart,
+  end,
+  imports,
+  packageAuthorization,
+) {
+  if (
+    tokens[argumentsStart]?.value !== "(" ||
+    matchingToken(tokens, argumentsStart, "(", ")", end) !== end - 1
+  ) {
+    return false;
+  }
+  const segments = topLevelSegments(tokens, argumentsStart + 1, end - 1);
+  return (
+    segments.length > 0 &&
+    segments.every(([start, finish]) => {
+      const path = identifierPath(tokens, start, finish);
+      return (
+        path !== null &&
+        derivePathIsAudited(path, imports, packageAuthorization)
+      );
+    })
+  );
+}
+
+function deriveHelperAttributeIsAudited(helper, packageAuthorization) {
+  if (!packageAuthorization) return false;
+  return [...packageAuthorization.aliases.entries()].some(
+    ([alias, authorization]) =>
+      authorization.identity.package === helper &&
+      authorization.derives.size > 0 &&
+      !packageAuthorization.shadowedAliases.has(alias),
+  );
+}
+
+function attributeSourceExpansionIsAudited(
+  tokens,
+  start,
+  end,
+  file,
+  imports,
+  discoveredFiles,
+  packageAuthorization,
+  depth = 0,
+) {
+  if (depth > 32) return false;
+  const parsed = attributePathAndArguments(tokens, start, end);
+  if (!parsed) return false;
+  const { argumentsStart, path } = parsed;
+  const absolute = path[0] === "";
+  const parts = path.filter((part) => part.length > 0);
+
+  if (!absolute && parts.length === 1 && imports.has(parts[0])) {
+    return importedExpansionPathsAreAudited(
+      imports.get(parts[0]),
+      new Set(),
+      packageAuthorization,
+      "attributes",
+    );
+  }
+  if (!absolute && parts.length === 1 && parts[0] === "path") {
+    return (
+      argumentsStart + 2 === end &&
+      tokens[argumentsStart]?.value === "=" &&
+      isCoveredTrustSource(file, tokens[argumentsStart + 1], discoveredFiles)
+    );
+  }
+  if (!absolute && parts.length === 1 && parts[0] === "derive") {
+    return deriveArgumentsAreAudited(
+      tokens,
+      argumentsStart,
+      end,
+      imports,
+      packageAuthorization,
+    );
+  }
+  if (!absolute && parts.length === 1 && parts[0] === "cfg_attr") {
+    if (
+      tokens[argumentsStart]?.value !== "(" ||
+      matchingToken(tokens, argumentsStart, "(", ")", end) !== end - 1
+    ) {
+      return false;
+    }
+    const segments = topLevelSegments(tokens, argumentsStart + 1, end - 1);
+    return (
+      segments.length >= 2 &&
+      segments
+        .slice(1)
+        .every(([nestedStart, nestedEnd]) =>
+          attributeSourceExpansionIsAudited(
+            tokens,
+            nestedStart,
+            nestedEnd,
+            file,
+            imports,
+            discoveredFiles,
+            packageAuthorization,
+            depth + 1,
+          ),
+        )
+    );
+  }
+  if (
+    !absolute &&
+    parts.length === 1 &&
+    AUDITED_DERIVE_HELPER_ATTRIBUTES.has(parts[0])
+  ) {
+    return deriveHelperAttributeIsAudited(parts[0], packageAuthorization);
+  }
+  if (
+    !absolute &&
+    parts.length === 1 &&
+    BUILTIN_SOURCE_ATTRIBUTES.has(parts[0])
+  ) {
+    return true;
+  }
+  if (
+    auditedExternalExpansionPath(
+      parts,
+      absolute,
+      packageAuthorization,
+      "attributes",
+    )
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function macroInvocationUsesLocalDefinition(

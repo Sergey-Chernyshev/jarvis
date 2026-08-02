@@ -50,11 +50,41 @@ function readExact(fd, size, label) {
   return buffer;
 }
 
+function readBoundedStream(fd, label, maximumBytes) {
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const chunk = Buffer.allocUnsafe(
+      Math.min(64 * 1024, maximumBytes - total + 1),
+    );
+    const bytesRead = readSync(fd, chunk, 0, chunk.length, null);
+    if (bytesRead === 0) break;
+    total += bytesRead;
+    if (total > maximumBytes) {
+      throw new Error(`${label} exceeds ${maximumBytes} bytes`);
+    }
+    chunks.push(chunk.subarray(0, bytesRead));
+  }
+  return Buffer.concat(chunks, total);
+}
+
 export function readStableFd(fd, label, maximumBytes) {
   if (!Number.isInteger(fd) || fd < 0) {
     throw new Error(`${label} descriptor is invalid`);
   }
   const before = fstatSync(fd, { bigint: true });
+  if (before.isFIFO()) {
+    const buffer = readBoundedStream(fd, label, maximumBytes);
+    const after = fstatSync(fd, { bigint: true });
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.mode !== after.mode
+    ) {
+      throw new Error(`${label} changed while being read`);
+    }
+    return { buffer, stats: after };
+  }
   const size = checkedSize(before, label, maximumBytes);
   const first = readExact(fd, size, label);
   const middle = fstatSync(fd, { bigint: true });

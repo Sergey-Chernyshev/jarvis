@@ -4,7 +4,6 @@ import {
   existsSync,
   lstatSync,
   mkdtempSync,
-  opendirSync,
   realpathSync,
   rmSync,
 } from "node:fs";
@@ -18,14 +17,13 @@ import {
   resolve,
   sep,
 } from "node:path";
+import { fileURLToPath } from "node:url";
 import { readStableFile } from "./read-stable-file.mjs";
 
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024;
 const MAX_SOURCE_FILE_BYTES = 32 * 1024 * 1024;
-const MAX_SOURCE_ENTRIES = 20_000;
-const MAX_SOURCE_BYTES = 256 * 1024 * 1024;
-const MAX_SOURCE_DEPTH = 64;
+const MAX_TREE_MANIFEST_BYTES = 16 * 1024 * 1024;
 const ARTIFACT_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 const CARGO_OK = Buffer.from('{"v":1}', "utf8");
 const OFFICIAL_REGISTRY_INDEXES = new Set([
@@ -158,118 +156,6 @@ export function assertNoCargoSourceOverrides(workspaceRoot) {
   }
 }
 
-function directoryEntries(path, label) {
-  const before = lstatSync(path, { bigint: true });
-  if (before.isSymbolicLink() || !before.isDirectory()) {
-    throw new Error(`${label} must be a non-symlink directory`);
-  }
-  const entries = [];
-  const directory = opendirSync(path);
-  try {
-    let entry;
-    while ((entry = directory.readSync()) !== null) {
-      entries.push(entry);
-      if (entries.length > MAX_SOURCE_ENTRIES + 1) {
-        throw new Error(`${label} exceeds ${MAX_SOURCE_ENTRIES} entries`);
-      }
-    }
-  } finally {
-    directory.closeSync();
-  }
-  const after = lstatSync(path, { bigint: true });
-  for (const field of ["dev", "ino", "mode", "size", "mtimeNs", "ctimeNs"]) {
-    if (before[field] !== after[field]) {
-      throw new Error(`${label} changed while being read`);
-    }
-  }
-  return entries.sort((left, right) => left.name.localeCompare(right.name));
-}
-
-function compareSourceTrees(
-  expectedRoot,
-  physicalRoot,
-  budget,
-  relativePath = "",
-  depth = 0,
-) {
-  if (depth > MAX_SOURCE_DEPTH) {
-    throw new Error(`audited Cargo source exceeds depth ${MAX_SOURCE_DEPTH}`);
-  }
-  const expectedDirectory = join(expectedRoot, relativePath);
-  const physicalDirectory = join(physicalRoot, relativePath);
-  const expectedEntries = directoryEntries(
-    expectedDirectory,
-    "audited Cargo archive directory",
-  );
-  const expectedNames = new Set(expectedEntries.map((entry) => entry.name));
-  const physicalEntries = directoryEntries(
-    physicalDirectory,
-    "audited Cargo source directory",
-  ).filter(
-    (entry) =>
-      relativePath !== "" ||
-      entry.name !== ".cargo-ok" ||
-      expectedNames.has(entry.name),
-  );
-  if (
-    expectedEntries.length !== physicalEntries.length ||
-    expectedEntries.some(
-      (entry, index) => entry.name !== physicalEntries[index]?.name,
-    )
-  ) {
-    throw new Error("audited Cargo source tree differs from its crate archive");
-  }
-
-  for (const [index, expectedEntry] of expectedEntries.entries()) {
-    budget.entries += 1;
-    if (budget.entries > MAX_SOURCE_ENTRIES) {
-      throw new Error(
-        `audited Cargo source exceeds ${MAX_SOURCE_ENTRIES} entries`,
-      );
-    }
-    const physicalEntry = physicalEntries[index];
-    const child = relativePath
-      ? join(relativePath, expectedEntry.name)
-      : expectedEntry.name;
-    if (
-      expectedEntry.isSymbolicLink() ||
-      physicalEntry.isSymbolicLink() ||
-      expectedEntry.isDirectory() !== physicalEntry.isDirectory() ||
-      expectedEntry.isFile() !== physicalEntry.isFile()
-    ) {
-      throw new Error(
-        "audited Cargo source entry type differs from its archive",
-      );
-    }
-    if (expectedEntry.isDirectory()) {
-      compareSourceTrees(expectedRoot, physicalRoot, budget, child, depth + 1);
-      continue;
-    }
-    if (!expectedEntry.isFile()) {
-      throw new Error("audited Cargo source contains an unsupported entry");
-    }
-    const expected = readStableFile(
-      join(expectedRoot, child),
-      "audited Cargo archive source",
-      MAX_SOURCE_FILE_BYTES,
-    );
-    const physical = readStableFile(
-      join(physicalRoot, child),
-      "audited Cargo physical source",
-      MAX_SOURCE_FILE_BYTES,
-    );
-    budget.bytes += expected.buffer.length;
-    if (budget.bytes > MAX_SOURCE_BYTES) {
-      throw new Error(`audited Cargo source exceeds ${MAX_SOURCE_BYTES} bytes`);
-    }
-    if (!expected.buffer.equals(physical.buffer)) {
-      throw new Error(
-        `audited Cargo source file differs from its archive: ${child}`,
-      );
-    }
-  }
-}
-
 function trustedTarBinary() {
   for (const candidate of ["/usr/bin/bsdtar", "/usr/bin/tar", "/bin/tar"]) {
     try {
@@ -290,10 +176,111 @@ function trustedTarBinary() {
   throw new Error("no trusted system tar binary is available");
 }
 
-function requireDirectory(path, label) {
-  const info = lstatSync(path);
-  if (info.isSymbolicLink() || !info.isDirectory()) {
+function trustedPythonBinary() {
+  for (const candidate of ["/usr/bin/python3"]) {
+    try {
+      const canonical = realpathSync(candidate);
+      const info = lstatSync(canonical);
+      if (
+        info.isFile() &&
+        !info.isSymbolicLink() &&
+        info.uid === 0 &&
+        (info.mode & 0o022) === 0
+      ) {
+        return canonical;
+      }
+    } catch {
+      // Try the next fixed system path.
+    }
+  }
+  throw new Error("no trusted system Python binary is available");
+}
+
+const treeInspector = readStableFile(
+  fileURLToPath(new URL("./inspect-cargo-source-tree.py", import.meta.url)),
+  "Cargo source tree inspector",
+  1024 * 1024,
+);
+const treeInspectorSource = new TextDecoder("utf-8", { fatal: true }).decode(
+  treeInspector.buffer,
+);
+
+function inspectSourceTree(root, label) {
+  const before = lstatSync(root, { bigint: true });
+  if (before.isSymbolicLink() || !before.isDirectory()) {
     throw new Error(`${label} must be a non-symlink directory`);
+  }
+  const result = spawnSync(
+    trustedPythonBinary(),
+    ["-I", "-S", "-c", treeInspectorSource, root],
+    {
+      encoding: "utf8",
+      env: {
+        LANG: "C",
+        LC_ALL: "C",
+        PATH: "/usr/bin:/bin",
+      },
+      maxBuffer: MAX_TREE_MANIFEST_BYTES,
+      timeout: 60_000,
+    },
+  );
+  if (result.error || result.status !== 0 || result.signal !== null) {
+    const detail = result.stderr.trim();
+    throw new Error(`${label} inspection failed${detail ? `: ${detail}` : ""}`);
+  }
+  const after = lstatSync(root, { bigint: true });
+  const manifest = JSON.parse(result.stdout);
+  if (
+    !manifest ||
+    !Array.isArray(manifest.records) ||
+    typeof manifest.root !== "object" ||
+    manifest.root.dev !== before.dev.toString() ||
+    manifest.root.ino !== before.ino.toString() ||
+    manifest.root.mode !== before.mode.toString() ||
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    before.mode !== after.mode ||
+    before.mtimeNs !== after.mtimeNs ||
+    before.ctimeNs !== after.ctimeNs
+  ) {
+    throw new Error(`${label} changed while being inspected`);
+  }
+  return manifest.records;
+}
+
+function compareSourceTreeManifests(expected, physical) {
+  const expectedByPath = new Map(expected.map((entry) => [entry.path, entry]));
+  const physicalWithoutMarker = physical.filter(
+    (entry) => entry.path !== ".cargo-ok" || expectedByPath.has(entry.path),
+  );
+  if (
+    expected.length !== physicalWithoutMarker.length ||
+    expected.some((entry, index) => {
+      const actual = physicalWithoutMarker[index];
+      return (
+        actual?.path !== entry.path ||
+        actual.kind !== entry.kind ||
+        actual.size !== entry.size ||
+        actual.sha256 !== entry.sha256
+      );
+    })
+  ) {
+    const differingFile = expected.find((entry) => {
+      const actual = physicalWithoutMarker.find(
+        (candidate) => candidate.path === entry.path,
+      );
+      return (
+        entry.kind === "file" &&
+        actual?.kind === "file" &&
+        (actual.size !== entry.size || actual.sha256 !== entry.sha256)
+      );
+    });
+    if (differingFile) {
+      throw new Error(
+        `audited Cargo source file differs from its archive: ${differingFile.path}`,
+      );
+    }
+    throw new Error("audited Cargo source tree differs from its crate archive");
   }
 }
 
@@ -336,10 +323,6 @@ export function verifyCargoRegistrySource(packageRecord, checksum) {
       `audited Cargo package ${packageRecord.name} has a non-registry physical source`,
     );
   }
-  requireDirectory(registryRoot, "Cargo registry root");
-  requireDirectory(registrySourceRoot, "Cargo registry source root");
-  requireDirectory(registryIndexRoot, "Cargo registry index root");
-  requireDirectory(physicalRoot, "audited Cargo package source root");
   const cargoOk = readStableFile(
     join(physicalRoot, ".cargo-ok"),
     `audited Cargo package ${packageRecord.name} extraction marker`,
@@ -406,26 +389,20 @@ export function verifyCargoRegistrySource(packageRecord, checksum) {
         `failed to extract audited Cargo package ${packageRecord.name}`,
       );
     }
-    const extractedEntries = directoryEntries(
-      resolvedTempRoot,
-      "audited Cargo extraction root",
-    );
-    if (
-      extractedEntries.length !== 1 ||
-      extractedEntries[0].name !== artifactName ||
-      !extractedEntries[0].isDirectory() ||
-      extractedEntries[0].isSymbolicLink()
-    ) {
-      throw new Error("audited Cargo archive has an unexpected root layout");
-    }
-    const expectedRoot = realpathSync(join(extractionRoot, artifactName));
+    const expectedPath = join(resolvedTempRoot, artifactName);
+    const expectedRoot = realpathSync(expectedPath);
     if (!isInside(resolvedTempRoot, expectedRoot)) {
       throw new Error("audited Cargo archive escaped its extraction root");
     }
-    compareSourceTrees(expectedRoot, physicalRoot, {
-      bytes: 0,
-      entries: 0,
-    });
+    const expectedManifest = inspectSourceTree(
+      expectedPath,
+      "audited Cargo archive source",
+    );
+    const physicalManifest = inspectSourceTree(
+      physicalRoot,
+      "audited Cargo physical source",
+    );
+    compareSourceTreeManifests(expectedManifest, physicalManifest);
   } finally {
     rmSync(resolvedTempRoot, { force: true, recursive: true });
   }

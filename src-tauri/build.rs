@@ -7,7 +7,7 @@ macro_rules! define_app_command_names {
     };
 }
 
-app_command_inventory::with_app_commands!(define_app_command_names);
+crate::app_command_inventory::with_app_commands!(define_app_command_names);
 
 fn main() {
     ensure_external_bin_placeholder();

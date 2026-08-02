@@ -140,7 +140,7 @@ fn main() {
         ))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(app_command_inventory::with_app_commands!(
+        .invoke_handler(crate::app_command_inventory::with_app_commands!(
             build_app_invoke_handler
         ))
         .setup(|app| {

@@ -208,6 +208,7 @@ run_provenance_contract() {
   local resolved_version="$5"
   local resolved_source="$6"
   local scenario="${7:-exact}"
+  local resolved_manifest_path="${8:-$serde_json_manifest_path}"
   node -e '
       const manifestPath = process.argv[1];
       const workspaceRoot = require("node:path").dirname(
@@ -220,6 +221,7 @@ run_provenance_contract() {
       const resolvedVersion = process.argv[6];
       const resolvedSource = process.argv[7] || null;
       const scenario = process.argv[8];
+      const resolvedManifestPath = process.argv[9];
       const rootId = `path+file://${manifestPath}#provenance-fixture@0.1.0`;
       const dependencyId =
         `${resolvedSource ?? `path+file://${workspaceRoot}/patched`}` +
@@ -229,7 +231,7 @@ run_provenance_contract() {
         version: resolvedVersion,
         id: dependencyId,
         source: resolvedSource,
-        manifest_path: `${workspaceRoot}/registry/${resolvedName}/Cargo.toml`,
+        manifest_path: resolvedManifestPath,
         dependencies: [],
         targets: [],
       };
@@ -370,6 +372,7 @@ run_provenance_contract() {
     "$resolved_version" \
     "$resolved_source" \
     "$scenario" \
+    "$resolved_manifest_path" \
     | node "$repo_root/scripts/resolve-cargo-macro-provenance.mjs" \
       "$provenance_manifest"
 }
@@ -392,6 +395,29 @@ expect_provenance_rejected() {
 registry_source='registry+https://github.com/rust-lang/crates.io-index'
 serde_1_0_150_checksum='e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9'
 serde_1_0_151_checksum='c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14'
+serde_json_manifest_path="$(
+  cargo metadata \
+    --all-features \
+    --format-version=1 \
+    --locked \
+    --offline \
+    --manifest-path "$repo_root/crates/jarvis-package/Cargo.toml" \
+    | node -e '
+      let source = "";
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (chunk) => { source += chunk; });
+      process.stdin.on("end", () => {
+        const metadata = JSON.parse(source);
+        const matches = metadata.packages.filter(
+          (candidate) =>
+            candidate.name === "serde_json" &&
+            candidate.version === "1.0.151",
+        );
+        if (matches.length !== 1) process.exit(1);
+        process.stdout.write(matches[0].manifest_path);
+      });
+    '
+)"
 write_provenance_lock \
   "serde_json|1.0.151|$registry_source|$serde_1_0_151_checksum"
 verified_provenance="$(
@@ -547,8 +573,84 @@ expect_provenance_rejected \
   "$registry_source" \
   "null-resolve"
 
+substituted_registry="$provenance_root/substituted/registry"
+substituted_index="index.crates.io-1949cf8c6b5b557f"
+substituted_artifact="serde_json-1.0.151"
+substituted_source_root="$substituted_registry/src/$substituted_index"
+substituted_cache_root="$substituted_registry/cache/$substituted_index"
+serde_json_source_root="$(dirname "$serde_json_manifest_path")"
+serde_json_registry_root="$(
+  dirname "$(dirname "$(dirname "$serde_json_source_root")")"
+)"
+mkdir -p "$substituted_source_root" "$substituted_cache_root"
+cp -R "$serde_json_source_root" "$substituted_source_root/$substituted_artifact"
+cp \
+  "$serde_json_registry_root/cache/$substituted_index/$substituted_artifact.crate" \
+  "$substituted_cache_root/$substituted_artifact.crate"
+printf '\n# local source replacement\n' \
+  >> "$substituted_source_root/$substituted_artifact/Cargo.toml"
+expect_provenance_rejected \
+  "audited Cargo source file differs from its archive" \
+  "serde_json" \
+  "serde_json" \
+  "$registry_source" \
+  "serde_json" \
+  "1.0.151" \
+  "$registry_source" \
+  "exact" \
+  "$substituted_source_root/$substituted_artifact/Cargo.toml"
+
+source_override_output=""
+if source_override_output="$(
+  CARGO_SOURCE_CRATES_IO_REPLACE_WITH=mirror \
+    run_provenance_contract \
+      "serde_json" \
+      "serde_json" \
+      "$registry_source" \
+      "serde_json" \
+      "1.0.151" \
+      "$registry_source" \
+      2>&1
+)"; then
+  echo "Cargo provenance accepted a source override environment" >&2
+  exit 1
+fi
+if [[ "$source_override_output" != *"Cargo source override environment is forbidden"* ]]; then
+  echo "Cargo provenance did not identify a source override environment" >&2
+  echo "$source_override_output" >&2
+  exit 1
+fi
+
 tauri_checksum='437404997acf375d85f1177afa7e11bb971f274ed6a7b83a2a3e339015f4cc28'
 tauri_macros_checksum='ae6cb4e3896c21d2f6da5b31251d2faea0153bba56ed0e970f918115dbee4924'
+read -r tauri_manifest_path tauri_macros_manifest_path < <(
+  cargo metadata \
+    --all-features \
+    --format-version=1 \
+    --locked \
+    --offline \
+    --manifest-path "$repo_root/src-tauri/Cargo.toml" \
+    | node -e '
+      let source = "";
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (chunk) => { source += chunk; });
+      process.stdin.on("end", () => {
+        const metadata = JSON.parse(source);
+        const pathFor = (name, version) => {
+          const matches = metadata.packages.filter(
+            (candidate) =>
+              candidate.name === name && candidate.version === version,
+          );
+          if (matches.length !== 1) process.exit(1);
+          return matches[0].manifest_path;
+        };
+        process.stdout.write(
+          `${pathFor("tauri", "2.11.2")} ` +
+          `${pathFor("tauri-macros", "2.6.2")}\n`,
+        );
+      });
+    '
+)
 run_tauri_provenance_contract() {
   local provider_source="$1"
   node -e '
@@ -589,7 +691,7 @@ run_tauri_provenance_contract() {
         version: "2.11.2",
         id: tauriId,
         source: registry,
-        manifest_path: `${workspaceRoot}/registry/tauri/Cargo.toml`,
+        manifest_path: process.argv[4],
         dependencies: [],
         targets: [],
       }, {
@@ -597,7 +699,7 @@ run_tauri_provenance_contract() {
         version: "2.6.2",
         id: macrosId,
         source: providerSource,
-        manifest_path: `${workspaceRoot}/registry/tauri-macros/Cargo.toml`,
+        manifest_path: process.argv[5],
         dependencies: [],
         targets: [],
       }],
@@ -632,7 +734,12 @@ run_tauri_provenance_contract() {
         }],
       },
     }));
-  ' "$provenance_manifest" "$registry_source" "$provider_source" \
+  ' \
+    "$provenance_manifest" \
+    "$registry_source" \
+    "$provider_source" \
+    "$tauri_manifest_path" \
+    "$tauri_macros_manifest_path" \
     | node "$repo_root/scripts/resolve-cargo-macro-provenance.mjs" \
       "$provenance_manifest"
 }

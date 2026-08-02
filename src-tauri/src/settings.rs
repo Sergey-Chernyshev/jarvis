@@ -47,7 +47,11 @@ fn defaults() -> Value {
         "launchDangerous": false,         // глобальный «опасный режим»: claude --dangerously-skip-permissions / codex YOLO
         // внешность (дизайн «Клевер», экран 14f «вид»)
         "theme": "light",   // 'light' | 'dark' | 'auto' (системная)
-        "paint": "clover",  // 'clover' | 'coal' | 'raspberry'
+        "paint": "clover",  // 'clover' | 'coal' | 'raspberry' | 'custom'
+        "accent": "#0B6B44", // тон своей краски: остальное выводится из него
+        "density": "normal", // 'compact' | 'normal' | 'roomy' — высота строк
+        "radius": "normal",  // 'sharp' | 'normal' | 'soft' — скругление углов
+        "scale": 1.0,        // масштаб интерфейса, 0.85..1.4
         "footerBottom": "limit", // что показывать внизу панели: 'limit' | 'spend'
         // раскладка: 'overlay' — накладка ⌘J поверх всего; 'window' — обычное
         // окно с иконкой в доке и списком слева (макет 14h)

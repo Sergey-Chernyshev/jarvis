@@ -243,12 +243,24 @@ pub fn emit_to_panel<P: Serialize + Clone>(app: &AppHandle, event: &str, payload
     let _ = app.emit_to("main", event, payload.clone());
 }
 
-/// Тема/краска сменились — разослать всем окнам, чтобы панель, тосты, чат и
-/// онбординг перекрасились одновременно (`theme.js` слушает `appearance`).
-pub fn broadcast_appearance(app: &AppHandle, theme: &str, paint: &str, mode: &str) {
-    let payload = json!({ "theme": theme, "paint": paint, "mode": mode });
+/// Вид сменили — разослать всем окнам, чтобы панель, тосты, чат и онбординг
+/// перестроились одновременно (`theme.js` слушает `appearance`).
+/// Шлём снимок целиком: полей немного, а частичный патч заставил бы каждое
+/// окно домысливать недостающее.
+pub fn broadcast_appearance(d: &Arc<Daemon>) {
+    let cfg = d.settings.load();
+    let get = |k: &str| cfg.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    let payload = json!({
+        "theme": get("theme"),
+        "paint": get("paint"),
+        "mode": get("mode"),
+        "accent": get("accent"),
+        "density": get("density"),
+        "radius": get("radius"),
+        "scale": get("scale"),
+    });
     for label in ["main", "toast", "agent-chat", "onboarding"] {
-        let _ = app.emit_to(label, "appearance", payload.clone());
+        let _ = d.app.emit_to(label, "appearance", payload.clone());
     }
 }
 

@@ -555,7 +555,7 @@
 #settings2 .saccount .sub { font-size:12px; color:var(--ink-mute); margin-top:2px; }
 #settings2 .snav { flex:1; overflow-y:auto; padding:8px 9px; min-height:0; }
 #settings2 .snav::-webkit-scrollbar { width:0; }
-#settings2 .snav .item { display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:8px; font-size:13.5px; color:var(--ink-2); cursor:default; user-select:none; }
+#settings2 .snav .item { display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:var(--r-pill); font-size:13.5px; color:var(--ink-2); cursor:default; user-select:none; }
 #settings2 .snav .item:hover { background: var(--fill-1); }
 #settings2 .snav .item.sel { background: var(--accent-soft); color:var(--ink); font-weight:500; }
 #settings2 .snav .item .ic { width:22px; height:22px; border-radius:7px; display:grid; place-items:center; font-size:12px; flex:none; }
@@ -629,12 +629,12 @@
 #settings2 .toggle:disabled { opacity:.45; }
 
 /* ── Segmented ───────────────────────────────────────────────────────── */
-#settings2 .seg { display:flex; gap:3px; padding:3px; border:0; border-radius:9px; background:var(--surface); }
-#settings2 .segbtn { appearance:none; border:0; background:transparent; color:var(--ink-mute); font:500 12.5px/1 var(--s2-font); padding:5px 12px; border-radius:7px; cursor:default; }
+#settings2 .seg { display:flex; gap:3px; padding:3px; border:0; border-radius:var(--r-seg); background:var(--surface); }
+#settings2 .segbtn { appearance:none; border:0; background:transparent; color:var(--ink-mute); font:500 12.5px/1 var(--s2-font); padding:5px 12px; border-radius:calc(var(--r-seg) - 2px); cursor:default; }
 #settings2 .segbtn.active { background:var(--paper); color:var(--ink); font-weight:600; box-shadow:var(--shadow-raised); }
 
 /* ── Button ──────────────────────────────────────────────────────────── */
-#settings2 .btn { font:500 13px/1 var(--s2-font); color:var(--ink); background:var(--surface); border:0; border-radius:9px; padding:10px 15px; cursor:default; display:inline-flex; align-items:center; gap:6px; transition:filter .12s ease, background .12s ease; }
+#settings2 .btn { font:500 13px/1 var(--s2-font); color:var(--ink); background:var(--surface); border:0; border-radius:var(--r-seg); padding:10px 15px; cursor:default; display:inline-flex; align-items:center; gap:6px; transition:filter .12s ease, background .12s ease; }
 #settings2 .btn:hover { background:var(--surface-2); }
 #settings2 .btn:disabled { opacity:.5; }
 #settings2 .btn.primary { background:var(--accent); color:var(--on-accent); font-weight:600; }
@@ -706,6 +706,8 @@
 #settings2 .paints { display:flex; align-items:center; gap:10px; }
 #settings2 .paintdot { appearance:none; border:0; padding:0; width:22px; height:22px; border-radius:50%; cursor:default; flex:none; }
 #settings2 .paintdot.active { box-shadow:0 0 0 2px var(--paper), 0 0 0 3.5px currentColor; }
+#settings2 .paintown { position:relative; overflow:hidden; display:inline-block; }
+#settings2 .paintown input { position:absolute; inset:-4px; opacity:0; cursor:default; padding:0; border:0; }
 
 /* ── lucide общая геометрия ──────────────────────────────────────────── */
 #settings2 svg.lucide { width:15px; height:15px; stroke-width:2; vertical-align:middle; flex:none; }
@@ -1741,25 +1743,45 @@
         cur.theme,
         (v) => { window.jarvisTheme && window.jarvisTheme.set({ theme: v }); })));
 
-    // краска: три точки, выбранная в кольце своего же цвета
+    // краска: точки, выбранная в кольце своего же цвета; последняя — своя,
+    // по клику открывает системный пикер и выводит из тона всю акцентную семью
     const PAINTS = [
       { value: 'coal', label: 'Уголь', color: '#1B1A16' },
       { value: 'clover', label: 'Клевер', color: '#0B6B44' },
       { value: 'raspberry', label: 'Малина', color: '#C0103F' },
     ];
     const paints = el('div.paints');
+    const clearRings = () => { for (const x of paints.querySelectorAll('.paintdot')) x.classList.remove('active'); };
     for (const pnt of PAINTS) {
       const b = el('button.paintdot' + (pnt.value === cur.paint ? '.active' : ''), { title: pnt.label });
       b.style.background = pnt.color;
       b.style.color = pnt.color; // кольцо выбранного берёт currentColor
       b.addEventListener('click', () => {
-        for (const x of paints.querySelectorAll('.paintdot')) x.classList.remove('active');
+        clearRings();
         b.classList.add('active');
         if (window.jarvisTheme) window.jarvisTheme.set({ paint: pnt.value });
       });
       paints.appendChild(b);
     }
-    group.appendChild(drow('Краска', 'Один акцент на действии и на том, кто ждёт.', paints));
+    // «своя»: сам кружок — это <input type=color>, поэтому клик сразу открывает
+    // системный пикер, а не заводит лишний шаг «сначала выбери, потом настрой»
+    const own = el('label.paintdot.paintown' + (cur.paint === 'custom' ? '.active' : ''),
+      { title: 'Своя краска' });
+    const ownInput = el('input', { type: 'color' });
+    ownInput.value = cur.accent || '#0B6B44';
+    own.style.background = ownInput.value;
+    own.style.color = ownInput.value;
+    ownInput.addEventListener('input', () => {
+      own.style.background = ownInput.value;
+      own.style.color = ownInput.value;
+      clearRings();
+      own.classList.add('active');
+      if (window.jarvisTheme) window.jarvisTheme.set({ paint: 'custom', accent: ownInput.value });
+    });
+    own.appendChild(ownInput);
+    paints.appendChild(own);
+
+    group.appendChild(drow('Краска', 'Один акцент на действии и на том, кто ждёт. Последняя точка — своя: тон выбираешь сам, остальное выводится из него.', paints));
 
     group.appendChild(drow('Внизу панели', 'Полоска лимита подписки с окном до сброса — или расход за день.',
       segmented(
@@ -1771,6 +1793,43 @@
         })));
 
     pane.appendChild(group);
+
+    /* ── Настройка вида: плотность, скругление, масштаб ──────────────────
+     * Всё это переопределяет токены дизайн-системы, поэтому меняется живьём
+     * и одинаково во всех окнах. */
+    pane.appendChild(el('div.dsection', { text: 'настройка' }));
+    const tune = el('div.dgroup');
+
+    tune.appendChild(drow('Плотность', 'Высота строк и воздух вокруг них.',
+      segmented(
+        [{ value: 'compact', label: 'плотно' }, { value: 'normal', label: 'обычно' }, { value: 'roomy', label: 'просторно' }],
+        cur.density || 'normal',
+        (v) => { window.jarvisTheme && window.jarvisTheme.set({ density: v }); })));
+
+    tune.appendChild(drow('Скругление', 'Углы карточек, кнопок и строк.',
+      segmented(
+        [{ value: 'sharp', label: 'острое' }, { value: 'normal', label: 'обычное' }, { value: 'soft', label: 'мягкое' }],
+        cur.radius || 'normal',
+        (v) => { window.jarvisTheme && window.jarvisTheme.set({ radius: v }); })));
+
+    // масштаб — ползунок с живым значением: тянешь и сразу видишь результат
+    const scaleVal = el('span.sval', { text: Math.round((cur.scale || 1) * 100) + '%' });
+    const scale = el('input.range', { type: 'range', min: '85', max: '140', step: '5' });
+    scale.value = String(Math.round((cur.scale || 1) * 100));
+    scale.addEventListener('input', () => {
+      scaleVal.textContent = scale.value + '%';
+      if (window.jarvisTheme) window.jarvisTheme.set({ scale: Number(scale.value) / 100 });
+    });
+    tune.appendChild(drow('Масштаб', 'Тянет весь интерфейс целиком — текст, отступы и элементы вместе.',
+      [scaleVal, scale]));
+
+    tune.appendChild(drow('Сбросить настройку вида', 'Вернуть плотность, скругление и масштаб к заводским.',
+      button('Сбросить', () => {
+        if (window.jarvisTheme) window.jarvisTheme.reset();
+        reRenderPane('look');
+      }, 'sm')));
+
+    pane.appendChild(tune);
   }
 
   const RENDERERS = {

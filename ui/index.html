@@ -102,7 +102,7 @@
     align-items: center;
     gap: 5px;
     padding: 6px 12px;
-    border-radius: 8px;
+    border-radius: var(--r-pill);
     font-size: 12.5px;
     font-weight: 500;
     cursor: default;
@@ -215,7 +215,7 @@
     letter-spacing: 0.02em;
     color: var(--ink-mute);
     background: var(--surface);
-    border-radius: 5px;
+    border-radius: var(--r-pill);
     padding: 2px 7px;
     flex: none;
   }
@@ -461,7 +461,7 @@
     gap: 3px;
     padding: 3px;
     border: 0;
-    border-radius: 9px;
+    border-radius: var(--r-seg);
     background: var(--surface);
     flex: none;
   }
@@ -472,7 +472,7 @@
     color: var(--ink-mute);
     font: 500 12.5px/1 var(--font);
     padding: 5px 12px;
-    border-radius: 7px;
+    border-radius: calc(var(--r-seg) - 2px);
     cursor: default;
     transition: background var(--dur) ease, color var(--dur) ease;
   }
@@ -491,6 +491,9 @@
     cursor: default; flex: none;
   }
   .paintdot.active { box-shadow: 0 0 0 2px var(--paper), 0 0 0 3.5px currentColor; }
+  /* своя краска: кружок и есть <input type=color> — клик открывает системный пикер */
+  .paintown { position: relative; overflow: hidden; display: inline-block; }
+  .paintown input { position: absolute; inset: -4px; opacity: 0; cursor: default; padding: 0; border: 0; }
 
   /* ---------- карточки настроек (голос, модели, интеграция) ---------- */
   .stitle .stitlehint { font-weight: 400; color: var(--ink-faint); margin-left: 8px; }
@@ -795,7 +798,7 @@
     gap: 6px;
     background: var(--surface);
     border: 0;
-    border-radius: 7px;
+    border-radius: var(--r-pill);
     padding: 5px 9px;
   }
   .attach svg { flex: none; color: var(--ink-mute); }
@@ -890,7 +893,7 @@
     gap: 8px;
     background: var(--surface);
     border: 0;
-    border-radius: 8px;
+    border-radius: var(--r-pill);
     padding: 6px 11px;
     max-width: 360px;
     min-width: 0;
@@ -915,7 +918,7 @@
 
   /* --- сводки ходов --- */
   .sumtoggle {
-    margin-left: 6px; padding: 4px 10px; font: 500 12px/1 var(--font); border-radius: 8px;
+    margin-left: 6px; padding: 4px 10px; font: 500 12px/1 var(--font); border-radius: var(--r-pill);
     border: 0; background: var(--surface);
     color: var(--ink-mute); cursor: default;
   }
@@ -1382,7 +1385,7 @@
     align-items: center;
     gap: 10px;
     padding: 9px 12px;
-    border-radius: 8px;
+    border-radius: var(--r-pill);
     font-size: 13px;
     color: var(--ink);
     cursor: default;
@@ -1411,7 +1414,7 @@
   .cpal-chip {
     font-size: 12.5px; color: var(--ink);
     background: var(--surface); border: 0;
-    border-radius: 8px; padding: 6px 12px; cursor: default;
+    border-radius: var(--r-pill); padding: 6px 12px; cursor: default;
   }
   .cpal-chip:hover { background: var(--surface-2); }
   .cpal-chip.active { color: var(--on-accent); background: var(--accent); }
@@ -1499,7 +1502,7 @@
   .tp-acts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 0 2px 26px; }
   .tp-act {
     appearance: none; border: 0; background: var(--surface);
-    color: var(--ink); font: 500 12px/1 var(--font); border-radius: 7px; padding: 6px 11px; cursor: default;
+    color: var(--ink); font: 500 12px/1 var(--font); border-radius: var(--r-pill); padding: 6px 11px; cursor: default;
   }
   .tp-act:hover { background: var(--surface-2); }
   .tp-act.term { color: var(--accent-text); background: var(--accent-soft); }
@@ -1553,7 +1556,7 @@
   .doc-body .md-link-dead { color: var(--ink-faint); }
   /* табы «Изменения / Документ» вьюера */
   .doc-tabs { display: flex; align-items: center; gap: 3px; padding: 8px 16px; border-bottom: 1px solid var(--line); flex: none; }
-  .doc-tab { font: 500 12px/1 var(--font); color: var(--ink-mute); background: none; border: none; cursor: default; padding: 5px 11px; border-radius: 7px; }
+  .doc-tab { font: 500 12px/1 var(--font); color: var(--ink-mute); background: none; border: none; cursor: default; padding: 5px 11px; border-radius: var(--r-pill); }
   .doc-tab:hover { color: var(--ink); background: var(--fill-1); }
   .doc-tab.active { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
   .doc-difflabel { margin-left: auto; font-size: 11.5px; color: var(--ink-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

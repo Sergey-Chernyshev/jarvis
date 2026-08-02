@@ -219,25 +219,38 @@ pub fn request_restart(d: &Arc<Daemon>) {
 
 pub fn install(app: tauri::AppHandle) {
     #[cfg(unix)]
+    {
+        install_signal_listener(app.clone(), "SIGTERM", sigterm_stream);
+        install_signal_listener(app, "SIGINT", sigint_stream);
+    }
+
+    #[cfg(not(unix))]
+    let _ = app;
+}
+
+#[cfg(unix)]
+fn install_signal_listener(
+    app: tauri::AppHandle,
+    signal_name: &'static str,
+    stream_factory: fn() -> std::io::Result<Signal>,
+) {
     tauri::async_runtime::spawn(async move {
-        let mut sigterm = match sigterm_stream() {
+        let mut stream = match stream_factory() {
             Ok(stream) => stream,
             Err(err) => {
                 crate::log::line(&format!(
-                    "[shutdown] не удалось установить SIGTERM handler: {err}"
+                    "[shutdown] не удалось установить {signal_name} handler: {err}"
                 ));
                 return;
             }
         };
-
-        if sigterm.recv().await.is_some() {
-            crate::log::line("[shutdown] получен SIGTERM, завершаемся штатно");
+        if stream.recv().await.is_some() {
+            crate::log::line(&format!(
+                "[shutdown] получен {signal_name}, завершаемся штатно"
+            ));
             request_exit(&Daemon::get(&app), 0);
         }
     });
-
-    #[cfg(not(unix))]
-    let _ = app;
 }
 
 #[cfg(unix)]
@@ -245,23 +258,92 @@ fn sigterm_stream() -> std::io::Result<Signal> {
     signal(SignalKind::terminate())
 }
 
+#[cfg(unix)]
+fn sigint_stream() -> std::io::Result<Signal> {
+    signal(SignalKind::interrupt())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::thread;
     use std::time::Duration;
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn sigterm_is_observed_for_graceful_shutdown() {
-        let mut sigterm = sigterm_stream().expect("SIGTERM handler must install");
+    #[test]
+    fn termination_signals_are_observed_in_isolated_subprocesses() {
+        for (signal_name, raw_signal) in [("SIGTERM", libc::SIGTERM), ("SIGINT", libc::SIGINT)] {
+            let mut child = Command::new(std::env::current_exe().expect("current test binary"))
+                .args([
+                    "--exact",
+                    "shutdown::tests::signal_probe_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("JARVIS_SIGNAL_PROBE", signal_name)
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("spawn isolated signal probe");
+            let stdout = child.stdout.take().expect("probe stdout");
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let reader = thread::spawn(move || {
+                let mut captured = String::new();
+                for line in BufReader::new(stdout).lines() {
+                    let line = line.expect("read probe output");
+                    if line.contains("signal-probe-ready") {
+                        let _ = ready_tx.send(());
+                    }
+                    captured.push_str(&line);
+                    captured.push('\n');
+                }
+                captured
+            });
 
-        let rc = unsafe { libc::kill(std::process::id() as libc::pid_t, libc::SIGTERM) };
-        assert_eq!(rc, 0);
+            if ready_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
+                let output = reader.join().expect("join probe output");
+                panic!("{signal_name} probe did not become ready:\n{output}");
+            }
 
-        let received = tokio::time::timeout(Duration::from_secs(1), sigterm.recv())
-            .await
-            .expect("SIGTERM must be observed before timeout");
-        assert!(received.is_some());
+            let rc = unsafe { libc::kill(child.id() as libc::pid_t, raw_signal) };
+            assert_eq!(rc, 0, "send {signal_name} to probe");
+            let status = child.wait().expect("wait for signal probe");
+            let output = reader.join().expect("join probe output");
+            assert!(
+                status.success(),
+                "{signal_name} probe failed with {status}:\n{output}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for termination_signals_are_observed_in_isolated_subprocesses"]
+    fn signal_probe_child() {
+        let Ok(signal_name) = std::env::var("JARVIS_SIGNAL_PROBE") else {
+            return;
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("signal probe runtime");
+        runtime.block_on(async {
+            let mut stream = match signal_name.as_str() {
+                "SIGTERM" => sigterm_stream(),
+                "SIGINT" => sigint_stream(),
+                other => panic!("unsupported signal probe: {other}"),
+            }
+            .expect("install signal probe");
+            println!("signal-probe-ready:{signal_name}");
+            std::io::stdout().flush().expect("flush probe readiness");
+            let received = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+                .await
+                .expect("signal must be observed before timeout");
+            assert!(received.is_some());
+        });
     }
 
     #[test]

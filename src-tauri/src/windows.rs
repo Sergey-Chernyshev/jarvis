@@ -22,30 +22,128 @@ pub const ONBOARD_H: f64 = 600.0;
 pub const AGENT_W: f64 = 460.0;
 pub const AGENT_H: f64 = 600.0;
 
+/// Оконный режим (макет 14h): список слева 264px + диалог справа.
+pub const WINDOW_W: f64 = 1120.0;
+pub const WINDOW_H: f64 = 640.0;
+pub const WINDOW_MIN_W: f64 = 720.0;
+pub const WINDOW_MIN_H: f64 = 420.0;
+
+/// Настройка `mode`: `true` — обычное окно, `false` — накладка ⌘J.
+/// try_state, а не Daemon::get: окна строятся до регистрации стейта.
+pub fn is_window_mode(app: &AppHandle) -> bool {
+    app.try_state::<Arc<Daemon>>()
+        .map(|d| d.settings.string("mode") == "window")
+        .unwrap_or(false)
+}
+
+/// Запомненный размер окна (или размер из макета, если ещё не меняли).
+fn window_size(app: &AppHandle) -> (f64, f64) {
+    let Some(d) = app.try_state::<Arc<Daemon>>() else {
+        return (WINDOW_W, WINDOW_H);
+    };
+    let cfg = d.settings.load();
+    let num = |k: &str, def: f64| cfg.get(k).and_then(|v| v.as_f64()).unwrap_or(def);
+    (
+        num("windowW", WINDOW_W).max(WINDOW_MIN_W),
+        num("windowH", WINDOW_H).max(WINDOW_MIN_H),
+    )
+}
+
+/// Тема нативного материала окна. Панель — непрозрачная «бумага», но по
+/// скруглённым углам просвечивает NSVisualEffectView: он должен совпадать с
+/// выбранной темой, иначе на светлой панели видна тёмная кайма.
+/// `auto` отдаём системе (`None` — Tauri берёт системную).
+fn window_theme(app: &AppHandle) -> Option<Theme> {
+    // окна строятся на старте — демон может быть ещё не зарегистрирован в state,
+    // поэтому try_state, а не Daemon::get (тот паникует на отсутствующем стейте)
+    let theme = app
+        .try_state::<Arc<Daemon>>()
+        .map(|d| d.settings.string("theme"))
+        .unwrap_or_else(|| "light".into());
+    match theme.as_str() {
+        "dark" => Some(Theme::Dark),
+        "auto" => None,
+        _ => Some(Theme::Light),
+    }
+}
+
+/// Главное окно. В накладке — раскладка Raycast (поверх всего, без дока,
+/// не тянется); в оконном режиме — обычное окно: тянется, сворачивается,
+/// живёт на своём уровне. Разметка одна и та же, её перестраивает CSS
+/// по `data-mode` (см. `ui/theme.js`).
 pub fn create_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    let window_mode = is_window_mode(app);
+    let (w, h) = if window_mode {
+        window_size(app)
+    } else {
+        (PANEL_W, PANEL_H)
+    };
     let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("Jarvis")
-        .inner_size(PANEL_W, PANEL_H)
+        .inner_size(w, h)
+        .min_inner_size(WINDOW_MIN_W, WINDOW_MIN_H)
         .visible(false)
+        // светофор рисуем сами (14h), поэтому системных декораций нет в обоих режимах
         .decorations(false)
         // настоящий блюр подложки: нативный NSVisualEffectView, не CSS
         .transparent(true)
         .effects(WindowEffectsConfig {
             effects: vec![Effect::UnderWindowBackground],
             state: Some(EffectState::Active), // блюр не гаснет у неактивного окна (тихий показ)
-            radius: Some(12.0),
+            radius: Some(16.0),
             color: None,
         })
-        .resizable(false)
-        .minimizable(false)
-        .maximizable(false)
-        .skip_taskbar(true)
+        .resizable(window_mode)
+        .minimizable(window_mode)
+        .maximizable(window_mode)
+        .skip_taskbar(!window_mode)
         .shadow(true)
-        .theme(Some(Theme::Dark)) // вибранси всегда тёмный, как дизайн
+        .theme(window_theme(app)) // материал под тему из настроек (см. window_theme)
         .accept_first_mouse(true)
         .build()?;
-    macos::float_above_everything(&win);
+    if window_mode {
+        macos::float_normal(&win);
+    } else {
+        macos::float_above_everything(&win);
+    }
     Ok(win)
+}
+
+/// Переключение режима на лету: окно уже создано, поэтому меняем его свойства,
+/// а не пересоздаём (иначе улетели бы открытый чат и позиция). Иконка в доке
+/// (ActivationPolicy) ставится на старте — она подхватится со следующего запуска.
+pub fn apply_mode(d: &Arc<Daemon>) {
+    let Some(win) = d.app.get_webview_window("main") else {
+        return;
+    };
+    let window_mode = d.settings.string("mode") == "window";
+    let _ = win.set_resizable(window_mode);
+    let _ = win.set_maximizable(window_mode);
+    let _ = win.set_minimizable(window_mode);
+    let _ = win.set_skip_taskbar(!window_mode);
+    if window_mode {
+        macos::float_normal(&win);
+        let (w, h) = window_size(&d.app);
+        let _ = win.set_size(tauri::LogicalSize::new(w, h));
+        let _ = win.center();
+        let _ = win.show();
+        let _ = win.set_focus();
+    } else {
+        macos::float_above_everything(&win);
+        let _ = win.set_size(tauri::LogicalSize::new(PANEL_W, PANEL_H));
+        position_panel(d);
+    }
+}
+
+/// Запомнить размер окна, чтобы следующий запуск открылся таким же.
+pub fn remember_window_size(d: &Arc<Daemon>, w: f64, h: f64) {
+    if d.settings.string("mode") != "window" {
+        return; // накладка не тянется — её размер считает place_panel
+    }
+    let mut patch = serde_json::Map::new();
+    patch.insert("windowW".into(), json!(w.round()));
+    patch.insert("windowH".into(), json!(h.round()));
+    d.settings.save(patch);
 }
 
 /// Окно онбординга первого запуска (стеклянное, по центру). Повторный вызов из
@@ -75,7 +173,7 @@ pub fn create_onboarding(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             .skip_taskbar(true)
             .shadow(true)
             .center()
-            .theme(Some(Theme::Dark))
+            .theme(window_theme(app))
             .accept_first_mouse(true)
             .build()?;
     let _ = win.set_focus();
@@ -110,7 +208,7 @@ pub fn create_agent_chat(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             .skip_taskbar(true)
             .shadow(true)
             .center()
-            .theme(Some(Theme::Dark))
+            .theme(window_theme(app))
             .accept_first_mouse(true)
             .build()?;
     let _ = win.set_focus();
@@ -131,7 +229,7 @@ pub fn create_toast(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .shadow(false) // форму рисует карточка, а не системное окно
         .focusable(false) // клики работают, фокус не воруется
         .accept_first_mouse(true)
-        .theme(Some(Theme::Dark))
+        .theme(window_theme(app))
         .build()?;
     macos::float_above_everything(&win);
     Ok(win)
@@ -141,6 +239,15 @@ pub fn create_toast(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 
 pub fn emit_to_panel<P: Serialize + Clone>(app: &AppHandle, event: &str, payload: &P) {
     let _ = app.emit_to("main", event, payload.clone());
+}
+
+/// Тема/краска сменились — разослать всем окнам, чтобы панель, тосты, чат и
+/// онбординг перекрасились одновременно (`theme.js` слушает `appearance`).
+pub fn broadcast_appearance(app: &AppHandle, theme: &str, paint: &str, mode: &str) {
+    let payload = json!({ "theme": theme, "paint": paint, "mode": mode });
+    for label in ["main", "toast", "agent-chat", "onboarding"] {
+        let _ = app.emit_to(label, "appearance", payload.clone());
+    }
 }
 
 /// Эмит события напрямую в окно `toast` (для прямых эмиттеров вне `Daemon`,
@@ -247,6 +354,10 @@ pub fn position_panel(d: &Arc<Daemon>) {
     let Some(panel) = d.app.get_webview_window("main") else {
         return;
     };
+    // окно пользователь ставит сам — не таскаем его под курсор на каждый показ
+    if d.settings.string("mode") == "window" {
+        return;
+    }
     let corner = d.settings.string("position") == "corner";
     macos::place_panel(&panel, PANEL_W, PANEL_H, corner);
 }
@@ -264,7 +375,11 @@ pub fn show_panel(d: &Arc<Daemon>) {
     };
     position_panel(d);
     emit_to_panel(&d.app, "panel-shown", &json!(null));
-    macos::show_inactive(&panel);
+    if d.settings.string("mode") == "window" {
+        let _ = panel.show();
+    } else {
+        macos::show_inactive(&panel);
+    }
     d.push();
 }
 
@@ -309,6 +424,18 @@ pub fn toggle_panel(d: &Arc<Daemon>) {
 
 pub fn toggle_hotkey_panel(d: &Arc<Daemon>) {
     if panel_visible(d) {
+        // Окно живёт под другими окнами: ⌘J по нему должен поднимать, а не прятать.
+        // Прячем только когда оно уже в фокусе — тогда хоткей читается как «убрать».
+        if d.settings.string("mode") == "window"
+            && !d
+                .app
+                .get_webview_window("main")
+                .and_then(|w| w.is_focused().ok())
+                .unwrap_or(false)
+        {
+            show_panel_focused(d);
+            return;
+        }
         hide_panel(d);
     } else {
         show_panel_focused(d);

@@ -6,6 +6,13 @@
   const tauri = window.__TAURI__;
   const invoke = tauri && tauri.core ? tauri.core.invoke : async () => null;
   const listen = tauri && tauri.event ? tauri.event.listen : async () => () => {};
+
+  // тема и краска: окно живёт вне общего моста, поэтому подписывается само
+  window.jarvis = Object.assign(window.jarvis || {}, {
+    getSettings: () => invoke('settings_get'),
+    setSettings: (patch) => invoke('settings_set', { patch }),
+    onAppearance: (cb) => { listen('appearance', (e) => cb(e.payload)); },
+  });
   const content = document.getElementById('content');
   const primary = document.getElementById('primary');
   const secondary = document.getElementById('secondary');

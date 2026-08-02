@@ -45,6 +45,15 @@ fn defaults() -> Value {
         "launchCustomCmd": "",            // шаблон для 'custom', плейсхолдер {cmd}
         "launchProxyCmd": "",             // команда, выполняемая в терминале ПЕРЕД запуском агента (опц.)
         "launchDangerous": false,         // глобальный «опасный режим»: claude --dangerously-skip-permissions / codex YOLO
+        // внешность (дизайн «Клевер», экран 14f «вид»)
+        "theme": "light",   // 'light' | 'dark' | 'auto' (системная)
+        "paint": "clover",  // 'clover' | 'coal' | 'raspberry'
+        "footerBottom": "limit", // что показывать внизу панели: 'limit' | 'spend'
+        // раскладка: 'overlay' — накладка ⌘J поверх всего; 'window' — обычное
+        // окно с иконкой в доке и списком слева (макет 14h)
+        "mode": "overlay",
+        "windowW": 1120,
+        "windowH": 640,
         "schemaVersion": SCHEMA_VERSION,
         "notify": {
             "content": { "branch": true, "model": false, "effort": false, "tokens": false, "time": false },

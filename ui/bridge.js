@@ -10,6 +10,9 @@
 
   const on = (event, cb) => { listen(event, (e) => cb(e.payload)); };
 
+  // собственный светофор оконного режима: декораций нет, кнопки рисуем сами
+  const self = () => window.__TAURI__.window.getCurrentWindow();
+
   window.jarvis = {
     onState: (cb) => on('state', cb),
     onShown: (cb) => on('panel-shown', () => cb()),
@@ -18,6 +21,11 @@
     clearFinished: () => invoke('state_clear'),
     hidePanel: () => invoke('panel_hide'),
     getSettings: () => invoke('settings_get'),
+    // тема/краска сменились в другом окне (демон рассылает всем)
+    onAppearance: (cb) => on('appearance', cb),
+    winMinimize: () => self().minimize(),
+    winZoom: () => self().toggleMaximize(),
+    winClose: () => self().close(),  // CloseRequested перехвачен → просто прячет
     setSettings: (patch) => invoke('settings_set', { patch }),
     openChat: (sessionId) => invoke('chat_open', { sessionId }),
     closeChat: () => invoke('chat_close'),

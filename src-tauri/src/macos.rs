@@ -66,6 +66,16 @@ pub fn float_above_everything(win: &WebviewWindow) {
     });
 }
 
+/// Обычное окно: нормальный уровень и поведение — оконный режим (макет 14h).
+/// Антипод `float_above_everything`: окно ведёт себя как окно, а не как накладка.
+pub fn float_normal(win: &WebviewWindow) {
+    on_main(win, |w| unsafe {
+        let _: () = msg_send![w, setLevel: 0isize];
+        let _: () = msg_send![w, setCollectionBehavior: 0usize];
+        let _: () = msg_send![w, setHidesOnDeactivate: false];
+    });
+}
+
 /// Показать окно, не активируя приложение (аналог showInactive в Electron):
 /// orderFrontRegardless выводит окно на экран, не делая его key.
 pub fn show_inactive(win: &WebviewWindow) {

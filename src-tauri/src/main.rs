@@ -233,11 +233,18 @@ fn main() {
             // их читает). Сейчас no-op v0→v1; задел под ломающие изменения формата.
             settings::Store::new().migrate_on_startup();
 
-            // чистое меню-бар приложение: без иконки в доке
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-
             let d = Arc::new(Daemon::new(app.handle().clone()));
             app.manage(d.clone());
+
+            // Накладка ⌘J — чистое меню-бар приложение без иконки в доке.
+            // Оконный режим (макет 14h) — обычное приложение: док, ⌘Tab, меню.
+            // Политика ставится один раз на старте; смена режима на лету
+            // перестраивает окно сразу, а иконку в доке — со следующего запуска.
+            app.set_activation_policy(if d.settings.string("mode") == "window" {
+                tauri::ActivationPolicy::Regular
+            } else {
+                tauri::ActivationPolicy::Accessory
+            });
             shutdown::install(app.handle().clone());
 
             // Конфиг служебного LLM («Под капотом»: Claude/Codex + модель) — из
@@ -343,6 +350,10 @@ fn main() {
                 // один кадр. Гасим только если фокус реально ушёл из приложения и
                 // не вернулся за 120 мс — иначе панель моргала бы на каждой стрелке.
                 tauri::WindowEvent::Focused(false) => {
+                    // обычное окно не исчезает от клика мимо — это поведение накладки
+                    if windows::is_window_mode(window.app_handle()) {
+                        return;
+                    }
                     let w = window.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(120));
@@ -360,6 +371,13 @@ fn main() {
             if let tauri::RunEvent::Exit = event {
                 let d = Daemon::get(app);
                 d.write_state_now(); // реестр переживает перезапуск
+                // размер окна тоже: снимаем один раз здесь, а не на каждом кадре ресайза
+                if let Some(w) = app.get_webview_window("main") {
+                    if let (Ok(sz), Ok(sf)) = (w.inner_size(), w.scale_factor()) {
+                        let l = sz.to_logical::<f64>(sf);
+                        windows::remember_window_size(&d, l.width, l.height);
+                    }
+                }
                 power::Power::dispose(&d); // снять assertion, вернуть disablesleep
                 d.voice.dispose(); // погасить Silero-сайдкар, если был поднят
                 d.stt.dispose(); // погасить Qwen3-MLX-сайдкар, если был поднят

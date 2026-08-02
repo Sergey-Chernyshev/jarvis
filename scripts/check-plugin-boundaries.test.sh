@@ -634,7 +634,11 @@ fi
 
 tauri_checksum='437404997acf375d85f1177afa7e11bb971f274ed6a7b83a2a3e339015f4cc28'
 tauri_macros_checksum='ae6cb4e3896c21d2f6da5b31251d2faea0153bba56ed0e970f918115dbee4924'
-read -r tauri_manifest_path tauri_macros_manifest_path < <(
+tauri_codegen_checksum='e4a0319528a025a38c4078e7dae2c446f4e63620ddb0659a643ede1cb38f90e9'
+read -r \
+  tauri_manifest_path \
+  tauri_macros_manifest_path \
+  tauri_codegen_manifest_path < <(
   cargo metadata \
     --all-features \
     --format-version=1 \
@@ -657,13 +661,18 @@ read -r tauri_manifest_path tauri_macros_manifest_path < <(
         };
         process.stdout.write(
           `${pathFor("tauri", "2.11.2")} ` +
-          `${pathFor("tauri-macros", "2.6.2")}\n`,
+          `${pathFor("tauri-macros", "2.6.2")} ` +
+          `${pathFor("tauri-codegen", "2.6.2")}\n`,
         );
       });
     '
 )
 run_tauri_provenance_contract() {
   local provider_source="$1"
+  local codegen_source="$registry_source"
+  if [[ "$#" -ge 2 ]]; then
+    codegen_source="$2"
+  fi
   node -e '
     const manifestPath = process.argv[1];
     const workspaceRoot = require("node:path").dirname(
@@ -671,11 +680,15 @@ run_tauri_provenance_contract() {
     );
     const registry = process.argv[2];
     const providerSource = process.argv[3] || null;
+    const codegenSource = process.argv[4] || null;
     const rootId = `path+file://${manifestPath}#provenance-fixture@0.1.0`;
     const tauriId = `${registry}#tauri@2.11.2`;
     const macrosId =
       `${providerSource ?? `path+file://${workspaceRoot}/patched`}` +
       "#tauri-macros@2.6.2";
+    const codegenId =
+      `${codegenSource ?? `path+file://${workspaceRoot}/patched-codegen`}` +
+      "#tauri-codegen@2.6.2";
     process.stdout.write(JSON.stringify({
       packages: [{
         name: "provenance-fixture",
@@ -703,7 +716,7 @@ run_tauri_provenance_contract() {
         version: "2.11.2",
         id: tauriId,
         source: registry,
-        manifest_path: process.argv[4],
+        manifest_path: process.argv[5],
         dependencies: [],
         targets: [],
       }, {
@@ -711,7 +724,15 @@ run_tauri_provenance_contract() {
         version: "2.6.2",
         id: macrosId,
         source: providerSource,
-        manifest_path: process.argv[5],
+        manifest_path: process.argv[6],
+        dependencies: [],
+        targets: [],
+      }, {
+        name: "tauri-codegen",
+        version: "2.6.2",
+        id: codegenId,
+        source: codegenSource,
+        manifest_path: process.argv[7],
         dependencies: [],
         targets: [],
       }],
@@ -740,6 +761,15 @@ run_tauri_provenance_contract() {
           features: [],
         }, {
           id: macrosId,
+          dependencies: [codegenId],
+          deps: [{
+            name: "tauri_codegen",
+            pkg: codegenId,
+            dep_kinds: [{ kind: null, target: null }],
+          }],
+          features: [],
+        }, {
+          id: codegenId,
           dependencies: [],
           deps: [],
           features: [],
@@ -750,15 +780,18 @@ run_tauri_provenance_contract() {
     "$provenance_manifest" \
     "$registry_source" \
     "$provider_source" \
+    "$codegen_source" \
     "$tauri_manifest_path" \
     "$tauri_macros_manifest_path" \
+    "$tauri_codegen_manifest_path" \
     | node "$repo_root/scripts/resolve-cargo-macro-provenance.mjs" \
       "$provenance_manifest"
 }
 
 write_provenance_lock \
   "tauri|2.11.2|$registry_source|$tauri_checksum" \
-  "tauri-macros|2.6.2|$registry_source|$tauri_macros_checksum"
+  "tauri-macros|2.6.2|$registry_source|$tauri_macros_checksum" \
+  "tauri-codegen|2.6.2|$registry_source|$tauri_codegen_checksum"
 tauri_provenance="$(run_tauri_provenance_contract "$registry_source")"
 if [[ "$tauri_provenance" != *'"tauri-macros"'* ]]; then
   echo "Cargo provenance omitted the audited Tauri proc-macro provider" >&2
@@ -772,6 +805,19 @@ fi
 if [[ "$tauri_provider_output" != *"Cargo macro provider tauri-macros must use the crates.io registry"* ]]; then
   echo "Cargo provenance did not identify the patched Tauri macro provider" >&2
   echo "$tauri_provider_output" >&2
+  exit 1
+fi
+
+tauri_codegen_output=""
+if tauri_codegen_output="$(
+  run_tauri_provenance_contract "$registry_source" "" 2>&1
+)"; then
+  echo "Cargo provenance accepted a patched proc-macro dependency" >&2
+  exit 1
+fi
+if [[ "$tauri_codegen_output" != *"Cargo macro provider dependency tauri-codegen must use the crates.io registry"* ]]; then
+  echo "Cargo provenance did not identify the patched proc-macro dependency" >&2
+  echo "$tauri_codegen_output" >&2
   exit 1
 fi
 
@@ -941,6 +987,77 @@ absolute_macro_scan="$(
 if [[ "$absolute_macro_scan" == *$'source\t'* ]]; then
   echo "scanner rejected an absolute Cargo-bound macro path" >&2
   echo "$absolute_macro_scan" >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  '#[unknown_attribute]' \
+  'pub fn decorated() {}' \
+  > "$provenance_package_root/src/lib.rs"
+unknown_attribute_scan="$(
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    "$provenance_package_root" \
+    --cargo-provenance-file "$provenance_records"
+)"
+if [[ "$unknown_attribute_scan" != *$'source\t'* ]]; then
+  echo "scanner accepted an unaudited source-expanding attribute" >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  '#[derive(UnknownDerive)]' \
+  'pub struct Decorated;' \
+  > "$provenance_package_root/src/lib.rs"
+unknown_derive_scan="$(
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    "$provenance_package_root" \
+    --cargo-provenance-file "$provenance_records"
+)"
+if [[ "$unknown_derive_scan" != *$'source\t'* ]]; then
+  echo "scanner accepted an unaudited source-expanding derive" >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  '#[cfg_attr(any(), unknown_attribute)]' \
+  'pub fn nested_decorated() {}' \
+  > "$provenance_package_root/src/lib.rs"
+nested_attribute_scan="$(
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    "$provenance_package_root" \
+    --cargo-provenance-file "$provenance_records"
+)"
+if [[ "$nested_attribute_scan" != *$'source\t'* ]]; then
+  echo "scanner accepted an unaudited nested cfg_attr expansion" >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'use attacker::derive;' \
+  '#[derive(Clone)]' \
+  'pub struct ShadowedDerive;' \
+  > "$provenance_package_root/src/lib.rs"
+shadowed_derive_scan="$(
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    "$provenance_package_root" \
+    --cargo-provenance-file "$provenance_records"
+)"
+if [[ "$shadowed_derive_scan" != *$'source\t'* ]]; then
+  echo "scanner accepted an imported attribute named derive" >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  '#[serde_json::json]' \
+  'pub fn wrong_expansion_kind() {}' \
+  > "$provenance_package_root/src/lib.rs"
+cross_kind_attribute_scan="$(
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    "$provenance_package_root" \
+    --cargo-provenance-file "$provenance_records"
+)"
+if [[ "$cross_kind_attribute_scan" != *$'source\t'* ]]; then
+  echo "scanner accepted a function macro as an attribute" >&2
   exit 1
 fi
 
@@ -2132,6 +2249,8 @@ node -e '
   const { readFileSync } = require("node:fs");
   const workflow = readFileSync(process.argv[1], "utf8");
   const boundaryScript = readFileSync(process.argv[2], "utf8");
+  const sourceVerifier = readFileSync(process.argv[3], "utf8");
+  const sourceInspector = readFileSync(process.argv[4], "utf8");
   const prepareMarker =
     "      - name: Prepare plugin boundary Cargo metadata";
   const boundaryMarker = "      - name: Plugin source boundary";
@@ -2179,17 +2298,32 @@ node -e '
   }
   if (
     !boundaryScript.includes("--cargo-provenance-fd 9") ||
+    !boundaryScript.includes("9< <(cargo_provenance_snapshot)") ||
+    boundaryScript.includes("exec 9<>") ||
+    boundaryScript.includes(">&9") ||
     boundaryScript.includes(
       "--cargo-provenance-file \"$cargo_provenance_file\"",
     )
   ) {
     throw new Error(
-      "plugin boundary must hand scanner the already-open provenance inode",
+      "plugin boundary must hand scanner a read-only provenance snapshot",
+    );
+  }
+  if (
+    sourceVerifier.includes("opendirSync") ||
+    !sourceVerifier.includes("inspectSourceTree") ||
+    !sourceInspector.includes("dir_fd=parent_descriptor") ||
+    !sourceInspector.includes("os.O_NOFOLLOW")
+  ) {
+    throw new Error(
+      "Cargo source verification must walk through stable directory fds",
     );
   }
 ' \
   "$repo_root/.github/workflows/ci.yml" \
-  "$repo_root/scripts/check-plugin-boundaries.sh"
+  "$repo_root/scripts/check-plugin-boundaries.sh" \
+  "$repo_root/scripts/verify-cargo-registry-source.mjs" \
+  "$repo_root/scripts/inspect-cargo-source-tree.py"
 
 mkdir -p "$fixture_root/schemas"
 printf '%s\n' '{}' > "$fixture_root/schemas/plugin-private-v1.schema.json"

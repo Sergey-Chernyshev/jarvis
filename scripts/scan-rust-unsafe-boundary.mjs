@@ -497,6 +497,7 @@ const cargoProvenanceByRoot = loadCargoProvenance(
   cargoProvenanceArgument,
   cargoProvenanceFd,
 );
+const uncertainExpansionBindingFiles = new Set();
 const filePackageRootCache = new Map();
 const filePackageAuthorizationCache = new Map();
 
@@ -1514,16 +1515,19 @@ function useBindingAnalysis(tokens) {
 function applyCargoAliasShadowProof(tokenizedFiles) {
   for (const { tokens, file } of tokenizedFiles) {
     const authorization = packageAuthorizationForFile(file);
-    if (!authorization || authorization.aliases.size === 0) continue;
-    const aliases = new Set(authorization.aliases.keys());
     const useAnalysis = useBindingAnalysis(tokens);
-    if (
+    const uncertainExpansionBindings =
       useAnalysis.uncertain ||
       useAnalysis.globPrefixes.some((prefix) => {
         const first = prefix.find((part) => part.length > 0);
         return !LOCAL_MACRO_PATH_PREFIXES.has(first);
-      })
-    ) {
+      });
+    if (uncertainExpansionBindings) {
+      uncertainExpansionBindingFiles.add(file);
+    }
+    if (!authorization || authorization.aliases.size === 0) continue;
+    const aliases = new Set(authorization.aliases.keys());
+    if (uncertainExpansionBindings) {
       for (const alias of aliases) {
         authorization.shadowedAliases.add(alias);
       }
@@ -1791,6 +1795,13 @@ function attributeSourceExpansionIsAudited(
   const absolute = path[0] === "";
   const parts = path.filter((part) => part.length > 0);
 
+  if (
+    !absolute &&
+    parts.length === 1 &&
+    uncertainExpansionBindingFiles.has(file)
+  ) {
+    return false;
+  }
   if (!absolute && parts.length === 1 && imports.has(parts[0])) {
     return importedExpansionPathsAreAudited(
       imports.get(parts[0]),

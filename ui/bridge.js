@@ -26,6 +26,14 @@
     winMinimize: () => self().minimize(),
     winZoom: () => self().toggleMaximize(),
     winClose: () => self().close(),  // CloseRequested перехвачен → просто прячет
+    // зелёная кнопка macOS — фуллскрин (зум под Alt, как в системе)
+    winIsFullscreen: () => self().isFullscreen(),
+    winToggleFullscreen: async () => {
+      const w = self();
+      await w.setFullscreen(!(await w.isFullscreen()));
+    },
+    // светофор горит только у активного окна — как у системных кнопок
+    onWinFocus: (cb) => { self().onFocusChanged(({ payload }) => cb(!!payload)); },
     setSettings: (patch) => invoke('settings_set', { patch }),
     openChat: (sessionId) => invoke('chat_open', { sessionId }),
     closeChat: () => invoke('chat_close'),

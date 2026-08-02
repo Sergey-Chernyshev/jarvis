@@ -1174,6 +1174,13 @@
   /* титульная полоса живёт только в окне */
   .titlebar { display: none; }
 
+  /* накладка «выпрыгивает» при каждом показе — окно так себя не ведёт */
+  [data-mode='window'] .panel.entering { animation: none; }
+
+  /* фуллскрин: карточка растянута на экран — скругление и тень только мешают */
+  [data-fullscreen='1'] .panel { border-radius: 0; box-shadow: none; }
+  [data-fullscreen='1'] .titlebar { padding-left: 20px; }
+
   [data-mode='window'] .panel {
     display: grid;
     grid-template-columns: 264px minmax(0, 1fr);
@@ -1200,18 +1207,30 @@
     color: var(--ink-mute);
   }
   .titlebar .spacer { flex: 1; }
-  /* светофор: гасший серый, цвет — только под курсором, как в системе */
+
+  /* Светофор — как системный: у активного окна горит, у неактивного гаснет,
+     значки проявляются при наведении на группу. */
   .tl-lights { display: flex; align-items: center; gap: 8px; flex: none; }
   .tl-dot {
     appearance: none; border: 0; padding: 0;
-    width: 11px; height: 11px; border-radius: 50%;
-    background: var(--surface-2); cursor: default;
-    transition: background var(--dur) ease;
+    width: 12px; height: 12px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font: 700 9px/1 -apple-system, ui-sans-serif, sans-serif;
+    color: transparent; cursor: default;
+    background: var(--tl-off, #D8D8D6);
+    transition: background var(--dur) ease, color var(--dur) ease;
   }
-  .tl-lights:hover .tl-close { background: #EC6A5E; }
-  .tl-lights:hover .tl-min   { background: #F4BF4F; }
-  .tl-lights:hover .tl-zoom  { background: #61C554; }
-  .tl-mode { font-size: 12.5px; color: var(--ink-mute); flex: none; }
+  :root[data-theme='dark'] { --tl-off: #4A4E4B; }
+  /* окно в фокусе — кнопки в цвете */
+  [data-win-focus='1'] .tl-close { background: #FF5F57; }
+  [data-win-focus='1'] .tl-min   { background: #FEBC2E; }
+  [data-win-focus='1'] .tl-zoom  { background: #28C840; }
+  /* наведение на группу — проявить значки (macOS показывает их так же) */
+  .tl-lights:hover .tl-dot { color: rgba(0, 0, 0, 0.55); }
+  .tl-close::before { content: '\2715'; }
+  .tl-min::before   { content: '\2212'; }
+  .tl-zoom::before  { content: '\2921'; }
+  .tl-dot:active { filter: brightness(0.85); }
   .tl-divider { width: 1px; height: 14px; background: var(--line); flex: none; }
 
   /* сайдбар: поиск, вкладки и строки — одной колонкой на тонированной бумаге */
@@ -1562,11 +1581,10 @@
         <button class="tl-dot tl-min" id="winMin" title="Свернуть"></button>
         <button class="tl-dot tl-zoom" id="winZoom" title="Развернуть"></button>
       </span>
-      <span class="spacer"></span>
+      <span class="spacer" data-tauri-drag-region></span>
       <button class="tl-btn" id="tlSettings" title="Настройки · ⌘,">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
       </button>
-      <span class="tl-mode" id="tlMode">йоло</span>
       <span class="tl-divider"></span>
       <span class="flimit" id="tlLimit" hidden>
         <span class="j-meter" id="tlMeter"><i></i></span>

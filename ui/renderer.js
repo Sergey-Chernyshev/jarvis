@@ -2073,7 +2073,6 @@ setInterval(refreshFooterUsage, 60000);
 
 window.jarvis.getSettings().then((s) => {
   footerBottom = s?.footerBottom === 'spend' ? 'spend' : 'limit';
-  tlModeEl.textContent = s?.launchDangerous ? 'йоло' : 'спрашивать';
   paintFooterLimit();
 }).catch(() => {});
 // «Внизу панели» переключили в настройках — полоска меняется без перезапуска
@@ -2084,7 +2083,6 @@ window.addEventListener('jarvis:footer-bottom', (e) => {
 
 /* ---------- титульная полоса оконного режима (14h) ---------- */
 
-const tlModeEl = document.getElementById('tlMode');
 const tlLimitEl = document.getElementById('tlLimit');
 const tlMeterEl = document.getElementById('tlMeter');
 const tlLimitTextEl = document.getElementById('tlLimitText');
@@ -2099,7 +2097,37 @@ tlSettingsEl.addEventListener('click', () => {
 
 document.getElementById('winClose').addEventListener('click', () => window.jarvis.winClose());
 document.getElementById('winMin').addEventListener('click', () => window.jarvis.winMinimize());
-document.getElementById('winZoom').addEventListener('click', () => window.jarvis.winZoom());
+// зелёная кнопка — фуллскрин, с Alt — зум по содержимому: ровно как в macOS
+document.getElementById('winZoom').addEventListener('click', (e) => {
+  if (e.altKey) window.jarvis.winZoom();
+  else window.jarvis.winToggleFullscreen().then(syncFullscreen).catch(() => {});
+});
+// двойной клик по титульной полосе — зум, системная привычка
+document.getElementById('titlebar').addEventListener('dblclick', (e) => {
+  if (e.target.closest('button')) return;
+  window.jarvis.winZoom();
+});
+
+/** Фуллскрин: убрать скругление и тень, иначе по углам экрана видны прорези. */
+function syncFullscreen() {
+  window.jarvis.winIsFullscreen?.()
+    .then((on) => { document.documentElement.dataset.fullscreen = on ? '1' : '0'; })
+    .catch(() => {});
+}
+// ⌃⌘F и зелёная кнопка меняют размер окна — ловим оба пути через resize
+let fsTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(fsTimer);
+  fsTimer = setTimeout(syncFullscreen, 120);
+});
+syncFullscreen();
+
+// светофор горит только у активного окна
+const paintWinFocus = (on) => { document.documentElement.dataset.winFocus = on ? '1' : '0'; };
+paintWinFocus(document.hasFocus());
+window.jarvis.onWinFocus?.(paintWinFocus);
+window.addEventListener('focus', () => paintWinFocus(true));
+window.addEventListener('blur', () => paintWinFocus(false));
 
 /** Лимит в титульной полосе — тот же расчёт, что внизу панели. */
 function paintTitlebarLimit() {
@@ -4123,6 +4151,24 @@ window.addEventListener('keydown', async (e) => {
     else if (e.key === 'ArrowUp') { e.preventDefault(); apSel = Math.max(0, apSel - 1); paintActions(items); }
     else if (e.key === 'Enter') { e.preventDefault(); closeActions(); items[apSel] && items[apSel].run(); }
     else if (e.key === 'Escape' || (e.metaKey && (e.key === 'k' || e.key === 'K'))) { e.preventDefault(); closeActions(); }
+    return;
+  }
+
+  // Оконные сочетания macOS. Своего меню у нас нет, поэтому системные ⌘W / ⌘M /
+  // ⌃⌘F не привязаны сами — вешаем их руками, чтобы окно вело себя как окно.
+  if (windowMode() && e.metaKey && (e.key === 'w' || e.key === 'W')) { // ⌘W — закрыть (спрятать)
+    e.preventDefault();
+    window.jarvis.winClose();
+    return;
+  }
+  if (windowMode() && e.metaKey && !e.ctrlKey && (e.key === 'm' || e.key === 'M')) { // ⌘M — свернуть
+    e.preventDefault();
+    window.jarvis.winMinimize();
+    return;
+  }
+  if (windowMode() && e.metaKey && e.ctrlKey && (e.key === 'f' || e.key === 'F')) { // ⌃⌘F — фуллскрин
+    e.preventDefault();
+    window.jarvis.winToggleFullscreen().then(syncFullscreen).catch(() => {});
     return;
   }
 

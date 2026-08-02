@@ -129,6 +129,8 @@ pub fn apply_mode(d: &Arc<Daemon>) {
         let _ = win.show();
         let _ = win.set_focus();
     } else {
+        // из фуллскрина накладку не построишь — выходим до смены геометрии
+        let _ = win.set_fullscreen(false);
         macos::float_above_everything(&win);
         let _ = win.set_size(tauri::LogicalSize::new(PANEL_W, PANEL_H));
         position_panel(d);

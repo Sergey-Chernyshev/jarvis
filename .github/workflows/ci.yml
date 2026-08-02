@@ -57,6 +57,18 @@ jobs:
       - name: Public repository boundary
         run: npm run check:public
 
+      - name: Prepare plugin boundary Cargo metadata
+        run: |
+          cargo fetch --locked --manifest-path crates/jarvis-package/Cargo.toml
+          cargo fetch --locked --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
+          cargo fetch --locked --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
+          cargo fetch --locked --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
+          cargo fetch --locked --manifest-path crates/jarvis-power-core/Cargo.toml
+          cargo fetch --locked --manifest-path crates/jarvis-power-helper/Cargo.toml
+          cargo fetch --locked --manifest-path crates/jarvis-secret-store/Cargo.toml
+          cargo fetch --locked --manifest-path plugins/agent-vm/Cargo.toml
+          cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+
       - name: Plugin source boundary
         run: |
           npm run test:plugin-boundaries

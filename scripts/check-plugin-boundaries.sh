@@ -8,6 +8,15 @@ failed=0
 max_semantic_target_count=20000
 max_semantic_target_bytes=8388608
 max_semantic_metadata_bytes=16777216
+max_resolved_metadata_bytes=33554432
+
+cargo_provenance_file="$(
+  mktemp "${TMPDIR:-/tmp}/jarvis-cargo-provenance.XXXXXX"
+)"
+cleanup_cargo_provenance() {
+  rm -f -- "$cargo_provenance_file"
+}
+trap cleanup_cargo_provenance EXIT
 
 repo_root_resolved="$(cd "$repo_root" && pwd -P)"
 boundary_fixture_mode=0
@@ -50,6 +59,57 @@ semantic_manifest_json() {
     ' "$max_semantic_metadata_bytes"
 }
 
+resolved_manifest_json() {
+  local manifest="$1"
+  "$cargo_bin" metadata \
+    --all-features \
+    --format-version=1 \
+    --locked \
+    --offline \
+    --manifest-path "$manifest" \
+    | node -e '
+      const limit = Number(process.argv[1]);
+      let bytes = 0;
+      process.stdin.on("data", (chunk) => {
+        bytes += chunk.length;
+        if (bytes > limit) {
+          console.error(`Cargo resolved metadata exceeds ${limit} bytes`);
+          process.exit(2);
+        }
+        process.stdout.write(chunk);
+      });
+    ' "$max_resolved_metadata_bytes"
+}
+
+append_cargo_macro_provenance() {
+  local manifest="$1"
+  local record=""
+  if [[ "$boundary_fixture_mode" == "1" ]]; then
+    if ! record="$(
+      node -e '
+        const { dirname } = require("node:path");
+        const { realpathSync } = require("node:fs");
+        const manifestPath = realpathSync(process.argv[1]);
+        process.stdout.write(JSON.stringify({
+          packageRoot: realpathSync(dirname(manifestPath)),
+          manifestPath,
+          aliases: {},
+        }));
+      ' "$manifest"
+    )"; then
+      return 1
+    fi
+  else
+    if ! record="$(
+      resolved_manifest_json "$manifest" \
+        | node "$script_dir/resolve-cargo-macro-provenance.mjs" "$manifest"
+    )"; then
+      return 1
+    fi
+  fi
+  printf '%s\n' "$record" >> "$cargo_provenance_file"
+}
+
 semantic_target_source_lines() {
   local manifest="$1"
   node -e '
@@ -67,6 +127,7 @@ semantic_target_source_lines() {
         (candidate) => realpathSync(candidate.manifest_path) === wantedManifest,
       );
       if (!packageRecord || !Array.isArray(packageRecord.targets)) process.exit(2);
+      const packageRoot = require("node:path").dirname(wantedManifest);
       if (packageRecord.targets.length > maxCount) {
         console.error(`Cargo target source count exceeds ${maxCount}`);
         process.exit(2);
@@ -81,6 +142,37 @@ semantic_target_source_lines() {
         ) {
           console.error("Cargo target source path is not transport-safe");
           process.exit(2);
+        }
+        const resolvedTarget = realpathSync(target.src_path);
+        const relativeTarget = require("node:path").relative(
+          packageRoot,
+          resolvedTarget,
+        );
+        if (
+          relativeTarget === ".." ||
+          relativeTarget.startsWith(`..${require("node:path").sep}`) ||
+          require("node:path").isAbsolute(relativeTarget)
+        ) {
+          console.error(
+            `Cargo target source is outside its owning package: ${target.src_path}`,
+          );
+          process.exit(2);
+        }
+        let targetDirectory = require("node:path").dirname(resolvedTarget);
+        while (targetDirectory !== packageRoot) {
+          if (
+            require("node:fs").existsSync(
+              require("node:path").join(targetDirectory, "Cargo.toml"),
+            )
+          ) {
+            console.error(
+              `Cargo target source is owned by a nested package: ${target.src_path}`,
+            );
+            process.exit(2);
+          }
+          const parent = require("node:path").dirname(targetDirectory);
+          if (parent === targetDirectory) process.exit(2);
+          targetDirectory = parent;
         }
         bytes += Buffer.byteLength(target.src_path) + 1;
         if (bytes > maxBytes) {
@@ -176,6 +268,10 @@ if [[ -f "$package_manifest" ]]; then
     echo "failed to parse private package targets semantically: $package_manifest" >&2
     failed=1
   fi
+  if ! append_cargo_macro_provenance "$package_manifest"; then
+    echo "failed to resolve private package Cargo macro provenance: $package_manifest" >&2
+    failed=1
+  fi
   package_target_sources=()
   if [[ -n "$package_manifest_json" ]]; then
     package_target_source_lines=""
@@ -201,6 +297,7 @@ if [[ -f "$package_manifest" ]]; then
       | node \
         "$script_dir/scan-rust-unsafe-boundary.mjs" \
         "$package_root" \
+        --cargo-provenance-file "$cargo_provenance_file" \
         --target-sources-stdin0
   )"; then
     echo "failed to scan jarvis-package Rust syntax: $package_root" >&2
@@ -300,12 +397,19 @@ while IFS= read -r manifest; do
     "$crates_root_resolved"/* \
       | "$plugins_root_resolved"/* \
       | "$src_tauri_root_resolved"/*)
+      if [[ "$manifest_resolved" != "$package_manifest_resolved" ]] \
+        && ! append_cargo_macro_provenance "$manifest_resolved"; then
+        echo "failed to resolve Cargo macro provenance: $manifest" >&2
+        failed=1
+      fi
       semantic_target_sources=""
       if ! semantic_target_sources="$(
         printf '%s\n' "$manifest_json" \
           | semantic_target_source_lines "$manifest_resolved"
       )"; then
-        echo "failed to select Cargo target metadata: $manifest" >&2
+        echo \
+          "PackageTrustVerifier source discovery escape: failed to select Cargo target metadata: $manifest" \
+          >&2
         failed=1
         continue
       fi
@@ -397,6 +501,7 @@ if [[ "${#trust_roots[@]}" -gt 0 ]] && ! trust_scan="$(
   } \
     | node "$script_dir/scan-rust-unsafe-boundary.mjs" \
       --trust-roots "${trust_roots[@]}" \
+      --cargo-provenance-file "$cargo_provenance_file" \
       --target-sources-stdin0
 )"; then
   echo "failed to scan PackageTrustVerifier ownership roots" >&2

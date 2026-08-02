@@ -7,7 +7,7 @@ import {
   readdirSync,
   realpathSync,
   statSync,
-} from 'node:fs';
+} from "node:fs";
 import {
   basename,
   dirname,
@@ -16,7 +16,8 @@ import {
   relative,
   resolve,
   sep,
-} from 'node:path';
+} from "node:path";
+import { fileURLToPath } from "node:url";
 
 const MAX_DISCOVERY_ENTRIES = 200_000;
 const MAX_RUST_FILES = 20_000;
@@ -25,42 +26,72 @@ const MAX_CARGO_TARGET_SOURCES = 20_000;
 const MAX_CARGO_TARGET_SOURCE_BYTES = 8 * 1024 * 1024;
 const MAX_DIAGNOSTIC_RECORDS = 1_024;
 const MAX_DIAGNOSTIC_BYTES = 1024 * 1024;
+const MAX_CARGO_PROVENANCE_BYTES = 1024 * 1024;
+const MAX_CARGO_PROVENANCE_RECORDS = 4_096;
+const MAX_CARGO_PROVENANCE_ALIASES = 4_096;
+const MAX_CARGO_PROVENANCE_PROVIDERS = 64;
 const MAX_USE_ALIAS_EDGES = 4_096;
 const MAX_USE_ALIAS_CLOSURE_WORK = 8_192;
 const MAX_MACRO_DEPENDENCY_EDGES = 4_096;
 const EXCLUDED_DIRECTORY_NAMES = new Set([
-  '.git',
-  '.worktrees',
-  'node_modules',
+  ".git",
+  ".worktrees",
+  "node_modules",
 ]);
+const RUST_CRATE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const CARGO_CHECKSUM = /^[a-f0-9]{64}$/;
 
-const scanArguments = process.argv.slice(2);
-const trustRootsMode = scanArguments[0] === '--trust-roots';
-const targetSourcesOption = scanArguments.indexOf('--target-sources-stdin0');
+const rawScanArguments = process.argv.slice(2);
+const scanArguments = [];
+let cargoProvenanceArgument = null;
+let invalidCargoProvenanceArguments = false;
+for (let index = 0; index < rawScanArguments.length; index += 1) {
+  if (rawScanArguments[index] !== "--cargo-provenance-file") {
+    scanArguments.push(rawScanArguments[index]);
+    continue;
+  }
+  if (
+    cargoProvenanceArgument !== null ||
+    index + 1 >= rawScanArguments.length ||
+    rawScanArguments[index + 1].startsWith("--")
+  ) {
+    invalidCargoProvenanceArguments = true;
+    continue;
+  }
+  cargoProvenanceArgument = rawScanArguments[index + 1];
+  index += 1;
+}
+const trustRootsMode = scanArguments[0] === "--trust-roots";
+const targetSourcesOption = scanArguments.indexOf("--target-sources-stdin0");
 const rootArguments = trustRootsMode
   ? scanArguments.slice(
       1,
       targetSourcesOption === -1 ? scanArguments.length : targetSourcesOption,
     )
-  : scanArguments.slice(0, targetSourcesOption === -1 ? 1 : targetSourcesOption);
+  : scanArguments.slice(
+      0,
+      targetSourcesOption === -1 ? 1 : targetSourcesOption,
+    );
 const unexpectedArguments =
+  invalidCargoProvenanceArguments ||
   (trustRootsMode
-    ? targetSourcesOption !== -1 && targetSourcesOption !== scanArguments.length - 1
+    ? targetSourcesOption !== -1 &&
+      targetSourcesOption !== scanArguments.length - 1
     : rootArguments.length !== 1 ||
       (targetSourcesOption === -1
         ? scanArguments.length !== 1
         : targetSourcesOption !== scanArguments.length - 1)) ||
-  scanArguments.includes('--target-sources');
+  scanArguments.includes("--target-sources");
 if (rootArguments.length === 0 || unexpectedArguments) {
   console.error(
-    'usage: scan-rust-unsafe-boundary.mjs <package-root> [--target-sources-stdin0] | --trust-roots <root>... [--target-sources-stdin0]',
+    "usage: scan-rust-unsafe-boundary.mjs <package-root> [--cargo-provenance-file <path>] [--target-sources-stdin0] | --trust-roots <root>... [--cargo-provenance-file <path>] [--target-sources-stdin0]",
   );
   process.exit(2);
 }
 
 async function readTargetSourcesFromStdin() {
   const targetSources = [];
-  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   let pending = Buffer.alloc(0);
   let transportBytes = 0;
 
@@ -84,7 +115,9 @@ async function readTargetSourcesFromStdin() {
       terminator !== -1;
       terminator = pending.indexOf(0, recordStart)
     ) {
-      targetSources.push(decoder.decode(pending.subarray(recordStart, terminator)));
+      targetSources.push(
+        decoder.decode(pending.subarray(recordStart, terminator)),
+      );
       if (targetSources.length > MAX_CARGO_TARGET_SOURCES) {
         throw new Error(
           `Cargo target source count exceeds ${MAX_CARGO_TARGET_SOURCES}`,
@@ -95,7 +128,7 @@ async function readTargetSourcesFromStdin() {
     pending = Buffer.from(pending.subarray(recordStart));
   }
   if (pending.length !== 0) {
-    throw new Error('Cargo target source transport must be NUL terminated');
+    throw new Error("Cargo target source transport must be NUL terminated");
   }
   return targetSources;
 }
@@ -108,7 +141,7 @@ const scanRoots = [
 const diagnosticBudget = { records: 0, bytes: 0 };
 
 function diagnosticRecord(kind, path, line, reason) {
-  const record = `${kind}\t${path}:${line}${reason ? `\t${reason}` : ''}\n`;
+  const record = `${kind}\t${path}:${line}${reason ? `\t${reason}` : ""}\n`;
   const recordBytes = Buffer.byteLength(record);
   if (diagnosticBudget.records >= MAX_DIAGNOSTIC_RECORDS) {
     throw new Error(
@@ -128,15 +161,17 @@ function diagnosticRecord(kind, path, line, reason) {
 function rustFiles(root, discoveryBudget) {
   const files = new Set();
   const sourceEscapes = [];
-  const rootBuildOutput = join(root, 'target');
+  const rootBuildOutput = join(root, "target");
 
   function visit(directory) {
-    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
-      a.name.localeCompare(b.name),
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort(
+      (a, b) => a.name.localeCompare(b.name),
     )) {
       discoveryBudget.entries += 1;
       if (discoveryBudget.entries > MAX_DISCOVERY_ENTRIES) {
-        throw new Error(`Rust source discovery exceeds ${MAX_DISCOVERY_ENTRIES} entries`);
+        throw new Error(
+          `Rust source discovery exceeds ${MAX_DISCOVERY_ENTRIES} entries`,
+        );
       }
       if (EXCLUDED_DIRECTORY_NAMES.has(entry.name)) {
         continue;
@@ -144,20 +179,22 @@ function rustFiles(root, discoveryBudget) {
       const path = join(directory, entry.name);
       if (entry.isSymbolicLink()) {
         sourceEscapes.push(
-          diagnosticRecord('source', path, 1, 'symlink source entry'),
+          diagnosticRecord("source", path, 1, "symlink source entry"),
         );
       } else if (entry.isDirectory()) {
         if (
           path === rootBuildOutput ||
-          (entry.name === 'target' && existsSync(join(directory, 'Cargo.toml')))
+          (entry.name === "target" && existsSync(join(directory, "Cargo.toml")))
         ) {
           continue;
         }
         visit(path);
-      } else if (entry.isFile() && entry.name.endsWith('.rs')) {
+      } else if (entry.isFile() && entry.name.endsWith(".rs")) {
         files.add(path);
         if (files.size > MAX_RUST_FILES) {
-          throw new Error(`Rust source discovery exceeds ${MAX_RUST_FILES} files`);
+          throw new Error(
+            `Rust source discovery exceeds ${MAX_RUST_FILES} files`,
+          );
         }
       }
     }
@@ -170,16 +207,301 @@ function rustFiles(root, discoveryBudget) {
 function isInsideRoot(root, candidate) {
   const relativeCandidate = relative(root, candidate);
   return (
-    relativeCandidate !== '..' &&
+    relativeCandidate !== ".." &&
     !relativeCandidate.startsWith(`..${sep}`) &&
     !isAbsolute(relativeCandidate)
   );
 }
 
+function exactObject(value, keys, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  if (
+    actual.length !== expected.length ||
+    actual.some((key, index) => key !== expected[index])
+  ) {
+    throw new Error(`${label} has unexpected fields`);
+  }
+}
+
+function regularFile(path, label, maximumBytes) {
+  const absolute = resolve(path);
+  const info = lstatSync(absolute);
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error(`${label} must be a regular non-symlink file`);
+  }
+  if (info.size > maximumBytes) {
+    throw new Error(`${label} exceeds ${maximumBytes} bytes`);
+  }
+  return realpathSync(absolute);
+}
+
+function validateAuditVersions(versions, label) {
+  if (
+    !versions ||
+    typeof versions !== "object" ||
+    Array.isArray(versions) ||
+    Object.keys(versions).length === 0
+  ) {
+    throw new Error(`${label} versions are malformed`);
+  }
+  for (const [version, checksum] of Object.entries(versions)) {
+    if (version.length === 0 || !CARGO_CHECKSUM.test(checksum)) {
+      throw new Error(`${label} identity is malformed`);
+    }
+  }
+}
+
+function loadCargoMacroAudit() {
+  const path = regularFile(
+    fileURLToPath(new URL("./audited-cargo-macros.json", import.meta.url)),
+    "Cargo macro audit",
+    MAX_CARGO_PROVENANCE_BYTES,
+  );
+  const audit = JSON.parse(readFileSync(path, "utf8"));
+  exactObject(
+    audit,
+    ["packages", "providers", "registrySource"],
+    "Cargo macro audit",
+  );
+  if (
+    typeof audit.registrySource !== "string" ||
+    !audit.packages ||
+    typeof audit.packages !== "object" ||
+    Array.isArray(audit.packages) ||
+    !audit.providers ||
+    typeof audit.providers !== "object" ||
+    Array.isArray(audit.providers)
+  ) {
+    throw new Error("Cargo macro audit is malformed");
+  }
+  if (Object.keys(audit.providers).length > MAX_CARGO_PROVENANCE_PROVIDERS) {
+    throw new Error(
+      `Cargo macro audit exceeds ${MAX_CARGO_PROVENANCE_PROVIDERS} providers`,
+    );
+  }
+  for (const [providerName, policy] of Object.entries(audit.providers)) {
+    exactObject(policy, ["versions"], `Cargo macro provider ${providerName}`);
+    validateAuditVersions(
+      policy.versions,
+      `Cargo macro provider ${providerName}`,
+    );
+  }
+  for (const [packageName, policy] of Object.entries(audit.packages)) {
+    exactObject(
+      policy,
+      ["macros", "versions"],
+      `Cargo macro audit ${packageName}`,
+    );
+    validateAuditVersions(policy.versions, `Cargo macro audit ${packageName}`);
+    if (
+      !policy.macros ||
+      typeof policy.macros !== "object" ||
+      Array.isArray(policy.macros) ||
+      Object.keys(policy.macros).length === 0
+    ) {
+      throw new Error(`Cargo macro audit ${packageName} macros are malformed`);
+    }
+    for (const [macroName, providerName] of Object.entries(policy.macros)) {
+      if (
+        !RUST_CRATE_NAME.test(macroName) ||
+        (providerName !== null &&
+          (typeof providerName !== "string" ||
+            !Object.hasOwn(audit.providers, providerName)))
+      ) {
+        throw new Error(
+          `Cargo macro audit ${packageName} macro ${macroName} is malformed`,
+        );
+      }
+    }
+  }
+  return audit;
+}
+
+const cargoMacroAudit = loadCargoMacroAudit();
+
+function verifiedCargoIdentity(identity, policy, label) {
+  exactObject(
+    identity,
+    ["checksum", "package", "providers", "source", "version"],
+    label,
+  );
+  if (
+    typeof identity.package !== "string" ||
+    typeof identity.version !== "string" ||
+    identity.source !== cargoMacroAudit.registrySource ||
+    !CARGO_CHECKSUM.test(identity.checksum ?? "") ||
+    policy.versions[identity.version] !== identity.checksum ||
+    !identity.providers ||
+    typeof identity.providers !== "object" ||
+    Array.isArray(identity.providers)
+  ) {
+    throw new Error(`${label} is not an audited Cargo identity`);
+  }
+  const expectedProviders = new Set(
+    Object.values(policy.macros).filter(
+      (providerName) => providerName !== null,
+    ),
+  );
+  const actualProviders = Object.keys(identity.providers);
+  if (
+    actualProviders.length !== expectedProviders.size ||
+    actualProviders.some((providerName) => !expectedProviders.has(providerName))
+  ) {
+    throw new Error(`${label} has incomplete macro provider provenance`);
+  }
+  for (const providerName of expectedProviders) {
+    const provider = identity.providers[providerName];
+    exactObject(
+      provider,
+      ["checksum", "package", "source", "version"],
+      `${label} provider ${providerName}`,
+    );
+    if (
+      provider.package !== providerName ||
+      typeof provider.version !== "string" ||
+      provider.source !== cargoMacroAudit.registrySource ||
+      !CARGO_CHECKSUM.test(provider.checksum ?? "") ||
+      cargoMacroAudit.providers[providerName].versions[provider.version] !==
+        provider.checksum
+    ) {
+      throw new Error(
+        `${label} provider ${providerName} is not an audited Cargo identity`,
+      );
+    }
+  }
+}
+
+function loadCargoProvenance(argument) {
+  const recordsByRoot = new Map();
+  if (argument === null) return recordsByRoot;
+  const path = regularFile(
+    argument,
+    "Cargo macro provenance",
+    MAX_CARGO_PROVENANCE_BYTES,
+  );
+  const source = new TextDecoder("utf-8", { fatal: true }).decode(
+    readFileSync(path),
+  );
+  const lines = source.split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  if (lines.some((line) => line.length === 0)) {
+    throw new Error("Cargo macro provenance contains an empty record");
+  }
+  if (lines.length > MAX_CARGO_PROVENANCE_RECORDS) {
+    throw new Error(
+      `Cargo macro provenance exceeds ${MAX_CARGO_PROVENANCE_RECORDS} records`,
+    );
+  }
+  let aliasCount = 0;
+  for (const [index, line] of lines.entries()) {
+    const record = JSON.parse(line);
+    const label = `Cargo macro provenance record ${index + 1}`;
+    exactObject(record, ["aliases", "manifestPath", "packageRoot"], label);
+    if (
+      typeof record.packageRoot !== "string" ||
+      typeof record.manifestPath !== "string" ||
+      !record.aliases ||
+      typeof record.aliases !== "object" ||
+      Array.isArray(record.aliases)
+    ) {
+      throw new Error(`${label} is malformed`);
+    }
+    const packageRootInfo = lstatSync(resolve(record.packageRoot));
+    if (packageRootInfo.isSymbolicLink() || !packageRootInfo.isDirectory()) {
+      throw new Error(`${label} package root must be a non-symlink directory`);
+    }
+    const packageRoot = realpathSync(resolve(record.packageRoot));
+    const manifestPath = regularFile(
+      record.manifestPath,
+      `${label} manifest`,
+      1024 * 1024,
+    );
+    if (
+      dirname(manifestPath) !== packageRoot ||
+      basename(manifestPath) !== "Cargo.toml" ||
+      !scanRoots.some((root) => isInsideRoot(root, packageRoot))
+    ) {
+      throw new Error(`${label} is outside its scanned package root`);
+    }
+    if (recordsByRoot.has(packageRoot)) {
+      throw new Error(
+        `Cargo macro provenance repeats package root ${packageRoot}`,
+      );
+    }
+    const aliases = new Map();
+    for (const [localAlias, identity] of Object.entries(record.aliases)) {
+      aliasCount += 1;
+      if (aliasCount > MAX_CARGO_PROVENANCE_ALIASES) {
+        throw new Error(
+          `Cargo macro provenance exceeds ${MAX_CARGO_PROVENANCE_ALIASES} aliases`,
+        );
+      }
+      if (!RUST_CRATE_NAME.test(localAlias)) {
+        throw new Error(`${label} contains malformed alias ${localAlias}`);
+      }
+      const policy = cargoMacroAudit.packages[identity?.package];
+      if (!policy) {
+        throw new Error(`${label} alias ${localAlias} is not audited`);
+      }
+      verifiedCargoIdentity(identity, policy, `${label} alias ${localAlias}`);
+      aliases.set(localAlias, {
+        identity,
+        macros: new Set(Object.keys(policy.macros)),
+      });
+    }
+    recordsByRoot.set(packageRoot, {
+      aliases,
+      manifestPath,
+      packageRoot,
+      shadowedAliases: new Set(),
+    });
+  }
+  return recordsByRoot;
+}
+
+const cargoProvenanceByRoot = loadCargoProvenance(cargoProvenanceArgument);
+const filePackageAuthorizationCache = new Map();
+
+function packageAuthorizationForFile(file) {
+  if (filePackageAuthorizationCache.has(file)) {
+    return filePackageAuthorizationCache.get(file);
+  }
+  const containingRoots = scanRoots
+    .filter((root) => isInsideRoot(root, file))
+    .sort((left, right) => right.length - left.length);
+  let packageRoot = null;
+  if (containingRoots.length > 0) {
+    const scanRoot = containingRoots[0];
+    let directory = dirname(file);
+    while (isInsideRoot(scanRoot, directory)) {
+      const manifest = join(directory, "Cargo.toml");
+      if (existsSync(manifest)) {
+        const info = lstatSync(manifest);
+        if (!info.isSymbolicLink() && info.isFile()) {
+          packageRoot = realpathSync(directory);
+        }
+        break;
+      }
+      if (directory === scanRoot) break;
+      const parent = dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
+  const authorization =
+    (packageRoot && cargoProvenanceByRoot.get(packageRoot)) ?? null;
+  filePackageAuthorizationCache.set(file, authorization);
+  return authorization;
+}
+
 function isInsideSkippedBuildOutput(candidate, roots) {
   for (const root of roots) {
     if (!isInsideRoot(root, candidate)) continue;
-    const rootBuildOutput = join(root, 'target');
+    const rootBuildOutput = join(root, "target");
     if (
       candidate === rootBuildOutput ||
       candidate.startsWith(`${rootBuildOutput}${sep}`)
@@ -189,8 +511,8 @@ function isInsideSkippedBuildOutput(candidate, roots) {
     let directory = dirname(candidate);
     while (directory !== root && isInsideRoot(root, directory)) {
       if (
-        basename(directory) === 'target' &&
-        existsSync(join(dirname(directory), 'Cargo.toml'))
+        basename(directory) === "target" &&
+        existsSync(join(dirname(directory), "Cargo.toml"))
       ) {
         return true;
       }
@@ -222,7 +544,9 @@ function cargoTargetFiles(targetSources, roots, discoveryBudget) {
   for (const targetSourceArgument of targetSources) {
     discoveryBudget.entries += 1;
     if (discoveryBudget.entries > MAX_DISCOVERY_ENTRIES) {
-      throw new Error(`Rust source discovery exceeds ${MAX_DISCOVERY_ENTRIES} entries`);
+      throw new Error(
+        `Rust source discovery exceeds ${MAX_DISCOVERY_ENTRIES} entries`,
+      );
     }
     const targetSource = resolve(targetSourceArgument);
     let sourceInfo;
@@ -230,13 +554,23 @@ function cargoTargetFiles(targetSources, roots, discoveryBudget) {
       sourceInfo = lstatSync(targetSource);
     } catch {
       sourceEscapes.push(
-        diagnosticRecord('source', targetSource, 1, 'missing Cargo target source'),
+        diagnosticRecord(
+          "source",
+          targetSource,
+          1,
+          "missing Cargo target source",
+        ),
       );
       continue;
     }
     if (sourceInfo.isSymbolicLink()) {
       sourceEscapes.push(
-        diagnosticRecord('source', targetSource, 1, 'symlink Cargo target source'),
+        diagnosticRecord(
+          "source",
+          targetSource,
+          1,
+          "symlink Cargo target source",
+        ),
       );
       continue;
     }
@@ -244,12 +578,12 @@ function cargoTargetFiles(targetSources, roots, discoveryBudget) {
     if (!roots.some((root) => isInsideRoot(root, realSource))) {
       sourceEscapes.push(
         diagnosticRecord(
-          'source',
+          "source",
           targetSource,
           1,
           trustRootsMode
-            ? 'Cargo target source outside trust roots'
-            : 'Cargo target source outside package root',
+            ? "Cargo target source outside trust roots"
+            : "Cargo target source outside package root",
         ),
       );
       continue;
@@ -257,10 +591,10 @@ function cargoTargetFiles(targetSources, roots, discoveryBudget) {
     if (isInsideSkippedBuildOutput(realSource, roots)) {
       sourceEscapes.push(
         diagnosticRecord(
-          'source',
+          "source",
           targetSource,
           1,
-          'Cargo target source inside build output',
+          "Cargo target source inside build output",
         ),
       );
       continue;
@@ -268,10 +602,10 @@ function cargoTargetFiles(targetSources, roots, discoveryBudget) {
     if (isInsideExcludedDirectory(realSource, roots)) {
       sourceEscapes.push(
         diagnosticRecord(
-          'source',
+          "source",
           targetSource,
           1,
-          'Cargo target source inside excluded directory',
+          "Cargo target source inside excluded directory",
         ),
       );
       continue;
@@ -279,10 +613,10 @@ function cargoTargetFiles(targetSources, roots, discoveryBudget) {
     if (!sourceInfo.isFile()) {
       sourceEscapes.push(
         diagnosticRecord(
-          'source',
+          "source",
           targetSource,
           1,
-          'Cargo target source is not a regular file',
+          "Cargo target source is not a regular file",
         ),
       );
       continue;
@@ -302,13 +636,16 @@ function isIdentifierContinue(character) {
 
 function rawStringStart(source, offset) {
   let cursor = offset;
-  if ((source[cursor] === 'b' || source[cursor] === 'c') && source[cursor + 1] === 'r') {
+  if (
+    (source[cursor] === "b" || source[cursor] === "c") &&
+    source[cursor + 1] === "r"
+  ) {
     cursor += 1;
   }
-  if (source[cursor] !== 'r') return null;
+  if (source[cursor] !== "r") return null;
   cursor += 1;
   let hashes = 0;
-  while (source[cursor] === '#') {
+  while (source[cursor] === "#") {
     hashes += 1;
     cursor += 1;
   }
@@ -318,11 +655,11 @@ function rawStringStart(source, offset) {
 function skipRawString(source, offset, line) {
   const start = rawStringStart(source, offset);
   if (!start) return null;
-  const terminator = `"${'#'.repeat(start.hashes)}`;
+  const terminator = `"${"#".repeat(start.hashes)}`;
   const end = source.indexOf(terminator, start.contentStart);
   const limit = end === -1 ? source.length : end + terminator.length;
   for (let cursor = offset; cursor < limit; cursor += 1) {
-    if (source[cursor] === '\n') line += 1;
+    if (source[cursor] === "\n") line += 1;
   }
   return { offset: limit, line };
 }
@@ -330,8 +667,8 @@ function skipRawString(source, offset, line) {
 function skipQuoted(source, offset, quote, line) {
   let cursor = offset + 1;
   while (cursor < source.length) {
-    if (source[cursor] === '\n') line += 1;
-    if (source[cursor] === '\\') {
+    if (source[cursor] === "\n") line += 1;
+    if (source[cursor] === "\\") {
       cursor += 2;
       continue;
     }
@@ -343,8 +680,8 @@ function skipQuoted(source, offset, quote, line) {
 
 function looksLikeCharacterLiteral(source, offset) {
   let cursor = offset + 1;
-  if (cursor >= source.length || source[cursor] === '\n') return false;
-  if (source[cursor] === '\\') cursor += 2;
+  if (cursor >= source.length || source[cursor] === "\n") return false;
+  if (source[cursor] === "\\") cursor += 2;
   else cursor += 1;
   return source[cursor] === "'";
 }
@@ -358,7 +695,7 @@ function lexRust(source) {
     const character = source[offset];
     const next = source[offset + 1];
 
-    if (character === '\n') {
+    if (character === "\n") {
       line += 1;
       offset += 1;
       continue;
@@ -367,20 +704,20 @@ function lexRust(source) {
       offset += 1;
       continue;
     }
-    if (character === '/' && next === '/') {
+    if (character === "/" && next === "/") {
       offset += 2;
-      while (offset < source.length && source[offset] !== '\n') offset += 1;
+      while (offset < source.length && source[offset] !== "\n") offset += 1;
       continue;
     }
-    if (character === '/' && next === '*') {
+    if (character === "/" && next === "*") {
       let depth = 1;
       offset += 2;
       while (offset < source.length && depth > 0) {
-        if (source[offset] === '\n') line += 1;
-        if (source[offset] === '/' && source[offset + 1] === '*') {
+        if (source[offset] === "\n") line += 1;
+        if (source[offset] === "/" && source[offset + 1] === "*") {
           depth += 1;
           offset += 2;
-        } else if (source[offset] === '*' && source[offset + 1] === '/') {
+        } else if (source[offset] === "*" && source[offset + 1] === "/") {
           depth -= 1;
           offset += 2;
         } else {
@@ -397,7 +734,7 @@ function lexRust(source) {
     }
     if (
       character === '"' ||
-      ((character === 'b' || character === 'c') && next === '"')
+      ((character === "b" || character === "c") && next === '"')
     ) {
       const tokenLine = line;
       const quoteOffset = character === '"' ? offset : offset + 1;
@@ -408,7 +745,7 @@ function lexRust(source) {
         source[skipped.offset - 1] === '"'
       ) {
         tokens.push({
-          kind: 'string',
+          kind: "string",
           value: source.slice(quoteOffset + 1, skipped.offset - 1),
           raw: false,
           line: tokenLine,
@@ -418,15 +755,12 @@ function lexRust(source) {
       line = skipped.line;
       continue;
     }
-    if (
-      character === "'" &&
-      looksLikeCharacterLiteral(source, offset)
-    ) {
+    if (character === "'" && looksLikeCharacterLiteral(source, offset)) {
       ({ offset, line } = skipQuoted(source, offset, "'", line));
       continue;
     }
     if (
-      character === 'b' &&
+      character === "b" &&
       next === "'" &&
       looksLikeCharacterLiteral(source, offset + 1)
     ) {
@@ -437,24 +771,31 @@ function lexRust(source) {
     }
 
     if (
-      character === 'r' &&
-      next === '#' &&
-      isIdentifierStart(source[offset + 2] ?? '')
+      character === "r" &&
+      next === "#" &&
+      isIdentifierStart(source[offset + 2] ?? "")
     ) {
       const tokenLine = line;
       offset += 2;
       const start = offset;
-      while (offset < source.length && isIdentifierContinue(source[offset])) offset += 1;
-      tokens.push({ kind: 'identifier', value: source.slice(start, offset), raw: true, line: tokenLine });
+      while (offset < source.length && isIdentifierContinue(source[offset]))
+        offset += 1;
+      tokens.push({
+        kind: "identifier",
+        value: source.slice(start, offset),
+        raw: true,
+        line: tokenLine,
+      });
       continue;
     }
     if (isIdentifierStart(character)) {
       const tokenLine = line;
       const start = offset;
       offset += 1;
-      while (offset < source.length && isIdentifierContinue(source[offset])) offset += 1;
+      while (offset < source.length && isIdentifierContinue(source[offset]))
+        offset += 1;
       tokens.push({
-        kind: 'identifier',
+        kind: "identifier",
         value: source.slice(start, offset),
         raw: false,
         line: tokenLine,
@@ -462,7 +803,7 @@ function lexRust(source) {
       continue;
     }
 
-    tokens.push({ kind: 'punctuation', value: character, raw: false, line });
+    tokens.push({ kind: "punctuation", value: character, raw: false, line });
     offset += 1;
   }
 
@@ -484,11 +825,11 @@ function matchingToken(tokens, start, open, close, limit = tokens.length) {
 function attributes(tokens) {
   const ranges = [];
   for (let index = 0; index < tokens.length; index += 1) {
-    if (tokens[index].value !== '#') continue;
+    if (tokens[index].value !== "#") continue;
     let bracket = index + 1;
-    if (tokens[bracket]?.value === '!') bracket += 1;
-    if (tokens[bracket]?.value !== '[') continue;
-    const bracketEnd = matchingToken(tokens, bracket, '[', ']');
+    if (tokens[bracket]?.value === "!") bracket += 1;
+    if (tokens[bracket]?.value !== "[") continue;
+    const bracketEnd = matchingToken(tokens, bracket, "[", "]");
     if (bracketEnd === -1) continue;
     ranges.push({ start: bracket + 1, end: bracketEnd });
     index = bracketEnd;
@@ -502,18 +843,27 @@ function unsafeLintAttributes(tokens) {
     for (let cursor = attribute.start; cursor < attribute.end; cursor += 1) {
       const lintLevel = tokens[cursor];
       if (
-        lintLevel.kind !== 'identifier' ||
-        !['allow', 'expect', 'warn'].includes(lintLevel.value) ||
-        tokens[cursor + 1]?.value !== '('
+        lintLevel.kind !== "identifier" ||
+        !["allow", "expect", "warn"].includes(lintLevel.value) ||
+        tokens[cursor + 1]?.value !== "("
       ) {
         continue;
       }
-      const argumentsEnd = matchingToken(tokens, cursor + 1, '(', ')', attribute.end);
+      const argumentsEnd = matchingToken(
+        tokens,
+        cursor + 1,
+        "(",
+        ")",
+        attribute.end,
+      );
       if (argumentsEnd === -1) continue;
       if (
         tokens
           .slice(cursor + 2, argumentsEnd)
-          .some((token) => token.kind === 'identifier' && token.value === 'unsafe_code')
+          .some(
+            (token) =>
+              token.kind === "identifier" && token.value === "unsafe_code",
+          )
       ) {
         lines.push(lintLevel.line);
       }
@@ -526,8 +876,8 @@ function unsafeLintAttributes(tokens) {
 function isCoveredTrustSource(file, literal, discoveredFiles) {
   if (
     !trustRootsMode ||
-    literal?.kind !== 'string' ||
-    literal.value.includes('\\')
+    literal?.kind !== "string" ||
+    literal.value.includes("\\")
   ) {
     return false;
   }
@@ -551,37 +901,39 @@ function sourceDiscoveryViolations(
   discoveredFiles,
   sourceMacroNames,
   macroBoundary,
+  packageAuthorization,
 ) {
-  const violations = [
-    ...(macroBoundary.definitionViolations.get(file) ?? []),
-  ];
+  const violations = [...(macroBoundary.definitionViolations.get(file) ?? [])];
   const imports = macroBoundary.importsByFile.get(file) ?? new Map();
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (
       isNamedSymbol(token, sourceMacroNames) &&
-      tokens[index + 1]?.value === '!'
+      tokens[index + 1]?.value === "!"
     ) {
       const opener = tokens[index + 2]?.value;
-      const literal = ['(', '[', '{'].includes(opener)
+      const literal = ["(", "[", "{"].includes(opener)
         ? tokens[index + 3]
         : undefined;
       if (isCoveredTrustSource(file, literal, discoveredFiles)) continue;
-      violations.push({ line: token.line, reason: 'include! source expansion' });
+      violations.push({
+        line: token.line,
+        reason: "include! source expansion",
+      });
       continue;
     }
     if (
-      token.kind !== 'identifier' ||
-      tokens[index + 1]?.value !== '!' ||
-      !['(', '[', '{'].includes(tokens[index + 2]?.value) ||
-      (!token.raw && token.value === 'macro_rules') ||
+      token.kind !== "identifier" ||
+      tokens[index + 1]?.value !== "!" ||
+      !["(", "[", "{"].includes(tokens[index + 2]?.value) ||
+      (!token.raw && token.value === "macro_rules") ||
       (!token.raw && RUST_KEYWORDS.has(token.value)) ||
-      tokens[index - 1]?.value === '$'
+      tokens[index - 1]?.value === "$"
     ) {
       continue;
     }
     const opener = tokens[index + 2].value;
-    const closer = opener === '(' ? ')' : opener === '[' ? ']' : '}';
+    const closer = opener === "(" ? ")" : opener === "[" ? "]" : "}";
     const argumentsEnd = matchingToken(tokens, index + 2, opener, closer);
     const macroName = canonicalSymbolName(token.value);
     if (
@@ -591,11 +943,12 @@ function sourceDiscoveryViolations(
         index,
         imports,
         macroBoundary.safeLocalMacroNames,
+        packageAuthorization,
       )
     ) {
       violations.push({
         line: token.line,
-        reason: 'unaudited macro invocation may expand Rust source',
+        reason: "unaudited macro invocation may expand Rust source",
       });
       continue;
     }
@@ -607,7 +960,7 @@ function sourceDiscoveryViolations(
     );
     const argumentsContainBang = tokens
       .slice(index + 3, argumentsEnd)
-      .some((argument) => argument.value === '!');
+      .some((argument) => argument.value === "!");
     if (
       usesLocalDefinition &&
       !localMacroArgumentsAreAudited(
@@ -619,11 +972,12 @@ function sourceDiscoveryViolations(
         macroBoundary.safeLocalMacroNames,
         macroBoundary.dynamicLocalMacroNames.has(macroName) ||
           argumentsContainBang,
+        packageAuthorization,
       )
     ) {
       violations.push({
         line: token.line,
-        reason: 'local macro invocation may expand Rust source',
+        reason: "local macro invocation may expand Rust source",
       });
     }
   }
@@ -631,26 +985,24 @@ function sourceDiscoveryViolations(
     for (let index = attribute.start; index < attribute.end; index += 1) {
       const token = tokens[index];
       if (
-        token.kind === 'identifier' &&
+        token.kind === "identifier" &&
         !token.raw &&
-        token.value === 'macro_use'
+        token.value === "macro_use"
       ) {
         violations.push({
           line: token.line,
-          reason: 'unaudited macro import may expand Rust source',
+          reason: "unaudited macro import may expand Rust source",
         });
       }
       if (
-        token.kind === 'identifier' &&
-        token.value === 'path' &&
-        tokens[index + 1]?.value === '='
+        token.kind === "identifier" &&
+        token.value === "path" &&
+        tokens[index + 1]?.value === "="
       ) {
-        if (
-          isCoveredTrustSource(file, tokens[index + 2], discoveredFiles)
-        ) {
+        if (isCoveredTrustSource(file, tokens[index + 2], discoveredFiles)) {
           continue;
         }
-        violations.push({ line: token.line, reason: 'custom #[path] source' });
+        violations.push({ line: token.line, reason: "custom #[path] source" });
       }
     }
   }
@@ -663,39 +1015,39 @@ function cfgTestModuleRanges(tokens) {
     const attributeTokens = tokens.slice(attribute.start, attribute.end);
     const isExactCfgTest =
       attributeTokens.length === 4 &&
-      attributeTokens[0].kind === 'identifier' &&
-      attributeTokens[0].value === 'cfg' &&
-      attributeTokens[1].value === '(' &&
-      attributeTokens[2].kind === 'identifier' &&
-      attributeTokens[2].value === 'test' &&
-      attributeTokens[3].value === ')';
+      attributeTokens[0].kind === "identifier" &&
+      attributeTokens[0].value === "cfg" &&
+      attributeTokens[1].value === "(" &&
+      attributeTokens[2].kind === "identifier" &&
+      attributeTokens[2].value === "test" &&
+      attributeTokens[3].value === ")";
     if (!isExactCfgTest) {
       continue;
     }
     let module = -1;
     let body = -1;
     for (let cursor = attribute.end + 1; cursor < tokens.length; cursor += 1) {
-      if (tokens[cursor].value === ';') break;
+      if (tokens[cursor].value === ";") break;
       if (
-        tokens[cursor].kind === 'identifier' &&
-        tokens[cursor].value === 'mod'
+        tokens[cursor].kind === "identifier" &&
+        tokens[cursor].value === "mod"
       ) {
         module = cursor;
       }
-      if (tokens[cursor].value === '{') {
+      if (tokens[cursor].value === "{") {
         body = cursor;
         break;
       }
     }
     if (module === -1 || body === -1 || module > body) continue;
-    const bodyEnd = matchingToken(tokens, body, '{', '}');
+    const bodyEnd = matchingToken(tokens, body, "{", "}");
     if (bodyEnd !== -1) ranges.push({ start: body + 1, end: bodyEnd });
   }
   return ranges;
 }
 
 function canonicalSymbolName(value) {
-  return value.normalize('NFC');
+  return value.normalize("NFC");
 }
 
 function isNamedSymbol(token, names) {
@@ -703,109 +1055,100 @@ function isNamedSymbol(token, names) {
   // Unicode spellings resolve to the same symbol. Keyword recognition must
   // continue to inspect token.raw and the source text stays unmodified.
   return (
-    token?.kind === 'identifier' &&
-    names.has(canonicalSymbolName(token.value))
+    token?.kind === "identifier" && names.has(canonicalSymbolName(token.value))
   );
 }
 
-const SOURCE_INERT_BUILTIN_MACROS = new Set([
-  'assert',
-  'assert_eq',
-  'assert_ne',
-  'cfg',
-  'concat',
-  'debug_assert',
-  'debug_assert_eq',
-  'env',
-  'eprint',
-  'eprintln',
-  'format',
-  'format_args',
-  'include_bytes',
-  'include_str',
-  'matches',
-  'module_path',
-  'option_env',
-  'panic',
-  'print',
-  'println',
-  'stringify',
-  'thread_local',
-  'todo',
-  'unreachable',
-  'vec',
-  'write',
-  'writeln',
-].map(canonicalSymbolName));
-const AUDITED_SOURCE_INERT_MACRO_PATHS = new Set([
-  'objc2::class',
-  'objc2::msg_send',
-  'ort::inputs',
-  'schemars::schema_for',
-  'serde_json::json',
-  'tauri::generate_context',
-  'tauri::generate_handler',
-  'tokio::join',
-  'tokio::pin',
-  'tokio::select',
-]);
-const LOCAL_MACRO_PATH_PREFIXES = new Set(['crate', 'self', 'super']);
+const SOURCE_INERT_BUILTIN_MACROS = new Set(
+  [
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "cfg",
+    "concat",
+    "debug_assert",
+    "debug_assert_eq",
+    "env",
+    "eprint",
+    "eprintln",
+    "format",
+    "format_args",
+    "include_bytes",
+    "include_str",
+    "matches",
+    "module_path",
+    "option_env",
+    "panic",
+    "print",
+    "println",
+    "stringify",
+    "thread_local",
+    "todo",
+    "unreachable",
+    "vec",
+    "write",
+    "writeln",
+  ].map(canonicalSymbolName),
+);
+const LOCAL_MACRO_PATH_PREFIXES = new Set(["crate", "self", "super"]);
 const RUST_KEYWORDS = new Set([
-  'as',
-  'async',
-  'await',
-  'break',
-  'const',
-  'continue',
-  'crate',
-  'dyn',
-  'else',
-  'enum',
-  'extern',
-  'false',
-  'fn',
-  'for',
-  'if',
-  'impl',
-  'in',
-  'let',
-  'loop',
-  'match',
-  'mod',
-  'move',
-  'mut',
-  'pub',
-  'ref',
-  'return',
-  'self',
-  'Self',
-  'static',
-  'struct',
-  'super',
-  'trait',
-  'true',
-  'type',
-  'union',
-  'unsafe',
-  'use',
-  'where',
-  'while',
+  "as",
+  "async",
+  "await",
+  "break",
+  "const",
+  "continue",
+  "crate",
+  "dyn",
+  "else",
+  "enum",
+  "extern",
+  "false",
+  "fn",
+  "for",
+  "if",
+  "impl",
+  "in",
+  "let",
+  "loop",
+  "match",
+  "mod",
+  "move",
+  "mut",
+  "pub",
+  "ref",
+  "return",
+  "self",
+  "Self",
+  "static",
+  "struct",
+  "super",
+  "trait",
+  "true",
+  "type",
+  "union",
+  "unsafe",
+  "use",
+  "where",
+  "while",
 ]);
 
 function identifierPath(tokens, start, end) {
   const parts = [];
   let cursor = start;
-  while (
+  let absolute = false;
+  if (
     cursor + 1 < end &&
-    tokens[cursor].value === ':' &&
-    tokens[cursor + 1].value === ':'
+    tokens[cursor].value === ":" &&
+    tokens[cursor + 1].value === ":"
   ) {
+    absolute = true;
     cursor += 2;
   }
   let expectsIdentifier = true;
   while (cursor < end) {
     if (expectsIdentifier) {
-      if (tokens[cursor].kind !== 'identifier') return null;
+      if (tokens[cursor].kind !== "identifier") return null;
       parts.push(canonicalSymbolName(tokens[cursor].value));
       cursor += 1;
       expectsIdentifier = false;
@@ -813,22 +1156,23 @@ function identifierPath(tokens, start, end) {
     }
     if (
       cursor + 1 >= end ||
-      tokens[cursor].value !== ':' ||
-      tokens[cursor + 1].value !== ':'
+      tokens[cursor].value !== ":" ||
+      tokens[cursor + 1].value !== ":"
     ) {
       return null;
     }
     cursor += 2;
     expectsIdentifier = true;
   }
-  return parts.length > 0 && !expectsIdentifier ? parts : null;
+  if (parts.length === 0 || expectsIdentifier) return null;
+  return absolute ? ["", ...parts] : parts;
 }
 
 function topLevelToken(tokens, start, end, wanted) {
   const closing = new Map([
-    ['(', ')'],
-    ['[', ']'],
-    ['{', '}'],
+    ["(", ")"],
+    ["[", "]"],
+    ["{", "}"],
   ]);
   const stack = [];
   for (let index = start; index < end; index += 1) {
@@ -844,35 +1188,33 @@ function topLevelToken(tokens, start, end, wanted) {
 }
 
 function addUseTreeImports(tokens, start, end, prefix, imports) {
-  while (start < end && tokens[start].value === ',') start += 1;
-  while (end > start && tokens[end - 1].value === ',') end -= 1;
+  while (start < end && tokens[start].value === ",") start += 1;
+  while (end > start && tokens[end - 1].value === ",") end -= 1;
   if (start >= end) return;
 
-  const groupStart = topLevelToken(tokens, start, end, '{');
+  const groupStart = topLevelToken(tokens, start, end, "{");
   if (groupStart !== -1) {
-    const groupEnd = matchingToken(tokens, groupStart, '{', '}', end);
+    const groupEnd = matchingToken(tokens, groupStart, "{", "}", end);
     if (groupEnd === -1) return;
     let prefixEnd = groupStart;
-    while (prefixEnd > start && tokens[prefixEnd - 1].value === ':') {
+    while (prefixEnd > start && tokens[prefixEnd - 1].value === ":") {
       prefixEnd -= 1;
     }
     const branchPrefix =
-      prefixEnd === start
-        ? prefix
-        : identifierPath(tokens, start, prefixEnd);
+      prefixEnd === start ? prefix : identifierPath(tokens, start, prefixEnd);
     if (!branchPrefix) return;
     const nestedPrefix =
       prefixEnd === start ? prefix : [...prefix, ...branchPrefix];
     let branchStart = groupStart + 1;
     const closing = new Map([
-      ['(', ')'],
-      ['[', ']'],
-      ['{', '}'],
+      ["(", ")"],
+      ["[", "]"],
+      ["{", "}"],
     ]);
     const stack = [];
     for (let index = branchStart; index < groupEnd; index += 1) {
       const value = tokens[index].value;
-      if (stack.length === 0 && value === ',') {
+      if (stack.length === 0 && value === ",") {
         addUseTreeImports(tokens, branchStart, index, nestedPrefix, imports);
         branchStart = index + 1;
         continue;
@@ -887,7 +1229,7 @@ function addUseTreeImports(tokens, start, end, prefix, imports) {
     return;
   }
 
-  const aliasIndex = topLevelToken(tokens, start, end, 'as');
+  const aliasIndex = topLevelToken(tokens, start, end, "as");
   const sourceEnd = aliasIndex === -1 ? end : aliasIndex;
   const suffix = identifierPath(tokens, start, sourceEnd);
   if (!suffix) return;
@@ -895,9 +1237,9 @@ function addUseTreeImports(tokens, start, end, prefix, imports) {
   let localName;
   if (aliasIndex !== -1) {
     const alias = tokens[aliasIndex + 1];
-    if (alias?.kind !== 'identifier' || aliasIndex + 2 !== end) return;
+    if (alias?.kind !== "identifier" || aliasIndex + 2 !== end) return;
     localName = canonicalSymbolName(alias.value);
-  } else if (sourceParts.at(-1) === 'self') {
+  } else if (sourceParts.at(-1) === "self") {
     // A `self` leaf imports its containing module, not a macro item.
     return;
   } else {
@@ -909,24 +1251,21 @@ function addUseTreeImports(tokens, start, end, prefix, imports) {
     paths = new Set();
     imports.set(localName, paths);
   }
-  paths.add(sourceParts.join('::'));
+  paths.add(sourceParts.join("::"));
 }
 
 function useImports(tokens) {
   const imports = new Map();
   for (let index = 0; index < tokens.length; index += 1) {
     if (
-      tokens[index].kind !== 'identifier' ||
+      tokens[index].kind !== "identifier" ||
       tokens[index].raw ||
-      tokens[index].value !== 'use'
+      tokens[index].value !== "use"
     ) {
       continue;
     }
     let statementEnd = index + 1;
-    while (
-      statementEnd < tokens.length &&
-      tokens[statementEnd].value !== ';'
-    ) {
+    while (statementEnd < tokens.length && tokens[statementEnd].value !== ";") {
       statementEnd += 1;
     }
     if (statementEnd >= tokens.length) continue;
@@ -936,19 +1275,215 @@ function useImports(tokens) {
   return imports;
 }
 
+function collectUseBindings(tokens, start, end, prefix, analysis) {
+  while (start < end && tokens[start].value === ",") start += 1;
+  while (end > start && tokens[end - 1].value === ",") end -= 1;
+  if (start >= end) return;
+
+  const groupStart = topLevelToken(tokens, start, end, "{");
+  if (groupStart !== -1) {
+    const groupEnd = matchingToken(tokens, groupStart, "{", "}", end);
+    if (groupEnd === -1 || groupEnd + 1 !== end) {
+      analysis.uncertain = true;
+      return;
+    }
+    let prefixEnd = groupStart;
+    while (
+      prefixEnd >= start + 2 &&
+      tokens[prefixEnd - 1].value === ":" &&
+      tokens[prefixEnd - 2].value === ":"
+    ) {
+      prefixEnd -= 2;
+    }
+    let nestedPrefix = prefix;
+    if (prefixEnd > start) {
+      const branchPrefix = identifierPath(tokens, start, prefixEnd);
+      if (!branchPrefix || (prefix.length > 0 && branchPrefix[0] === "")) {
+        analysis.uncertain = true;
+        return;
+      }
+      nestedPrefix = [...prefix, ...branchPrefix];
+    }
+    let branchStart = groupStart + 1;
+    const closing = new Map([
+      ["(", ")"],
+      ["[", "]"],
+      ["{", "}"],
+    ]);
+    const stack = [];
+    for (let index = branchStart; index < groupEnd; index += 1) {
+      const value = tokens[index].value;
+      if (stack.length === 0 && value === ",") {
+        collectUseBindings(tokens, branchStart, index, nestedPrefix, analysis);
+        branchStart = index + 1;
+        continue;
+      }
+      if (closing.has(value)) {
+        stack.push(closing.get(value));
+      } else if (stack.at(-1) === value) {
+        stack.pop();
+      }
+    }
+    collectUseBindings(tokens, branchStart, groupEnd, nestedPrefix, analysis);
+    return;
+  }
+
+  const aliasIndex = topLevelToken(tokens, start, end, "as");
+  const sourceEnd = aliasIndex === -1 ? end : aliasIndex;
+  if (sourceEnd >= start + 1 && tokens[sourceEnd - 1].value === "*") {
+    let globPrefixEnd = sourceEnd - 1;
+    if (
+      globPrefixEnd >= start + 2 &&
+      tokens[globPrefixEnd - 1].value === ":" &&
+      tokens[globPrefixEnd - 2].value === ":"
+    ) {
+      globPrefixEnd -= 2;
+    }
+    const suffix =
+      globPrefixEnd === start
+        ? []
+        : identifierPath(tokens, start, globPrefixEnd);
+    if (
+      aliasIndex !== -1 ||
+      suffix === null ||
+      (prefix.length > 0 && suffix[0] === "")
+    ) {
+      analysis.uncertain = true;
+      return;
+    }
+    analysis.globPrefixes.push([...prefix, ...suffix]);
+    return;
+  }
+
+  const suffix = identifierPath(tokens, start, sourceEnd);
+  if (!suffix || (prefix.length > 0 && suffix[0] === "")) {
+    analysis.uncertain = true;
+    return;
+  }
+  const sourceParts = [...prefix, ...suffix];
+  let localName;
+  if (aliasIndex !== -1) {
+    const alias = tokens[aliasIndex + 1];
+    if (alias?.kind !== "identifier" || aliasIndex + 2 !== end) {
+      analysis.uncertain = true;
+      return;
+    }
+    localName = canonicalSymbolName(alias.value);
+  } else if (sourceParts.at(-1) === "self") {
+    localName = sourceParts.at(-2);
+  } else {
+    localName = sourceParts.at(-1);
+  }
+  if (localName && localName !== "") analysis.bindings.add(localName);
+}
+
+function useBindingAnalysis(tokens) {
+  const analysis = {
+    bindings: new Set(),
+    globPrefixes: [],
+    uncertain: false,
+  };
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (
+      tokens[index].kind !== "identifier" ||
+      tokens[index].raw ||
+      tokens[index].value !== "use"
+    ) {
+      continue;
+    }
+    let statementEnd = index + 1;
+    while (statementEnd < tokens.length && tokens[statementEnd].value !== ";") {
+      statementEnd += 1;
+    }
+    if (statementEnd >= tokens.length) {
+      analysis.uncertain = true;
+      continue;
+    }
+    collectUseBindings(tokens, index + 1, statementEnd, [], analysis);
+    index = statementEnd;
+  }
+  return analysis;
+}
+
+function applyCargoAliasShadowProof(tokenizedFiles) {
+  for (const { tokens, file } of tokenizedFiles) {
+    const authorization = packageAuthorizationForFile(file);
+    if (!authorization || authorization.aliases.size === 0) continue;
+    const aliases = new Set(authorization.aliases.keys());
+    const useAnalysis = useBindingAnalysis(tokens);
+    if (
+      useAnalysis.uncertain ||
+      useAnalysis.globPrefixes.some((prefix) => {
+        const first = prefix.find((part) => part.length > 0);
+        return !LOCAL_MACRO_PATH_PREFIXES.has(first);
+      })
+    ) {
+      for (const alias of aliases) {
+        authorization.shadowedAliases.add(alias);
+      }
+    }
+    for (const binding of useAnalysis.bindings) {
+      if (aliases.has(binding)) {
+        authorization.shadowedAliases.add(binding);
+      }
+    }
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (
+        token.kind === "identifier" &&
+        !token.raw &&
+        token.value === "mod" &&
+        tokens[index + 1]?.kind === "identifier"
+      ) {
+        const name = canonicalSymbolName(tokens[index + 1].value);
+        if (aliases.has(name)) authorization.shadowedAliases.add(name);
+      }
+      if (
+        token.kind === "identifier" &&
+        !token.raw &&
+        token.value === "extern" &&
+        tokens[index + 1]?.kind === "identifier" &&
+        !tokens[index + 1].raw &&
+        tokens[index + 1].value === "crate"
+      ) {
+        let binding = tokens[index + 2];
+        if (
+          tokens[index + 3]?.kind === "identifier" &&
+          !tokens[index + 3].raw &&
+          tokens[index + 3].value === "as"
+        ) {
+          binding = tokens[index + 4];
+        }
+        if (binding?.kind !== "identifier") {
+          for (const alias of aliases) {
+            authorization.shadowedAliases.add(alias);
+          }
+          continue;
+        }
+        const name = canonicalSymbolName(binding.value);
+        if (aliases.has(name)) authorization.shadowedAliases.add(name);
+      }
+    }
+  }
+}
+
 function macroInvocationPath(tokens, macroIndex) {
   const parts = [canonicalSymbolName(tokens[macroIndex].value)];
   let start = macroIndex;
   while (
     start >= 3 &&
-    tokens[start - 1].value === ':' &&
-    tokens[start - 2].value === ':' &&
-    tokens[start - 3].kind === 'identifier'
+    tokens[start - 1].value === ":" &&
+    tokens[start - 2].value === ":" &&
+    tokens[start - 3].kind === "identifier"
   ) {
     parts.unshift(canonicalSymbolName(tokens[start - 3].value));
     start -= 3;
   }
-  return { parts, start };
+  const absolute =
+    start >= 2 &&
+    tokens[start - 1].value === ":" &&
+    tokens[start - 2].value === ":";
+  return { absolute, parts, start };
 }
 
 function isAuditedLocalMacroPath(parts, safeLocalMacroNames) {
@@ -959,10 +1494,26 @@ function isAuditedLocalMacroPath(parts, safeLocalMacroNames) {
   );
 }
 
-function importedMacroPathsAreAudited(paths, safeLocalMacroNames) {
+function auditedExternalMacroPath(parts, absolute, packageAuthorization) {
+  if (parts.length !== 2 || !packageAuthorization) return false;
+  const alias = parts[0];
+  const macro = parts[1];
+  const authorization = packageAuthorization.aliases.get(alias);
+  if (!authorization || !authorization.macros.has(macro)) return false;
+  return absolute || !packageAuthorization.shadowedAliases.has(alias);
+}
+
+function importedMacroPathsAreAudited(
+  paths,
+  safeLocalMacroNames,
+  packageAuthorization,
+) {
   return [...paths].every((path) => {
-    if (AUDITED_SOURCE_INERT_MACRO_PATHS.has(path)) return true;
-    const parts = path.split('::');
+    const absolute = path.startsWith("::");
+    const parts = path.split("::").filter((part) => part.length > 0);
+    if (auditedExternalMacroPath(parts, absolute, packageAuthorization)) {
+      return true;
+    }
     return isAuditedLocalMacroPath(parts, safeLocalMacroNames);
   });
 }
@@ -979,7 +1530,7 @@ function macroInvocationUsesLocalDefinition(
   }
   if (safeLocalMacroNames.has(parts[0])) return true;
   return [...(imports.get(parts[0]) ?? [])].some((path) =>
-    isAuditedLocalMacroPath(path.split('::'), safeLocalMacroNames),
+    isAuditedLocalMacroPath(path.split("::"), safeLocalMacroNames),
   );
 }
 
@@ -994,17 +1545,17 @@ function macroBoundaryModel(tokenizedFiles, sourceMacroNames) {
     const fileViolations = [];
     for (let index = 0; index < tokens.length - 3; index += 1) {
       if (
-        tokens[index].kind !== 'identifier' ||
+        tokens[index].kind !== "identifier" ||
         tokens[index].raw ||
-        tokens[index].value !== 'macro_rules' ||
-        tokens[index + 1]?.value !== '!' ||
-        tokens[index + 2]?.kind !== 'identifier' ||
-        !['(', '[', '{'].includes(tokens[index + 3]?.value)
+        tokens[index].value !== "macro_rules" ||
+        tokens[index + 1]?.value !== "!" ||
+        tokens[index + 2]?.kind !== "identifier" ||
+        !["(", "[", "{"].includes(tokens[index + 3]?.value)
       ) {
         continue;
       }
       const opener = tokens[index + 3].value;
-      const closer = opener === '(' ? ')' : opener === '[' ? ']' : '}';
+      const closer = opener === "(" ? ")" : opener === "[" ? "]" : "}";
       const bodyEnd = matchingToken(tokens, index + 3, opener, closer);
       if (bodyEnd === -1) continue;
       const body = tokens.slice(index + 4, bodyEnd);
@@ -1017,17 +1568,16 @@ function macroBoundaryModel(tokenizedFiles, sourceMacroNames) {
       const sourceSensitive =
         body.some(
           (token) =>
-            token.kind === 'identifier' &&
+            token.kind === "identifier" &&
             !token.raw &&
-            token.value === 'use',
-        ) ||
-        body.some((token) => isNamedSymbol(token, sourceMacroNames));
+            ["extern", "mod", "use"].includes(token.value),
+        ) || body.some((token) => isNamedSymbol(token, sourceMacroNames));
       if (
         body.some(
           (token, bodyIndex) =>
-            token.value === '$' &&
-            body[bodyIndex + 1]?.kind === 'identifier' &&
-            body[bodyIndex + 2]?.value === '!',
+            token.value === "$" &&
+            body[bodyIndex + 1]?.kind === "identifier" &&
+            body[bodyIndex + 2]?.value === "!",
         )
       ) {
         dynamicLocalMacroNames.add(macroName);
@@ -1039,7 +1589,7 @@ function macroBoundaryModel(tokenizedFiles, sourceMacroNames) {
       if (sourceSensitive) {
         fileViolations.push({
           line: tokens[index].line,
-          reason: 'source-sensitive declarative macro definition',
+          reason: "source-sensitive declarative macro definition",
         });
       }
       index = bodyEnd;
@@ -1067,36 +1617,41 @@ function localMacroArgumentsAreAudited(
   sourceMacroNames,
   safeLocalMacroNames,
   auditQualifiedMacroPaths,
+  packageAuthorization,
 ) {
   for (let index = start; index < end; index += 1) {
     const token = tokens[index];
     if (
-      token.kind === 'identifier' &&
-      ((!token.raw && token.value === 'use') ||
+      token.kind === "identifier" &&
+      ((!token.raw && token.value === "use") ||
         isNamedSymbol(token, sourceMacroNames))
     ) {
       return false;
     }
-    if (token.kind !== 'identifier') continue;
+    if (token.kind !== "identifier") continue;
     const name = canonicalSymbolName(token.value);
     const importedPaths = imports.get(name);
     if (
       importedPaths &&
-      !importedMacroPathsAreAudited(importedPaths, safeLocalMacroNames)
+      !importedMacroPathsAreAudited(
+        importedPaths,
+        safeLocalMacroNames,
+        packageAuthorization,
+      )
     ) {
       return false;
     }
     if (
       auditQualifiedMacroPaths &&
-      tokens[index + 1]?.value === ':' &&
-      tokens[index + 2]?.value === ':' &&
-      tokens[index + 3]?.kind === 'identifier'
+      tokens[index + 1]?.value === ":" &&
+      tokens[index + 2]?.value === ":" &&
+      tokens[index + 3]?.kind === "identifier"
     ) {
       let pathEnd = index + 3;
       while (
-        tokens[pathEnd + 1]?.value === ':' &&
-        tokens[pathEnd + 2]?.value === ':' &&
-        tokens[pathEnd + 3]?.kind === 'identifier'
+        tokens[pathEnd + 1]?.value === ":" &&
+        tokens[pathEnd + 2]?.value === ":" &&
+        tokens[pathEnd + 3]?.kind === "identifier"
       ) {
         pathEnd += 3;
       }
@@ -1104,9 +1659,14 @@ function localMacroArgumentsAreAudited(
       for (let cursor = index; cursor <= pathEnd; cursor += 3) {
         parts.push(canonicalSymbolName(tokens[cursor].value));
       }
-      const path = parts.join('::');
       if (
-        !AUDITED_SOURCE_INERT_MACRO_PATHS.has(path) &&
+        !auditedExternalMacroPath(
+          parts,
+          index >= 2 &&
+            tokens[index - 1]?.value === ":" &&
+            tokens[index - 2]?.value === ":",
+          packageAuthorization,
+        ) &&
         !isAuditedLocalMacroPath(parts, safeLocalMacroNames)
       ) {
         return false;
@@ -1122,23 +1682,25 @@ function macroInvocationIsAudited(
   macroIndex,
   imports,
   safeLocalMacroNames,
+  packageAuthorization,
 ) {
-  const { parts } = macroInvocationPath(tokens, macroIndex);
+  const { absolute, parts } = macroInvocationPath(tokens, macroIndex);
   if (parts.length > 1) {
     return (
-      AUDITED_SOURCE_INERT_MACRO_PATHS.has(parts.join('::')) ||
+      auditedExternalMacroPath(parts, absolute, packageAuthorization) ||
       isAuditedLocalMacroPath(parts, safeLocalMacroNames)
     );
   }
   const name = parts[0];
   const importedPaths = imports.get(name);
   if (importedPaths) {
-    return importedMacroPathsAreAudited(importedPaths, safeLocalMacroNames);
+    return importedMacroPathsAreAudited(
+      importedPaths,
+      safeLocalMacroNames,
+      packageAuthorization,
+    );
   }
-  return (
-    SOURCE_INERT_BUILTIN_MACROS.has(name) ||
-    safeLocalMacroNames.has(name)
-  );
+  return SOURCE_INERT_BUILTIN_MACROS.has(name) || safeLocalMacroNames.has(name);
 }
 
 function buildUseAliasGraph(tokenizedFiles) {
@@ -1150,30 +1712,26 @@ function buildUseAliasGraph(tokenizedFiles) {
     let branchStart = 0;
     for (let index = 0; index < tokens.length; index += 1) {
       const token = tokens[index];
-      if (token.value === ';') {
+      if (token.value === ";") {
         inUseStatement = false;
         branchStart = index + 1;
         continue;
       }
-      if (
-        token.kind === 'identifier' &&
-        !token.raw &&
-        token.value === 'use'
-      ) {
+      if (token.kind === "identifier" && !token.raw && token.value === "use") {
         inUseStatement = true;
         branchStart = index + 1;
         continue;
       }
       if (!inUseStatement) continue;
-      if (token.value === '{' || token.value === ',') {
+      if (token.value === "{" || token.value === ",") {
         branchStart = index + 1;
         continue;
       }
       if (
-        token.kind !== 'identifier' ||
+        token.kind !== "identifier" ||
         token.raw ||
-        token.value !== 'as' ||
-        tokens[index + 1]?.kind !== 'identifier'
+        token.value !== "as" ||
+        tokens[index + 1]?.kind !== "identifier"
       ) {
         continue;
       }
@@ -1181,7 +1739,7 @@ function buildUseAliasGraph(tokenizedFiles) {
       let sourceIndex = index - 1;
       while (
         sourceIndex >= branchStart &&
-        tokens[sourceIndex].kind !== 'identifier'
+        tokens[sourceIndex].kind !== "identifier"
       ) {
         sourceIndex -= 1;
       }
@@ -1239,21 +1797,17 @@ function expandNameGraph(graphs, names, budgetReason) {
 }
 
 function addUseAliases(useAliasGraph, names) {
-  return expandNameGraph(
-    [useAliasGraph],
-    names,
-    'Rust use-alias closure',
-  );
+  return expandNameGraph([useAliasGraph], names, "Rust use-alias closure");
 }
 
 function packageTrustVerifierNames(useAliasGraph) {
-  const names = new Set([canonicalSymbolName('PackageTrustVerifier')]);
+  const names = new Set([canonicalSymbolName("PackageTrustVerifier")]);
   addUseAliases(useAliasGraph, names);
   return names;
 }
 
 function sourceExpandingMacroNames(useAliasGraph) {
-  const names = new Set([canonicalSymbolName('include')]);
+  const names = new Set([canonicalSymbolName("include")]);
   addUseAliases(useAliasGraph, names);
   return names;
 }
@@ -1263,15 +1817,15 @@ function packageTrustVerifierImplementations(tokens, verifierNames) {
   const testModules = cfgTestModuleRanges(tokens);
   for (let index = 0; index < tokens.length; index += 1) {
     if (
-      tokens[index].kind !== 'identifier' ||
+      tokens[index].kind !== "identifier" ||
       tokens[index].raw ||
-      tokens[index].value !== 'impl'
+      tokens[index].value !== "impl"
     ) {
       continue;
     }
     let cursor = index + 1;
-    if (tokens[cursor]?.value === '<') {
-      const genericsEnd = matchingToken(tokens, cursor, '<', '>');
+    if (tokens[cursor]?.value === "<") {
+      const genericsEnd = matchingToken(tokens, cursor, "<", ">");
       if (genericsEnd === -1) continue;
       cursor = genericsEnd + 1;
     }
@@ -1279,15 +1833,11 @@ function packageTrustVerifierImplementations(tokens, verifierNames) {
     let forToken = -1;
     for (; cursor < tokens.length; cursor += 1) {
       const token = tokens[cursor];
-      if (token.value === '{' || token.value === ';') break;
+      if (token.value === "{" || token.value === ";") break;
       if (isNamedSymbol(token, verifierNames)) {
         verifier = cursor;
       }
-      if (
-        token.kind === 'identifier' &&
-        !token.raw &&
-        token.value === 'for'
-      ) {
+      if (token.kind === "identifier" && !token.raw && token.value === "for") {
         forToken = cursor;
         break;
       }
@@ -1315,17 +1865,17 @@ function packageTrustVerifierMacroNames(
   for (const { tokens } of tokenizedFiles) {
     for (let index = 0; index < tokens.length - 3; index += 1) {
       if (
-        tokens[index].kind !== 'identifier' ||
+        tokens[index].kind !== "identifier" ||
         tokens[index].raw ||
-        tokens[index].value !== 'macro_rules' ||
-        tokens[index + 1]?.value !== '!' ||
-        tokens[index + 2]?.kind !== 'identifier' ||
-        !['(', '[', '{'].includes(tokens[index + 3]?.value)
+        tokens[index].value !== "macro_rules" ||
+        tokens[index + 1]?.value !== "!" ||
+        tokens[index + 2]?.kind !== "identifier" ||
+        !["(", "[", "{"].includes(tokens[index + 3]?.value)
       ) {
         continue;
       }
       const opener = tokens[index + 3].value;
-      const closer = opener === '(' ? ')' : opener === '[' ? ']' : '}';
+      const closer = opener === "(" ? ")" : opener === "[" ? "]" : "}";
       const bodyEnd = matchingToken(tokens, index + 3, opener, closer);
       if (bodyEnd === -1) continue;
       const body = tokens.slice(index + 4, bodyEnd);
@@ -1335,8 +1885,8 @@ function packageTrustVerifierMacroNames(
       }
       for (let bodyIndex = 0; bodyIndex < body.length - 1; bodyIndex += 1) {
         if (
-          body[bodyIndex].kind !== 'identifier' ||
-          body[bodyIndex + 1]?.value !== '!'
+          body[bodyIndex].kind !== "identifier" ||
+          body[bodyIndex + 1]?.value !== "!"
         ) {
           continue;
         }
@@ -1360,7 +1910,7 @@ function packageTrustVerifierMacroNames(
   expandNameGraph(
     [useAliasGraph, macroDependencies],
     macroNames,
-    'Rust verifier-macro closure',
+    "Rust verifier-macro closure",
   );
   return macroNames;
 }
@@ -1374,14 +1924,14 @@ function packageTrustVerifierMacroInvocations(
   const testModules = cfgTestModuleRanges(tokens);
   for (let index = 0; index < tokens.length - 2; index += 1) {
     if (
-      tokens[index].kind !== 'identifier' ||
-      tokens[index + 1]?.value !== '!' ||
-      !['(', '[', '{'].includes(tokens[index + 2]?.value)
+      tokens[index].kind !== "identifier" ||
+      tokens[index + 1]?.value !== "!" ||
+      !["(", "[", "{"].includes(tokens[index + 2]?.value)
     ) {
       continue;
     }
     const opener = tokens[index + 2].value;
-    const closer = opener === '(' ? ')' : opener === '[' ? ']' : '}';
+    const closer = opener === "(" ? ")" : opener === "[" ? "]" : "}";
     const argumentsEnd = matchingToken(tokens, index + 2, opener, closer);
     if (argumentsEnd === -1) continue;
     const carriesVerifier =
@@ -1444,9 +1994,10 @@ const tokenizedFiles = [...discoveredFiles].sort().map((file) => {
   }
   return {
     file,
-    tokens: lexRust(readFileSync(file, 'utf8')),
+    tokens: lexRust(readFileSync(file, "utf8")),
   };
 });
+applyCargoAliasShadowProof(tokenizedFiles);
 const useAliasGraph = buildUseAliasGraph(tokenizedFiles);
 const sourceMacroNames = sourceExpandingMacroNames(useAliasGraph);
 const macroBoundary = macroBoundaryModel(tokenizedFiles, sourceMacroNames);
@@ -1463,17 +2014,18 @@ for (const { file, tokens } of tokenizedFiles) {
     discoveredFiles,
     sourceMacroNames,
     macroBoundary,
+    packageAuthorizationForFile(file),
   )) {
     process.stdout.write(
-      diagnosticRecord('source', file, violation.line, violation.reason),
+      diagnosticRecord("source", file, violation.line, violation.reason),
     );
   }
   for (const line of unsafeLintAttributes(tokens)) {
-    process.stdout.write(diagnosticRecord('allow', file, line));
+    process.stdout.write(diagnosticRecord("allow", file, line));
   }
   for (const token of tokens) {
-    if (token.kind === 'identifier' && !token.raw && token.value === 'unsafe') {
-      process.stdout.write(diagnosticRecord('unsafe', file, token.line));
+    if (token.kind === "identifier" && !token.raw && token.value === "unsafe") {
+      process.stdout.write(diagnosticRecord("unsafe", file, token.line));
     }
   }
   const verifierSites = [
@@ -1491,7 +2043,7 @@ for (const { file, tokens } of tokenizedFiles) {
     emittedVerifierSites.add(site);
     process.stdout.write(
       diagnosticRecord(
-        implementation.testOnly ? 'trust-test' : 'trust',
+        implementation.testOnly ? "trust-test" : "trust",
         file,
         implementation.line,
       ),

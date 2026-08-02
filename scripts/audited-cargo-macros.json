@@ -1,0 +1,65 @@
+{
+  "registrySource": "registry+https://github.com/rust-lang/crates.io-index",
+  "packages": {
+    "objc2": {
+      "macros": {
+        "class": null,
+        "msg_send": null
+      },
+      "versions": {
+        "0.6.4": "3a12a8ed07aefc768292f076dc3ac8c48f3781c8f2d5851dd3d98950e8c5a89f"
+      }
+    },
+    "ort": {
+      "macros": {
+        "inputs": null
+      },
+      "versions": {
+        "2.0.0-rc.10": "1fa7e49bd669d32d7bc2a15ec540a527e7764aec722a45467814005725bcd721"
+      }
+    },
+    "schemars": {
+      "macros": {
+        "schema_for": null
+      },
+      "versions": {
+        "0.8.22": "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
+      }
+    },
+    "serde_json": {
+      "macros": {
+        "json": null
+      },
+      "versions": {
+        "1.0.150": "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9",
+        "1.0.151": "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+      }
+    },
+    "tauri": {
+      "macros": {
+        "generate_context": "tauri-macros",
+        "generate_handler": "tauri-macros"
+      },
+      "versions": {
+        "2.11.2": "437404997acf375d85f1177afa7e11bb971f274ed6a7b83a2a3e339015f4cc28"
+      }
+    },
+    "tokio": {
+      "macros": {
+        "join": null,
+        "pin": null,
+        "select": null
+      },
+      "versions": {
+        "1.52.3": "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
+      }
+    }
+  },
+  "providers": {
+    "tauri-macros": {
+      "versions": {
+        "2.6.2": "ae6cb4e3896c21d2f6da5b31251d2faea0153bba56ed0e970f918115dbee4924"
+      }
+    }
+  }
+}

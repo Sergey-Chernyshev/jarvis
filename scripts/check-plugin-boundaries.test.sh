@@ -1061,6 +1061,23 @@ if [[ "$cross_kind_attribute_scan" != *$'source\t'* ]]; then
   exit 1
 fi
 
+printf '%s\n' \
+  'mod bad_scope {' \
+  '    use attacker::*;' \
+  '    #[test]' \
+  '    fn shadowed_builtin() {}' \
+  '}' \
+  > "$provenance_package_root/src/lib.rs"
+glob_shadowed_attribute_scan="$(
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    "$provenance_package_root" \
+    --cargo-provenance-file "$provenance_records"
+)"
+if [[ "$glob_shadowed_attribute_scan" != *$'source\t'* ]]; then
+  echo "scanner accepted an attribute shadowed through an external glob" >&2
+  exit 1
+fi
+
 rm -rf -- "$provenance_root"
 
 write_clean_fixture

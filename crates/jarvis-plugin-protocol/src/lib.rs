@@ -10,6 +10,7 @@ pub mod manifest;
 pub mod operation;
 pub mod package;
 pub mod process;
+pub mod receipt;
 pub mod settings;
 
 mod validation;

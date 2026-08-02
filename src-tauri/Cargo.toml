@@ -35,6 +35,7 @@ sha2 = { version = "=0.10.9", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 regex = "1"
+rusqlite = "=0.31.0"
 chrono = "0.4"
 libc = "0.2"
 # голос (инкремент 7): проигрывание WAV на системный output
@@ -56,6 +57,7 @@ rubato = "0.16.2"
 # вставка текста (инкр. 9, фаза 5): clipboard snapshot/restore для ⌘V-вставки
 arboard = "3"
 zeroize = "1"
+uuid = { version = "1", features = ["v4"] }
 
 [[bin]]
 name = "jarvis"

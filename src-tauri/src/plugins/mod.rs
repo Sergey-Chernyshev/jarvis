@@ -9,6 +9,8 @@ pub mod install;
 pub mod manifest;
 pub mod manifest_v2;
 pub mod package;
+#[allow(dead_code)] // A5 storage primitives are wired into manager transactions in A6.
+pub mod package_manager;
 pub mod protocol;
 pub mod supervisor;
 pub mod trust;

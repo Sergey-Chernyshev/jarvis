@@ -707,6 +707,63 @@ if [[ "$scoped_provenance_scan" != *$'source\t'* ]]; then
 fi
 rm -rf -- "$provenance_package_root/nested"
 
+mkdir -p "$provenance_package_root/nested/src"
+printf '%s\n' \
+  '[package]' \
+  'name = "nested-with-provenance"' \
+  'version = "0.1.0"' \
+  > "$provenance_package_root/nested/Cargo.toml"
+printf '%s\n' \
+  'pub fn nested() {' \
+  '    let _ = serde_json::json!({ "safe": true });' \
+  '}' \
+  > "$provenance_package_root/nested/src/shared.rs"
+printf '%s\n' \
+  'include!("../nested/src/shared.rs");' \
+  > "$provenance_package_root/src/lib.rs"
+printf '%s\n' "$verified_provenance" > "$provenance_records"
+node -e '
+  const record = JSON.parse(process.argv[1]);
+  const { realpathSync } = require("node:fs");
+  const { join } = require("node:path");
+  record.packageRoot = realpathSync(process.argv[2]);
+  record.manifestPath = realpathSync(
+    join(record.packageRoot, "Cargo.toml"),
+  );
+  process.stdout.write(`${JSON.stringify(record)}\n`);
+' \
+  "$verified_provenance" \
+  "$provenance_package_root/nested" \
+  >> "$provenance_records"
+cross_package_include_scan="$(
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    --trust-roots \
+    "$provenance_package_root" \
+    --cargo-provenance-file "$provenance_records"
+)"
+if [[ "$cross_package_include_scan" != *$'source\t'* ]]; then
+  echo "scanner accepted a cross-package include under the wrong namespace" >&2
+  exit 1
+fi
+rm -rf -- "$provenance_package_root/nested"
+
+printf '%s\n' "$verified_provenance" > "$provenance_records"
+printf '%s\n' \
+  'extern crate self as serde_json;' \
+  'pub fn rebound_absolute() {' \
+  '    let _ = ::serde_json::json!({ "safe": true });' \
+  '}' \
+  > "$provenance_package_root/src/lib.rs"
+absolute_rebind_scan="$(
+  node "$repo_root/scripts/scan-rust-unsafe-boundary.mjs" \
+    "$provenance_package_root" \
+    --cargo-provenance-file "$provenance_records"
+)"
+if [[ "$absolute_rebind_scan" != *$'source\t'* ]]; then
+  echo "scanner accepted an absolute Cargo alias rebound by extern crate" >&2
+  exit 1
+fi
+
 printf '%s\n' "$renamed_provenance" > "$provenance_records"
 printf '%s\n' \
   'pub fn renamed() {' \
@@ -2000,6 +2057,16 @@ node -e '
     if (!boundaryScript.includes(flag)) {
       throw new Error(`plugin boundary metadata is missing ${flag}`);
     }
+  }
+  if (
+    !boundaryScript.includes("--cargo-provenance-fd 9") ||
+    boundaryScript.includes(
+      "--cargo-provenance-file \"$cargo_provenance_file\"",
+    )
+  ) {
+    throw new Error(
+      "plugin boundary must hand scanner the already-open provenance inode",
+    );
   }
 ' \
   "$repo_root/.github/workflows/ci.yml" \

@@ -474,6 +474,8 @@ test('main panel exposes Agent VM workspace, bridge and keyboard contract', () =
   assert.doesNotMatch(renderer, /className: 'pm-card-rail'/);
   assert.doesNotMatch(html, /aspect-ratio:\s*1/);
   assert.match(folderPicker, /NSOpenPanel/);
+  assert.match(folderPicker, /beginWithCompletionHandler/);
+  assert.doesNotMatch(folderPicker, /runModal/);
   assert.doesNotMatch(ipc, /PICK_FOLDER_SCRIPT|osascript/);
   assert.match(html, /Добавить папку/);
   assert.match(html, /pm-card-grid\.cards/);

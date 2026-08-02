@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readStableFile } from "./read-stable-file.mjs";
+import {
+  assertNoCargoSourceOverrides,
+  verifyCargoRegistrySource,
+} from "./verify-cargo-registry-source.mjs";
 
 const MAX_METADATA_BYTES = 32 * 1024 * 1024;
 const MAX_LOCK_BYTES = 16 * 1024 * 1024;
@@ -13,22 +18,11 @@ const MAX_LOCK_PACKAGES = 20_000;
 const MAX_PROVIDERS = 64;
 const RUST_CRATE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const CHECKSUM = /^[a-f0-9]{64}$/;
+const EXTERN_PRELUDE_EDITIONS = new Set(["2018", "2021", "2024"]);
 
 if (process.argv.length !== 3) {
   console.error("usage: resolve-cargo-macro-provenance.mjs <Cargo.toml>");
   process.exit(2);
-}
-
-function regularFile(path, label, maximumBytes) {
-  const absolute = resolve(path);
-  const info = lstatSync(absolute);
-  if (info.isSymbolicLink() || !info.isFile()) {
-    throw new Error(`${label} must be a regular non-symlink file`);
-  }
-  if (info.size > maximumBytes) {
-    throw new Error(`${label} exceeds ${maximumBytes} bytes`);
-  }
-  return realpathSync(absolute);
 }
 
 function exactObject(value, keys, label) {
@@ -61,12 +55,14 @@ function validateVersions(versions, label) {
   }
 }
 
-const auditPath = regularFile(
+const auditFile = readStableFile(
   fileURLToPath(new URL("./audited-cargo-macros.json", import.meta.url)),
   "Cargo macro audit",
   1024 * 1024,
 );
-const audit = JSON.parse(readFileSync(auditPath, "utf8"));
+const audit = JSON.parse(
+  new TextDecoder("utf-8", { fatal: true }).decode(auditFile.buffer),
+);
 exactObject(
   audit,
   ["packages", "providers", "registrySource"],
@@ -132,11 +128,12 @@ for (const [packageName, policy] of Object.entries(audit.packages)) {
   }
 }
 
-const manifestPath = regularFile(
+const manifestFile = readStableFile(
   process.argv[2],
   "Cargo manifest",
   1024 * 1024,
 );
+const manifestPath = manifestFile.path;
 
 let metadataBytes = 0;
 const metadataChunks = [];
@@ -159,11 +156,12 @@ if (typeof metadata.workspace_root !== "string") {
   throw new Error("Cargo metadata workspace root is missing");
 }
 const workspaceRoot = realpathSync(resolve(metadata.workspace_root));
+assertNoCargoSourceOverrides(workspaceRoot);
 const relativeManifest = relative(workspaceRoot, manifestPath);
 if (relativeManifest === ".." || relativeManifest.startsWith(`..${sep}`)) {
   throw new Error("Cargo manifest is outside its metadata workspace");
 }
-const lockPath = regularFile(
+const lockFile = readStableFile(
   join(workspaceRoot, "Cargo.lock"),
   "Cargo lockfile",
   MAX_LOCK_BYTES,
@@ -209,7 +207,9 @@ function parseLockPackages(source) {
   return packages;
 }
 
-const lockPackages = parseLockPackages(readFileSync(lockPath, "utf8"));
+const lockPackages = parseLockPackages(
+  new TextDecoder("utf-8", { fatal: true }).decode(lockFile.buffer),
+);
 if (
   !Array.isArray(metadata.packages) ||
   metadata.packages.length > MAX_METADATA_PACKAGES
@@ -247,10 +247,16 @@ if (packageMatches.length !== 1) {
 const packageRecord = packageMatches[0];
 if (
   typeof packageRecord.id !== "string" ||
+  typeof packageRecord.edition !== "string" ||
   !Array.isArray(packageRecord.dependencies) ||
   packageRecord.dependencies.length > MAX_DIRECT_DEPENDENCIES
 ) {
   throw new Error("Cargo metadata requested package is malformed");
+}
+if (!EXTERN_PRELUDE_EDITIONS.has(packageRecord.edition)) {
+  throw new Error(
+    "audited Cargo macro provenance requires Rust edition 2018 or newer",
+  );
 }
 
 function uniqueById(records, label) {
@@ -387,11 +393,20 @@ function resolvedPackage(packageId, label) {
   if (
     typeof record.name !== "string" ||
     typeof record.version !== "string" ||
+    typeof record.manifest_path !== "string" ||
     !Object.hasOwn(record, "source")
   ) {
     throw new Error(`Cargo resolve package identity is malformed for ${label}`);
   }
   return record;
+}
+
+const verifiedPhysicalPackages = new Set();
+function verifyPhysicalPackage(packageIdentity, identity) {
+  const key = `${packageIdentity.id}\0${identity.checksum}`;
+  if (verifiedPhysicalPackages.has(key)) return;
+  verifyCargoRegistrySource(packageIdentity, identity.checksum);
+  verifiedPhysicalPackages.add(key);
 }
 
 function providerIdentities(packageIdentity, policy) {
@@ -432,13 +447,15 @@ function providerIdentities(packageIdentity, policy) {
       providerId,
       `macro provider ${providerName}`,
     );
-    providers[providerName] = lockIdentity(
+    const providerIdentity = lockIdentity(
       provider.name,
       provider.version,
       provider.source,
       audit.providers[providerName].versions,
       `Cargo macro provider ${providerName}`,
     );
+    verifyPhysicalPackage(provider, providerIdentity);
+    providers[providerName] = providerIdentity;
   }
   return providers;
 }
@@ -478,6 +495,7 @@ for (const [localAlias, packageIds] of resolvedAliases) {
     policy.versions,
     `audited Cargo macro package ${resolved.name}`,
   );
+  verifyPhysicalPackage(resolved, identity);
   aliases[localAlias] = {
     ...identity,
     providers: providerIdentities(resolved, policy),

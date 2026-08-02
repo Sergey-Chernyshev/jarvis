@@ -18,6 +18,7 @@ import {
   sep,
 } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readStableFd, readStableFile } from "./read-stable-file.mjs";
 
 const MAX_DISCOVERY_ENTRIES = 200_000;
 const MAX_RUST_FILES = 20_000;
@@ -44,21 +45,36 @@ const CARGO_CHECKSUM = /^[a-f0-9]{64}$/;
 const rawScanArguments = process.argv.slice(2);
 const scanArguments = [];
 let cargoProvenanceArgument = null;
+let cargoProvenanceFd = null;
 let invalidCargoProvenanceArguments = false;
 for (let index = 0; index < rawScanArguments.length; index += 1) {
-  if (rawScanArguments[index] !== "--cargo-provenance-file") {
+  if (
+    rawScanArguments[index] !== "--cargo-provenance-file" &&
+    rawScanArguments[index] !== "--cargo-provenance-fd"
+  ) {
     scanArguments.push(rawScanArguments[index]);
     continue;
   }
+  const provenanceOption = rawScanArguments[index];
   if (
     cargoProvenanceArgument !== null ||
+    cargoProvenanceFd !== null ||
     index + 1 >= rawScanArguments.length ||
     rawScanArguments[index + 1].startsWith("--")
   ) {
     invalidCargoProvenanceArguments = true;
     continue;
   }
-  cargoProvenanceArgument = rawScanArguments[index + 1];
+  if (provenanceOption === "--cargo-provenance-file") {
+    cargoProvenanceArgument = rawScanArguments[index + 1];
+  } else {
+    const parsedFd = Number(rawScanArguments[index + 1]);
+    if (!Number.isInteger(parsedFd) || parsedFd < 3 || parsedFd > 255) {
+      invalidCargoProvenanceArguments = true;
+    } else {
+      cargoProvenanceFd = parsedFd;
+    }
+  }
   index += 1;
 }
 const trustRootsMode = scanArguments[0] === "--trust-roots";
@@ -84,7 +100,7 @@ const unexpectedArguments =
   scanArguments.includes("--target-sources");
 if (rootArguments.length === 0 || unexpectedArguments) {
   console.error(
-    "usage: scan-rust-unsafe-boundary.mjs <package-root> [--cargo-provenance-file <path>] [--target-sources-stdin0] | --trust-roots <root>... [--cargo-provenance-file <path>] [--target-sources-stdin0]",
+    "usage: scan-rust-unsafe-boundary.mjs <package-root> [--cargo-provenance-file <path> | --cargo-provenance-fd <fd>] [--target-sources-stdin0] | --trust-roots <root>... [--cargo-provenance-file <path> | --cargo-provenance-fd <fd>] [--target-sources-stdin0]",
   );
   process.exit(2);
 }
@@ -227,18 +243,6 @@ function exactObject(value, keys, label) {
   }
 }
 
-function regularFile(path, label, maximumBytes) {
-  const absolute = resolve(path);
-  const info = lstatSync(absolute);
-  if (info.isSymbolicLink() || !info.isFile()) {
-    throw new Error(`${label} must be a regular non-symlink file`);
-  }
-  if (info.size > maximumBytes) {
-    throw new Error(`${label} exceeds ${maximumBytes} bytes`);
-  }
-  return realpathSync(absolute);
-}
-
 function validateAuditVersions(versions, label) {
   if (
     !versions ||
@@ -256,12 +260,14 @@ function validateAuditVersions(versions, label) {
 }
 
 function loadCargoMacroAudit() {
-  const path = regularFile(
+  const auditFile = readStableFile(
     fileURLToPath(new URL("./audited-cargo-macros.json", import.meta.url)),
     "Cargo macro audit",
     MAX_CARGO_PROVENANCE_BYTES,
   );
-  const audit = JSON.parse(readFileSync(path, "utf8"));
+  const audit = JSON.parse(
+    new TextDecoder("utf-8", { fatal: true }).decode(auditFile.buffer),
+  );
   exactObject(
     audit,
     ["packages", "providers", "registrySource"],
@@ -375,16 +381,19 @@ function verifiedCargoIdentity(identity, policy, label) {
   }
 }
 
-function loadCargoProvenance(argument) {
+function loadCargoProvenance(argument, fd) {
   const recordsByRoot = new Map();
-  if (argument === null) return recordsByRoot;
-  const path = regularFile(
-    argument,
-    "Cargo macro provenance",
-    MAX_CARGO_PROVENANCE_BYTES,
-  );
+  if (argument === null && fd === null) return recordsByRoot;
+  const provenanceFile =
+    fd === null
+      ? readStableFile(
+          argument,
+          "Cargo macro provenance",
+          MAX_CARGO_PROVENANCE_BYTES,
+        )
+      : readStableFd(fd, "Cargo macro provenance", MAX_CARGO_PROVENANCE_BYTES);
   const source = new TextDecoder("utf-8", { fatal: true }).decode(
-    readFileSync(path),
+    provenanceFile.buffer,
   );
   const lines = source.split(/\r?\n/);
   if (lines.at(-1) === "") lines.pop();
@@ -415,11 +424,12 @@ function loadCargoProvenance(argument) {
       throw new Error(`${label} package root must be a non-symlink directory`);
     }
     const packageRoot = realpathSync(resolve(record.packageRoot));
-    const manifestPath = regularFile(
+    const manifestFile = readStableFile(
       record.manifestPath,
       `${label} manifest`,
       1024 * 1024,
     );
+    const manifestPath = manifestFile.path;
     if (
       dirname(manifestPath) !== packageRoot ||
       basename(manifestPath) !== "Cargo.toml" ||
@@ -454,6 +464,7 @@ function loadCargoProvenance(argument) {
       });
     }
     recordsByRoot.set(packageRoot, {
+      absoluteShadowedAliases: new Set(),
       aliases,
       manifestPath,
       packageRoot,
@@ -463,12 +474,16 @@ function loadCargoProvenance(argument) {
   return recordsByRoot;
 }
 
-const cargoProvenanceByRoot = loadCargoProvenance(cargoProvenanceArgument);
+const cargoProvenanceByRoot = loadCargoProvenance(
+  cargoProvenanceArgument,
+  cargoProvenanceFd,
+);
+const filePackageRootCache = new Map();
 const filePackageAuthorizationCache = new Map();
 
-function packageAuthorizationForFile(file) {
-  if (filePackageAuthorizationCache.has(file)) {
-    return filePackageAuthorizationCache.get(file);
+function packageRootForFile(file) {
+  if (filePackageRootCache.has(file)) {
+    return filePackageRootCache.get(file);
   }
   const containingRoots = scanRoots
     .filter((root) => isInsideRoot(root, file))
@@ -492,8 +507,18 @@ function packageAuthorizationForFile(file) {
       directory = parent;
     }
   }
-  const authorization =
-    (packageRoot && cargoProvenanceByRoot.get(packageRoot)) ?? null;
+  filePackageRootCache.set(file, packageRoot);
+  return packageRoot;
+}
+
+function packageAuthorizationForFile(file) {
+  if (filePackageAuthorizationCache.has(file)) {
+    return filePackageAuthorizationCache.get(file);
+  }
+  const packageRoot = packageRootForFile(file);
+  const authorization = packageRoot
+    ? (cargoProvenanceByRoot.get(packageRoot) ?? null)
+    : null;
   filePackageAuthorizationCache.set(file, authorization);
   return authorization;
 }
@@ -888,10 +913,14 @@ function isCoveredTrustSource(file, literal, discoveredFiles) {
   } catch {
     return false;
   }
+  const realCandidate = realpathSync(candidate);
+  const sourcePackageRoot = packageRootForFile(file);
   return (
     !candidateInfo.isSymbolicLink() &&
     candidateInfo.isFile() &&
-    discoveredFiles.has(realpathSync(candidate))
+    discoveredFiles.has(realCandidate) &&
+    sourcePackageRoot !== null &&
+    packageRootForFile(realCandidate) === sourcePackageRoot
   );
 }
 
@@ -1457,11 +1486,15 @@ function applyCargoAliasShadowProof(tokenizedFiles) {
         if (binding?.kind !== "identifier") {
           for (const alias of aliases) {
             authorization.shadowedAliases.add(alias);
+            authorization.absoluteShadowedAliases.add(alias);
           }
           continue;
         }
         const name = canonicalSymbolName(binding.value);
-        if (aliases.has(name)) authorization.shadowedAliases.add(name);
+        if (aliases.has(name)) {
+          authorization.shadowedAliases.add(name);
+          authorization.absoluteShadowedAliases.add(name);
+        }
       }
     }
   }
@@ -1500,7 +1533,9 @@ function auditedExternalMacroPath(parts, absolute, packageAuthorization) {
   const macro = parts[1];
   const authorization = packageAuthorization.aliases.get(alias);
   if (!authorization || !authorization.macros.has(macro)) return false;
-  return absolute || !packageAuthorization.shadowedAliases.has(alias);
+  return absolute
+    ? !packageAuthorization.absoluteShadowedAliases.has(alias)
+    : !packageAuthorization.shadowedAliases.has(alias);
 }
 
 function importedMacroPathsAreAudited(

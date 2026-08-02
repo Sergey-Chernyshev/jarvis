@@ -14,9 +14,12 @@ cargo_provenance_file="$(
   mktemp "${TMPDIR:-/tmp}/jarvis-cargo-provenance.XXXXXX"
 )"
 cleanup_cargo_provenance() {
+  exec 9>&- || true
   rm -f -- "$cargo_provenance_file"
 }
 trap cleanup_cargo_provenance EXIT
+exec 9<>"$cargo_provenance_file"
+rm -f -- "$cargo_provenance_file"
 
 repo_root_resolved="$(cd "$repo_root" && pwd -P)"
 boundary_fixture_mode=0
@@ -61,12 +64,15 @@ semantic_manifest_json() {
 
 resolved_manifest_json() {
   local manifest="$1"
-  "$cargo_bin" metadata \
-    --all-features \
-    --format-version=1 \
-    --locked \
-    --offline \
-    --manifest-path "$manifest" \
+  (
+    cd "$repo_root_resolved"
+    "$cargo_bin" metadata \
+      --all-features \
+      --format-version=1 \
+      --locked \
+      --offline \
+      --manifest-path "$manifest"
+  ) \
     | node -e '
       const limit = Number(process.argv[1]);
       let bytes = 0;
@@ -107,7 +113,7 @@ append_cargo_macro_provenance() {
       return 1
     fi
   fi
-  printf '%s\n' "$record" >> "$cargo_provenance_file"
+  printf '%s\n' "$record" >&9
 }
 
 semantic_target_source_lines() {
@@ -297,7 +303,7 @@ if [[ -f "$package_manifest" ]]; then
       | node \
         "$script_dir/scan-rust-unsafe-boundary.mjs" \
         "$package_root" \
-        --cargo-provenance-file "$cargo_provenance_file" \
+        --cargo-provenance-fd 9 \
         --target-sources-stdin0
   )"; then
     echo "failed to scan jarvis-package Rust syntax: $package_root" >&2
@@ -501,7 +507,7 @@ if [[ "${#trust_roots[@]}" -gt 0 ]] && ! trust_scan="$(
   } \
     | node "$script_dir/scan-rust-unsafe-boundary.mjs" \
       --trust-roots "${trust_roots[@]}" \
-      --cargo-provenance-file "$cargo_provenance_file" \
+      --cargo-provenance-fd 9 \
       --target-sources-stdin0
 )"; then
   echo "failed to scan PackageTrustVerifier ownership roots" >&2

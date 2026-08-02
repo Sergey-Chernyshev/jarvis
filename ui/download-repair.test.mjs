@@ -64,3 +64,50 @@ test('main UI loads repair classifier before settings and exposes the proxy CTA 
     'proxy field is focused even when the service pane was already rendered',
   );
 });
+
+test('fresh model progress authoritatively clears its stale error before rendering', async () => {
+  const settings = await readFile(new URL('./settings2.js', import.meta.url), 'utf8');
+
+  assert.match(settings, /function clearDownloadError\(id\)/);
+  assert.match(settings, /data-download-error/);
+  assert.doesNotMatch(
+    settings,
+    /for \(const id of ids\) clearDownloadError\(id\)/,
+    'a click is not proof that the backend accepted a bulk retry',
+  );
+  assert.doesNotMatch(
+    settings,
+    /activeDownload = 'hey_jarvis'; clearDownloadError/,
+    'a click is not proof that the legacy wake retry started',
+  );
+
+  const progressStart = settings.indexOf('window.jarvis.onModelInstallProgress');
+  assert.notEqual(progressStart, -1, 'model progress subscription exists');
+  const progressBlock = settings.slice(progressStart, progressStart + 900);
+  const clearIndex = progressBlock.indexOf('clearDownloadError(id)');
+  const renderIndex = progressBlock.indexOf('data-model');
+  assert.ok(clearIndex >= 0, 'fresh progress clears the stale error');
+  assert.ok(renderIndex > clearIndex, 'error clears before progress is rendered');
+
+  const legacyProgressStart = settings.indexOf('window.jarvis.onSttInstallProgress');
+  assert.notEqual(legacyProgressStart, -1, 'legacy progress subscription exists');
+  const legacyProgressBlock = settings.slice(legacyProgressStart, legacyProgressStart + 650);
+  assert.match(
+    legacyProgressBlock,
+    /clearDownloadError\(activeDownload\)/,
+    'legacy progress also authoritatively clears its stale error',
+  );
+});
+
+test('model selection uses an accessible Jarvis checkbox instead of native styling', async () => {
+  const settings = await readFile(new URL('./settings2.js', import.meta.url), 'utf8');
+
+  assert.match(settings, /input\.model-check/);
+  assert.match(settings, /'aria-label':\s*'Выбрать для установки:/);
+  assert.match(settings, /#settings2 \.model-check\s*\{/);
+  assert.match(settings, /#settings2 \.model-check:hover/);
+  assert.match(settings, /#settings2 \.model-check:focus-visible/);
+  assert.match(settings, /#settings2 \.model-check:checked/);
+  assert.match(settings, /#settings2 \.model-check:disabled/);
+  assert.doesNotMatch(settings, /margin-right:6px;vertical-align:middle/);
+});

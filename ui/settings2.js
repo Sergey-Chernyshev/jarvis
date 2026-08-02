@@ -467,8 +467,18 @@
   /* ── Инлайн-заметка ошибки загрузки (красная, под строкой модели) ───────
    * Показывает реальную причину провала скачивания (раньше ошибка молча
    * глоталась и статус «сбрасывался» в «не скачана»). */
-  function dlErrorNote(msg) {
+  function clearDownloadError(id) {
+    if (!id) return;
+    delete dlState[id];
+    if (!currentRoot) return;
+    for (const note of currentRoot.querySelectorAll('[data-download-error]')) {
+      if (note.getAttribute('data-download-error') === id) note.remove();
+    }
+  }
+
+  function dlErrorNote(msg, id) {
     const n = el('div.s2err');
+    if (id) n.setAttribute('data-download-error', id);
     n.appendChild(el('span.s2err-ic', icon('alert-triangle')));
     n.appendChild(el('span.s2err-txt', { text: msg }));
     const repair = window.JarvisDownloadRepair
@@ -634,6 +644,17 @@
 #settings2 .toggle::after { content:""; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,0.4); transition:left 120ms ease; }
 #settings2 .toggle:checked::after { left:14px; }
 #settings2 .toggle:disabled { opacity:.45; }
+
+/* ── Checkbox выбора модели ──────────────────────────────────────────── */
+#settings2 .model-actions { display:flex; align-items:center; gap:9px; }
+#settings2 .model-check { appearance:none; -webkit-appearance:none; width:18px; height:18px; margin:0; flex:none; display:grid; place-content:center; color:#08101e; background:rgba(255,255,255,.045); border:1px solid rgba(255,255,255,.22); border-radius:5px; transition:background .14s ease,border-color .14s ease,box-shadow .14s ease,transform .1s ease; }
+#settings2 .model-check::before { content:""; width:8px; height:4px; border-left:2px solid currentColor; border-bottom:2px solid currentColor; transform:translateY(-1px) rotate(-45deg) scale(0); transform-origin:center; transition:transform .12s ease; }
+#settings2 .model-check:hover { border-color:rgba(108,160,255,.72); background:rgba(108,160,255,.10); }
+#settings2 .model-check:focus-visible { outline:none; border-color:var(--working,#6ca0ff); box-shadow:0 0 0 3px rgba(108,160,255,.22); }
+#settings2 .model-check:checked { border-color:var(--working,#6ca0ff); background:var(--working,#6ca0ff); }
+#settings2 .model-check:checked::before { transform:translateY(-1px) rotate(-45deg) scale(1); }
+#settings2 .model-check:active { transform:scale(.92); }
+#settings2 .model-check:disabled { opacity:.42; }
 
 /* ── Segmented ───────────────────────────────────────────────────────── */
 #settings2 .seg { display:flex; border:1px solid var(--border, rgba(255,255,255,0.08)); border-radius:6px; overflow:hidden; }
@@ -967,7 +988,7 @@
     // Статус: явный успех «✓ размер» (видно, что скачалось) либо «не скачана».
     grow.appendChild(el('div.dd', { text: m.present ? '✓ установлена · ' + fmtBytes(m.bytes) : 'не скачана' }));
     // Ошибка прошлой попытки — прямо в строке (вместо тихого сброса), с подсказкой про retry.
-    if (dlState[m.id] && dlState[m.id].error) grow.appendChild(dlErrorNote(dlState[m.id].error));
+    if (dlState[m.id] && dlState[m.id].error) grow.appendChild(dlErrorNote(dlState[m.id].error, m.id));
 
     const action = downloadActionFor(m);
     if (action) {
@@ -977,17 +998,19 @@
       const label = retry ? 'Повторить' : action.label;
       const btn = el('button.btn.sm', null, [iconSpan(retry ? 'rotate-ccw' : 'download'), document.createTextNode(label)]);
       btn.addEventListener('click', async () => {
-        delete dlState[m.id];             // сбросить прежнюю ошибку
         btn.disabled = true; btn.replaceChildren(document.createTextNode('Качаю…'));
         // единый путь: оркестратор шлёт прогресс/финал по id модели
         await safe(() => window.jarvis.modelsInstall([m.id]), null);
       });
-      const cb = el('input', { type: 'checkbox', style: 'margin-right:6px;vertical-align:middle' });
+      const cb = el('input.model-check', {
+        type: 'checkbox',
+        'aria-label': 'Выбрать для установки: ' + m.label,
+      });
       cb.checked = selectedModels.has(m.id);
       cb.addEventListener('change', () => {
         if (cb.checked) selectedModels.add(m.id); else selectedModels.delete(m.id);
       });
-      const btnRow = el('div', { style: 'display:flex;align-items:center' }, [cb, btn]);
+      const btnRow = el('div.model-actions', null, [cb, btn]);
       wrap.appendChild(btnRow);
       wrap.appendChild(el('div', { 'data-model': m.id })); // плейсхолдер прогресса
       return el('div.drow', null, [dot, grow, wrap]);
@@ -1097,11 +1120,11 @@
       const werr = dlState['hey_jarvis'] && dlState['hey_jarvis'].error;
       const wctl = el('div.dctl', { style: 'flex-direction:column;align-items:flex-end;gap:6px' });
       wctl.appendChild(button(werr ? 'Повторить' : 'Скачать (~3.5 МБ)', async (b) => {
-        activeDownload = 'hey_jarvis'; delete dlState['hey_jarvis'];
+        activeDownload = 'hey_jarvis';
         b.disabled = true; b.textContent = 'Скачиваю…';
         await safe(() => window.jarvis.wakeInstallModels(), null);
       }, 'sm'));
-      if (werr) wctl.appendChild(dlErrorNote(werr));
+      if (werr) wctl.appendChild(dlErrorNote(werr, 'hey_jarvis'));
       group.appendChild(drow('Модели openWakeWord', 'Нужно скачать модели (~3.5 МБ), чтобы детектор заработал.',
         wctl, { dot: '' }));
     }
@@ -1831,7 +1854,7 @@
     if (res && res.ok === false) {
       dlState[id] = { error: (res && res.error) || 'неизвестная ошибка (подробности в логах ~/.jarvis/jarvis.log)' };
     } else {
-      delete dlState[id]; // успех — present-статус («✓ установлена») придёт перерисовкой
+      clearDownloadError(id); // успех — present-статус («✓ установлена») придёт перерисовкой
     }
   }
 
@@ -1844,7 +1867,9 @@
     // прогресс установки STT → ТОЛЬКО в строку качаемой модели (не во все сразу)
     try {
       window.jarvis.onSttInstallProgress((step) => {
-        if (!currentRoot || !activeDownload) return;
+        if (!activeDownload) return;
+        clearDownloadError(activeDownload);
+        if (!currentRoot) return;
         const pct = step && typeof step.pct === 'number' ? step.pct : null;
         const h = currentRoot.querySelector('#s2-pane-stt [data-model="' + activeDownload + '"]');
         if (!h) return;
@@ -1877,7 +1902,9 @@
     // ── Единые события мультизагрузки (models_install) — прогресс по id модели ──
     try {
       window.jarvis.onModelInstallProgress(({ id, step }) => {
-        if (!currentRoot || !id) return;
+        if (!id) return;
+        clearDownloadError(id);
+        if (!currentRoot) return;
         const h = currentRoot.querySelector('[data-model="' + id + '"]');
         if (!h) return;
         h.textContent = '';
@@ -1890,7 +1917,7 @@
       window.jarvis.onModelInstallDone(({ id, ok, error }) => {
         if (!id) return;
         if (!ok) dlState[id] = { error: error || 'неизвестная ошибка (подробности в ~/.jarvis/jarvis.log)' };
-        else { delete dlState[id]; selectedModels.delete(id); }
+        else { clearDownloadError(id); selectedModels.delete(id); }
       });
     } catch (e) {}
     try {

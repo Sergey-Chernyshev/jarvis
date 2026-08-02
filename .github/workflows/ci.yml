@@ -57,6 +57,9 @@ jobs:
       - name: Public repository boundary
         run: npm run check:public
 
+      - name: Ensure ripgrep
+        run: rg --version || brew install ripgrep
+
       - name: Prepare plugin boundary Cargo metadata
         run: |
           cargo fetch --locked --manifest-path crates/jarvis-package/Cargo.toml

@@ -628,10 +628,10 @@ impl<'a, R: Read> RawStream<'a, R> {
         let mut byte = [0_u8; 1];
         match self.reader.read(&mut byte) {
             Ok(0) => Ok(()),
-            Ok(_) => {
+            Ok(read) => {
                 self.position = self
                     .position
-                    .checked_add(1)
+                    .checked_add(u64::try_from(read).map_err(|_| PackageError::archive_quota())?)
                     .ok_or_else(PackageError::archive_quota)?;
                 if self.position > self.maximum {
                     Err(PackageError::archive_quota())

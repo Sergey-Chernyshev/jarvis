@@ -5,6 +5,33 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/jarvis-plugin-boundary.XXXXXX")"
 cargo_bin="${CARGO_BIN:-cargo}"
 
+node -e '
+  const { readFileSync } = require("node:fs");
+  const workflow = readFileSync(process.argv[1], "utf8");
+  const ripgrepMarker = "      - name: Ensure ripgrep";
+  const prepareMarker =
+    "      - name: Prepare plugin boundary Cargo metadata";
+  const ripgrepIndex = workflow.indexOf(ripgrepMarker);
+  const prepareIndex = workflow.indexOf(prepareMarker);
+  if (
+    ripgrepIndex === -1 ||
+    prepareIndex === -1 ||
+    ripgrepIndex >= prepareIndex
+  ) {
+    throw new Error(
+      "CI must ensure ripgrep before preparing plugin boundary metadata",
+    );
+  }
+  const ripgrepStep = workflow.slice(ripgrepIndex, prepareIndex);
+  if (
+    !ripgrepStep.includes(
+      "        run: rg --version || brew install ripgrep",
+    )
+  ) {
+    throw new Error("CI must install ripgrep when it is unavailable");
+  }
+' "$repo_root/.github/workflows/ci.yml"
+
 cleanup() {
   case "$fixture_root" in
     "${TMPDIR:-/tmp}"/jarvis-plugin-boundary.*) rm -rf -- "$fixture_root" ;;

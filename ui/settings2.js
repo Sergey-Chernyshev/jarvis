@@ -716,6 +716,10 @@
     const style = document.createElement('style');
     style.id = 'settings2-style';
     style.textContent = css;
+    const nonceSource = document.querySelector('style[nonce]');
+    if (nonceSource && nonceSource.nonce) {
+      style.nonce = nonceSource.nonce;
+    }
     document.head.appendChild(style);
   }
 

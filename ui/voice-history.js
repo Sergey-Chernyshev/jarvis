@@ -288,6 +288,10 @@
     const style = document.createElement('style');
     style.id = 'voice-history-style';
     style.textContent = CSS;
+    const nonceSource = document.querySelector('style[nonce]');
+    if (nonceSource && nonceSource.nonce) {
+      style.nonce = nonceSource.nonce;
+    }
     document.head.appendChild(style);
   }
 

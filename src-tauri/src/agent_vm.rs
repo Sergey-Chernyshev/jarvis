@@ -485,14 +485,20 @@ pub fn notification_for(
             "waiting",
             format!("{project}: агент ждёт ответа"),
         ),
-        "agent_run" if current.state == "completed" && !is_focused(focus, current) => (
-            "run",
-            "completed",
-            format!("{project} — готово"),
-            "Задача завершена".into(),
-            "done",
-            format!("{project}: задача завершена"),
-        ),
+        "agent_run"
+            if current.state == "completed"
+                && (!recovered || previous.is_some())
+                && !is_focused(focus, current) =>
+        {
+            (
+                "run",
+                "completed",
+                format!("{project} — готово"),
+                "Задача завершена".into(),
+                "done",
+                format!("{project}: задача завершена"),
+            )
+        }
         "agent_run"
             if matches!(current.state.as_str(), "failed" | "error" | "interrupted")
                 && (previous.is_some() || recovered) =>
@@ -938,6 +944,39 @@ mod tests {
         let crash = notification_for(None, &interrupted, None).unwrap();
         assert_eq!(crash.kind, "error");
         assert_eq!(crash.target["runId"], "run-a");
+    }
+
+    #[test]
+    fn completed_notification_suppresses_only_recovered_hydration() {
+        let working = entity(
+            "agent_run",
+            "run-a",
+            "working",
+            json!({
+                "runId":"run-a","projectId":"project-a","project":"alpha","cwd":"/tmp/alpha"
+            }),
+        );
+        let completed = entity(
+            "agent_run",
+            "run-a",
+            "completed",
+            json!({
+                "runId":"run-a","projectId":"project-a","project":"alpha","cwd":"/tmp/alpha"
+            }),
+        );
+        let recovered_completed = entity(
+            "agent_run",
+            "run-a",
+            "completed",
+            json!({
+                "runId":"run-a","projectId":"project-a","project":"alpha","cwd":"/tmp/alpha",
+                "recovered":true
+            }),
+        );
+
+        assert!(notification_for(Some(&working), &completed, None).is_some());
+        assert!(notification_for(None, &recovered_completed, None).is_none());
+        assert!(notification_for(Some(&working), &recovered_completed, None).is_some());
     }
 
     #[test]

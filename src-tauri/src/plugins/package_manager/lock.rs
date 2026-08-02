@@ -1,13 +1,14 @@
-use std::fs::{self, File, OpenOptions};
+use std::ffi::CString;
+use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use super::paths::PluginPaths;
+use super::paths::{open_real_directory, PluginPaths};
+use super::secure_fs;
 use super::StorageError;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -27,16 +28,43 @@ impl ManagerLock {
         paths: &PluginPaths,
         requested_timeout: Duration,
     ) -> Result<Self, StorageError> {
+        Self::acquire_internal(
+            paths,
+            requested_timeout,
+            Option::<fn(&std::path::Path)>::None,
+        )
+    }
+
+    #[cfg(test)]
+    fn acquire_with_timeout_after_inspect(
+        paths: &PluginPaths,
+        requested_timeout: Duration,
+        after_inspect: impl FnOnce(&std::path::Path),
+    ) -> Result<Self, StorageError> {
+        Self::acquire_internal(paths, requested_timeout, Some(after_inspect))
+    }
+
+    fn acquire_internal<F>(
+        paths: &PluginPaths,
+        requested_timeout: Duration,
+        mut after_inspect: Option<F>,
+    ) -> Result<Self, StorageError>
+    where
+        F: FnOnce(&std::path::Path),
+    {
         paths.prepare()?;
         let path = paths.manager_lock();
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                return Err(StorageError::new(
-                    "manager_lock_type",
-                    format!("{} is not a regular lock file", path.display()),
-                ));
+        let parent = open_real_directory(&paths.plugins_root())?;
+        let name = CString::new(".manager.lock").expect("fixed lock filename contains no NUL");
+        match secure_fs::entry_metadata(&parent, &name) {
+            Ok(inspected) => {
+                if !secure_fs::is_type(&inspected, libc::S_IFREG) {
+                    return Err(StorageError::new(
+                        "manager_lock_type",
+                        format!("{} is not a regular lock file", path.display()),
+                    ));
+                }
             }
-            Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(StorageError::new(
@@ -45,25 +73,64 @@ impl ManagerLock {
                 ));
             }
         }
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|error| {
-                StorageError::new(
-                    "manager_lock_io",
-                    format!("cannot open {}: {error}", path.display()),
-                )
-            })?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+        if let Some(after_inspect) = after_inspect.take() {
+            after_inspect(&path);
+        }
+        let descriptor = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        };
+        if descriptor < 0 {
+            let error = io::Error::last_os_error();
+            return Err(StorageError::new(
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::ELOOP) | Some(libc::ENOTDIR)
+                ) {
+                    "manager_lock_type"
+                } else {
+                    "manager_lock_io"
+                },
+                format!("cannot open {}: {error}", path.display()),
+            ));
+        }
+        let mut file = unsafe { File::from_raw_fd(descriptor) };
+        let opened = secure_fs::metadata(&file).map_err(|error| {
             StorageError::new(
-                "manager_lock_permissions",
-                format!("cannot protect {}: {error}", path.display()),
+                "manager_lock_io",
+                format!("cannot inspect opened {}: {error}", path.display()),
             )
         })?;
+        if !secure_fs::is_type(&opened, libc::S_IFREG) {
+            return Err(StorageError::new(
+                "manager_lock_type",
+                format!("{} is not a regular lock file", path.display()),
+            ));
+        }
+        if let Err(error) = secure_fs::chmod(&file, 0o600) {
+            return Err(StorageError::new(
+                "manager_lock_permissions",
+                format!("cannot protect {}: {error}", path.display()),
+            ));
+        }
+        let anchored = secure_fs::entry_metadata(&parent, &name).map_err(|error| {
+            StorageError::new(
+                "manager_lock_io",
+                format!("cannot recheck {}: {error}", path.display()),
+            )
+        })?;
+        if !secure_fs::is_type(&anchored, libc::S_IFREG)
+            || !secure_fs::same_identity(&anchored, &opened)
+        {
+            return Err(StorageError::new(
+                "manager_lock_type",
+                format!("{} changed while it was opened", path.display()),
+            ));
+        }
 
         let timeout = requested_timeout.min(DEFAULT_TIMEOUT);
         let started = Instant::now();
@@ -198,7 +265,7 @@ fn current_process_start_identity() -> Result<String, StorageError> {
 
 #[cfg(target_os = "linux")]
 fn current_process_start_identity() -> Result<String, StorageError> {
-    let stat = fs::read_to_string("/proc/self/stat").map_err(|error| {
+    let stat = std::fs::read_to_string("/proc/self/stat").map_err(|error| {
         StorageError::new(
             "manager_lock_identity",
             format!("cannot read /proc/self/stat: {error}"),
@@ -231,6 +298,7 @@ mod tests {
     use super::ManagerLock;
     use crate::plugins::package_manager::paths::PluginPaths;
     use std::fs;
+    use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
@@ -238,11 +306,13 @@ mod tests {
     static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
 
     fn fixture_paths() -> PluginPaths {
-        let root = std::env::temp_dir().join(format!(
-            "jarvis-plugin-manager-lock-{}-{}",
-            std::process::id(),
-            NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "jarvis-plugin-manager-lock-{}-{}",
+                std::process::id(),
+                NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed)
+            ));
         let _ = fs::remove_dir_all(&root);
         let paths = PluginPaths::new(root.join("profile"));
         paths.prepare().unwrap();
@@ -278,5 +348,34 @@ mod tests {
 
         drop(first);
         ManagerLock::acquire_with_timeout(&paths, Duration::from_millis(50)).unwrap();
+    }
+
+    #[test]
+    fn lock_file_swap_to_symlink_is_rejected_before_open() {
+        let paths = fixture_paths();
+        let lock_path = paths.manager_lock();
+        let original_path = paths.plugins_root().join(".manager.lock.original");
+        let outside = paths
+            .profile()
+            .parent()
+            .unwrap()
+            .join("outside-lock-target");
+        fs::write(&lock_path, b"original-owner").unwrap();
+        fs::write(&outside, b"outside-must-not-change").unwrap();
+
+        let error = ManagerLock::acquire_with_timeout_after_inspect(
+            &paths,
+            Duration::from_millis(50),
+            |inspected| {
+                assert_eq!(inspected, lock_path);
+                fs::rename(&lock_path, &original_path).unwrap();
+                symlink(&outside, &lock_path).unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "manager_lock_type");
+        assert_eq!(fs::read(&outside).unwrap(), b"outside-must-not-change");
+        assert_eq!(fs::read(&original_path).unwrap(), b"original-owner");
     }
 }

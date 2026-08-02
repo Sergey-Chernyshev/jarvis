@@ -2517,7 +2517,6 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "url",
- "uuid",
  "voice_activity_detector",
  "whisper-rs",
  "zeroize",

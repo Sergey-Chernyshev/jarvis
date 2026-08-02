@@ -80,28 +80,20 @@ impl InstallReceipt {
         if self.schema_version != INSTALL_RECEIPT_SCHEMA_VERSION {
             return Err(ReceiptContractError("receipt_schema"));
         }
-        if self.publisher_key_id.is_empty()
-            || self.publisher_key_id.len() > 256
-            || self.publisher_lineage.is_empty()
-            || self.publisher_lineage.len() > 256
-            || self.generation == 0
-            || self.state_schema_version == 0
-            || self.rollback_compatible_through == 0
-            || self.rollback_compatible_through > self.state_schema_version
-        {
-            return Err(ReceiptContractError("receipt_schema"));
-        }
+        validate_receipt_fields(
+            &self.plugin_id,
+            &self.publisher_key_id,
+            &self.publisher_lineage,
+            self.source,
+            self.native_trust_digest.as_ref(),
+            self.generation,
+            self.state_schema_version,
+            self.rollback_compatible_through,
+        )?;
         if let Some(previous) = &self.previous {
+            previous.validate()?;
             if previous.plugin_id != self.plugin_id || previous.generation >= self.generation {
                 return Err(ReceiptContractError("receipt_previous"));
-            }
-        }
-        if self.source == InstallSource::LegacyBundledV1 {
-            if self.plugin_id.as_str() != "agent-vm" {
-                return Err(ReceiptContractError("receipt_legacy_plugin_id"));
-            }
-            if self.native_trust_digest.is_some() {
-                return Err(ReceiptContractError("receipt_legacy_native_trust"));
             }
         }
         Ok(())
@@ -127,6 +119,21 @@ pub struct ReceiptSummary {
     pub rollback_compatible_through: u32,
 }
 
+impl ReceiptSummary {
+    pub fn validate(&self) -> Result<(), ReceiptContractError> {
+        validate_receipt_fields(
+            &self.plugin_id,
+            &self.publisher_key_id,
+            &self.publisher_lineage,
+            self.source,
+            self.native_trust_digest.as_ref(),
+            self.generation,
+            self.state_schema_version,
+            self.rollback_compatible_through,
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InstallSource {
@@ -134,6 +141,38 @@ pub enum InstallSource {
     LocalPackage,
     DeveloperSnapshot,
     LegacyBundledV1,
+}
+
+fn validate_receipt_fields(
+    plugin_id: &PluginId,
+    publisher_key_id: &str,
+    publisher_lineage: &str,
+    source: InstallSource,
+    native_trust_digest: Option<&Digest>,
+    generation: u64,
+    state_schema_version: u32,
+    rollback_compatible_through: u32,
+) -> Result<(), ReceiptContractError> {
+    if publisher_key_id.is_empty()
+        || publisher_key_id.len() > 256
+        || publisher_lineage.is_empty()
+        || publisher_lineage.len() > 256
+        || generation == 0
+        || state_schema_version == 0
+        || rollback_compatible_through == 0
+        || rollback_compatible_through > state_schema_version
+    {
+        return Err(ReceiptContractError("receipt_schema"));
+    }
+    if source == InstallSource::LegacyBundledV1 {
+        if plugin_id.as_str() != "agent-vm" {
+            return Err(ReceiptContractError("receipt_legacy_plugin_id"));
+        }
+        if native_trust_digest.is_some() {
+            return Err(ReceiptContractError("receipt_legacy_native_trust"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -205,6 +244,58 @@ mod tests {
         assert!(receipt("agent-vm", InstallSource::LegacyBundledV1)
             .validate()
             .is_ok());
+    }
+
+    #[test]
+    fn previous_summary_must_satisfy_schema_and_generation_invariants() {
+        let mut expected = receipt("dev.example.echo", InstallSource::Catalog);
+        let mut previous = expected.summary();
+        previous.generation = 0;
+        expected.previous = Some(previous);
+
+        assert_eq!(expected.validate().unwrap_err().code(), "receipt_schema");
+
+        let mut expected = receipt("dev.example.echo", InstallSource::Catalog);
+        let mut previous = expected.summary();
+        previous.generation = 6;
+        previous.state_schema_version = 0;
+        expected.previous = Some(previous);
+
+        assert_eq!(expected.validate().unwrap_err().code(), "receipt_schema");
+
+        let mut expected = receipt("dev.example.echo", InstallSource::Catalog);
+        let mut previous = expected.summary();
+        previous.generation = 6;
+        previous.rollback_compatible_through = previous.state_schema_version + 1;
+        expected.previous = Some(previous);
+
+        assert_eq!(expected.validate().unwrap_err().code(), "receipt_schema");
+    }
+
+    #[test]
+    fn previous_summary_must_satisfy_legacy_source_restrictions() {
+        let mut expected = receipt("dev.example.echo", InstallSource::Catalog);
+        let mut previous = expected.summary();
+        previous.generation = 6;
+        previous.source = InstallSource::LegacyBundledV1;
+        expected.previous = Some(previous);
+
+        assert_eq!(
+            expected.validate().unwrap_err().code(),
+            "receipt_legacy_plugin_id"
+        );
+
+        let mut expected = receipt("agent-vm", InstallSource::Catalog);
+        let mut previous = expected.summary();
+        previous.generation = 6;
+        previous.source = InstallSource::LegacyBundledV1;
+        previous.native_trust_digest = Some(digest('b'));
+        expected.previous = Some(previous);
+
+        assert_eq!(
+            expected.validate().unwrap_err().code(),
+            "receipt_legacy_native_trust"
+        );
     }
 
     #[test]

@@ -17,14 +17,22 @@ use super::{random_storage_id, StorageError};
 use jarvis_plugin_protocol::operation::Operation;
 pub use jarvis_plugin_protocol::operation::OperationState;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, ToSql};
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5_000);
+const MAX_OPERATION_PAYLOAD_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OperationFailure {
     pub code: String,
     pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StoredOperation<P> {
+    pub(crate) operation: Operation,
+    pub(crate) payload: P,
 }
 
 #[cfg(test)]
@@ -195,6 +203,15 @@ impl OperationJournal {
     }
 
     pub fn begin(&self, kind: &str, plugin_id: &str) -> Result<String, StorageError> {
+        self.begin_with_payload(kind, plugin_id, &serde_json::json!({}))
+    }
+
+    pub(crate) fn begin_with_payload<P: Serialize>(
+        &self,
+        kind: &str,
+        plugin_id: &str,
+        payload: &P,
+    ) -> Result<String, StorageError> {
         let id = random_storage_id()?;
         self.insert(
             &id,
@@ -202,7 +219,7 @@ impl OperationJournal {
             plugin_id,
             OperationState::Queued,
             "queued",
-            &serde_json::json!({}),
+            payload,
             None,
         )?;
         Ok(id)
@@ -213,6 +230,29 @@ impl OperationJournal {
         id: &str,
         next: OperationState,
         phase: &str,
+        failure: Option<OperationFailure>,
+    ) -> Result<(), StorageError> {
+        self.transition_internal(id, next, phase, None, failure)
+    }
+
+    pub(crate) fn transition_with_payload<P: Serialize>(
+        &self,
+        id: &str,
+        next: OperationState,
+        phase: &str,
+        payload: &P,
+        failure: Option<OperationFailure>,
+    ) -> Result<(), StorageError> {
+        let payload_json = canonical_payload(payload)?;
+        self.transition_internal(id, next, phase, Some(&payload_json), failure)
+    }
+
+    fn transition_internal(
+        &self,
+        id: &str,
+        next: OperationState,
+        phase: &str,
+        payload_json: Option<&str>,
         failure: Option<OperationFailure>,
     ) -> Result<(), StorageError> {
         let mut connection = self
@@ -250,19 +290,90 @@ impl OperationJournal {
             .unwrap_or((None, None));
         let next_state = state_name(&next);
         let updated_at_ms = crate::util::now_ms();
-        let parameters: [&dyn ToSql; 6] = [
-            &id,
-            &next_state,
-            &phase,
-            &error_code,
-            &error_message,
-            &updated_at_ms,
-        ];
+        match payload_json {
+            Some(payload_json) => {
+                let parameters: [&dyn ToSql; 7] = [
+                    &id,
+                    &next_state,
+                    &phase,
+                    &payload_json,
+                    &error_code,
+                    &error_message,
+                    &updated_at_ms,
+                ];
+                transaction
+                    .execute(
+                        "UPDATE operations
+                         SET state = ?2, phase = ?3, payload_json = ?4,
+                             error_code = ?5, error_message = ?6, updated_at_ms = ?7
+                         WHERE id = ?1",
+                        parameters,
+                    )
+                    .map_err(database_error)?;
+            }
+            None => {
+                let parameters: [&dyn ToSql; 6] = [
+                    &id,
+                    &next_state,
+                    &phase,
+                    &error_code,
+                    &error_message,
+                    &updated_at_ms,
+                ];
+                transaction
+                    .execute(
+                        "UPDATE operations
+                         SET state = ?2, phase = ?3, error_code = ?4, error_message = ?5,
+                             updated_at_ms = ?6
+                         WHERE id = ?1",
+                        parameters,
+                    )
+                    .map_err(database_error)?;
+            }
+        }
+        transaction.commit().map_err(database_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn checkpoint<P: Serialize>(
+        &self,
+        id: &str,
+        phase: &str,
+        payload: &P,
+    ) -> Result<(), StorageError> {
+        if phase.is_empty() {
+            return Err(StorageError::new(
+                "operation_schema",
+                "checkpoint phase is required",
+            ));
+        }
+        let payload_json = canonical_payload(payload)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| StorageError::new("operation_db", "operation database lock poisoned"))?;
+        let transaction = connection.transaction().map_err(database_error)?;
+        let current = transaction
+            .query_row("SELECT state FROM operations WHERE id = ?1", [id], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(database_error)?
+            .ok_or_else(|| StorageError::new("operation_not_found", id))?;
+        let current = parse_state(&current)?;
+        if is_terminal(&current) {
+            return Err(StorageError::new(
+                "operation_terminal",
+                format!("operation {id} is terminal"),
+            ));
+        }
+        self.protect_before_mutation()?;
+        let updated_at_ms = crate::util::now_ms();
+        let parameters: [&dyn ToSql; 4] = [&id, &phase, &payload_json, &updated_at_ms];
         transaction
             .execute(
                 "UPDATE operations
-                 SET state = ?2, phase = ?3, error_code = ?4, error_message = ?5,
-                     updated_at_ms = ?6
+                 SET phase = ?2, payload_json = ?3, updated_at_ms = ?4
                  WHERE id = ?1",
                 parameters,
             )
@@ -272,71 +383,70 @@ impl OperationJournal {
     }
 
     pub fn recoverable(&self) -> Result<Vec<Operation>, StorageError> {
+        Ok(self
+            .recoverable_with_payload::<Value>()?
+            .into_iter()
+            .map(|stored| stored.operation)
+            .collect())
+    }
+
+    pub(crate) fn load_with_payload<P: DeserializeOwned>(
+        &self,
+        id: &str,
+    ) -> Result<StoredOperation<P>, StorageError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| StorageError::new("operation_db", "operation database lock poisoned"))?;
+        let row = connection
+            .query_row(
+                "SELECT id, kind, plugin_id, state, phase, payload_json,
+                        created_at_ms, updated_at_ms, error_code, error_message
+                 FROM operations
+                 WHERE id = ?1",
+                [id],
+                operation_row,
+            )
+            .optional()
+            .map_err(database_error)?
+            .ok_or_else(|| StorageError::new("operation_not_found", id))?;
+        decode_stored_operation(row)
+    }
+
+    pub(crate) fn recoverable_with_payload<P: DeserializeOwned>(
+        &self,
+    ) -> Result<Vec<StoredOperation<P>>, StorageError> {
         let connection = self
             .connection
             .lock()
             .map_err(|_| StorageError::new("operation_db", "operation database lock poisoned"))?;
         let mut statement = connection
             .prepare(
-                "SELECT id, kind, plugin_id, state, phase, created_at_ms, updated_at_ms,
-                        error_code, error_message
+                "SELECT id, kind, plugin_id, state, phase, payload_json,
+                        created_at_ms, updated_at_ms, error_code, error_message
                  FROM operations
                  WHERE state IN ('queued', 'running', 'waiting-for-consent')
                  ORDER BY id ASC",
             )
             .map_err(database_error)?;
         let rows = statement
-            .query_map([], |row| {
-                let state: String = row.get(3)?;
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    state,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                ))
-            })
+            .query_map([], operation_row)
             .map_err(database_error)?;
         let mut operations = Vec::new();
         for row in rows {
-            let (
-                id,
-                kind,
-                plugin_id,
-                state,
-                phase,
-                created_at_ms,
-                updated_at_ms,
-                error_code,
-                error_message,
-            ) = row.map_err(database_error)?;
-            operations.push(Operation {
-                id,
-                kind,
-                plugin_id,
-                state: parse_state(&state)?,
-                phase,
-                created_at_ms,
-                updated_at_ms,
-                error_code,
-                error_message,
-            });
+            operations.push(decode_stored_operation(row.map_err(database_error)?)?);
         }
         Ok(operations)
     }
 
-    fn insert(
+    fn insert<P: Serialize>(
         &self,
         id: &str,
         kind: &str,
         plugin_id: &str,
         state: OperationState,
         phase: &str,
-        payload: &Value,
+        payload: &P,
         failure: Option<OperationFailure>,
     ) -> Result<(), StorageError> {
         if kind.is_empty() || plugin_id.is_empty() || phase.is_empty() {
@@ -345,12 +455,7 @@ impl OperationJournal {
                 "kind, plugin_id and phase are required",
             ));
         }
-        let payload_json = serde_json_canonicalizer::to_string(payload).map_err(|error| {
-            StorageError::new(
-                "operation_payload",
-                format!("cannot serialize operation payload: {error}"),
-            )
-        })?;
+        let payload_json = canonical_payload(payload)?;
         let (error_code, error_message) = failure
             .map(|failure| (Some(failure.code), Some(failure.message)))
             .unwrap_or((None, None));
@@ -433,6 +538,105 @@ impl OperationJournal {
             .query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
             .map_err(database_error)
     }
+}
+
+struct OperationRow {
+    id: String,
+    kind: String,
+    plugin_id: String,
+    state: String,
+    phase: String,
+    payload_json: String,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    error_code: Option<String>,
+    error_message: Option<String>,
+}
+
+fn operation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRow> {
+    Ok(OperationRow {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        plugin_id: row.get(2)?,
+        state: row.get(3)?,
+        phase: row.get(4)?,
+        payload_json: row.get(5)?,
+        created_at_ms: row.get(6)?,
+        updated_at_ms: row.get(7)?,
+        error_code: row.get(8)?,
+        error_message: row.get(9)?,
+    })
+}
+
+fn canonical_payload<P: Serialize>(payload: &P) -> Result<String, StorageError> {
+    let payload_json = serde_json_canonicalizer::to_string(payload).map_err(|error| {
+        StorageError::new(
+            "operation_payload",
+            format!("cannot serialize operation payload: {error}"),
+        )
+    })?;
+    ensure_payload_size(&payload_json)?;
+    Ok(payload_json)
+}
+
+fn ensure_payload_size(payload_json: &str) -> Result<(), StorageError> {
+    if payload_json.len() > MAX_OPERATION_PAYLOAD_BYTES {
+        return Err(StorageError::new(
+            "operation_payload_too_large",
+            format!(
+                "operation payload is {} bytes; maximum is {MAX_OPERATION_PAYLOAD_BYTES}",
+                payload_json.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn decode_stored_operation<P: DeserializeOwned>(
+    row: OperationRow,
+) -> Result<StoredOperation<P>, StorageError> {
+    ensure_payload_size(&row.payload_json)?;
+    let payload_value = serde_json::from_str::<Value>(&row.payload_json).map_err(|error| {
+        StorageError::new(
+            "operation_payload",
+            format!("operation {} payload is malformed: {error}", row.id),
+        )
+    })?;
+    let canonical = serde_json_canonicalizer::to_string(&payload_value).map_err(|error| {
+        StorageError::new(
+            "operation_payload",
+            format!("cannot canonicalize operation {} payload: {error}", row.id),
+        )
+    })?;
+    if canonical != row.payload_json {
+        return Err(StorageError::new(
+            "operation_payload",
+            format!("operation {} payload is not canonical", row.id),
+        ));
+    }
+    let payload = serde_json::from_value(payload_value).map_err(|error| {
+        StorageError::new(
+            "operation_payload",
+            format!(
+                "operation {} payload does not match its type: {error}",
+                row.id
+            ),
+        )
+    })?;
+    Ok(StoredOperation {
+        operation: Operation {
+            id: row.id,
+            kind: row.kind,
+            plugin_id: row.plugin_id,
+            state: parse_state(&row.state)?,
+            phase: row.phase,
+            created_at_ms: row.created_at_ms,
+            updated_at_ms: row.updated_at_ms,
+            error_code: row.error_code,
+            error_message: row.error_message,
+        },
+        payload,
+    })
 }
 
 fn prepare_database_path<F>(
@@ -769,7 +973,10 @@ fn legal_transition(current: &OperationState, next: &OperationState) -> bool {
 mod tests {
     use super::{
         validate_database_metadata, OperationJournal, OperationJournalFailpoints, OperationState,
+        MAX_OPERATION_PAYLOAD_BYTES,
     };
+    use rusqlite::ToSql;
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::fs;
     use std::os::unix::fs::symlink;
@@ -779,6 +986,13 @@ mod tests {
     use std::sync::Arc;
 
     static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct TestPayload {
+        artifact: String,
+        attempt: u32,
+    }
 
     fn journal_path(label: &str) -> PathBuf {
         let root = fs::canonicalize(std::env::temp_dir())
@@ -839,6 +1053,302 @@ mod tests {
                 None,
             )
             .unwrap();
+    }
+
+    fn replace_payload_json(journal: &OperationJournal, id: &str, payload_json: &str) {
+        let connection = journal.connection.lock().unwrap();
+        let parameters: [&dyn ToSql; 2] = [&payload_json, &id];
+        connection
+            .execute(
+                "UPDATE operations SET payload_json = ?1 WHERE id = ?2",
+                parameters,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn typed_payload_is_durable_across_reopen() {
+        let path = journal_path("typed-payload-reopen");
+        let expected = TestPayload {
+            artifact: "package.tar.zst".to_owned(),
+            attempt: 1,
+        };
+        let id = {
+            let journal = OperationJournal::open(&path).unwrap();
+            journal
+                .begin_with_payload("install", "dev.example.echo", &expected)
+                .unwrap()
+        };
+
+        let reopened = OperationJournal::open(&path).unwrap();
+        let stored = reopened.load_with_payload::<TestPayload>(&id).unwrap();
+
+        assert_eq!(stored.operation.id, id);
+        assert_eq!(stored.operation.state, OperationState::Queued);
+        assert_eq!(stored.payload, expected);
+    }
+
+    #[test]
+    fn checkpoint_updates_phase_and_payload_without_changing_state() {
+        let journal = fixture_journal();
+        let id = journal
+            .begin_with_payload(
+                "install",
+                "dev.example.echo",
+                &TestPayload {
+                    artifact: "download.pending".to_owned(),
+                    attempt: 1,
+                },
+            )
+            .unwrap();
+        journal
+            .transition(&id, OperationState::Running, "download", None)
+            .unwrap();
+        let expected = TestPayload {
+            artifact: "download.complete".to_owned(),
+            attempt: 2,
+        };
+
+        journal.checkpoint(&id, "verify", &expected).unwrap();
+
+        let stored = journal.load_with_payload::<TestPayload>(&id).unwrap();
+        assert_eq!(stored.operation.state, OperationState::Running);
+        assert_eq!(stored.operation.phase, "verify");
+        assert_eq!(stored.payload, expected);
+    }
+
+    #[test]
+    fn waiting_for_consent_transition_persists_plan_atomically() {
+        let path = journal_path("waiting-consent-plan");
+        let journal = OperationJournal::open(&path).unwrap();
+        let id = journal
+            .begin_with_payload(
+                "install",
+                "dev.example.echo",
+                &TestPayload {
+                    artifact: "unverified".to_owned(),
+                    attempt: 0,
+                },
+            )
+            .unwrap();
+        let plan = TestPayload {
+            artifact: "verified-install-plan".to_owned(),
+            attempt: 1,
+        };
+
+        journal
+            .transition_with_payload(
+                &id,
+                OperationState::WaitingForConsent,
+                "consent",
+                &plan,
+                None,
+            )
+            .unwrap();
+        drop(journal);
+
+        let reopened = OperationJournal::open(&path).unwrap();
+        let stored = reopened.load_with_payload::<TestPayload>(&id).unwrap();
+        assert_eq!(stored.operation.state, OperationState::WaitingForConsent);
+        assert_eq!(stored.operation.phase, "consent");
+        assert_eq!(stored.payload, plan);
+        assert_eq!(stored.operation.error_code, None);
+        assert_eq!(stored.operation.error_message, None);
+    }
+
+    #[test]
+    fn typed_transition_protection_failure_leaves_full_row_unchanged() {
+        let path = journal_path("typed-transition-protection-failure");
+        let failpoints = Arc::new(OperationJournalFailpoints::default());
+        let journal =
+            OperationJournal::open_with_failpoints(&path, Arc::clone(&failpoints)).unwrap();
+        let initial = TestPayload {
+            artifact: "before".to_owned(),
+            attempt: 1,
+        };
+        let id = journal
+            .begin_with_payload("install", "dev.example.echo", &initial)
+            .unwrap();
+        let before = journal.load_with_payload::<TestPayload>(&id).unwrap();
+
+        failpoints.fail_next_protection();
+        let error = journal
+            .transition_with_payload(
+                &id,
+                OperationState::Running,
+                "verify",
+                &TestPayload {
+                    artifact: "after".to_owned(),
+                    attempt: 2,
+                },
+                Some(super::OperationFailure {
+                    code: "verification_failed".to_owned(),
+                    message: "must not persist".to_owned(),
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "operation_db_permissions");
+        drop(journal);
+
+        let reopened = OperationJournal::open(&path).unwrap();
+        assert_eq!(
+            reopened.load_with_payload::<TestPayload>(&id).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn terminal_checkpoint_is_rejected_without_mutating_payload() {
+        let journal = fixture_journal();
+        let initial = TestPayload {
+            artifact: "complete".to_owned(),
+            attempt: 1,
+        };
+        let id = journal
+            .begin_with_payload("install", "dev.example.echo", &initial)
+            .unwrap();
+        journal
+            .transition(&id, OperationState::Running, "install", None)
+            .unwrap();
+        journal
+            .transition(&id, OperationState::Succeeded, "complete", None)
+            .unwrap();
+        let before = journal.load_with_payload::<TestPayload>(&id).unwrap();
+
+        let error = journal
+            .checkpoint(
+                &id,
+                "late-checkpoint",
+                &TestPayload {
+                    artifact: "mutated".to_owned(),
+                    attempt: 2,
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), "operation_terminal");
+        assert_eq!(
+            journal.load_with_payload::<TestPayload>(&id).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn malformed_unknown_and_oversized_payloads_fail_closed() {
+        let journal = fixture_journal();
+        let malformed = journal.begin("install", "dev.example.malformed").unwrap();
+        let unknown = journal.begin("install", "dev.example.unknown").unwrap();
+        let oversized = journal.begin("install", "dev.example.oversized").unwrap();
+        replace_payload_json(&journal, &malformed, "{");
+        replace_payload_json(
+            &journal,
+            &unknown,
+            r#"{"artifact":"package","attempt":1,"unexpected":true}"#,
+        );
+        let oversized_json = format!(
+            "\"{}\"",
+            "x".repeat(MAX_OPERATION_PAYLOAD_BYTES.saturating_sub(1))
+        );
+        assert_eq!(oversized_json.len(), MAX_OPERATION_PAYLOAD_BYTES + 1);
+        replace_payload_json(&journal, &oversized, &oversized_json);
+
+        assert_eq!(
+            journal
+                .load_with_payload::<serde_json::Value>(&malformed)
+                .unwrap_err()
+                .code(),
+            "operation_payload"
+        );
+        assert_eq!(
+            journal
+                .load_with_payload::<TestPayload>(&unknown)
+                .unwrap_err()
+                .code(),
+            "operation_payload"
+        );
+        assert_eq!(
+            journal
+                .load_with_payload::<String>(&oversized)
+                .unwrap_err()
+                .code(),
+            "operation_payload_too_large"
+        );
+        assert!(journal.recoverable_with_payload::<TestPayload>().is_err());
+    }
+
+    #[test]
+    fn canonical_payload_limit_accepts_exact_boundary_and_rejects_oversize() {
+        let journal = fixture_journal();
+        let exact = "x".repeat(MAX_OPERATION_PAYLOAD_BYTES - 2);
+        let id = journal
+            .begin_with_payload("install", "dev.example.exact", &exact)
+            .unwrap();
+        assert_eq!(
+            journal.load_with_payload::<String>(&id).unwrap().payload,
+            exact
+        );
+
+        let oversized = "x".repeat(MAX_OPERATION_PAYLOAD_BYTES - 1);
+        let error = journal
+            .begin_with_payload("install", "dev.example.oversized", &oversized)
+            .unwrap_err();
+        assert_eq!(error.code(), "operation_payload_too_large");
+    }
+
+    #[test]
+    fn legacy_transition_preserves_existing_payload() {
+        let journal = fixture_journal();
+        let expected = TestPayload {
+            artifact: "preserve-me".to_owned(),
+            attempt: 1,
+        };
+        let id = journal
+            .begin_with_payload("install", "dev.example.echo", &expected)
+            .unwrap();
+
+        journal
+            .transition(&id, OperationState::Running, "verify", None)
+            .unwrap();
+
+        let stored = journal.load_with_payload::<TestPayload>(&id).unwrap();
+        assert_eq!(stored.operation.state, OperationState::Running);
+        assert_eq!(stored.operation.phase, "verify");
+        assert_eq!(stored.payload, expected);
+    }
+
+    #[test]
+    fn typed_recovery_order_is_deterministic() {
+        let journal = fixture_journal();
+        for (id, attempt) in [("operation-z", 3), ("operation-a", 1), ("operation-m", 2)] {
+            journal
+                .insert(
+                    id,
+                    "install",
+                    "dev.example.echo",
+                    OperationState::Running,
+                    "download",
+                    &json!({"artifact": id, "attempt": attempt}),
+                    None,
+                )
+                .unwrap();
+        }
+
+        let recovered = journal.recoverable_with_payload::<TestPayload>().unwrap();
+
+        assert_eq!(
+            recovered
+                .iter()
+                .map(|stored| stored.operation.id.as_str())
+                .collect::<Vec<_>>(),
+            ["operation-a", "operation-m", "operation-z"]
+        );
+        assert_eq!(
+            recovered
+                .iter()
+                .map(|stored| stored.payload.attempt)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
     }
 
     #[test]

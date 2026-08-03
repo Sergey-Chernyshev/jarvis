@@ -1174,7 +1174,7 @@ mod tests {
 
     #[test]
     fn archive_rejects_pax_global_local_and_sparse_extensions() {
-        for kind in [b'x', b'g', b'K', b'S'] {
+        for kind in *b"xgKS" {
             let mut archive = Vec::new();
             append_raw_entry(&mut archive, b"plugin.json", 0o444, b"{}", kind);
             finish(&mut archive);
@@ -1230,7 +1230,7 @@ mod tests {
 
     #[test]
     fn archive_rejects_links_directories_devices_fifo_socket_and_sparse() {
-        for kind in [b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'D', b'F', b'S'] {
+        for kind in *b"1234567DFS" {
             let mut archive = Vec::new();
             append_raw_entry(&mut archive, b"plugin.json", 0o444, b"", kind);
             finish(&mut archive);

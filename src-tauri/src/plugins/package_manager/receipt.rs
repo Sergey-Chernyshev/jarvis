@@ -470,7 +470,9 @@ impl VersionStore {
         let directory = open_real_directory(&version_parent)?;
         let mut exact = false;
         let mut conflict = None;
+        let mut saw_entry = false;
         for name in directory_entry_names(&directory, &version_parent)? {
+            saw_entry = true;
             let child_path = version_parent.join(&name);
             let entry_name = CString::new(name.as_bytes()).map_err(|_| {
                 StorageError::new(
@@ -479,7 +481,14 @@ impl VersionStore {
                 )
             })?;
             let child = open_verified_directory_entry(&directory, &entry_name, &child_path)?;
-            drop(child);
+            verify_immutable_directory_tree(&child, &child_path)?;
+            verify_directory_entry(
+                &directory,
+                &entry_name,
+                &child,
+                &child_path,
+                "plugin_version_identity",
+            )?;
             let Some(name_text) = name.to_str() else {
                 continue;
             };
@@ -491,6 +500,9 @@ impl VersionStore {
             } else if conflict.is_none() {
                 conflict = Some(observed_digest);
             }
+        }
+        if saw_entry {
+            verify_immutable_directory_metadata(&directory, &version_parent)?;
         }
         if let Some(package_digest) = conflict {
             Ok(VersionVisibility::Conflict { package_digest })
@@ -1332,6 +1344,136 @@ fn protect_directory_tree(
     Ok(())
 }
 
+fn verify_immutable_directory_tree(directory: &File, path: &Path) -> Result<(), StorageError> {
+    verify_immutable_directory_metadata(directory, path)?;
+    for name in directory_entry_names(directory, path)? {
+        let child_path = path.join(&name);
+        let name = CString::new(name.as_bytes()).map_err(|_| {
+            StorageError::new(
+                "plugin_version_type",
+                format!("{} contains NUL", child_path.display()),
+            )
+        })?;
+        let inspected = secure_fs::entry_metadata(directory, &name).map_err(|error| {
+            StorageError::new(
+                "plugin_version_permissions",
+                format!("cannot inspect {}: {error}", child_path.display()),
+            )
+        })?;
+        validate_immutable_metadata(&inspected, &child_path)?;
+        let file_type = inspected.st_mode & libc::S_IFMT;
+        let flags = if file_type == libc::S_IFDIR {
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+        } else {
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+        };
+        let descriptor = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        if descriptor < 0 {
+            let error = std::io::Error::last_os_error();
+            return Err(StorageError::new(
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::ELOOP) | Some(libc::ENOTDIR)
+                ) {
+                    "plugin_version_symlink"
+                } else {
+                    "plugin_version_permissions"
+                },
+                format!("cannot open {}: {error}", child_path.display()),
+            ));
+        }
+        let child = unsafe { File::from_raw_fd(descriptor) };
+        let opened = secure_fs::metadata(&child).map_err(|error| {
+            StorageError::new(
+                "plugin_version_permissions",
+                format!("cannot inspect opened {}: {error}", child_path.display()),
+            )
+        })?;
+        if !secure_fs::same_identity(&inspected, &opened)
+            || inspected.st_mode & libc::S_IFMT != opened.st_mode & libc::S_IFMT
+        {
+            return Err(StorageError::new(
+                "plugin_version_type",
+                format!("{} changed while it was opened", child_path.display()),
+            ));
+        }
+        validate_immutable_metadata(&opened, &child_path)?;
+        if file_type == libc::S_IFDIR {
+            verify_immutable_directory_tree(&child, &child_path)?;
+        }
+        let anchored = secure_fs::entry_metadata(directory, &name).map_err(|error| {
+            StorageError::new(
+                "plugin_version_identity",
+                format!("cannot recheck {}: {error}", child_path.display()),
+            )
+        })?;
+        if !secure_fs::same_identity(&opened, &anchored)
+            || opened.st_mode & libc::S_IFMT != anchored.st_mode & libc::S_IFMT
+        {
+            return Err(StorageError::new(
+                "plugin_version_identity",
+                format!("{} changed while it was verified", child_path.display()),
+            ));
+        }
+        validate_immutable_metadata(&anchored, &child_path)?;
+    }
+    verify_immutable_directory_metadata(directory, path)
+}
+
+fn verify_immutable_directory_metadata(directory: &File, path: &Path) -> Result<(), StorageError> {
+    let metadata = secure_fs::metadata(directory).map_err(|error| {
+        StorageError::new(
+            "plugin_version_permissions",
+            format!("cannot inspect opened {}: {error}", path.display()),
+        )
+    })?;
+    validate_immutable_metadata(&metadata, path)
+}
+
+fn validate_immutable_metadata(metadata: &libc::stat, path: &Path) -> Result<(), StorageError> {
+    let file_type = metadata.st_mode & libc::S_IFMT;
+    if file_type == libc::S_IFLNK {
+        return Err(StorageError::new(
+            "plugin_version_symlink",
+            format!("{} is a symbolic link", path.display()),
+        ));
+    }
+    if !matches!(file_type, libc::S_IFDIR | libc::S_IFREG) {
+        return Err(StorageError::new(
+            "plugin_version_type",
+            format!("{} is not a regular file or directory", path.display()),
+        ));
+    }
+    if !secure_fs::owned_by_effective_user(metadata) {
+        return Err(StorageError::new(
+            "plugin_version_owner",
+            format!("{} is not owned by the current user", path.display()),
+        ));
+    }
+    if file_type == libc::S_IFREG && !secure_fs::has_single_link(metadata) {
+        return Err(StorageError::new(
+            "plugin_version_links",
+            format!("{} has more than one hard link", path.display()),
+        ));
+    }
+    let expected_mode = if file_type == libc::S_IFDIR || metadata.st_mode & 0o111 != 0 {
+        0o555
+    } else {
+        0o444
+    };
+    let observed_mode = metadata.st_mode & 0o7777;
+    if observed_mode != expected_mode {
+        return Err(StorageError::new(
+            "plugin_version_permissions",
+            format!(
+                "{} has mode {observed_mode:04o}, expected {expected_mode:04o}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn directory_entry_names(directory: &File, path: &Path) -> Result<Vec<OsString>, StorageError> {
     let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
     if duplicate < 0 {
@@ -1473,6 +1615,7 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
@@ -1979,6 +2122,76 @@ mod tests {
         assert!(!extracted.exists());
         assert_finalized_modes(&paths, &plugin_id, &version, &package_digest);
         assert_no_operation_transitions(&journal, &before);
+    }
+
+    #[test]
+    fn restart_after_version_rename_does_not_confirm_writable_exact_destination() {
+        let paths = fixture_paths("restart-after-version-rename");
+        let store = VersionStore::new(paths.clone());
+        let plugin_id = PluginId::new("dev.example.echo").unwrap();
+        let version = Version::parse("1.0.0").unwrap();
+        let package_digest = digest('a');
+        let extracted = extracted_fixture(&paths, "crash-source");
+        let destination = paths
+            .versions(&plugin_id)
+            .join(version.to_string())
+            .join(package_digest.as_str());
+
+        let crashed = catch_unwind(AssertUnwindSafe(|| {
+            let _ = store.finalize_extracted_after_rename(
+                &extracted,
+                &plugin_id,
+                &version,
+                &package_digest,
+                |_| panic!("simulated process death immediately after version rename"),
+            );
+        }));
+
+        assert!(crashed.is_err());
+        assert_eq!(
+            fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let reopened = VersionStore::new(paths.clone());
+        let observe_error = reopened
+            .observe(&plugin_id, &version, &package_digest)
+            .unwrap_err();
+        assert_eq!(observe_error.code(), "plugin_version_permissions");
+
+        let retry_source = extracted_fixture(&paths, "retry-source");
+        let retry_error = reopened
+            .finalize_extracted(&retry_source, &plugin_id, &version, &package_digest)
+            .unwrap_err();
+        assert_eq!(retry_error.code(), "plugin_version_permissions");
+        assert!(retry_source.exists());
+    }
+
+    #[test]
+    fn restart_before_version_rename_reuses_empty_private_version_parent() {
+        let paths = fixture_paths("restart-before-version-rename");
+        let store = VersionStore::new(paths.clone());
+        let plugin_id = PluginId::new("dev.example.echo").unwrap();
+        let version = Version::parse("1.0.0").unwrap();
+        let package_digest = digest('a');
+        let version_parent = paths.versions(&plugin_id).join(version.to_string());
+        paths.prepare_plugin(&plugin_id).unwrap();
+        fs::create_dir(&version_parent).unwrap();
+        fs::set_permissions(&version_parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let extracted = extracted_fixture(&paths, "retry-empty-parent");
+
+        assert_eq!(
+            store
+                .finalize_extracted(&extracted, &plugin_id, &version, &package_digest)
+                .unwrap(),
+            DurableObservation::Confirmed(VersionVisibility::Exact {
+                plugin_id: plugin_id.clone(),
+                version: version.clone(),
+                package_digest: package_digest.clone(),
+            })
+        );
+        assert!(!extracted.exists());
+        assert_finalized_modes(&paths, &plugin_id, &version, &package_digest);
     }
 
     #[test]

@@ -17,6 +17,7 @@ use semver::Version;
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum StorageFailpoint {
     AfterVersionRename,
+    QuarantineAfterMarkerParentSync,
     VersionDestinationChmod,
     VersionParentSync,
     AfterReceiptRename,
@@ -26,6 +27,7 @@ pub(crate) enum StorageFailpoint {
 #[derive(Debug, Default)]
 pub(crate) struct StorageFailpoints {
     after_version_rename: AtomicBool,
+    quarantine_after_marker_parent_sync: AtomicBool,
     version_destination_chmod: AtomicBool,
     version_parent_sync: AtomicBool,
     after_receipt_rename: AtomicBool,
@@ -45,6 +47,9 @@ impl StorageFailpoints {
     fn flag(&self, failpoint: StorageFailpoint) -> &AtomicBool {
         match failpoint {
             StorageFailpoint::AfterVersionRename => &self.after_version_rename,
+            StorageFailpoint::QuarantineAfterMarkerParentSync => {
+                &self.quarantine_after_marker_parent_sync
+            }
             StorageFailpoint::VersionDestinationChmod => &self.version_destination_chmod,
             StorageFailpoint::VersionParentSync => &self.version_parent_sync,
             StorageFailpoint::AfterReceiptRename => &self.after_receipt_rename,
@@ -72,6 +77,17 @@ pub struct VersionStore {
     failpoints: Arc<StorageFailpoints>,
 }
 
+type ChildInspectHook<'a> = &'a mut dyn FnMut(&Path);
+type BeforeRenameHook<'a> = &'a mut dyn FnMut(&Path, &Path);
+type AfterRenameHook<'a> = &'a mut dyn FnMut(&Path);
+
+#[derive(Default)]
+struct FinalizeHooks<'a> {
+    before_child_open: Option<ChildInspectHook<'a>>,
+    before_rename: Option<BeforeRenameHook<'a>>,
+    after_rename: Option<AfterRenameHook<'a>>,
+}
+
 impl VersionStore {
     pub fn new(paths: PluginPaths) -> Self {
         Self {
@@ -97,7 +113,7 @@ impl VersionStore {
             plugin_id,
             version,
             package_digest,
-            Option::<fn(&Path)>::None,
+            FinalizeHooks::default(),
         )
     }
 
@@ -108,43 +124,101 @@ impl VersionStore {
         plugin_id: &PluginId,
         version: &Version,
         package_digest: &Digest,
-        before_child_open: impl FnMut(&Path),
+        mut before_child_open: impl FnMut(&Path),
     ) -> Result<DurableObservation<VersionVisibility>, StorageError> {
         self.finalize_extracted_internal(
             extracted,
             plugin_id,
             version,
             package_digest,
-            Some(before_child_open),
+            FinalizeHooks {
+                before_child_open: Some(&mut before_child_open),
+                ..FinalizeHooks::default()
+            },
         )
     }
 
-    fn finalize_extracted_internal<F>(
+    #[cfg(test)]
+    fn finalize_extracted_before_rename(
         &self,
         extracted: &Path,
         plugin_id: &PluginId,
         version: &Version,
         package_digest: &Digest,
-        mut before_child_open: Option<F>,
-    ) -> Result<DurableObservation<VersionVisibility>, StorageError>
-    where
-        F: FnMut(&Path),
-    {
+        mut before_rename: impl FnMut(&Path, &Path),
+    ) -> Result<DurableObservation<VersionVisibility>, StorageError> {
+        self.finalize_extracted_internal(
+            extracted,
+            plugin_id,
+            version,
+            package_digest,
+            FinalizeHooks {
+                before_rename: Some(&mut before_rename),
+                ..FinalizeHooks::default()
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn finalize_extracted_after_rename(
+        &self,
+        extracted: &Path,
+        plugin_id: &PluginId,
+        version: &Version,
+        package_digest: &Digest,
+        mut after_rename: impl FnMut(&Path),
+    ) -> Result<DurableObservation<VersionVisibility>, StorageError> {
+        self.finalize_extracted_internal(
+            extracted,
+            plugin_id,
+            version,
+            package_digest,
+            FinalizeHooks {
+                after_rename: Some(&mut after_rename),
+                ..FinalizeHooks::default()
+            },
+        )
+    }
+
+    fn finalize_extracted_internal(
+        &self,
+        extracted: &Path,
+        plugin_id: &PluginId,
+        version: &Version,
+        package_digest: &Digest,
+        hooks: FinalizeHooks<'_>,
+    ) -> Result<DurableObservation<VersionVisibility>, StorageError> {
+        let FinalizeHooks {
+            before_child_open,
+            mut before_rename,
+            mut after_rename,
+        } = hooks;
         self.paths.prepare_plugin(plugin_id)?;
         let existing = self.observe(plugin_id, version, package_digest)?;
         if existing != VersionVisibility::Absent {
             return Ok(DurableObservation::Confirmed(existing));
         }
 
+        // Resolve cleanup names before the fixed destination can become
+        // visible. Randomness failure must leave the source namespace intact.
+        let quarantine_rejected_name = CString::new(format!(".rejected-{}", random_storage_id()?))
+            .expect("storage ID has no NUL");
+        let quarantine_marker_name =
+            CString::new(format!(".identity-invalid-{}", random_storage_id()?))
+                .expect("storage ID has no NUL");
         let version_parent = self.paths.versions(plugin_id).join(version.to_string());
         ensure_real_directory(&version_parent, 0o700)?;
         let version_parent_directory = open_real_directory(&version_parent)?;
-        let extracted_directory = make_tree_immutable(
-            extracted,
-            before_child_open
-                .as_mut()
-                .map(|hook| hook as &mut dyn FnMut(&Path)),
-        )?;
+        let extracted_directory = make_tree_immutable(extracted, before_child_open)?;
+        let expected_metadata = secure_fs::metadata(&extracted_directory).map_err(|error| {
+            StorageError::new(
+                "plugin_version_identity",
+                format!(
+                    "cannot inspect held source {}: {error}",
+                    extracted.display()
+                ),
+            )
+        })?;
         let source_parent_path = extracted.parent().ok_or_else(|| {
             StorageError::new(
                 "plugin_version_source",
@@ -171,6 +245,13 @@ impl VersionStore {
             extracted,
             "plugin_version_source",
         )?;
+        let destination = version_parent.join(package_digest.as_str());
+        let destination_name = CString::new(package_digest.as_str()).map_err(|_| {
+            StorageError::new(
+                "plugin_version_path",
+                format!("{} contains NUL", destination.display()),
+            )
+        })?;
         // Darwin requires the moved directory itself to be writable while its
         // `..` entry changes across parents. Its contents remain immutable;
         // the fixed destination is restored to 0555 immediately after rename.
@@ -180,13 +261,24 @@ impl VersionStore {
                 format!("cannot prepare {} for rename: {error}", extracted.display()),
             )
         })?;
-        let destination = version_parent.join(package_digest.as_str());
-        let destination_name = CString::new(package_digest.as_str()).map_err(|_| {
-            StorageError::new(
-                "plugin_version_path",
-                format!("{} contains NUL", destination.display()),
-            )
-        })?;
+        if let Some(hook) = before_rename.as_mut() {
+            hook(extracted, &destination);
+        }
+        if let Err(identity_error) = verify_directory_entry(
+            &source_parent,
+            &source_name,
+            &extracted_directory,
+            extracted,
+            "plugin_version_source",
+        ) {
+            restore_version_rename_permissions(
+                &extracted_directory,
+                &version_parent_directory,
+                extracted,
+                &version_parent,
+            )?;
+            return Err(identity_error);
+        }
         if unsafe {
             libc::renameatx_np(
                 source_parent.as_raw_fd(),
@@ -229,6 +321,83 @@ impl VersionStore {
         // This is intentionally the first decision after namespace visibility:
         // failpoints mark durability uncertain but never bypass re-protection.
         let mut durability_unknown = self.failpoints.take(StorageFailpoint::AfterVersionRename);
+        if let Some(hook) = after_rename.as_mut() {
+            hook(&destination);
+        }
+        let destination_directory = match open_verified_directory_entry(
+            &version_parent_directory,
+            &destination_name,
+            &destination,
+        ) {
+            Ok(directory) => directory,
+            Err(open_error) => {
+                quarantine_untrusted_destination(DestinationQuarantine {
+                    failpoints: &self.failpoints,
+                    source_parent: &source_parent,
+                    source_parent_path,
+                    version_parent_directory: &version_parent_directory,
+                    version_parent: &version_parent,
+                    destination_name: &destination_name,
+                    destination: &destination,
+                    extracted_directory: &extracted_directory,
+                    rejected_name: &quarantine_rejected_name,
+                    marker_name: &quarantine_marker_name,
+                })?;
+                return Err(StorageError::new(
+                    "plugin_version_identity",
+                    format!(
+                        "cannot verify fixed destination {} after rename: {open_error}",
+                        destination.display()
+                    ),
+                ));
+            }
+        };
+        let destination_metadata = match secure_fs::metadata(&destination_directory) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                quarantine_untrusted_destination(DestinationQuarantine {
+                    failpoints: &self.failpoints,
+                    source_parent: &source_parent,
+                    source_parent_path,
+                    version_parent_directory: &version_parent_directory,
+                    version_parent: &version_parent,
+                    destination_name: &destination_name,
+                    destination: &destination,
+                    extracted_directory: &extracted_directory,
+                    rejected_name: &quarantine_rejected_name,
+                    marker_name: &quarantine_marker_name,
+                })?;
+                return Err(StorageError::new(
+                    "plugin_version_identity",
+                    format!(
+                        "cannot inspect fixed destination {}: {error}",
+                        destination.display()
+                    ),
+                ));
+            }
+        };
+        if !secure_fs::same_identity(&destination_metadata, &expected_metadata) {
+            quarantine_untrusted_destination(DestinationQuarantine {
+                failpoints: &self.failpoints,
+                source_parent: &source_parent,
+                source_parent_path,
+                version_parent_directory: &version_parent_directory,
+                version_parent: &version_parent,
+                destination_name: &destination_name,
+                destination: &destination,
+                extracted_directory: &extracted_directory,
+                rejected_name: &quarantine_rejected_name,
+                marker_name: &quarantine_marker_name,
+            })?;
+            return Err(StorageError::new(
+                "plugin_version_identity",
+                format!(
+                    "fixed destination {} does not match held source {}",
+                    destination.display(),
+                    extracted.display()
+                ),
+            ));
+        }
         let first_protection = if self
             .failpoints
             .take(StorageFailpoint::VersionDestinationChmod)
@@ -237,11 +406,11 @@ impl VersionStore {
                 "injected version destination chmod failure",
             ))
         } else {
-            secure_fs::chmod(&extracted_directory, 0o555)
+            secure_fs::chmod(&destination_directory, 0o555)
         };
         if first_protection.is_err() {
             durability_unknown = true;
-            secure_fs::chmod(&extracted_directory, 0o555).map_err(|error| {
+            secure_fs::chmod(&destination_directory, 0o555).map_err(|error| {
                 StorageError::new(
                     "plugin_version_permissions",
                     format!(
@@ -337,6 +506,201 @@ impl VersionStore {
     }
 }
 
+fn restore_version_rename_permissions(
+    extracted_directory: &File,
+    version_parent_directory: &File,
+    extracted: &Path,
+    version_parent: &Path,
+) -> Result<(), StorageError> {
+    secure_fs::chmod(extracted_directory, 0o555).map_err(|error| {
+        StorageError::new(
+            "plugin_version_permissions",
+            format!(
+                "cannot restore held source {}: {error}",
+                extracted.display()
+            ),
+        )
+    })?;
+    secure_fs::chmod(version_parent_directory, 0o555).map_err(|error| {
+        StorageError::new(
+            "plugin_version_permissions",
+            format!("cannot protect {}: {error}", version_parent.display()),
+        )
+    })
+}
+
+struct DestinationQuarantine<'a> {
+    failpoints: &'a StorageFailpoints,
+    source_parent: &'a File,
+    source_parent_path: &'a Path,
+    version_parent_directory: &'a File,
+    version_parent: &'a Path,
+    destination_name: &'a CStr,
+    destination: &'a Path,
+    extracted_directory: &'a File,
+    rejected_name: &'a CStr,
+    marker_name: &'a CStr,
+}
+
+fn quarantine_untrusted_destination(
+    quarantine: DestinationQuarantine<'_>,
+) -> Result<(), StorageError> {
+    let DestinationQuarantine {
+        failpoints,
+        source_parent,
+        source_parent_path,
+        version_parent_directory,
+        version_parent,
+        destination_name,
+        destination,
+        extracted_directory,
+        rejected_name,
+        marker_name,
+    } = quarantine;
+    let marker_descriptor = unsafe {
+        libc::openat(
+            version_parent_directory.as_raw_fd(),
+            marker_name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600 as libc::c_uint,
+        )
+    };
+    if marker_descriptor < 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(StorageError::new(
+            "plugin_version_identity_cleanup",
+            format!(
+                "cannot create fail-closed marker in {}: {error}",
+                version_parent.display()
+            ),
+        ));
+    }
+    let marker = unsafe { File::from_raw_fd(marker_descriptor) };
+    let marker_metadata = secure_fs::metadata(&marker).map_err(|error| {
+        StorageError::new(
+            "plugin_version_identity_cleanup",
+            format!("cannot inspect fail-closed marker: {error}"),
+        )
+    })?;
+    if !secure_fs::is_type(&marker_metadata, libc::S_IFREG)
+        || !secure_fs::owned_by_effective_user(&marker_metadata)
+        || !secure_fs::has_single_link(&marker_metadata)
+    {
+        return Err(StorageError::new(
+            "plugin_version_identity_cleanup",
+            "fail-closed marker is not an owned single-link regular file",
+        ));
+    }
+    marker.sync_all().map_err(|error| {
+        StorageError::new(
+            "plugin_version_identity_cleanup",
+            format!("cannot sync fail-closed marker: {error}"),
+        )
+    })?;
+    version_parent_directory.sync_all().map_err(|error| {
+        StorageError::new(
+            "plugin_version_identity_cleanup",
+            format!(
+                "cannot sync fail-closed marker in {}: {error}",
+                version_parent.display()
+            ),
+        )
+    })?;
+    if failpoints.take(StorageFailpoint::QuarantineAfterMarkerParentSync) {
+        return Err(StorageError::new(
+            "plugin_version_identity_cleanup",
+            "injected interruption after fail-closed marker parent sync",
+        ));
+    }
+    secure_fs::chmod(extracted_directory, 0o555).map_err(|error| {
+        StorageError::new(
+            "plugin_version_permissions",
+            format!("cannot restore held source after destination mismatch: {error}"),
+        )
+    })?;
+    if unsafe {
+        libc::renameatx_np(
+            version_parent_directory.as_raw_fd(),
+            destination_name.as_ptr(),
+            source_parent.as_raw_fd(),
+            rejected_name.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    } != 0
+    {
+        let rename_error = std::io::Error::last_os_error();
+        if rename_error.kind() != std::io::ErrorKind::NotFound {
+            secure_fs::chmod(version_parent_directory, 0o555).map_err(|error| {
+                StorageError::new(
+                    "plugin_version_identity_cleanup",
+                    format!(
+                        "cannot protect {} after quarantine failed with {rename_error}: {error}",
+                        version_parent.display()
+                    ),
+                )
+            })?;
+            version_parent_directory.sync_all().map_err(|error| {
+                StorageError::new(
+                    "plugin_version_identity_cleanup",
+                    format!(
+                        "cannot sync fail-closed {}: {error}",
+                        version_parent.display()
+                    ),
+                )
+            })?;
+            return Err(StorageError::new(
+                "plugin_version_identity_cleanup",
+                format!(
+                    "cannot move untrusted {} back to {}: {rename_error}",
+                    destination.display(),
+                    source_parent_path.display()
+                ),
+            ));
+        }
+    }
+
+    // Keep the durable marker in place until the quarantine rename is durable
+    // in both namespaces. A crash before either sync must still prevent Exact.
+    source_parent.sync_all().map_err(|error| {
+        StorageError::new(
+            "plugin_version_identity_cleanup",
+            format!("cannot sync {}: {error}", source_parent_path.display()),
+        )
+    })?;
+    version_parent_directory.sync_all().map_err(|error| {
+        StorageError::new(
+            "plugin_version_identity_cleanup",
+            format!("cannot sync {}: {error}", version_parent.display()),
+        )
+    })?;
+    if unsafe {
+        libc::unlinkat(
+            version_parent_directory.as_raw_fd(),
+            marker_name.as_ptr(),
+            0,
+        )
+    } != 0
+    {
+        let error = std::io::Error::last_os_error();
+        return Err(StorageError::new(
+            "plugin_version_identity_cleanup",
+            format!("cannot remove fail-closed marker: {error}"),
+        ));
+    }
+    secure_fs::chmod(version_parent_directory, 0o555).map_err(|error| {
+        StorageError::new(
+            "plugin_version_identity_cleanup",
+            format!("cannot protect {}: {error}", version_parent.display()),
+        )
+    })?;
+    version_parent_directory.sync_all().map_err(|error| {
+        StorageError::new(
+            "plugin_version_identity_cleanup",
+            format!("cannot sync {}: {error}", version_parent.display()),
+        )
+    })
+}
+
 fn verify_directory_entry(
     parent: &File,
     name: &CStr,
@@ -363,6 +727,14 @@ fn verify_directory_entry(
         return Err(StorageError::new(
             error_code,
             format!("{} changed while it was opened", path.display()),
+        ));
+    }
+    if !secure_fs::owned_by_effective_user(&anchored)
+        || !secure_fs::owned_by_effective_user(&opened)
+    {
+        return Err(StorageError::new(
+            error_code,
+            format!("{} is not owned by the current user", path.display()),
         ));
     }
     Ok(())
@@ -489,6 +861,18 @@ impl ReceiptStore {
                 format!("{} is not a regular receipt file", path.display()),
             ));
         }
+        if !secure_fs::owned_by_effective_user(&inspected) {
+            return Err(StorageError::new(
+                "plugin_receipt_owner",
+                format!("{} is not owned by the current user", path.display()),
+            ));
+        }
+        if !secure_fs::has_single_link(&inspected) {
+            return Err(StorageError::new(
+                "plugin_receipt_links",
+                format!("{} has more than one hard link", path.display()),
+            ));
+        }
         if let Some(after_inspect) = after_inspect {
             after_inspect(&path);
         }
@@ -529,6 +913,18 @@ impl ReceiptStore {
                 format!("{} is not a regular receipt file", path.display()),
             ));
         }
+        if !secure_fs::owned_by_effective_user(&opened) {
+            return Err(StorageError::new(
+                "plugin_receipt_owner",
+                format!("{} is not owned by the current user", path.display()),
+            ));
+        }
+        if !secure_fs::has_single_link(&opened) {
+            return Err(StorageError::new(
+                "plugin_receipt_links",
+                format!("{} has more than one hard link", path.display()),
+            ));
+        }
         let mut anchored = std::mem::MaybeUninit::<libc::stat>::zeroed();
         if unsafe {
             libc::fstatat(
@@ -553,6 +949,13 @@ impl ReceiptStore {
             return Err(StorageError::new(
                 "plugin_receipt_type",
                 format!("{} changed while it was opened", path.display()),
+            ));
+        }
+        if !secure_fs::owned_by_effective_user(&anchored) || !secure_fs::has_single_link(&anchored)
+        {
+            return Err(StorageError::new(
+                "plugin_receipt_links",
+                format!("{} is not an owned single-link receipt", path.display()),
             ));
         }
         let mut bytes = Vec::new();
@@ -664,6 +1067,21 @@ impl ReceiptStore {
                 ));
             }
             let mut output = unsafe { File::from_raw_fd(descriptor) };
+            let output_metadata = secure_fs::metadata(&output).map_err(|error| {
+                StorageError::new(
+                    "plugin_receipt_write",
+                    format!("cannot inspect opened {}: {error}", temp.display()),
+                )
+            })?;
+            if !secure_fs::is_type(&output_metadata, libc::S_IFREG)
+                || !secure_fs::owned_by_effective_user(&output_metadata)
+                || !secure_fs::has_single_link(&output_metadata)
+            {
+                return Err(StorageError::new(
+                    "plugin_receipt_write",
+                    format!("{} is not an owned single-link file", temp.display()),
+                ));
+            }
             secure_fs::chmod(&output, 0o600).map_err(|error| {
                 StorageError::new(
                     "plugin_receipt_write",
@@ -770,6 +1188,20 @@ fn make_tree_immutable(
     before_child_open: Option<&mut dyn FnMut(&Path)>,
 ) -> Result<File, StorageError> {
     let directory = open_real_directory(path)?;
+    let metadata = secure_fs::metadata(&directory).map_err(|error| {
+        StorageError::new(
+            "plugin_version_permissions",
+            format!("cannot inspect opened {}: {error}", path.display()),
+        )
+    })?;
+    if !secure_fs::is_type(&metadata, libc::S_IFDIR)
+        || !secure_fs::owned_by_effective_user(&metadata)
+    {
+        return Err(StorageError::new(
+            "plugin_version_owner",
+            format!("{} is not an owned directory", path.display()),
+        ));
+    }
     let mut before_child_open = before_child_open;
     protect_directory_tree(&directory, path, &mut before_child_open)?;
     Ok(directory)
@@ -860,6 +1292,18 @@ fn protect_directory_tree(
             return Err(StorageError::new(
                 "plugin_version_type",
                 format!("{} changed while it was opened", child_path.display()),
+            ));
+        }
+        if !secure_fs::owned_by_effective_user(&opened) {
+            return Err(StorageError::new(
+                "plugin_version_owner",
+                format!("{} is not owned by the current user", child_path.display()),
+            ));
+        }
+        if file_type == libc::S_IFREG && !secure_fs::has_single_link(&opened) {
+            return Err(StorageError::new(
+                "plugin_version_links",
+                format!("{} has more than one hard link", child_path.display()),
             ));
         }
         if file_type == libc::S_IFDIR {
@@ -999,6 +1443,12 @@ fn open_verified_directory_entry(
         return Err(StorageError::new(
             "plugin_version_type",
             format!("{} changed while it was opened", path.display()),
+        ));
+    }
+    if !secure_fs::owned_by_effective_user(&opened) {
+        return Err(StorageError::new(
+            "plugin_version_owner",
+            format!("{} is not owned by the current user", path.display()),
         ));
     }
     Ok(child)
@@ -1305,6 +1755,202 @@ mod tests {
     }
 
     #[test]
+    fn version_source_real_directory_swap_before_rename_is_rejected() {
+        let paths = fixture_paths("source-real-directory-swap");
+        let store = VersionStore::new(paths.clone());
+        let plugin_id = PluginId::new("dev.example.echo").unwrap();
+        let version = Version::parse("1.0.0").unwrap();
+        let package_digest = digest('a');
+        let extracted = extracted_fixture(&paths, "source");
+        let replacement = extracted_fixture(&paths, "replacement");
+        let held_original = paths.quarantine_root().join("held-original");
+        let destination = paths
+            .versions(&plugin_id)
+            .join(version.to_string())
+            .join(package_digest.as_str());
+
+        let error = store
+            .finalize_extracted_before_rename(
+                &extracted,
+                &plugin_id,
+                &version,
+                &package_digest,
+                |source, fixed_destination| {
+                    assert_eq!(source, extracted);
+                    assert_eq!(fixed_destination, destination);
+                    fs::rename(&extracted, &held_original).unwrap();
+                    fs::rename(&replacement, &extracted).unwrap();
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), "plugin_version_source");
+        assert!(!destination.exists());
+        assert_eq!(
+            fs::metadata(extracted.join("bin/plugin"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(held_original.join("bin/plugin"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o555
+        );
+    }
+
+    #[test]
+    fn fixed_destination_real_directory_swap_after_rename_is_quarantined() {
+        let paths = fixture_paths("destination-real-directory-swap");
+        let store = VersionStore::new(paths.clone());
+        let plugin_id = PluginId::new("dev.example.echo").unwrap();
+        let version = Version::parse("1.0.0").unwrap();
+        let package_digest = digest('a');
+        let extracted = extracted_fixture(&paths, "source");
+        let attacker = extracted_fixture(&paths, "attacker");
+        let version_parent = paths.versions(&plugin_id).join(version.to_string());
+        let destination = version_parent.join(package_digest.as_str());
+        let held_original = version_parent.join("held-original");
+
+        let error = store
+            .finalize_extracted_after_rename(
+                &extracted,
+                &plugin_id,
+                &version,
+                &package_digest,
+                |fixed_destination| {
+                    assert_eq!(fixed_destination, destination);
+                    fs::rename(&destination, &held_original).unwrap();
+                    fs::rename(&attacker, &destination).unwrap();
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), "plugin_version_identity");
+        assert!(!destination.exists());
+        assert_eq!(
+            store
+                .observe(&plugin_id, &version, &package_digest)
+                .unwrap(),
+            VersionVisibility::Absent
+        );
+        let rejected = fs::read_dir(paths.quarantine_root())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".rejected-"))
+            })
+            .expect("attacker destination must be moved out of the fixed digest name");
+        assert_eq!(
+            fs::metadata(rejected.join("bin/plugin"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(rejected.join("ui/index.html"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(held_original.join("bin/plugin"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o555
+        );
+    }
+
+    #[test]
+    fn quarantine_marker_is_parent_synced_before_destination_cleanup() {
+        let paths = fixture_paths("destination-quarantine-order");
+        let failpoints = Arc::new(StorageFailpoints::default());
+        failpoints.arm(StorageFailpoint::QuarantineAfterMarkerParentSync);
+        let store = VersionStore::with_failpoints(paths.clone(), failpoints);
+        let plugin_id = PluginId::new("dev.example.echo").unwrap();
+        let version = Version::parse("1.0.0").unwrap();
+        let package_digest = digest('a');
+        let extracted = extracted_fixture(&paths, "source");
+        let attacker = extracted_fixture(&paths, "attacker");
+        let version_parent = paths.versions(&plugin_id).join(version.to_string());
+        let destination = version_parent.join(package_digest.as_str());
+        let held_original = version_parent.join("held-original");
+
+        let error = store
+            .finalize_extracted_after_rename(
+                &extracted,
+                &plugin_id,
+                &version,
+                &package_digest,
+                |fixed_destination| {
+                    fs::rename(fixed_destination, &held_original).unwrap();
+                    fs::rename(&attacker, fixed_destination).unwrap();
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), "plugin_version_identity_cleanup");
+        assert!(destination.exists());
+        assert!(fs::read_dir(&version_parent).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(".identity-invalid-"))
+        }));
+        assert_eq!(
+            store
+                .observe(&plugin_id, &version, &package_digest)
+                .unwrap_err()
+                .code(),
+            "plugin_version_type"
+        );
+    }
+
+    #[test]
+    fn regular_tree_hardlink_is_rejected_without_chmodding_outside_inode() {
+        let paths = fixture_paths("tree-hardlink");
+        let store = VersionStore::new(paths.clone());
+        let plugin_id = PluginId::new("dev.example.echo").unwrap();
+        let extracted = extracted_fixture(&paths, "tree-hardlink");
+        let linked_child = extracted.join("ui/index.html");
+        let outside = paths.profile().parent().unwrap().join("outside-hardlink");
+        fs::write(&outside, b"outside-must-not-change").unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::remove_file(&linked_child).unwrap();
+        fs::hard_link(&outside, &linked_child).unwrap();
+
+        let error = store
+            .finalize_extracted(
+                &extracted,
+                &plugin_id,
+                &Version::parse("1.0.0").unwrap(),
+                &digest('a'),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), "plugin_version_links");
+        assert_eq!(fs::read(&outside).unwrap(), b"outside-must-not-change");
+        assert_eq!(
+            fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
     fn version_rename_reports_exact_visibility_without_operation_transition() {
         let paths = fixture_paths("version-after-rename");
         let journal = OperationJournal::open(paths.operations_db()).unwrap();
@@ -1524,6 +2170,28 @@ mod tests {
         assert_eq!(
             fs::read(&original).unwrap(),
             serde_json_canonicalizer::to_vec(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn current_hardlink_is_rejected_without_changing_outside_inode() {
+        let paths = fixture_paths("receipt-hardlink");
+        let plugin_id = PluginId::new("dev.example.echo").unwrap();
+        let expected = receipt("dev.example.echo", "1.0.0", 1, None);
+        paths.prepare_plugin(&plugin_id).unwrap();
+        let outside = paths.profile().parent().unwrap().join("outside-receipt");
+        let outside_bytes = serde_json_canonicalizer::to_vec(&expected).unwrap();
+        fs::write(&outside, &outside_bytes).unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::hard_link(&outside, paths.current(&plugin_id)).unwrap();
+
+        let error = ReceiptStore::new(paths).current(&plugin_id).unwrap_err();
+
+        assert_eq!(error.code(), "plugin_receipt_links");
+        assert_eq!(fs::read(&outside).unwrap(), outside_bytes);
+        assert_eq!(
+            fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o640
         );
     }
 

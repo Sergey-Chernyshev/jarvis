@@ -64,6 +64,18 @@ impl ManagerLock {
                         format!("{} is not a regular lock file", path.display()),
                     ));
                 }
+                if !secure_fs::owned_by_effective_user(&inspected) {
+                    return Err(StorageError::new(
+                        "manager_lock_owner",
+                        format!("{} is not owned by the current user", path.display()),
+                    ));
+                }
+                if !secure_fs::has_single_link(&inspected) {
+                    return Err(StorageError::new(
+                        "manager_lock_links",
+                        format!("{} has more than one hard link", path.display()),
+                    ));
+                }
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -111,6 +123,18 @@ impl ManagerLock {
                 format!("{} is not a regular lock file", path.display()),
             ));
         }
+        if !secure_fs::owned_by_effective_user(&opened) {
+            return Err(StorageError::new(
+                "manager_lock_owner",
+                format!("{} is not owned by the current user", path.display()),
+            ));
+        }
+        if !secure_fs::has_single_link(&opened) {
+            return Err(StorageError::new(
+                "manager_lock_links",
+                format!("{} has more than one hard link", path.display()),
+            ));
+        }
         if let Err(error) = secure_fs::chmod(&file, 0o600) {
             return Err(StorageError::new(
                 "manager_lock_permissions",
@@ -129,6 +153,13 @@ impl ManagerLock {
             return Err(StorageError::new(
                 "manager_lock_type",
                 format!("{} changed while it was opened", path.display()),
+            ));
+        }
+        if !secure_fs::owned_by_effective_user(&anchored) || !secure_fs::has_single_link(&anchored)
+        {
+            return Err(StorageError::new(
+                "manager_lock_links",
+                format!("{} is not an owned single-link lock file", path.display()),
             ));
         }
 
@@ -170,6 +201,24 @@ impl ManagerLock {
                 format!("cannot serialize lock owner: {error}"),
             )
         })?;
+        let before_truncate = secure_fs::metadata(&file).map_err(|error| {
+            StorageError::new(
+                "manager_lock_io",
+                format!("cannot inspect locked {}: {error}", path.display()),
+            )
+        })?;
+        if !secure_fs::is_type(&before_truncate, libc::S_IFREG)
+            || !secure_fs::owned_by_effective_user(&before_truncate)
+            || !secure_fs::has_single_link(&before_truncate)
+        {
+            return Err(StorageError::new(
+                "manager_lock_links",
+                format!(
+                    "{} is not an owned single-link file before truncate",
+                    path.display()
+                ),
+            ));
+        }
         file.set_len(0).map_err(|error| {
             StorageError::new(
                 "manager_lock_record",
@@ -377,5 +426,29 @@ mod tests {
         assert_eq!(error.code(), "manager_lock_type");
         assert_eq!(fs::read(&outside).unwrap(), b"outside-must-not-change");
         assert_eq!(fs::read(&original_path).unwrap(), b"original-owner");
+    }
+
+    #[test]
+    fn lock_hardlink_is_rejected_before_chmod_or_truncate() {
+        let paths = fixture_paths();
+        let lock_path = paths.manager_lock();
+        let outside = paths
+            .profile()
+            .parent()
+            .unwrap()
+            .join("outside-lock-hardlink");
+        fs::write(&outside, b"outside-owner-record").unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::hard_link(&outside, &lock_path).unwrap();
+
+        let error =
+            ManagerLock::acquire_with_timeout(&paths, Duration::from_millis(50)).unwrap_err();
+
+        assert_eq!(error.code(), "manager_lock_links");
+        assert_eq!(fs::read(&outside).unwrap(), b"outside-owner-record");
+        assert_eq!(
+            fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
     }
 }

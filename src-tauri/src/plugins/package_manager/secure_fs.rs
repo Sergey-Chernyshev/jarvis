@@ -44,3 +44,11 @@ pub(crate) fn is_type(metadata: &libc::stat, file_type: libc::mode_t) -> bool {
 pub(crate) fn same_identity(left: &libc::stat, right: &libc::stat) -> bool {
     left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
+
+pub(crate) fn owned_by_effective_user(metadata: &libc::stat) -> bool {
+    metadata.st_uid == unsafe { libc::geteuid() }
+}
+
+pub(crate) fn has_single_link(metadata: &libc::stat) -> bool {
+    metadata.st_nlink == 1
+}

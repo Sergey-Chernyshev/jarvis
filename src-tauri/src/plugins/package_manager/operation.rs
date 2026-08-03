@@ -16,7 +16,7 @@ use super::secure_fs;
 use super::{random_storage_id, StorageError};
 use jarvis_plugin_protocol::operation::Operation;
 pub use jarvis_plugin_protocol::operation::OperationState;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, ToSql};
 use serde_json::Value;
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5_000);
@@ -60,6 +60,7 @@ impl OperationJournal {
         Self::open_internal(
             path.into(),
             Option::<fn(&Path)>::None,
+            None,
             #[cfg(test)]
             Arc::new(OperationJournalFailpoints::default()),
         )
@@ -73,6 +74,20 @@ impl OperationJournal {
         Self::open_internal(
             path.into(),
             Some(after_inspect),
+            None,
+            Arc::new(OperationJournalFailpoints::default()),
+        )
+    }
+
+    #[cfg(test)]
+    fn open_after_journal_mode(
+        path: impl Into<PathBuf>,
+        after_journal_mode: fn(&Path),
+    ) -> Result<Self, StorageError> {
+        Self::open_internal(
+            path.into(),
+            Option::<fn(&Path)>::None,
+            Some(after_journal_mode),
             Arc::new(OperationJournalFailpoints::default()),
         )
     }
@@ -82,18 +97,19 @@ impl OperationJournal {
         path: impl Into<PathBuf>,
         failpoints: Arc<OperationJournalFailpoints>,
     ) -> Result<Self, StorageError> {
-        Self::open_internal(path.into(), Option::<fn(&Path)>::None, failpoints)
+        Self::open_internal(path.into(), Option::<fn(&Path)>::None, None, failpoints)
     }
 
     fn open_internal<F>(
         path: PathBuf,
         after_inspect: Option<F>,
+        after_journal_mode: Option<fn(&Path)>,
         #[cfg(test)] failpoints: Arc<OperationJournalFailpoints>,
     ) -> Result<Self, StorageError>
     where
         F: FnOnce(&Path),
     {
-        let (parent, main_file) = prepare_database_path(&path, after_inspect)?;
+        let (parent, main_file, preflight_sidecars) = prepare_database_path(&path, after_inspect)?;
         if rusqlite::version_number() < 3_031_000 {
             return Err(StorageError::new(
                 "operation_db_nofollow",
@@ -150,6 +166,11 @@ impl OperationJournal {
         connection
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(database_error)?;
+        if let Some(after_journal_mode) = after_journal_mode {
+            after_journal_mode(&path);
+        }
+        protect_database_files(&parent, &path)?;
+        drop(preflight_sidecars);
         connection
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(database_error)?;
@@ -227,20 +248,23 @@ impl OperationJournal {
         let (error_code, error_message) = failure
             .map(|failure| (Some(failure.code), Some(failure.message)))
             .unwrap_or((None, None));
+        let next_state = state_name(&next);
+        let updated_at_ms = crate::util::now_ms();
+        let parameters: [&dyn ToSql; 6] = [
+            &id,
+            &next_state,
+            &phase,
+            &error_code,
+            &error_message,
+            &updated_at_ms,
+        ];
         transaction
             .execute(
                 "UPDATE operations
                  SET state = ?2, phase = ?3, error_code = ?4, error_message = ?5,
                      updated_at_ms = ?6
                  WHERE id = ?1",
-                params![
-                    id,
-                    state_name(&next),
-                    phase,
-                    error_code,
-                    error_message,
-                    crate::util::now_ms()
-                ],
+                parameters,
             )
             .map_err(database_error)?;
         transaction.commit().map_err(database_error)?;
@@ -337,23 +361,25 @@ impl OperationJournal {
             .map_err(|_| StorageError::new("operation_db", "operation database lock poisoned"))?;
         self.protect_before_mutation()?;
         let transaction = connection.transaction().map_err(database_error)?;
+        let operation_state = state_name(&state);
+        let parameters: [&dyn ToSql; 9] = [
+            &id,
+            &kind,
+            &plugin_id,
+            &operation_state,
+            &phase,
+            &payload_json,
+            &error_code,
+            &error_message,
+            &now,
+        ];
         transaction
             .execute(
                 "INSERT INTO operations (
                     id, kind, plugin_id, state, phase, payload_json,
                     error_code, error_message, created_at_ms, updated_at_ms
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
-                params![
-                    id,
-                    kind,
-                    plugin_id,
-                    state_name(&state),
-                    phase,
-                    payload_json,
-                    error_code,
-                    error_message,
-                    now
-                ],
+                parameters,
             )
             .map_err(database_error)?;
         transaction.commit().map_err(database_error)?;
@@ -412,7 +438,7 @@ impl OperationJournal {
 fn prepare_database_path<F>(
     path: &Path,
     after_inspect: Option<F>,
-) -> Result<(File, File), StorageError>
+) -> Result<(File, File, Vec<File>), StorageError>
 where
     F: FnOnce(&Path),
 {
@@ -422,75 +448,68 @@ where
             format!("{} has no parent", path.display()),
         )
     })?;
-    let leaf = path.file_name().ok_or_else(|| {
-        StorageError::new(
-            "operation_db_path",
-            format!("{} has no database filename", path.display()),
-        )
-    })?;
-    let leaf = CString::new(leaf.as_bytes()).map_err(|_| {
-        StorageError::new(
-            "operation_db_path",
-            format!("{} contains NUL", path.display()),
-        )
-    })?;
     ensure_real_directory(parent_path, 0o700)?;
     let parent = open_real_directory(parent_path)?;
-    match secure_fs::entry_metadata(&parent, &leaf) {
-        Ok(inspected) => {
-            if !secure_fs::is_type(&inspected, libc::S_IFREG) {
-                return Err(StorageError::new(
-                    "operation_db_type",
-                    format!("{} is not a regular database file", path.display()),
-                ));
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(StorageError::new(
-                "operation_db_path",
-                format!("cannot inspect {}: {error}", path.display()),
-            ));
-        }
-    }
+    let specs = database_candidate_specs(path)?;
+    let inspected = specs
+        .iter()
+        .map(|spec| inspect_database_candidate(&parent, spec))
+        .collect::<Result<Vec<_>, _>>()?;
     if let Some(after_inspect) = after_inspect {
         after_inspect(path);
     }
-    let descriptor = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            leaf.as_ptr(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o600 as libc::c_uint,
-        )
-    };
-    if descriptor < 0 {
-        let error = std::io::Error::last_os_error();
-        return Err(StorageError::new(
-            if matches!(
-                error.raw_os_error(),
-                Some(libc::ELOOP) | Some(libc::ENOTDIR)
-            ) {
-                "operation_db_type"
-            } else {
-                "operation_db_create"
-            },
-            format!("cannot open {}: {error}", path.display()),
-        ));
+    let mut opened = Vec::with_capacity(specs.len());
+    for (spec, inspected) in specs.into_iter().zip(inspected) {
+        let file = match inspected {
+            Some(inspected) => open_inspected_database_candidate(&parent, &spec, &inspected)?,
+            None if spec.required => create_database_candidate(&parent, &spec)?,
+            None => continue,
+        };
+        opened.push((spec, file));
     }
-    let file = unsafe { File::from_raw_fd(descriptor) };
-    let opened = regular_file_metadata(&file, path)?;
-    if let Err(error) = secure_fs::chmod(&file, 0o600) {
-        return Err(StorageError::new(
-            "operation_db_permissions",
-            format!("cannot protect {}: {error}", path.display()),
-        ));
-    }
-    verify_anchored_file(&parent, &leaf, &opened, path)?;
-    Ok((parent, file))
+    protect_opened_database_candidates(&parent, &opened)?;
+
+    let main_index = opened
+        .iter()
+        .position(|(spec, _)| spec.required)
+        .ok_or_else(|| StorageError::new("operation_db_create", "database file was not opened"))?;
+    let (_, main) = opened.swap_remove(main_index);
+    let sidecars = opened.into_iter().map(|(_, file)| file).collect();
+    Ok((parent, main, sidecars))
 }
 
 fn protect_database_files(parent: &File, path: &Path) -> Result<(), StorageError> {
+    let specs = database_candidate_specs(path)?;
+    let inspected = specs
+        .iter()
+        .map(|spec| inspect_database_candidate(parent, spec))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut opened = Vec::with_capacity(specs.len());
+    for (spec, inspected) in specs.into_iter().zip(inspected) {
+        match inspected {
+            Some(inspected) => {
+                let file = open_inspected_database_candidate(parent, &spec, &inspected)?;
+                opened.push((spec, file));
+            }
+            None if spec.required => {
+                return Err(StorageError::new(
+                    "operation_db_path",
+                    format!("{} disappeared", spec.path.display()),
+                ));
+            }
+            None => {}
+        }
+    }
+    protect_opened_database_candidates(parent, &opened)
+}
+
+struct DatabaseCandidateSpec {
+    name: CString,
+    path: PathBuf,
+    required: bool,
+}
+
+fn database_candidate_specs(path: &Path) -> Result<Vec<DatabaseCandidateSpec>, StorageError> {
     let base = path.file_name().ok_or_else(|| {
         StorageError::new(
             "operation_db_path",
@@ -501,53 +520,132 @@ fn protect_database_files(parent: &File, path: &Path) -> Result<(), StorageError
     wal.push("-wal");
     let mut shm = base.to_os_string();
     shm.push("-shm");
-    for (candidate, required) in [(base.to_os_string(), true), (wal, false), (shm, false)] {
-        let name = CString::new(candidate.as_bytes()).map_err(|_| {
-            StorageError::new("operation_db_path", "database filename contains NUL")
-        })?;
-        let descriptor = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if descriptor < 0 {
-            let error = std::io::Error::last_os_error();
-            if !required && error.kind() == std::io::ErrorKind::NotFound {
-                continue;
-            }
-            return Err(StorageError::new(
-                if matches!(
-                    error.raw_os_error(),
-                    Some(libc::ELOOP) | Some(libc::ENOTDIR)
-                ) {
-                    "operation_db_type"
-                } else {
-                    "operation_db_permissions"
-                },
-                format!(
-                    "cannot open {}: {error}",
-                    path.parent()
-                        .unwrap_or_else(|| Path::new(""))
-                        .join(&candidate)
-                        .display()
-                ),
-            ));
+    [(base.to_os_string(), true), (wal, false), (shm, false)]
+        .into_iter()
+        .map(|(candidate, required)| {
+            let candidate_path = path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(&candidate);
+            let name = CString::new(candidate.as_bytes()).map_err(|_| {
+                StorageError::new("operation_db_path", "database filename contains NUL")
+            })?;
+            Ok(DatabaseCandidateSpec {
+                name,
+                path: candidate_path,
+                required,
+            })
+        })
+        .collect()
+}
+
+fn inspect_database_candidate(
+    parent: &File,
+    spec: &DatabaseCandidateSpec,
+) -> Result<Option<libc::stat>, StorageError> {
+    match secure_fs::entry_metadata(parent, &spec.name) {
+        Ok(metadata) => {
+            validate_database_metadata(&metadata, &spec.path)?;
+            Ok(Some(metadata))
         }
-        let file = unsafe { File::from_raw_fd(descriptor) };
-        let candidate_path = path
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join(&candidate);
-        let opened = regular_file_metadata(&file, &candidate_path)?;
-        if let Err(error) = secure_fs::chmod(&file, 0o600) {
+        Err(error) if !spec.required && error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if spec.required && error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(StorageError::new(
+            "operation_db_path",
+            format!("cannot inspect {}: {error}", spec.path.display()),
+        )),
+    }
+}
+
+fn open_inspected_database_candidate(
+    parent: &File,
+    spec: &DatabaseCandidateSpec,
+    inspected: &libc::stat,
+) -> Result<File, StorageError> {
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            spec.name.as_ptr(),
+            libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(open_database_candidate_error(
+            &spec.path,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let file = unsafe { File::from_raw_fd(descriptor) };
+    let opened = regular_file_metadata(&file, &spec.path)?;
+    if !secure_fs::same_identity(inspected, &opened) {
+        return Err(StorageError::new(
+            "operation_db_type",
+            format!("{} changed while it was opened", spec.path.display()),
+        ));
+    }
+    verify_anchored_file(parent, &spec.name, &opened, &spec.path)?;
+    Ok(file)
+}
+
+fn create_database_candidate(
+    parent: &File,
+    spec: &DatabaseCandidateSpec,
+) -> Result<File, StorageError> {
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            spec.name.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600 as libc::c_uint,
+        )
+    };
+    if descriptor < 0 {
+        return Err(open_database_candidate_error(
+            &spec.path,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let file = unsafe { File::from_raw_fd(descriptor) };
+    let opened = regular_file_metadata(&file, &spec.path)?;
+    verify_anchored_file(parent, &spec.name, &opened, &spec.path)?;
+    Ok(file)
+}
+
+fn open_database_candidate_error(path: &Path, error: std::io::Error) -> StorageError {
+    StorageError::new(
+        if matches!(
+            error.raw_os_error(),
+            Some(libc::ELOOP) | Some(libc::ENOTDIR)
+        ) {
+            "operation_db_type"
+        } else {
+            "operation_db_create"
+        },
+        format!("cannot open {}: {error}", path.display()),
+    )
+}
+
+fn protect_opened_database_candidates(
+    parent: &File,
+    opened: &[(DatabaseCandidateSpec, File)],
+) -> Result<(), StorageError> {
+    for (spec, file) in opened {
+        if let Err(error) = secure_fs::chmod(file, 0o600) {
             return Err(StorageError::new(
                 "operation_db_permissions",
-                format!("cannot protect {}: {error}", candidate_path.display()),
+                format!("cannot protect {}: {error}", spec.path.display()),
             ));
         }
-        verify_anchored_file(parent, &name, &opened, &candidate_path)?;
+    }
+    for (spec, file) in opened {
+        let protected = regular_file_metadata(file, &spec.path)?;
+        if protected.st_mode & 0o777 != 0o600 {
+            return Err(StorageError::new(
+                "operation_db_permissions",
+                format!("{} is not mode 0600", spec.path.display()),
+            ));
+        }
+        verify_anchored_file(parent, &spec.name, &protected, &spec.path)?;
     }
     Ok(())
 }
@@ -559,13 +657,36 @@ fn regular_file_metadata(file: &File, path: &Path) -> Result<libc::stat, Storage
             format!("cannot inspect opened {}: {error}", path.display()),
         )
     })?;
-    if !secure_fs::is_type(&metadata, libc::S_IFREG) {
+    validate_database_metadata(&metadata, path)?;
+    Ok(metadata)
+}
+
+fn validate_database_metadata(metadata: &libc::stat, path: &Path) -> Result<(), StorageError> {
+    if !secure_fs::is_type(metadata, libc::S_IFREG) {
         return Err(StorageError::new(
             "operation_db_type",
             format!("{} is not a regular database file", path.display()),
         ));
     }
-    Ok(metadata)
+    if metadata.st_uid != unsafe { libc::geteuid() } {
+        return Err(StorageError::new(
+            "operation_db_owner",
+            format!("{} is not owned by the effective user", path.display()),
+        ));
+    }
+    if metadata.st_nlink != 1 {
+        return Err(StorageError::new(
+            "operation_db_links",
+            format!("{} must have exactly one hard link", path.display()),
+        ));
+    }
+    if metadata.st_mode & 0o077 != 0 {
+        return Err(StorageError::new(
+            "operation_db_permissions",
+            format!("{} grants group or other access", path.display()),
+        ));
+    }
+    Ok(())
 }
 
 fn verify_anchored_file(
@@ -646,7 +767,9 @@ fn legal_transition(current: &OperationState, next: &OperationState) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{OperationJournal, OperationJournalFailpoints, OperationState};
+    use super::{
+        validate_database_metadata, OperationJournal, OperationJournalFailpoints, OperationState,
+    };
     use serde_json::json;
     use std::fs;
     use std::os::unix::fs::symlink;
@@ -672,6 +795,36 @@ mod tests {
 
     fn fixture_journal() -> OperationJournal {
         OperationJournal::open(journal_path("fixture")).unwrap()
+    }
+
+    fn write_owner_only(path: &std::path::Path, contents: &[u8]) {
+        fs::write(path, contents).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn sidecar_path(path: &std::path::Path, suffix: &str) -> PathBuf {
+        PathBuf::from(format!("{}{suffix}", path.display()))
+    }
+
+    fn inject_sidecar_symlink(path: &std::path::Path, suffix: &str) {
+        let candidate = sidecar_path(path, suffix);
+        if fs::symlink_metadata(&candidate).is_ok() {
+            fs::remove_file(&candidate).unwrap();
+        }
+        let outside = path
+            .parent()
+            .unwrap()
+            .join(format!("outside-post-journal-{}", &suffix[1..]));
+        write_owner_only(&outside, b"post-journal-target-must-not-change");
+        symlink(outside, candidate).unwrap();
+    }
+
+    fn inject_wal_symlink(path: &std::path::Path) {
+        inject_sidecar_symlink(path, "-wal");
+    }
+
+    fn inject_shm_symlink(path: &std::path::Path) {
+        inject_sidecar_symlink(path, "-shm");
     }
 
     fn seed_operation(journal: &OperationJournal, id: &str, state: OperationState, phase: &str) {
@@ -763,7 +916,7 @@ mod tests {
         let path = journal_path("swap");
         let original = path.with_extension("original");
         let outside = path.parent().unwrap().join("outside-database-target");
-        fs::write(&path, []).unwrap();
+        write_owner_only(&path, b"");
         fs::write(&outside, b"outside-must-not-change").unwrap();
 
         let error = OperationJournal::open_after_inspect(&path, |inspected| {
@@ -779,16 +932,33 @@ mod tests {
     }
 
     #[test]
+    fn database_swap_to_regular_decoy_is_rejected_before_sqlite_open() {
+        let path = journal_path("regular-decoy-swap");
+        let original = path.with_extension("original");
+        write_owner_only(&path, b"");
+
+        let error = OperationJournal::open_after_inspect(&path, |_| {
+            fs::rename(&path, &original).unwrap();
+            write_owner_only(&path, b"");
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code(), "operation_db_type");
+        assert_eq!(fs::read(&path).unwrap(), b"");
+        assert_eq!(fs::read(&original).unwrap(), b"");
+    }
+
+    #[test]
     fn database_parent_swap_to_real_decoy_is_rejected_before_schema_mutation() {
         let path = journal_path("parent-swap");
         let parent = path.parent().unwrap().to_path_buf();
         let original_parent = parent.with_extension("original");
-        fs::write(&path, []).unwrap();
+        write_owner_only(&path, b"");
 
         let error = OperationJournal::open_after_inspect(&path, |_| {
             fs::rename(&parent, &original_parent).unwrap();
             fs::create_dir(&parent).unwrap();
-            fs::write(&path, []).unwrap();
+            write_owner_only(&path, b"");
         })
         .unwrap_err();
 
@@ -798,6 +968,192 @@ mod tests {
             fs::read(original_parent.join("operations.sqlite3")).unwrap(),
             b""
         );
+    }
+
+    #[test]
+    fn database_with_group_or_other_access_is_rejected_before_chmod() {
+        let path = journal_path("database-open-permissions");
+        fs::write(&path, []).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+
+        let error = OperationJournal::open(&path).unwrap_err();
+
+        assert_eq!(error.code(), "operation_db_permissions");
+        assert_eq!(fs::read(&path).unwrap(), b"");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o666
+        );
+    }
+
+    #[test]
+    fn database_metadata_owned_by_another_euid_is_rejected() {
+        let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+        metadata.st_mode = (libc::S_IFREG | 0o600) as _;
+        metadata.st_uid = unsafe { libc::geteuid() }.wrapping_add(1);
+        metadata.st_nlink = 1;
+
+        let error =
+            validate_database_metadata(&metadata, std::path::Path::new("operations.sqlite3"))
+                .unwrap_err();
+
+        assert_eq!(error.code(), "operation_db_owner");
+    }
+
+    #[test]
+    fn hardlinked_database_is_rejected_without_mutating_external_target() {
+        let path = journal_path("database-hardlink");
+        let outside = path.parent().unwrap().join("outside-database-hardlink");
+        write_owner_only(&outside, b"external-database-must-not-change");
+        fs::hard_link(&outside, &path).unwrap();
+
+        let error = OperationJournal::open(&path).unwrap_err();
+
+        assert_eq!(error.code(), "operation_db_links");
+        assert_eq!(
+            fs::read(&outside).unwrap(),
+            b"external-database-must-not-change"
+        );
+        assert_eq!(
+            fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn wal_and_shm_symlinks_are_rejected_before_sqlite_open() {
+        for suffix in ["-wal", "-shm"] {
+            let path = journal_path(&format!("sidecar-symlink-{}", &suffix[1..]));
+            let candidate = sidecar_path(&path, suffix);
+            let outside = path
+                .parent()
+                .unwrap()
+                .join(format!("outside-sidecar-{}", &suffix[1..]));
+            write_owner_only(&path, b"");
+            write_owner_only(&outside, b"external-sidecar-must-not-change");
+            symlink(&outside, &candidate).unwrap();
+
+            let error = OperationJournal::open(&path).unwrap_err();
+
+            assert_eq!(error.code(), "operation_db_type", "{suffix}");
+            assert_eq!(fs::read(&path).unwrap(), b"", "{suffix}");
+            assert_eq!(
+                fs::read(&outside).unwrap(),
+                b"external-sidecar-must-not-change",
+                "{suffix}"
+            );
+        }
+    }
+
+    #[test]
+    fn wal_and_shm_non_regular_entries_are_rejected_before_sqlite_open() {
+        for suffix in ["-wal", "-shm"] {
+            let path = journal_path(&format!("sidecar-directory-{}", &suffix[1..]));
+            let candidate = sidecar_path(&path, suffix);
+            write_owner_only(&path, b"");
+            fs::create_dir(&candidate).unwrap();
+
+            let error = OperationJournal::open(&path).unwrap_err();
+
+            assert_eq!(error.code(), "operation_db_type", "{suffix}");
+            assert_eq!(fs::read(&path).unwrap(), b"", "{suffix}");
+            assert!(candidate.is_dir(), "{suffix}");
+        }
+    }
+
+    #[test]
+    fn wal_and_shm_hardlinks_are_rejected_without_external_mutation() {
+        for suffix in ["-wal", "-shm"] {
+            let path = journal_path(&format!("sidecar-hardlink-{}", &suffix[1..]));
+            let candidate = sidecar_path(&path, suffix);
+            let outside = path
+                .parent()
+                .unwrap()
+                .join(format!("outside-hardlink-{}", &suffix[1..]));
+            write_owner_only(&path, b"");
+            write_owner_only(&outside, b"external-hardlink-must-not-change");
+            fs::hard_link(&outside, &candidate).unwrap();
+
+            let error = OperationJournal::open(&path).unwrap_err();
+
+            assert_eq!(error.code(), "operation_db_links", "{suffix}");
+            assert_eq!(fs::read(&path).unwrap(), b"", "{suffix}");
+            assert_eq!(
+                fs::read(&outside).unwrap(),
+                b"external-hardlink-must-not-change",
+                "{suffix}"
+            );
+            assert_eq!(
+                fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "{suffix}"
+            );
+        }
+    }
+
+    #[test]
+    fn wal_and_shm_open_permissions_are_rejected_before_chmod() {
+        for suffix in ["-wal", "-shm"] {
+            let path = journal_path(&format!("sidecar-permissions-{}", &suffix[1..]));
+            let candidate = sidecar_path(&path, suffix);
+            write_owner_only(&path, b"");
+            fs::write(&candidate, b"sidecar-must-not-change").unwrap();
+            fs::set_permissions(&candidate, fs::Permissions::from_mode(0o666)).unwrap();
+
+            let error = OperationJournal::open(&path).unwrap_err();
+
+            assert_eq!(error.code(), "operation_db_permissions", "{suffix}");
+            assert_eq!(fs::read(&path).unwrap(), b"", "{suffix}");
+            assert_eq!(
+                fs::read(&candidate).unwrap(),
+                b"sidecar-must-not-change",
+                "{suffix}"
+            );
+            assert_eq!(
+                fs::metadata(&candidate).unwrap().permissions().mode() & 0o777,
+                0o666,
+                "{suffix}"
+            );
+        }
+    }
+
+    #[test]
+    fn wal_and_shm_are_rechecked_after_journal_mode_before_schema() {
+        for (label, suffix, inject) in [
+            ("wal", "-wal", inject_wal_symlink as fn(&std::path::Path)),
+            ("shm", "-shm", inject_shm_symlink as fn(&std::path::Path)),
+        ] {
+            let path = journal_path(&format!("post-journal-{label}"));
+            let outside = path
+                .parent()
+                .unwrap()
+                .join(format!("outside-post-journal-{label}"));
+
+            let error = OperationJournal::open_after_journal_mode(&path, inject).unwrap_err();
+
+            assert_eq!(error.code(), "operation_db_type", "{suffix}");
+            assert_eq!(
+                fs::read(&outside).unwrap(),
+                b"post-journal-target-must-not-change",
+                "{suffix}"
+            );
+            fs::remove_file(sidecar_path(&path, suffix)).unwrap();
+            let connection = rusqlite::Connection::open_with_flags(
+                format!("file:{}?immutable=1", path.display()),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .unwrap();
+            let schema_rows: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name = 'operations'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(schema_rows, 0, "{suffix}");
+        }
     }
 
     #[test]

@@ -212,6 +212,20 @@ fn open_directory_components(
         ));
     }
     if let Some(mode) = create_mode {
+        let metadata = secure_fs::metadata(&directory).map_err(|error| {
+            StorageError::new(
+                "plugin_path_io",
+                format!("cannot inspect opened {}: {error}", path.display()),
+            )
+        })?;
+        if !secure_fs::is_type(&metadata, libc::S_IFDIR)
+            || !secure_fs::owned_by_effective_user(&metadata)
+        {
+            return Err(StorageError::new(
+                "plugin_path_owner",
+                format!("{} is not owned by the current user", path.display()),
+            ));
+        }
         if let Err(error) = secure_fs::chmod(&directory, mode) {
             return Err(StorageError::new(
                 "plugin_path_permissions",

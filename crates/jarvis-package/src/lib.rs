@@ -24,6 +24,7 @@ mod spool;
 pub use extract::{
     extract_verified_package, inspect_and_verify_package, ExtractedPackage, PackageTrustError,
     PackageTrustVerifier, UntrustedPackageObservation, VerifiedPackageEvidence,
+    VerifiedPackageFacts,
 };
 #[cfg(target_os = "macos")]
 pub use pack::pack_plugin;

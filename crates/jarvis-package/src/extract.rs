@@ -89,6 +89,102 @@ impl UntrustedPackageObservation<'_> {
     }
 }
 
+/// Read-only facts copied from the exact archive held by
+/// [`VerifiedPackageEvidence`] after trust verification succeeds.
+///
+/// Facts may be inspected to plan an install, but they are deliberately not an
+/// extraction capability. The held evidence must still be consumed by
+/// [`extract_verified_package`], which re-reads and compares the archive.
+///
+/// ```
+/// use jarvis_package::VerifiedPackageFacts;
+///
+/// fn inspect(facts: &VerifiedPackageFacts) {
+///     let _ = facts.archive_digest();
+///     let _ = facts.metadata();
+///     let _ = facts.signature();
+///     let _ = facts.manifest();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use jarvis_package::VerifiedPackageFacts;
+///
+/// let forged = VerifiedPackageFacts {
+///     archive_digest: unimplemented!(),
+///     metadata: unimplemented!(),
+///     signature: unimplemented!(),
+///     manifest: unimplemented!(),
+/// };
+/// ```
+///
+/// ```compile_fail
+/// use jarvis_package::{extract_verified_package, VerifiedPackageFacts};
+/// use std::os::fd::OwnedFd;
+///
+/// fn cannot_extract(facts: VerifiedPackageFacts, parent: &OwnedFd) {
+///     let _ = extract_verified_package(facts, parent, "quarantine");
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use jarvis_package::VerifiedPackageFacts;
+///
+/// fn cannot_clone(facts: &VerifiedPackageFacts) {
+///     let _ = <VerifiedPackageFacts as Clone>::clone(facts);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use jarvis_package::VerifiedPackageFacts;
+///
+/// fn cannot_serialize(facts: &VerifiedPackageFacts) {
+///     let _ = serde_json::to_vec(facts);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use jarvis_package::VerifiedPackageFacts;
+///
+/// let _: VerifiedPackageFacts = serde_json::from_str("{}").unwrap();
+/// ```
+pub struct VerifiedPackageFacts {
+    archive_digest: Digest,
+    metadata: PackageMetadataV1,
+    signature: PackageSignatureV1,
+    manifest: ManifestV2,
+}
+
+impl VerifiedPackageFacts {
+    pub fn archive_digest(&self) -> &Digest {
+        &self.archive_digest
+    }
+
+    pub fn metadata(&self) -> &PackageMetadataV1 {
+        &self.metadata
+    }
+
+    pub fn signature(&self) -> &PackageSignatureV1 {
+        &self.signature
+    }
+
+    pub fn manifest(&self) -> &ManifestV2 {
+        &self.manifest
+    }
+}
+
+impl fmt::Debug for VerifiedPackageFacts {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VerifiedPackageFacts")
+            .field("archive_digest", &self.archive_digest)
+            .field("plugin_id", &self.metadata.plugin_id)
+            .field("version", &self.metadata.version)
+            .field("key_id", &self.signature.key_id)
+            .finish()
+    }
+}
+
 /// Opaque proof that the exact held archive file passed strict inspection and
 /// the caller-provided trust verifier.
 ///
@@ -101,17 +197,21 @@ pub struct VerifiedPackageEvidence {
     archive: File,
     inspection: ArchiveInspection,
     identity: FileIdentity,
-    metadata: PackageMetadataV1,
-    signature: PackageSignatureV1,
-    manifest: ManifestV2,
+    facts: VerifiedPackageFacts,
+}
+
+impl VerifiedPackageEvidence {
+    pub fn facts(&self) -> &VerifiedPackageFacts {
+        &self.facts
+    }
 }
 
 impl fmt::Debug for VerifiedPackageEvidence {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VerifiedPackageEvidence")
-            .field("archive_digest", self.inspection.physical_digest())
-            .field("plugin_id", &self.metadata.plugin_id)
+            .field("archive_digest", self.facts.archive_digest())
+            .field("plugin_id", &self.facts.metadata.plugin_id)
             .finish_non_exhaustive()
     }
 }
@@ -216,13 +316,17 @@ where
     if FileIdentity::archive(&archive)? != identity {
         return Err(PackageError::archive_changed_after_verification());
     }
+    let archive_digest = inspection.physical_digest().clone();
     Ok(VerifiedPackageEvidence {
         archive,
         inspection,
         identity,
-        metadata,
-        signature,
-        manifest,
+        facts: VerifiedPackageFacts {
+            archive_digest,
+            metadata,
+            signature,
+            manifest,
+        },
     })
 }
 
@@ -375,7 +479,8 @@ pub(crate) fn extract_verified_package_with_hook<H: ExtractionHook>(
     hook: &H,
 ) -> Result<ExtractedPackage, PackageError> {
     validate_quarantine_name(quarantine_name)?;
-    if evidence.metadata.plugin_id != evidence.manifest.id || evidence.signature.validate().is_err()
+    if evidence.facts.metadata.plugin_id != evidence.facts.manifest.id
+        || evidence.facts.signature.validate().is_err()
     {
         return Err(PackageError::package_metadata());
     }
@@ -754,7 +859,7 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
 
-    use jarvis_plugin_protocol::manifest::ManifestV2;
+    use jarvis_plugin_protocol::manifest::{ManifestV2, RuntimeKind};
     use jarvis_plugin_protocol::package::PackageTarget;
 
     use super::{
@@ -922,6 +1027,24 @@ mod tests {
     #[test]
     fn extract_requires_opaque_verified_package_evidence() {
         assert!(std::mem::size_of::<VerifiedPackageEvidence>() > 0);
+    }
+
+    #[test]
+    fn verified_facts_match_the_exact_verified_archive() {
+        let mut bytes = GOLDEN;
+        let inspection =
+            inspect_reader_with_limits(&mut bytes, ArchiveLimits::production()).unwrap();
+        let evidence = verify_fixture(archive_file());
+
+        let facts = evidence.facts();
+
+        assert_eq!(facts.archive_digest(), inspection.physical_digest());
+        assert_eq!(facts.metadata().plugin_id, facts.manifest().id);
+        assert_eq!(facts.metadata().version, facts.manifest().version);
+        assert_eq!(facts.metadata().state, facts.manifest().state);
+        assert_eq!(facts.signature().key_id, "fixture.opaque:1");
+        assert_eq!(facts.manifest().runtime.kind, RuntimeKind::UiOnly);
+        assert!(facts.manifest().permissions.is_empty());
     }
 
     #[test]

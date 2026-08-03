@@ -22,6 +22,8 @@
 #   - взведён предохранитель от рекурсии (JARVIS_SHIM)
 
 JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
+JARVIS_SOCK="${JARVIS_SOCK:-$JARVIS_DIR/run.sock}"
+export JARVIS_DIR JARVIS_SOCK
 SHIM_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 BIN_NAME=$(basename -- "$0")
 

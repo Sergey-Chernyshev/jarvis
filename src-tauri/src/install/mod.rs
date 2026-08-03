@@ -2851,6 +2851,21 @@ mod tests {
             SHIM_SRC.contains("command -v \"$BIN_NAME\""),
             "резолвит реальный бинарь по имени"
         );
+        assert!(
+            SHIM_SRC.contains("JARVIS_SOCK=\"${JARVIS_SOCK:-$JARVIS_DIR/run.sock}\""),
+            "каждая agent-сессия привязана к сокету своего Jarvis profile"
+        );
+        assert!(
+            SHIM_SRC.contains("export JARVIS_DIR JARVIS_SOCK"),
+            "profile binding наследуется настоящим agent-процессом"
+        );
+        assert!(
+            TMUX_CONF_SRC
+                .lines()
+                .find(|line| line.contains("update-environment"))
+                .is_some_and(|line| line.contains("JARVIS_SOCK")),
+            "tmux переносит profile socket из запускающего терминала"
+        );
     }
 
     #[test]

@@ -1,15 +1,18 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
 
 use serde_json::{json, Value};
 use zeroize::Zeroize;
 
 use crate::host::{HostApi, HostEvent};
-use crate::inventory::InventoryVm;
 use crate::project::ProjectIdentity;
 use crate::run_event::Backend;
 use crate::run_supervisor::{RunSupervisor, SendRequest};
 use crate::service::{validate_project_id, RuntimeService, RuntimeSnapshot};
+use crate::vm_entity::VmEntityPublisher;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_PUBLIC_ERROR_CHARS: usize = 400;
@@ -99,44 +102,72 @@ pub fn valid_request_id(value: &str) -> bool {
 pub struct Dispatcher<S: RuntimeService, H: HostApi> {
     service: S,
     host: H,
-    published_vms: BTreeSet<String>,
+    vm_entities: VmEntityPublisher<H>,
+    inventory_in_flight: Arc<AtomicBool>,
     supervisor: Option<RunSupervisor<H>>,
 }
 
 impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
     pub fn new(service: S, host: H) -> Self {
+        let vm_entities = VmEntityPublisher::new(host.clone());
         Self {
             service,
             host,
-            published_vms: BTreeSet::new(),
+            vm_entities,
+            inventory_in_flight: Arc::new(AtomicBool::new(false)),
             supervisor: None,
         }
     }
 
     pub fn with_supervisor(service: S, host: H, supervisor: RunSupervisor<H>) -> Self {
+        let vm_entities = supervisor.vm_entities().clone();
         Self {
             service,
             host,
-            published_vms: BTreeSet::new(),
+            vm_entities,
+            inventory_in_flight: Arc::new(AtomicBool::new(false)),
             supervisor: Some(supervisor),
         }
     }
 
-    pub fn refresh_inventory(&mut self) -> Result<(), String> {
-        let inventory = self.service.inventory()?;
-        let current = inventory
-            .iter()
-            .map(|vm| vm.name.clone())
-            .collect::<BTreeSet<_>>();
-        for vm in &inventory {
-            self.publish_inventory_vm(vm)?;
+    pub fn schedule_inventory_reconcile(&self) -> bool {
+        if self
+            .inventory_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
         }
-        for removed in self.published_vms.difference(&current) {
-            self.host
-                .publish_entity("remove", "vm", removed, "", json!({}))?;
+        let service = self.service.clone();
+        let vm_entities = self.vm_entities.clone();
+        let inventory_in_flight = self.inventory_in_flight.clone();
+        let spawned = thread::Builder::new()
+            .name("agent-vm-inventory".into())
+            .spawn(move || {
+                let _guard = InventoryJobGuard(inventory_in_flight);
+                let checkpoint = vm_entities.checkpoint();
+                if let Ok(inventory) = service.inventory() {
+                    let _ = vm_entities.reconcile_inventory(checkpoint, &service, inventory);
+                }
+            });
+        if spawned.is_err() {
+            self.inventory_in_flight.store(false, Ordering::Release);
+            return false;
         }
-        self.published_vms = current;
-        Ok(())
+        true
+    }
+
+    pub fn poll_and_reconcile(&mut self, after: u64) -> Result<u64, String> {
+        let batch = self.host.poll(after)?;
+        let next_seq = after.max(batch.next_seq);
+        let heartbeat = batch.events.is_empty();
+        for event in batch.events {
+            self.process(event)?;
+        }
+        if heartbeat {
+            self.schedule_inventory_reconcile();
+        }
+        Ok(next_seq)
     }
 
     pub fn process(&mut self, event: HostEvent) -> Result<(), String> {
@@ -152,20 +183,13 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
         self.publish_operation(&request_id, &name, "started", context.clone())?;
 
         if name == "runtime.inventory" {
-            return match self.refresh_inventory() {
-                Ok(()) => self.publish_operation(
-                    &request_id,
-                    &name,
-                    "done",
-                    operation_attrs(&context, json!({})),
-                ),
-                Err(error) => self.publish_operation(
-                    &request_id,
-                    &name,
-                    "error",
-                    operation_attrs(&context, json!({"error": public_error(&error)})),
-                ),
-            };
+            let scheduled = self.schedule_inventory_reconcile();
+            return self.publish_operation(
+                &request_id,
+                &name,
+                "done",
+                operation_attrs(&context, json!({"scheduled":scheduled})),
+            );
         }
 
         if let Some(result) = self.dispatch_supervisor_command(&name, &event.payload.args) {
@@ -315,72 +339,7 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
     }
 
     fn publish_snapshot(&mut self, snapshot: &RuntimeSnapshot) -> Result<(), String> {
-        let state = snapshot
-            .vm
-            .as_ref()
-            .map(|vm| vm.state.as_str())
-            .unwrap_or("absent");
-        let (management, guest_workspace, modules, resources) = snapshot
-            .vm
-            .as_ref()
-            .and_then(|vm| vm.record.as_ref().map(|record| (vm, record)))
-            .map(|(vm, record)| {
-                (
-                    vm.management.as_str(),
-                    record.workspace.guest_path.as_str(),
-                    record.modules.clone(),
-                    serde_json::to_value(&record.resources).unwrap_or(Value::Null),
-                )
-            })
-            .unwrap_or(("missing", "", Vec::new(), Value::Null));
-        self.host.publish_entity(
-            "upsert",
-            "vm",
-            &snapshot.vm_name,
-            state,
-            json!({
-                "projectId": snapshot.project_id,
-                "project": snapshot.display_name,
-                "cwd": snapshot.cwd,
-                "management": management,
-                "guestWorkspace": guest_workspace,
-                "modules": modules,
-                "resources": resources,
-                "shellCommand": snapshot.shell_command,
-                "createdSpec": snapshot.created_spec,
-                "environment": snapshot.environment
-            }),
-        )?;
-        self.published_vms.insert(snapshot.vm_name.clone());
-        Ok(())
-    }
-
-    fn publish_inventory_vm(&self, vm: &InventoryVm) -> Result<(), String> {
-        let attrs = match &vm.record {
-            Some(record) => {
-                let project = record
-                    .workspace
-                    .host_path
-                    .as_deref()
-                    .and_then(|path| ProjectIdentity::from_path(Path::new(path)).ok());
-                json!({
-                    "management": vm.management,
-                    "projectId": project.as_ref().map(|item| item.project_id.as_str()),
-                    "project": project.as_ref().map(|item| item.display_name.as_str()),
-                    "cwd": project.as_ref().map(|item| item.canonical_path.to_string_lossy().into_owned()),
-                    "guestWorkspace": record.workspace.guest_path,
-                    "modules": record.modules,
-                    "resources": record.resources,
-                    "shellCommand": self.service.shell_command(&vm.name, true)
-                })
-            }
-            None => json!({
-                "management": vm.management,
-                "shellCommand": self.service.shell_command(&vm.name, false)
-            }),
-        };
-        self.host
-            .publish_entity("upsert", "vm", &vm.name, &vm.state, attrs)
+        self.vm_entities.publish_snapshot(snapshot)
     }
 
     fn publish_operation(
@@ -404,6 +363,14 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
             state,
             Value::Object(payload),
         )
+    }
+}
+
+struct InventoryJobGuard(Arc<AtomicBool>);
+
+impl Drop for InventoryJobGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -480,22 +447,25 @@ fn fit_replay_events(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
     use std::path::Path;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
 
     use serde_json::{json, Value};
 
     use super::*;
+    use crate::guest_bootstrap::BootstrapCredentialStatus;
     use crate::host::{HostApi, PollResponse};
     use crate::inventory::{InventoryVm, VmRecord, VmResources, VmWorkspace};
     use crate::run_event::{Backend, BackendEvent, RunEvent};
     use crate::run_executor::{BackendEventSink, ExecutionOutcome, TurnExecution, TurnExecutor};
     use crate::run_store::RunStore;
     use crate::run_supervisor::RunSupervisor;
-    use crate::service::{RuntimeService, RuntimeSnapshot};
+    use crate::service::{BootstrapStatus, RuntimeService, RuntimeSnapshot};
 
     struct Publication {
+        op: String,
         kind: String,
         object_id: String,
         state: String,
@@ -505,6 +475,83 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeHost {
         publications: Arc<Mutex<Vec<Publication>>>,
+        polls: Arc<Mutex<VecDeque<PollResponse>>>,
+        poll_after: Arc<Mutex<Vec<u64>>>,
+        publish_control: Arc<(Mutex<PublishControl>, Condvar)>,
+        persisted_vm_ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[derive(Default)]
+    struct PublishControl {
+        blocked_state: Option<String>,
+        started: bool,
+        released: bool,
+    }
+
+    impl FakeHost {
+        fn push_poll(&self, response: PollResponse) {
+            self.polls.lock().unwrap().push_back(response);
+        }
+
+        fn wait_for_publication(&self, kind: &str, state: &str, count: usize) {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let found = self
+                    .publications
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|item| item.kind == kind && item.state == state)
+                    .count();
+                if found >= count {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "missing {kind}/{state} publication #{count}"
+                );
+                std::thread::yield_now();
+            }
+        }
+
+        fn block_vm_publication(&self, state: &str) {
+            let mut control = self.publish_control.0.lock().unwrap();
+            control.blocked_state = Some(state.into());
+            control.started = false;
+            control.released = false;
+        }
+
+        fn wait_for_blocked_publication(&self) {
+            let (lock, changed) = &*self.publish_control;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut control = lock.lock().unwrap();
+            while !control.started {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(!remaining.is_zero(), "blocked publication did not start");
+                let (next, _) = changed.wait_timeout(control, remaining).unwrap();
+                control = next;
+            }
+        }
+
+        fn release_vm_publication(&self) {
+            let (lock, changed) = &*self.publish_control;
+            lock.lock().unwrap().released = true;
+            changed.notify_all();
+        }
+
+        fn seed_persisted_vm(&self, vm_name: &str) {
+            self.persisted_vm_ids
+                .lock()
+                .unwrap()
+                .push(format!("vm.{vm_name}"));
+            self.publications.lock().unwrap().push(Publication {
+                op: "upsert".into(),
+                kind: "vm".into(),
+                object_id: vm_name.into(),
+                state: "running".into(),
+                attrs: json!({"persisted":true}),
+            });
+        }
     }
 
     impl HostApi for FakeHost {
@@ -512,8 +559,13 @@ mod tests {
             Ok(())
         }
 
-        fn poll(&self, _after: u64) -> Result<PollResponse, String> {
-            Err("not used".into())
+        fn poll(&self, after: u64) -> Result<PollResponse, String> {
+            self.poll_after.lock().unwrap().push(after);
+            self.polls
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| "unexpected poll".into())
         }
 
         fn publish_entity(
@@ -525,7 +577,19 @@ mod tests {
             attrs: Value,
         ) -> Result<(), String> {
             assert!(matches!(op, "upsert" | "remove"));
+            if kind == "vm" {
+                let (lock, changed) = &*self.publish_control;
+                let mut control = lock.lock().unwrap();
+                if control.blocked_state.as_deref() == Some(state) && !control.released {
+                    control.started = true;
+                    changed.notify_all();
+                    while !control.released {
+                        control = changed.wait(control).unwrap();
+                    }
+                }
+            }
             self.publications.lock().unwrap().push(Publication {
+                op: op.into(),
                 kind: kind.into(),
                 object_id: object_id.into(),
                 state: state.into(),
@@ -533,16 +597,101 @@ mod tests {
             });
             Ok(())
         }
+
+        fn query_vm_entity_ids(&self) -> Result<Vec<String>, String> {
+            Ok(self
+                .persisted_vm_ids
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|id| id.strip_prefix("vm."))
+                .map(str::to_owned)
+                .collect())
+        }
+    }
+
+    #[derive(Default)]
+    struct InventoryControl {
+        calls: usize,
+        block: bool,
+        released: bool,
+        error: Option<String>,
+        override_vms: Option<Vec<InventoryVm>>,
     }
 
     #[derive(Clone)]
     struct FakeService {
         result: Arc<Mutex<Result<RuntimeSnapshot, String>>>,
         calls: Arc<Mutex<Vec<String>>>,
+        inventory: Arc<(Mutex<InventoryControl>, Condvar)>,
+    }
+
+    impl FakeService {
+        fn new(result: Result<RuntimeSnapshot, String>) -> Self {
+            Self {
+                result: Arc::new(Mutex::new(result)),
+                calls: Arc::new(Mutex::new(Vec::new())),
+                inventory: Arc::new((Mutex::new(InventoryControl::default()), Condvar::new())),
+            }
+        }
+
+        fn set_inventory_error(&self, error: &str) {
+            self.inventory.0.lock().unwrap().error = Some(error.into());
+        }
+
+        fn clear_inventory_error(&self) {
+            self.inventory.0.lock().unwrap().error = None;
+        }
+
+        fn set_inventory_override(&self, vms: Vec<InventoryVm>) {
+            self.inventory.0.lock().unwrap().override_vms = Some(vms);
+        }
+
+        fn block_inventory(&self) {
+            let mut control = self.inventory.0.lock().unwrap();
+            control.block = true;
+            control.released = false;
+        }
+
+        fn release_inventory(&self) {
+            let (lock, changed) = &*self.inventory;
+            lock.lock().unwrap().released = true;
+            changed.notify_all();
+        }
+
+        fn wait_for_inventory_calls(&self, count: usize) {
+            let (lock, changed) = &*self.inventory;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut control = lock.lock().unwrap();
+            while control.calls < count {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(!remaining.is_zero(), "inventory call #{count} not observed");
+                let (next, _) = changed.wait_timeout(control, remaining).unwrap();
+                control = next;
+            }
+        }
+
+        fn inventory_calls(&self) -> usize {
+            self.inventory.0.lock().unwrap().calls
+        }
     }
 
     impl RuntimeService for FakeService {
         fn inventory(&self) -> Result<Vec<InventoryVm>, String> {
+            let (lock, changed) = &*self.inventory;
+            let mut control = lock.lock().unwrap();
+            control.calls += 1;
+            changed.notify_all();
+            while control.block && !control.released {
+                control = changed.wait(control).unwrap();
+            }
+            if let Some(error) = &control.error {
+                return Err(error.clone());
+            }
+            if let Some(vms) = &control.override_vms {
+                return Ok(vms.clone());
+            }
+            drop(control);
             Ok(self
                 .result
                 .lock()
@@ -622,6 +771,17 @@ mod tests {
         }
     }
 
+    fn wait_for_inventory_idle<S: RuntimeService, H: HostApi>(dispatcher: &Dispatcher<S, H>) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while dispatcher.inventory_in_flight.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "inventory reconcile did not become idle"
+            );
+            std::thread::yield_now();
+        }
+    }
+
     #[derive(Clone, Default)]
     struct NoopExecutor;
 
@@ -693,14 +853,745 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_inventory_does_not_republish_vm_entity() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-inventory-stable-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let service = FakeService::new(Ok(snapshot(&root)));
+        let host = FakeHost::default();
+        let mut dispatcher = Dispatcher::new(service, host.clone());
+        host.push_poll(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: 0,
+        });
+        host.push_poll(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: 0,
+        });
+
+        dispatcher.poll_and_reconcile(0).unwrap();
+        wait_for_inventory_idle(&dispatcher);
+        dispatcher.poll_and_reconcile(0).unwrap();
+        wait_for_inventory_idle(&dispatcher);
+
+        let publications = host.publications.lock().unwrap();
+        assert_eq!(
+            publications.iter().filter(|item| item.kind == "vm").count(),
+            1
+        );
+        drop(publications);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disappeared_inventory_vm_is_removed_once_without_churn() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-inventory-remove-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let service = FakeService::new(Ok(snapshot(&root)));
+        let host = FakeHost::default();
+        let mut dispatcher = Dispatcher::new(service.clone(), host.clone());
+        for next_seq in 1..=3 {
+            host.push_poll(PollResponse {
+                ok: true,
+                events: Vec::new(),
+                next_seq,
+            });
+        }
+
+        dispatcher.poll_and_reconcile(0).unwrap();
+        wait_for_inventory_idle(&dispatcher);
+        service.set_inventory_override(Vec::new());
+        dispatcher.poll_and_reconcile(1).unwrap();
+        wait_for_inventory_idle(&dispatcher);
+        dispatcher.poll_and_reconcile(2).unwrap();
+        wait_for_inventory_idle(&dispatcher);
+
+        let publications = host.publications.lock().unwrap();
+        let vm_publications = publications
+            .iter()
+            .filter(|item| item.kind == "vm")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            vm_publications
+                .iter()
+                .map(|item| item.op.as_str())
+                .collect::<Vec<_>>(),
+            ["upsert", "remove"]
+        );
+        assert_eq!(
+            vm_publications
+                .iter()
+                .map(|item| item.object_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "synthetic-project-a1b2c3d4e5f6",
+                "synthetic-project-a1b2c3d4e5f6"
+            ]
+        );
+        drop(publications);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn poll_heartbeat_reconciles_external_running_to_stopped_transition() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-inventory-heartbeat-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let service = FakeService::new(Ok(snapshot(&root)));
+        let host = FakeHost::default();
+        let mut dispatcher = Dispatcher::new(service.clone(), host.clone());
+        host.push_poll(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: 0,
+        });
+        dispatcher.poll_and_reconcile(0).unwrap();
+        wait_for_inventory_idle(&dispatcher);
+        service
+            .result
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .vm
+            .as_mut()
+            .unwrap()
+            .state = "stopped".into();
+        host.push_poll(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: 0,
+        });
+
+        let next_seq = dispatcher.poll_and_reconcile(0).unwrap();
+        wait_for_inventory_idle(&dispatcher);
+
+        assert_eq!(next_seq, 0);
+        let publications = host.publications.lock().unwrap();
+        assert_eq!(
+            publications
+                .iter()
+                .filter(|item| item.kind == "vm")
+                .map(|item| item.state.as_str())
+                .collect::<Vec<_>>(),
+            ["running", "stopped"]
+        );
+        drop(publications);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn poll_command_processing_advances_next_sequence() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-poll-command-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let service = FakeService::new(Ok(snapshot(&root)));
+        let host = FakeHost::default();
+        host.push_poll(PollResponse {
+            ok: true,
+            events: vec![command("runtime.status", &root)],
+            next_seq: 9,
+        });
+        let mut dispatcher = Dispatcher::new(service.clone(), host.clone());
+
+        let next_seq = dispatcher.poll_and_reconcile(4).unwrap();
+
+        assert_eq!(next_seq, 9);
+        assert_eq!(*host.poll_after.lock().unwrap(), [4]);
+        assert_eq!(*service.calls.lock().unwrap(), ["status"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ensure_poll_keeps_bootstrap_credentials_for_terminal_contract() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-poll-credentials-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ready = snapshot(&root);
+        ready.created_spec = true;
+        ready.environment = Some(BootstrapStatus {
+            fingerprint: "synthetic-ready".into(),
+            files: 3,
+            skipped: 0,
+            credentials: BootstrapCredentialStatus {
+                claude: "ready".into(),
+                codex: "ready".into(),
+            },
+            proxy_configured: true,
+        });
+        let service = FakeService::new(Ok(ready));
+        let host = FakeHost::default();
+        host.push_poll(PollResponse {
+            ok: true,
+            events: vec![command("runtime.ensure", &root)],
+            next_seq: 8,
+        });
+        let mut dispatcher = Dispatcher::new(service.clone(), host.clone());
+
+        assert_eq!(dispatcher.poll_and_reconcile(0).unwrap(), 8);
+        assert_eq!(service.inventory_calls(), 0);
+        host.push_poll(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: 8,
+        });
+        assert_eq!(dispatcher.poll_and_reconcile(8).unwrap(), 8);
+        wait_for_inventory_idle(&dispatcher);
+
+        let publications = host.publications.lock().unwrap();
+        let vm = publications
+            .iter()
+            .rev()
+            .find(|item| item.kind == "vm")
+            .unwrap();
+        assert_eq!(vm.state, "running");
+        assert_eq!(
+            vm.attrs.pointer("/environment/credentials/claude"),
+            Some(&json!("ready"))
+        );
+        assert_eq!(vm.attrs["createdSpec"], json!(true));
+        assert_eq!(vm.attrs["guestWorkspace"], "/home/dev/synthetic");
+        assert!(vm.attrs["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|module| module == "claude"));
+        assert_eq!(service.inventory_calls(), 1);
+        assert_eq!(
+            publications.iter().filter(|item| item.kind == "vm").count(),
+            1
+        );
+        drop(publications);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn running_status_snapshot_does_not_clear_ready_bootstrap_environment() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-status-credentials-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ready = snapshot(&root);
+        ready.created_spec = true;
+        ready.environment = Some(BootstrapStatus {
+            fingerprint: "synthetic-ready".into(),
+            files: 3,
+            skipped: 0,
+            credentials: BootstrapCredentialStatus {
+                claude: "ready".into(),
+                codex: "ready".into(),
+            },
+            proxy_configured: true,
+        });
+        let service = FakeService::new(Ok(ready));
+        let host = FakeHost::default();
+        let mut dispatcher = Dispatcher::new(service.clone(), host.clone());
+        dispatcher
+            .process(command("runtime.ensure", &root))
+            .unwrap();
+        {
+            let mut current = service.result.lock().unwrap();
+            let snapshot = current.as_mut().unwrap();
+            snapshot.created_spec = false;
+            snapshot.environment = None;
+        }
+
+        dispatcher
+            .process(command("runtime.status", &root))
+            .unwrap();
+
+        let publications = host.publications.lock().unwrap();
+        let vm = publications
+            .iter()
+            .rev()
+            .find(|item| item.kind == "vm")
+            .unwrap();
+        assert_eq!(
+            vm.attrs.pointer("/environment/credentials/claude"),
+            Some(&json!("ready"))
+        );
+        assert_eq!(vm.attrs["createdSpec"], json!(true));
+        assert_eq!(
+            publications.iter().filter(|item| item.kind == "vm").count(),
+            1
+        );
+        drop(publications);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn newer_bootstrap_snapshot_replaces_previous_environment_status() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-bootstrap-refresh-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut initial = snapshot(&root);
+        initial.created_spec = true;
+        initial.environment = Some(BootstrapStatus {
+            fingerprint: "synthetic-old".into(),
+            files: 1,
+            skipped: 0,
+            credentials: BootstrapCredentialStatus {
+                claude: "missing".into(),
+                codex: "ready".into(),
+            },
+            proxy_configured: false,
+        });
+        let service = FakeService::new(Ok(initial));
+        let host = FakeHost::default();
+        let mut dispatcher = Dispatcher::new(service.clone(), host.clone());
+        dispatcher
+            .process(command("runtime.ensure", &root))
+            .unwrap();
+        {
+            let mut current = service.result.lock().unwrap();
+            let snapshot = current.as_mut().unwrap();
+            snapshot.created_spec = false;
+            snapshot.environment = Some(BootstrapStatus {
+                fingerprint: "synthetic-new".into(),
+                files: 4,
+                skipped: 0,
+                credentials: BootstrapCredentialStatus {
+                    claude: "ready".into(),
+                    codex: "ready".into(),
+                },
+                proxy_configured: true,
+            });
+        }
+
+        dispatcher
+            .process(command("runtime.ensure", &root))
+            .unwrap();
+
+        let publications = host.publications.lock().unwrap();
+        let vm = publications
+            .iter()
+            .rev()
+            .find(|item| item.kind == "vm")
+            .unwrap();
+        assert_eq!(
+            vm.attrs.pointer("/environment/credentials/claude"),
+            Some(&json!("ready"))
+        );
+        assert_eq!(
+            vm.attrs.pointer("/environment/fingerprint"),
+            Some(&json!("synthetic-new"))
+        );
+        assert_eq!(vm.attrs["createdSpec"], json!(false));
+        assert_eq!(
+            publications.iter().filter(|item| item.kind == "vm").count(),
+            2
+        );
+        drop(publications);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stopped_or_rebound_vm_does_not_keep_previous_bootstrap_environment() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-bootstrap-clear-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let replacement = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-bootstrap-rebound-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&replacement).unwrap();
+        let mut ready = snapshot(&root);
+        ready.created_spec = true;
+        ready.environment = Some(BootstrapStatus {
+            fingerprint: "synthetic-ready".into(),
+            files: 3,
+            skipped: 0,
+            credentials: BootstrapCredentialStatus {
+                claude: "ready".into(),
+                codex: "ready".into(),
+            },
+            proxy_configured: true,
+        });
+        let service = FakeService::new(Ok(ready));
+        let host = FakeHost::default();
+        let mut dispatcher = Dispatcher::new(service.clone(), host.clone());
+        dispatcher
+            .process(command("runtime.ensure", &root))
+            .unwrap();
+        {
+            let mut current = service.result.lock().unwrap();
+            let snapshot = current.as_mut().unwrap();
+            snapshot.vm.as_mut().unwrap().state = "stopped".into();
+            snapshot.created_spec = false;
+            snapshot.environment = None;
+        }
+        dispatcher
+            .process(command("runtime.status", &root))
+            .unwrap();
+        {
+            let mut current = service.result.lock().unwrap();
+            *current = Ok(snapshot(&replacement));
+        }
+        dispatcher
+            .process(command("runtime.status", &replacement))
+            .unwrap();
+
+        let publications = host.publications.lock().unwrap();
+        let vm_publications = publications
+            .iter()
+            .filter(|item| item.kind == "vm")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            vm_publications
+                .iter()
+                .map(|item| item.state.as_str())
+                .collect::<Vec<_>>(),
+            ["running", "stopped", "running"]
+        );
+        for vm in &vm_publications[1..] {
+            assert_eq!(vm.attrs["environment"], Value::Null);
+            assert_eq!(vm.attrs["createdSpec"], json!(false));
+        }
+        assert_ne!(
+            vm_publications[0].attrs["projectId"],
+            vm_publications[2].attrs["projectId"]
+        );
+        drop(publications);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(replacement).unwrap();
+    }
+
+    #[test]
+    fn transient_inventory_error_does_not_fail_poll_or_remove_last_vm() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-poll-inventory-error-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let service = FakeService::new(Ok(snapshot(&root)));
+        service.set_inventory_error("synthetic limactl timeout");
+        let host = FakeHost::default();
+        host.push_poll(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: 3,
+        });
+        let mut dispatcher = Dispatcher::new(service.clone(), host.clone());
+        dispatcher
+            .process(command("runtime.status", &root))
+            .unwrap();
+
+        let result = dispatcher.poll_and_reconcile(1);
+        service.wait_for_inventory_calls(1);
+        wait_for_inventory_idle(&dispatcher);
+        service.clear_inventory_error();
+        host.push_poll(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: 4,
+        });
+        let retry = dispatcher.poll_and_reconcile(3);
+        service.wait_for_inventory_calls(2);
+        wait_for_inventory_idle(&dispatcher);
+
+        assert_eq!(result.unwrap(), 3);
+        assert_eq!(retry.unwrap(), 4);
+        assert_eq!(service.inventory_calls(), 2);
+        let publications = host.publications.lock().unwrap();
+        assert_eq!(
+            publications
+                .iter()
+                .filter(|item| item.kind == "vm")
+                .map(|item| item.state.as_str())
+                .collect::<Vec<_>>(),
+            ["running"]
+        );
+        drop(publications);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn blocked_reconcile_does_not_block_next_command_or_spawn_another_job() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-poll-blocked-inventory-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let service = FakeService::new(Ok(snapshot(&root)));
+        service.set_inventory_override(Vec::new());
+        service.block_inventory();
+        let host = FakeHost::default();
+        host.push_poll(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: 2,
+        });
+        host.push_poll(PollResponse {
+            ok: true,
+            events: vec![command("runtime.status", &root)],
+            next_seq: 5,
+        });
+        host.push_poll(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: 5,
+        });
+        let dispatcher = Dispatcher::new(service.clone(), host.clone());
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut dispatcher = dispatcher;
+            let result = dispatcher.poll_and_reconcile(0);
+            sent.send((dispatcher, result)).unwrap();
+        });
+
+        let first = received.recv_timeout(Duration::from_millis(250));
+        let (mut dispatcher, first_result) = match first {
+            Ok(value) => value,
+            Err(error) => {
+                service.release_inventory();
+                worker.join().unwrap();
+                panic!("heartbeat blocked on inventory: {error}");
+            }
+        };
+        worker.join().unwrap();
+        service.wait_for_inventory_calls(1);
+        let command_next = dispatcher.poll_and_reconcile(2);
+        let heartbeat_next = dispatcher.poll_and_reconcile(5);
+        let inventory_calls = service.inventory_calls();
+        let runtime_calls = service.calls.lock().unwrap().clone();
+        let poll_after = host.poll_after.lock().unwrap().clone();
+        service.release_inventory();
+        wait_for_inventory_idle(&dispatcher);
+
+        assert_eq!(first_result.unwrap(), 2);
+        assert_eq!(command_next.unwrap(), 5);
+        assert_eq!(heartbeat_next.unwrap(), 5);
+        assert_eq!(inventory_calls, 1);
+        assert_eq!(runtime_calls, ["status"]);
+        assert_eq!(poll_after, [0, 2, 5]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn identical_authoritative_snapshot_fences_older_inventory_sample() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-authoritative-fence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let running = snapshot(&root);
+        let mut stopped = running.vm.clone().unwrap();
+        stopped.state = "stopped".into();
+        let service = FakeService::new(Ok(running));
+        service.set_inventory_override(vec![stopped]);
+        service.block_inventory();
+        let host = FakeHost::default();
+        let mut dispatcher = Dispatcher::new(service.clone(), host.clone());
+        dispatcher
+            .process(command("runtime.status", &root))
+            .unwrap();
+        host.push_poll(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: 1,
+        });
+        dispatcher.poll_and_reconcile(0).unwrap();
+        service.wait_for_inventory_calls(1);
+
+        dispatcher
+            .process(command("runtime.status", &root))
+            .unwrap();
+        service.release_inventory();
+        wait_for_inventory_idle(&dispatcher);
+
+        let publications = host.publications.lock().unwrap();
+        assert_eq!(
+            publications
+                .iter()
+                .filter(|item| item.kind == "vm")
+                .map(|item| item.state.as_str())
+                .collect::<Vec<_>>(),
+            ["running"]
+        );
+        drop(publications);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn slow_inventory_publish_does_not_block_newer_vm_command_and_repairs_final_state() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-slow-publish-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let running = snapshot(&root);
+        let mut stopped = running.vm.clone().unwrap();
+        stopped.state = "stopped".into();
+        let service = FakeService::new(Ok(running));
+        service.set_inventory_override(vec![stopped]);
+        let host = FakeHost::default();
+        let mut dispatcher = Dispatcher::new(service.clone(), host.clone());
+        dispatcher
+            .process(command("runtime.status", &root))
+            .unwrap();
+        host.block_vm_publication("stopped");
+        host.push_poll(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: 1,
+        });
+        dispatcher.poll_and_reconcile(0).unwrap();
+        host.wait_for_blocked_publication();
+        let (sent, received) = std::sync::mpsc::channel();
+        let command_root = root.clone();
+        let worker = std::thread::spawn(move || {
+            let result = dispatcher.process(command("runtime.status", &command_root));
+            sent.send((dispatcher, result)).unwrap();
+        });
+
+        let response = received.recv_timeout(Duration::from_millis(250));
+        let (dispatcher, command_result) = match response {
+            Ok(value) => value,
+            Err(error) => {
+                host.release_vm_publication();
+                worker.join().unwrap();
+                panic!("VM command blocked behind inventory publication: {error}");
+            }
+        };
+        worker.join().unwrap();
+        host.release_vm_publication();
+        wait_for_inventory_idle(&dispatcher);
+
+        command_result.unwrap();
+        let publications = host.publications.lock().unwrap();
+        let states = publications
+            .iter()
+            .filter(|item| item.kind == "vm")
+            .map(|item| item.state.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(states.first(), Some(&"running"));
+        assert_eq!(states.last(), Some(&"running"));
+        drop(publications);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_reconcile_removes_stale_host_vm_absent_from_inventory() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-restart-remove-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let service = FakeService::new(Ok(snapshot(&root)));
+        service.set_inventory_override(Vec::new());
+        let host = FakeHost::default();
+        host.seed_persisted_vm("legacy_VM.v1");
+        host.push_poll(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: 1,
+        });
+        let mut dispatcher = Dispatcher::new(service, host.clone());
+
+        dispatcher.poll_and_reconcile(0).unwrap();
+        wait_for_inventory_idle(&dispatcher);
+
+        let publications = host.publications.lock().unwrap();
+        let stale = publications
+            .iter()
+            .filter(|item| item.object_id == "legacy_VM.v1")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stale
+                .iter()
+                .map(|item| item.op.as_str())
+                .collect::<Vec<_>>(),
+            ["upsert", "remove"]
+        );
+        drop(publications);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn supervisor_vm_publication_updates_cache_before_external_stop() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-supervisor-shared-cache-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let running = snapshot(&root);
+        let mut stopped_vm = running.vm.clone().unwrap();
+        stopped_vm.state = "stopped".into();
+        let service = FakeService::new(Ok(running));
+        service.set_inventory_override(vec![stopped_vm]);
+        let host = FakeHost::default();
+        host.push_poll(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: 0,
+        });
+        host.push_poll(PollResponse {
+            ok: true,
+            events: Vec::new(),
+            next_seq: 0,
+        });
+        let store = RunStore::new(root.join("private/runs"));
+        let supervisor = RunSupervisor::new(host.clone(), store, Arc::new(NoopExecutor));
+        let mut dispatcher = Dispatcher::with_supervisor(service.clone(), host.clone(), supervisor);
+
+        dispatcher.poll_and_reconcile(0).unwrap();
+        service.wait_for_inventory_calls(1);
+        wait_for_inventory_idle(&dispatcher);
+        host.wait_for_publication("vm", "stopped", 1);
+        let identity = ProjectIdentity::from_path(&root).unwrap();
+        let mut send = command("runtime.send", &root);
+        send.payload.args = json!({
+            "cwd":root,
+            "projectId":identity.project_id,
+            "agent":"claude",
+            "message":"сделай"
+        });
+        dispatcher.process(send).unwrap();
+        host.wait_for_publication("vm", "running", 1);
+        host.wait_for_publication("agent_run", "completed", 1);
+
+        dispatcher.poll_and_reconcile(0).unwrap();
+        service.wait_for_inventory_calls(2);
+        wait_for_inventory_idle(&dispatcher);
+        host.wait_for_publication("vm", "stopped", 2);
+
+        let publications = host.publications.lock().unwrap();
+        assert_eq!(
+            publications
+                .iter()
+                .filter(|item| item.kind == "vm")
+                .map(|item| item.state.as_str())
+                .collect::<Vec<_>>(),
+            ["stopped", "running", "stopped"]
+        );
+        drop(publications);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn dispatcher_publishes_started_vm_snapshot_and_done_for_ensure() {
         let root =
             std::env::temp_dir().join(format!("jarvis-agent-vm-dispatch-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        let service = FakeService {
-            result: Arc::new(Mutex::new(Ok(snapshot(&root)))),
-            calls: Arc::new(Mutex::new(Vec::new())),
-        };
+        let service = FakeService::new(Ok(snapshot(&root)));
         let host = FakeHost::default();
         let mut dispatcher = Dispatcher::new(service.clone(), host.clone());
 
@@ -736,12 +1627,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let service = FakeService {
-            result: Arc::new(Mutex::new(Err(
-                "proxy Authorization credential synthetic".into()
-            ))),
-            calls: Arc::new(Mutex::new(Vec::new())),
-        };
+        let service = FakeService::new(Err("proxy Authorization credential synthetic".into()));
         let host = FakeHost::default();
         let mut dispatcher = Dispatcher::new(service, host.clone());
         let mut event = command("runtime.restart", &root);
@@ -785,10 +1671,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let service = FakeService {
-            result: Arc::new(Mutex::new(Ok(snapshot(&root)))),
-            calls: Arc::new(Mutex::new(Vec::new())),
-        };
+        let service = FakeService::new(Ok(snapshot(&root)));
         let host = FakeHost::default();
         let store = RunStore::new(root.join("private/runs"));
         let supervisor = RunSupervisor::new(host.clone(), store.clone(), Arc::new(NoopExecutor));

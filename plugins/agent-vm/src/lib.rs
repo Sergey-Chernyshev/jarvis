@@ -11,3 +11,4 @@ pub mod run_supervisor;
 pub mod runner;
 pub mod runtime_paths;
 pub mod service;
+pub mod vm_entity;

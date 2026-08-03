@@ -39,15 +39,11 @@ fn run() -> Result<(), String> {
     )
     .with_runtime_paths(paths);
     let mut dispatcher = Dispatcher::with_supervisor(service, host.clone(), supervisor.clone());
-    dispatcher.refresh_inventory()?;
+    dispatcher.schedule_inventory_reconcile();
     supervisor.recover()?;
 
     let mut after = 0;
     loop {
-        let batch = host.poll(after)?;
-        for event in batch.events {
-            dispatcher.process(event)?;
-        }
-        after = after.max(batch.next_seq);
+        after = dispatcher.poll_and_reconcile(after)?;
     }
 }

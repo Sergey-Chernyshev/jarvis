@@ -18,6 +18,7 @@ use crate::run_executor::{
 use crate::run_store::{validate_run_id, RunStore, RunSummary};
 use crate::runtime_paths::RuntimePaths;
 use crate::service::{RuntimeService, RuntimeSnapshot};
+use crate::vm_entity::VmEntityPublisher;
 
 const DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(60);
 const MAX_DELTA_CHARS: usize = 8 * 1024;
@@ -72,6 +73,7 @@ pub struct RunSupervisor<H: HostApi> {
     executor: Arc<dyn TurnExecutor>,
     active: Arc<Mutex<HashMap<String, ActiveRun>>>,
     runtime_paths: Option<RuntimePaths>,
+    vm_entities: VmEntityPublisher<H>,
 }
 
 impl<H: HostApi> Clone for RunSupervisor<H> {
@@ -82,18 +84,21 @@ impl<H: HostApi> Clone for RunSupervisor<H> {
             executor: self.executor.clone(),
             active: self.active.clone(),
             runtime_paths: self.runtime_paths.clone(),
+            vm_entities: self.vm_entities.clone(),
         }
     }
 }
 
 impl<H: HostApi> RunSupervisor<H> {
     pub fn new(host: H, store: RunStore, executor: Arc<dyn TurnExecutor>) -> Self {
+        let vm_entities = VmEntityPublisher::new(host.clone());
         Self {
             host,
             store,
             executor,
             active: Arc::new(Mutex::new(HashMap::new())),
             runtime_paths: None,
+            vm_entities,
         }
     }
 
@@ -345,6 +350,10 @@ impl<H: HostApi> RunSupervisor<H> {
         &self.store
     }
 
+    pub fn vm_entities(&self) -> &VmEntityPublisher<H> {
+        &self.vm_entities
+    }
+
     fn publish_recovered(&self, summary: &RunSummary) -> Result<(), String> {
         let project = if summary.project.is_empty() {
             Path::new(&summary.cwd)
@@ -449,7 +458,7 @@ impl<H: HostApi> RunSupervisor<H> {
                 return;
             }
         };
-        let _ = publish_vm_snapshot(&self.host, &snapshot);
+        let _ = self.vm_entities.publish_snapshot(&snapshot);
         let Some(record) = runnable_record(&snapshot).cloned() else {
             let _ = publisher.emit(
                 &turn.turn_id,
@@ -1004,33 +1013,6 @@ fn base_attrs(
     })
 }
 
-fn publish_vm_snapshot<H: HostApi>(host: &H, snapshot: &RuntimeSnapshot) -> Result<(), String> {
-    let state = snapshot
-        .vm
-        .as_ref()
-        .map(|vm| vm.state.as_str())
-        .unwrap_or("absent");
-    let record = snapshot.vm.as_ref().and_then(|vm| vm.record.as_ref());
-    host.publish_entity(
-        "upsert",
-        "vm",
-        &snapshot.vm_name,
-        state,
-        json!({
-            "projectId":snapshot.project_id,
-            "project":snapshot.display_name,
-            "cwd":snapshot.cwd,
-            "shellCommand":snapshot.shell_command,
-            "environment":snapshot.environment,
-            "management":snapshot.vm.as_ref().map(|vm| vm.management.as_str()).unwrap_or("missing"),
-            "guestWorkspace":record.map(|record| record.workspace.guest_path.as_str()).unwrap_or(""),
-            "modules":record.map(|record| record.modules.as_slice()).unwrap_or(&[]),
-            "resources":record.map(|record| &record.resources),
-            "createdSpec":snapshot.created_spec
-        }),
-    )
-}
-
 fn runnable_record(snapshot: &RuntimeSnapshot) -> Option<&VmRecord> {
     snapshot
         .vm
@@ -1446,7 +1428,10 @@ mod tests {
         let (root, supervisor, service) = fixture("snapshot-attrs", FakeExecutor::default());
         let snapshot = service.snapshot();
 
-        publish_vm_snapshot(supervisor.host(), &snapshot).unwrap();
+        supervisor
+            .vm_entities()
+            .publish_snapshot(&snapshot)
+            .unwrap();
 
         let publications = supervisor.host().publications.0.lock().unwrap();
         let (_, state, attrs) = publications

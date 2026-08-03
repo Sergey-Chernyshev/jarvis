@@ -5,6 +5,7 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use jarvis_secret_store::{
     migrate_legacy_claude_secret, read_claude_code_credentials, MacKeychainStore, SecretStore,
@@ -28,6 +29,7 @@ modules:\n\
   - node\n\
   - claude\n\
   - codex\n";
+const INVENTORY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Toolchain {
@@ -329,17 +331,20 @@ impl<R: CommandRunner> AgentVmService<R> {
     pub fn inventory(&self) -> Result<Vec<InventoryVm>, String> {
         let result = self
             .runner
-            .run(&CommandSpec {
-                program: self.tools.limactl.clone(),
-                args: vec![
-                    "list".into(),
-                    "--format".into(),
-                    "{{.Name}}\t{{.Status}}".into(),
-                ],
-                cwd: None,
-                env: self.paths.command_env(),
-                stdin: None,
-            })?
+            .run_with_timeout(
+                &CommandSpec {
+                    program: self.tools.limactl.clone(),
+                    args: vec![
+                        "list".into(),
+                        "--format".into(),
+                        "{{.Name}}\t{{.Status}}".into(),
+                    ],
+                    cwd: None,
+                    env: self.paths.command_env(),
+                    stdin: None,
+                },
+                INVENTORY_COMMAND_TIMEOUT,
+            )?
             .success_or_error("limactl list")?;
         let output = result.stdout_text("limactl list")?;
         let records = load_records(&self.paths.registry_root)?;
@@ -599,6 +604,7 @@ mod tests {
     struct FakeRunner {
         calls: Arc<Mutex<Vec<CommandSpec>>>,
         outputs: Arc<Mutex<VecDeque<CommandResult>>>,
+        timeouts: Arc<Mutex<Vec<Duration>>>,
     }
 
     impl FakeRunner {
@@ -606,6 +612,7 @@ mod tests {
             Self {
                 calls: Arc::new(Mutex::new(Vec::new())),
                 outputs: Arc::new(Mutex::new(outputs.into())),
+                timeouts: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -618,6 +625,15 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .ok_or_else(|| "fake output exhausted".into())
+        }
+
+        fn run_with_timeout(
+            &self,
+            spec: &CommandSpec,
+            timeout: Duration,
+        ) -> Result<CommandResult, String> {
+            self.timeouts.lock().unwrap().push(timeout);
+            self.run(spec)
         }
     }
 
@@ -682,6 +698,22 @@ mod tests {
             plan_ensure(Some(("managed", "running"))),
             EnsureAction::Ready
         );
+    }
+
+    #[test]
+    fn inventory_uses_a_bounded_runtime_tool_deadline() {
+        let (root, _project, paths) = fixture("inventory-timeout");
+        let runner = FakeRunner::with_outputs(vec![ok("")]);
+        let api = service(runner.clone(), paths);
+
+        let inventory = api.inventory().unwrap();
+
+        assert!(inventory.is_empty());
+        assert_eq!(
+            runner.timeouts.lock().unwrap().as_slice(),
+            [INVENTORY_COMMAND_TIMEOUT]
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

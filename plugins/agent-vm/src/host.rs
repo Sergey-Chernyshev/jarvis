@@ -142,6 +142,9 @@ pub struct PollResponse {
 pub trait HostApi: Clone + Send + Sync + 'static {
     fn register(&self, pid: u32) -> Result<(), String>;
     fn poll(&self, after: u64) -> Result<PollResponse, String>;
+    fn query_vm_entity_ids(&self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
     fn publish_entity(
         &self,
         op: &str,
@@ -213,6 +216,41 @@ impl<T: Transport> HostApi for HostClient<T> {
         )?;
         serde_json::from_value(value)
             .map_err(|_| "Jarvis вернул некорректный event batch".to_string())
+    }
+
+    fn query_vm_entity_ids(&self) -> Result<Vec<String>, String> {
+        let value = self.json_request(
+            "POST",
+            "/capability",
+            json!({
+                "id": "entities.query",
+                "args": {
+                    "kind": "vm",
+                    "owner": "plugin:agent-vm"
+                }
+            }),
+        )?;
+        if value.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err("Jarvis отклонил entity query".into());
+        }
+        let entities = value
+            .get("value")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Jarvis вернул некорректный VM entity query".to_string())?;
+        let mut vm_names = entities
+            .iter()
+            .filter(|entity| {
+                entity.get("kind").and_then(Value::as_str) == Some("vm")
+                    && entity.get("owner").and_then(Value::as_str) == Some("plugin:agent-vm")
+            })
+            .filter_map(|entity| entity.get("id").and_then(Value::as_str))
+            .filter_map(|id| id.strip_prefix("vm."))
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        vm_names.sort();
+        vm_names.dedup();
+        Ok(vm_names)
     }
 
     fn publish_entity(
@@ -417,6 +455,34 @@ mod tests {
                 200,
                 json!({"ok": true, "value": {"entity": {"id": "vm.synthetic"}}}),
             ),
+            response(
+                200,
+                json!({
+                    "ok": true,
+                    "value": [
+                        {
+                            "id": "vm.synthetic-project-a1b2c3d4e5f6",
+                            "kind": "vm",
+                            "owner": "plugin:agent-vm"
+                        },
+                        {
+                            "id": "vm.legacy_VM.v1",
+                            "kind": "vm",
+                            "owner": "plugin:agent-vm"
+                        },
+                        {
+                            "id": "vm.foreign-project-a1b2c3d4e5f6",
+                            "kind": "vm",
+                            "owner": "plugin:other"
+                        },
+                        {
+                            "id": "session.synthetic",
+                            "kind": "session",
+                            "owner": "plugin:agent-vm"
+                        }
+                    ]
+                }),
+            ),
         ]);
         let host = HostClient::new(transport.clone(), "synthetic-token".into(), 1);
 
@@ -430,9 +496,17 @@ mod tests {
             json!({"management": "managed"}),
         )
         .unwrap();
+        let vm_entity_ids = host.query_vm_entity_ids().unwrap();
 
         assert_eq!(events.next_seq, 4);
         assert_eq!(events.events[0].payload.name, "runtime.status");
+        assert_eq!(
+            vm_entity_ids,
+            [
+                "legacy_VM.v1".to_string(),
+                "synthetic-project-a1b2c3d4e5f6".to_string()
+            ]
+        );
         let calls = transport.calls.lock().unwrap();
         assert_eq!(calls[0].path, "/plugin/register");
         assert_eq!(
@@ -448,5 +522,10 @@ mod tests {
         assert_eq!(publish["id"], "entities.publish");
         assert_eq!(publish["args"]["kind"], "vm");
         assert_eq!(publish["args"]["id"], "synthetic");
+        assert_eq!(calls[3].path, "/capability");
+        let query: serde_json::Value = serde_json::from_slice(&calls[3].body).unwrap();
+        assert_eq!(query["id"], "entities.query");
+        assert_eq!(query["args"]["kind"], "vm");
+        assert_eq!(query["args"]["owner"], "plugin:agent-vm");
     }
 }

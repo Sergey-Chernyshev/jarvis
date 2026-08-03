@@ -8,6 +8,7 @@
 #[allow(dead_code)] // UI-потребитель подключается в фазе 7 (chat UI)
 mod agent;
 mod agent_vm;
+mod agent_vm_cli;
 mod agent_vm_terminal;
 mod app_command_inventory;
 #[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
@@ -81,6 +82,10 @@ fn is_headless() -> bool {
 }
 
 fn main() {
+    if let Some(exit_code) = agent_vm_cli::maybe_run() {
+        std::process::exit(exit_code);
+    }
+
     let mut builder = tauri::Builder::default();
 
     // single-instance — только в проде; в dev-сборке (JARVIS_DEV=1) НЕ ставим,

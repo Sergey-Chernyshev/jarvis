@@ -118,6 +118,15 @@ pub struct TerminalSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalSession {
+    pub session_name: String,
+    pub project_id: String,
+    pub backend: TerminalBackend,
+    pub attached: bool,
+    pub activity: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalTools {
     pub tmux: PathBuf,
     pub limactl: PathBuf,
@@ -508,6 +517,100 @@ pub fn stop_terminal(tools: &TerminalTools, target: &TerminalTarget) -> Result<b
         "не остановить Agent VM terminal",
     )?;
     Ok(true)
+}
+
+pub fn list_sessions(tools: &TerminalTools) -> Result<Vec<TerminalSession>, String> {
+    let result = run(&tmux_spec(
+        tools,
+        vec![
+            "list-sessions".into(),
+            "-F".into(),
+            "#{session_name}\t#{session_attached}\t#{session_activity}".into(),
+        ],
+        None,
+    ))?;
+    if result.status != 0 {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        if stderr.contains("no server running") || stderr.contains("no sessions") {
+            return Ok(Vec::new());
+        }
+        return Err(format!(
+            "не прочитать Agent VM terminal sessions (код {})",
+            result.status
+        ));
+    }
+    let text = std::str::from_utf8(&result.stdout)
+        .map_err(|_| "tmux вернул non-UTF-8 session inventory".to_string())?;
+    parse_sessions(text)
+}
+
+pub fn attach_session(tools: &TerminalTools, session_name: &str) -> Result<i32, String> {
+    parse_session_name(session_name)
+        .ok_or_else(|| "Agent VM terminal session имеет unsafe name".to_string())?;
+    let mut command = Command::new(&tools.tmux);
+    let status = command
+        .args(["-L", TMUX_SOCKET, "attach-session", "-t", session_name])
+        .env_clear()
+        .envs(tools.command_env())
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|_| "не подключиться к Agent VM terminal session".to_string())?;
+    Ok(status.code().unwrap_or(1))
+}
+
+fn parse_sessions(text: &str) -> Result<Vec<TerminalSession>, String> {
+    let mut sessions = Vec::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split('\t');
+        let name = fields.next().unwrap_or_default();
+        let attached = fields
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or_else(|| "tmux session inventory имеет invalid attached count".to_string())?;
+        let activity = fields
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| "tmux session inventory имеет invalid activity".to_string())?;
+        if fields.next().is_some() {
+            return Err("tmux session inventory имеет лишние поля".into());
+        }
+        // The dedicated tmux server may contain only sessions created by the
+        // Agent VM terminal bridge. Ignore an unknown name fail-closed.
+        let Some((project_id, backend)) = parse_session_name(name) else {
+            continue;
+        };
+        sessions.push(TerminalSession {
+            session_name: name.to_string(),
+            project_id,
+            backend,
+            attached: attached > 0,
+            activity,
+        });
+    }
+    sessions.sort_by(|left, right| {
+        right
+            .activity
+            .cmp(&left.activity)
+            .then_with(|| left.session_name.cmp(&right.session_name))
+    });
+    Ok(sessions)
+}
+
+fn parse_session_name(value: &str) -> Option<(String, TerminalBackend)> {
+    let body = value.strip_prefix("avm-")?;
+    let (project_id, backend) = body.rsplit_once('-')?;
+    if project_id.len() != "project-".len() + 16
+        || !project_id.starts_with("project-")
+        || !project_id["project-".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return None;
+    }
+    let backend = TerminalBackend::parse(backend).ok()?;
+    Some((project_id.to_string(), backend))
 }
 
 fn build_upload_spec(
@@ -1038,5 +1141,30 @@ mod tests {
         assert!(!gate.observe("❯ ", Duration::from_millis(1_400)));
         assert!(!gate.observe("❯ ", Duration::from_millis(1_600)));
         assert!(gate.observe("❯ ", Duration::from_millis(1_800)));
+    }
+
+    #[test]
+    fn terminal_inventory_is_strict_sorted_and_ignores_foreign_tmux_names() {
+        let sessions = parse_sessions(
+            "avm-project-0123456789abcdef-claude\t0\t41\n\
+             foreign-session\t0\t100\n\
+             avm-project-fedcba9876543210-codex\t2\t42\n",
+        )
+        .unwrap();
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            sessions[0],
+            TerminalSession {
+                session_name: "avm-project-fedcba9876543210-codex".into(),
+                project_id: "project-fedcba9876543210".into(),
+                backend: TerminalBackend::Codex,
+                attached: true,
+                activity: 42,
+            }
+        );
+        assert_eq!(sessions[1].backend, TerminalBackend::Claude);
+        assert!(parse_session_name("avm-project-0123456789ABCDEF-claude").is_none());
+        assert!(parse_session_name("avm-project-0123456789abcdef-claude;open").is_none());
     }
 }

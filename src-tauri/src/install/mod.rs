@@ -602,6 +602,10 @@ fn codex_shim_dst() -> PathBuf {
 fn tmux_conf_dst() -> PathBuf {
     jarvis_dir().join("tmux.conf")
 }
+
+fn jarvis_cli_dst() -> PathBuf {
+    shims_dir().join("jarvis")
+}
 fn settings_path() -> PathBuf {
     home_opt()
         .map(|home| home.join(".claude/settings.json"))
@@ -2221,6 +2225,18 @@ fn install_tmux_transport(progress: &Progress) {
         // тот же скрипт под именем codex — поведение выбирается по basename "$0".
         write_executable(&codex_shim_dst(), &shim);
     }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            let jarvis = directory.join("jarvis");
+            if jarvis.is_file() {
+                let command = format!(
+                    "#!/bin/sh\nexec {} \"$@\"\n",
+                    shell_quote(&jarvis.to_string_lossy())
+                );
+                write_executable(&jarvis_cli_dst(), &command);
+            }
+        }
+    }
     fs::write(tmux_conf_dst(), TMUX_CONF_SRC).expect("запись tmux.conf");
 
     let shims = shims_dir().display().to_string();
@@ -2262,6 +2278,7 @@ pub fn uninstall(progress: &Progress) {
         jarvis_dir().join("run.sock"),
         shim_dst(),
         codex_shim_dst(),
+        jarvis_cli_dst(),
         tmux_conf_dst(),
     ] {
         let _ = fs::remove_file(&f);

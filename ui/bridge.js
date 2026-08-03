@@ -8,7 +8,7 @@
   const { invoke, listen } = transport;
   delete globalThis.__JARVIS_CORE_TRANSPORT__;
 
-  const on = (event, cb) => { listen(event, (e) => cb(e.payload)); };
+  const on = (event, cb) => listen(event, (e) => cb(e.payload));
 
   window.jarvis = Object.freeze({
     onState: (cb) => on('state', cb),

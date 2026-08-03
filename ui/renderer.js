@@ -1945,7 +1945,7 @@ async function focusTerminal(sessionId, project) {
 
 /* ---------- состояние от демона ---------- */
 
-window.jarvis.onState((list) => {
+function applySessionState(list) {
   state = list;
   render();
   if (view === 'chat') updateChatChannelMark();
@@ -1953,8 +1953,15 @@ window.jarvis.onState((list) => {
     const s = state.find((x) => x.id === qSessionId);
     if (!s || !s.question) { setView('list'); render(); } // ответили в терминале — выходим
   }
+}
+
+const sync = window.JarvisStateSync.create({
+  subscribe: (apply) => window.jarvis.onState(apply),
+  read: () => window.jarvis.getState(),
+  apply: applySessionState,
+  onError: (error) => console.error('[state-sync]', error),
 });
-window.jarvis.getState().then((list) => { state = list; rebuildOrder(); render(); });
+void sync.start();
 
 /* ---------- лимит-баннер ---------- */
 
@@ -2408,7 +2415,7 @@ window.jarvis.getPlugins().then((list) => {
 // клик по уведомлению: панель уже показана демоном — открываем чат сессии
 window.jarvis.onOpenSession(async (id) => {
   if (!state.length) {
-    try { state = await window.jarvis.getState(); rebuildOrder(); } catch {}
+    await sync.refresh();
   }
   const s = state.find((x) => x.id === id);
   if (s) openSession(s);
@@ -2416,7 +2423,7 @@ window.jarvis.onOpenSession(async (id) => {
 
 // Анимация появления в стиле Raycast: scale(.98)→1 + fade, 120ms.
 // Порядок строк пересобираем ТОЛЬКО здесь — при открытии панели, не во время просмотра.
-window.jarvis.onShown(() => {
+window.jarvis.onShown(async () => {
   // перезапуск входной анимации на каждый показ: снять класс → форс-рефлоу → вернуть.
   // keyframe стартует с opacity:0 (fill both держит 0 до показа окна), поэтому
   // реверс-fade и «моргание» исключены, даже если панель уже была видима.
@@ -2424,6 +2431,8 @@ window.jarvis.onShown(() => {
   void panelEl.offsetWidth;
   panelEl.classList.add('entering');
   refreshConfigHealth();
+  const refreshed = await sync.refresh();
+  if (!refreshed) return;
   // Окно при скрытии не уничтожается — view и открытый чат живы. Возвращаем
   // на то же место (клик мимо / Cmd+J прячут панель как есть). Чат или вопрос
   // уже закрытой сессии (могла завершиться, пока панель была спрятана) —

@@ -29,6 +29,221 @@ function trustedHtml(body) {
   return `<!doctype html><html><head><title>fixture</title></head><body>${body}</body></html>`;
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function rendererHarness(refresh) {
+  const events = [];
+  const handlers = new Map();
+  const elements = new Map();
+  const selectorElements = new Map();
+  const pending = new Promise(() => {});
+
+  function element(id = '') {
+    const children = [];
+    let textContent = '';
+    const value = {
+      id,
+      children,
+      dataset: {},
+      style: {},
+      hidden: false,
+      value: '',
+      checked: false,
+      disabled: false,
+      className: '',
+      tagName: 'DIV',
+      selectionStart: 0,
+      selectionEnd: 0,
+      classList: {
+        add(name) {
+          if (id === 'panel') events.push(`animation:add:${name}`);
+        },
+        remove(name) {
+          if (id === 'panel') events.push(`animation:remove:${name}`);
+        },
+        toggle() {},
+        contains() {
+          return false;
+        },
+      },
+      addEventListener() {},
+      removeEventListener() {},
+      append(...nodes) {
+        children.push(...nodes);
+      },
+      appendChild(node) {
+        children.push(node);
+        return node;
+      },
+      remove() {},
+      replaceChildren(...nodes) {
+        children.splice(0, children.length, ...nodes);
+      },
+      querySelector() {
+        return null;
+      },
+      querySelectorAll() {
+        return [];
+      },
+      setAttribute() {},
+      removeAttribute() {},
+      focus() {},
+      blur() {},
+      click() {},
+      scrollBy() {},
+      scrollTo() {},
+      setSelectionRange() {},
+      closest() {
+        return null;
+      },
+      contains() {
+        return false;
+      },
+      getBoundingClientRect() {
+        return { width: 0, height: 0, top: 0, right: 0, bottom: 0, left: 0 };
+      },
+    };
+    Object.defineProperties(value, {
+      textContent: {
+        get() {
+          return textContent;
+        },
+        set(next) {
+          textContent = next;
+          if (id === 'list') events.push('render:list');
+        },
+      },
+      offsetWidth: {
+        get() {
+          if (id === 'panel') events.push('animation:reflow');
+          return 1;
+        },
+      },
+      scrollHeight: {
+        get() {
+          return 0;
+        },
+      },
+    });
+    return value;
+  }
+
+  const document = {
+    activeElement: null,
+    body: element('body'),
+    getElementById(id) {
+      if (!elements.has(id)) elements.set(id, element(id));
+      return elements.get(id);
+    },
+    querySelector(selector) {
+      if (selector === '.toast') return null;
+      if (!selectorElements.has(selector)) {
+        selectorElements.set(selector, element(selector));
+      }
+      return selectorElements.get(selector);
+    },
+    querySelectorAll() {
+      return [];
+    },
+    createElement() {
+      return element();
+    },
+    createElementNS() {
+      return element();
+    },
+    createTextNode(text) {
+      return { textContent: text };
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+
+  const jarvis = new Proxy({}, {
+    get(_target, name) {
+      if (typeof name === 'string' && name.startsWith('on')) {
+        return (callback) => {
+          handlers.set(name, callback);
+          return Promise.resolve(() => {});
+        };
+      }
+      return () => pending;
+    },
+  });
+
+  const sandbox = {
+    document,
+    jarvis,
+    console: { error() {}, warn() {}, log() {} },
+    localStorage: {
+      getItem() {
+        return null;
+      },
+      setItem() {},
+    },
+    navigator: { clipboard: { writeText() {} } },
+    setTimeout() {
+      return 0;
+    },
+    clearTimeout() {},
+    setInterval() {
+      return 0;
+    },
+    clearInterval() {},
+    addEventListener() {},
+    removeEventListener() {},
+    JarvisMarkdown: {
+      isDocPath() {
+        return false;
+      },
+      isMarkdownPath() {
+        return false;
+      },
+      render() {
+        return '';
+      },
+    },
+    JarvisDiffView: { renderTo() {} },
+    JarvisQuestionAnswer: {
+      customAllowed() {
+        return false;
+      },
+      normalizeText(value) {
+        return value;
+      },
+    },
+    JarvisAgentVm: {
+      activeEnvironments() {
+        return [];
+      },
+    },
+    JarvisStateSync: {
+      create(options) {
+        return Object.freeze({
+          start() {
+            events.push('sync:start');
+            return Promise.resolve();
+          },
+          refresh() {
+            events.push('sync:refresh');
+            return refresh.promise;
+          },
+          options,
+        });
+      },
+    },
+  };
+  sandbox.window = sandbox;
+  return { sandbox, document, elements, events, handlers };
+}
+
 test('bridge initializes from the explicit core transport without touching window.__TAURI__', async () => {
   const invoked = [];
   const listened = [];
@@ -63,6 +278,111 @@ test('bridge initializes from the explicit core transport without touching windo
   await sandbox.jarvis.getState();
   assert.deepEqual(invoked, [['state_get', undefined]]);
   assert.deepEqual(listened, []);
+});
+
+test('bridge subscriptions expose registration promises and preserve event payload behavior', async () => {
+  const listened = [];
+  const stateRegistration = Promise.resolve(() => {});
+  const shownRegistration = Promise.resolve(() => {});
+  const registrations = new Map([
+    ['state', stateRegistration],
+    ['panel-shown', shownRegistration],
+  ]);
+  const sandbox = {
+    navigator: {},
+    __JARVIS_CORE_TRANSPORT__: Object.freeze({
+      invoke() {
+        return Promise.resolve(null);
+      },
+      listen(event, callback) {
+        listened.push([event, callback]);
+        return registrations.get(event);
+      },
+    }),
+  };
+  sandbox.window = sandbox;
+
+  vm.runInNewContext(await source('ui/bridge.js'), sandbox, {
+    filename: 'ui/bridge.js',
+  });
+
+  const states = [];
+  const shownCalls = [];
+  const stateResult = sandbox.jarvis.onState((value) => states.push(value));
+  const shownResult = sandbox.jarvis.onShown((...args) => shownCalls.push(args));
+  assert.equal(stateResult, stateRegistration);
+  assert.equal(shownResult, shownRegistration);
+
+  listened[0][1]({ payload: ['live state'] });
+  listened[1][1]({ payload: 'not forwarded' });
+  assert.deepEqual(states, [['live state']]);
+  assert.deepEqual(shownCalls, [[]]);
+});
+
+test('panel shown animates immediately, waits for state refresh, then reconciles and index wires the sync first', async () => {
+  const refresh = deferred();
+  const harness = rendererHarness(refresh);
+  const context = vm.createContext(harness.sandbox);
+  vm.runInContext(await source('ui/renderer.js'), context, {
+    filename: 'ui/renderer.js',
+  });
+  vm.runInContext("view = 'chat'; chatSessionId = 'missing';", context);
+  harness.events.length = 0;
+
+  const shown = harness.handlers.get('onShown');
+  assert.equal(typeof shown, 'function');
+  const shownResult = shown();
+  assert.deepEqual(harness.events, [
+    'animation:remove:entering',
+    'animation:reflow',
+    'animation:add:entering',
+    'sync:refresh',
+  ]);
+  assert.equal(
+    vm.runInContext('view', context),
+    'chat',
+    'stale-session reconciliation waits for the refresh',
+  );
+  assert.equal(
+    harness.events.includes('render:list'),
+    false,
+    'the hidden stale state is not rendered before refresh',
+  );
+
+  harness.events.push('refresh:resolved');
+  refresh.resolve(true);
+  await shownResult;
+  assert.equal(vm.runInContext('view', context), 'list');
+  assert.ok(
+    harness.events.indexOf('render:list') >
+      harness.events.indexOf('refresh:resolved'),
+    'the refreshed state is reconciled and rendered after refresh',
+  );
+
+  const failedRefresh = deferred();
+  const failedHarness = rendererHarness(failedRefresh);
+  const failedContext = vm.createContext(failedHarness.sandbox);
+  vm.runInContext(await source('ui/renderer.js'), failedContext, {
+    filename: 'ui/renderer.js',
+  });
+  vm.runInContext("view = 'chat'; chatSessionId = 'missing';", failedContext);
+  failedHarness.events.length = 0;
+
+  const failedShown = failedHarness.handlers.get('onShown')();
+  failedRefresh.resolve(false);
+  await failedShown;
+  assert.equal(
+    vm.runInContext('view', failedContext),
+    'chat',
+    'a failed or superseded refresh cannot evict the open chat',
+  );
+  assert.equal(failedHarness.events.includes('render:list'), false);
+
+  const scripts = scriptSources(await source('ui/index.html'));
+  const syncIndex = scripts.indexOf('./state-sync.js');
+  const rendererIndex = scripts.indexOf('./renderer.js');
+  assert.notEqual(syncIndex, -1, 'index loads the state sync');
+  assert.equal(syncIndex + 1, rendererIndex, 'state sync initializes immediately before renderer');
 });
 
 test('all trusted documents load one transport immediately before its consumer', async () => {

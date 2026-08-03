@@ -503,6 +503,8 @@ impl VersionStore {
         }
         if saw_entry {
             verify_immutable_directory_metadata(&directory, &version_parent)?;
+        } else {
+            verify_empty_private_directory_metadata(&directory, &version_parent)?;
         }
         if let Some(package_digest) = conflict {
             Ok(VersionVisibility::Conflict { package_digest })
@@ -1430,6 +1432,54 @@ fn verify_immutable_directory_metadata(directory: &File, path: &Path) -> Result<
     validate_immutable_metadata(&metadata, path)
 }
 
+fn verify_empty_private_directory_metadata(
+    directory: &File,
+    path: &Path,
+) -> Result<(), StorageError> {
+    let metadata = secure_fs::metadata(directory).map_err(|error| {
+        StorageError::new(
+            "plugin_version_permissions",
+            format!("cannot inspect opened {}: {error}", path.display()),
+        )
+    })?;
+    validate_empty_private_directory_metadata(&metadata, path)
+}
+
+fn validate_empty_private_directory_metadata(
+    metadata: &libc::stat,
+    path: &Path,
+) -> Result<(), StorageError> {
+    if !secure_fs::is_type(metadata, libc::S_IFDIR) {
+        return Err(StorageError::new(
+            "plugin_version_type",
+            format!("{} is not a directory", path.display()),
+        ));
+    }
+    if !secure_fs::owned_by_effective_user(metadata) {
+        return Err(StorageError::new(
+            "plugin_version_owner",
+            format!("{} is not owned by the current user", path.display()),
+        ));
+    }
+    if metadata.st_nlink == 0 {
+        return Err(StorageError::new(
+            "plugin_version_links",
+            format!("{} is no longer linked", path.display()),
+        ));
+    }
+    let observed_mode = metadata.st_mode & 0o7777;
+    if observed_mode != 0o700 {
+        return Err(StorageError::new(
+            "plugin_version_permissions",
+            format!(
+                "{} has mode {observed_mode:04o}, expected 0700",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_immutable_metadata(metadata: &libc::stat, path: &Path) -> Result<(), StorageError> {
     let file_type = metadata.st_mode & libc::S_IFMT;
     if file_type == libc::S_IFLNK {
@@ -1599,8 +1649,8 @@ fn open_verified_directory_entry(
 #[cfg(test)]
 mod tests {
     use super::{
-        ReceiptStore, ReceiptVisibility, StorageFailpoint, StorageFailpoints, VersionStore,
-        VersionVisibility,
+        open_real_directory, secure_fs, validate_empty_private_directory_metadata, ReceiptStore,
+        ReceiptVisibility, StorageFailpoint, StorageFailpoints, VersionStore, VersionVisibility,
     };
     use crate::plugins::package_manager::operation::{OperationJournal, OperationState};
     use crate::plugins::package_manager::paths::PluginPaths;
@@ -2192,6 +2242,77 @@ mod tests {
         );
         assert!(!extracted.exists());
         assert_finalized_modes(&paths, &plugin_id, &version, &package_digest);
+    }
+
+    fn assert_empty_version_parent_mode_is_rejected(mode: u32, label: &str) {
+        let paths = fixture_paths(label);
+        let store = VersionStore::new(paths.clone());
+        let plugin_id = PluginId::new("dev.example.echo").unwrap();
+        let version = Version::parse("1.0.0").unwrap();
+        let package_digest = digest('a');
+        let version_parent = paths.versions(&plugin_id).join(version.to_string());
+        paths.prepare_plugin(&plugin_id).unwrap();
+        fs::create_dir(&version_parent).unwrap();
+        fs::set_permissions(&version_parent, fs::Permissions::from_mode(mode)).unwrap();
+
+        let observe_error = store
+            .observe(&plugin_id, &version, &package_digest)
+            .unwrap_err();
+        assert_eq!(observe_error.code(), "plugin_version_permissions");
+        assert_eq!(
+            fs::metadata(&version_parent).unwrap().permissions().mode() & 0o7777,
+            mode
+        );
+
+        let extracted = extracted_fixture(&paths, &format!("{label}-source"));
+        let finalize_error = store
+            .finalize_extracted(&extracted, &plugin_id, &version, &package_digest)
+            .unwrap_err();
+        assert_eq!(finalize_error.code(), "plugin_version_permissions");
+        assert!(extracted.exists());
+        assert_eq!(
+            fs::metadata(&version_parent).unwrap().permissions().mode() & 0o7777,
+            mode
+        );
+    }
+
+    #[test]
+    fn restart_rejects_empty_world_writable_version_parent_without_repair() {
+        assert_empty_version_parent_mode_is_rejected(0o777, "restart-empty-world-writable-parent");
+    }
+
+    #[test]
+    fn restart_rejects_empty_immutable_version_parent_without_repair() {
+        assert_empty_version_parent_mode_is_rejected(0o555, "restart-empty-immutable-parent");
+    }
+
+    #[test]
+    fn empty_private_metadata_rejects_foreign_owner_and_unlinked_directory() {
+        let paths = fixture_paths("empty-private-metadata");
+        let path = paths.profile();
+        let directory = open_real_directory(path).unwrap();
+
+        let mut foreign = secure_fs::metadata(&directory).unwrap();
+        foreign.st_uid = if foreign.st_uid == 0 {
+            1
+        } else {
+            foreign.st_uid - 1
+        };
+        assert_eq!(
+            validate_empty_private_directory_metadata(&foreign, path)
+                .unwrap_err()
+                .code(),
+            "plugin_version_owner"
+        );
+
+        let mut unlinked = secure_fs::metadata(&directory).unwrap();
+        unlinked.st_nlink = 0;
+        assert_eq!(
+            validate_empty_private_directory_metadata(&unlinked, path)
+                .unwrap_err()
+                .code(),
+            "plugin_version_links"
+        );
     }
 
     #[test]

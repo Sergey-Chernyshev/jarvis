@@ -2,7 +2,6 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/jarvis-plugin-boundary.XXXXXX")"
 cargo_bin="${CARGO_BIN:-cargo}"
 
 node -e '
@@ -31,6 +30,8 @@ node -e '
     throw new Error("CI must install ripgrep when it is unavailable");
   }
 ' "$repo_root/.github/workflows/ci.yml"
+
+fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/jarvis-plugin-boundary.XXXXXX")"
 
 cleanup() {
   case "$fixture_root" in

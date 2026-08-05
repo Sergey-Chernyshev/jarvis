@@ -1425,8 +1425,16 @@ pub fn agent_vm_focus(app: AppHandle, project_id: Option<String>, run_id: Option
     {
         return err("Некорректная Agent VM focus target");
     }
-    d.agent_vm
-        .set_focus(Some(crate::agent_vm::AgentVmFocus { project_id, run_id }));
+    // окно активно в момент, когда UI сообщает о фокусе: сам вызов приходит из
+    // видимого webview, но подтверждаем это у окна — свёрнутое не считается
+    let window_active = tauri::Manager::get_webview_window(&app, "main")
+        .and_then(|window| window.is_focused().ok())
+        .unwrap_or(false);
+    d.agent_vm.set_focus(Some(crate::agent_vm::AgentVmFocus {
+        project_id,
+        run_id,
+        window_active,
+    }));
     ok()
 }
 

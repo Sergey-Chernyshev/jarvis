@@ -65,6 +65,9 @@ pub enum FavoriteMove {
 pub struct AgentVmFocus {
     pub project_id: String,
     pub run_id: Option<String>,
+    /// Окно приложения активно. Без этого «проект открыт» означало бы
+    /// «пользователь смотрит», что неверно для свёрнутого или фонового окна.
+    pub window_active: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -89,6 +92,15 @@ impl Coordinator {
 
     pub fn clear_focus(&self) {
         self.set_focus(None);
+    }
+
+    /// Окно стало активным/фоновым. Проект остаётся открытым, но «пользователь
+    /// смотрит» — только когда окно активно; иначе уведомление о завершении
+    /// задачи подавлялось бы, пока человек работает в другом приложении.
+    pub fn set_window_active(&self, active: bool) {
+        if let Some(focus) = self.focus.lock().unwrap().as_mut() {
+            focus.window_active = active;
+        }
     }
 
     pub fn focus(&self) -> Option<AgentVmFocus> {
@@ -438,8 +450,16 @@ fn notification_enabled(settings: &Value, kind: &str) -> bool {
     settings.get(key).and_then(Value::as_bool).unwrap_or(true)
 }
 
+/// Пользователь прямо сейчас смотрит на этот проект.
+///
+/// Открытого проекта мало: в оконном режиме окно не прячется при уходе фокуса,
+/// поэтому `AgentVmFocus` остаётся выставленным, даже когда пользователь ушёл
+/// в редактор. Раньше из-за этого уведомление «задача завершена» подавлялось
+/// навсегда — та самая жалоба «нет уведов по окончанию тасок».
 fn is_focused(focus: Option<&AgentVmFocus>, entity: &Entity) -> bool {
-    focus.is_some_and(|focus| focus.project_id == attr(entity, "projectId"))
+    focus.is_some_and(|focus| {
+        focus.project_id == attr(entity, "projectId") && focus.window_active
+    })
 }
 
 pub fn notification_for(
@@ -896,15 +916,30 @@ mod tests {
         assert_eq!(notification.id, "agent-vm:project-a:runtime:ready");
         assert_eq!(notification.kind, "done");
         assert!(notification_for(Some(&ready), &ready, None).is_none());
+        // проект открыт И окно активно — пользователь это уже видит
         assert!(notification_for(
             Some(&previous),
             &ready,
             Some(&AgentVmFocus {
                 project_id: "project-a".into(),
                 run_id: None,
+                window_active: true,
             }),
         )
         .is_none());
+        // проект открыт, но окно ушло в фон — уведомление обязано прийти:
+        // в оконном режиме панель не прячется, и раньше фокус оставался
+        // выставленным навсегда («нет уведов по окончанию тасок»)
+        assert!(notification_for(
+            Some(&previous),
+            &ready,
+            Some(&AgentVmFocus {
+                project_id: "project-a".into(),
+                run_id: None,
+                window_active: false,
+            }),
+        )
+        .is_some());
     }
 
     #[test]

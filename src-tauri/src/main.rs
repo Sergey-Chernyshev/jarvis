@@ -323,7 +323,18 @@ fn main() {
                 // рефокусит queryEl), отчего WKWebView даёт ложный blur→focus за
                 // один кадр. Гасим только если фокус реально ушёл из приложения и
                 // не вернулся за 120 мс — иначе панель моргала бы на каждой стрелке.
+                // окно стало активным — пользователь снова смотрит на проект
+                tauri::WindowEvent::Focused(true) => {
+                    Daemon::get(window.app_handle())
+                        .agent_vm
+                        .set_window_active(true);
+                }
                 tauri::WindowEvent::Focused(false) => {
+                    // проект остаётся открытым, но уведомления о завершении
+                    // задач больше не подавляем: человек ушёл в другое окно
+                    Daemon::get(window.app_handle())
+                        .agent_vm
+                        .set_window_active(false);
                     // обычное окно не исчезает от клика мимо — это поведение накладки;
                     // системный folder picker тоже забирает фокус, но панель нужна дальше
                     if windows::is_window_mode(window.app_handle())

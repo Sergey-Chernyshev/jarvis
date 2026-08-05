@@ -28,6 +28,25 @@ async function loadStateSync() {
   return sandbox.JarvisStateSync;
 }
 
+test('session normalization rejects invalid envelopes and deduplicates by newest update', async () => {
+  const JarvisStateSync = await loadStateSync();
+
+  assert.equal(JarvisStateSync.normalizeSessions(null), null);
+  assert.equal(JarvisStateSync.normalizeSessions({ sessions: [] }), null);
+
+  const normalized = JarvisStateSync.normalizeSessions([
+    { id: '', project: 'broken' },
+    { id: 'alpha', project: 'old', updatedAt: 10, status: 'working', agent: 'Codex' },
+    { id: 'alpha', project: 'new', updatedAt: 20, status: 'waiting', agent: 'CODEX' },
+    { id: 'beta', project: 42, updatedAt: 'bad', status: 'future-status', agent: 'other' },
+  ]);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(normalized)), [
+    { id: 'alpha', project: 'new', updatedAt: 20, status: 'waiting', agent: 'codex' },
+    { id: 'beta', updatedAt: 0, status: 'idle' },
+  ]);
+});
+
 test('initial snapshot waits for listener registration to settle', async () => {
   const JarvisStateSync = await loadStateSync();
   const listener = deferred();

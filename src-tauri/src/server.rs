@@ -43,6 +43,9 @@ pub async fn serve(d: Arc<Daemon>) {
         .route("/capability", post(handle_capability))
         .route("/plugin/register", post(plugin_register))
         .route("/plugin/events", get(plugin_events))
+        .route("/control/state", get(agent_control_state))
+        .route("/control/agent-vm", post(agent_vm_control))
+        .route("/control/agent-vm/ack", post(agent_vm_control_ack))
         .fallback(fallback)
         // защита от мусора, но с запасом: диффы Edit бывают жирными
         .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
@@ -92,6 +95,17 @@ fn plugin_id_for_token(store: &TokenStore, token: Option<&str>) -> Option<String
         .strip_prefix("plugin:")
         .filter(|id| !id.is_empty())
         .map(str::to_string)
+}
+
+fn agent_control_authorized(store: &TokenStore, token: Option<&str>) -> bool {
+    consumer_for(store, token).is_some_and(|consumer| consumer.id == "agent")
+}
+
+fn allowed_agent_vm_control(command: &str) -> bool {
+    matches!(
+        command,
+        "runtime.status" | "runtime.ensure" | "runtime.stop" | "runtime.restart"
+    )
 }
 
 enum RegisterRouteError {
@@ -192,6 +206,117 @@ async fn plugin_events(
     }
 }
 
+async fn agent_vm_control(
+    State(d): State<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Response {
+    let token = headers.get("x-jarvis-token").and_then(|v| v.to_str().ok());
+    if !agent_control_authorized(&d.tokens, token) {
+        return json_response(
+            StatusCode::UNAUTHORIZED,
+            json!({"ok":false,"code":"unauthorized","error":"нет/неизвестен agent token"}),
+        );
+    }
+    let Ok(request) = serde_json::from_slice::<Value>(&body) else {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"ok":false,"code":"bad_json","error":"некорректный JSON"}),
+        );
+    };
+    let command = request
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !allowed_agent_vm_control(command) {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"ok":false,"code":"control_command_denied","error":"команда не разрешена"}),
+        );
+    }
+    let args = request.get("args").cloned().unwrap_or_else(|| json!({}));
+    if args
+        .get("cwd")
+        .and_then(Value::as_str)
+        .is_none_or(|cwd| cwd.is_empty())
+    {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"ok":false,"code":"cwd_required","error":"cwd обязателен"}),
+        );
+    }
+    json_response(
+        StatusCode::OK,
+        d.plugins.command(&d, "agent-vm", command, args),
+    )
+}
+
+async fn agent_control_state(
+    State(d): State<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let token = headers.get("x-jarvis-token").and_then(|v| v.to_str().ok());
+    if !agent_control_authorized(&d.tokens, token) {
+        return json_response(
+            StatusCode::UNAUTHORIZED,
+            json!({"ok":false,"code":"unauthorized","error":"нет/неизвестен agent token"}),
+        );
+    }
+    json_response(
+        StatusCode::OK,
+        json!({"ok":true,"entities":d.entities.snapshot()}),
+    )
+}
+
+async fn agent_vm_control_ack(
+    State(d): State<Arc<Daemon>>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Response {
+    let token = headers.get("x-jarvis-token").and_then(|v| v.to_str().ok());
+    if !agent_control_authorized(&d.tokens, token) {
+        return json_response(
+            StatusCode::UNAUTHORIZED,
+            json!({"ok":false,"code":"unauthorized"}),
+        );
+    }
+    let request_id = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("requestId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    if !request_id.starts_with("agent-vm-")
+        || request_id.len() > 128
+        || !request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"ok":false,"code":"request_id_invalid"}),
+        );
+    }
+    let entity_id = format!("operation.{request_id}");
+    let removable = d
+        .entities
+        .get(&entity_id)
+        .filter(|entity| {
+            entity.owner == "plugin:agent-vm"
+                && entity.kind == "operation"
+                && matches!(entity.state.as_str(), "done" | "error")
+        })
+        .is_some();
+    let removed = removable
+        && d.entities
+            .remove("plugin:agent-vm", &entity_id)
+            .unwrap_or(false);
+    json_response(StatusCode::OK, json!({"ok":true,"removed":removed}))
+}
+
 /// POST /capability — вызов капабилити через гейт. Тело: {id, args}.
 /// Это межпроцессная проекция слоя истины (§5): MCP-сервер агента ходит сюда,
 /// гейт (грант/провенанс/аудит) — в демоне, обойти его нельзя.
@@ -203,13 +328,21 @@ async fn handle_capability(
 ) -> Response {
     let token = headers.get("x-jarvis-token").and_then(|v| v.to_str().ok());
     let Some(consumer) = consumer_for(&d.tokens, token) else {
-        return (StatusCode::UNAUTHORIZED, "{\"ok\":false,\"error\":\"нет/неизвестен токен\",\"code\":\"unauthorized\"}").into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            "{\"ok\":false,\"error\":\"нет/неизвестен токен\",\"code\":\"unauthorized\"}",
+        )
+            .into_response();
     };
 
     let Ok(req) = serde_json::from_slice::<Value>(&body) else {
         return (StatusCode::BAD_REQUEST, "bad json").into_response();
     };
-    let id = req.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let id = req
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     let args = req.get("args").cloned().unwrap_or_else(|| json!({}));
 
     let confirmer = crate::capability::confirm_panel::PanelConfirmer {
@@ -265,7 +398,10 @@ mod tests {
             std::env::temp_dir().join(format!("jarvis-srv-{}.json", std::process::id())),
         );
         let agent = store.ensure_agent_token();
-        assert!(consumer_for(&store, None).is_none(), "нет токена → нет потребителя");
+        assert!(
+            consumer_for(&store, None).is_none(),
+            "нет токена → нет потребителя"
+        );
         assert!(consumer_for(&store, Some("bogus")).is_none());
         // INV-PANEL: валидный agent-токен даёт agent, НИКОГДА не panel
         assert_eq!(consumer_for(&store, Some(&agent)).unwrap().id, "agent");
@@ -294,6 +430,25 @@ mod tests {
     }
 
     #[test]
+    fn agent_control_requires_agent_identity_and_has_a_closed_command_set() {
+        let store = test_token_store("agent-control");
+        let agent = store.ensure_agent_token();
+        let plugin = store
+            .ensure_plugin_token(
+                "agent-vm",
+                &[crate::capability::contract::RiskClass::Control],
+            )
+            .unwrap();
+
+        assert!(agent_control_authorized(&store, Some(&agent)));
+        assert!(!agent_control_authorized(&store, Some(&plugin)));
+        assert!(allowed_agent_vm_control("runtime.ensure"));
+        assert!(allowed_agent_vm_control("runtime.stop"));
+        assert!(!allowed_agent_vm_control("runtime.send"));
+        assert!(!allowed_agent_vm_control("_restart"));
+    }
+
+    #[test]
     fn register_error_maps_to_stable_http_status_and_code() {
         assert_eq!(
             register_error_parts(&RegisterRouteError::Unauthorized),
@@ -310,7 +465,10 @@ mod tests {
         assert_eq!(
             register_error_parts(&RegisterRouteError::Host(
                 crate::plugins::HostRegistrationError::Runtime(
-                    crate::plugins::supervisor::RegistrationError::Incompatible { received: 2 }
+                    crate::plugins::supervisor::RegistrationError::Incompatible {
+                        received: 2,
+                        expected: crate::plugins::manifest::PROTOCOL_VERSION,
+                    }
                 )
             )),
             (StatusCode::UPGRADE_REQUIRED, "incompatible_protocol")

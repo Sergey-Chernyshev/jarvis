@@ -1,10 +1,17 @@
 use std::fmt;
 use std::fmt::Write as _;
 
+pub mod consent;
+pub mod downloader;
+pub mod health;
 pub mod lock;
+pub mod manager;
+pub mod migration;
 pub mod operation;
 pub mod paths;
+pub mod quarantine;
 pub mod receipt;
+pub mod recovery;
 mod secure_fs;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,7 +72,7 @@ fn format_storage_id(mut bytes: [u8; 16]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+mod storage_tests {
     use super::format_storage_id;
 
     #[test]
@@ -80,3 +87,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;

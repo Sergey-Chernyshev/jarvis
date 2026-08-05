@@ -34,6 +34,11 @@ mod macos;
 mod metrics;
 mod model;
 mod onboarding;
+mod plugin_cli;
+#[cfg(test)]
+mod plugin_cli_tests;
+mod plugin_manager_api;
+mod plugin_platform;
 mod plugins;
 mod power;
 mod project_folder_picker;
@@ -82,6 +87,9 @@ fn is_headless() -> bool {
 }
 
 fn main() {
+    if let Some(exit_code) = plugin_cli::maybe_run() {
+        std::process::exit(exit_code);
+    }
     if let Some(exit_code) = agent_vm_cli::maybe_run() {
         std::process::exit(exit_code);
     }
@@ -308,11 +316,17 @@ fn main() {
                 // один кадр. Гасим только если фокус реально ушёл из приложения и
                 // не вернулся за 120 мс — иначе панель моргала бы на каждой стрелке.
                 tauri::WindowEvent::Focused(false) => {
+                    if project_folder_picker::is_active() {
+                        return;
+                    }
                     let w = window.clone();
                     let app = window.app_handle().clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(120));
-                        if !w.is_focused().unwrap_or(false) && w.is_visible().unwrap_or(false) {
+                        if !project_folder_picker::is_active()
+                            && !w.is_focused().unwrap_or(false)
+                            && w.is_visible().unwrap_or(false)
+                        {
                             windows::hide_panel(&Daemon::get(&app));
                         }
                     });

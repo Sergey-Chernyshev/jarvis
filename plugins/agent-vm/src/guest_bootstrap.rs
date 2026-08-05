@@ -19,32 +19,80 @@ const GUEST_BOOTSTRAP_SCRIPT: &str = r#"
 user_name="$1"
 guest_home="$2"
 umask 077
+lock_file="/run/lock/jarvis-vm-bootstrap-${user_name}.lock"
+exec 9>"$lock_file"
+flock -x 9
 stage="$(mktemp -d /tmp/jarvis-vm-bootstrap.XXXXXX)"
+directories="$(mktemp /tmp/jarvis-vm-directories.XXXXXX)"
+home_locked=0
+restore_guest_home() {
+  if [ "$home_locked" != 1 ]; then
+    return
+  fi
+  while IFS= read -r directory; do
+    if [ -d "$directory" ] && [ ! -L "$directory" ]; then
+      chown "$user_name:$user_name" -- "$directory"
+      chmod 0700 -- "$directory"
+    fi
+  done < "$directories"
+  chown "$home_uid:$home_gid" -- "$guest_home"
+  chmod "$home_mode" -- "$guest_home"
+  home_locked=0
+}
 cleanup() {
+  restore_guest_home
   rm -rf -- "$stage"
+  rm -f -- "$directories"
 }
 trap cleanup EXIT
 tar --extract --file=- --directory="$stage" --no-same-owner --no-same-permissions
+[ -d "$guest_home" ] && [ ! -L "$guest_home" ] || exit 66
+home_uid="$(stat -c '%u' -- "$guest_home")"
+home_gid="$(stat -c '%g' -- "$guest_home")"
+home_mode="$(stat -c '%a' -- "$guest_home")"
+chown root:root -- "$guest_home"
+chmod 0700 -- "$guest_home"
+home_locked=1
+[ -d "$guest_home" ] && [ ! -L "$guest_home" ] || exit 66
+secure_directory() {
+  directory="$1"
+  if [ -L "$directory" ] || { [ -e "$directory" ] && [ ! -d "$directory" ]; }; then
+    exit 66
+  fi
+  if [ ! -d "$directory" ]; then
+    mkdir -- "$directory"
+  fi
+  chown root:root -- "$directory"
+  chmod 0700 -- "$directory"
+  [ -d "$directory" ] && [ ! -L "$directory" ] || exit 66
+  printf '%s\n' "$directory" >> "$directories"
+}
 while IFS= read -r -d '' source; do
   relative="${source#"$stage"/}"
   case "$relative" in
     .claude/*|.codex/*|.jarvis-vm/*) ;;
     *) exit 64 ;;
   esac
+  IFS='/' read -r -a components <<< "$relative"
+  directory="$guest_home"
+  last_index=$((${#components[@]} - 1))
+  for ((index = 0; index < last_index; index++)); do
+    directory="$directory/${components[$index]}"
+    secure_directory "$directory"
+  done
   target="$guest_home/$relative"
-  parent="$(dirname "$target")"
-  install -d -m 0700 -o "$user_name" -g "$user_name" "$parent"
   mode="$(stat -c '%a' "$source")"
   case "$mode" in
     600|700) ;;
     *) exit 65 ;;
   esac
-  temporary="$(mktemp "$parent/.jarvis-bootstrap.XXXXXX")"
+  temporary="$(mktemp "$directory/.jarvis-bootstrap.XXXXXX")"
   cat -- "$source" > "$temporary"
   chown "$user_name:$user_name" "$temporary"
   chmod "$mode" "$temporary"
   mv -f -- "$temporary" "$target"
 done < <(find "$stage" -type f -print0 | sort -z)
+restore_guest_home
 "#;
 const GUEST_CREDENTIAL_PROBE_SCRIPT: &str = r#"
 user_name="$1"
@@ -678,6 +726,7 @@ mod tests {
                 repo: None,
                 git_ref: None,
             },
+            mounts: Vec::new(),
         }
     }
 
@@ -953,6 +1002,15 @@ mod tests {
             .windows(b"SYNTHETIC_PRIVATE_VALUE".len())
             .any(|part| part == b"SYNTHETIC_PRIVATE_VALUE"));
         assert_eq!(spec.cwd, None);
+    }
+
+    #[test]
+    fn bootstrap_script_locks_guest_home_and_rejects_symlink_components() {
+        assert!(GUEST_BOOTSTRAP_SCRIPT.contains("chmod 0700 -- \"$guest_home\""));
+        assert!(GUEST_BOOTSTRAP_SCRIPT.contains("chown root:root -- \"$guest_home\""));
+        assert!(GUEST_BOOTSTRAP_SCRIPT.contains("[ -L \"$directory\" ]"));
+        assert!(GUEST_BOOTSTRAP_SCRIPT.contains("restore_guest_home"));
+        assert!(!GUEST_BOOTSTRAP_SCRIPT.contains("install -d"));
     }
 
     #[test]

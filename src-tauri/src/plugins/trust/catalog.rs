@@ -10,7 +10,7 @@ use jarvis_plugin_protocol::json::{parse_bounded_json_with_limits, JsonLimits};
 use jarvis_plugin_protocol::manifest::Digest;
 use jarvis_plugin_protocol::package::{MacOsVersion, PackageTarget};
 use semver::Version;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::signature::{catalog_digest, catalog_signature_message, verify_catalog_signature};
@@ -22,7 +22,7 @@ const MAX_ROOT_CONFIG_DEPTH: usize = 8;
 const MAX_ROOT_CONFIG_NODES: usize = 512;
 const MAX_ROOT_CONFIG_STRING_BYTES: usize = 4096;
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RootTrustConfig {
     schema_version: u32,
@@ -126,6 +126,10 @@ impl CatalogCompatibility {
                 .map_err(|_| TrustError::new("catalog_compatibility"))?,
         })
     }
+
+    pub(crate) fn target(&self) -> PackageTarget {
+        self.target
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -161,6 +165,30 @@ impl CatalogState {
             .into_iter()
             .collect()
     }
+
+    pub(crate) fn digest(&self) -> Option<&Digest> {
+        self.digest.as_ref()
+    }
+
+    pub(crate) fn accepted_roots(&self) -> &RootTrustConfig {
+        &self.accepted_roots
+    }
+
+    pub(crate) fn from_checkpoint(
+        sequence: u64,
+        digest: Digest,
+        accepted_roots: RootTrustConfig,
+    ) -> Result<Self, TrustError> {
+        if sequence == 0 || !accepted_roots.is_provisioned() {
+            return Err(TrustError::new("catalog_state_invalid"));
+        }
+        accepted_roots.validate()?;
+        Ok(Self {
+            sequence,
+            digest: Some(digest),
+            accepted_roots,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -178,6 +206,10 @@ impl VerifiedCatalog {
 
     pub fn digest(&self) -> &Digest {
         &self.digest
+    }
+
+    pub(crate) fn releases(&self) -> &[VerifiedCatalogRelease] {
+        &self.releases
     }
 
     pub fn release(

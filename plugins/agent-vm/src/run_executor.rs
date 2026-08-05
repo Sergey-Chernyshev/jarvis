@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use zeroize::Zeroize;
 
@@ -17,6 +19,8 @@ use crate::runner::{CommandRunner, CommandSpec, SystemRunner};
 pub const MAX_BACKEND_LINE_BYTES: usize = 1024 * 1024;
 pub const MAX_PROMPT_BYTES: usize = 48 * 1024;
 pub const MAX_STDERR_TAIL_BYTES: usize = 64 * 1024;
+const REMOTE_CANCEL_TIMEOUT: Duration = Duration::from_secs(15);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 const GUEST_RUN_SCRIPT: &str = r#"
 run_id="$1"
@@ -35,7 +39,15 @@ export DISABLE_NON_ESSENTIAL_MODEL_CALLS=1
 setsid "$@" <&0 &
 agent_pid="$!"
 pid_file="$run_dir/$run_id.pid"
-printf '%s\n' "$agent_pid" > "$pid_file"
+agent_start="$(awk '{print $22}' "/proc/$agent_pid/stat" 2>/dev/null || true)"
+case "$agent_start" in
+  ''|*[!0-9]*)
+    kill -TERM -- "-$agent_pid" 2>/dev/null || kill -TERM "$agent_pid" 2>/dev/null || true
+    wait "$agent_pid" 2>/dev/null || true
+    exit 70
+    ;;
+esac
+printf '%s %s\n' "$agent_pid" "$agent_start" > "$pid_file"
 chmod 0600 "$pid_file"
 cleanup() {
   rm -f -- "$pid_file"
@@ -58,11 +70,35 @@ pid_file="$HOME/.jarvis-vm/runs/$run_id.pid"
 if [ ! -f "$pid_file" ]; then
   exit 0
 fi
-IFS= read -r agent_pid < "$pid_file"
+IFS=' ' read -r agent_pid expected_start extra < "$pid_file"
 case "$agent_pid" in
   ''|*[!0-9]*) exit 64 ;;
 esac
+case "$expected_start" in
+  ''|*[!0-9]*) exit 64 ;;
+esac
+if [ -n "${extra:-}" ]; then
+  exit 64
+fi
+current_start="$(awk '{print $22}' "/proc/$agent_pid/stat" 2>/dev/null || true)"
+if [ -z "$current_start" ]; then
+  rm -f -- "$pid_file"
+  exit 0
+fi
+if [ "$current_start" != "$expected_start" ]; then
+  rm -f -- "$pid_file"
+  exit 65
+fi
 kill -TERM -- "-$agent_pid" 2>/dev/null || kill -TERM "$agent_pid" 2>/dev/null || true
+attempt=0
+while kill -0 "$agent_pid" 2>/dev/null && [ "$attempt" -lt 50 ]; do
+  sleep 0.1
+  attempt=$((attempt + 1))
+done
+if kill -0 "$agent_pid" 2>/dev/null; then
+  kill -KILL -- "-$agent_pid" 2>/dev/null || kill -KILL "$agent_pid" 2>/dev/null || true
+fi
+rm -f -- "$pid_file"
 "#;
 
 pub struct TurnExecution {
@@ -190,22 +226,20 @@ impl TurnExecutor for SystemTurnExecutor {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        command.process_group(0);
         let mut child = command
             .spawn()
             .map_err(|_| "не запустить headless Agent VM invocation".to_string())?;
         let Some(stdout) = child.stdout.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_host_transport(&mut child);
             return Err("headless Agent VM stdout недоступен".into());
         };
         let Some(stderr) = child.stderr.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_host_transport(&mut child);
             return Err("headless Agent VM stderr недоступен".into());
         };
         let Some(mut stdin) = child.stdin.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_host_transport(&mut child);
             return Err("headless Agent VM stdin недоступен".into());
         };
         let child = Arc::new(Mutex::new(child));
@@ -215,8 +249,7 @@ impl TurnExecutor for SystemTurnExecutor {
             .insert(request.run_id.clone(), child.clone());
         if let Some(input) = &spec.stdin {
             if stdin.write_all(input).is_err() {
-                let _ = child.lock().unwrap().kill();
-                let _ = child.lock().unwrap().wait();
+                terminate_host_transport(&mut child.lock().unwrap());
                 self.processes.lock().unwrap().remove(&request.run_id);
                 return Err("не передать prompt в headless Agent VM stdin".into());
             }
@@ -297,7 +330,7 @@ impl TurnExecutor for SystemTurnExecutor {
             }
         }
         if stream_error.is_some() {
-            let _ = child.lock().unwrap().kill();
+            terminate_host_transport(&mut child.lock().unwrap());
         }
         let status = child.lock().unwrap().wait();
         self.processes.lock().unwrap().remove(&request.run_id);
@@ -317,31 +350,37 @@ impl TurnExecutor for SystemTurnExecutor {
         let child = self.processes.lock().unwrap().get(run_id).cloned();
         let mut cancelled = false;
         if let Some(child) = child {
-            child
-                .lock()
-                .unwrap()
-                .kill()
-                .map_err(|_| "не остановить local Agent VM transport".to_string())?;
+            terminate_host_transport(&mut child.lock().unwrap());
             cancelled = true;
         }
         if let Some(vm_name) = vm_name {
             let spec = build_cancel_spec(&self.limactl, &self.env, vm_name, run_id)?;
-            thread::Builder::new()
-                .name(format!("agent-vm-cancel-{}", short_id(run_id)))
-                .spawn(move || {
-                    let _ = SystemRunner
-                        .run(&spec)
-                        .and_then(|result| result.success_or_error("Agent VM remote cancel"));
-                })
-                .map_err(|_| "не запустить Agent VM remote cancel worker".to_string())?;
+            SystemRunner
+                .run_with_timeout(&spec, REMOTE_CANCEL_TIMEOUT)?
+                .success_or_error("Agent VM remote cancel")?;
             cancelled = true;
         }
         Ok(cancelled)
     }
 }
 
-fn short_id(value: &str) -> &str {
-    value.get(..value.len().min(20)).unwrap_or(value)
+fn terminate_host_transport(child: &mut Child) {
+    let process_group = child.id() as i32;
+    unsafe {
+        libc::kill(-process_group, libc::SIGTERM);
+    }
+    let grace = Instant::now() + Duration::from_millis(250);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < grace => thread::sleep(PROCESS_POLL_INTERVAL),
+            _ => break,
+        }
+    }
+    unsafe {
+        libc::kill(-process_group, libc::SIGKILL);
+    }
+    let _ = child.wait();
 }
 
 pub fn build_turn_spec(
@@ -589,6 +628,7 @@ mod tests {
                 repo: None,
                 git_ref: None,
             },
+            mounts: Vec::new(),
         }
     }
 
@@ -635,6 +675,14 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg.contains(r#"setsid "$@" <&0 &"#)));
+        assert!(fresh
+            .args
+            .iter()
+            .any(|arg| arg.contains(r#"awk '{print $22}' "/proc/$agent_pid/stat""#)));
+        assert!(fresh
+            .args
+            .iter()
+            .any(|arg| arg.contains(r#"printf '%s %s\n' "$agent_pid" "$agent_start""#)));
 
         let resumed = build_turn_spec(
             Path::new("/synthetic/bin/limactl"),
@@ -705,6 +753,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cancel.stdin, None);
+        assert!(cancel
+            .args
+            .iter()
+            .any(|arg| arg.contains(r#""$current_start" != "$expected_start""#)));
+        assert!(cancel
+            .args
+            .iter()
+            .any(|arg| arg.contains(r#"kill -KILL -- "-$agent_pid""#)));
         assert!(build_cancel_spec(
             Path::new("/synthetic/bin/limactl"),
             &BTreeMap::new(),

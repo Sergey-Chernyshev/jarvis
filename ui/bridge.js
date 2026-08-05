@@ -61,6 +61,7 @@
     onPlugins: (cb) => on('plugins', cb),
     getPlugins: () => invoke('plugins_status'),
     pluginCmd: (id, cmd, args) => invoke('plugins_cmd', { id, cmd, args: args ?? null }),
+    pluginManagerRequest: (request) => invoke('plugin_manager_request', { request }),
     onEntities: (cb) => on('entities', cb),
     getEntities: () => invoke('entities_get'),
     getAgentVmProfiles: () => invoke('agent_vm_profiles_get'),

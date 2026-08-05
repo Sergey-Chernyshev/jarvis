@@ -22,6 +22,16 @@
         "2.0.0-rc.10": "1fa7e49bd669d32d7bc2a15ec540a527e7764aec722a45467814005725bcd721"
       }
     },
+    "rusqlite": {
+      "attributes": {},
+      "derives": {},
+      "macros": {
+        "params": null
+      },
+      "versions": {
+        "0.31.0": "b838eba278d213a8beaf485bd313fd580ca4505a00d5871caeb1457c55322cae"
+      }
+    },
     "schemars": {
       "attributes": {},
       "derives": {

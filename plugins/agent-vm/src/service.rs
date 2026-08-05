@@ -1,16 +1,16 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CStr;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use jarvis_secret_store::{
     migrate_legacy_claude_secret, read_claude_code_credentials, MacKeychainStore, SecretStore,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 use crate::config_mirror::{build_snapshot, build_snapshot_for_project, MirrorRoots};
@@ -18,7 +18,10 @@ use crate::guest_bootstrap::{
     bootstrap_spec, build_bundle, guest_credential_probe_spec, load_codex_credential,
     run_bootstrap, run_guest_credential_probe, BootstrapCredentialStatus, LoadedCodexCredential,
 };
-use crate::inventory::{load_records, parse_lima_instances, reconcile, InventoryVm};
+use crate::inventory::{
+    load_records, parse_lima_instances, reconcile, InventoryVm, VmRecord, MAX_ADDITIONAL_MOUNTS,
+    MAX_RECORD_BYTES,
+};
 use crate::project::{ensure_project_link, is_valid_vm_name, ProjectIdentity};
 use crate::runner::{CommandRunner, CommandSpec};
 use crate::runtime_paths::RuntimePaths;
@@ -30,6 +33,66 @@ modules:\n\
   - claude\n\
   - codex\n";
 const INVENTORY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_ACTIVE_VMS: usize = 8;
+const PROTECTED_ACCOUNT_MOUNT_DIRS: &[&str] = &[
+    ".aws",
+    ".azure",
+    ".claude",
+    ".codex",
+    ".config",
+    ".docker",
+    ".gnupg",
+    ".jarvis",
+    ".jarvis-dev",
+    ".kube",
+    ".ssh",
+    "Library/Keychains",
+    ".local/share/keyrings",
+];
+
+#[derive(Debug, Deserialize)]
+struct ProjectSpec {
+    #[serde(default)]
+    mounts: Option<Vec<ProjectMountSpec>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ProjectMountSpec {
+    Path(String),
+    Named {
+        path: String,
+        #[serde(default)]
+        name: String,
+    },
+}
+
+impl ProjectMountSpec {
+    fn path(&self) -> &str {
+        match self {
+            Self::Path(path) | Self::Named { path, .. } => path,
+        }
+    }
+
+    fn validate_name(&self) -> Result<(), String> {
+        let Self::Named { name, .. } = self else {
+            return Ok(());
+        };
+        if name.is_empty() {
+            return Ok(());
+        }
+        if name == "."
+            || name == ".."
+            || name.len() > 128
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            return Err("mount name должен быть одним безопасным guest path segment".into());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Toolchain {
@@ -263,7 +326,7 @@ pub enum EnsureAction {
 pub fn plan_ensure(current: Option<(&str, &str)>) -> EnsureAction {
     match current {
         None => EnsureAction::Create,
-        Some(("orphaned", _)) => EnsureAction::Recreate,
+        Some(("orphaned", _)) => EnsureAction::Wait,
         Some(("managed", "stopped")) => EnsureAction::Start,
         Some(("managed", "running")) => EnsureAction::Ready,
         Some(_) => EnsureAction::Wait,
@@ -290,6 +353,7 @@ pub struct AgentVmService<R: CommandRunner> {
     tools: Toolchain,
     config_bootstrap: Option<Arc<dyn ConfigBootstrap>>,
     trust_source: Option<PathBuf>,
+    ensure_admission: Arc<Mutex<()>>,
 }
 
 impl<R: CommandRunner> AgentVmService<R> {
@@ -300,6 +364,7 @@ impl<R: CommandRunner> AgentVmService<R> {
             tools,
             config_bootstrap: None,
             trust_source: None,
+            ensure_admission: Arc::new(Mutex::new(())),
         }
     }
 
@@ -325,6 +390,7 @@ impl<R: CommandRunner> AgentVmService<R> {
             tools,
             config_bootstrap: Some(Arc::new(bootstrap)),
             trust_source: Some(trust_source),
+            ensure_admission: Arc::new(Mutex::new(())),
         })
     }
 
@@ -357,41 +423,103 @@ impl<R: CommandRunner> AgentVmService<R> {
     }
 
     pub fn ensure(&self, cwd: &Path) -> Result<RuntimeSnapshot, String> {
+        let _admission = self
+            .ensure_admission
+            .lock()
+            .map_err(|_| "Agent VM admission lock poisoned".to_string())?;
         self.paths.create_private_dirs()?;
         if let Some(source) = &self.trust_source {
             self.paths.sync_trust_from(source)?;
         }
         let project = ProjectIdentity::from_path(cwd)?;
+        let home = account_home()
+            .ok_or_else(|| "не определить account home для mount policy".to_string())?;
+        validate_project_spec(&project, &self.paths, &home)?;
         let binding = ensure_project_link(&self.paths.project_links, &project)?;
         let before = self.inventory()?;
         let current = find_project_vm(&before, &project);
+        if let Some(vm) = current.filter(|vm| vm.management == "managed") {
+            let record = vm
+                .record
+                .as_ref()
+                .ok_or_else(|| "managed VM требует valid Agent VM Record".to_string())?;
+            validate_record_mounts(record, &project, &self.paths, &home)?;
+        }
         let action = plan_ensure(current.map(|vm| (vm.management.as_str(), vm.state.as_str())));
+        let expected_vm_name = current
+            .map(|vm| vm.name.clone())
+            .unwrap_or_else(|| project.vm_name.clone());
+        if matches!(action, EnsureAction::Create | EnsureAction::Start) {
+            let active = before
+                .iter()
+                .filter(|vm| !matches!(vm.state.as_str(), "stopped" | "missing"))
+                .count();
+            if active >= MAX_ACTIVE_VMS {
+                return Err(format!(
+                    "достигнут безопасный лимит {MAX_ACTIVE_VMS} active Agent VM; останови ненужную VM перед запуском новой"
+                ));
+            }
+        }
         let mut created_spec = false;
+        let changed_runtime = matches!(
+            action,
+            EnsureAction::Create | EnsureAction::Recreate | EnsureAction::Start
+        );
         let inventory = match action {
             EnsureAction::Create => {
                 created_spec = ensure_project_spec(&project.canonical_path)?;
+                validate_project_spec(&project, &self.paths, &home)?;
                 self.run_avm(
                     "create",
                     vec!["create".into(), binding.to_string_lossy().into_owned()],
                 )?;
-                self.inventory()?
+                self.inventory()
             }
             EnsureAction::Recreate => {
                 let name = current
                     .map(|vm| vm.name.as_str())
                     .unwrap_or(&project.vm_name);
+                let record = current
+                    .and_then(|vm| vm.record.as_ref())
+                    .ok_or_else(|| "recreate требует valid Agent VM Record".to_string())?;
+                validate_record_mounts(record, &project, &self.paths, &home)?;
                 self.run_lifecycle("recreate", name)?;
-                self.inventory()?
+                self.inventory()
             }
             EnsureAction::Start => {
                 let name = current
                     .map(|vm| vm.name.as_str())
                     .unwrap_or(&project.vm_name);
+                let record = current
+                    .and_then(|vm| vm.record.as_ref())
+                    .ok_or_else(|| "start требует valid Agent VM Record".to_string())?;
+                validate_record_mounts(record, &project, &self.paths, &home)?;
                 self.run_lifecycle("start", name)?;
-                self.inventory()?
+                self.inventory()
             }
-            EnsureAction::Ready | EnsureAction::Wait => before,
+            EnsureAction::Ready | EnsureAction::Wait => Ok(before),
         };
+        let inventory = match inventory {
+            Ok(inventory) => inventory,
+            Err(error) if changed_runtime => {
+                return Err(self.contain_post_action_failure(&expected_vm_name, error));
+            }
+            Err(error) => return Err(error),
+        };
+        if action != EnsureAction::Wait {
+            if let Err(error) = validate_expected_managed_vm(
+                &inventory,
+                &expected_vm_name,
+                &project,
+                &self.paths,
+                &home,
+            ) {
+                if changed_runtime {
+                    return Err(self.contain_post_action_failure(&expected_vm_name, error));
+                }
+                return Err(error);
+            }
+        }
         let snapshot = self.snapshot(&project, inventory, created_spec)?;
         self.bootstrap_if_ready(snapshot)
     }
@@ -405,6 +533,10 @@ impl<R: CommandRunner> AgentVmService<R> {
     }
 
     fn lifecycle(&self, cwd: &Path, action: &str) -> Result<RuntimeSnapshot, String> {
+        let _admission = self
+            .ensure_admission
+            .lock()
+            .map_err(|_| "Agent VM admission lock poisoned".to_string())?;
         let project = ProjectIdentity::from_path(cwd)?;
         let before = self.inventory()?;
         let vm = find_project_vm(&before, &project)
@@ -412,8 +544,45 @@ impl<R: CommandRunner> AgentVmService<R> {
         if vm.management != "managed" {
             return Err(format!("VM {} имеет состояние {}", vm.name, vm.management));
         }
-        self.run_lifecycle(action, &vm.name)?;
-        let snapshot = self.snapshot(&project, self.inventory()?, false)?;
+        if action == "restart" {
+            let home = account_home()
+                .ok_or_else(|| "не определить account home для mount policy".to_string())?;
+            let record = vm
+                .record
+                .as_ref()
+                .ok_or_else(|| "restart требует valid Agent VM Record".to_string())?;
+            validate_record_mounts(record, &project, &self.paths, &home)?;
+            if matches!(vm.state.as_str(), "stopped" | "missing") {
+                let active = before
+                    .iter()
+                    .filter(|item| !matches!(item.state.as_str(), "stopped" | "missing"))
+                    .count();
+                if active >= MAX_ACTIVE_VMS {
+                    return Err(format!(
+                        "достигнут безопасный лимит {MAX_ACTIVE_VMS} active Agent VM; останови ненужную VM перед restart"
+                    ));
+                }
+            }
+        }
+        let vm_name = vm.name.clone();
+        self.run_lifecycle(action, &vm_name)?;
+        let inventory = match self.inventory() {
+            Ok(inventory) => inventory,
+            Err(error) if action == "restart" => {
+                return Err(self.contain_post_action_failure(&vm_name, error));
+            }
+            Err(error) => return Err(error),
+        };
+        if action == "restart" {
+            let home = account_home()
+                .ok_or_else(|| "не определить account home для mount policy".to_string())?;
+            if let Err(error) =
+                validate_expected_managed_vm(&inventory, &vm_name, &project, &self.paths, &home)
+            {
+                return Err(self.contain_post_action_failure(&vm_name, error));
+            }
+        }
+        let snapshot = self.snapshot(&project, inventory, false)?;
         if action == "restart" {
             self.bootstrap_if_ready(snapshot)
         } else {
@@ -440,6 +609,37 @@ impl<R: CommandRunner> AgentVmService<R> {
             })?
             .success_or_error(&format!("avm {operation}"))?;
         Ok(())
+    }
+
+    fn contain_post_action_failure(&self, vm_name: &str, cause: String) -> String {
+        let stop = self.run_lifecycle("stop", vm_name);
+        let inventory = self.inventory();
+        let state = inventory.as_ref().ok().and_then(|inventory| {
+            inventory
+                .iter()
+                .find(|vm| vm.name == vm_name)
+                .map(|vm| vm.state.clone())
+        });
+        let contained = matches!(state.as_deref(), None | Some("stopped") | Some("missing"));
+        match (stop, inventory, contained) {
+            (_, _, true) => {
+                format!("{cause}; rejected Agent VM {vm_name} остановлена и сверена")
+            }
+            (Err(stop_error), Err(inventory_error), false) => format!(
+                "{cause}; не удалось остановить rejected Agent VM {vm_name}: {stop_error}; не удалось сверить состояние: {inventory_error}"
+            ),
+            (Err(stop_error), _, false) => format!(
+                "{cause}; не удалось остановить rejected Agent VM {vm_name}: {stop_error}; observed state={}",
+                state.as_deref().unwrap_or("unknown")
+            ),
+            (_, Err(inventory_error), false) => format!(
+                "{cause}; stop rejected Agent VM {vm_name} выполнен, но состояние не сверено: {inventory_error}"
+            ),
+            (_, _, false) => format!(
+                "{cause}; rejected Agent VM {vm_name} осталась в unsafe state={}",
+                state.as_deref().unwrap_or("unknown")
+            ),
+        }
     }
 
     fn snapshot(
@@ -532,6 +732,32 @@ fn find_project_vm<'a>(
     })
 }
 
+fn validate_expected_managed_vm(
+    inventory: &[InventoryVm],
+    expected_vm_name: &str,
+    project: &ProjectIdentity,
+    paths: &RuntimePaths,
+    account_home: &Path,
+) -> Result<(), String> {
+    let vm = inventory
+        .iter()
+        .find(|vm| vm.name == expected_vm_name)
+        .ok_or_else(|| {
+            format!("Agent VM {expected_vm_name} отсутствует в fresh runtime inventory")
+        })?;
+    if vm.management != "managed" {
+        return Err(format!(
+            "Agent VM {expected_vm_name} имеет недоверенное состояние {}",
+            vm.management
+        ));
+    }
+    let record = vm
+        .record
+        .as_ref()
+        .ok_or_else(|| format!("Agent VM {expected_vm_name} не содержит valid Record"))?;
+    validate_record_mounts(record, project, paths, account_home)
+}
+
 pub fn validate_project_id(
     project: &ProjectIdentity,
     supplied: Option<&str>,
@@ -561,6 +787,169 @@ pub fn lifecycle_spec(
         env: env.clone(),
         stdin: None,
     })
+}
+
+fn validate_project_spec(
+    project: &ProjectIdentity,
+    paths: &RuntimePaths,
+    account_home: &Path,
+) -> Result<(), String> {
+    reject_protected_mount(&project.canonical_path, paths, account_home)?;
+    let spec_path = project.canonical_path.join(".agent-vm.yaml");
+    let metadata = match fs::symlink_metadata(&spec_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "не проверить project config {}: {error}",
+                spec_path.display()
+            ));
+        }
+    };
+    if !metadata.file_type().is_file() || metadata.len() > MAX_RECORD_BYTES {
+        return Err("project config должен быть bounded regular file".into());
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&spec_path)
+        .map_err(|_| "не открыть project config без symlink follow".to_string())?;
+    let opened = file
+        .metadata()
+        .map_err(|_| "не проверить открытый project config".to_string())?;
+    if !opened.file_type().is_file() || opened.len() > MAX_RECORD_BYTES {
+        return Err("project config изменился или имеет unsafe type/size".into());
+    }
+    let mut data = Vec::with_capacity(opened.len() as usize);
+    Read::by_ref(&mut file)
+        .take(MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut data)
+        .map_err(|_| "не прочитать project config".to_string())?;
+    if data.len() as u64 > MAX_RECORD_BYTES {
+        return Err("project config превышает size limit".into());
+    }
+    let spec = serde_yaml::from_slice::<Option<ProjectSpec>>(&data)
+        .map_err(|error| format!("не разобрать project config: {error}"))?
+        .unwrap_or(ProjectSpec { mounts: None });
+    let mounts = spec.mounts.unwrap_or_default();
+    if mounts.len() > MAX_ADDITIONAL_MOUNTS {
+        return Err(format!(
+            "project config содержит больше {MAX_ADDITIONAL_MOUNTS} mounts"
+        ));
+    }
+
+    let mut seen = BTreeSet::new();
+    for mount in mounts {
+        mount.validate_name()?;
+        let raw = mount.path();
+        if raw.is_empty() || raw.len() > 4096 || raw.as_bytes().contains(&0) {
+            return Err("mount path имеет unsafe format".into());
+        }
+        let raw_path = Path::new(raw);
+        let candidate = if raw_path.is_absolute() {
+            raw_path.to_path_buf()
+        } else {
+            project.canonical_path.join(raw_path)
+        };
+        reject_protected_mount(&candidate, paths, account_home)?;
+        let canonical = canonical_mount_directory(&candidate)?;
+        reject_protected_mount(&canonical, paths, account_home)?;
+        if canonical == project.canonical_path {
+            return Err("additional mount дублирует primary project mount".into());
+        }
+        if !canonical.starts_with(&project.canonical_path) {
+            return Err(
+                "mount path находится вне granted canonical project root; нужен explicit grant"
+                    .into(),
+            );
+        }
+        if !seen.insert(canonical) {
+            return Err("project config содержит duplicate canonical mount".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_record_mounts(
+    record: &VmRecord,
+    project: &ProjectIdentity,
+    paths: &RuntimePaths,
+    account_home: &Path,
+) -> Result<(), String> {
+    reject_protected_mount(&project.canonical_path, paths, account_home)?;
+    if record.workspace.mode_name != "mount" {
+        return Err("Agent VM Record не описывает project mount".into());
+    }
+    let primary = record
+        .workspace
+        .host_path
+        .as_deref()
+        .ok_or_else(|| "Agent VM Record не содержит primary host mount".to_string())?;
+    let primary = canonical_mount_directory(Path::new(primary))?;
+    reject_protected_mount(&primary, paths, account_home)?;
+    if primary != project.canonical_path {
+        return Err("Agent VM Record primary mount не совпадает с canonical project grant".into());
+    }
+
+    let mut seen = BTreeSet::from([primary]);
+    for mount in &record.mounts {
+        let candidate = Path::new(&mount.host_path);
+        reject_protected_mount(candidate, paths, account_home)?;
+        let canonical = canonical_mount_directory(candidate)?;
+        reject_protected_mount(&canonical, paths, account_home)?;
+        if !canonical.starts_with(&project.canonical_path) {
+            return Err(
+                "Agent VM Record mount находится вне granted canonical project root".into(),
+            );
+        }
+        if !seen.insert(canonical) {
+            return Err("Agent VM Record содержит duplicate canonical mount".into());
+        }
+    }
+    Ok(())
+}
+
+fn canonical_mount_directory(path: &Path) -> Result<PathBuf, String> {
+    let canonical = fs::canonicalize(path)
+        .map_err(|_| "mount source недоступен для canonicalize".to_string())?;
+    if !canonical.is_dir() {
+        return Err("mount source должен быть каталогом".into());
+    }
+    Ok(canonical)
+}
+
+fn reject_protected_mount(
+    path: &Path,
+    paths: &RuntimePaths,
+    account_home: &Path,
+) -> Result<(), String> {
+    if path == Path::new("/") {
+        return Err("mount source не может быть filesystem root".into());
+    }
+    if path.starts_with("/Library/Keychains") || path.starts_with("/System/Library/Keychains") {
+        return Err("mount source указывает на protected system Keychain state".into());
+    }
+    let canonical_home =
+        fs::canonicalize(account_home).unwrap_or_else(|_| account_home.to_path_buf());
+    for home in [account_home, canonical_home.as_path()] {
+        if path == home {
+            return Err("mount source не может быть account home root".into());
+        }
+        if PROTECTED_ACCOUNT_MOUNT_DIRS
+            .iter()
+            .map(|relative| home.join(relative))
+            .any(|protected| path.starts_with(protected))
+        {
+            return Err("mount source указывает на protected auth/account state".into());
+        }
+    }
+
+    let canonical_jarvis =
+        fs::canonicalize(&paths.jarvis_dir).unwrap_or_else(|_| paths.jarvis_dir.clone());
+    if path.starts_with(&paths.jarvis_dir) || path.starts_with(canonical_jarvis) {
+        return Err("mount source указывает на protected Jarvis/plugin/runtime state".into());
+    }
+    Ok(())
 }
 
 pub fn ensure_project_spec(project: &Path) -> Result<bool, String> {
@@ -593,7 +982,9 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::mpsc;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::thread;
 
     use super::*;
     use crate::runner::{CommandResult, CommandRunner, CommandSpec};
@@ -637,6 +1028,96 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct BlockingBootstrap {
+        state: Arc<(Mutex<(bool, bool)>, Condvar)>,
+    }
+
+    impl BlockingBootstrap {
+        fn new() -> Self {
+            Self {
+                state: Arc::new((Mutex::new((false, false)), Condvar::new())),
+            }
+        }
+
+        fn wait_until_started(&self) {
+            let (state, changed) = &*self.state;
+            let mut state = state.lock().unwrap();
+            while !state.0 {
+                state = changed.wait(state).unwrap();
+            }
+        }
+
+        fn release(&self) {
+            let (state, changed) = &*self.state;
+            state.lock().unwrap().1 = true;
+            changed.notify_all();
+        }
+    }
+
+    impl ConfigBootstrap for BlockingBootstrap {
+        fn apply(&self, _record: &VmRecord) -> Result<BootstrapStatus, String> {
+            let (state, changed) = &*self.state;
+            let mut state = state.lock().unwrap();
+            state.0 = true;
+            changed.notify_all();
+            while !state.1 {
+                state = changed.wait(state).unwrap();
+            }
+            Ok(BootstrapStatus {
+                fingerprint: "a".repeat(64),
+                files: 0,
+                skipped: 0,
+                credentials: BootstrapCredentialStatus {
+                    claude: "ready".into(),
+                    codex: "ready".into(),
+                },
+                proxy_configured: false,
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct CorruptingRunner {
+        calls: Arc<Mutex<Vec<CommandSpec>>>,
+        outputs: Arc<Mutex<VecDeque<CommandResult>>>,
+        paths: RuntimePaths,
+        vm_name: String,
+        binding: PathBuf,
+        outside: PathBuf,
+    }
+
+    impl CommandRunner for CorruptingRunner {
+        fn run(&self, spec: &CommandSpec) -> Result<CommandResult, String> {
+            self.calls.lock().unwrap().push(spec.clone());
+            if spec.args.first().map(String::as_str) == Some("start") {
+                write_record_with_mount(&self.paths, &self.vm_name, &self.binding, &self.outside);
+            }
+            self.outputs
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| "fake output exhausted".into())
+        }
+    }
+
+    #[derive(Clone)]
+    struct ResultRunner {
+        calls: Arc<Mutex<Vec<CommandSpec>>>,
+        outputs: Arc<Mutex<VecDeque<Result<CommandResult, String>>>>,
+    }
+
+    impl CommandRunner for ResultRunner {
+        fn run(&self, spec: &CommandSpec) -> Result<CommandResult, String> {
+            self.calls.lock().unwrap().push(spec.clone());
+            self.outputs
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| "fake output exhausted".to_string())?
+        }
+    }
+
     fn ok(stdout: &str) -> CommandResult {
         CommandResult {
             status: 0,
@@ -672,6 +1153,24 @@ mod tests {
         .unwrap();
     }
 
+    fn write_record_with_mount(
+        paths: &RuntimePaths,
+        vm_name: &str,
+        host_path: &Path,
+        mount_path: &Path,
+    ) {
+        fs::create_dir_all(paths.registry_root.join("vms")).unwrap();
+        fs::write(
+            paths.registry_root.join(format!("vms/{vm_name}.yaml")),
+            format!(
+                "name: {vm_name}\nsource: project\nmodules: [node, claude, codex]\nresources: {{cpus: 4, memory: 4GiB, disk: 120GiB}}\nuser: dev\nworkspace:\n  mode: mount\n  guestPath: /home/dev/{vm_name}\n  hostPath: {}\nmounts:\n  - hostPath: {}\n    guestPath: /home/dev/additional\n",
+                host_path.display(),
+                mount_path.display()
+            ),
+        )
+        .unwrap();
+    }
+
     fn service(runner: FakeRunner, paths: RuntimePaths) -> AgentVmService<FakeRunner> {
         AgentVmService::new(
             runner,
@@ -684,11 +1183,11 @@ mod tests {
     }
 
     #[test]
-    fn ensure_plan_never_recreates_a_stopped_or_running_vm() {
+    fn ensure_plan_never_implicitly_recreates_an_orphaned_vm() {
         assert_eq!(plan_ensure(None), EnsureAction::Create);
         assert_eq!(
             plan_ensure(Some(("orphaned", "missing"))),
-            EnsureAction::Recreate
+            EnsureAction::Wait
         );
         assert_eq!(
             plan_ensure(Some(("managed", "stopped"))),
@@ -717,11 +1216,363 @@ mod tests {
     }
 
     #[test]
+    fn ensure_leaves_an_orphaned_record_untouched_without_a_lifecycle_command() {
+        let (root, project, paths) = fixture("orphan-no-recreate");
+        let identity = ProjectIdentity::from_path(&project).unwrap();
+        let binding = ensure_project_link(&paths.project_links, &identity).unwrap();
+        write_record(&paths, &identity.vm_name, &binding);
+        let runner = FakeRunner::with_outputs(vec![ok("")]);
+        let api = service(runner.clone(), paths);
+
+        let snapshot = api.ensure(&project).unwrap();
+
+        let vm = snapshot
+            .vm
+            .expect("orphan remains visible for explicit repair");
+        assert_eq!(vm.management, "orphaned");
+        assert_eq!(vm.state, "missing");
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "ensure must only inspect inventory");
+        assert_eq!(calls[0].program, Path::new("/synthetic/bin/limactl"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_spec_rejects_ungranted_and_symlink_escape_mounts_before_runner() {
+        use std::os::unix::fs::symlink;
+
+        for tag in ["absolute", "symlink", "home", "auth", "jarvis"] {
+            let (root, project, paths) = fixture(&format!("unsafe-spec-{tag}"));
+            let outside = root.join("outside");
+            fs::create_dir_all(&outside).unwrap();
+            let (mount, object_form) = match tag {
+                "absolute" => (outside.to_string_lossy().into_owned(), false),
+                "symlink" => {
+                    let link = project.join("escape");
+                    symlink(&outside, &link).unwrap();
+                    ("escape".to_string(), true)
+                }
+                "home" => (
+                    account_home()
+                        .expect("test account home")
+                        .to_string_lossy()
+                        .into_owned(),
+                    false,
+                ),
+                "auth" => (
+                    account_home()
+                        .expect("test account home")
+                        .join(".ssh")
+                        .to_string_lossy()
+                        .into_owned(),
+                    false,
+                ),
+                "jarvis" => (paths.state_root.to_string_lossy().into_owned(), false),
+                _ => unreachable!(),
+            };
+            let mount_yaml = if object_form {
+                format!("  - path: {mount}\n    name: escaped\n")
+            } else {
+                format!("  - {mount}\n")
+            };
+            fs::write(
+                project.join(".agent-vm.yaml"),
+                format!("modules: [node]\nmounts:\n{mount_yaml}"),
+            )
+            .unwrap();
+            let runner = FakeRunner::with_outputs(Vec::new());
+            let api = service(runner.clone(), paths);
+
+            let error = api.ensure(&project).unwrap_err();
+
+            assert!(
+                error.contains("mount") || error.contains("grant"),
+                "unsafe project spec must have an actionable error: {error}"
+            );
+            assert!(
+                runner.calls.lock().unwrap().is_empty(),
+                "unsafe spec reached a runner command"
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn ensure_rejects_an_ungranted_record_mount_before_lifecycle() {
+        let (root, project, paths) = fixture("unsafe-record-mount");
+        let identity = ProjectIdentity::from_path(&project).unwrap();
+        let binding = ensure_project_link(&paths.project_links, &identity).unwrap();
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        write_record_with_mount(&paths, &identity.vm_name, &binding, &outside);
+        let runner =
+            FakeRunner::with_outputs(vec![ok(&format!("{}\tStopped\n", identity.vm_name))]);
+        let api = service(runner.clone(), paths);
+
+        let error = api.ensure(&project).unwrap_err();
+
+        assert!(
+            error.contains("mount") || error.contains("grant"),
+            "unsafe Record must have an actionable error: {error}"
+        );
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "unsafe Record reached avm lifecycle");
+        assert_eq!(calls[0].program, Path::new("/synthetic/bin/limactl"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ensure_rejects_an_ungranted_record_mount_for_an_already_running_vm() {
+        let (root, project, paths) = fixture("unsafe-running-record-mount");
+        let identity = ProjectIdentity::from_path(&project).unwrap();
+        let binding = ensure_project_link(&paths.project_links, &identity).unwrap();
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        write_record_with_mount(&paths, &identity.vm_name, &binding, &outside);
+        let runner =
+            FakeRunner::with_outputs(vec![ok(&format!("{}\tRunning\n", identity.vm_name))]);
+        let api = service(runner.clone(), paths);
+
+        let error = api.ensure(&project).unwrap_err();
+
+        assert!(
+            error.contains("mount") || error.contains("grant"),
+            "unsafe running Record must have an actionable error: {error}"
+        );
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "unsafe running Record reached bootstrap or lifecycle"
+        );
+        assert_eq!(calls[0].program, Path::new("/synthetic/bin/limactl"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn post_create_validation_selects_the_expected_vm_name_before_trusting_its_mount() {
+        let (root, project, paths) = fixture("unsafe-created-primary");
+        let identity = ProjectIdentity::from_path(&project).unwrap();
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        write_record(&paths, &identity.vm_name, &outside);
+        let record = load_records(&paths.registry_root).unwrap().remove(0);
+        let inventory = vec![InventoryVm {
+            name: identity.vm_name.clone(),
+            management: "managed".into(),
+            state: "running".into(),
+            record: Some(record),
+        }];
+
+        assert!(
+            find_project_vm(&inventory, &identity).is_none(),
+            "the old selector demonstrates why validation could be skipped"
+        );
+        let error = validate_expected_managed_vm(
+            &inventory,
+            &identity.vm_name,
+            &identity,
+            &paths,
+            &account_home().expect("test account home"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("primary mount") || error.contains("grant"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stop_waits_until_same_vm_bootstrap_restores_guest_home() {
+        let (root, project, paths) = fixture("serialized-bootstrap-stop");
+        let identity = ProjectIdentity::from_path(&project).unwrap();
+        let binding = ensure_project_link(&paths.project_links, &identity).unwrap();
+        write_record(&paths, &identity.vm_name, &binding);
+        let runner = FakeRunner::with_outputs(vec![
+            ok(&format!("{}\tRunning\n", identity.vm_name)),
+            ok(&format!("{}\tRunning\n", identity.vm_name)),
+            ok("stopped\n"),
+            ok(&format!("{}\tStopped\n", identity.vm_name)),
+        ]);
+        let bootstrap = BlockingBootstrap::new();
+        let mut api = service(runner.clone(), paths);
+        api.config_bootstrap = Some(Arc::new(bootstrap.clone()));
+
+        let ensure_api = api.clone();
+        let ensure_project = project.clone();
+        let ensure = thread::spawn(move || ensure_api.ensure(&ensure_project));
+        bootstrap.wait_until_started();
+
+        let stop_api = api.clone();
+        let stop_project = project.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let stop = thread::spawn(move || {
+            let result = stop_api.stop(&stop_project);
+            done_tx.send(()).unwrap();
+            result
+        });
+
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(150)).is_err(),
+            "stop raced through a bootstrap that still owns guest home"
+        );
+        assert_eq!(
+            runner.calls.lock().unwrap().len(),
+            1,
+            "stop reached inventory before bootstrap released its ownership lock"
+        );
+
+        bootstrap.release();
+        ensure.join().unwrap().unwrap();
+        stop.join().unwrap().unwrap();
+        assert_eq!(runner.calls.lock().unwrap().len(), 4);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejected_post_start_record_is_stopped_by_exact_vm_name() {
+        let (root, project, paths) = fixture("post-start-cleanup");
+        let identity = ProjectIdentity::from_path(&project).unwrap();
+        let binding = ensure_project_link(&paths.project_links, &identity).unwrap();
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        write_record(&paths, &identity.vm_name, &binding);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = CorruptingRunner {
+            calls: calls.clone(),
+            outputs: Arc::new(Mutex::new(
+                vec![
+                    ok(&format!("{}\tStopped\n", identity.vm_name)),
+                    ok("started\n"),
+                    ok(&format!("{}\tRunning\n", identity.vm_name)),
+                    ok("stopped\n"),
+                    ok(&format!("{}\tStopped\n", identity.vm_name)),
+                ]
+                .into(),
+            )),
+            paths: paths.clone(),
+            vm_name: identity.vm_name.clone(),
+            binding,
+            outside,
+        };
+        let api = AgentVmService::new(
+            runner,
+            paths,
+            Toolchain {
+                avm: PathBuf::from("/synthetic/bin/avm"),
+                limactl: PathBuf::from("/synthetic/bin/limactl"),
+            },
+        );
+
+        let error = api.ensure(&project).unwrap_err();
+
+        assert!(
+            error.contains("mount") || error.contains("grant"),
+            "{error}"
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 5, "rejected running VM was not reconciled");
+        assert_eq!(
+            calls[3].args,
+            ["stop", identity.vm_name.as_str()],
+            "cleanup must stop only the exact VM that passed the pre-action checks"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn post_create_inventory_failure_stops_and_reconciles_exact_vm() {
+        let (root, project, paths) = fixture("post-create-inventory-cleanup");
+        let identity = ProjectIdentity::from_path(&project).unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runner = ResultRunner {
+            calls: calls.clone(),
+            outputs: Arc::new(Mutex::new(
+                vec![
+                    Ok(ok("")),
+                    Ok(ok("created\n")),
+                    Err("synthetic post-create inventory failure".into()),
+                    Ok(ok("stopped\n")),
+                    Ok(ok(&format!("{}\tStopped\n", identity.vm_name))),
+                ]
+                .into(),
+            )),
+        };
+        let api = AgentVmService::new(
+            runner,
+            paths,
+            Toolchain {
+                avm: PathBuf::from("/synthetic/bin/avm"),
+                limactl: PathBuf::from("/synthetic/bin/limactl"),
+            },
+        );
+
+        let error = api.ensure(&project).unwrap_err();
+
+        assert!(
+            error.contains("synthetic post-create inventory failure"),
+            "{error}"
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            5,
+            "failed create was not stopped and reconciled"
+        );
+        assert_eq!(calls[3].args, ["stop", identity.vm_name.as_str()]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_spec_accepts_relative_and_absolute_mounts_inside_the_project_grant() {
+        let (root, project, paths) = fixture("safe-spec-mounts");
+        let relative = project.join("relative");
+        let absolute = project.join("absolute");
+        fs::create_dir_all(&relative).unwrap();
+        fs::create_dir_all(&absolute).unwrap();
+        fs::write(
+            project.join(".agent-vm.yaml"),
+            format!(
+                "modules: [node]\nmounts:\n  - relative\n  - path: {}\n    name: absolute-source\n",
+                absolute.display()
+            ),
+        )
+        .unwrap();
+        let identity = ProjectIdentity::from_path(&project).unwrap();
+        let home = account_home().expect("test account home");
+
+        validate_project_spec(&identity, &paths, &home).unwrap();
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mount_policy_denies_home_auth_and_jarvis_state_as_primary_projects() {
+        let (root, _project, paths) = fixture("protected-primary");
+        let account_home = root.join("account-home");
+        let auth = account_home.join(".ssh");
+        fs::create_dir_all(&auth).unwrap();
+        for project_path in [&account_home, &auth, &paths.state_root] {
+            fs::write(project_path.join(".agent-vm.yaml"), "modules: [node]\n").unwrap();
+            let identity = ProjectIdentity::from_path(project_path).unwrap();
+
+            let error = validate_project_spec(&identity, &paths, &account_home).unwrap_err();
+
+            assert!(
+                error.contains("home") || error.contains("auth") || error.contains("Jarvis"),
+                "protected primary mount has an actionable error: {error}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn ensure_starts_stopped_vm_with_sanitized_argv_and_returns_shell_command() {
         let (root, project, paths) = fixture("start");
         let identity = ProjectIdentity::from_path(&project).unwrap();
         let binding = ensure_project_link(&paths.project_links, &identity).unwrap();
-        write_record(&paths, &identity.vm_name, &binding);
+        let additional = project.join("additional");
+        fs::create_dir_all(&additional).unwrap();
+        write_record_with_mount(&paths, &identity.vm_name, &binding, &additional);
         let runner = FakeRunner::with_outputs(vec![
             ok(&format!("{}\tStopped\n", identity.vm_name)),
             ok("start: synthetic\n"),
@@ -741,6 +1592,50 @@ mod tests {
         assert_eq!(
             calls[1].env.keys().map(String::as_str).collect::<Vec<_>>(),
             ["HOME", "LANG", "LIMA_HOME", "PATH", "XDG_CONFIG_HOME"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ensure_denies_new_vm_when_the_global_active_budget_is_full() {
+        let (root, project, paths) = fixture("active-budget");
+        let inventory = (0..MAX_ACTIVE_VMS)
+            .map(|index| format!("foreign-{index}\tRunning"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let runner = FakeRunner::with_outputs(vec![ok(&inventory)]);
+        let api = service(runner.clone(), paths);
+
+        let error = api.ensure(&project).unwrap_err();
+
+        assert!(error.contains("лимит"));
+        assert!(error.contains(&MAX_ACTIVE_VMS.to_string()));
+        assert_eq!(
+            runner.calls.lock().unwrap().len(),
+            1,
+            "budget rejection must not invoke avm create"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restart_of_a_stopped_vm_obeys_the_same_global_active_budget() {
+        let (root, project, paths) = fixture("restart-active-budget");
+        let identity = ProjectIdentity::from_path(&project).unwrap();
+        let binding = ensure_project_link(&paths.project_links, &identity).unwrap();
+        write_record(&paths, &identity.vm_name, &binding);
+        let mut inventory = vec![format!("{}\tStopped", identity.vm_name)];
+        inventory.extend((0..MAX_ACTIVE_VMS).map(|index| format!("foreign-{index}\tRunning")));
+        let runner = FakeRunner::with_outputs(vec![ok(&inventory.join("\n"))]);
+        let api = service(runner.clone(), paths);
+
+        let error = api.restart(&project).unwrap_err();
+
+        assert!(error.contains("лимит"));
+        assert_eq!(
+            runner.calls.lock().unwrap().len(),
+            1,
+            "budget rejection must not invoke avm restart"
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -838,6 +1733,7 @@ mod tests {
                 repo: None,
                 git_ref: None,
             },
+            mounts: Vec::new(),
         };
         let runner = FakeRunner::with_outputs(vec![ok("claude=missing\ncodex=missing\n"), ok("")]);
         let bootstrap = SystemConfigBootstrap::new(
@@ -911,6 +1807,7 @@ mod tests {
                 repo: None,
                 git_ref: None,
             },
+            mounts: Vec::new(),
         };
         let runner = FakeRunner::with_outputs(vec![ok("claude=ready\ncodex=ready\n"), ok("")]);
         let bootstrap = SystemConfigBootstrap::new(

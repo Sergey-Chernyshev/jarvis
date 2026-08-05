@@ -274,6 +274,7 @@ fn snapshot_attrs(snapshot: &RuntimeSnapshot) -> Value {
         "management":vm.map(|vm| vm.management.as_str()).unwrap_or("missing"),
         "guestWorkspace":record.map(|record| record.workspace.guest_path.as_str()).unwrap_or(""),
         "modules":record.map(|record| record.modules.as_slice()).unwrap_or(&[]),
+        "mounts":record.map(|record| record.mounts.as_slice()).unwrap_or(&[]),
         "resources":record.map(|record| &record.resources),
         "shellCommand":snapshot.shell_command,
         "createdSpec":snapshot.created_spec,
@@ -296,6 +297,7 @@ fn inventory_attrs<S: RuntimeService>(service: &S, vm: &InventoryVm) -> Value {
                 "management":vm.management,
                 "guestWorkspace":record.workspace.guest_path,
                 "modules":record.modules,
+                "mounts":record.mounts,
                 "resources":record.resources,
                 "shellCommand":service.shell_command(&vm.name, true),
                 "createdSpec":false,
@@ -309,6 +311,7 @@ fn inventory_attrs<S: RuntimeService>(service: &S, vm: &InventoryVm) -> Value {
             "management":vm.management,
             "guestWorkspace":"",
             "modules":[],
+            "mounts":[],
             "resources":Value::Null,
             "shellCommand":service.shell_command(&vm.name, false),
             "createdSpec":false,
@@ -327,8 +330,7 @@ fn preserve_running_bootstrap(existing: &DesiredVm, state: &str, attrs: &mut Val
     };
     if state != "running"
         || existing_state != "running"
-        || project_binding(existing_attrs) != project_binding(attrs)
-        || project_binding(attrs).is_none()
+        || !same_runtime_binding(existing_attrs, attrs)
         || attrs
             .get("environment")
             .is_some_and(|environment| !environment.is_null())
@@ -345,9 +347,62 @@ fn preserve_running_bootstrap(existing: &DesiredVm, state: &str, attrs: &mut Val
     }
 }
 
-fn project_binding(attrs: &Value) -> Option<(&str, &str)> {
-    Some((
-        attrs.get("projectId")?.as_str()?,
-        attrs.get("cwd")?.as_str()?,
-    ))
+fn same_runtime_binding(left: &Value, right: &Value) -> bool {
+    const BINDING_FIELDS: [&str; 7] = [
+        "projectId",
+        "cwd",
+        "management",
+        "guestWorkspace",
+        "modules",
+        "mounts",
+        "resources",
+    ];
+    left.get("projectId").and_then(Value::as_str).is_some()
+        && right.get("projectId").and_then(Value::as_str).is_some()
+        && BINDING_FIELDS
+            .into_iter()
+            .all(|field| left.get(field) == right.get(field))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_runtime_binding_never_inherits_a_ready_bootstrap_environment() {
+        let existing = DesiredVm {
+            publication: VmPublication::Upsert {
+                state: "running".into(),
+                attrs: json!({
+                    "projectId":"project-a",
+                    "cwd":"/work/a",
+                    "management":"managed",
+                    "guestWorkspace":"/home/dev/a",
+                    "modules":["claude"],
+                    "mounts":[{"hostPath":"/work/a/one"}],
+                    "resources":{"cpus":2},
+                    "environment":{"claude":"ready"},
+                    "createdSpec":true
+                }),
+            },
+            revision: 1,
+            confirmed: true,
+        };
+        let mut changed = json!({
+            "projectId":"project-a",
+            "cwd":"/work/a",
+            "management":"managed",
+            "guestWorkspace":"/home/dev/a",
+            "modules":["claude"],
+            "mounts":[{"hostPath":"/work/a/two"}],
+            "resources":{"cpus":2},
+            "environment":Value::Null,
+            "createdSpec":false
+        });
+
+        preserve_running_bootstrap(&existing, "running", &mut changed);
+
+        assert!(changed["environment"].is_null());
+        assert_eq!(changed["createdSpec"], false);
+    }
 }

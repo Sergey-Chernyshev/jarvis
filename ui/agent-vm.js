@@ -247,6 +247,10 @@
         .includes(normalized));
   }
 
+  function projectPrimaryTarget(project) {
+    return asObject(project).history ? 'history' : 'agentvm';
+  }
+
   function filterCommands(commands, input, limit = 12) {
     const value = asString(input);
     if (!value.startsWith('/') || /\s/.test(value.slice(1))) return [];
@@ -396,10 +400,12 @@
   }
 
   function activeEnvironments(entities) {
+    const runs = newestByProject(entities, 'agent_run');
     return owned(entities, 'vm')
       .filter((entity) => ACTIVE_VM_STATES.has(entity.state) || entity.stale)
       .map((entity) => {
         const attrs = asObject(entity.attrs);
+        const run = runs.get(projectKey(entity)) || null;
         return {
           id: entity.id,
           projectId: asString(attrs.projectId) || asString(attrs.cwd),
@@ -408,9 +414,9 @@
             || asString(attrs.cwd).split('/').filter(Boolean).at(-1)
             || 'Project',
           vm: entity,
-          run: null,
-          uiState: environmentState(entity, null),
-          updatedAt: entityTime(entity),
+          run,
+          uiState: environmentState(entity, run),
+          updatedAt: Math.max(entityTime(entity), entityTime(run)),
         };
       })
       .filter((item) => item.uiState !== 'off')
@@ -620,6 +626,7 @@
     mergeEvents,
     operationResult,
     pluginRuntimeStatus,
+    projectPrimaryTarget,
     reduceRun,
     runSummary,
     selectBackend,

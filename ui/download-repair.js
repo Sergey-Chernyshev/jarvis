@@ -12,5 +12,13 @@
     return TRANSPORT_FAILURE.test(String(message || '')) ? 'proxy' : null;
   }
 
-  return Object.freeze({ actionFor });
+  function idsForAction(errorsById, action) {
+    if (!errorsById || !action) return [];
+    return Object.keys(errorsById).filter((id) => {
+      const entry = errorsById[id];
+      return entry && actionFor(entry.error) === action;
+    });
+  }
+
+  return Object.freeze({ actionFor, idsForAction });
 });

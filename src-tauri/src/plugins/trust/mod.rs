@@ -2,7 +2,12 @@ use std::fmt;
 
 pub mod catalog;
 pub mod package;
+pub mod provider;
 pub mod signature;
+
+pub(crate) const fn package_signature_domain() -> &'static [u8] {
+    b"jarvis-plugin-package-v1"
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrustError {

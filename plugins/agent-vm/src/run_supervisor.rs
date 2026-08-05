@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,6 +25,7 @@ const MAX_DELTA_CHARS: usize = 8 * 1024;
 const MAX_RESULT_FILES: usize = 64;
 const MAX_DISPLAY_PATH_CHARS: usize = 1024;
 const MAX_ENTITY_ATTRS_BYTES: usize = 60 * 1024;
+const MAX_QUEUED_TURNS: usize = 8;
 
 pub struct SendRequest {
     pub cwd: PathBuf,
@@ -64,7 +65,7 @@ struct ActiveRun {
     vm_name: Option<String>,
     backend_session_id: Option<String>,
     cancel_requested: Arc<AtomicBool>,
-    queued: Option<QueuedTurn>,
+    queued: VecDeque<QueuedTurn>,
 }
 
 pub struct RunSupervisor<H: HostApi> {
@@ -142,7 +143,12 @@ impl<H: HostApi> RunSupervisor<H> {
                 {
                     return Err("runId не соответствует active project run".into());
                 }
-                run.queued = Some(QueuedTurn {
+                if run.queued.len() >= MAX_QUEUED_TURNS {
+                    return Err(format!(
+                        "очередь Agent VM заполнена (максимум {MAX_QUEUED_TURNS} сообщений)"
+                    ));
+                }
+                run.queued.push_back(QueuedTurn {
                     turn_id: turn_id.clone(),
                     message: std::mem::take(&mut request.message),
                 });
@@ -186,7 +192,7 @@ impl<H: HostApi> RunSupervisor<H> {
                 vm_name: Some(project.vm_name.clone()),
                 backend_session_id: backend_session_id.clone(),
                 cancel_requested: cancel_requested.clone(),
-                queued: None,
+                queued: VecDeque::new(),
             },
         );
         if let Err(error) = self.publish_queue_state(
@@ -254,17 +260,38 @@ impl<H: HostApi> RunSupervisor<H> {
 
     pub fn cancel(&self, run_id: &str) -> Result<bool, String> {
         validate_run_id(run_id)?;
-        let (vm_name, found) = {
+        let (active_found, vm_name) = {
             let mut active = self.active.lock().unwrap();
-            let Some(run) = active.values_mut().find(|run| run.run_id == run_id) else {
-                return Ok(false);
-            };
-            run.cancel_requested.store(true, Ordering::Release);
-            run.queued = None;
-            (run.vm_name.clone(), true)
+            if let Some(run) = active.values_mut().find(|run| run.run_id == run_id) {
+                run.cancel_requested.store(true, Ordering::Release);
+                run.queued.clear();
+                (true, run.vm_name.clone())
+            } else {
+                (false, None)
+            }
         };
-        let _ = self.executor.cancel(run_id, vm_name.as_deref())?;
-        Ok(found)
+        if active_found {
+            let _ = self.executor.cancel(run_id, vm_name.as_deref())?;
+            return Ok(true);
+        }
+        let Some(summary) = self.store.summary(run_id)? else {
+            return Ok(false);
+        };
+        if !matches!(summary.state.as_str(), "working" | "waiting" | "interrupted") {
+            return Ok(false);
+        }
+        self.executor.cancel(run_id, Some(&summary.vm))
+    }
+
+    fn cleanup_recovered_run(&self, summary: &RunSummary) -> Result<(), String> {
+        if self
+            .executor
+            .cancel(&summary.run_id, Some(&summary.vm))?
+        {
+            Ok(())
+        } else {
+            Err("не очистить persisted Agent VM run".into())
+        }
     }
 
     pub fn replay(
@@ -311,7 +338,8 @@ impl<H: HostApi> RunSupervisor<H> {
         summaries.sort_by(|left, right| left.project_id.cmp(&right.project_id));
 
         for summary in &mut summaries {
-            if summary.state == "working" {
+            if matches!(summary.state.as_str(), "working" | "waiting") {
+                self.cleanup_recovered_run(summary)?;
                 let event = RunEvent {
                     run_id: summary.run_id.clone(),
                     turn_id: summary.last_turn_id.clone(),
@@ -326,7 +354,8 @@ impl<H: HostApi> RunSupervisor<H> {
                         "project":summary.project,
                         "cwd":summary.cwd,
                         "backendSessionId":summary.backend_session_id,
-                        "reason":"host-restarted"
+                        "reason":"host-restarted",
+                        "guestCleanup":"completed"
                     }),
                     backend: summary.backend,
                     vm: summary.vm.clone(),
@@ -631,8 +660,8 @@ impl<H: HostApi> RunSupervisor<H> {
                 if cancelled || failed {
                     active.remove(&project.project_id);
                     None
-                } else if run.queued.is_some() {
-                    run.queued.take()
+                } else if let Some(queued) = run.queued.pop_front() {
+                    Some(queued)
                 } else {
                     active.remove(&project.project_id);
                     None
@@ -781,21 +810,17 @@ impl<H: HostApi> BackendEventSink for PublishingSink<'_, H> {
                 "working",
             ),
             BackendEvent::FileChanged { guest_path, change } => {
-                let Some(host_root) = self.record.workspace.host_path.as_deref() else {
+                if self.record.mount_roots().is_empty() {
                     return self.publisher.emit_current(
                         "backend.unmapped",
                         json!({"upstreamType":"file.path","reason":"host mount unavailable"}),
                         "working",
                     );
-                };
-                match map_guest_path(
-                    Path::new(&self.record.workspace.guest_path),
-                    Path::new(host_root),
-                    Path::new(&guest_path),
-                ) {
-                    Ok(path) => {
+                }
+                match map_record_guest_path(&self.record, Path::new(&guest_path)) {
+                    Some((host_root, path)) => {
                         let relative = path
-                            .strip_prefix(host_root)
+                            .strip_prefix(&host_root)
                             .ok()
                             .map(display_path)
                             .unwrap_or_default();
@@ -810,9 +835,9 @@ impl<H: HostApi> BackendEventSink for PublishingSink<'_, H> {
                             "working",
                         )
                     }
-                    Err(_) => self.publisher.emit_current(
+                    None => self.publisher.emit_current(
                         "backend.unmapped",
-                        json!({"upstreamType":"file.path","reason":"outside project mount"}),
+                        json!({"upstreamType":"file.path","reason":"outside granted mounts"}),
                         "working",
                     ),
                 }
@@ -857,6 +882,17 @@ impl<H: HostApi> BackendEventSink for PublishingSink<'_, H> {
             BackendEvent::AssistantDelta { .. } => unreachable!(),
         }
     }
+}
+
+fn map_record_guest_path(record: &VmRecord, guest_path: &Path) -> Option<(PathBuf, PathBuf)> {
+    record
+        .mount_roots()
+        .into_iter()
+        .find_map(|(host_root, guest_root)| {
+            map_guest_path(&guest_root, &host_root, guest_path)
+                .ok()
+                .map(|path| (host_root, path))
+        })
 }
 
 struct RunPublisher<H: HostApi> {
@@ -1370,6 +1406,7 @@ mod tests {
                             repo: None,
                             git_ref: None,
                         },
+                        mounts: Vec::new(),
                     }),
                 }),
                 created_spec: false,
@@ -1595,7 +1632,7 @@ mod tests {
     }
 
     #[test]
-    fn one_follow_up_is_queued_replaced_and_runs_with_backend_resume() {
+    fn follow_ups_are_bounded_fifo_and_run_with_backend_resume() {
         let executor = FakeExecutor::blocking_first();
         let (root, supervisor, service) = fixture("queue", executor.clone());
         let first = supervisor
@@ -1619,12 +1656,12 @@ mod tests {
                     project_id: None,
                     backend: Backend::Codex,
                     run_id: Some(first.run_id.clone()),
-                    message: "заменить меня".into(),
+                    message: "второй".into(),
                 },
             )
             .unwrap();
         assert!(queued.queued);
-        let replacement = supervisor
+        let third = supervisor
             .submit(
                 service,
                 SendRequest {
@@ -1632,27 +1669,92 @@ mod tests {
                     project_id: None,
                     backend: Backend::Codex,
                     run_id: Some(first.run_id.clone()),
-                    message: "второй".into(),
+                    message: "третий".into(),
                 },
             )
             .unwrap();
-        assert!(replacement.queued);
+        assert!(third.queued);
         executor.release_first();
-        executor.wait_calls(2);
+        executor.wait_calls(3);
         supervisor.host().wait_for_state("completed");
         let state = executor.state.0.lock().unwrap();
-        assert_eq!(state.calls.len(), 2);
+        assert_eq!(state.calls.len(), 3);
         assert_eq!(
             state.calls[1].1.as_deref(),
             Some("018f0000-0000-7000-8000-000000000090")
         );
         assert_eq!(state.calls[1].2, "второй");
+        assert_eq!(state.calls[2].2, "третий");
         drop(state);
         let deadline = Instant::now() + Duration::from_secs(3);
         while supervisor.is_active(&first.run_id) {
             assert!(Instant::now() < deadline, "run worker не завершил cleanup");
             std::thread::yield_now();
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn follow_up_queue_applies_backpressure_without_displacing_accepted_turns() {
+        let executor = FakeExecutor::blocking_first();
+        let (root, supervisor, service) = fixture("queue-limit", executor.clone());
+        let first = supervisor
+            .submit(
+                service.clone(),
+                SendRequest {
+                    cwd: root.join("synthetic-project"),
+                    project_id: None,
+                    backend: Backend::Claude,
+                    run_id: None,
+                    message: "первый".into(),
+                },
+            )
+            .unwrap();
+        executor.wait_first_started();
+        for index in 0..MAX_QUEUED_TURNS {
+            let receipt = supervisor
+                .submit(
+                    service.clone(),
+                    SendRequest {
+                        cwd: root.join("synthetic-project"),
+                        project_id: None,
+                        backend: Backend::Claude,
+                        run_id: Some(first.run_id.clone()),
+                        message: format!("queued-{index}"),
+                    },
+                )
+                .unwrap();
+            assert!(receipt.queued);
+        }
+
+        let error = supervisor
+            .submit(
+                service,
+                SendRequest {
+                    cwd: root.join("synthetic-project"),
+                    project_id: None,
+                    backend: Backend::Claude,
+                    run_id: Some(first.run_id.clone()),
+                    message: "must-not-displace".into(),
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.contains("очередь Agent VM заполнена"));
+        assert_eq!(
+            supervisor
+                .active
+                .lock()
+                .unwrap()
+                .values()
+                .next()
+                .unwrap()
+                .queued
+                .len(),
+            MAX_QUEUED_TURNS
+        );
+        assert!(supervisor.cancel(&first.run_id).unwrap());
+        supervisor.host().wait_for_state("cancelled");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1684,7 +1786,8 @@ mod tests {
 
     #[test]
     fn recovery_marks_only_unfinished_latest_run_interrupted_and_is_idempotent() {
-        let (root, supervisor, _service) = fixture("recovery", FakeExecutor::default());
+        let executor = FakeExecutor::default();
+        let (root, supervisor, _service) = fixture("recovery", executor.clone());
         let project = ProjectIdentity::from_path(&root.join("synthetic-project")).unwrap();
         let run_id = "run-018f000000000077";
         for event in [
@@ -1718,6 +1821,10 @@ mod tests {
         }
 
         assert_eq!(supervisor.recover().unwrap(), 1);
+        assert!(
+            executor.state.0.lock().unwrap().cancel_called,
+            "recovery must cancel the persisted guest pid before publishing interrupted"
+        );
         let summary = supervisor.store().summary(run_id).unwrap().unwrap();
         assert_eq!(summary.state, "interrupted");
         assert_eq!(summary.last_seq, 3);
@@ -1728,6 +1835,8 @@ mod tests {
             attrs["resumeCommand"],
             "claude --resume valid-recovery-session"
         );
+        assert_eq!(attrs["latestEvent"]["payload"]["guestCleanup"], "completed");
+        assert!(supervisor.cancel(run_id).unwrap());
 
         assert_eq!(supervisor.recover().unwrap(), 1);
         assert_eq!(
@@ -1751,6 +1860,47 @@ mod tests {
         );
         assert_eq!(
             terminal_resume_command(Backend::Codex, "session;open /tmp/leak"),
+            None
+        );
+    }
+
+    #[test]
+    fn file_events_map_only_primary_or_declared_additional_mounts() {
+        let record = VmRecord {
+            name: "synthetic-project-a1b2c3d4e5f6".into(),
+            source: "project".into(),
+            modules: vec![],
+            resources: VmResources::default(),
+            user: "dev".into(),
+            workspace: VmWorkspace {
+                mode_name: "mount".into(),
+                guest_path: "/home/dev/main".into(),
+                host_path: Some("/host/main".into()),
+                repo: None,
+                git_ref: None,
+            },
+            mounts: vec![crate::inventory::VmMount {
+                host_path: "/host/shared".into(),
+                guest_path: "/home/dev/shared".into(),
+            }],
+        };
+
+        assert_eq!(
+            map_record_guest_path(&record, Path::new("/home/dev/shared/src/lib.rs")),
+            Some((
+                PathBuf::from("/host/shared"),
+                PathBuf::from("/host/shared/src/lib.rs")
+            ))
+        );
+        assert_eq!(
+            map_record_guest_path(&record, Path::new("src/main.rs")),
+            Some((
+                PathBuf::from("/host/main"),
+                PathBuf::from("/host/main/src/main.rs")
+            ))
+        );
+        assert_eq!(
+            map_record_guest_path(&record, Path::new("/home/dev/other/private.txt")),
             None
         );
     }

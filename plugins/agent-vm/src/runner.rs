@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroize;
 
 pub const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -94,12 +95,29 @@ pub trait CommandRunner: Clone + Send + Sync + 'static {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemRunner;
+#[derive(Clone, Copy, Debug)]
+pub struct SystemRunner {
+    default_timeout: Duration,
+}
+
+impl SystemRunner {
+    pub const fn with_timeout(default_timeout: Duration) -> Self {
+        Self { default_timeout }
+    }
+}
+
+impl Default for SystemRunner {
+    fn default() -> Self {
+        Self::with_timeout(DEFAULT_COMMAND_TIMEOUT)
+    }
+}
+
+#[allow(non_upper_case_globals)]
+pub const SystemRunner: SystemRunner = SystemRunner::with_timeout(DEFAULT_COMMAND_TIMEOUT);
 
 impl CommandRunner for SystemRunner {
     fn run(&self, spec: &CommandSpec) -> Result<CommandResult, String> {
-        run_system(spec, None)
+        run_system(spec, Some(self.default_timeout))
     }
 
     fn run_with_timeout(
@@ -391,6 +409,27 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "timeout must bound the child wait"
+        );
+    }
+
+    #[test]
+    fn system_runner_run_uses_its_bounded_default_timeout() {
+        let spec = CommandSpec {
+            program: PathBuf::from("/bin/sleep"),
+            args: vec!["5".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            stdin: None,
+        };
+        let runner = SystemRunner::with_timeout(Duration::from_millis(100));
+        let started = Instant::now();
+
+        let error = runner.run(&spec).unwrap_err();
+
+        assert!(error.contains("timeout"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "default timeout must bound every runtime command"
         );
     }
 

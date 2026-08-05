@@ -64,11 +64,16 @@ impl PluginPaths {
         self.plugins_root().join(".manager.lock")
     }
 
+    pub fn receipt_trust_root(&self) -> PathBuf {
+        self.plugins_root().join(".receipt-trust")
+    }
+
     pub fn prepare(&self) -> Result<(), StorageError> {
         ensure_real_directory(&self.profile, 0o700)?;
         for root in [
             self.plugins_root(),
             self.quarantine_root(),
+            self.receipt_trust_root(),
             self.profile.join("plugin-data"),
             self.profile.join("plugin-cache"),
             self.profile.join("plugin-runtime"),

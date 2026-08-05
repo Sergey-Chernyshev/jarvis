@@ -55,6 +55,39 @@ pub struct Discovery {
     pub errors: Vec<LoadError>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscoverySource {
+    Production,
+    Developer,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveryRoot {
+    pub path: PathBuf,
+    pub source: DiscoverySource,
+}
+
+impl DiscoveryRoot {
+    pub fn production(path: PathBuf) -> Self {
+        Self {
+            path,
+            source: DiscoverySource::Production,
+        }
+    }
+
+    pub fn developer(path: PathBuf) -> Self {
+        Self {
+            path,
+            source: DiscoverySource::Developer,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiscoveryPolicy {
+    pub developer_mode: bool,
+}
+
 fn path_key(path: &Path) -> String {
     path.parent()
         .and_then(Path::file_name)
@@ -202,11 +235,30 @@ pub fn load_package(manifest_path: &Path) -> Result<PluginPackage, LoadError> {
 }
 
 pub fn discover(roots: &[PathBuf]) -> Discovery {
-    let mut packages = BTreeMap::<String, PluginPackage>::new();
+    let roots = roots
+        .iter()
+        .cloned()
+        .map(DiscoveryRoot::production)
+        .collect::<Vec<_>>();
+    discover_roots(&roots, DiscoveryPolicy::default())
+}
+
+pub fn discover_roots(roots: &[DiscoveryRoot], _policy: DiscoveryPolicy) -> Discovery {
+    #[derive(Debug)]
+    struct Candidate {
+        package: PluginPackage,
+        source: DiscoverySource,
+    }
+
+    let policy = _policy;
+    let mut candidates = BTreeMap::<String, Vec<Candidate>>::new();
     let mut errors = Vec::new();
 
     for root in roots {
-        let mut directories = match fs::read_dir(root) {
+        if root.source == DiscoverySource::Developer && !policy.developer_mode {
+            continue;
+        }
+        let mut directories = match fs::read_dir(&root.path) {
             Ok(entries) => entries
                 .filter_map(Result::ok)
                 .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
@@ -215,8 +267,9 @@ pub fn discover(roots: &[PathBuf]) -> Discovery {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => {
                 errors.push(error(
-                    root,
-                    root.file_name()
+                    &root.path,
+                    root.path
+                        .file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or("plugin-root"),
                     format!("каталог плагинов недоступен: {err}"),
@@ -234,31 +287,78 @@ pub fn discover(roots: &[PathBuf]) -> Discovery {
             match load_package(&manifest_path) {
                 Ok(package) => {
                     let id = package.manifest.id.clone();
-                    match packages.entry(id) {
-                        std::collections::btree_map::Entry::Occupied(entry) => {
-                            errors.push(error(
-                                &manifest_path,
-                                entry.key(),
-                                format!(
-                                    "дубликат plugin id '{}', используется первый root",
-                                    entry.key()
-                                ),
-                            ));
+                    let entries = candidates.entry(id).or_default();
+                    if let Some(existing) = entries
+                        .iter_mut()
+                        .find(|existing| existing.package.root == package.root)
+                    {
+                        if root.source == DiscoverySource::Developer {
+                            existing.source = DiscoverySource::Developer;
                         }
-                        std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert(package);
-                        }
+                        continue;
                     }
+                    entries.push(Candidate {
+                        package,
+                        source: root.source,
+                    });
                 }
                 Err(err) => errors.push(err),
             }
         }
     }
 
-    Discovery {
-        packages: packages.into_values().collect(),
-        errors,
+    let mut packages = Vec::new();
+    for (id, candidates) in candidates {
+        let production = candidates
+            .iter()
+            .filter(|candidate| candidate.source == DiscoverySource::Production)
+            .collect::<Vec<_>>();
+        if production.len() > 1 {
+            let roots = production
+                .iter()
+                .map(|candidate| format!("'{}'", candidate.package.root.display()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            errors.push(error(
+                &production[0].package.root.join("manifest.json"),
+                &id,
+                format!("конфликт plugin id '{id}' между production packages: {roots}"),
+            ));
+            continue;
+        }
+
+        let developer = candidates
+            .iter()
+            .filter(|candidate| candidate.source == DiscoverySource::Developer)
+            .collect::<Vec<_>>();
+        if developer.len() > 1 {
+            let roots = developer
+                .iter()
+                .map(|candidate| format!("'{}'", candidate.package.root.display()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            errors.push(error(
+                &developer[0].package.root.join("manifest.json"),
+                &id,
+                format!("конфликт plugin id '{id}' между developer packages: {roots}"),
+            ));
+            continue;
+        }
+
+        let selected = if policy.developer_mode {
+            developer
+                .first()
+                .copied()
+                .or_else(|| production.first().copied())
+        } else {
+            production.first().copied()
+        };
+        if let Some(selected) = selected {
+            packages.push(selected.package.clone());
+        }
     }
+
+    Discovery { packages, errors }
 }
 
 #[cfg(test)]
@@ -439,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_is_sorted_and_first_root_wins_duplicate_id() {
+    fn discovery_fails_closed_for_distinct_production_packages_with_same_id() {
         let first = temp_root("first");
         let second = temp_root("second");
         write_plugin(
@@ -478,13 +578,147 @@ mod tests {
                 .iter()
                 .map(|package| package.manifest.id.as_str())
                 .collect::<Vec<_>>(),
-            ["dupe", "zed"]
+            ["zed"]
         );
-        assert_eq!(found.packages[0].manifest.version, "1.0.0");
         assert_eq!(found.errors.len(), 1);
-        assert!(found.errors[0].message.contains("дубликат"));
+        assert_eq!(found.errors[0].key, "dupe");
+        assert!(
+            found.errors[0].message.contains("конфликт"),
+            "ошибка должна явно запрещать неоднозначную production-активацию: {:?}",
+            found.errors[0]
+        );
         fs::remove_dir_all(first).unwrap();
         fs::remove_dir_all(second).unwrap();
+    }
+
+    #[test]
+    fn discovery_deduplicates_the_same_canonical_package_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("canonical-root");
+        write_plugin(
+            &root,
+            "same",
+            "same",
+            "1.0.0",
+            PROTOCOL_VERSION,
+            json!(["read"]),
+            "plugin",
+        );
+        let alias = root.with_extension("alias");
+        symlink(&root, &alias).unwrap();
+
+        let found = discover(&[root.clone(), alias.clone()]);
+
+        assert_eq!(found.packages.len(), 1);
+        assert_eq!(found.packages[0].manifest.id, "same");
+        assert!(
+            found.errors.is_empty(),
+            "один canonical package не является конфликтом: {:?}",
+            found.errors
+        );
+        fs::remove_file(alias).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn developer_package_overrides_production_only_when_developer_mode_is_enabled() {
+        let installed = temp_root("installed-source");
+        let developer = temp_root("developer-source");
+        write_plugin(
+            &installed,
+            "agent-vm",
+            "agent-vm",
+            "1.0.0",
+            PROTOCOL_VERSION,
+            json!(["read"]),
+            "plugin",
+        );
+        write_plugin(
+            &developer,
+            "agent-vm",
+            "agent-vm",
+            "2.0.0-dev",
+            PROTOCOL_VERSION,
+            json!(["read"]),
+            "plugin",
+        );
+        let roots = [
+            DiscoveryRoot::production(installed.clone()),
+            DiscoveryRoot::developer(developer.clone()),
+        ];
+
+        let production = discover_roots(
+            &roots,
+            DiscoveryPolicy {
+                developer_mode: false,
+            },
+        );
+        assert_eq!(production.packages.len(), 1);
+        assert_eq!(production.packages[0].manifest.version, "1.0.0");
+        assert!(
+            production.errors.is_empty(),
+            "выключенный dev root не должен создавать конфликт: {:?}",
+            production.errors
+        );
+
+        let development = discover_roots(
+            &roots,
+            DiscoveryPolicy {
+                developer_mode: true,
+            },
+        );
+        assert_eq!(development.packages.len(), 1);
+        assert_eq!(development.packages[0].manifest.version, "2.0.0-dev");
+        assert!(
+            development.errors.is_empty(),
+            "явный dev override не является production-конфликтом: {:?}",
+            development.errors
+        );
+        fs::remove_dir_all(installed).unwrap();
+        fs::remove_dir_all(developer).unwrap();
+    }
+
+    #[test]
+    fn developer_override_does_not_hide_a_production_id_conflict() {
+        let installed_a = temp_root("installed-conflict-a");
+        let installed_b = temp_root("installed-conflict-b");
+        let developer = temp_root("developer-over-conflict");
+        for (root, version) in [
+            (&installed_a, "1.0.0"),
+            (&installed_b, "1.1.0"),
+            (&developer, "2.0.0-dev"),
+        ] {
+            write_plugin(
+                root,
+                "agent-vm",
+                "agent-vm",
+                version,
+                PROTOCOL_VERSION,
+                json!(["read"]),
+                "plugin",
+            );
+        }
+        let found = discover_roots(
+            &[
+                DiscoveryRoot::production(installed_a.clone()),
+                DiscoveryRoot::developer(developer.clone()),
+                DiscoveryRoot::production(installed_b.clone()),
+            ],
+            DiscoveryPolicy {
+                developer_mode: true,
+            },
+        );
+
+        assert!(
+            found.packages.is_empty(),
+            "dev override must not make corrupt production state activatable"
+        );
+        assert_eq!(found.errors.len(), 1);
+        assert!(found.errors[0].message.contains("production"));
+        fs::remove_dir_all(installed_a).unwrap();
+        fs::remove_dir_all(installed_b).unwrap();
+        fs::remove_dir_all(developer).unwrap();
     }
 
     #[test]

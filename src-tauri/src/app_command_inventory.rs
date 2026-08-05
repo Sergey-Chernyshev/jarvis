@@ -31,6 +31,7 @@ macro_rules! with_app_commands {
             ("app_relaunch", crate::ipc::app_relaunch, ["main", "onboarding"]),
             ("plugins_status", crate::ipc::plugins_status, ["main"]),
             ("plugins_cmd", crate::ipc::plugins_cmd, ["main"]),
+            ("plugin_manager_request", crate::ipc::plugin_manager_request, ["main"]),
             ("entities_get", crate::ipc::entities_get, ["main"]),
             ("agent_vm_profiles_get", crate::ipc::agent_vm_profiles_get, ["main"]),
             ("agent_vm_profile_set", crate::ipc::agent_vm_profile_set, ["main"]),

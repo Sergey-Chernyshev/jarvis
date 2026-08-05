@@ -9,18 +9,21 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use sha2::{Digest as _, Sha256};
 use zeroize::Zeroize;
 
 use crate::entities::Entity;
 
-const TMUX_SOCKET: &str = "jarvis-agent-vm";
+const TMUX_SOCKET_PREFIX: &str = "jarvis-agent-vm";
 const MAX_INPUT_BYTES: usize = 48 * 1024;
 const MAX_IMAGE_BYTES: usize = 25 * 1024 * 1024;
 const MAX_SCREEN_BYTES: usize = 1024 * 1024;
@@ -29,6 +32,9 @@ const STARTUP_MIN_SETTLE: Duration = Duration::from_millis(1_200);
 const STARTUP_POLL: Duration = Duration::from_millis(200);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
 const BRACKETED_PASTE_SETTLE: Duration = Duration::from_millis(90);
+const TMUX_COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
+const UPLOAD_COMMAND_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 static BUFFER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static UPLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -178,6 +184,16 @@ impl TerminalTools {
     fn xdg_config_home(&self) -> PathBuf {
         self.jarvis_dir.join("agent-vm/host-home/.config")
     }
+
+    fn tmux_socket_name(&self) -> String {
+        let digest = Sha256::digest(self.jarvis_dir.as_os_str().as_bytes());
+        let suffix = digest
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("{TMUX_SOCKET_PREFIX}-{suffix}")
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -186,6 +202,7 @@ pub struct TerminalCommandSpec {
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub stdin: Option<Vec<u8>>,
+    pub timeout: Duration,
 }
 
 impl fmt::Debug for TerminalCommandSpec {
@@ -196,6 +213,7 @@ impl fmt::Debug for TerminalCommandSpec {
             .field("args", &self.args)
             .field("env_keys", &self.env.keys().collect::<Vec<_>>())
             .field("stdin_bytes", &self.stdin.as_ref().map(Vec::len))
+            .field("timeout", &self.timeout)
             .finish()
     }
 }
@@ -549,7 +567,9 @@ pub fn attach_session(tools: &TerminalTools, session_name: &str) -> Result<i32, 
         .ok_or_else(|| "Agent VM terminal session имеет unsafe name".to_string())?;
     let mut command = Command::new(&tools.tmux);
     let status = command
-        .args(["-L", TMUX_SOCKET, "attach-session", "-t", session_name])
+        .arg("-L")
+        .arg(tools.tmux_socket_name())
+        .args(["attach-session", "-t", session_name])
         .env_clear()
         .envs(tools.command_env())
         .stdin(Stdio::inherit())
@@ -678,6 +698,7 @@ fn build_upload_spec(
             ],
             env,
             stdin: Some(bytes),
+            timeout: UPLOAD_COMMAND_TIMEOUT,
         },
         guest_path,
     ))
@@ -827,13 +848,14 @@ fn tmux_spec(
     mut args: Vec<String>,
     stdin: Option<Vec<u8>>,
 ) -> TerminalCommandSpec {
-    let mut prefixed = vec!["-L".into(), TMUX_SOCKET.into()];
+    let mut prefixed = vec!["-L".into(), tools.tmux_socket_name()];
     prefixed.append(&mut args);
     TerminalCommandSpec {
         program: tools.tmux.clone(),
         args: prefixed,
         env: tools.command_env(),
         stdin,
+        timeout: TMUX_COMMAND_TIMEOUT,
     }
 }
 
@@ -853,30 +875,69 @@ fn run(spec: &TerminalCommandSpec) -> Result<TerminalCommandResult, String> {
     } else {
         command.stdin(Stdio::null());
     }
+    command.process_group(0);
     let mut child = command
         .spawn()
         .map_err(|_| "не запустить Agent VM terminal transport".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Agent VM terminal stdout недоступен".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "Agent VM terminal stderr недоступен".to_string())?;
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            terminate_process_group(&mut child);
+            return Err("Agent VM terminal stdout недоступен".into());
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            terminate_process_group(&mut child);
+            return Err("Agent VM terminal stderr недоступен".into());
+        }
+    };
     let stdout_thread = thread::spawn(move || read_bounded_and_drain(stdout, MAX_SCREEN_BYTES + 1));
     let stderr_thread = thread::spawn(move || read_bounded_and_drain(stderr, 64 * 1024));
-    if let Some(input) = &spec.stdin {
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| "Agent VM terminal stdin недоступен".to_string())?
-            .write_all(input)
-            .map_err(|_| "не записать Agent VM terminal stdin".to_string())?;
-    }
-    let status = child
-        .wait()
-        .map_err(|_| "не дождаться Agent VM terminal transport".to_string())?;
+    let stdin_thread = match (&spec.stdin, child.stdin.take()) {
+        (Some(input), Some(mut stdin)) => {
+            let mut input = input.clone();
+            Some(thread::spawn(move || {
+                let result = stdin
+                    .write_all(&input)
+                    .map_err(|_| "не записать Agent VM terminal stdin".to_string());
+                input.zeroize();
+                result
+            }))
+        }
+        (Some(_), None) => {
+            terminate_process_group(&mut child);
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            return Err("Agent VM terminal stdin недоступен".into());
+        }
+        (None, _) => None,
+    };
+    let deadline = Instant::now()
+        .checked_add(spec.timeout)
+        .ok_or_else(|| "Agent VM terminal timeout имеет unsafe значение".to_string())?;
+    let status = match wait_until(&mut child, deadline) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            terminate_process_group(&mut child);
+            let _ = join_stdin(stdin_thread);
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            return Err(format!(
+                "Agent VM terminal transport timeout after {} ms",
+                spec.timeout.as_millis()
+            ));
+        }
+        Err(error) => {
+            terminate_process_group(&mut child);
+            let _ = join_stdin(stdin_thread);
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            return Err(error);
+        }
+    };
+    join_stdin(stdin_thread)?;
     let stdout = stdout_thread
         .join()
         .map_err(|_| "Agent VM terminal stdout reader завершился аварийно".to_string())?
@@ -890,6 +951,48 @@ fn run(spec: &TerminalCommandSpec) -> Result<TerminalCommandResult, String> {
         stdout,
         stderr,
     })
+}
+
+fn wait_until(child: &mut Child, deadline: Instant) -> Result<Option<ExitStatus>, String> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Some(status)),
+            Ok(None) if Instant::now() >= deadline => return Ok(None),
+            Ok(None) => thread::sleep(PROCESS_POLL_INTERVAL),
+            Err(_) => return Err("не дождаться Agent VM terminal transport".into()),
+        }
+    }
+}
+
+fn join_stdin(worker: Option<thread::JoinHandle<Result<(), String>>>) -> Result<(), String> {
+    match worker {
+        Some(worker) => worker
+            .join()
+            .map_err(|_| "Agent VM terminal stdin writer завершился аварийно".to_string())?,
+        None => Ok(()),
+    }
+}
+
+fn terminate_process_group(child: &mut Child) {
+    let process_group = child.id() as i32;
+    // SAFETY: `process_group` is the positive pid returned for the child whose
+    // group was set to itself. Negating it targets only that private group.
+    unsafe {
+        libc::kill(-process_group, libc::SIGTERM);
+    }
+    let grace = Instant::now() + Duration::from_millis(250);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < grace => thread::sleep(PROCESS_POLL_INTERVAL),
+            _ => break,
+        }
+    }
+    // SAFETY: same private process-group reasoning as above.
+    unsafe {
+        libc::kill(-process_group, libc::SIGKILL);
+    }
+    let _ = child.wait();
 }
 
 fn read_bounded_and_drain<R: Read>(mut reader: R, limit: usize) -> std::io::Result<Vec<u8>> {
@@ -1112,6 +1215,26 @@ mod tests {
     }
 
     #[test]
+    fn terminal_transport_times_out_and_kills_its_private_process_group() {
+        let spec = TerminalCommandSpec {
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(), "sleep 30".into()],
+            env: BTreeMap::new(),
+            stdin: None,
+            timeout: Duration::from_millis(50),
+        };
+        let started = Instant::now();
+
+        let error = match run(&spec) {
+            Err(error) => error,
+            Ok(_) => panic!("long-running terminal command unexpectedly completed"),
+        };
+
+        assert!(error.contains("timeout"));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
     fn image_upload_is_private_guest_stdin_and_never_project_or_argv_data() {
         let target = resolve_target(&[vm_entity()], "project-018f000000000001", "claude").unwrap();
         let bytes = b"SYNTHETIC_PRIVATE_IMAGE_BYTES".to_vec();
@@ -1127,6 +1250,7 @@ mod tests {
         assert!(guest_path.starts_with("/home/dev.guest/.jarvis-vm/uploads/"));
         assert!(!guest_path.starts_with(&target.guest_workspace));
         assert!(guest_path.ends_with(".png"));
+        assert_eq!(spec.timeout, UPLOAD_COMMAND_TIMEOUT);
         assert!(build_upload_spec(&tools(), &target, vec![], "png").is_err());
         assert!(build_upload_spec(&tools(), &target, vec![1], "exe").is_err());
     }
@@ -1166,5 +1290,27 @@ mod tests {
         assert_eq!(sessions[1].backend, TerminalBackend::Claude);
         assert!(parse_session_name("avm-project-0123456789ABCDEF-claude").is_none());
         assert!(parse_session_name("avm-project-0123456789abcdef-claude;open").is_none());
+    }
+
+    #[test]
+    fn tmux_socket_namespace_is_stable_and_profile_scoped() {
+        let production = tools();
+        let mut development = tools();
+        development.jarvis_dir = PathBuf::from("/private/jarvis-dev");
+
+        let production_first = tmux_spec(&production, vec!["list-sessions".into()], None);
+        let production_second = tmux_spec(&production, vec!["list-sessions".into()], None);
+        let development_spec = tmux_spec(&development, vec!["list-sessions".into()], None);
+
+        assert_eq!(production_first.args[0], "-L");
+        assert_eq!(production_first.timeout, TMUX_COMMAND_TIMEOUT);
+        assert_eq!(production_first.args[1], production_second.args[1]);
+        assert_ne!(production_first.args[1], development_spec.args[1]);
+        for socket in [&production_first.args[1], &development_spec.args[1]] {
+            assert!(socket.starts_with("jarvis-agent-vm-"));
+            assert!(socket
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'));
+        }
     }
 }

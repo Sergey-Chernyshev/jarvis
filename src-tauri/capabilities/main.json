@@ -31,6 +31,7 @@
     "allow-app-relaunch",
     "allow-plugins-status",
     "allow-plugins-cmd",
+    "allow-plugin-manager-request",
     "allow-entities-get",
     "allow-agent-vm-profiles-get",
     "allow-agent-vm-profile-set",

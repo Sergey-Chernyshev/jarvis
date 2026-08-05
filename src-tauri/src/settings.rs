@@ -13,7 +13,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::util::jarvis_dir;
 
@@ -21,7 +21,12 @@ use crate::util::jarvis_dir;
 /// (не при простом добавлении полей), добавляя шаг в `run_migrations`.
 pub const SCHEMA_VERSION: u64 = 1;
 
+#[derive(Clone)]
 pub struct Store {
+    inner: Arc<StoreInner>,
+}
+
+struct StoreInner {
     cache: Mutex<Option<Value>>,
     path: PathBuf,
 }
@@ -46,6 +51,7 @@ pub(crate) fn defaults() -> Value {
         "launchCustomCmd": "",            // шаблон для 'custom', плейсхолдер {cmd}
         "launchProxyCmd": "",             // команда, выполняемая в терминале ПЕРЕД запуском агента (опц.)
         "launchDangerous": false,         // глобальный «опасный режим»: claude --dangerously-skip-permissions / codex YOLO
+        "pluginDeveloperMode": false,     // immutable локальные snapshots только после явного включения
         "schemaVersion": SCHEMA_VERSION,
         "notify": {
             "content": { "branch": true, "model": false, "effort": false, "tokens": false, "time": false },
@@ -164,16 +170,20 @@ fn run_migrations(mut obj: Map<String, Value>, from: u64) -> Map<String, Value> 
 impl Store {
     pub fn new() -> Self {
         Self {
-            cache: Mutex::new(None),
-            path: file(),
+            inner: Arc::new(StoreInner {
+                cache: Mutex::new(None),
+                path: file(),
+            }),
         }
     }
 
     #[cfg(test)]
-    fn with_path(path: PathBuf) -> Self {
+    pub(crate) fn with_path(path: PathBuf) -> Self {
         Self {
-            cache: Mutex::new(None),
-            path,
+            inner: Arc::new(StoreInner {
+                cache: Mutex::new(None),
+                path,
+            }),
         }
     }
 
@@ -181,7 +191,7 @@ impl Store {
         if let Some(value) = cache.as_ref() {
             return value.clone();
         }
-        let value = read_merged(&self.path);
+        let value = read_merged(&self.inner.path);
         *cache = Some(value.clone());
         value
     }
@@ -189,12 +199,12 @@ impl Store {
     /// Execute one read-modify-write transaction while holding the cache
     /// mutex. Cache advances only after the atomic rename has succeeded.
     fn update(&self, mutate: impl FnOnce(&mut Map<String, Value>)) -> Value {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.inner.cache.lock().unwrap();
         let current = self.current_locked(&mut cache);
         let mut next = current.clone();
         mutate(next.as_object_mut().unwrap());
 
-        match atomic_write(&self.path, &next) {
+        match atomic_write(&self.inner.path, &next) {
             Ok(()) => {
                 *cache = Some(next.clone());
                 next
@@ -210,8 +220,8 @@ impl Store {
     /// бэкап + прогон миграций + перезапись. Актуальный/отсутствующий/битый файл
     /// не трогаем. Вызывать ОДИН раз при инициализации, до чтения настроек.
     pub fn migrate_on_startup(&self) {
-        let mut cache = self.cache.lock().unwrap();
-        let path = &self.path;
+        let mut cache = self.inner.cache.lock().unwrap();
+        let path = &self.inner.path;
         let Ok(raw) = fs::read_to_string(path) else {
             return;
         }; // нет файла → дефолты
@@ -241,8 +251,8 @@ impl Store {
     /// Проверяет именно байты на диске. `load()` намеренно остаётся fail-safe,
     /// поэтому его merged-кэш для диагностики использовать нельзя.
     pub fn health(&self) -> crate::config_health::ConfigHealth {
-        let path = self.path.to_string_lossy().into_owned();
-        match fs::read_to_string(&self.path) {
+        let path = self.inner.path.to_string_lossy().into_owned();
+        match fs::read_to_string(&self.inner.path) {
             Ok(raw) => {
                 crate::config_health::validate_raw(Some(&raw), &defaults(), SCHEMA_VERSION, path)
             }
@@ -270,10 +280,11 @@ impl Store {
     /// же mutex, что и обычные настройки.
     pub fn repair(&self) -> Result<RepairOutcome, String> {
         let mut cache = self
+            .inner
             .cache
             .lock()
             .map_err(|_| "Хранилище настроек временно недоступно".to_string())?;
-        let original = fs::read(&self.path)
+        let original = fs::read(&self.inner.path)
             .map_err(|err| format!("Не удалось прочитать settings.json: {err}"))?;
         let raw = std::str::from_utf8(&original).unwrap_or_default();
         let repaired = if raw.is_empty() && !original.is_empty() {
@@ -282,9 +293,9 @@ impl Store {
             crate::config_health::repair_raw(raw, &defaults(), SCHEMA_VERSION)?
         };
 
-        let backup_path = write_private_backup(&self.path, &original)
+        let backup_path = write_private_backup(&self.inner.path, &original)
             .map_err(|err| format!("Не удалось создать резервную копию: {err}"))?;
-        atomic_write(&self.path, &repaired)
+        atomic_write(&self.inner.path, &repaired)
             .map_err(|err| format!("Не удалось записать исправленный конфиг: {err}"))?;
         *cache = None;
         drop(cache);
@@ -302,7 +313,7 @@ impl Store {
     /// Настройки целиком (дефолты ⊕ диск). Значения — динамический JSON:
     /// схема расширяется плагинами, жёсткая структура тут только мешала бы.
     pub fn load(&self) -> Value {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.inner.cache.lock().unwrap();
         self.current_locked(&mut cache)
     }
 
@@ -366,6 +377,18 @@ impl Store {
     pub fn remove_top(&self, key: &str) {
         self.update(|m| {
             m.remove(key);
+        });
+    }
+
+    /// Save the canonical service proxy and remove the legacy top-level value
+    /// in the same atomic update, so clearing cannot reactivate the fallback.
+    pub fn set_service_proxy(&self, proxy: &str) {
+        self.update(|root| {
+            let service = root.entry("service").or_insert_with(|| json!({}));
+            if let Some(service) = service.as_object_mut() {
+                service.insert("proxy".into(), Value::String(proxy.to_string()));
+            }
+            root.remove("proxy");
         });
     }
 
@@ -500,7 +523,7 @@ mod proxy_tests {
     // load() отдаёт кэш, если он есть, минуя файл — подменяем его напрямую.
     fn store_with(v: Value) -> Store {
         let s = Store::new();
-        *s.cache.lock().unwrap() = Some(v);
+        *s.inner.cache.lock().unwrap() = Some(v);
         s
     }
 
@@ -613,6 +636,29 @@ mod persistence_tests {
                 Some(&Value::from(i as u64))
             );
         }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn set_service_proxy_replaces_and_clears_legacy_proxy_atomically() {
+        let dir = temp_dir("service-proxy");
+        let store = store_at(&dir);
+        store.set_top("proxy", Value::from("http://legacy:8080"));
+
+        store.set_service_proxy("http://current:9090");
+        assert_eq!(store.proxy().as_deref(), Some("http://current:9090"));
+        assert!(store.load().get("proxy").is_none());
+
+        store.set_service_proxy("");
+        assert_eq!(store.proxy(), None);
+        assert!(store.load().get("proxy").is_none());
+        assert_eq!(
+            store
+                .load()
+                .pointer("/service/proxy")
+                .and_then(Value::as_str),
+            Some("")
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -24,6 +24,7 @@ pub struct CleanupReport {
     pub power: PhaseStatus,
     pub state: PhaseStatus,
     pub plugins: PhaseStatus,
+    pub broker: PhaseStatus,
     pub voice: PhaseStatus,
     pub stt: PhaseStatus,
     pub wake: PhaseStatus,
@@ -37,6 +38,7 @@ impl CleanupReport {
             self.power,
             self.state,
             self.plugins,
+            self.broker,
             self.voice,
             self.stt,
             self.wake,
@@ -53,6 +55,7 @@ struct CleanupState {
     power: bool,
     state: bool,
     plugins: bool,
+    broker: bool,
     voice: bool,
     stt: bool,
     wake: bool,
@@ -155,8 +158,19 @@ pub fn cleanup(d: &Arc<Daemon>) -> CleanupReport {
         true
     });
     let plugins = run_phase("plugins", &mut state.plugins, || {
-        d.plugins.dispose(d);
-        true
+        match d.plugins.dispose(d) {
+            Ok(()) => true,
+            Err(error) => {
+                crate::log::line(&format!("[shutdown] plugin cleanup incomplete: {error}"));
+                false
+            }
+        }
+    });
+    let broker = run_phase("broker", &mut state.broker, || {
+        d.plugin_broker
+            .as_ref()
+            .map(|broker| broker.shutdown().is_ok())
+            .unwrap_or(true)
     });
     let voice = run_phase("voice", &mut state.voice, || {
         d.voice.dispose();
@@ -189,6 +203,7 @@ pub fn cleanup(d: &Arc<Daemon>) -> CleanupReport {
         power,
         state: persisted_state,
         plugins,
+        broker,
         voice,
         stt,
         wake,

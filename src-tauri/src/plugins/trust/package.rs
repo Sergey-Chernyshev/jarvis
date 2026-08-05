@@ -1,7 +1,10 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use jarvis_package::{PackageTrustError, PackageTrustVerifier, UntrustedPackageObservation};
+use jarvis_plugin_protocol::manifest::Digest;
 
 use super::catalog::VerifiedCatalogRelease;
 use super::signature::verify_package_signature;
@@ -20,6 +23,21 @@ impl CatalogPackageVerifier {
     fn verify_observation(
         &self,
         observation: &UntrustedPackageObservation<'_>,
+    ) -> Result<(), TrustError> {
+        self.verify_persisted(
+            observation.archive_digest(),
+            observation.package_json(),
+            observation.metadata(),
+            observation.signature(),
+        )
+    }
+
+    pub(crate) fn verify_persisted(
+        &self,
+        archive_digest: &Digest,
+        package_json: &[u8],
+        metadata: &jarvis_plugin_protocol::package::PackageMetadataV1,
+        signature: &jarvis_plugin_protocol::package::PackageSignatureV1,
     ) -> Result<(), TrustError> {
         if self.now < self.release.catalog_issued_at() {
             return Err(TrustError::new("catalog_not_yet_valid"));
@@ -45,24 +63,29 @@ impl CatalogPackageVerifier {
             return Err(TrustError::new("publisher_key_not_valid"));
         }
 
-        let observed = observation.metadata();
-        if observed.plugin_id != expected.plugin_id
-            || observed.publisher != expected.publisher
-            || observed.version != expected.version
-            || observed.target != expected.target
-            || observed.minimum_macos != expected.minimum_macos
-            || observed.jarvis_range != expected.jarvis_range
-            || observed.plugin_api != expected.plugin_api
-            || observation.archive_digest() != &expected.archive_digest
-            || observation.signature() != &expected.package_signature
+        if metadata.plugin_id != expected.plugin_id
+            || metadata.publisher != expected.publisher
+            || metadata.version != expected.version
+            || metadata.target != expected.target
+            || metadata.minimum_macos != expected.minimum_macos
+            || metadata.jarvis_range != expected.jarvis_range
+            || metadata.plugin_api != expected.plugin_api
+            || archive_digest != &expected.archive_digest
+            || signature != &expected.package_signature
         {
             return Err(TrustError::new("package_catalog_mismatch"));
         }
 
+        let mut signature_message = Vec::with_capacity(
+            crate::plugins::trust::package_signature_domain().len() + 1 + package_json.len(),
+        );
+        signature_message.extend_from_slice(crate::plugins::trust::package_signature_domain());
+        signature_message.push(0);
+        signature_message.extend_from_slice(package_json);
         verify_package_signature(
             &publisher_key.public_key,
-            observation.signature_message(),
-            observation.signature().value(),
+            &signature_message,
+            signature.value(),
         )
     }
 }
@@ -74,6 +97,109 @@ impl PackageTrustVerifier for CatalogPackageVerifier {
     ) -> Result<(), PackageTrustError> {
         self.verify_observation(observation)
             .map_err(|error| PackageTrustError::new(error.code()))
+    }
+}
+
+pub(crate) trait CatalogEvidenceRecorder: Send + Sync {
+    fn record(
+        &self,
+        observation: &UntrustedPackageObservation<'_>,
+    ) -> Result<(), PackageTrustError>;
+}
+
+struct RecordingCatalogPackageVerifier {
+    release: VerifiedCatalogRelease,
+    now: Arc<dyn Fn() -> Result<DateTime<Utc>, PackageTrustError> + Send + Sync>,
+    recorder: Arc<dyn CatalogEvidenceRecorder>,
+}
+
+impl PackageTrustVerifier for RecordingCatalogPackageVerifier {
+    fn verify(
+        &self,
+        observation: &UntrustedPackageObservation<'_>,
+    ) -> Result<(), PackageTrustError> {
+        CatalogPackageVerifier::new(self.release.clone(), (self.now)()?)
+            .verify_observation(observation)
+            .map_err(|error| PackageTrustError::new(error.code()))?;
+        self.recorder.record(observation)
+    }
+}
+
+pub(crate) fn recording_catalog_package_verifier(
+    release: VerifiedCatalogRelease,
+    now: Arc<dyn Fn() -> Result<DateTime<Utc>, PackageTrustError> + Send + Sync>,
+    recorder: Arc<dyn CatalogEvidenceRecorder>,
+) -> Arc<dyn PackageTrustVerifier + Send + Sync> {
+    Arc::new(RecordingCatalogPackageVerifier {
+        release,
+        now,
+        recorder,
+    })
+}
+
+pub(crate) struct DeveloperPackageVerifier {
+    expected_digest: Digest,
+    expected_key_id: &'static str,
+    expected_signature: String,
+}
+
+impl DeveloperPackageVerifier {
+    pub(crate) fn new(
+        expected_digest: Digest,
+        expected_key_id: &'static str,
+        expected_signature: String,
+    ) -> Self {
+        Self {
+            expected_digest,
+            expected_key_id,
+            expected_signature,
+        }
+    }
+}
+
+impl PackageTrustVerifier for DeveloperPackageVerifier {
+    fn verify(
+        &self,
+        observation: &UntrustedPackageObservation<'_>,
+    ) -> Result<(), PackageTrustError> {
+        if observation.archive_digest() != &self.expected_digest
+            || observation.signature().key_id != self.expected_key_id
+            || observation.signature().value() != self.expected_signature
+        {
+            return Err(PackageTrustError::new("developer_package_digest_mismatch"));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct SharedPackageVerifier(Arc<dyn PackageTrustVerifier + Send + Sync>);
+
+impl SharedPackageVerifier {
+    pub(crate) fn new(verifier: Arc<dyn PackageTrustVerifier + Send + Sync>) -> Self {
+        Self(verifier)
+    }
+}
+
+impl PackageTrustVerifier for SharedPackageVerifier {
+    fn verify(
+        &self,
+        observation: &UntrustedPackageObservation<'_>,
+    ) -> Result<(), PackageTrustError> {
+        self.0.verify(observation)
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct AllowPackageVerifier;
+
+#[cfg(test)]
+impl PackageTrustVerifier for AllowPackageVerifier {
+    fn verify(
+        &self,
+        _observation: &UntrustedPackageObservation<'_>,
+    ) -> Result<(), PackageTrustError> {
+        Ok(())
     }
 }
 

@@ -92,7 +92,13 @@ fn search_items(items: &[crate::transcript::ChatItem], query: &str, limit: usize
     let mut hits: Vec<String> = items
         .iter()
         .filter(|it| it.kind == "text" && it.text.to_lowercase().contains(&q))
-        .map(|it| format!("{}: {}", it.role, crate::util::ellipsize(it.text.trim(), 120)))
+        .map(|it| {
+            format!(
+                "{}: {}",
+                it.role,
+                crate::util::ellipsize(it.text.trim(), 120)
+            )
+        })
         .collect();
     if hits.len() > limit {
         hits = hits.split_off(hits.len() - limit); // последние limit = самые свежие
@@ -118,8 +124,10 @@ fn search_chats(d: &Arc<Daemon>, query: &str) -> SkillOutcome {
         return SkillOutcome::Rejected("пустой запрос".into());
     }
     let mut results = Vec::new();
-    for s in d.snapshot().into_iter().filter(|s| s.renamed_to.is_none()) {
-        let Some(tr) = s.transcript.as_deref() else { continue };
+    for s in d.snapshot() {
+        let Some(tr) = s.transcript.as_deref() else {
+            continue;
+        };
         let hits = search_items(&session_chat_items(tr), q, 3);
         if !hits.is_empty() {
             results.push(json!({
@@ -168,12 +176,7 @@ pub fn resolve_sid(d: &Arc<Daemon>, hint: &str) -> Result<String, String> {
     if d.session(hint).is_some() {
         return Ok(hint.to_string());
     }
-    let ids: Vec<String> = d
-        .snapshot()
-        .into_iter()
-        .filter(|s| s.renamed_to.is_none())
-        .map(|s| s.id)
-        .collect();
+    let ids: Vec<String> = d.snapshot().into_iter().map(|s| s.id).collect();
     match_prefix(&ids, hint)
 }
 
@@ -214,7 +217,11 @@ fn outcome_from_core(res: &Value) -> SkillOutcome {
     } else if res.get("needsTmux").and_then(Value::as_bool) == Some(true) {
         SkillOutcome::Rejected("сессия не в tmux".into())
     } else {
-        let why = res.get("error").and_then(Value::as_str).unwrap_or("не вышло").to_string();
+        let why = res
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("не вышло")
+            .to_string();
         SkillOutcome::Rejected(why)
     }
 }
@@ -245,7 +252,9 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
             None => SkillOutcome::Rejected("нет query".into()),
         },
         "metrics" => SkillOutcome::Data(d.usage.stats("today")),
-        "limits" => SkillOutcome::Data(serde_json::to_value(d.limits.state()).unwrap_or(Value::Null)),
+        "limits" => {
+            SkillOutcome::Data(serde_json::to_value(d.limits.state()).unwrap_or(Value::Null))
+        }
 
         // assistant — особый путь в convo::converse_turn (нужен контекст разговора).
 
@@ -264,7 +273,12 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
             if let Err(e) = validate_model(model) {
                 return SkillOutcome::Rejected(e);
             }
-            if crate::convo::confirm(d, &format!("Переключить {} на {model}?", d.session_label(&sid))).await {
+            if crate::convo::confirm(
+                d,
+                &format!("Переключить {} на {model}?", d.session_label(&sid)),
+            )
+            .await
+            {
                 outcome_from_core(&crate::ipc::set_model_core(d, &sid, model).await)
             } else {
                 SkillOutcome::Cancelled
@@ -284,29 +298,53 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
             if let Err(e) = validate_effort(level) {
                 return SkillOutcome::Rejected(e);
             }
-            if crate::convo::confirm(d, &format!("Поставить {} effort {level}?", d.session_label(&sid))).await {
+            if crate::convo::confirm(
+                d,
+                &format!("Поставить {} effort {level}?", d.session_label(&sid)),
+            )
+            .await
+            {
                 outcome_from_core(&crate::ipc::set_effort_core(d, &sid, level).await)
             } else {
                 SkillOutcome::Cancelled
             }
         }
         "keep_awake" => {
-            if action.args.get("off").and_then(Value::as_bool).unwrap_or(false) {
-                if crate::convo::confirm(d, "Выключить режим «не спать»?").await {
+            if action
+                .args
+                .get("off")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                if crate::convo::confirm(d, "Выключить режим «не спать»?").await
+                {
                     // "off" = мастер-выкл (set_auto(false)+stop_manual+persist), а не
                     // "stop" (чистит лишь ручной слот, авто-грант остаётся) — L1/VR-4.
-                    outcome_from_core(&crate::power::Power::cmd(d, "keep-awake", "off", &json!({})).await)
+                    outcome_from_core(
+                        &crate::power::Power::cmd(d, "keep-awake", "off", &json!({})).await,
+                    )
                 } else {
                     SkillOutcome::Cancelled
                 }
             } else {
-                let m = action.args.get("minutes").and_then(Value::as_i64).unwrap_or(0);
+                let m = action
+                    .args
+                    .get("minutes")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
                 if let Err(e) = validate_minutes(m) {
                     return SkillOutcome::Rejected(e);
                 }
-                if crate::convo::confirm(d, &format!("Не давать маку уснуть {m} минут?")).await {
+                if crate::convo::confirm(d, &format!("Не давать маку уснуть {m} минут?")).await
+                {
                     outcome_from_core(
-                        &crate::power::Power::cmd(d, "keep-awake", "start-timer", &json!({ "minutes": m })).await,
+                        &crate::power::Power::cmd(
+                            d,
+                            "keep-awake",
+                            "start-timer",
+                            &json!({ "minutes": m }),
+                        )
+                        .await,
                     )
                 } else {
                     SkillOutcome::Cancelled
@@ -315,8 +353,16 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
         }
         "mute" => {
             // mute{on} глушит звуковой аудит-след → ТОЛЬКО через confirm (как и off)
-            let on = action.args.get("on").and_then(Value::as_bool).unwrap_or(false);
-            let q = if on { "Выключить звук Джарвиса?" } else { "Включить звук Джарвиса?" };
+            let on = action
+                .args
+                .get("on")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let q = if on {
+                "Выключить звук Джарвиса?"
+            } else {
+                "Включить звук Джарвиса?"
+            };
             if crate::convo::confirm(d, q).await {
                 d.voice.set_mute(on); // инфолибельно (void)
                 SkillOutcome::Controlled
@@ -357,16 +403,33 @@ mod tests {
     fn menu_lists_core_skills() {
         let m = skills_menu();
         for s in [
-            "route", "set_model", "set_effort", "keep_awake", "mute", "session_chat", "time",
-            "media", "system_volume", "open_app", "session_detail", "search_chats", "metrics",
-            "limits", "assistant",
+            "route",
+            "set_model",
+            "set_effort",
+            "keep_awake",
+            "mute",
+            "session_chat",
+            "time",
+            "media",
+            "system_volume",
+            "open_app",
+            "session_detail",
+            "search_chats",
+            "metrics",
+            "limits",
+            "assistant",
         ] {
             assert!(m.contains(s), "меню без {s}");
         }
     }
 
     fn item(role: &'static str, kind: &'static str, text: &str) -> crate::transcript::ChatItem {
-        crate::transcript::ChatItem { role, kind, text: text.into(), ts: 0 }
+        crate::transcript::ChatItem {
+            role,
+            kind,
+            text: text.into(),
+            ts: 0,
+        }
     }
 
     #[test]
@@ -377,8 +440,15 @@ mod tests {
             item("assistant", "text", "Сборка готова"),
         ];
         let hits = search_items(&items, "сборк", 5);
-        assert_eq!(hits.len(), 2, "оба текстовых совпадения (без учёта регистра)");
-        assert!(hits.iter().all(|h| !h.contains("cargo")), "tool-реплики не ищем");
+        assert_eq!(
+            hits.len(),
+            2,
+            "оба текстовых совпадения (без учёта регистра)"
+        );
+        assert!(
+            hits.iter().all(|h| !h.contains("cargo")),
+            "tool-реплики не ищем"
+        );
     }
 
     #[test]
@@ -391,7 +461,10 @@ mod tests {
         let hits = search_items(&items, "тест", 2);
         assert_eq!(hits.len(), 2);
         assert!(hits[1].contains("тест 3"), "последний = самый свежий");
-        assert!(!hits.iter().any(|h| h.contains("тест 1")), "старейший вытеснен");
+        assert!(
+            !hits.iter().any(|h| h.contains("тест 1")),
+            "старейший вытеснен"
+        );
     }
 
     #[test]
@@ -430,7 +503,11 @@ mod tests {
 
     #[test]
     fn match_prefix_unique_none_ambiguous() {
-        let ids = vec!["aaaa1111".to_string(), "aaaa2222".to_string(), "bbbb3333".to_string()];
+        let ids = vec![
+            "aaaa1111".to_string(),
+            "aaaa2222".to_string(),
+            "bbbb3333".to_string(),
+        ];
         assert_eq!(match_prefix(&ids, "bbbb").unwrap(), "bbbb3333"); // уникальный префикс
         assert_eq!(match_prefix(&ids, "aaaa1111").unwrap(), "aaaa1111"); // полный
         assert!(match_prefix(&ids, "zzzz").is_err()); // нет

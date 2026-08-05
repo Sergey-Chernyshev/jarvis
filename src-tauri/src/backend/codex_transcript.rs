@@ -10,87 +10,131 @@ use serde_json::Value;
 use crate::transcript::{parse_ts, ChatItem};
 use crate::util::{ellipsize, now_ms, one_line};
 
+#[derive(Debug, PartialEq)]
+enum NormalizedItem {
+    UserText(String),
+    AssistantFinal(String),
+    Activity(String),
+    Ignored,
+}
+
 /// Одна строка rollout → элементы чата (обычно 0–1). Пропускаем developer/system
-/// (системный промпт), reasoning, function_call_output, session_meta, turn_context,
-/// event_msg (дубль).
+/// (системный промпт), assistant commentary/progress, reasoning,
+/// function_call_output, session_meta, turn_context, event_msg (дубль).
 pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
-    if entry.get("type").and_then(Value::as_str) != Some("response_item") {
-        return vec![];
-    }
-    let Some(payload) = entry.get("payload") else {
-        return vec![];
-    };
     let ts = entry
         .get("timestamp")
         .and_then(Value::as_str)
         .and_then(parse_ts)
         .unwrap_or_else(now_ms);
 
+    match normalize(entry) {
+        NormalizedItem::UserText(text) => vec![ChatItem {
+            role: "user",
+            kind: "text",
+            text,
+            ts,
+        }],
+        NormalizedItem::AssistantFinal(text) => vec![ChatItem {
+            role: "assistant",
+            kind: "text",
+            text,
+            ts,
+        }],
+        NormalizedItem::Activity(text) => vec![ChatItem {
+            role: "assistant",
+            kind: "tool",
+            text,
+            ts,
+        }],
+        NormalizedItem::Ignored => vec![],
+    }
+}
+
+fn normalize(entry: &Value) -> NormalizedItem {
+    if entry.get("type").and_then(Value::as_str) != Some("response_item") {
+        return NormalizedItem::Ignored;
+    }
+    let Some(payload) = entry.get("payload") else {
+        return NormalizedItem::Ignored;
+    };
+
     match payload.get("type").and_then(Value::as_str) {
-        Some("message") => {
-            let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
-            // только реплики юзера/ассистента; developer/system (огромный системный
-            // промпт и инъекции контекста) — мимо ленты.
-            let role: &'static str = match role {
-                "user" => "user",
-                "assistant" => "assistant",
-                _ => return vec![],
-            };
-            let Some(blocks) = payload.get("content").and_then(Value::as_array) else {
-                return vec![];
-            };
-            let mut out = Vec::new();
-            for b in blocks {
-                let bt = b.get("type").and_then(Value::as_str).unwrap_or("");
-                if !matches!(bt, "input_text" | "output_text" | "text") {
-                    continue;
-                }
-                let text = b.get("text").and_then(Value::as_str).unwrap_or("");
-                // служебные инъекции: <...> (как Claude) + впрыск AGENTS.md, который
-                // Codex кладёт первым user-блоком как «# AGENTS.md instructions …».
-                if text.is_empty()
-                    || text.starts_with('<')
-                    || text.starts_with("# AGENTS.md instructions")
-                {
-                    continue;
-                }
-                out.push(ChatItem {
-                    role,
-                    kind: "text",
-                    text: text.to_string(),
-                    ts,
-                });
-            }
-            out
-        }
+        Some("message") => normalize_message(payload),
         Some("function_call") => {
-            let name = payload.get("name").and_then(Value::as_str).unwrap_or("");
+            let Some(name) = payload
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+            else {
+                return NormalizedItem::Ignored;
+            };
             let args = payload
                 .get("arguments")
                 .and_then(Value::as_str)
                 .and_then(|s| serde_json::from_str::<Value>(s).ok());
-            vec![ChatItem {
-                role: "assistant",
-                kind: "tool",
-                text: tool_label(name, args.as_ref()),
-                ts,
-            }]
+            NormalizedItem::Activity(tool_label(name, args.as_ref()))
         }
         Some("custom_tool_call") => {
             // apply_patch и т.п.
-            let name = payload
+            let Some(name) = payload
                 .get("name")
                 .and_then(Value::as_str)
-                .unwrap_or("инструмент");
+                .filter(|name| !name.is_empty())
+            else {
+                return NormalizedItem::Ignored;
+            };
             let input = payload.get("input").and_then(Value::as_str);
-            vec![ChatItem {
-                role: "assistant",
-                kind: "tool",
-                text: custom_tool_label(name, input),
-                ts,
-            }]
+            NormalizedItem::Activity(custom_tool_label(name, input))
         }
-        _ => vec![], // reasoning, function_call_output, ...
+        _ => NormalizedItem::Ignored, // reasoning, tool outputs, unknown runtime events
+    }
+}
+
+fn normalize_message(payload: &Value) -> NormalizedItem {
+    let Some(text) = message_text(payload) else {
+        return NormalizedItem::Ignored;
+    };
+
+    match payload.get("role").and_then(Value::as_str) {
+        Some("user") => NormalizedItem::UserText(text),
+        Some("assistant") => match payload.get("phase") {
+            None => NormalizedItem::AssistantFinal(text), // legacy rollout format
+            Some(Value::String(phase)) if phase == "final_answer" => {
+                NormalizedItem::AssistantFinal(text)
+            }
+            Some(_) => NormalizedItem::Ignored,
+        },
+        _ => NormalizedItem::Ignored,
+    }
+}
+
+fn message_text(payload: &Value) -> Option<String> {
+    let blocks = payload.get("content").and_then(Value::as_array)?;
+    let texts = blocks
+        .iter()
+        .filter_map(|block| {
+            let block_type = block.get("type").and_then(Value::as_str)?;
+            if !matches!(block_type, "input_text" | "output_text" | "text") {
+                return None;
+            }
+            let text = block.get("text").and_then(Value::as_str)?;
+            // Служебные инъекции: <...> (как Claude) + впрыск AGENTS.md, который
+            // Codex кладёт первым user-блоком как «# AGENTS.md instructions …».
+            if text.is_empty()
+                || text.starts_with('<')
+                || text.starts_with("# AGENTS.md instructions")
+            {
+                return None;
+            }
+            Some(text)
+        })
+        .collect::<Vec<_>>();
+
+    if texts.is_empty() {
+        None
+    } else {
+        Some(texts.join("\n\n"))
     }
 }
 
@@ -99,6 +143,7 @@ fn tool_label(name: &str, args: Option<&Value>) -> String {
     match name {
         "exec_command" => label_with_hint("Bash", command_hint(args)),
         "write_stdin" => label_with_hint("Bash", Some("stdin".into())),
+        "wait" => "Wait".into(),
         "update_plan" => {
             let count = args
                 .and_then(|a| a.get("plan"))
@@ -135,6 +180,7 @@ fn tool_label(name: &str, args: Option<&Value>) -> String {
 fn custom_tool_label(name: &str, input: Option<&str>) -> String {
     match name {
         "apply_patch" => label_with_hint("Edit", input.and_then(patch_file_hint)),
+        "exec" => "Task".into(),
         _ => label_with_hint(
             display_tool_name(name),
             input.map(|s| ellipsize(&one_line(s), 96)),
@@ -422,6 +468,100 @@ mod tests {
         assert_eq!(
             to_chat_items(&docs)[0].text,
             "Read · /tauri-apps/tauri-plugin-global-shortcut"
+        );
+    }
+
+    #[test]
+    fn responses_api_fixture_keeps_one_markdown_final_and_compacts_runtime_activity() {
+        let entries = vec![
+            line(
+                "response_item",
+                json!({
+                    "type":"message",
+                    "role":"assistant",
+                    "phase":"commentary",
+                    "content":[{"type":"output_text","text":"Промежуточный прогресс"}]
+                }),
+            ),
+            line(
+                "response_item",
+                json!({
+                    "type":"custom_tool_call",
+                    "name":"exec",
+                    "input":"const secret = await tools.exec_command({\"cmd\":\"cargo test\"});"
+                }),
+            ),
+            line(
+                "response_item",
+                json!({
+                    "type":"custom_tool_call_output",
+                    "call_id":"exec-1",
+                    "output":"raw exec output must stay out of the answer"
+                }),
+            ),
+            line(
+                "response_item",
+                json!({
+                    "type":"function_call",
+                    "name":"wait",
+                    "arguments":"{\"cell_id\":\"84\",\"yield_time_ms\":10000}"
+                }),
+            ),
+            line(
+                "response_item",
+                json!({
+                    "type":"function_call_output",
+                    "call_id":"wait-1",
+                    "output":"raw wait output must stay out of the answer"
+                }),
+            ),
+            line(
+                "response_item",
+                json!({
+                    "type":"message",
+                    "role":"assistant",
+                    "phase":"final_answer",
+                    "content":[
+                        {"type":"output_text","text":"## Готово\n\n- [результат](https://example.com)"},
+                        {"type":"output_text","text":"```text\nmarkdown сохранён\n```"}
+                    ]
+                }),
+            ),
+            line(
+                "response_item",
+                json!({
+                    "type":"message",
+                    "role":"assistant",
+                    "phase":{"unexpected":"shape"},
+                    "content":[{"type":"output_text","text":"malformed progress must stay out"}]
+                }),
+            ),
+            line(
+                "event_msg",
+                json!({"type":"agent_message","phase":"final_answer","message":"дубль"}),
+            ),
+            line(
+                "response_item",
+                json!({"type":"future_runtime_event","text":"unknown must be ignored"}),
+            ),
+        ];
+
+        let items = entries.iter().flat_map(to_chat_items).collect::<Vec<_>>();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].kind, "tool");
+        assert_eq!(items[0].text, "Task");
+        assert_eq!(items[1].kind, "tool");
+        assert_eq!(items[1].text, "Wait");
+        assert_eq!(items[2].kind, "text");
+        assert_eq!(
+            items[2].text,
+            "## Готово\n\n- [результат](https://example.com)\n\n```text\nmarkdown сохранён\n```"
+        );
+        assert_eq!(
+            full_final_reply(&entries).as_deref(),
+            Some(
+                "## Готово\n\n- [результат](https://example.com)\n\n```text\nmarkdown сохранён\n```"
+            )
         );
     }
 

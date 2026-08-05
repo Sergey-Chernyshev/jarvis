@@ -55,6 +55,7 @@ pub trait PackageTrustVerifier {
 }
 
 pub struct UntrustedPackageObservation<'a> {
+    plugin_json: &'a [u8],
     package_json: &'a [u8],
     signature_bytes: &'a [u8],
     archive_digest: &'a Digest,
@@ -64,6 +65,10 @@ pub struct UntrustedPackageObservation<'a> {
 }
 
 impl UntrustedPackageObservation<'_> {
+    pub fn plugin_json(&self) -> &[u8] {
+        self.plugin_json
+    }
+
     pub fn package_json(&self) -> &[u8] {
         self.package_json
     }
@@ -303,6 +308,7 @@ where
     let (metadata, signature, manifest, signature_message) =
         validate_inspection_documents(&inspection, adapter, limits)?;
     let observation = UntrustedPackageObservation {
+        plugin_json: inspection.plugin_json(),
         package_json: inspection.package_json(),
         signature_bytes: inspection.signature(),
         archive_digest: inspection.physical_digest(),

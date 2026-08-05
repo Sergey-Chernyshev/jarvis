@@ -429,6 +429,15 @@ fn project_title(entity: &Entity) -> String {
     }
 }
 
+fn notification_enabled(settings: &Value, kind: &str) -> bool {
+    let key = match kind {
+        "done" => "notifyDone",
+        "waiting" => "notifyWaiting",
+        _ => return true,
+    };
+    settings.get(key).and_then(Value::as_bool).unwrap_or(true)
+}
+
 fn is_focused(focus: Option<&AgentVmFocus>, entity: &Entity) -> bool {
     focus.is_some_and(|focus| focus.project_id == attr(entity, "projectId"))
 }
@@ -559,6 +568,9 @@ pub fn route_transition(
     let Some(notification) = notification_for(previous, current, focus.as_ref()) else {
         return;
     };
+    if !notification_enabled(&daemon.settings.load(), &notification.kind) {
+        return;
+    }
     daemon.notify_id_voiced_target(
         &notification.id,
         &notification.title,
@@ -944,6 +956,27 @@ mod tests {
         let crash = notification_for(None, &interrupted, None).unwrap();
         assert_eq!(crash.kind, "error");
         assert_eq!(crash.target["runId"], "run-a");
+    }
+
+    #[test]
+    fn global_notification_preferences_gate_agent_vm_done_and_waiting() {
+        let disabled = json!({
+            "notifyDone": false,
+            "notifyWaiting": false
+        });
+        assert!(!notification_enabled(&disabled, "done"));
+        assert!(!notification_enabled(&disabled, "waiting"));
+        assert!(
+            notification_enabled(&disabled, "error"),
+            "error notifications are not controlled by done/waiting preferences"
+        );
+
+        let enabled = json!({
+            "notifyDone": true,
+            "notifyWaiting": true
+        });
+        assert!(notification_enabled(&enabled, "done"));
+        assert!(notification_enabled(&enabled, "waiting"));
     }
 
     #[test]

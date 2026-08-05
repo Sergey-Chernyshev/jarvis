@@ -81,6 +81,19 @@ pub fn settings_repair(app: AppHandle) -> Result<crate::settings::RepairOutcome,
     Daemon::get(&app).settings.repair()
 }
 
+#[tauri::command]
+pub fn plugin_manager_request(
+    app: AppHandle,
+    request: crate::plugin_manager_api::ManagerRequest,
+) -> Result<crate::plugin_manager_api::ManagerResponse, crate::plugin_manager_api::ManagerApiError>
+{
+    let daemon = Daemon::get(&app);
+    match daemon.plugin_manager.as_ref() {
+        Ok(manager) => crate::plugin_manager_api::dispatch_ipc(request, manager.as_ref()),
+        Err(error) => Err(error.clone()),
+    }
+}
+
 /// Регистрация глобального хоткея с откатом на прежний при провале.
 pub fn register_hotkey(d: &Arc<Daemon>, accelerator: &str) -> Result<(), String> {
     let gs = d.app.global_shortcut();
@@ -2844,9 +2857,7 @@ pub fn service_set_proxy(app: AppHandle, proxy: String) -> Value {
         return err("прокси должен начинаться с http://, https:// или socks5://");
     }
     let d = Daemon::get(&app);
-    let mut p = serde_json::Map::new();
-    p.insert("proxy".into(), Value::String(proxy));
-    d.settings.set_block("service", p);
+    d.settings.set_service_proxy(&proxy);
     apply_service_config(&d);
     ok()
 }

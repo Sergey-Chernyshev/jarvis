@@ -43,16 +43,37 @@ test('other transport failures recommend a proxy but HTTP and disk failures do n
   }
 });
 
+test('successful proxy apply selects only stale network errors for clearing', () => {
+  assert.ok(Repair, 'download repair classifier is available');
+  assert.deepEqual(
+    Repair.idsForAction(
+      {
+        'whisper-turbo': {
+          error: 'error sending request for url (https://huggingface.co/model.bin)',
+        },
+        silero: { error: 'No space left on device' },
+        'qwen3-0.6b': { error: 'request timed out after 30 seconds' },
+        complete: {},
+      },
+      'proxy',
+    ),
+    ['whisper-turbo', 'qwen3-0.6b'],
+  );
+});
+
 test('main UI loads repair classifier before settings and exposes the proxy CTA contract', async () => {
   const [html, settings] = await Promise.all([
     readFile(new URL('./index.html', import.meta.url), 'utf8'),
     readFile(new URL('./settings2.js', import.meta.url), 'utf8'),
   ]);
   const repairIndex = html.indexOf('<script src="./download-repair.js"></script>');
+  const checkboxIndex = html.indexOf('<script src="./model-checkbox.js"></script>');
   const settingsIndex = html.indexOf('<script src="./settings2.js"></script>');
 
   assert.notEqual(repairIndex, -1, 'main UI loads download repair classifier');
   assert.ok(repairIndex < settingsIndex, 'classifier loads before settings');
+  assert.notEqual(checkboxIndex, -1, 'main UI loads the model checkbox control');
+  assert.ok(checkboxIndex < settingsIndex, 'model checkbox control loads before settings');
   assert.match(settings, /JarvisDownloadRepair\.actionFor/);
   assert.match(settings, /Настроить прокси/);
   assert.match(settings, /id:\s*'s2-egress-proxy'/);
@@ -70,9 +91,12 @@ test('fresh model progress authoritatively clears its stale error before renderi
 
   assert.match(settings, /function clearDownloadError\(id\)/);
   assert.match(settings, /data-download-error/);
+  const bulkStart = settings.indexOf('function bulkDownloadBtn');
+  const bulkEnd = settings.indexOf('function downloadActionFor', bulkStart);
+  const bulkBlock = settings.slice(bulkStart, bulkEnd);
   assert.doesNotMatch(
-    settings,
-    /for \(const id of ids\) clearDownloadError\(id\)/,
+    bulkBlock,
+    /clearDownloadError/,
     'a click is not proof that the backend accepted a bulk retry',
   );
   assert.doesNotMatch(
@@ -99,15 +123,10 @@ test('fresh model progress authoritatively clears its stale error before renderi
   );
 });
 
-test('model selection uses an accessible Jarvis checkbox instead of native styling', async () => {
+test('settings uses the shared model checkbox control instead of styling a native input', async () => {
   const settings = await readFile(new URL('./settings2.js', import.meta.url), 'utf8');
 
-  assert.match(settings, /input\.model-check/);
-  assert.match(settings, /'aria-label':\s*'Выбрать для установки:/);
-  assert.match(settings, /#settings2 \.model-check\s*\{/);
-  assert.match(settings, /#settings2 \.model-check:hover/);
-  assert.match(settings, /#settings2 \.model-check:focus-visible/);
-  assert.match(settings, /#settings2 \.model-check:checked/);
-  assert.match(settings, /#settings2 \.model-check:disabled/);
-  assert.doesNotMatch(settings, /margin-right:6px;vertical-align:middle/);
+  assert.match(settings, /JarvisModelCheckbox\.create/);
+  assert.doesNotMatch(settings, /el\('input\.model-check'/);
+  assert.doesNotMatch(settings, /appearance:none[^}]*\.model-check/);
 });

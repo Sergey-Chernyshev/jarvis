@@ -2,6 +2,7 @@ use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use block2::RcBlock;
@@ -13,11 +14,13 @@ use tokio::sync::oneshot;
 
 const NS_MODAL_RESPONSE_OK: isize = 1;
 const PICKER_WINDOW_LEVEL: isize = 1_001;
+static ACTIVE_PICKERS: AtomicUsize = AtomicUsize::new(0);
 
 type PickResult = Result<Option<PathBuf>, String>;
 type PickResponder = Arc<Mutex<Option<oneshot::Sender<PickResult>>>>;
 
 pub async fn pick(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    let _activity = PickerActivity::enter();
     let (sender, receiver) = oneshot::channel();
     let responder = Arc::new(Mutex::new(Some(sender)));
     let main_thread_responder = Arc::clone(&responder);
@@ -38,6 +41,26 @@ pub async fn pick(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     receiver
         .await
         .map_err(|_| "Нативный выбор папки не вернул результат".to_string())?
+}
+
+pub fn is_active() -> bool {
+    ACTIVE_PICKERS.load(Ordering::Acquire) > 0
+}
+
+struct PickerActivity;
+
+impl PickerActivity {
+    fn enter() -> Self {
+        ACTIVE_PICKERS.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for PickerActivity {
+    fn drop(&mut self) {
+        let previous = ACTIVE_PICKERS.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "picker activity counter underflow");
+    }
 }
 
 fn complete_pick(responder: &PickResponder, result: PickResult) {
@@ -97,4 +120,19 @@ unsafe fn selected_folder(panel: &AnyObject, response: isize) -> PickResult {
     Ok(Some(PathBuf::from(
         String::from_utf8_lossy(bytes).into_owned(),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picker_activity_is_cleared_on_every_scope_exit() {
+        assert!(!is_active());
+        {
+            let _activity = PickerActivity::enter();
+            assert!(is_active());
+        }
+        assert!(!is_active());
+    }
 }

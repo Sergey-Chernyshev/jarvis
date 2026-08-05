@@ -1,6 +1,8 @@
+use std::ffi::{CStr, CString, OsStr};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
-use std::os::unix::ffi::OsStrExt;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
@@ -102,6 +104,14 @@ fn build_snapshot_inner(
         (roots.claude.join("CLAUDE.md"), ".claude/CLAUDE.md"),
         (roots.codex.join("config.toml"), ".codex/config.toml"),
         (roots.codex.join("AGENTS.md"), ".codex/AGENTS.md"),
+        (
+            roots.codex.join("memories/MEMORY.md"),
+            ".codex/memories/MEMORY.md",
+        ),
+        (
+            roots.codex.join("memories/memory_summary.md"),
+            ".codex/memories/memory_summary.md",
+        ),
     ] {
         collect_single(&source, Path::new(guest), &mut snapshot, &mut total_bytes)?;
     }
@@ -110,6 +120,10 @@ fn build_snapshot_inner(
         (roots.claude.join("commands"), ".claude/commands"),
         (roots.claude.join("skills"), ".claude/skills"),
         (roots.codex.join("skills"), ".codex/skills"),
+        (
+            roots.codex.join("memories/skills"),
+            ".codex/memories/skills",
+        ),
     ] {
         collect_tree(
             &source,
@@ -174,17 +188,12 @@ fn collect_single(
         snapshot.diagnostics.skipped_non_regular += 1;
         return Ok(());
     }
-    add_regular_file(
-        source,
-        guest_path.to_path_buf(),
-        metadata,
-        snapshot,
-        total_bytes,
-    )
+    let file = no_follow_file(source)?;
+    add_open_regular_file(file, guest_path.to_path_buf(), snapshot, total_bytes)
 }
 
 fn collect_tree(
-    allowlist_root: &Path,
+    _allowlist_root: &Path,
     current: &Path,
     guest_root: &Path,
     snapshot: &mut ConfigSnapshot,
@@ -203,36 +212,43 @@ fn collect_tree(
         snapshot.diagnostics.skipped_non_regular += 1;
         return Ok(());
     }
-    let mut entries = fs::read_dir(current)
-        .map_err(|_| "не прочитать allowlisted config tree".to_string())?
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        let source = entry.path();
-        let metadata = match fs::symlink_metadata(&source) {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                snapshot.diagnostics.skipped_non_regular += 1;
-                continue;
-            }
-        };
-        if metadata.file_type().is_symlink() {
-            snapshot.diagnostics.skipped_symlinks += 1;
-            continue;
-        }
-        if is_denied_name(&entry.file_name()) {
+    let directory = open_directory_no_follow(current)?;
+    collect_open_tree(&directory, Path::new(""), guest_root, snapshot, total_bytes)
+}
+
+fn collect_open_tree(
+    directory: &File,
+    relative: &Path,
+    guest_root: &Path,
+    snapshot: &mut ConfigSnapshot,
+    total_bytes: &mut u64,
+) -> Result<(), String> {
+    for name in descriptor_entry_names(directory)? {
+        if is_denied_name(&name) {
             snapshot.diagnostics.skipped_non_regular += 1;
             continue;
         }
-        if metadata.file_type().is_dir() {
-            collect_tree(allowlist_root, &source, guest_root, snapshot, total_bytes)?;
-        } else if metadata.file_type().is_file() {
-            let relative = source
-                .strip_prefix(allowlist_root)
-                .map_err(|_| "allowlisted config path escaped its root".to_string())?;
-            let guest_path = guest_root.join(relative);
-            add_regular_file(&source, guest_path, metadata, snapshot, total_bytes)?;
+        let child = match openat_no_follow(directory, &name) {
+            Ok(child) => child,
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+                snapshot.diagnostics.skipped_symlinks += 1;
+                continue;
+            }
+            Err(_) => return Err("allowlisted config tree changed during traversal".into()),
+        };
+        let metadata = child
+            .metadata()
+            .map_err(|_| "не проверить opened config entry".to_string())?;
+        let child_relative = relative.join(&name);
+        if metadata.is_dir() {
+            collect_open_tree(&child, &child_relative, guest_root, snapshot, total_bytes)?;
+        } else if metadata.is_file() {
+            add_open_regular_file(
+                child,
+                guest_root.join(child_relative),
+                snapshot,
+                total_bytes,
+            )?;
         } else {
             snapshot.diagnostics.skipped_non_regular += 1;
         }
@@ -240,35 +256,24 @@ fn collect_tree(
     Ok(())
 }
 
-fn add_regular_file(
-    source: &Path,
+fn add_open_regular_file(
+    mut file: File,
     guest_path: PathBuf,
-    metadata: fs::Metadata,
     snapshot: &mut ConfigSnapshot,
     total_bytes: &mut u64,
 ) -> Result<(), String> {
     validate_guest_path(&guest_path)?;
-    if metadata.len() > MAX_MIRROR_FILE_BYTES {
-        snapshot.diagnostics.skipped_oversize += 1;
-        return Ok(());
-    }
     if snapshot.files.len() >= MAX_MIRROR_FILES {
         return Err("config mirror превышает file-count limit".into());
     }
-    let canonical_parent = source
-        .parent()
-        .and_then(|parent| fs::canonicalize(parent).ok())
-        .ok_or_else(|| "не проверить allowlisted config parent".to_string())?;
-    let canonical_source = fs::canonicalize(source)
-        .map_err(|_| "не canonicalize allowlisted config file".to_string())?;
-    if canonical_source.parent() != Some(canonical_parent.as_path()) {
-        return Err("allowlisted config file escaped its parent".into());
-    }
-    let mut file = no_follow_file(source)?;
     let opened = file
         .metadata()
         .map_err(|_| "не проверить opened config file".to_string())?;
-    if !opened.is_file() || opened.len() > MAX_MIRROR_FILE_BYTES {
+    if !opened.is_file() {
+        snapshot.diagnostics.skipped_non_regular += 1;
+        return Ok(());
+    }
+    if opened.len() > MAX_MIRROR_FILE_BYTES {
         snapshot.diagnostics.skipped_oversize += 1;
         return Ok(());
     }
@@ -307,23 +312,64 @@ fn sanitize_mirrored_bytes(
     bytes: Vec<u8>,
     diagnostics: &mut MirrorDiagnostics,
 ) -> Result<Vec<u8>, String> {
-    if guest_path != Path::new(".claude/settings.json") {
-        return Ok(bytes);
+    match guest_path {
+        path if path == Path::new(".claude/settings.json") => {
+            sanitize_claude_settings(bytes, diagnostics)
+        }
+        path if path == Path::new(".codex/config.toml") => {
+            sanitize_codex_config(bytes, diagnostics)
+        }
+        _ => Ok(bytes),
     }
+}
+
+fn sanitize_claude_settings(
+    bytes: Vec<u8>,
+    diagnostics: &mut MirrorDiagnostics,
+) -> Result<Vec<u8>, String> {
     let mut settings = serde_json::from_slice::<serde_json::Value>(&bytes)
         .map_err(|_| "Claude settings содержат invalid JSON".to_string())?;
     let object = settings
         .as_object_mut()
         .ok_or_else(|| "Claude settings должны быть JSON object".to_string())?;
-    let removed = ["hooks", "statusLine"]
-        .into_iter()
-        .filter(|key| object.remove(*key).is_some())
-        .count();
-    if removed == 0 {
-        return Ok(bytes);
+
+    let mut portable = serde_json::Map::new();
+    for key in [
+        "model",
+        "language",
+        "outputStyle",
+        "alwaysThinkingEnabled",
+        "cleanupPeriodDays",
+        "includeCoAuthoredBy",
+        "respectGitignore",
+        "showTurnDuration",
+        "spinnerTipsEnabled",
+        "preferredNotifChannel",
+    ] {
+        if let Some(value) = object.get(key).filter(|value| portable_scalar(value)) {
+            portable.insert(key.into(), value.clone());
+        }
     }
-    diagnostics.removed_host_commands += removed;
-    let mut sanitized = serde_json::to_vec(&settings)
+    if let Some(default_mode) = object
+        .get("permissions")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|permissions| permissions.get("defaultMode"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|mode| {
+            matches!(
+                *mode,
+                "default" | "acceptEdits" | "plan" | "bypassPermissions"
+            )
+        })
+    {
+        portable.insert(
+            "permissions".into(),
+            serde_json::json!({"defaultMode":default_mode}),
+        );
+    }
+
+    diagnostics.removed_host_commands += object.len().saturating_sub(portable.len());
+    let mut sanitized = serde_json::to_vec(&portable)
         .map_err(|_| "не подготовить guest-safe Claude settings".to_string())?;
     sanitized.push(b'\n');
     if sanitized.len() as u64 > MAX_MIRROR_FILE_BYTES {
@@ -332,12 +378,145 @@ fn sanitize_mirrored_bytes(
     Ok(sanitized)
 }
 
+fn sanitize_codex_config(
+    bytes: Vec<u8>,
+    diagnostics: &mut MirrorDiagnostics,
+) -> Result<Vec<u8>, String> {
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| "Codex config.toml должен быть UTF-8".to_string())?;
+    let config = toml::from_str::<toml::Value>(text)
+        .map_err(|_| "Codex config.toml содержит invalid TOML".to_string())?;
+    let object = config
+        .as_table()
+        .ok_or_else(|| "Codex config.toml должен быть TOML table".to_string())?;
+    let mut portable = toml::map::Map::new();
+    for key in [
+        "model",
+        "model_reasoning_effort",
+        "plan_mode_reasoning_effort",
+        "approval_policy",
+        "sandbox_mode",
+        "web_search",
+        "personality",
+        "cli_auth_credentials_store",
+        "hide_agent_reasoning",
+        "show_raw_agent_reasoning",
+    ] {
+        if let Some(value) = object.get(key).filter(|value| portable_toml_scalar(value)) {
+            portable.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(features) = object.get("features").and_then(toml::Value::as_table) {
+        let features = features
+            .iter()
+            .filter(|(_, value)| value.is_bool())
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<toml::map::Map<_, _>>();
+        if !features.is_empty() {
+            portable.insert("features".into(), toml::Value::Table(features));
+        }
+    }
+    diagnostics.removed_host_commands += object.len().saturating_sub(portable.len());
+    let mut sanitized = toml::to_string(&toml::Value::Table(portable))
+        .map_err(|_| "не подготовить guest-safe Codex config".to_string())?
+        .into_bytes();
+    if !sanitized.ends_with(b"\n") {
+        sanitized.push(b'\n');
+    }
+    if sanitized.len() as u64 > MAX_MIRROR_FILE_BYTES {
+        return Err("guest-safe Codex config превышает size limit".into());
+    }
+    Ok(sanitized)
+}
+
+fn portable_scalar(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) => true,
+        serde_json::Value::String(value) => {
+            value.len() <= 1024 && !value.bytes().any(|byte| matches!(byte, 0 | b'\n' | b'\r'))
+        }
+        _ => false,
+    }
+}
+
+fn portable_toml_scalar(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::Boolean(_) | toml::Value::Integer(_) => true,
+        toml::Value::String(value) => {
+            value.len() <= 1024 && !value.bytes().any(|byte| matches!(byte, 0 | b'\n' | b'\r'))
+        }
+        _ => false,
+    }
+}
+
 fn no_follow_file(path: &Path) -> Result<File, String> {
     OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
         .map_err(|_| "не открыть allowlisted config file".to_string())
+}
+
+fn open_directory_no_follow(path: &Path) -> Result<File, String> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| "не открыть allowlisted config directory".to_string())
+}
+
+fn descriptor_entry_names(directory: &File) -> Result<Vec<std::ffi::OsString>, String> {
+    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err("не продублировать allowlisted config directory".into());
+    }
+    // SAFETY: fdopendir takes ownership of the fresh duplicate. closedir below
+    // releases it on every successful fdopendir path.
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        unsafe {
+            libc::close(duplicate);
+        }
+        return Err("не открыть allowlisted config directory stream".into());
+    }
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: stream remains owned and valid until closedir after the loop;
+        // each returned dirent is copied before the next readdir call.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if matches!(bytes, b"." | b"..") {
+            continue;
+        }
+        names.push(std::ffi::OsString::from_vec(bytes.to_vec()));
+    }
+    let close_result = unsafe { libc::closedir(stream) };
+    if close_result != 0 {
+        return Err("не закрыть allowlisted config directory stream".into());
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn openat_no_follow(directory: &File, name: &OsStr) -> Result<File, std::io::Error> {
+    let name = CString::new(name.as_bytes())
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let descriptor = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        // SAFETY: successful openat returns a new descriptor now owned by File.
+        Ok(unsafe { File::from_raw_fd(descriptor) })
+    }
 }
 
 fn validate_guest_path(path: &Path) -> Result<(), String> {
@@ -480,6 +659,28 @@ mod tests {
             "synthetic planner",
         )
         .unwrap();
+        fs::create_dir_all(roots.codex.join("memories/skills/reviewer")).unwrap();
+        fs::write(
+            roots.codex.join("memories/MEMORY.md"),
+            "synthetic durable memory",
+        )
+        .unwrap();
+        fs::write(
+            roots.codex.join("memories/memory_summary.md"),
+            "synthetic memory summary",
+        )
+        .unwrap();
+        fs::write(
+            roots.codex.join("memories/skills/reviewer/SKILL.md"),
+            "synthetic memory skill",
+        )
+        .unwrap();
+        fs::create_dir_all(roots.codex.join("memories/sessions")).unwrap();
+        fs::write(
+            roots.codex.join("memories/sessions/transcript.jsonl"),
+            "memory history must stay host-only",
+        )
+        .unwrap();
         fs::write(roots.codex.join("auth.json"), "must stay credential-only").unwrap();
         fs::create_dir_all(roots.codex.join("sessions")).unwrap();
         fs::write(roots.codex.join("sessions/rollout.jsonl"), "host-only").unwrap();
@@ -496,6 +697,9 @@ mod tests {
                 Path::new(".claude/skills/reviewer/SKILL.md"),
                 Path::new(".codex/AGENTS.md"),
                 Path::new(".codex/config.toml"),
+                Path::new(".codex/memories/MEMORY.md"),
+                Path::new(".codex/memories/memory_summary.md"),
+                Path::new(".codex/memories/skills/reviewer/SKILL.md"),
                 Path::new(".codex/skills/planner/SKILL.md"),
             ]
         );
@@ -557,6 +761,7 @@ mod tests {
             br#"{
                 "model":"synthetic",
                 "permissions":{"defaultMode":"bypassPermissions"},
+                "env":{"ANTHROPIC_API_KEY":"SYNTHETIC_CLAUDE_SECRET"},
                 "hooks":{"Stop":[{"hooks":[{"type":"command","command":"/host/jarvis-hook"}]}]},
                 "statusLine":{"type":"command","command":"uv run /host/status.py"},
                 "futurePortableSetting":true
@@ -574,11 +779,66 @@ mod tests {
 
         assert_eq!(value["model"], "synthetic");
         assert_eq!(value["permissions"]["defaultMode"], "bypassPermissions");
-        assert_eq!(value["futurePortableSetting"], true);
+        assert!(value.get("futurePortableSetting").is_none());
+        assert!(value.get("env").is_none());
         assert!(value.get("hooks").is_none());
         assert!(value.get("statusLine").is_none());
-        assert_eq!(snapshot.diagnostics.removed_host_commands, 2);
+        assert_eq!(snapshot.diagnostics.removed_host_commands, 4);
         assert!(!String::from_utf8_lossy(&settings.bytes).contains("/host/"));
+        assert!(!String::from_utf8_lossy(&settings.bytes).contains("SYNTHETIC_CLAUDE_SECRET"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_config_keeps_portable_preferences_but_drops_provider_and_mcp_secrets() {
+        let (root, roots) = fixture("codex-secret-config");
+        fs::write(
+            roots.codex.join("config.toml"),
+            r#"
+model = "synthetic"
+model_reasoning_effort = "high"
+cli_auth_credentials_store = "file"
+future_unknown = "SYNTHETIC_UNKNOWN_SECRET"
+
+[features]
+web_search = true
+
+[mcp_servers.private]
+command = "/host/private-server"
+env = { API_TOKEN = "SYNTHETIC_MCP_SECRET" }
+
+[model_providers.private]
+base_url = "https://private.invalid"
+env_key = "SYNTHETIC_PROVIDER_SECRET"
+"#,
+        )
+        .unwrap();
+
+        let snapshot = build_snapshot(&roots).unwrap();
+        let config = snapshot
+            .files
+            .iter()
+            .find(|file| file.guest_path == Path::new(".codex/config.toml"))
+            .unwrap();
+        let value =
+            toml::from_str::<toml::Value>(std::str::from_utf8(&config.bytes).unwrap()).unwrap();
+
+        assert_eq!(value["model"].as_str(), Some("synthetic"));
+        assert_eq!(value["model_reasoning_effort"].as_str(), Some("high"));
+        assert_eq!(value["cli_auth_credentials_store"].as_str(), Some("file"));
+        assert_eq!(value["features"]["web_search"].as_bool(), Some(true));
+        assert!(value.get("mcp_servers").is_none());
+        assert!(value.get("model_providers").is_none());
+        assert!(value.get("future_unknown").is_none());
+        let text = String::from_utf8_lossy(&config.bytes);
+        for secret in [
+            "SYNTHETIC_UNKNOWN_SECRET",
+            "SYNTHETIC_MCP_SECRET",
+            "SYNTHETIC_PROVIDER_SECRET",
+            "/host/private-server",
+        ] {
+            assert!(!text.contains(secret), "{secret} escaped sanitization");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -594,6 +854,44 @@ mod tests {
         assert_eq!(snapshot.diagnostics.skipped_symlinks, 1);
         assert!(snapshot.files.is_empty());
         assert!(!format!("{snapshot:?}").contains("SYNTHETIC_PRIVATE_VALUE"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn opened_tree_descriptor_cannot_be_retargeted_by_directory_symlink_swap() {
+        let (root, roots) = fixture("directory-swap");
+        let allowed = roots.claude.join("skills/reviewer");
+        fs::write(allowed.join("SAFE.md"), "SYNTHETIC_SAFE_VALUE").unwrap();
+        let directory = open_directory_no_follow(&allowed).unwrap();
+        let held = roots.claude.join("skills/reviewer-held");
+        fs::rename(&allowed, &held).unwrap();
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("SECRET.md"), "SYNTHETIC_HOST_SECRET").unwrap();
+        symlink(&outside, &allowed).unwrap();
+        let mut snapshot = ConfigSnapshot {
+            files: Vec::new(),
+            fingerprint: String::new(),
+            diagnostics: MirrorDiagnostics::default(),
+        };
+        let mut total_bytes = 0;
+
+        collect_open_tree(
+            &directory,
+            Path::new(""),
+            Path::new(".claude/skills/reviewer"),
+            &mut snapshot,
+            &mut total_bytes,
+        )
+        .unwrap();
+
+        assert_eq!(
+            guest_paths(&snapshot),
+            vec![Path::new(".claude/skills/reviewer/SAFE.md")]
+        );
+        let mirrored = String::from_utf8_lossy(&snapshot.files[0].bytes);
+        assert!(mirrored.contains("SYNTHETIC_SAFE_VALUE"));
+        assert!(!mirrored.contains("SYNTHETIC_HOST_SECRET"));
         fs::remove_dir_all(root).unwrap();
     }
 

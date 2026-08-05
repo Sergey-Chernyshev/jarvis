@@ -116,6 +116,23 @@ test('project search matches folder names and paths without chat metadata', () =
   assert.equal(AgentVm.filterProjects(projects, '  ALPHA  ').length, 1);
 });
 
+test('project primary action opens existing chat history while keeping Agent VM separate', () => {
+  assert.equal(
+    AgentVm.projectPrimaryTarget({
+      cwd: '/work/with-history',
+      history: { sessions: [{ id: 'chat-1' }] },
+    }),
+    'history',
+  );
+  assert.equal(
+    AgentVm.projectPrimaryTarget({
+      cwd: '/work/vm-only',
+      history: null,
+    }),
+    'agentvm',
+  );
+});
+
 test('project catalog hides ephemeral history unless the folder was explicitly added', () => {
   const history = [
     { project: 'real', cwd: '/Users/dev/work/real', exists: true, sessions: [] },
@@ -158,7 +175,7 @@ test('Agent VM slash suggestions rank prefix matches and ignore ordinary prompts
   assert.deepEqual(AgentVm.filterCommands(commands, 'review'), []);
 });
 
-test('Agent VM image paths are appended as editable terminal input', () => {
+test('Agent VM image paths are appended to the managed prompt', () => {
   assert.equal(
     AgentVm.composePrompt('Проверь интерфейс', [
       '/home/dev.guest/.jarvis-vm/uploads/jarvis-1.png',
@@ -173,7 +190,7 @@ test('Agent VM image paths are appended as editable terminal input', () => {
   );
 });
 
-test('active environments reflect VM truth and ignore legacy run state', () => {
+test('active environments combine VM lifecycle with the latest structured run state', () => {
   const entities = [
     vm('ready', 'running', { projectId: 'p-ready', project: 'ready', cwd: '/p/ready' }, 30),
     vm('work', 'running', { projectId: 'p-work', project: 'work', cwd: '/p/work' }, 20),
@@ -185,9 +202,12 @@ test('active environments reflect VM truth and ignore legacy run state', () => {
 
   const active = AgentVm.activeEnvironments(entities);
 
-  assert.deepEqual(active.map((item) => item.projectId), ['p-ready', 'p-work', 'p-wait']);
-  assert.deepEqual(active.map((item) => item.uiState), ['ready', 'ready', 'ready']);
-  assert.ok(active.every((item) => item.run === null));
+  assert.deepEqual(active.map((item) => item.projectId), ['p-wait', 'p-work', 'p-ready']);
+  assert.deepEqual(active.map((item) => item.uiState), ['waiting', 'working', 'ready']);
+  assert.deepEqual(
+    active.map((item) => item.run?.attrs?.runId || null),
+    ['wait-run', 'work-run', null],
+  );
 });
 
 test('a run cannot report working before its project VM exists', () => {
@@ -418,14 +438,19 @@ test('main panel exposes Agent VM workspace, bridge and keyboard contract', () =
   const bridge = readFileSync(new URL('./bridge.js', import.meta.url), 'utf8');
   const renderer = readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
   const ipc = readFileSync(new URL('../src-tauri/src/ipc.rs', import.meta.url), 'utf8');
-  const folderPicker = readFileSync(
-    new URL('../src-tauri/src/project_folder_picker.rs', import.meta.url),
-    'utf8',
+  const sendUi = renderer.slice(
+    renderer.indexOf('async function sendAgentVmMessage()'),
+    renderer.indexOf('async function stopAgentVmTerminal()'),
+  );
+  const projectCardUi = renderer.slice(
+    renderer.indexOf('function renderProjectCard(project)'),
+    renderer.indexOf('async function pickProjectManagerFolder()'),
   );
 
   assert.match(html, /id="activeEnvironments"/);
   assert.match(html, /id="agentVmWorkspace"/);
   assert.match(html, /id="agentVmFeed"/);
+  assert.match(html, /Управляемая задача Agent VM/);
   assert.match(html, /id="agentVmTerminalScreen"/);
   assert.match(html, /data-agent-vm-key="C-c"/);
   assert.match(html, /class="vm-key-menu"/);
@@ -462,8 +487,11 @@ test('main panel exposes Agent VM workspace, bridge and keyboard contract', () =
   assert.match(renderer, /agentVmTerminalEnsurePromises/);
   assert.match(renderer, /agentVmTerminalInput/);
   assert.match(renderer, /ResizeObserver/);
-  assert.doesNotMatch(renderer, /runtime\.send/);
+  assert.match(sendUi, /agentVmCommand\('runtime\.send'/);
+  assert.doesNotMatch(sendUi, /window\.jarvis\.agentVmTerminalInput\(/);
   assert.doesNotMatch(renderer, /runtime\.replay/);
+  assert.match(projectCardUi, /openProjectPrimary\(project\)/);
+  assert.match(projectCardUi, /openAgentVmProject\(project\)/);
   assert.match(renderer, /onOpenAgentVm/);
   assert.match(renderer, /requestedRunId/);
   assert.match(renderer, /renderAgentVmRuntimeStatus/);
@@ -473,10 +501,30 @@ test('main panel exposes Agent VM workspace, bridge and keyboard contract', () =
   assert.match(renderer, /pm-card-grid/);
   assert.doesNotMatch(renderer, /className: 'pm-card-rail'/);
   assert.doesNotMatch(html, /aspect-ratio:\s*1/);
-  assert.match(folderPicker, /NSOpenPanel/);
-  assert.match(folderPicker, /beginWithCompletionHandler/);
-  assert.doesNotMatch(folderPicker, /runModal/);
   assert.doesNotMatch(ipc, /PICK_FOLDER_SCRIPT|osascript/);
   assert.match(html, /Добавить папку/);
   assert.match(html, /pm-card-grid\.cards/);
+});
+
+test('folder picker stays async and releases project UI after cancel or error', () => {
+  const renderer = readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
+  const ipc = readFileSync(new URL('../src-tauri/src/ipc.rs', import.meta.url), 'utf8');
+  const main = readFileSync(new URL('../src-tauri/src/main.rs', import.meta.url), 'utf8');
+  const folderPicker = readFileSync(
+    new URL('../src-tauri/src/project_folder_picker.rs', import.meta.url),
+    'utf8',
+  );
+  const pickerUi = renderer.slice(
+    renderer.indexOf('async function pickProjectManagerFolder()'),
+    renderer.indexOf('async function setProjectManagerFavorite('),
+  );
+
+  assert.match(folderPicker, /NSOpenPanel/);
+  assert.match(folderPicker, /beginWithCompletionHandler/);
+  assert.doesNotMatch(folderPicker, /runModal/);
+  assert.match(main, /project_folder_picker::is_active\(\)/);
+  assert.match(ipc, /Ok\(None\)[\s\S]*?"cancelled": true/);
+  assert.match(pickerUi, /if \(result\.cancelled\) return;/);
+  assert.match(pickerUi, /catch \(error\)/);
+  assert.match(pickerUi, /finally\s*\{\s*projectManagerSaving = false;/);
 });

@@ -900,7 +900,11 @@ impl Power {
     }
 
     fn deactivate_keep_awake(d: &Arc<Daemon>) {
-        if let Some(mut e) = d.power.engine.lock().unwrap().take() {
+        d.power.deactivate_keep_awake_owned();
+    }
+
+    fn deactivate_keep_awake_owned(&self) {
+        if let Some(mut e) = self.engine.lock().unwrap().take() {
             e.dispose();
         }
         println!("[jarvis:keep-awake] выключен");
@@ -1116,8 +1120,12 @@ impl Power {
     }
 
     fn deactivate_clamshell_inner(d: &Arc<Daemon>) -> ClamshellDisposeOutcome {
+        d.power.deactivate_clamshell_inner_owned()
+    }
+
+    fn deactivate_clamshell_inner_owned(&self) -> ClamshellDisposeOutcome {
         let (was_active, receipt, unknown) = {
-            let mut clam = d.power.clam.lock().unwrap();
+            let mut clam = self.clam.lock().unwrap();
             let was_active = clam.active;
             if let Some(pending) = clam.unknown_acquire.as_ref() {
                 if !pending.blocks_blind_retry(now_ms()) {
@@ -1136,9 +1144,9 @@ impl Power {
         };
         let outcome = match (receipt, unknown) {
             (Some(receipt), _) => {
-                match ExactReleaseOutcome::from_result(d.power.lease_client.release(&receipt)) {
+                match ExactReleaseOutcome::from_result(self.lease_client.release(&receipt)) {
                     ExactReleaseOutcome::Confirmed | ExactReleaseOutcome::AlreadyAbsent(_) => {
-                        let mut clam = d.power.clam.lock().unwrap();
+                        let mut clam = self.clam.lock().unwrap();
                         if clam.lease.as_ref() == Some(&receipt) {
                             clam.lease = None;
                             clam.renewal_error = None;
@@ -1151,8 +1159,7 @@ impl Power {
                         eprintln!(
                             "[jarvis:clamshell] helper release on deactivate failed: {error}"
                         );
-                        d.power
-                            .clam
+                        self.clam
                             .lock()
                             .unwrap()
                             .retain_lease_debt(receipt, error.to_string());
@@ -1161,18 +1168,16 @@ impl Power {
                 }
             }
             (None, Some(pending)) => {
-                match d
-                    .power
+                match self
                     .lease_client
                     .acquire(&pending.profile, &pending.owner_generation)
                 {
                     Ok(receipt) => {
-                        match ExactReleaseOutcome::from_result(
-                            d.power.lease_client.release(&receipt),
-                        ) {
+                        match ExactReleaseOutcome::from_result(self.lease_client.release(&receipt))
+                        {
                             ExactReleaseOutcome::Confirmed
                             | ExactReleaseOutcome::AlreadyAbsent(_) => {
-                                let mut clam = d.power.clam.lock().unwrap();
+                                let mut clam = self.clam.lock().unwrap();
                                 if clam
                                     .unknown_acquire
                                     .as_ref()
@@ -1187,7 +1192,7 @@ impl Power {
                                 let message = format!(
                                     "ambiguous acquire reconciled but exact release failed: {error}"
                                 );
-                                d.power.clam.lock().unwrap().retain_reconciled_debt(
+                                self.clam.lock().unwrap().retain_reconciled_debt(
                                     &pending,
                                     receipt,
                                     message.clone(),
@@ -1198,7 +1203,7 @@ impl Power {
                     }
                     Err(error) => {
                         let message = format!("ambiguous acquire reconciliation failed: {error}");
-                        let mut clam = d.power.clam.lock().unwrap();
+                        let mut clam = self.clam.lock().unwrap();
                         if let Some(current) = clam.unknown_acquire.as_mut() {
                             if current.same_attempt(&pending) {
                                 current.record_retry_failure(now_ms(), message.clone());
@@ -1218,7 +1223,11 @@ impl Power {
     }
 
     fn stop_clamshell_renewal(d: &Arc<Daemon>) {
-        let renewal = d.power.clam.lock().unwrap().renewal.take();
+        d.power.stop_clamshell_renewal_owned();
+    }
+
+    fn stop_clamshell_renewal_owned(&self) {
+        let renewal = self.clam.lock().unwrap().renewal.take();
         if let Some(renewal) = renewal {
             renewal.stop();
         }
@@ -1407,24 +1416,28 @@ impl Power {
     /// Выход из приложения: сначала закрыть admission и остановить renewal,
     /// затем освободить точную helper lease, и только потом снять IOKit.
     pub fn dispose(d: &Arc<Daemon>) -> PowerDisposeReport {
+        d.power.dispose_owned()
+    }
+
+    fn dispose_owned(&self) -> PowerDisposeReport {
         let clamshell = run_shutdown_sequence(
             || {
-                d.power.operations.close();
+                self.operations.close();
             },
-            || Self::stop_clamshell_renewal(d),
+            || self.stop_clamshell_renewal_owned(),
             || {
-                if d.power
+                if self
                     .operations
                     .wait_for_idle(POWER_OPERATION_BARRIER_TIMEOUT)
                 {
                     // Admission is closed, so no new operation can race this retry.
-                    Self::deactivate_clamshell_inner(d)
+                    self.deactivate_clamshell_inner_owned()
                 } else {
                     eprintln!("[jarvis:power] timed out waiting for in-flight helper operation");
                     ClamshellDisposeOutcome::BarrierTimeout
                 }
             },
-            || Self::deactivate_keep_awake(d),
+            || self.deactivate_keep_awake_owned(),
         );
         PowerDisposeReport { clamshell }
     }
@@ -1989,6 +2002,25 @@ impl Power {
                 changed(&d); // сигнатура меню изменилась → пересборка
             }
         });
+    }
+}
+
+impl Drop for Power {
+    fn drop(&mut self) {
+        // `std::process::exit` before `Daemon::new` cannot own these resources.
+        // Once `Power` exists, this is the final fallback for setup errors,
+        // unwinding, or any future exit path that misses the central coordinator.
+        // Cleanup remains exact: helper release uses the stored lease receipt and
+        // IOKit release uses the assertion id owned by the engine.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispose_owned())) {
+            Ok(report) if report.released() => {}
+            Ok(report) => {
+                eprintln!("[jarvis:power] drop cleanup remains incomplete: {report:?}");
+            }
+            Err(_) => {
+                eprintln!("[jarvis:power] drop cleanup panicked");
+            }
+        }
     }
 }
 
@@ -2868,6 +2900,12 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    use jarvis_power_core::protocol::{
+        Request, RequestId, Response, ResponseEnvelope, PROTOCOL_VERSION,
+    };
+
+    use crate::power::helper::client::{HelperClient, HelperClientError, HelperReply, HelperTrust};
+
     struct FakeProcesses {
         identities: HashMap<u32, Result<Option<String>, String>>,
     }
@@ -2937,6 +2975,116 @@ mod tests {
             owner_generation: "other".into(),
             granted_ttl_ms: jarvis_power_core::protocol::DEFAULT_TTL_MS,
         }
+    }
+
+    struct RecordingReleaseHelper {
+        requests: Arc<Mutex<Vec<Request>>>,
+    }
+
+    impl HelperClient for RecordingReleaseHelper {
+        fn send(&self, request: Request) -> Result<HelperReply, HelperClientError> {
+            let response = match &request {
+                Request::ReleaseLease { lease_id, .. } => Response::Released {
+                    lease_id: lease_id.clone(),
+                },
+                request => panic!("unexpected helper request during cleanup: {request:?}"),
+            };
+            self.requests.lock().unwrap().push(request);
+            Ok(HelperReply {
+                response: ResponseEnvelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: RequestId::parse("018f0000-0000-7000-8000-000000000001").unwrap(),
+                    response,
+                },
+                trust: HelperTrust::ProductionAttested,
+            })
+        }
+
+        fn trust(&self) -> HelperTrust {
+            HelperTrust::ProductionAttested
+        }
+    }
+
+    fn power_with_owned_lease(receipt: LeaseReceipt) -> (Power, Arc<Mutex<Vec<Request>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let helper = Arc::new(RecordingReleaseHelper {
+            requests: requests.clone(),
+        });
+        (
+            Power {
+                engine: Mutex::new(None),
+                clam: Mutex::new(Clam {
+                    active: true,
+                    armed: true,
+                    lease: Some(receipt),
+                    ..Clam::default()
+                }),
+                clam_transition: tokio::sync::Mutex::new(()),
+                processes: Mutex::new(Vec::new()),
+                is_air: AtomicBool::new(false),
+                last_tick_at: AtomicI64::new(0),
+                last_working: AtomicUsize::new(0),
+                last_suggest_at: AtomicI64::new(0),
+                last_countdown_at: AtomicI64::new(0),
+                operations: PowerOperations::default(),
+                lease_client: LeaseClient::new(helper),
+            },
+            requests,
+        )
+    }
+
+    #[test]
+    fn normal_power_cleanup_is_idempotent_and_releases_only_the_owned_lease() {
+        let owned = helper_receipt();
+        let foreign = other_helper_receipt();
+        let (power, requests) = power_with_owned_lease(owned.clone());
+
+        assert_eq!(
+            power.dispose_owned().clamshell,
+            ClamshellDisposeOutcome::Released
+        );
+        assert_eq!(
+            power.dispose_owned().clamshell,
+            ClamshellDisposeOutcome::Idle
+        );
+        drop(power);
+
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            &[Request::ReleaseLease {
+                lease_id: owned.lease_id,
+                owner_generation: owned.owner_generation,
+            }]
+        );
+        assert!(
+            requests.lock().unwrap().iter().all(|request| {
+                !matches!(
+                    request,
+                    Request::ReleaseLease {
+                        lease_id,
+                        owner_generation,
+                    } if lease_id == &foreign.lease_id
+                        || owner_generation == &foreign.owner_generation
+                )
+            }),
+            "cleanup must never address an unowned helper lease"
+        );
+    }
+
+    #[test]
+    fn dropping_power_releases_the_owned_lease_without_explicit_shutdown() {
+        let owned = helper_receipt();
+        let (power, requests) = power_with_owned_lease(owned.clone());
+
+        drop(power);
+
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            &[Request::ReleaseLease {
+                lease_id: owned.lease_id,
+                owner_generation: owned.owner_generation,
+            }]
+        );
     }
 
     #[test]

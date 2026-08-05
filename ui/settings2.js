@@ -476,6 +476,14 @@
     }
   }
 
+  function clearDownloadErrorsForAction(action) {
+    const repair = window.JarvisDownloadRepair;
+    if (!repair || typeof repair.idsForAction !== 'function') return [];
+    const ids = repair.idsForAction(dlState, action);
+    for (const id of ids) clearDownloadError(id);
+    return ids;
+  }
+
   function dlErrorNote(msg, id) {
     const n = el('div.s2err');
     if (id) n.setAttribute('data-download-error', id);
@@ -647,14 +655,16 @@
 
 /* ── Checkbox выбора модели ──────────────────────────────────────────── */
 #settings2 .model-actions { display:flex; align-items:center; gap:9px; }
-#settings2 .model-check { appearance:none; -webkit-appearance:none; width:18px; height:18px; margin:0; flex:none; display:grid; place-content:center; color:#08101e; background:rgba(255,255,255,.045); border:1px solid rgba(255,255,255,.22); border-radius:5px; transition:background .14s ease,border-color .14s ease,box-shadow .14s ease,transform .1s ease; }
-#settings2 .model-check::before { content:""; width:8px; height:4px; border-left:2px solid currentColor; border-bottom:2px solid currentColor; transform:translateY(-1px) rotate(-45deg) scale(0); transform-origin:center; transition:transform .12s ease; }
-#settings2 .model-check:hover { border-color:rgba(108,160,255,.72); background:rgba(108,160,255,.10); }
-#settings2 .model-check:focus-visible { outline:none; border-color:var(--working,#6ca0ff); box-shadow:0 0 0 3px rgba(108,160,255,.22); }
-#settings2 .model-check:checked { border-color:var(--working,#6ca0ff); background:var(--working,#6ca0ff); }
-#settings2 .model-check:checked::before { transform:translateY(-1px) rotate(-45deg) scale(1); }
-#settings2 .model-check:active { transform:scale(.92); }
-#settings2 .model-check:disabled { opacity:.42; }
+#settings2 .model-check { width:28px; height:28px; margin:0; flex:none; display:grid; place-items:center; position:relative; cursor:pointer; }
+#settings2 .model-check-input { position:absolute; width:1px; height:1px; margin:-1px; padding:0; border:0; overflow:hidden; clip:rect(0 0 0 0); clip-path:inset(50%); white-space:nowrap; }
+#settings2 .model-check-mark { width:18px; height:18px; box-sizing:border-box; display:grid; place-content:center; color:#08101e; background:rgba(255,255,255,.045); border:1px solid rgba(255,255,255,.22); border-radius:5px; transition:background .14s ease,border-color .14s ease,box-shadow .14s ease,transform .1s ease; }
+#settings2 .model-check-mark::before { content:""; width:8px; height:4px; border-left:2px solid currentColor; border-bottom:2px solid currentColor; transform:translateY(-1px) rotate(-45deg) scale(0); transform-origin:center; transition:transform .12s ease; }
+#settings2 .model-check:hover .model-check-mark { border-color:rgba(108,160,255,.72); background:rgba(108,160,255,.10); }
+#settings2 .model-check-input:focus-visible + .model-check-mark { border-color:var(--working,#6ca0ff); box-shadow:0 0 0 3px rgba(108,160,255,.22); }
+#settings2 .model-check-input:checked + .model-check-mark { border-color:var(--working,#6ca0ff); background:var(--working,#6ca0ff); }
+#settings2 .model-check-input:checked + .model-check-mark::before { transform:translateY(-1px) rotate(-45deg) scale(1); }
+#settings2 .model-check:active .model-check-mark { transform:scale(.92); }
+#settings2 .model-check-input:disabled + .model-check-mark { opacity:.42; }
 
 /* ── Segmented ───────────────────────────────────────────────────────── */
 #settings2 .seg { display:flex; border:1px solid var(--border, rgba(255,255,255,0.08)); border-radius:6px; overflow:hidden; }
@@ -1002,15 +1012,14 @@
         // единый путь: оркестратор шлёт прогресс/финал по id модели
         await safe(() => window.jarvis.modelsInstall([m.id]), null);
       });
-      const cb = el('input.model-check', {
-        type: 'checkbox',
-        'aria-label': 'Выбрать для установки: ' + m.label,
+      const checkbox = window.JarvisModelCheckbox.create(document, {
+        label: 'Выбрать для установки: ' + m.label,
+        checked: selectedModels.has(m.id),
+        onChange: (checked) => {
+          if (checked) selectedModels.add(m.id); else selectedModels.delete(m.id);
+        },
       });
-      cb.checked = selectedModels.has(m.id);
-      cb.addEventListener('change', () => {
-        if (cb.checked) selectedModels.add(m.id); else selectedModels.delete(m.id);
-      });
-      const btnRow = el('div.model-actions', null, [cb, btn]);
+      const btnRow = el('div.model-actions', null, [checkbox.node, btn]);
       wrap.appendChild(btnRow);
       wrap.appendChild(el('div', { 'data-model': m.id })); // плейсхолдер прогресса
       return el('div.drow', null, [dot, grow, wrap]);
@@ -1643,6 +1652,11 @@
       if (r && r.ok) {
         proxyCap.classList.remove('err');
         proxyCap.textContent = val ? 'прокси сохранён ✓' : 'очищен — снова из окружения';
+        const cleared = clearDownloadErrorsForAction('proxy');
+        if (cleared.length) {
+          reRenderPane('stt');
+          reRenderPane('wake');
+        }
       } else {
         proxyCap.classList.add('err');
         proxyCap.textContent = (r && r.error) ? r.error : 'не сохранилось';

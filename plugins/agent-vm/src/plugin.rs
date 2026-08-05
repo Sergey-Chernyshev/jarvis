@@ -227,12 +227,15 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
                     })),
                 )
             }
-            Err(error) => self.publish_operation(
-                &request_id,
-                &name,
-                "error",
-                operation_attrs(&context, json!({"error": public_error(&error)})),
-            ),
+            Err(error) => {
+                self.publish_residual_project_snapshot(&name, &event.payload.args);
+                self.publish_operation(
+                    &request_id,
+                    &name,
+                    "error",
+                    operation_attrs(&context, json!({"error": public_error(&error)})),
+                )
+            }
         }
     }
 
@@ -340,6 +343,28 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
 
     fn publish_snapshot(&mut self, snapshot: &RuntimeSnapshot) -> Result<(), String> {
         self.vm_entities.publish_snapshot(snapshot)
+    }
+
+    fn publish_residual_project_snapshot(&mut self, name: &str, args: &Value) {
+        if !matches!(name, "runtime.ensure" | "runtime.stop" | "runtime.restart") {
+            return;
+        }
+        let Some(cwd) = args
+            .get("cwd")
+            .and_then(Value::as_str)
+            .filter(|cwd| !cwd.is_empty())
+        else {
+            return;
+        };
+        let Ok(project) = ProjectIdentity::from_path(Path::new(cwd)) else {
+            return;
+        };
+        if validate_project_id(&project, args.get("projectId").and_then(Value::as_str)).is_err() {
+            return;
+        }
+        if let Ok(snapshot) = self.service.status(&project.canonical_path) {
+            let _ = self.publish_snapshot(&snapshot);
+        }
     }
 
     fn publish_operation(
@@ -722,6 +747,36 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct FailedLifecycleService {
+        residual: RuntimeSnapshot,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RuntimeService for FailedLifecycleService {
+        fn inventory(&self) -> Result<Vec<InventoryVm>, String> {
+            Ok(self.residual.vm.clone().into_iter().collect())
+        }
+
+        fn status(&self, _cwd: &Path) -> Result<RuntimeSnapshot, String> {
+            self.calls.lock().unwrap().push("status".into());
+            Ok(self.residual.clone())
+        }
+
+        fn ensure(&self, _cwd: &Path) -> Result<RuntimeSnapshot, String> {
+            self.calls.lock().unwrap().push("ensure".into());
+            Err("synthetic rejected runtime".into())
+        }
+
+        fn stop(&self, _cwd: &Path) -> Result<RuntimeSnapshot, String> {
+            Err("unexpected stop".into())
+        }
+
+        fn restart(&self, _cwd: &Path) -> Result<RuntimeSnapshot, String> {
+            Err("unexpected restart".into())
+        }
+    }
+
     fn snapshot(root: &Path) -> RuntimeSnapshot {
         let vm_name = "synthetic-project-a1b2c3d4e5f6";
         let identity = crate::project::ProjectIdentity::from_path(root).unwrap();
@@ -747,6 +802,7 @@ mod tests {
                         repo: None,
                         git_ref: None,
                     },
+                    mounts: Vec::new(),
                 }),
             }),
             created_spec: false,
@@ -1660,6 +1716,44 @@ mod tests {
                 .to_string()
                 .contains("proxy"),
             "operation context не копирует чувствительные args/error"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dispatcher_publishes_reconciled_vm_before_lifecycle_error() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-dispatch-residual-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut residual = snapshot(&root);
+        residual.vm.as_mut().unwrap().state = "stopped".into();
+        residual.environment = None;
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let service = FailedLifecycleService {
+            residual,
+            calls: calls.clone(),
+        };
+        let host = FakeHost::default();
+        let mut dispatcher = Dispatcher::new(service, host.clone());
+
+        dispatcher
+            .process(command("runtime.ensure", &root))
+            .unwrap();
+
+        assert_eq!(*calls.lock().unwrap(), ["ensure", "status"]);
+        let publications = host.publications.lock().unwrap();
+        assert_eq!(
+            publications
+                .iter()
+                .map(|item| (item.kind.as_str(), item.state.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("operation", "started"),
+                ("vm", "stopped"),
+                ("operation", "error"),
+            ]
         );
         std::fs::remove_dir_all(root).unwrap();
     }

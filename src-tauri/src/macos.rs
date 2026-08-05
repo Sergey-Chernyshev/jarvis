@@ -62,11 +62,20 @@ fn on_main(win: &WebviewWindow, f: impl FnOnce(*mut AnyObject) + Send + 'static)
 }
 
 /// Поверх всего, на всех Spaces, над фуллскрином — но без кражи фокуса при показе.
+///
+/// Симметрична `float_normal`: снимает и то, что та выставила. Resizable в
+/// стайл-маске обязателен оконному режиму, но накладке он оставляет управляемое
+/// Mission Control окно — а такое окно AppKit держит на том Space, где его
+/// активировали, и над фуллскрином оно не встаёт. Поэтому маска возвращается
+/// к накладочной, иначе после «окно → накладка» ⌘J показывал бы панель только
+/// на исходном рабочем столе.
 pub fn float_above_everything(win: &WebviewWindow) {
     on_main(win, |w| unsafe {
         let _: () = msg_send![w, setLevel: NS_SCREEN_SAVER_WINDOW_LEVEL];
         let _: () = msg_send![w, setCollectionBehavior: COLLECTION_BEHAVIOR];
         let _: () = msg_send![w, setHidesOnDeactivate: false];
+        let mask: usize = msg_send![w, styleMask];
+        let _: () = msg_send![w, setStyleMask: mask & !(1 << 3)]; // без Resizable
     });
 }
 

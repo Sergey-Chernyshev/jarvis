@@ -61,7 +61,9 @@ fn window_theme(app: &AppHandle) -> Option<Theme> {
         .map(|d| d.settings.string("theme"))
         .unwrap_or_else(|| "light".into());
     match theme.as_str() {
-        "dark" => Some(Theme::Dark),
+        // «Полночь» — тоже тёмная: нативный материал окна должен быть тёмным,
+        // иначе за webview просвечивает светлый фон в момент показа
+        "dark" | "midnight" => Some(Theme::Dark),
         "auto" => None,
         _ => Some(Theme::Light),
     }
@@ -110,8 +112,12 @@ pub fn create_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 }
 
 /// Переключение режима на лету: окно уже создано, поэтому меняем его свойства,
-/// а не пересоздаём (иначе улетели бы открытый чат и позиция). Иконка в доке
-/// (ActivationPolicy) ставится на старте — она подхватится со следующего запуска.
+/// а не пересоздаём (иначе улетели бы открытый чат и позиция).
+///
+/// ActivationPolicy переключается здесь же: Regular-приложение управляется
+/// Mission Control и остаётся на своём Space, поэтому без этого накладка после
+/// оконного режима всплывала только на исходном рабочем столе и не вставала
+/// над чужим окном.
 pub fn apply_mode(d: &Arc<Daemon>) {
     let Some(win) = d.app.get_webview_window("main") else {
         return;
@@ -122,6 +128,7 @@ pub fn apply_mode(d: &Arc<Daemon>) {
     let _ = win.set_minimizable(window_mode);
     let _ = win.set_skip_taskbar(!window_mode);
     if window_mode {
+        let _ = d.app.set_activation_policy(tauri::ActivationPolicy::Regular);
         macos::float_normal(&win);
         let (w, h) = window_size(&d.app);
         let _ = win.set_size(tauri::LogicalSize::new(w, h));
@@ -131,6 +138,9 @@ pub fn apply_mode(d: &Arc<Daemon>) {
     } else {
         // из фуллскрина накладку не построишь — выходим до смены геометрии
         let _ = win.set_fullscreen(false);
+        // Accessory до float_above_everything: пока приложение Regular, AppKit
+        // держит окно управляемым и игнорирует CanJoinAllSpaces
+        let _ = d.app.set_activation_policy(tauri::ActivationPolicy::Accessory);
         macos::float_above_everything(&win);
         let _ = win.set_size(tauri::LogicalSize::new(PANEL_W, PANEL_H));
         position_panel(d);

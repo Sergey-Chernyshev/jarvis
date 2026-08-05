@@ -1233,10 +1233,8 @@ Set `minimumSystemVersion` to `13.0` and Tauri `bundle.macOS.files`:
 
 ```json
 {
-  "PowerHelper/app.jarvis.monitor.power-helper":
-    "Library/LaunchDaemons/app.jarvis.monitor.power-helper",
-  "PowerHelper/app.jarvis.monitor.power-helper.plist":
-    "Library/LaunchDaemons/app.jarvis.monitor.power-helper.plist"
+  "PowerHelper/app.jarvis.monitor.power-helper": "Library/LaunchDaemons/app.jarvis.monitor.power-helper",
+  "PowerHelper/app.jarvis.monitor.power-helper.plist": "Library/LaunchDaemons/app.jarvis.monitor.power-helper.plist"
 }
 ```
 

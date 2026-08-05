@@ -20,14 +20,16 @@
     "rollbackCompatibleThrough": 1
   },
   "contributes": {
-    "pages": [{
-      "id": "home",
-      "title": "Home",
-      "entry": "ui/index.html",
-      "placements": ["sidebar"],
-      "instancePolicy": "singleton",
-      "paramsSchema": "schemas/message.schema.json"
-    }],
+    "pages": [
+      {
+        "id": "home",
+        "title": "Home",
+        "entry": "ui/index.html",
+        "placements": ["sidebar"],
+        "instancePolicy": "singleton",
+        "paramsSchema": "schemas/message.schema.json"
+      }
+    ],
     "commands": [],
     "actions": [],
     "hotkeys": [],

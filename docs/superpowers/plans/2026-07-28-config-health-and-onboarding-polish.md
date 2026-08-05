@@ -13,6 +13,7 @@
 ## Task 1: Чистая валидация и исправление JSON
 
 **Files:**
+
 - Create: `src-tauri/src/config_health.rs`
 - Modify: `src-tauri/src/main.rs`
 - Modify: `src-tauri/src/settings.rs`
@@ -27,6 +28,7 @@
 ## Task 2: Безопасная файловая операция в Store
 
 **Files:**
+
 - Modify: `src-tauri/src/settings.rs`
 
 1. Добавить тесты: backup байт-в-байт совпадает с исходником, неизвестные поля остаются, повреждённый JSON восстанавливается, итоговый файл и backup имеют `0600`.
@@ -38,6 +40,7 @@
 ## Task 3: Единое обнаружение CLI и честные ошибки
 
 **Files:**
+
 - Modify: `src-tauri/src/install/mod.rs`
 - Modify: `src-tauri/src/backend/codex.rs`
 - Modify: `src-tauri/src/claude_bin.rs`
@@ -52,6 +55,7 @@
 ## Task 4: Headless smoke и startup config recovery
 
 **Files:**
+
 - Modify: `src-tauri/src/main.rs`
 - Modify: `src-tauri/src/onboarding.rs`
 - Modify: `src-tauri/src/ipc.rs`
@@ -65,6 +69,7 @@
 ## Task 5: UI config recovery и основной баннер
 
 **Files:**
+
 - Modify: `ui/bridge.js`
 - Modify: `ui/onboarding-state.js`
 - Modify: `ui/onboarding-state.test.mjs`
@@ -82,6 +87,7 @@
 ## Task 6: Полный визуальный polish onboarding
 
 **Files:**
+
 - Modify: `ui/onboarding.html`
 - Modify: `ui/onboarding.js`
 - Modify: `src-tauri/src/windows.rs`

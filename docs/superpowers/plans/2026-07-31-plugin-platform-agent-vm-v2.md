@@ -13,16 +13,16 @@
 
 ## Delivery map
 
-| Order | Detailed plan | Independently testable result |
-|---|---|---|
-| 0 | `docs/superpowers/plans/2026-07-31-host-power-exit-safety.md` | GUI, headless and SIGTERM shutdown release keep-awake/clamshell; crash recovery has a renewable watchdog lease |
-| A | `docs/superpowers/plans/2026-08-01-plugin-package-contracts.md` | Manifest v2, deterministic package, signed catalog, receipts, Developer Mode and install/update/rollback CLI |
-| B | `docs/superpowers/plans/2026-08-01-plugin-ui-and-broker.md` | Isolated multi-page child WebViews, Bridge v1, extension points, typed settings, durable Data Broker and trusted-Core per-row projection receipts |
-| C | `docs/superpowers/plans/2026-08-01-project-runtime-core.md` | Provider-neutral Project/CatalogPreferences/Runtime/Session/Turn/ChangeSet schemas, mixed-source-safe snapshots, generic Projects UI and legacy ID aliases |
-| D | `docs/superpowers/plans/2026-08-01-agent-vm-controller-cli.md` | launchd controller, private protocol, guest supervisor/journal, multi-session CLI and safe lifecycle |
-| E | `docs/superpowers/plans/2026-08-01-agent-vm-plugin-migration.md` | Independently installed Agent VM pages/actions, pinned provider, current-data importer and bundled-install removal |
-| F | `docs/superpowers/plans/2026-08-01-agent-vm-memory-mounts-notifications.md` | Per-Turn memory snapshots, initial multi-mount grants, credential leases, resource budgets and durable notification dedupe |
-| G | `docs/superpowers/plans/2026-08-01-plugin-platform-release.md` | Migration rehearsal, negative security suites, live macOS smoke, docs and release/rollback evidence |
+| Order | Detailed plan                                                               | Independently testable result                                                                                                                              |
+| ----- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0     | `docs/superpowers/plans/2026-07-31-host-power-exit-safety.md`               | GUI, headless and SIGTERM shutdown release keep-awake/clamshell; crash recovery has a renewable watchdog lease                                             |
+| A     | `docs/superpowers/plans/2026-08-01-plugin-package-contracts.md`             | Manifest v2, deterministic package, signed catalog, receipts, Developer Mode and install/update/rollback CLI                                               |
+| B     | `docs/superpowers/plans/2026-08-01-plugin-ui-and-broker.md`                 | Isolated multi-page child WebViews, Bridge v1, extension points, typed settings, durable Data Broker and trusted-Core per-row projection receipts          |
+| C     | `docs/superpowers/plans/2026-08-01-project-runtime-core.md`                 | Provider-neutral Project/CatalogPreferences/Runtime/Session/Turn/ChangeSet schemas, mixed-source-safe snapshots, generic Projects UI and legacy ID aliases |
+| D     | `docs/superpowers/plans/2026-08-01-agent-vm-controller-cli.md`              | launchd controller, private protocol, guest supervisor/journal, multi-session CLI and safe lifecycle                                                       |
+| E     | `docs/superpowers/plans/2026-08-01-agent-vm-plugin-migration.md`            | Independently installed Agent VM pages/actions, pinned provider, current-data importer and bundled-install removal                                         |
+| F     | `docs/superpowers/plans/2026-08-01-agent-vm-memory-mounts-notifications.md` | Per-Turn memory snapshots, initial multi-mount grants, credential leases, resource budgets and durable notification dedupe                                 |
+| G     | `docs/superpowers/plans/2026-08-01-plugin-platform-release.md`              | Migration rehearsal, negative security suites, live macOS smoke, docs and release/rollback evidence                                                        |
 
 Each detailed plan is written and self-reviewed immediately before its code
 increment starts. A later increment may depend only on a committed public
@@ -36,17 +36,17 @@ contract from an earlier row, never on an internal module.
 - [ ] Verified native code is approved per exact digest and is described as trusted user-level code, not an OS sandbox.
 - [ ] Shared entities/events/commands flow through Core Broker with subject- and field-scoped grants.
 - [ ] Increment B is committed and green before C code: B alone allocates
-  `brokerRevision` and atomically stores query-invisible host receipts for every
-  trusted-Core row it projects.
+      `brokerRevision` and atomically stores query-invisible host receipts for every
+      trusted-Core row it projects.
 - [ ] `CatalogProjectionReceipt` is host-only Broker evidence, never a public
-  plugin contract/schema/TypeScript export.
+      plugin contract/schema/TypeScript export.
 - [ ] Every Catalog-derived Project row validates against its own immutable
-  receipt; the snapshot checkpoint identifies the latest applicable
-  CatalogPreferences receipt. A preferences-only or single-Project mutation
-  never requires untouched Projects to claim the latest source revision.
+      receipt; the snapshot checkpoint identifies the latest applicable
+      CatalogPreferences receipt. A preferences-only or single-Project mutation
+      never requires untouched Projects to claim the latest source revision.
 - [ ] Core Project UI and the headless/CLI port serialize one byte-identical
-  Broker snapshot and read only core-owned Project/CatalogPreferences/Runtime/
-  Session/Turn/ChangeSet envelopes.
+      Broker snapshot and read only core-owned Project/CatalogPreferences/Runtime/
+      Session/Turn/ChangeSet envelopes.
 - [ ] Agent VM has exactly one fenced controller writer per profile and one supervisor-owned PTY per Session.
 - [ ] Normal Jarvis close does not stop Agent VM sessions; plugin disable/uninstall does stop live mounts and scrubs provisioned credentials before succeeding.
 - [ ] Upstream artifacts are pinned by tag, commit and SHA-256; `latest` and `avm --version=dev` are never trusted as provenance.

@@ -68,7 +68,7 @@ content-type: application/json
 Successful response:
 
 ```json
-{"ok":true,"protocolVersion":1,"pluginId":"agent-vm"}
+{ "ok": true, "protocolVersion": 1, "pluginId": "agent-vm" }
 ```
 
 Core-to-plugin event poll:

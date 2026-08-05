@@ -10,7 +10,8 @@ import type {
 
 export const contractRef: ContractRef = {
   id: "dev.example/runtime",
-  schemaDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  schemaDigest:
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   version: "1.2.3-alpha.1+build.7",
 };
 

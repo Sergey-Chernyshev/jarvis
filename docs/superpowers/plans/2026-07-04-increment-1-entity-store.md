@@ -25,6 +25,7 @@
 ### Task 1: Модуль `entities.rs` — типы, store, pure-логика publish
 
 **Files:**
+
 - Create: `src-tauri/src/entities.rs`
 - Modify: `src-tauri/src/main.rs` (одна строка `mod entities;`)
 
@@ -359,6 +360,7 @@ git commit -m "feat(plugins): EntityStore — реестр сущностей я
 ### Task 2: Гейт инжектит личность вызывающего (`_consumer`)
 
 **Files:**
+
 - Modify: `src-tauri/src/capability/gate.rs`
 
 Хендлеры capability получают `(ctx, args)` без потребителя. Для ownership-логики
@@ -491,6 +493,7 @@ git commit -m "feat(capability): гейт инжектит _consumer в args —
 ### Task 3: Capability-фасад `entities.publish` / `entities.query` + поле в Daemon
 
 **Files:**
+
 - Create: `src-tauri/src/capability/native/entities_cap.rs`
 - Modify: `src-tauri/src/capability/native/mod.rs`
 - Modify: `src-tauri/src/daemon.rs` (поле + инициализация)
@@ -624,6 +627,7 @@ Expected: тесты PASS. Если clippy падает на НЕ тронуты
 - [ ] **Step 2: Проверить, что публичный контракт соответствует спеке §6.4**
 
 Чек-лист (глазами, без кода):
+
 - `entities.publish` пишет только под owner'ом вызывающего плагина — да (apply_publish).
 - Панель видит все сущности (`Consumer::panel` имеет Read без denylist) — да.
 - `stale` при остановке владельца — метод `mark_stale` готов, вызов добавит PluginHost

@@ -27,25 +27,25 @@ hatch, но для обычной работы не нужен.
 
 ### 1.1 Зафиксированные продуктовые решения
 
-| Область | Решение v1 |
-|---|---|
-| Workspace | Весь каталог проекта монтируется в VM через штатный mount mode `agent-vm` |
-| Доступ к проекту | Только `read-write`, как уже умеет `agent-vm`; `read-only` не показываем и не эмулируем |
-| Изменения в `agent-vm` | Не требуются |
-| Запуск | Ленивый: VM поднимается при первом сообщении или явном «Запустить» |
-| Запуск вместе с Jarvis | Только для проектов, которые пользователь закрепил для автозапуска |
-| Агент | Один постоянный интерактивный Claude/Codex process на project + backend |
-| Терминал | Реальный terminal viewport в Jarvis с reconnect; также даём `avm shell <vm>` |
-| Конфиги | Claude и Codex зеркалируются автоматически по явному allowlist |
-| Секреты | Не синхронизируются как обычные файлы; доставляются адресно, без аргументов команд и логов |
-| Главная страница | Активные VM видны отдельной компактной полосой и на карточках сессий |
-| Уведомления | Готовность/ошибка VM, ожидание ответа, завершение агента, аварийная остановка |
-| UI | Полноценный project workspace, а не набор технических кнопок плагина |
-| Каталог проектов | Любую существующую папку можно добавить системным folder picker |
-| Поиск | По имени проекта и каноническому пути, без transcript/chat metadata |
-| Избранное | Звезда закрепляет проект; порядок меняется вручную вверх/вниз |
-| Представление | Переключаемые компактный список и почти квадратные карточки |
-| Runtime status | Большая плашка видна только во время запуска/retry/ошибки |
+| Область                | Решение v1                                                                                 |
+| ---------------------- | ------------------------------------------------------------------------------------------ |
+| Workspace              | Весь каталог проекта монтируется в VM через штатный mount mode `agent-vm`                  |
+| Доступ к проекту       | Только `read-write`, как уже умеет `agent-vm`; `read-only` не показываем и не эмулируем    |
+| Изменения в `agent-vm` | Не требуются                                                                               |
+| Запуск                 | Ленивый: VM поднимается при первом сообщении или явном «Запустить»                         |
+| Запуск вместе с Jarvis | Только для проектов, которые пользователь закрепил для автозапуска                         |
+| Агент                  | Один постоянный интерактивный Claude/Codex process на project + backend                    |
+| Терминал               | Реальный terminal viewport в Jarvis с reconnect; также даём `avm shell <vm>`               |
+| Конфиги                | Claude и Codex зеркалируются автоматически по явному allowlist                             |
+| Секреты                | Не синхронизируются как обычные файлы; доставляются адресно, без аргументов команд и логов |
+| Главная страница       | Активные VM видны отдельной компактной полосой и на карточках сессий                       |
+| Уведомления            | Готовность/ошибка VM, ожидание ответа, завершение агента, аварийная остановка              |
+| UI                     | Полноценный project workspace, а не набор технических кнопок плагина                       |
+| Каталог проектов       | Любую существующую папку можно добавить системным folder picker                            |
+| Поиск                  | По имени проекта и каноническому пути, без transcript/chat metadata                        |
+| Избранное              | Звезда закрепляет проект; порядок меняется вручную вверх/вниз                              |
+| Представление          | Переключаемые компактный список и почти квадратные карточки                                |
+| Runtime status         | Большая плашка видна только во время запуска/retry/ошибки                                  |
 
 ## 2. Почему старая спека меняется
 
@@ -340,11 +340,13 @@ ready/working → disconnected → ready/working
 ```json
 {
   "projectManager": {
-    "folders": [{
-      "projectId": "project-…",
-      "project": "jarvis",
-      "cwd": "/canonical/path/jarvis"
-    }],
+    "folders": [
+      {
+        "projectId": "project-…",
+        "project": "jarvis",
+        "cwd": "/canonical/path/jarvis"
+      }
+    ],
     "favoriteProjectIds": ["project-…"],
     "view": "list"
   }
@@ -382,6 +384,7 @@ ready/working → disconnected → ready/working
 
    Существующий файл никогда не перезаписывается. UI сообщает, что новый
    project config добавлен в рабочее дерево.
+
 4. Jarvis вызывает `avm create <cwd>`.
 5. Project view остаётся доступным и показывает живые этапы provisioning.
 6. После `VM ready` выполняются ConfigMirror и GuestBootstrap.
@@ -397,8 +400,8 @@ ready/working → disconnected → ready/working
    разрешённые файлы.
 3. Если terminal session уже жива, Jarvis подключается к ней без bootstrap и
    без запуска нового Claude/Codex.
-3. Новый run создаётся либо существующий продолжается по backend session ID.
-4. VM уже `ready` — сообщение уходит без отдельного подтверждения.
+4. Новый run создаётся либо существующий продолжается по backend session ID.
+5. VM уже `ready` — сообщение уходит без отдельного подтверждения.
 
 ### 8.3 Сообщение во время работы
 
@@ -457,11 +460,11 @@ Jarvis доверяет проекту только после явного за
 
 User-scoped snapshot:
 
-| Backend | Переносим | Не переносим |
-|---|---|---|
-| Claude | `~/.claude/settings.json`, `~/.claude/CLAUDE.md`, `agents/`, `commands/`, `skills/`, project-scoped `projects/<host-cwd>/memory/`, декларативный список plugins | session JSONL, tool-results, transcripts, history, debug, cache, file-history, весь `~/.claude.json` |
-| Codex | `~/.codex/config.toml`, `~/.codex/AGENTS.md`, `skills/` | sessions/rollouts, logs, cache, временные файлы |
-| Git | `.gitconfig` через штатную sanitization agent-vm | credential helpers, stored credentials, private SSH keys |
+| Backend | Переносим                                                                                                                                                       | Не переносим                                                                                         |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Claude  | `~/.claude/settings.json`, `~/.claude/CLAUDE.md`, `agents/`, `commands/`, `skills/`, project-scoped `projects/<host-cwd>/memory/`, декларативный список plugins | session JSONL, tool-results, transcripts, history, debug, cache, file-history, весь `~/.claude.json` |
+| Codex   | `~/.codex/config.toml`, `~/.codex/AGENTS.md`, `skills/`                                                                                                         | sessions/rollouts, logs, cache, временные файлы                                                      |
+| Git     | `.gitconfig` через штатную sanitization agent-vm                                                                                                                | credential helpers, stored credentials, private SSH keys                                             |
 
 Из `~/.claude.json` разрешается извлечь только user-scoped `mcpServers`.
 Файл целиком не копируется: он смешивает OAuth, project trust и caches.
@@ -678,16 +681,16 @@ Environment popover:
 
 ### 12.1 События
 
-| Событие | Inline | System toast | TTS |
-|---|---:|---:|---:|
-| Provisioning начался | Да | Нет | Нет |
-| VM готова | Да | Да, если project не открыт | По настройке |
-| VM start/restart failed | Да | Да | Коротко |
-| Агент начал turn | Да | Нет | Нет |
-| Агент ждёт ответа | Да | Да | По существующей настройке |
-| Агент закончил | Да | Да, если chat не открыт | По существующей настройке |
-| Агент/VM аварийно завершился | Да | Да | Да |
-| Обычная ручная остановка | Да | Нет | Нет |
+| Событие                      | Inline |               System toast |                       TTS |
+| ---------------------------- | -----: | -------------------------: | ------------------------: |
+| Provisioning начался         |     Да |                        Нет |                       Нет |
+| VM готова                    |     Да | Да, если project не открыт |              По настройке |
+| VM start/restart failed      |     Да |                         Да |                   Коротко |
+| Агент начал turn             |     Да |                        Нет |                       Нет |
+| Агент ждёт ответа            |     Да |                         Да | По существующей настройке |
+| Агент закончил               |     Да |    Да, если chat не открыт | По существующей настройке |
+| Агент/VM аварийно завершился |     Да |                         Да |                        Да |
+| Обычная ручная остановка     |     Да |                        Нет |                       Нет |
 
 Toast ведёт прямо в project/run, а не просто открывает главную панель.
 
@@ -711,19 +714,19 @@ coalescing voice queue.
 
 ## 14. Ошибки и восстановление
 
-| Ошибка | Поведение |
-|---|---|
-| `avm`/Lima не установлен | Setup card с диагностикой и явной установкой, без бесконечного spinner |
-| `.agent-vm.yaml` невалиден | Показываем parser error и открываем файл; не перезаписываем |
-| Record orphaned | Объясняем `recreate`/`prune`; автоматического destructive выбора нет |
-| VM не стартует | Entity `error`, безопасный stderr tail, Retry |
-| Config несовместим с Linux | Остальной snapshot применяется, конкретный item получает warning |
-| Auth отсутствует/просрочен | Run не стартует; focused auth card, остальные VM-функции работают |
-| JSONL line битая | Логируем sanitized sample/hash, поток продолжается |
-| CLI event schema изменилась | `backend.unmapped`; result/exit остаются видимы; incompatible после порога ошибок |
-| Plugin упал | PluginHost restart backoff, entities stale, UI показывает reconnecting |
-| Jarvis закрылся во время turn | Journal сохранён, turn `interrupted`, доступен Resume |
-| Project path исчез | Runtime не запускается; Record не удаляется |
+| Ошибка                        | Поведение                                                                         |
+| ----------------------------- | --------------------------------------------------------------------------------- |
+| `avm`/Lima не установлен      | Setup card с диагностикой и явной установкой, без бесконечного spinner            |
+| `.agent-vm.yaml` невалиден    | Показываем parser error и открываем файл; не перезаписываем                       |
+| Record orphaned               | Объясняем `recreate`/`prune`; автоматического destructive выбора нет              |
+| VM не стартует                | Entity `error`, безопасный stderr tail, Retry                                     |
+| Config несовместим с Linux    | Остальной snapshot применяется, конкретный item получает warning                  |
+| Auth отсутствует/просрочен    | Run не стартует; focused auth card, остальные VM-функции работают                 |
+| JSONL line битая              | Логируем sanitized sample/hash, поток продолжается                                |
+| CLI event schema изменилась   | `backend.unmapped`; result/exit остаются видимы; incompatible после порога ошибок |
+| Plugin упал                   | PluginHost restart backoff, entities stale, UI показывает reconnecting            |
+| Jarvis закрылся во время turn | Journal сохранён, turn `interrupted`, доступен Resume                             |
+| Project path исчез            | Runtime не запускается; Record не удаляется                                       |
 
 ## 15. Безопасность
 
@@ -760,13 +763,15 @@ coalescing voice queue.
 {
   "id": "agent-vm",
   "protocolVersion": 1,
-  "projectRuntimes": [{
-    "id": "vm",
-    "title": "Agent VM",
-    "agents": ["claude", "codex"],
-    "workspace": "host-mount-rw",
-    "supports": ["terminal", "reconnect", "input", "files", "shell-command"]
-  }]
+  "projectRuntimes": [
+    {
+      "id": "vm",
+      "title": "Agent VM",
+      "agents": ["claude", "codex"],
+      "workspace": "host-mount-rw",
+      "supports": ["terminal", "reconnect", "input", "files", "shell-command"]
+    }
+  ]
 }
 ```
 

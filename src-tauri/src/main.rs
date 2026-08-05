@@ -195,11 +195,18 @@ fn main() {
                 crate::log::line(&format!("[plugins] Agent VM install skipped: {err}"));
             }
 
-            // чистое меню-бар приложение: без иконки в доке
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-
             let d = Arc::new(Daemon::new(app.handle().clone()));
             app.manage(d.clone());
+
+            // Накладка ⌘J — чистое меню-бар приложение без иконки в доке.
+            // Оконный режим (макет 14h) — обычное приложение: док, ⌘Tab, меню.
+            // Политика ставится один раз на старте; смена режима на лету
+            // перестраивает окно сразу, а иконку в доке — со следующего запуска.
+            app.set_activation_policy(if d.settings.string("mode") == "window" {
+                tauri::ActivationPolicy::Regular
+            } else {
+                tauri::ActivationPolicy::Accessory
+            });
             shutdown::install(app.handle().clone());
 
             // Конфиг служебного LLM («Под капотом»: Claude/Codex + модель) — из
@@ -316,7 +323,11 @@ fn main() {
                 // один кадр. Гасим только если фокус реально ушёл из приложения и
                 // не вернулся за 120 мс — иначе панель моргала бы на каждой стрелке.
                 tauri::WindowEvent::Focused(false) => {
-                    if project_folder_picker::is_active() {
+                    // обычное окно не исчезает от клика мимо — это поведение накладки;
+                    // системный folder picker тоже забирает фокус, но панель нужна дальше
+                    if windows::is_window_mode(window.app_handle())
+                        || project_folder_picker::is_active()
+                    {
                         return;
                     }
                     let w = window.clone();
@@ -339,6 +350,16 @@ fn main() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 let d = Daemon::get(app);
+                // размер окна снимаем до cleanup: внутри него write_state_now уже
+                // сбрасывает реестр на диск, после него правка настроек потерялась бы
+                if let Some(w) = app.get_webview_window("main") {
+                    if let (Ok(sz), Ok(sf)) = (w.inner_size(), w.scale_factor()) {
+                        let l = sz.to_logical::<f64>(sf);
+                        windows::remember_window_size(&d, l.width, l.height);
+                    }
+                }
+                // дальше порядком владеет cleanup: power освобождается до
+                // потенциально блокирующих disposals сайдкаров
                 let report = shutdown::cleanup(&d);
                 if !report.complete() {
                     crate::log::line(&format!(

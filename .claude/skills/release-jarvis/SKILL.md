@@ -93,6 +93,7 @@ Apple Developer) + артефакты авто-апдейтера и созда�
 
 `tauri-apps/tauri-action` с `releaseDraft: true`, `includeUpdaterJson: true`,
 `createUpdaterArtifacts: true`:
+
 - собирает `jarvis` (фичи `wakeword-ort,whisper-native,stt-vad`),
 - ad-hoc подписывает `.app` (без Apple/нотаризации), пакует `.dmg`,
 - генерит `latest.json` (для авто-апдейтера) с подписью,
@@ -111,6 +112,7 @@ Apple Developer) + артефакты авто-апдейтера и созда�
 ## Политика версий и совместимости
 
 См. `docs/release/versioning-and-migration.md` (полная политика). Кратко:
+
 - **Semver:** patch — фиксы; minor — фичи; major — ломающие изменения.
 - **Данные пользователя в `~/.jarvis/`** (вне бандла) — апдейт их НЕ трогает.
   НИКОГДА не хранить пользовательские данные внутри `.app`.

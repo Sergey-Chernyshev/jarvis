@@ -6,19 +6,25 @@
  */
 (function agentVmModule(root, factory) {
   const api = factory();
-  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.JarvisAgentVm = api;
-})(typeof window !== 'undefined' ? window : globalThis, () => {
-  const OWNER = 'plugin:agent-vm';
-  const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'waiting']);
+})(typeof window !== "undefined" ? window : globalThis, () => {
+  const OWNER = "plugin:agent-vm";
+  const TERMINAL_STATES = new Set([
+    "completed",
+    "failed",
+    "cancelled",
+    "interrupted",
+    "waiting",
+  ]);
   const ACTIVE_VM_STATES = new Set([
-    'provisioning',
-    'creating',
-    'starting',
-    'running',
-    'ready',
-    'working',
-    'error',
+    "provisioning",
+    "creating",
+    "starting",
+    "running",
+    "ready",
+    "working",
+    "error",
   ]);
   const ACTIVE_RANK = {
     waiting: 0,
@@ -29,13 +35,14 @@
     ready: 5,
   };
 
-  const asString = (value) => (typeof value === 'string' ? value : '');
+  const asString = (value) => (typeof value === "string" ? value : "");
   const asObject = (value) =>
-    value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    value && typeof value === "object" && !Array.isArray(value) ? value : {};
 
   function owned(entities, kind) {
-    return (Array.isArray(entities) ? entities : [])
-      .filter((entity) => entity && entity.owner === OWNER && entity.kind === kind);
+    return (Array.isArray(entities) ? entities : []).filter(
+      (entity) => entity && entity.owner === OWNER && entity.kind === kind,
+    );
   }
 
   function entityTime(entity) {
@@ -53,71 +60,83 @@
       const key = projectKey(entity);
       if (!key) continue;
       const current = out.get(key);
-      if (!current || entityTime(entity) >= entityTime(current)) out.set(key, entity);
+      if (!current || entityTime(entity) >= entityTime(current))
+        out.set(key, entity);
     }
     return out;
   }
 
   function runSummary(entity) {
-    if (!entity) return '';
+    if (!entity) return "";
     const attrs = asObject(entity.attrs);
     const latest = asObject(attrs.latestEvent);
     const payload = asObject(latest.payload);
     return (
-      asString(payload.text)
-      || asString(payload.detail)
-      || asString(payload.relativePath)
-      || (entity.state === 'waiting' ? 'Ждёт ответа' : '')
-      || (entity.state === 'working' ? 'Агент работает' : '')
-      || (entity.state === 'completed' ? 'Последний запуск завершён' : '')
+      asString(payload.text) ||
+      asString(payload.detail) ||
+      asString(payload.relativePath) ||
+      (entity.state === "waiting" ? "Ждёт ответа" : "") ||
+      (entity.state === "working" ? "Агент работает" : "") ||
+      (entity.state === "completed" ? "Последний запуск завершён" : "")
     );
   }
 
   function continuationRunId(run, backend, selectedRunId) {
-    if (!run || !['starting', 'working', 'waiting'].includes(run.state)
-      && !asString(asObject(run.attrs).backendSessionId)) {
-      return '';
+    if (
+      !run ||
+      (!["starting", "working", "waiting"].includes(run.state) &&
+        !asString(asObject(run.attrs).backendSessionId))
+    ) {
+      return "";
     }
     const attrs = asObject(run.attrs);
     const runId = asString(selectedRunId);
-    if (!runId || asString(attrs.runId) !== runId || asString(attrs.backend) !== backend) {
-      return '';
+    if (
+      !runId ||
+      asString(attrs.runId) !== runId ||
+      asString(attrs.backend) !== backend
+    ) {
+      return "";
     }
     return runId;
   }
 
   function configuredBackends(vm) {
-    if (!vm) return ['claude', 'codex'];
+    if (!vm) return ["claude", "codex"];
     const attrs = asObject(vm.attrs);
-    if (asString(attrs.management) === 'missing') {
-      return ['claude', 'codex'];
+    if (asString(attrs.management) === "missing") {
+      return ["claude", "codex"];
     }
-    if (!Object.prototype.hasOwnProperty.call(attrs, 'modules')) {
-      return ['claude', 'codex'];
+    if (!Object.prototype.hasOwnProperty.call(attrs, "modules")) {
+      return ["claude", "codex"];
     }
     const modules = Array.isArray(attrs.modules) ? attrs.modules : [];
-    return ['claude', 'codex'].filter((backend) => modules.includes(backend));
+    return ["claude", "codex"].filter((backend) => modules.includes(backend));
   }
 
   function backendAvailable(vm, backend) {
     return configuredBackends(vm).includes(backend);
   }
 
-  function selectBackend(vm, requested = 'claude') {
+  function selectBackend(vm, requested = "claude") {
     const configured = configuredBackends(vm);
-    return configured.includes(requested) ? requested : configured[0] || requested;
+    return configured.includes(requested)
+      ? requested
+      : configured[0] || requested;
   }
 
   function ephemeralHistoryCwd(cwd) {
     const path = asString(cwd);
-    return /^(?:\/private)?\/tmp(?:\/|$)/.test(path)
-      || /^\/var\/folders(?:\/|$)/.test(path)
-      || /^\/Users\/[^/]+$/.test(path)
-      || /\/\.jarvis-dev(?:\/|$)/.test(path);
+    return (
+      /^(?:\/private)?\/tmp(?:\/|$)/.test(path) ||
+      /^\/var\/folders(?:\/|$)/.test(path) ||
+      /^\/Users\/[^/]+$/.test(path) ||
+      /\/\.jarvis-dev(?:\/|$)/.test(path)
+    );
   }
 
   function displayProjectPath(cwd) {
-    return asString(cwd).replace(/^\/Users\/[^/]+(?=\/|$)/, '~');
+    return asString(cwd).replace(/^\/Users\/[^/]+(?=\/|$)/, "~");
   }
 
   function deriveProjects(history, entities) {
@@ -128,61 +147,73 @@
       byCwd.set(cwd, {
         key: cwd,
         cwd,
-        name: asString(group.project) || cwd.split('/').filter(Boolean).at(-1) || cwd,
-        projectId: '',
+        name:
+          asString(group.project) ||
+          cwd.split("/").filter(Boolean).at(-1) ||
+          cwd,
+        projectId: "",
         history: group,
         vm: null,
         run: null,
-        summary: '',
+        summary: "",
         updatedAt: Number(group.lastAt) || 0,
       });
     }
 
-    for (const entity of owned(entities, 'vm')) {
+    for (const entity of owned(entities, "vm")) {
       const attrs = asObject(entity.attrs);
       const cwd = asString(attrs.cwd);
       if (!cwd) continue;
       const item = byCwd.get(cwd) || {
         key: cwd,
         cwd,
-        name: asString(attrs.project) || cwd.split('/').filter(Boolean).at(-1) || cwd,
-        projectId: '',
+        name:
+          asString(attrs.project) ||
+          cwd.split("/").filter(Boolean).at(-1) ||
+          cwd,
+        projectId: "",
         history: null,
         vm: null,
         run: null,
-        summary: '',
+        summary: "",
         updatedAt: 0,
       };
-      if (!item.vm || entityTime(entity) >= entityTime(item.vm)) item.vm = entity;
+      if (!item.vm || entityTime(entity) >= entityTime(item.vm))
+        item.vm = entity;
       item.projectId = asString(attrs.projectId) || item.projectId;
       item.updatedAt = Math.max(item.updatedAt, entityTime(entity));
       byCwd.set(cwd, item);
     }
 
-    for (const entity of owned(entities, 'agent_run')) {
+    for (const entity of owned(entities, "agent_run")) {
       const attrs = asObject(entity.attrs);
       const cwd = asString(attrs.cwd);
       if (!cwd) continue;
       const item = byCwd.get(cwd) || {
         key: cwd,
         cwd,
-        name: asString(attrs.project) || cwd.split('/').filter(Boolean).at(-1) || cwd,
-        projectId: '',
+        name:
+          asString(attrs.project) ||
+          cwd.split("/").filter(Boolean).at(-1) ||
+          cwd,
+        projectId: "",
         history: null,
         vm: null,
         run: null,
-        summary: '',
+        summary: "",
         updatedAt: 0,
       };
-      if (!item.run || entityTime(entity) >= entityTime(item.run)) item.run = entity;
+      if (!item.run || entityTime(entity) >= entityTime(item.run))
+        item.run = entity;
       item.projectId = asString(attrs.projectId) || item.projectId;
       item.updatedAt = Math.max(item.updatedAt, entityTime(entity));
       item.summary = runSummary(item.run);
       byCwd.set(cwd, item);
     }
 
-    return [...byCwd.values()].sort((a, b) =>
-      b.updatedAt - a.updatedAt || a.name.localeCompare(b.name));
+    return [...byCwd.values()].sort(
+      (a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name),
+    );
   }
 
   function mergeProjectCatalog(projects, state) {
@@ -193,7 +224,9 @@
       if (!cwd) continue;
       byCwd.set(cwd, { ...project });
     }
-    for (const rawFolder of Array.isArray(manager.folders) ? manager.folders : []) {
+    for (const rawFolder of Array.isArray(manager.folders)
+      ? manager.folders
+      : []) {
       const folder = asObject(rawFolder);
       const cwd = asString(folder.cwd);
       if (!cwd) continue;
@@ -205,12 +238,15 @@
         byCwd.set(cwd, {
           key: cwd,
           cwd,
-          name: asString(folder.project) || cwd.split('/').filter(Boolean).at(-1) || cwd,
+          name:
+            asString(folder.project) ||
+            cwd.split("/").filter(Boolean).at(-1) ||
+            cwd,
           projectId: asString(folder.projectId),
           history: null,
           vm: null,
           run: null,
-          summary: '',
+          summary: "",
           updatedAt: 0,
           catalogFolder: folder,
         });
@@ -219,7 +255,8 @@
 
     const favorites = new Map();
     for (const projectId of Array.isArray(manager.favoriteProjectIds)
-      ? manager.favoriteProjectIds : []) {
+      ? manager.favoriteProjectIds
+      : []) {
       const id = asString(projectId);
       if (id && !favorites.has(id)) favorites.set(id, favorites.size);
     }
@@ -233,8 +270,10 @@
         const rightFavorite = right.favoriteIndex >= 0;
         if (leftFavorite !== rightFavorite) return leftFavorite ? -1 : 1;
         if (leftFavorite) return left.favoriteIndex - right.favoriteIndex;
-        return Number(right.updatedAt) - Number(left.updatedAt)
-          || asString(left.name).localeCompare(asString(right.name));
+        return (
+          Number(right.updatedAt) - Number(left.updatedAt) ||
+          asString(left.name).localeCompare(asString(right.name))
+        );
       });
   }
 
@@ -244,22 +283,25 @@
     return (Array.isArray(projects) ? projects : []).filter((project) =>
       `${asString(project && project.name)} ${asString(project && project.cwd)}`
         .toLocaleLowerCase()
-        .includes(normalized));
+        .includes(normalized),
+    );
   }
 
   function projectPrimaryTarget(project) {
-    return asObject(project).history ? 'history' : 'agentvm';
+    return asObject(project).history ? "history" : "agentvm";
   }
 
   function filterCommands(commands, input, limit = 12) {
     const value = asString(input);
-    if (!value.startsWith('/') || /\s/.test(value.slice(1))) return [];
+    if (!value.startsWith("/") || /\s/.test(value.slice(1))) return [];
     const query = value.slice(1).toLocaleLowerCase();
     const boundedLimit = Math.max(1, Math.min(50, Number(limit) || 12));
     return (Array.isArray(commands) ? commands : [])
-      .filter((command) => asString(command && command.name)
-        .toLocaleLowerCase()
-        .includes(query))
+      .filter((command) =>
+        asString(command && command.name)
+          .toLocaleLowerCase()
+          .includes(query),
+      )
       .sort((left, right) => {
         const leftName = asString(left && left.name).toLocaleLowerCase();
         const rightName = asString(right && right.name).toLocaleLowerCase();
@@ -278,130 +320,142 @@
       const value = asString(path).trim();
       if (value) parts.push(value);
     }
-    return parts.join('\n');
+    return parts.join("\n");
   }
 
   function environmentState(vmEntity, runEntity) {
-    if (runEntity && !runEntity.stale
-      && ['failed', 'error', 'interrupted'].includes(runEntity.state)) return 'error';
-    if (vmEntity && vmEntity.stale) return 'reconnecting';
-    const state = vmEntity ? vmEntity.state : 'absent';
-    if (['provisioning', 'creating', 'starting'].includes(state)) return 'starting';
-    if (state === 'error') return 'error';
-    if (!['running', 'ready', 'working'].includes(state)) {
-      return runEntity && !runEntity.stale
-        && ['starting', 'working', 'waiting'].includes(runEntity.state)
-        ? 'starting'
-        : 'off';
+    if (
+      runEntity &&
+      !runEntity.stale &&
+      ["failed", "error", "interrupted"].includes(runEntity.state)
+    )
+      return "error";
+    if (vmEntity && vmEntity.stale) return "reconnecting";
+    const state = vmEntity ? vmEntity.state : "absent";
+    if (["provisioning", "creating", "starting"].includes(state))
+      return "starting";
+    if (state === "error") return "error";
+    if (!["running", "ready", "working"].includes(state)) {
+      return runEntity &&
+        !runEntity.stale &&
+        ["starting", "working", "waiting"].includes(runEntity.state)
+        ? "starting"
+        : "off";
     }
     if (runEntity && !runEntity.stale) {
-      if (runEntity.state === 'waiting') return 'waiting';
-      if (['starting', 'working'].includes(runEntity.state)) return 'working';
+      if (runEntity.state === "waiting") return "waiting";
+      if (["starting", "working"].includes(runEntity.state)) return "working";
     }
-    return 'ready';
+    return "ready";
   }
 
   function pluginRuntimeStatus(plugin, now = Date.now()) {
     if (!plugin) {
       return {
-        state: 'missing',
-        tone: 'error',
+        state: "missing",
+        tone: "error",
         step: 0,
-        label: 'Agent VM не найдена',
-        detail: 'Пакет sidecar недоступен',
+        label: "Agent VM не найдена",
+        detail: "Пакет sidecar недоступен",
         retryable: false,
       };
     }
     if (!plugin.enabled) {
       return {
-        state: 'stopped',
-        tone: 'off',
+        state: "stopped",
+        tone: "off",
         step: 0,
-        label: 'Agent VM выключена',
-        detail: 'Включите плагин в настройках',
+        label: "Agent VM выключена",
+        detail: "Включите плагин в настройках",
         retryable: false,
       };
     }
 
     const status = asObject(plugin.status);
-    const state = asString(status.state) || 'stopped';
-    const error = asString(status.error).replace(/\s+/g, ' ').trim().slice(0, 180);
-    if (state === 'running') {
+    const state = asString(status.state) || "stopped";
+    const error = asString(status.error)
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 180);
+    if (state === "running") {
       return {
         state,
-        tone: 'ready',
+        tone: "ready",
         step: 2,
-        label: 'Agent VM подключена',
-        detail: 'Sidecar online',
+        label: "Agent VM подключена",
+        detail: "Sidecar online",
         retryable: false,
       };
     }
-    if (state === 'starting') {
+    if (state === "starting") {
       const startedAt = Number(status.startedAt);
       const deadline = Number(status.handshakeDeadline);
-      const elapsed = startedAt > 0
-        ? `${Math.max(0, Math.ceil((now - startedAt) / 1000))}с`
-        : 'Sidecar запущен';
-      const timeout = deadline > 0
-        ? `таймаут через ${Math.max(0, Math.ceil((deadline - now) / 1000))}с`
-        : 'ожидаю регистрацию';
+      const elapsed =
+        startedAt > 0
+          ? `${Math.max(0, Math.ceil((now - startedAt) / 1000))}с`
+          : "Sidecar запущен";
+      const timeout =
+        deadline > 0
+          ? `таймаут через ${Math.max(0, Math.ceil((deadline - now) / 1000))}с`
+          : "ожидаю регистрацию";
       return {
         state,
-        tone: 'starting',
+        tone: "starting",
         step: 1,
-        label: 'Handshake с Jarvis',
+        label: "Handshake с Jarvis",
         detail: `${elapsed} · ${timeout}`,
         retryable: false,
       };
     }
-    if (state === 'backoff') {
+    if (state === "backoff") {
       const retryAt = Number(status.retryAt);
-      const retryIn = retryAt > 0
-        ? Math.max(0, Math.ceil((retryAt - now) / 1000))
-        : Math.max(0, Math.ceil(Number(status.retryInMs) / 1000));
+      const retryIn =
+        retryAt > 0
+          ? Math.max(0, Math.ceil((retryAt - now) / 1000))
+          : Math.max(0, Math.ceil(Number(status.retryInMs) / 1000));
       const attempt = Math.max(1, Number(status.restartAttempt) || 1);
       return {
         state,
-        tone: 'waiting',
+        tone: "waiting",
         step: 0,
         label: `Повтор через ${retryIn}с`,
-        detail: `Попытка ${attempt}${error ? ` · ${error}` : ''}`,
+        detail: `Попытка ${attempt}${error ? ` · ${error}` : ""}`,
         retryable: true,
       };
     }
-    if (state === 'incompatible') {
+    if (state === "incompatible") {
       return {
         state,
-        tone: 'error',
+        tone: "error",
         step: 1,
-        label: 'Несовместимая версия',
-        detail: error || 'Обновите Jarvis и Agent VM sidecar',
+        label: "Несовместимая версия",
+        detail: error || "Обновите Jarvis и Agent VM sidecar",
         retryable: false,
       };
     }
-    if (state === 'error') {
+    if (state === "error") {
       return {
         state,
-        tone: 'error',
+        tone: "error",
         step: 0,
-        label: 'Ошибка запуска',
-        detail: error || 'Sidecar не удалось запустить',
+        label: "Ошибка запуска",
+        detail: error || "Sidecar не удалось запустить",
         retryable: true,
       };
     }
     return {
       state,
-      tone: 'starting',
+      tone: "starting",
       step: 0,
-      label: 'Запускаю sidecar',
-      detail: 'Ожидание supervisor',
+      label: "Запускаю sidecar",
+      detail: "Ожидание supervisor",
       retryable: false,
     };
   }
 
   function activeEnvironments(entities) {
-    const runs = newestByProject(entities, 'agent_run');
-    return owned(entities, 'vm')
+    const runs = newestByProject(entities, "agent_run");
+    return owned(entities, "vm")
       .filter((entity) => ACTIVE_VM_STATES.has(entity.state) || entity.stale)
       .map((entity) => {
         const attrs = asObject(entity.attrs);
@@ -410,19 +464,22 @@
           id: entity.id,
           projectId: asString(attrs.projectId) || asString(attrs.cwd),
           cwd: asString(attrs.cwd),
-          project: asString(attrs.project)
-            || asString(attrs.cwd).split('/').filter(Boolean).at(-1)
-            || 'Project',
+          project:
+            asString(attrs.project) ||
+            asString(attrs.cwd).split("/").filter(Boolean).at(-1) ||
+            "Project",
           vm: entity,
           run,
           uiState: environmentState(entity, run),
           updatedAt: Math.max(entityTime(entity), entityTime(run)),
         };
       })
-      .filter((item) => item.uiState !== 'off')
-      .sort((a, b) =>
-        (ACTIVE_RANK[a.uiState] ?? 99) - (ACTIVE_RANK[b.uiState] ?? 99)
-        || b.updatedAt - a.updatedAt);
+      .filter((item) => item.uiState !== "off")
+      .sort(
+        (a, b) =>
+          (ACTIVE_RANK[a.uiState] ?? 99) - (ACTIVE_RANK[b.uiState] ?? 99) ||
+          b.updatedAt - a.updatedAt,
+      );
   }
 
   function mergeEvents(current, incoming) {
@@ -439,29 +496,30 @@
     return {
       id: asString(event.turnId),
       startedAt: Number(event.at) || 0,
-      user: '',
-      assistantDraft: '',
-      assistant: '',
+      user: "",
+      assistantDraft: "",
+      assistant: "",
       tools: [],
       files: [],
       question: null,
       result: null,
-      state: 'working',
+      state: "working",
     };
   }
 
   function reduceRun(events) {
     const turnsById = new Map();
-    let state = 'idle';
-    let backend = '';
-    let vm = '';
-    let runId = '';
-    let sessionId = '';
-    let model = '';
+    let state = "idle";
+    let backend = "";
+    let vm = "";
+    let runId = "";
+    let sessionId = "";
+    let model = "";
 
     const turnFor = (event) => {
       const id = asString(event.turnId) || `turn-${event.seq}`;
-      if (!turnsById.has(id)) turnsById.set(id, newTurn({ ...event, turnId: id }));
+      if (!turnsById.has(id))
+        turnsById.set(id, newTurn({ ...event, turnId: id }));
       return turnsById.get(id);
     };
 
@@ -475,59 +533,61 @@
       sessionId = asString(payload.backendSessionId) || sessionId;
       model = asString(payload.model) || model;
 
-      if (type === 'user.message') turn.user = asString(payload.text);
-      if (type === 'assistant.delta') turn.assistantDraft += asString(payload.text);
-      if (type === 'assistant.message') turn.assistant = asString(payload.text);
-      if (type === 'tool.started') {
+      if (type === "user.message") turn.user = asString(payload.text);
+      if (type === "assistant.delta")
+        turn.assistantDraft += asString(payload.text);
+      if (type === "assistant.message") turn.assistant = asString(payload.text);
+      if (type === "tool.started") {
         const id = asString(payload.id) || `tool-${event.seq}`;
         const existing = turn.tools.find((tool) => tool.id === id);
         if (existing) {
           Object.assign(existing, {
             name: asString(payload.name) || existing.name,
             detail: asString(payload.detail) || existing.detail,
-            state: 'working',
+            state: "working",
           });
         } else {
           turn.tools.push({
             id,
-            name: asString(payload.name) || 'tool',
+            name: asString(payload.name) || "tool",
             detail: asString(payload.detail),
-            state: 'working',
+            state: "working",
           });
         }
       }
-      if (type === 'tool.completed' || type === 'tool.failed') {
+      if (type === "tool.completed" || type === "tool.failed") {
         const id = asString(payload.id);
         const existing = turn.tools.find((tool) => tool.id === id);
         if (existing) {
-          existing.state = type === 'tool.failed' ? 'failed' : 'completed';
+          existing.state = type === "tool.failed" ? "failed" : "completed";
           existing.detail = asString(payload.detail) || existing.detail;
         } else {
           turn.tools.push({
             id: id || `tool-${event.seq}`,
-            name: 'tool',
+            name: "tool",
             detail: asString(payload.detail),
-            state: type === 'tool.failed' ? 'failed' : 'completed',
+            state: type === "tool.failed" ? "failed" : "completed",
           });
         }
       }
-      if (type === 'file.changed') {
+      if (type === "file.changed") {
         const path = asString(payload.path);
         const existing = turn.files.find((file) => file.path === path);
         const file = {
           path,
-          relativePath: asString(payload.relativePath) || path.split('/').at(-1) || path,
-          change: asString(payload.change) || 'modified',
+          relativePath:
+            asString(payload.relativePath) || path.split("/").at(-1) || path,
+          change: asString(payload.change) || "modified",
         };
         if (existing) Object.assign(existing, file);
         else if (path) turn.files.push(file);
       }
-      if (type === 'question.opened') {
+      if (type === "question.opened") {
         turn.question = payload.question || payload;
-        turn.state = 'waiting';
-        state = 'waiting';
+        turn.state = "waiting";
+        state = "waiting";
       }
-      if (type === 'result.completed') {
+      if (type === "result.completed") {
         const files = Array.isArray(payload.files) ? payload.files : [];
         for (const value of files) {
           const file = asObject(value);
@@ -535,33 +595,33 @@
           if (!path || turn.files.some((item) => item.path === path)) continue;
           turn.files.push({
             path,
-            relativePath: path.split('/').at(-1) || path,
-            change: asString(file.change) || 'modified',
+            relativePath: path.split("/").at(-1) || path,
+            change: asString(file.change) || "modified",
           });
         }
         turn.result = { text: asString(payload.text), files: turn.files };
-        turn.state = 'completed';
-        state = 'completed';
+        turn.state = "completed";
+        state = "completed";
       }
-      if (type === 'run.failed') {
-        turn.state = 'failed';
+      if (type === "run.failed") {
+        turn.state = "failed";
         turn.result = {
-          text: asString(payload.error) || 'Agent VM run failed',
+          text: asString(payload.error) || "Agent VM run failed",
           files: turn.files,
         };
-        state = 'failed';
+        state = "failed";
       }
-      if (type === 'run.cancelled') {
-        turn.state = 'cancelled';
-        state = 'cancelled';
+      if (type === "run.cancelled") {
+        turn.state = "cancelled";
+        state = "cancelled";
       }
-      if (type === 'run.interrupted') {
-        turn.state = 'interrupted';
-        state = 'interrupted';
+      if (type === "run.interrupted") {
+        turn.state = "interrupted";
+        state = "interrupted";
       }
-      if (type === 'run.started' || type === 'run.resumed') {
-        turn.state = 'working';
-        if (!TERMINAL_STATES.has(state)) state = 'working';
+      if (type === "run.started" || type === "run.resumed") {
+        turn.state = "working";
+        if (!TERMINAL_STATES.has(state)) state = "working";
       }
     }
 
@@ -573,16 +633,19 @@
   }
 
   function operationResult(entities, requestId) {
-    const entity = (Array.isArray(entities) ? entities : []).find((item) =>
-      item
-      && item.owner === OWNER
-      && item.kind === 'operation'
-      && asObject(item.attrs).requestId === requestId);
-    if (!entity || !['done', 'error'].includes(entity.state)) return null;
-    if (entity.state === 'error') {
+    const entity = (Array.isArray(entities) ? entities : []).find(
+      (item) =>
+        item &&
+        item.owner === OWNER &&
+        item.kind === "operation" &&
+        asObject(item.attrs).requestId === requestId,
+    );
+    if (!entity || !["done", "error"].includes(entity.state)) return null;
+    if (entity.state === "error") {
       return {
         ok: false,
-        error: asString(asObject(entity.attrs).error) || 'Agent VM operation failed',
+        error:
+          asString(asObject(entity.attrs).error) || "Agent VM operation failed",
         attrs: asObject(entity.attrs),
       };
     }
@@ -590,24 +653,26 @@
   }
 
   function stateLabel(state) {
-    return {
-      absent: 'Нет VM',
-      off: 'Остановлена',
-      stopped: 'Остановлена',
-      provisioning: 'Создаётся',
-      creating: 'Создаётся',
-      starting: 'Запускается',
-      running: 'Готова',
-      ready: 'Готова',
-      reconnecting: 'Переподключаюсь',
-      working: 'Работает',
-      waiting: 'Ждёт тебя',
-      completed: 'Готово',
-      cancelled: 'Остановлено',
-      interrupted: 'Прервано',
-      failed: 'Ошибка',
-      error: 'Ошибка',
-    }[state] || 'Неизвестно';
+    return (
+      {
+        absent: "Нет VM",
+        off: "Остановлена",
+        stopped: "Остановлена",
+        provisioning: "Создаётся",
+        creating: "Создаётся",
+        starting: "Запускается",
+        running: "Готова",
+        ready: "Готова",
+        reconnecting: "Переподключаюсь",
+        working: "Работает",
+        waiting: "Ждёт тебя",
+        completed: "Готово",
+        cancelled: "Остановлено",
+        interrupted: "Прервано",
+        failed: "Ошибка",
+        error: "Ошибка",
+      }[state] || "Неизвестно"
+    );
   }
 
   return {

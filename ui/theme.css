@@ -1,0 +1,766 @@
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/golos-text-cyrillic-ext-400.woff2") format("woff2");
+  unicode-range:
+    U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/golos-text-cyrillic-400.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/golos-text-latin-ext-400.woff2") format("woff2");
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+    U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/golos-text-latin-400.woff2") format("woff2");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212,
+    U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./fonts/golos-text-cyrillic-ext-500.woff2") format("woff2");
+  unicode-range:
+    U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./fonts/golos-text-cyrillic-500.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./fonts/golos-text-latin-ext-500.woff2") format("woff2");
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+    U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./fonts/golos-text-latin-500.woff2") format("woff2");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212,
+    U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./fonts/golos-text-cyrillic-ext-600.woff2") format("woff2");
+  unicode-range:
+    U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./fonts/golos-text-cyrillic-600.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./fonts/golos-text-latin-ext-600.woff2") format("woff2");
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+    U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./fonts/golos-text-latin-600.woff2") format("woff2");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212,
+    U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./fonts/golos-text-cyrillic-ext-700.woff2") format("woff2");
+  unicode-range:
+    U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./fonts/golos-text-cyrillic-700.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./fonts/golos-text-latin-ext-700.woff2") format("woff2");
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB,
+    U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./fonts/golos-text-latin-700.woff2") format("woff2");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212,
+    U+2215, U+FEFF, U+FFFD;
+}
+
+/* ============================================================================
+   Jarvis · дизайн-система «Клевер»
+   Источник: claude.ai/design → «Jarvis Redesign.dc.html», Turn 14 (14a–14h).
+
+   Одна бумажная карточка, одна краска, монохромные точки-состояния.
+   Тема (светлая/тёмная) — на <html data-theme>, краска — на <html data-paint>.
+   Применяет theme.js; до его загрузки действуют значения по умолчанию отсюда.
+   ========================================================================= */
+
+:root {
+  /* ---- типографика ---- */
+  --font:
+    "Golos Text", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+
+  /* ---- геометрия (вложенные радиусы: внутренний = внешний − отступ) ---- */
+  --r-panel: 16px;
+  --r-card: 12px;
+  --r-chip: 10px;
+  --r-row: 10px;
+  --r-key: 6px;
+  --r-pill: 8px; /* вкладки, бейджи, мелкие чипы */
+  --r-seg: 9px; /* сегмент-переключатели */
+
+  /* ---- ритм строк из макета ---- */
+  --h-row: 46px; /* строка сессии */
+  --h-srow: 52px; /* строка настройки */
+  --h-head: 56px; /* шапка */
+  --h-strip: 42px; /* нижняя полоска */
+
+  --dur: 130ms;
+}
+
+/* ===================== СВЕТЛАЯ ТЕМА · краска «клевер» ===================== */
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --paper: #ffffff;
+  --paper-2: #fbfdfb;
+  --surface: #f1f5f0;
+  --surface-2: #e8eee7;
+  --line: #e6ede6;
+  --line-strong: #d7e0d6;
+
+  --ink: #17201a;
+  --ink-2: #26332a;
+  --ink-mute: #5a645c;
+  --ink-faint: #9aa69c;
+
+  --accent: #0b6b44;
+  --accent-text: #0b6b44;
+  --accent-soft: #e4f0e7;
+  --accent-ink: #3f6b52;
+  --accent-line: rgba(11, 107, 68, 0.28);
+  --on-accent: #ffffff;
+  --on-accent-dim: #cbe3d4;
+
+  /* нейтральные заливки взамен rgba(255,255,255,…) тёмной темы */
+  --fill-1: rgba(23, 32, 26, 0.035);
+  --fill-2: rgba(23, 32, 26, 0.06);
+  --fill-3: rgba(23, 32, 26, 0.1);
+
+  --dot-sleep: #d3dcd3;
+
+  --warn: #b4711a;
+  --danger: #c0103f;
+  --warn-soft: rgba(180, 113, 26, 0.12);
+  --danger-soft: rgba(192, 16, 63, 0.1);
+
+  --shadow-panel:
+    0 0 0 1px rgba(23, 32, 26, 0.07), 0 2px 6px rgba(23, 32, 26, 0.05),
+    0 20px 48px rgba(23, 32, 26, 0.12);
+  --shadow-pop:
+    0 0 0 1px rgba(23, 32, 26, 0.07), 0 12px 32px rgba(23, 32, 26, 0.16);
+  --shadow-raised: 0 1px 2px rgba(23, 32, 26, 0.1);
+  --backdrop: radial-gradient(
+    115% 90% at 72% 4%,
+    #e9eee8 0%,
+    #dce2da 55%,
+    #c8d0c6 100%
+  );
+}
+
+/* краска «уголь» — тёплая бумага без акцентного цвета (11a) */
+:root[data-paint="coal"],
+:root[data-theme="light"][data-paint="coal"] {
+  --paper: #f7f4ed;
+  --paper-2: #fbf9f4;
+  --surface: #efebe0;
+  --surface-2: #e7e2d4;
+  --line: #e4ded0;
+  --line-strong: #d6cfbc;
+
+  --ink: #1b1a16;
+  --ink-2: #2c2a24;
+  --ink-mute: #625d52;
+  --ink-faint: #a29c8c;
+
+  --accent: #1b1a16;
+  --accent-text: #625d52;
+  --accent-soft: #e4dfd1;
+  --accent-ink: #625d52;
+  --accent-line: rgba(27, 26, 22, 0.24);
+  --on-accent: #f7f4ed;
+  --on-accent-dim: #a9a69c;
+
+  --fill-1: rgba(27, 26, 22, 0.035);
+  --fill-2: rgba(27, 26, 22, 0.06);
+  --fill-3: rgba(27, 26, 22, 0.1);
+
+  --dot-sleep: #cfc8b8;
+
+  --shadow-panel:
+    0 0 0 1px rgba(60, 54, 40, 0.1), 0 1px 2px rgba(60, 54, 40, 0.06),
+    0 20px 48px rgba(60, 54, 40, 0.15);
+  --shadow-pop:
+    0 0 0 1px rgba(60, 54, 40, 0.1), 0 12px 32px rgba(60, 54, 40, 0.18);
+  --backdrop: radial-gradient(
+    115% 90% at 72% 4%,
+    #efebe1 0%,
+    #e2dcce 55%,
+    #cfc8b6 100%
+  );
+}
+
+/* краска «малина» — тёплая, заметная (11c) */
+:root[data-paint="raspberry"],
+:root[data-theme="light"][data-paint="raspberry"] {
+  --paper: #fffdfc;
+  --paper-2: #fffbfa;
+  --surface: #f8f2f1;
+  --surface-2: #f2e8e7;
+  --line: #f0e6e6;
+  --line-strong: #e4d5d6;
+
+  --ink: #221a1c;
+  --ink-2: #33272a;
+  --ink-mute: #6b6062;
+  --ink-faint: #b39ca2;
+
+  --accent: #c0103f;
+  --accent-text: #c0103f;
+  --accent-soft: #f5e9ec;
+  --accent-ink: #7c4e5a;
+  --accent-line: rgba(192, 16, 63, 0.26);
+  --on-accent: #ffffff;
+  --on-accent-dim: #f6d3dc;
+
+  --fill-1: rgba(34, 26, 28, 0.035);
+  --fill-2: rgba(34, 26, 28, 0.06);
+  --fill-3: rgba(34, 26, 28, 0.1);
+
+  --dot-sleep: #e3d4d7;
+
+  --shadow-panel:
+    0 0 0 1px rgba(34, 26, 28, 0.07), 0 2px 6px rgba(34, 26, 28, 0.05),
+    0 22px 52px rgba(34, 26, 28, 0.13);
+  --shadow-pop:
+    0 0 0 1px rgba(34, 26, 28, 0.07), 0 12px 32px rgba(34, 26, 28, 0.17);
+  --backdrop: radial-gradient(
+    115% 90% at 72% 4%,
+    #f2ecea 0%,
+    #e7dfdc 55%,
+    #d6cbc7 100%
+  );
+}
+
+/* ====================== ТЁМНАЯ ТЕМА (14g) ====================== */
+/* Те же правила, краска пересчитана под тёмное. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --paper: #1e211f;
+  --paper-2: #232724;
+  --surface: #262a27;
+  --surface-2: #2e332f;
+  --line: rgba(255, 255, 255, 0.07);
+  --line-strong: rgba(255, 255, 255, 0.13);
+
+  --ink: #eff2ef;
+  --ink-2: #dde2dd;
+  --ink-mute: #a3aca5;
+  --ink-faint: #77817a;
+
+  --accent: #34b37c;
+  --accent-text: #3fbf86;
+  --accent-soft: rgba(52, 179, 124, 0.15);
+  --accent-ink: #8fd9b8;
+  --accent-line: rgba(52, 179, 124, 0.34);
+  --on-accent: #10241a;
+  --on-accent-dim: rgba(16, 36, 26, 0.62);
+
+  --fill-1: rgba(255, 255, 255, 0.04);
+  --fill-2: rgba(255, 255, 255, 0.07);
+  --fill-3: rgba(255, 255, 255, 0.12);
+
+  --dot-sleep: #3a403c;
+
+  --warn: #e0a24d;
+  --danger: #f0537b;
+  --warn-soft: rgba(224, 162, 77, 0.14);
+  --danger-soft: rgba(240, 83, 123, 0.14);
+
+  --shadow-panel:
+    0 0 0 1px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 2px 6px rgba(0, 0, 0, 0.2), 0 20px 48px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 16px 40px rgba(0, 0, 0, 0.5);
+  --shadow-raised: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --backdrop: radial-gradient(
+    115% 90% at 72% 4%,
+    #3a3a3e 0%,
+    #2a2a2e 55%,
+    #1c1c1f 100%
+  );
+}
+
+:root[data-theme="dark"][data-paint="coal"] {
+  --accent: #e8e4da;
+  --accent-text: #d6d1c4;
+  --accent-soft: rgba(232, 228, 218, 0.13);
+  --accent-ink: #c6c2b7;
+  --accent-line: rgba(232, 228, 218, 0.3);
+  --on-accent: #1b1a16;
+  --on-accent-dim: rgba(27, 26, 22, 0.55);
+}
+
+:root[data-theme="dark"][data-paint="raspberry"] {
+  --accent: #f0537b;
+  --accent-text: #f4708f;
+  --accent-soft: rgba(240, 83, 123, 0.16);
+  --accent-ink: #f2a9bc;
+  --accent-line: rgba(240, 83, 123, 0.34);
+  --on-accent: #2a0710;
+  --on-accent-dim: rgba(42, 7, 16, 0.6);
+}
+
+/* ============================================================================
+   Настройка вида: плотность, скругление и масштаб.
+   Всё это — только переопределение токенов; компоненты уже считают геометрию
+   через них, поэтому ни один селектор ниже не знает о настройках.
+   ========================================================================= */
+
+/* --- плотность: высота строк и воздух вокруг них --- */
+:root[data-density="compact"] {
+  --h-row: 38px;
+  --h-srow: 44px;
+  --h-head: 48px;
+  --h-strip: 36px;
+}
+:root[data-density="roomy"] {
+  --h-row: 54px;
+  --h-srow: 60px;
+  --h-head: 64px;
+  --h-strip: 48px;
+}
+
+/* --- скругление: от строгих углов до мягкой пилюли --- */
+:root[data-radius="sharp"] {
+  --r-panel: 8px;
+  --r-card: 6px;
+  --r-chip: 5px;
+  --r-row: 5px;
+  --r-key: 4px;
+  --r-pill: 5px;
+  --r-seg: 6px;
+}
+:root[data-radius="soft"] {
+  --r-panel: 22px;
+  --r-card: 16px;
+  --r-chip: 999px;
+  --r-row: 14px;
+  --r-key: 999px;
+  --r-pill: 999px;
+  --r-seg: 999px;
+}
+/* мягкие углы: пилюльные кнопки требуют чуть больше воздуха по бокам */
+:root[data-radius="soft"] .j-btn,
+:root[data-radius="soft"] .j-chip {
+  padding-left: 22px;
+  padding-right: 22px;
+}
+
+/* --- масштаб интерфейса: zoom на корне тянет всё разом, включая отступы --- */
+/* значение ставит theme.js (--ui-scale), здесь только применение */
+:root {
+  zoom: var(--ui-scale, 1);
+}
+
+/* ============================================================================
+   Слой совместимости: старые имена переменных, которыми пользуются
+   renderer.js / settings2.js / voice-history.js во встроенных стилях.
+   Ставятся на *: значение берётся из текущей темы, где бы ни объявили.
+   ========================================================================= */
+:root {
+  --bg: var(--paper);
+  --card: var(--paper);
+  --sidebar: var(--paper-2);
+  --soft: var(--surface);
+  --void: var(--surface-2);
+
+  --text: var(--ink);
+  --fg: var(--ink);
+  --text-body: var(--ink-2);
+  --muted: var(--ink-mute);
+  --dim: var(--ink-mute);
+  --faint: var(--ink-faint);
+
+  --border: var(--line);
+  --hairline: var(--line);
+  --row-hover: var(--fill-2);
+
+  --keycap-text: var(--ink-mute);
+  --keycap-bg: var(--surface);
+
+  /* состояния — монохром + одна краска (см. «точки-состояния» макета) */
+  --working: var(--ink);
+  --waiting: var(--accent-text);
+  --done: var(--accent-text);
+  --idle: var(--ink-faint);
+  /* среда Agent VM — та же краска, что и «ждёт»: отдельного цвета язык не вводит */
+  --vm: var(--accent-text);
+  --limit: var(--ink-faint);
+  --signal: var(--accent-text);
+  --ready: var(--accent-text);
+  --ok: var(--accent-text);
+  --no: var(--danger);
+  --user: var(--ink);
+  --bot: var(--accent-text);
+
+  --accent-soft-2: var(--surface);
+  --done-soft: var(--accent-soft);
+  --done-line: var(--accent-line);
+  --working-soft: var(--fill-2);
+}
+
+/* ============================================================================
+   Примитивы. Одни и те же во всех четырёх окнах — панель, тост, чат, онбординг.
+   ========================================================================= */
+
+html,
+body {
+  background: transparent;
+}
+body {
+  font-family: var(--font);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- бумажная карточка: единственная поверхность продукта --- */
+.j-paper {
+  background: var(--paper);
+  border-radius: var(--r-panel);
+  box-shadow: var(--shadow-panel);
+}
+
+/* --- точки-состояния: 7px, различаются светом, не цветом --- */
+.j-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  box-sizing: border-box;
+  background: var(--dot-sleep);
+}
+.j-dot.is-working {
+  background: var(--ink);
+}
+.j-dot.is-waiting {
+  background: var(--accent);
+}
+.j-dot.is-done {
+  background: transparent;
+  border: 1.5px solid var(--ink);
+}
+.j-dot.is-limit {
+  background: var(--ink-faint);
+}
+.j-dot.is-idle {
+  background: var(--dot-sleep);
+}
+
+/* --- кнопка-вариант: главная (краска) и тональная, цифра — клавиша --- */
+.j-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 44px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: var(--r-card);
+  font: 500 14.5px/1 var(--font);
+  color: var(--ink);
+  background: var(--accent-soft);
+  cursor: default;
+  appearance: none;
+  transition:
+    filter var(--dur) ease,
+    background var(--dur) ease;
+}
+.j-btn .j-num {
+  font-weight: 400;
+  color: var(--accent-ink);
+  font-variant-numeric: tabular-nums;
+}
+.j-btn:hover {
+  filter: brightness(0.97);
+}
+.j-btn.is-primary {
+  font-weight: 600;
+  color: var(--on-accent);
+  background: var(--accent);
+}
+.j-btn.is-primary .j-num {
+  color: var(--on-accent-dim);
+}
+.j-btn.is-primary:hover {
+  filter: brightness(1.06);
+}
+
+/* компактный чип-вариант (внутри истории чата) */
+.j-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  height: 36px;
+  padding: 0 15px;
+  border: 0;
+  border-radius: var(--r-chip);
+  font: 500 13.5px/1 var(--font);
+  color: var(--ink);
+  background: var(--accent-soft);
+  cursor: default;
+  appearance: none;
+}
+.j-chip .j-num {
+  font-weight: 400;
+  color: var(--accent-ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- сегмент-переключатель (Режим / Тема / Внизу панели) --- */
+.j-seg {
+  display: flex;
+  gap: 3px;
+  flex: none;
+  padding: 3px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--surface);
+}
+.j-seg > button,
+.j-seg > .j-segbtn {
+  appearance: none;
+  border: 0;
+  cursor: default;
+  padding: 5px 12px;
+  border-radius: 7px;
+  font: 500 12.5px/1 var(--font);
+  color: var(--ink-mute);
+  background: transparent;
+  transition:
+    background var(--dur) ease,
+    color var(--dur) ease;
+}
+.j-seg > .is-active,
+.j-seg > .active {
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--paper);
+  box-shadow: var(--shadow-raised);
+}
+
+/* --- тумблер 40×24 --- */
+.j-toggle {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 24px;
+  border-radius: 12px;
+  background: var(--fill-3);
+  outline: none;
+  cursor: default;
+  transition: background var(--dur) ease;
+}
+.j-toggle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(23, 32, 26, 0.2);
+  transition: left var(--dur) ease;
+}
+.j-toggle:checked {
+  background: var(--accent);
+}
+.j-toggle:checked::after {
+  left: 18px;
+}
+
+/* --- клавиша-подсказка --- */
+.j-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: var(--r-key);
+  background: var(--surface);
+  color: var(--ink-mute);
+  font: 500 11px/1.4 var(--font);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- волна «слушаю»: пять столбиков, высоты из макета --- */
+.j-wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 2.5px;
+  flex: none;
+}
+.j-wave i {
+  display: block;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--ink-faint);
+}
+.j-wave i:nth-child(1) {
+  height: 5px;
+}
+.j-wave i:nth-child(2) {
+  height: 11px;
+}
+.j-wave i:nth-child(3) {
+  height: 7px;
+}
+.j-wave i:nth-child(4) {
+  height: 13px;
+}
+.j-wave i:nth-child(5) {
+  height: 6px;
+}
+.j-wave.is-live i {
+  background: var(--accent);
+  animation: jWave 1.1s ease-in-out infinite;
+}
+.j-wave.is-live i:nth-child(2) {
+  animation-delay: 0.12s;
+}
+.j-wave.is-live i:nth-child(3) {
+  animation-delay: 0.24s;
+}
+.j-wave.is-live i:nth-child(4) {
+  animation-delay: 0.36s;
+}
+.j-wave.is-live i:nth-child(5) {
+  animation-delay: 0.48s;
+}
+@keyframes jWave {
+  0%,
+  100% {
+    transform: scaleY(1);
+  }
+  50% {
+    transform: scaleY(0.45);
+  }
+}
+
+/* --- полоска лимита подписки --- */
+.j-meter {
+  display: inline-block;
+  width: 44px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+  flex: none;
+}
+.j-meter > i {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--ink-faint);
+  transition: width 200ms ease;
+}
+.j-meter.is-warn > i {
+  background: var(--warn);
+}
+.j-meter.is-crit > i {
+  background: var(--danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .j-wave.is-live i {
+    animation: none;
+  }
+  * {
+    transition-duration: 1ms !important;
+  }
+}

@@ -64,7 +64,7 @@
       "value": {
         "key": "3d.example.theme",
         "scope": "user",
-        "value": {"type": "string", "value": "dark"},
+        "value": { "type": "string", "value": "dark" },
         "revision": 1
       }
     },
@@ -76,7 +76,7 @@
       "value": {
         "key": "dev.example.theme_",
         "scope": "user",
-        "value": {"type": "string", "value": "dark"},
+        "value": { "type": "string", "value": "dark" },
         "revision": 1
       }
     },
@@ -129,14 +129,14 @@
       "schema": "bridge",
       "target": "BridgeClientFrame",
       "valid": true,
-      "value": {"v": 1, "type": "hello", "generation": 1}
+      "value": { "v": 1, "type": "hello", "generation": 1 }
     },
     {
       "name": "bridge protocol version two is invalid",
       "schema": "bridge",
       "target": "BridgeClientFrame",
       "valid": false,
-      "value": {"v": 2, "type": "hello", "generation": 1}
+      "value": { "v": 2, "type": "hello", "generation": 1 }
     },
     {
       "name": "bridge deadline lower boundary is valid",
@@ -303,15 +303,17 @@
       "target": "EntityQuery",
       "valid": true,
       "value": {
-        "selectors": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "ids": [],
-          "states": []
-        }],
+        "selectors": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "ids": [],
+            "states": []
+          }
+        ],
         "projection": null,
         "limit": 1
       }
@@ -322,15 +324,17 @@
       "target": "EntityQuery",
       "valid": false,
       "value": {
-        "selectors": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "ids": [],
-          "states": []
-        }],
+        "selectors": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "ids": [],
+            "states": []
+          }
+        ],
         "projection": null,
         "limit": 0
       }
@@ -341,15 +345,17 @@
       "target": "EntityQuery",
       "valid": true,
       "value": {
-        "selectors": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "ids": [],
-          "states": []
-        }],
+        "selectors": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "ids": [],
+            "states": []
+          }
+        ],
         "projection": null,
         "limit": 128
       }
@@ -360,15 +366,17 @@
       "target": "EntityQuery",
       "valid": false,
       "value": {
-        "selectors": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "ids": [],
-          "states": []
-        }],
+        "selectors": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "ids": [],
+            "states": []
+          }
+        ],
         "projection": null,
         "limit": 129
       }
@@ -378,17 +386,19 @@
       "schema": "broker",
       "target": "EntityQuery",
       "valid": true,
-      "repeat": {"pointer": "/selectors", "count": 128},
+      "repeat": { "pointer": "/selectors", "count": 128 },
       "value": {
-        "selectors": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "ids": [],
-          "states": []
-        }],
+        "selectors": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "ids": [],
+            "states": []
+          }
+        ],
         "projection": null,
         "limit": 128
       }
@@ -398,17 +408,19 @@
       "schema": "broker",
       "target": "EntityQuery",
       "valid": false,
-      "repeat": {"pointer": "/selectors", "count": 129},
+      "repeat": { "pointer": "/selectors", "count": 129 },
       "value": {
-        "selectors": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "ids": [],
-          "states": []
-        }],
+        "selectors": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "ids": [],
+            "states": []
+          }
+        ],
         "projection": null,
         "limit": 128
       }
@@ -510,7 +522,7 @@
       "schema": "broker",
       "target": "EntitySelector",
       "valid": true,
-      "repeat": {"pointer": "/ids", "count": 128},
+      "repeat": { "pointer": "/ids", "count": 128 },
       "value": {
         "contract": {
           "id": "dev.example/runtime",
@@ -526,7 +538,7 @@
       "schema": "broker",
       "target": "EntitySelector",
       "valid": false,
-      "repeat": {"pointer": "/ids", "count": 129},
+      "repeat": { "pointer": "/ids", "count": 129 },
       "value": {
         "contract": {
           "id": "dev.example/runtime",
@@ -557,7 +569,7 @@
       "schema": "broker",
       "target": "EntitySelector",
       "valid": true,
-      "repeat": {"pointer": "/states", "count": 128},
+      "repeat": { "pointer": "/states", "count": 128 },
       "value": {
         "contract": {
           "id": "dev.example/runtime",
@@ -573,7 +585,7 @@
       "schema": "broker",
       "target": "EntitySelector",
       "valid": false,
-      "repeat": {"pointer": "/states", "count": 129},
+      "repeat": { "pointer": "/states", "count": 129 },
       "value": {
         "contract": {
           "id": "dev.example/runtime",
@@ -604,53 +616,55 @@
       "schema": "broker",
       "target": "FieldProjection",
       "valid": true,
-      "repeat": {"pointer": "/fields", "count": 64},
-      "value": {"fields": ["summary"]}
+      "repeat": { "pointer": "/fields", "count": 64 },
+      "value": { "fields": ["summary"] }
     },
     {
       "name": "broker projection fields one over is invalid",
       "schema": "broker",
       "target": "FieldProjection",
       "valid": false,
-      "repeat": {"pointer": "/fields", "count": 65},
-      "value": {"fields": ["summary"]}
+      "repeat": { "pointer": "/fields", "count": 65 },
+      "value": { "fields": ["summary"] }
     },
     {
       "name": "broker projection fields reject a drive-relative path",
       "schema": "broker",
       "target": "FieldProjection",
       "valid": false,
-      "value": {"fields": ["C:repo"]}
+      "value": { "fields": ["C:repo"] }
     },
     {
       "name": "broker projection fields must be nonempty",
       "schema": "broker",
       "target": "FieldProjection",
       "valid": false,
-      "value": {"fields": []}
+      "value": { "fields": [] }
     },
     {
       "name": "broker query snapshot entities exact boundary is valid",
       "schema": "broker",
       "target": "EntityQuerySnapshot",
       "valid": true,
-      "repeat": {"pointer": "/entities", "count": 128},
+      "repeat": { "pointer": "/entities", "count": 128 },
       "value": {
         "snapshotRevision": 1,
-        "entities": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "id": "entity/01",
-          "revision": 1,
-          "brokerRevision": 1,
-          "state": "ready",
-          "data": {},
-          "updatedAtMs": 1,
-          "stale": false
-        }]
+        "entities": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "id": "entity/01",
+            "revision": 1,
+            "brokerRevision": 1,
+            "state": "ready",
+            "data": {},
+            "updatedAtMs": 1,
+            "stale": false
+          }
+        ]
       }
     },
     {
@@ -658,23 +672,25 @@
       "schema": "broker",
       "target": "EntityQuerySnapshot",
       "valid": false,
-      "repeat": {"pointer": "/entities", "count": 129},
+      "repeat": { "pointer": "/entities", "count": 129 },
       "value": {
         "snapshotRevision": 1,
-        "entities": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "id": "entity/01",
-          "revision": 1,
-          "brokerRevision": 1,
-          "state": "ready",
-          "data": {},
-          "updatedAtMs": 1,
-          "stale": false
-        }]
+        "entities": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "id": "entity/01",
+            "revision": 1,
+            "brokerRevision": 1,
+            "state": "ready",
+            "data": {},
+            "updatedAtMs": 1,
+            "stale": false
+          }
+        ]
       }
     },
     {
@@ -682,18 +698,20 @@
       "schema": "broker",
       "target": "EntityWatchRequest",
       "valid": true,
-      "repeat": {"pointer": "/selectors", "count": 128},
+      "repeat": { "pointer": "/selectors", "count": 128 },
       "value": {
         "cursor": 0,
-        "selectors": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "ids": [],
-          "states": []
-        }],
+        "selectors": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "ids": [],
+            "states": []
+          }
+        ],
         "projection": null,
         "limit": 128
       }
@@ -703,18 +721,20 @@
       "schema": "broker",
       "target": "EntityWatchRequest",
       "valid": false,
-      "repeat": {"pointer": "/selectors", "count": 129},
+      "repeat": { "pointer": "/selectors", "count": 129 },
       "value": {
         "cursor": 0,
-        "selectors": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "ids": [],
-          "states": []
-        }],
+        "selectors": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "ids": [],
+            "states": []
+          }
+        ],
         "projection": null,
         "limit": 128
       }
@@ -726,15 +746,17 @@
       "valid": false,
       "value": {
         "cursor": 0,
-        "selectors": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "ids": [],
-          "states": []
-        }],
+        "selectors": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "ids": [],
+            "states": []
+          }
+        ],
         "projection": null,
         "limit": 0
       }
@@ -746,15 +768,17 @@
       "valid": false,
       "value": {
         "cursor": 0,
-        "selectors": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "ids": [],
-          "states": []
-        }],
+        "selectors": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "ids": [],
+            "states": []
+          }
+        ],
         "projection": null,
         "limit": 129
       }
@@ -764,7 +788,7 @@
       "schema": "broker",
       "target": "EventWatchRequest",
       "valid": true,
-      "repeat": {"pointer": "/subjects", "count": 128},
+      "repeat": { "pointer": "/subjects", "count": 128 },
       "value": {
         "cursor": 0,
         "contract": {
@@ -781,7 +805,7 @@
       "schema": "broker",
       "target": "EventWatchRequest",
       "valid": false,
-      "repeat": {"pointer": "/subjects", "count": 129},
+      "repeat": { "pointer": "/subjects", "count": 129 },
       "value": {
         "cursor": 0,
         "contract": {
@@ -846,16 +870,18 @@
       "schema": "broker",
       "target": "RuntimeOperationQuery",
       "valid": true,
-      "repeat": {"pointer": "/subjects", "count": 128},
+      "repeat": { "pointer": "/subjects", "count": 128 },
       "value": {
-        "subjects": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "subjectId": "subject/01"
-        }],
+        "subjects": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "subjectId": "subject/01"
+          }
+        ],
         "includeTerminalSince": null,
         "limit": 128
       }
@@ -865,16 +891,18 @@
       "schema": "broker",
       "target": "RuntimeOperationQuery",
       "valid": false,
-      "repeat": {"pointer": "/subjects", "count": 129},
+      "repeat": { "pointer": "/subjects", "count": 129 },
       "value": {
-        "subjects": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "subjectId": "subject/01"
-        }],
+        "subjects": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "subjectId": "subject/01"
+          }
+        ],
         "includeTerminalSince": null,
         "limit": 128
       }
@@ -885,14 +913,16 @@
       "target": "RuntimeOperationQuery",
       "valid": false,
       "value": {
-        "subjects": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "subjectId": "project/"
-        }],
+        "subjects": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "subjectId": "project/"
+          }
+        ],
         "includeTerminalSince": null,
         "limit": 128
       }
@@ -903,14 +933,16 @@
       "target": "RuntimeOperationQuery",
       "valid": false,
       "value": {
-        "subjects": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "subjectId": "subject/01"
-        }],
+        "subjects": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "subjectId": "subject/01"
+          }
+        ],
         "includeTerminalSince": null,
         "limit": 0
       }
@@ -921,14 +953,16 @@
       "target": "RuntimeOperationQuery",
       "valid": false,
       "value": {
-        "subjects": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "subjectId": "subject/01"
-        }],
+        "subjects": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "subjectId": "subject/01"
+          }
+        ],
         "includeTerminalSince": null,
         "limit": 129
       }
@@ -938,17 +972,19 @@
       "schema": "broker",
       "target": "RuntimeOperationWatch",
       "valid": true,
-      "repeat": {"pointer": "/subjects", "count": 128},
+      "repeat": { "pointer": "/subjects", "count": 128 },
       "value": {
         "cursor": 0,
-        "subjects": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "subjectId": "subject/01"
-        }],
+        "subjects": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "subjectId": "subject/01"
+          }
+        ],
         "limit": 128
       }
     },
@@ -957,17 +993,19 @@
       "schema": "broker",
       "target": "RuntimeOperationWatch",
       "valid": false,
-      "repeat": {"pointer": "/subjects", "count": 129},
+      "repeat": { "pointer": "/subjects", "count": 129 },
       "value": {
         "cursor": 0,
-        "subjects": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "subjectId": "subject/01"
-        }],
+        "subjects": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "subjectId": "subject/01"
+          }
+        ],
         "limit": 128
       }
     },
@@ -978,14 +1016,16 @@
       "valid": false,
       "value": {
         "cursor": 0,
-        "subjects": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "subjectId": "subject/01"
-        }],
+        "subjects": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "subjectId": "subject/01"
+          }
+        ],
         "limit": 0
       }
     },
@@ -996,14 +1036,16 @@
       "valid": false,
       "value": {
         "cursor": 0,
-        "subjects": [{
-          "contract": {
-            "id": "dev.example/runtime",
-            "version": "1.0.0",
-            "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          },
-          "subjectId": "subject/01"
-        }],
+        "subjects": [
+          {
+            "contract": {
+              "id": "dev.example/runtime",
+              "version": "1.0.0",
+              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "subjectId": "subject/01"
+          }
+        ],
         "limit": 129
       }
     },
@@ -1012,23 +1054,25 @@
       "schema": "broker",
       "target": "OutboxBatch",
       "valid": true,
-      "repeat": {"pointer": "/mutations", "count": 128},
+      "repeat": { "pointer": "/mutations", "count": 128 },
       "value": {
         "sourceInstanceId": "source/01",
         "outboxId": "outbox/01",
-        "mutations": [{
-          "kind": "entity",
-          "mutation": {
-            "type": "delete",
-            "contract": {
-              "id": "dev.example/runtime",
-              "version": "1.0.0",
-              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-            },
-            "id": "entity/01",
-            "expectedRevision": 1
+        "mutations": [
+          {
+            "kind": "entity",
+            "mutation": {
+              "type": "delete",
+              "contract": {
+                "id": "dev.example/runtime",
+                "version": "1.0.0",
+                "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+              },
+              "id": "entity/01",
+              "expectedRevision": 1
+            }
           }
-        }]
+        ]
       }
     },
     {
@@ -1036,23 +1080,25 @@
       "schema": "broker",
       "target": "OutboxBatch",
       "valid": false,
-      "repeat": {"pointer": "/mutations", "count": 129},
+      "repeat": { "pointer": "/mutations", "count": 129 },
       "value": {
         "sourceInstanceId": "source/01",
         "outboxId": "outbox/01",
-        "mutations": [{
-          "kind": "entity",
-          "mutation": {
-            "type": "delete",
-            "contract": {
-              "id": "dev.example/runtime",
-              "version": "1.0.0",
-              "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-            },
-            "id": "entity/01",
-            "expectedRevision": 1
+        "mutations": [
+          {
+            "kind": "entity",
+            "mutation": {
+              "type": "delete",
+              "contract": {
+                "id": "dev.example/runtime",
+                "version": "1.0.0",
+                "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+              },
+              "id": "entity/01",
+              "expectedRevision": 1
+            }
           }
-        }]
+        ]
       }
     },
     {
@@ -1060,7 +1106,7 @@
       "schema": "broker",
       "target": "OutboxAck",
       "valid": true,
-      "repeat": {"pointer": "/acceptedOperationRefs", "count": 128},
+      "repeat": { "pointer": "/acceptedOperationRefs", "count": 128 },
       "value": {
         "sourceInstanceId": "source/01",
         "outboxId": "outbox/01",
@@ -1074,7 +1120,7 @@
       "schema": "broker",
       "target": "OutboxAck",
       "valid": false,
-      "repeat": {"pointer": "/acceptedOperationRefs", "count": 129},
+      "repeat": { "pointer": "/acceptedOperationRefs", "count": 129 },
       "value": {
         "sourceInstanceId": "source/01",
         "outboxId": "outbox/01",
@@ -1088,7 +1134,7 @@
       "schema": "broker",
       "target": "EntityEnvelope",
       "valid": true,
-      "repeatString": {"pointer": "/data", "value": "x", "count": 262142},
+      "repeatString": { "pointer": "/data", "value": "x", "count": 262142 },
       "value": {
         "contract": {
           "id": "dev.example/runtime",
@@ -1109,7 +1155,7 @@
       "schema": "broker",
       "target": "EntityEnvelope",
       "valid": false,
-      "repeatString": {"pointer": "/data", "value": "x", "count": 262143},
+      "repeatString": { "pointer": "/data", "value": "x", "count": 262143 },
       "value": {
         "contract": {
           "id": "dev.example/runtime",
@@ -1130,7 +1176,7 @@
       "schema": "broker",
       "target": "EntityEnvelope",
       "valid": true,
-      "repeatString": {"pointer": "/data", "value": "é", "count": 131071},
+      "repeatString": { "pointer": "/data", "value": "é", "count": 131071 },
       "value": {
         "contract": {
           "id": "dev.example/runtime",
@@ -1151,7 +1197,7 @@
       "schema": "broker",
       "target": "EntityEnvelope",
       "valid": false,
-      "repeatString": {"pointer": "/data", "value": "é", "count": 131072},
+      "repeatString": { "pointer": "/data", "value": "é", "count": 131072 },
       "value": {
         "contract": {
           "id": "dev.example/runtime",
@@ -1172,7 +1218,7 @@
       "schema": "broker",
       "target": "EntityMutation",
       "valid": true,
-      "repeatString": {"pointer": "/data", "value": "x", "count": 262142},
+      "repeatString": { "pointer": "/data", "value": "x", "count": 262142 },
       "value": {
         "type": "put",
         "contract": {
@@ -1190,7 +1236,7 @@
       "schema": "broker",
       "target": "EntityMutation",
       "valid": false,
-      "repeatString": {"pointer": "/data", "value": "x", "count": 262143},
+      "repeatString": { "pointer": "/data", "value": "x", "count": 262143 },
       "value": {
         "type": "put",
         "contract": {
@@ -1208,7 +1254,7 @@
       "schema": "broker",
       "target": "EventEnvelope",
       "valid": true,
-      "repeatString": {"pointer": "/data", "value": "x", "count": 131070},
+      "repeatString": { "pointer": "/data", "value": "x", "count": 131070 },
       "value": {
         "contract": {
           "id": "dev.example/runtime",
@@ -1230,7 +1276,7 @@
       "schema": "broker",
       "target": "EventEnvelope",
       "valid": false,
-      "repeatString": {"pointer": "/data", "value": "x", "count": 131071},
+      "repeatString": { "pointer": "/data", "value": "x", "count": 131071 },
       "value": {
         "contract": {
           "id": "dev.example/runtime",
@@ -1252,7 +1298,7 @@
       "schema": "broker",
       "target": "EventMutation",
       "valid": true,
-      "repeatString": {"pointer": "/data", "value": "x", "count": 131070},
+      "repeatString": { "pointer": "/data", "value": "x", "count": 131070 },
       "value": {
         "contract": {
           "id": "dev.example/runtime",
@@ -1273,7 +1319,7 @@
       "schema": "broker",
       "target": "EventMutation",
       "valid": false,
-      "repeatString": {"pointer": "/data", "value": "x", "count": 131071},
+      "repeatString": { "pointer": "/data", "value": "x", "count": 131071 },
       "value": {
         "contract": {
           "id": "dev.example/runtime",
@@ -1294,7 +1340,7 @@
       "schema": "broker",
       "target": "TypedCommandInvocation",
       "valid": true,
-      "repeatString": {"pointer": "/args", "value": "x", "count": 262142},
+      "repeatString": { "pointer": "/args", "value": "x", "count": 262142 },
       "value": {
         "command": {
           "id": "dev.example/runtime-command",
@@ -1318,7 +1364,7 @@
       "schema": "broker",
       "target": "TypedCommandInvocation",
       "valid": false,
-      "repeatString": {"pointer": "/args", "value": "x", "count": 262143},
+      "repeatString": { "pointer": "/args", "value": "x", "count": 262143 },
       "value": {
         "command": {
           "id": "dev.example/runtime-command",
@@ -1342,16 +1388,16 @@
       "schema": "broker",
       "target": "CommandResult",
       "valid": true,
-      "repeatString": {"pointer": "/result", "value": "x", "count": 262142},
-      "value": {"type": "completed", "result": "x"}
+      "repeatString": { "pointer": "/result", "value": "x", "count": 262142 },
+      "value": { "type": "completed", "result": "x" }
     },
     {
       "name": "completed command result one serialized byte over is invalid",
       "schema": "broker",
       "target": "CommandResult",
       "valid": false,
-      "repeatString": {"pointer": "/result", "value": "x", "count": 262143},
-      "value": {"type": "completed", "result": "x"}
+      "repeatString": { "pointer": "/result", "value": "x", "count": 262143 },
+      "value": { "type": "completed", "result": "x" }
     },
     {
       "name": "resolved pages exact boundary is valid",
@@ -1365,12 +1411,14 @@
         "prefix": "dev.example.page"
       },
       "value": {
-        "pages": [{
-          "id": "dev.example.page0",
-          "title": "Page",
-          "placements": ["sidebar"],
-          "instancePolicy": "singleton"
-        }],
+        "pages": [
+          {
+            "id": "dev.example.page0",
+            "title": "Page",
+            "placements": ["sidebar"],
+            "instancePolicy": "singleton"
+          }
+        ],
         "commands": [],
         "actions": [],
         "hotkeys": []
@@ -1388,12 +1436,14 @@
         "prefix": "dev.example.page"
       },
       "value": {
-        "pages": [{
-          "id": "dev.example.page0",
-          "title": "Page",
-          "placements": ["sidebar"],
-          "instancePolicy": "singleton"
-        }],
+        "pages": [
+          {
+            "id": "dev.example.page0",
+            "title": "Page",
+            "placements": ["sidebar"],
+            "instancePolicy": "singleton"
+          }
+        ],
         "commands": [],
         "actions": [],
         "hotkeys": []
@@ -1412,13 +1462,15 @@
       },
       "value": {
         "pages": [],
-        "commands": [{
-          "id": "dev.example.command0",
-          "title": "Command",
-          "placements": ["globalPalette"],
-          "riskFloor": "read",
-          "context": []
-        }],
+        "commands": [
+          {
+            "id": "dev.example.command0",
+            "title": "Command",
+            "placements": ["globalPalette"],
+            "riskFloor": "read",
+            "context": []
+          }
+        ],
         "actions": [],
         "hotkeys": []
       }
@@ -1436,13 +1488,15 @@
       },
       "value": {
         "pages": [],
-        "commands": [{
-          "id": "dev.example.command0",
-          "title": "Command",
-          "placements": ["globalPalette"],
-          "riskFloor": "read",
-          "context": []
-        }],
+        "commands": [
+          {
+            "id": "dev.example.command0",
+            "title": "Command",
+            "placements": ["globalPalette"],
+            "riskFloor": "read",
+            "context": []
+          }
+        ],
         "actions": [],
         "hotkeys": []
       }
@@ -1461,14 +1515,16 @@
       "value": {
         "pages": [],
         "commands": [],
-        "actions": [{
-          "id": "dev.example.action0",
-          "title": "Action",
-          "locations": ["project.actions"],
-          "command": "dev.example.command",
-          "riskFloor": "read",
-          "context": []
-        }],
+        "actions": [
+          {
+            "id": "dev.example.action0",
+            "title": "Action",
+            "locations": ["project.actions"],
+            "command": "dev.example.command",
+            "riskFloor": "read",
+            "context": []
+          }
+        ],
         "hotkeys": []
       }
     },
@@ -1486,14 +1542,16 @@
       "value": {
         "pages": [],
         "commands": [],
-        "actions": [{
-          "id": "dev.example.action0",
-          "title": "Action",
-          "locations": ["project.actions"],
-          "command": "dev.example.command",
-          "riskFloor": "read",
-          "context": []
-        }],
+        "actions": [
+          {
+            "id": "dev.example.action0",
+            "title": "Action",
+            "locations": ["project.actions"],
+            "command": "dev.example.command",
+            "riskFloor": "read",
+            "context": []
+          }
+        ],
         "hotkeys": []
       }
     },
@@ -1502,16 +1560,18 @@
       "schema": "contributions",
       "target": "ResolvedContributions",
       "valid": true,
-      "repeat": {"pointer": "/hotkeys", "count": 512},
+      "repeat": { "pointer": "/hotkeys", "count": 512 },
       "value": {
         "pages": [],
         "commands": [],
         "actions": [],
-        "hotkeys": [{
-          "command": "dev.example.command",
-          "shortcut": "CommandOrControl+K",
-          "scope": "global"
-        }]
+        "hotkeys": [
+          {
+            "command": "dev.example.command",
+            "shortcut": "CommandOrControl+K",
+            "scope": "global"
+          }
+        ]
       }
     },
     {
@@ -1519,16 +1579,18 @@
       "schema": "contributions",
       "target": "ResolvedContributions",
       "valid": false,
-      "repeat": {"pointer": "/hotkeys", "count": 513},
+      "repeat": { "pointer": "/hotkeys", "count": 513 },
       "value": {
         "pages": [],
         "commands": [],
         "actions": [],
-        "hotkeys": [{
-          "command": "dev.example.command",
-          "shortcut": "CommandOrControl+K",
-          "scope": "global"
-        }]
+        "hotkeys": [
+          {
+            "command": "dev.example.command",
+            "shortcut": "CommandOrControl+K",
+            "scope": "global"
+          }
+        ]
       }
     },
     {
@@ -1536,7 +1598,7 @@
       "schema": "contributions",
       "target": "ResolvedPageContribution",
       "valid": true,
-      "repeatString": {"pointer": "/title", "value": "x", "count": 256},
+      "repeatString": { "pointer": "/title", "value": "x", "count": 256 },
       "value": {
         "id": "dev.example.page",
         "title": "x",
@@ -1549,7 +1611,7 @@
       "schema": "contributions",
       "target": "ResolvedPageContribution",
       "valid": false,
-      "repeatString": {"pointer": "/title", "value": "x", "count": 257},
+      "repeatString": { "pointer": "/title", "value": "x", "count": 257 },
       "value": {
         "id": "dev.example.page",
         "title": "x",
@@ -1562,7 +1624,7 @@
       "schema": "contributions",
       "target": "ResolvedPageContribution",
       "valid": true,
-      "repeatString": {"pointer": "/title", "value": "é", "count": 128},
+      "repeatString": { "pointer": "/title", "value": "é", "count": 128 },
       "value": {
         "id": "dev.example.page",
         "title": "é",
@@ -1575,7 +1637,7 @@
       "schema": "contributions",
       "target": "ResolvedPageContribution",
       "valid": false,
-      "repeatString": {"pointer": "/title", "value": "é", "count": 129},
+      "repeatString": { "pointer": "/title", "value": "é", "count": 129 },
       "value": {
         "id": "dev.example.page",
         "title": "é",
@@ -1600,13 +1662,13 @@
       "schema": "contributions",
       "target": "ResolvedCommandContribution",
       "valid": true,
-      "repeat": {"pointer": "/context", "count": 16},
+      "repeat": { "pointer": "/context", "count": 16 },
       "value": {
         "id": "dev.example.command",
         "title": "Command",
         "placements": ["globalPalette"],
         "riskFloor": "read",
-        "context": [{"type": "project", "id": "project/01"}]
+        "context": [{ "type": "project", "id": "project/01" }]
       }
     },
     {
@@ -1614,13 +1676,13 @@
       "schema": "contributions",
       "target": "ResolvedCommandContribution",
       "valid": false,
-      "repeat": {"pointer": "/context", "count": 17},
+      "repeat": { "pointer": "/context", "count": 17 },
       "value": {
         "id": "dev.example.command",
         "title": "Command",
         "placements": ["globalPalette"],
         "riskFloor": "read",
-        "context": [{"type": "project", "id": "project/01"}]
+        "context": [{ "type": "project", "id": "project/01" }]
       }
     },
     {
@@ -1628,7 +1690,7 @@
       "schema": "contributions",
       "target": "ResolvedPageContribution",
       "valid": true,
-      "repeat": {"pointer": "/placements", "count": 16},
+      "repeat": { "pointer": "/placements", "count": 16 },
       "value": {
         "id": "dev.example.page",
         "title": "Page",
@@ -1641,7 +1703,7 @@
       "schema": "contributions",
       "target": "ResolvedPageContribution",
       "valid": false,
-      "repeat": {"pointer": "/placements", "count": 17},
+      "repeat": { "pointer": "/placements", "count": 17 },
       "value": {
         "id": "dev.example.page",
         "title": "Page",
@@ -1654,7 +1716,7 @@
       "schema": "contributions",
       "target": "ResolvedHotkeyContribution",
       "valid": true,
-      "repeatString": {"pointer": "/shortcut", "value": "x", "count": 128},
+      "repeatString": { "pointer": "/shortcut", "value": "x", "count": 128 },
       "value": {
         "command": "dev.example.command",
         "shortcut": "x",
@@ -1666,7 +1728,7 @@
       "schema": "contributions",
       "target": "ResolvedHotkeyContribution",
       "valid": false,
-      "repeatString": {"pointer": "/shortcut", "value": "x", "count": 129},
+      "repeatString": { "pointer": "/shortcut", "value": "x", "count": 129 },
       "value": {
         "command": "dev.example.command",
         "shortcut": "x",
@@ -1689,11 +1751,15 @@
       "schema": "settings",
       "target": "SettingRecord",
       "valid": true,
-      "repeatString": {"pointer": "/value/value", "value": "x", "count": 65536},
+      "repeatString": {
+        "pointer": "/value/value",
+        "value": "x",
+        "count": 65536
+      },
       "value": {
         "key": "dev.example.value",
         "scope": "user",
-        "value": {"type": "string", "value": "x"},
+        "value": { "type": "string", "value": "x" },
         "revision": 1
       }
     },
@@ -1702,11 +1768,15 @@
       "schema": "settings",
       "target": "SettingRecord",
       "valid": false,
-      "repeatString": {"pointer": "/value/value", "value": "x", "count": 65537},
+      "repeatString": {
+        "pointer": "/value/value",
+        "value": "x",
+        "count": 65537
+      },
       "value": {
         "key": "dev.example.value",
         "scope": "user",
-        "value": {"type": "string", "value": "x"},
+        "value": { "type": "string", "value": "x" },
         "revision": 1
       }
     },
@@ -1715,11 +1785,15 @@
       "schema": "settings",
       "target": "SettingRecord",
       "valid": true,
-      "repeatString": {"pointer": "/value/value", "value": "é", "count": 32768},
+      "repeatString": {
+        "pointer": "/value/value",
+        "value": "é",
+        "count": 32768
+      },
       "value": {
         "key": "dev.example.value",
         "scope": "user",
-        "value": {"type": "string", "value": "é"},
+        "value": { "type": "string", "value": "é" },
         "revision": 1
       }
     },
@@ -1728,11 +1802,15 @@
       "schema": "settings",
       "target": "SettingRecord",
       "valid": false,
-      "repeatString": {"pointer": "/value/value", "value": "é", "count": 32769},
+      "repeatString": {
+        "pointer": "/value/value",
+        "value": "é",
+        "count": 32769
+      },
       "value": {
         "key": "dev.example.value",
         "scope": "user",
-        "value": {"type": "string", "value": "é"},
+        "value": { "type": "string", "value": "é" },
         "revision": 1
       }
     },
@@ -1744,7 +1822,7 @@
       "value": {
         "key": "dev.example.theme",
         "scope": "user",
-        "value": {"type": "string", "value": "dark"},
+        "value": { "type": "string", "value": "dark" },
         "revision": 1
       }
     },
@@ -1757,7 +1835,7 @@
         "key": "dev.example.theme",
         "scope": "user",
         "projectId": "project/01",
-        "value": {"type": "string", "value": "dark"},
+        "value": { "type": "string", "value": "dark" },
         "revision": 1
       }
     },
@@ -1769,7 +1847,7 @@
       "value": {
         "key": "dev.example.theme",
         "scope": "project",
-        "value": {"type": "string", "value": "dark"},
+        "value": { "type": "string", "value": "dark" },
         "revision": 1
       }
     },
@@ -1782,7 +1860,7 @@
         "key": "dev.example.theme",
         "scope": "project",
         "projectId": "project/01",
-        "value": {"type": "string", "value": "dark"},
+        "value": { "type": "string", "value": "dark" },
         "revision": 1
       }
     },
@@ -1795,7 +1873,7 @@
         "key": "dev.example.theme",
         "scope": "project",
         "projectId": "https:opaque",
-        "value": {"type": "string", "value": "dark"},
+        "value": { "type": "string", "value": "dark" },
         "revision": 1
       }
     },
@@ -1839,7 +1917,7 @@
         "createdAt": 1,
         "updatedAt": 2,
         "deadlineAt": 3,
-        "error": {"code": "provider_unavailable"}
+        "error": { "code": "provider_unavailable" }
       }
     },
     {
@@ -1868,7 +1946,7 @@
         "createdAt": 1,
         "updatedAt": 2,
         "deadlineAt": 3,
-        "error": {"code": "sql_error"}
+        "error": { "code": "sql_error" }
       }
     },
     {

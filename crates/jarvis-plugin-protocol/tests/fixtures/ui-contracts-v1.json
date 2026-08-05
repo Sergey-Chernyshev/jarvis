@@ -21,9 +21,7 @@
   },
   "bridgeWelcome": {
     "generation": 7,
-    "grants": [
-      "broker.entities.watch"
-    ],
+    "grants": ["broker.entities.watch"],
     "packageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "pageId": "home",
     "pluginId": "dev.example.owner",

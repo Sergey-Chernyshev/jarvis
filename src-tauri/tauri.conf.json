@@ -36,12 +36,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [
-      "resources/plugin-trust-roots.json"
-    ],
-    "externalBin": [
-      "binaries/jarvis-agent-vm-plugin"
-    ],
+    "resources": ["resources/plugin-trust-roots.json"],
+    "externalBin": ["binaries/jarvis-agent-vm-plugin"],
     "macOS": {
       "bundleVersion": "340",
       "minimumSystemVersion": "11.0",

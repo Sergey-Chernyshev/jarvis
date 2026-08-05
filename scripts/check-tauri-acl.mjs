@@ -1,33 +1,33 @@
-import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { spawnSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { parse } from 'parse5';
+import { parse } from "parse5";
 
-const CORE_WEBVIEWS = ['main', 'toast', 'onboarding', 'agent-chat'];
+const CORE_WEBVIEWS = ["main", "toast", "onboarding", "agent-chat"];
 const CORE_WEBVIEW_SET = new Set(CORE_WEBVIEWS);
 const EXPECTED_CSP =
   "default-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost";
-const TRANSPORT_SCRIPT = './generated/tauri-transport.js';
+const TRANSPORT_SCRIPT = "./generated/tauri-transport.js";
 const TRUSTED_DOCUMENTS = new Map([
-  ['main', { filename: 'index.html', consumer: './bridge.js' }],
-  ['toast', { filename: 'toast.html', consumer: './toast-bridge.js' }],
+  ["main", { filename: "index.html", consumer: "./bridge.js" }],
+  ["toast", { filename: "toast.html", consumer: "./toast-bridge.js" }],
   [
-    'onboarding',
+    "onboarding",
     {
-      filename: 'onboarding.html',
-      consumer: 'onboarding.js',
-      predecessor: 'onboarding-state.js',
+      filename: "onboarding.html",
+      consumer: "onboarding.js",
+      predecessor: "onboarding-state.js",
     },
   ],
-  ['agent-chat', { filename: 'agent-chat.html', consumer: 'agent-chat.js' }],
+  ["agent-chat", { filename: "agent-chat.html", consumer: "agent-chat.js" }],
 ]);
 
 export class TauriAclError extends Error {
-  constructor(code, detail = '') {
+  constructor(code, detail = "") {
     super(detail ? `${code}: ${detail}` : code);
-    this.name = 'TauriAclError';
+    this.name = "TauriAclError";
     this.code = code;
   }
 }
@@ -41,7 +41,7 @@ function foldAsciiCodeUnit(codeUnit) {
 }
 
 function foldAsciiString(source) {
-  let folded = '';
+  let folded = "";
   for (let index = 0; index < source.length; index += 1) {
     folded += String.fromCharCode(foldAsciiCodeUnit(source.charCodeAt(index)));
   }
@@ -71,10 +71,10 @@ function indexOfAsciiCaseInsensitive(source, token, fromIndex) {
 
 export function parseClassicExternalScripts(
   source,
-  relative = 'trusted document',
+  relative = "trusted document",
 ) {
   const invalid = (detail) =>
-    fail('tauri_acl_script_tag_invalid', `${relative}: ${detail}`);
+    fail("tauri_acl_script_tag_invalid", `${relative}: ${detail}`);
   const parseErrors = [];
   const document = parse(source, {
     scriptingEnabled: true,
@@ -84,49 +84,49 @@ export function parseClassicExternalScripts(
     },
   });
   const blockingParseError = parseErrors.find(
-    (code) => code !== 'invalid-first-character-of-tag-name',
+    (code) => code !== "invalid-first-character-of-tag-name",
   );
   if (blockingParseError) {
     invalid(`html parse error ${blockingParseError}`);
   }
 
-  const html = document.childNodes.find((node) => node.nodeName === 'html');
-  const body = html?.childNodes?.find((node) => node.nodeName === 'body');
+  const html = document.childNodes.find((node) => node.nodeName === "html");
+  const body = html?.childNodes?.find((node) => node.nodeName === "body");
   const htmlLocation = html?.sourceCodeLocation;
   const bodyLocation = body?.sourceCodeLocation;
   if (!htmlLocation?.startTag || !htmlLocation.endTag) {
-    invalid('explicit html boundary required');
+    invalid("explicit html boundary required");
   }
   if (!body || !bodyLocation?.startTag || !bodyLocation.endTag) {
-    invalid('explicit body boundary required');
+    invalid("explicit body boundary required");
   }
 
   const allScriptOffsets = new Set();
   const scripts = [];
   const visit = (node, parent) => {
-    if (node.nodeName === 'script') {
+    if (node.nodeName === "script") {
       const location = node.sourceCodeLocation;
       if (!location?.startTag || !location.endTag) {
-        invalid('script source location missing');
+        invalid("script source location missing");
       }
       allScriptOffsets.add(location.startTag.startOffset);
       if (
-        node.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+        node.namespaceURI !== "http://www.w3.org/1999/xhtml" ||
         parent !== body ||
         location.startTag.startOffset < bodyLocation.startTag.endOffset ||
         location.endTag.endOffset > bodyLocation.endTag.startOffset
       ) {
-        invalid('script must be a direct body child');
+        invalid("script must be a direct body child");
       }
       if (
         !Array.isArray(node.attrs) ||
         node.attrs.length !== 1 ||
-        node.attrs[0].name !== 'src' ||
+        node.attrs[0].name !== "src" ||
         node.attrs[0].namespace != null ||
         node.attrs[0].prefix != null ||
         node.attrs[0].value.length === 0
       ) {
-        invalid('script must have exactly one non-empty src attribute');
+        invalid("script must have exactly one non-empty src attribute");
       }
       const rawStartTag = source.slice(
         location.startTag.startOffset,
@@ -137,16 +137,16 @@ export function parseClassicExternalScripts(
           foldAsciiString(rawStartTag),
         )
       ) {
-        invalid('script src must be the only quoted attribute');
+        invalid("script src must be the only quoted attribute");
       }
       if (
         (node.childNodes ?? []).some(
           (child) =>
-            child.nodeName !== '#text' ||
-            String(child.value ?? '').trim().length > 0,
+            child.nodeName !== "#text" ||
+            String(child.value ?? "").trim().length > 0,
         )
       ) {
-        invalid('inline script body');
+        invalid("inline script body");
       }
       scripts.push(Object.freeze({ src: node.attrs[0].value }));
     }
@@ -154,7 +154,7 @@ export function parseClassicExternalScripts(
     for (const child of node.childNodes ?? []) {
       visit(child, node);
     }
-    if (node.nodeName === 'template' && node.content) {
+    if (node.nodeName === "template" && node.content) {
       visit(node.content, node);
     }
   };
@@ -163,28 +163,28 @@ export function parseClassicExternalScripts(
   const rawScriptOffsets = [];
   let cursor = 0;
   while (cursor < source.length) {
-    const start = indexOfAsciiCaseInsensitive(source, '<script', cursor);
+    const start = indexOfAsciiCaseInsensitive(source, "<script", cursor);
     if (start === -1) break;
-    const boundary = source[start + '<script'.length];
+    const boundary = source[start + "<script".length];
     if (
       boundary === undefined ||
-      boundary === ' ' ||
-      boundary === '\t' ||
-      boundary === '\n' ||
-      boundary === '\r' ||
-      boundary === '\f' ||
-      boundary === '>' ||
-      boundary === '/'
+      boundary === " " ||
+      boundary === "\t" ||
+      boundary === "\n" ||
+      boundary === "\r" ||
+      boundary === "\f" ||
+      boundary === ">" ||
+      boundary === "/"
     ) {
       rawScriptOffsets.push(start);
     }
-    cursor = start + '<script'.length;
+    cursor = start + "<script".length;
   }
   if (
     rawScriptOffsets.length !== allScriptOffsets.size ||
     rawScriptOffsets.some((offset) => !allScriptOffsets.has(offset))
   ) {
-    invalid('script token is inert, malformed, or hidden from the DOM');
+    invalid("script token is inert, malformed, or hidden from the DOM");
   }
 
   return Object.freeze(scripts);
@@ -193,15 +193,15 @@ export function parseClassicExternalScripts(
 function readJson(root, relative) {
   const file = path.join(root, relative);
   try {
-    return JSON.parse(readFileSync(file, 'utf8'));
+    return JSON.parse(readFileSync(file, "utf8"));
   } catch (error) {
-    fail('tauri_acl_json_invalid', `${relative}: ${error.message}`);
+    fail("tauri_acl_json_invalid", `${relative}: ${error.message}`);
   }
 }
 
 function parseInventory(root) {
-  const relative = 'src-tauri/src/app_command_inventory.rs';
-  const source = readFileSync(path.join(root, relative), 'utf8');
+  const relative = "src-tauri/src/app_command_inventory.rs";
+  const source = readFileSync(path.join(root, relative), "utf8");
   const row =
     /\(\s*"([a-z][a-z0-9_]*)"\s*,\s*crate::(?:ipc|onboarding)::([a-z][a-z0-9_]*)\s*,\s*\[([^\]]*)\]\s*\)/g;
   const label = /"([^"]+)"/g;
@@ -210,7 +210,7 @@ function parseInventory(root) {
   for (const match of source.matchAll(row)) {
     const [, command, handler, rawLabels] = match;
     if (command !== handler || inventory.has(command)) {
-      fail('tauri_acl_inventory_invalid', command);
+      fail("tauri_acl_inventory_invalid", command);
     }
     const webviews = new Set(
       [...rawLabels.matchAll(label)].map((entry) => entry[1]),
@@ -219,13 +219,13 @@ function parseInventory(root) {
       webviews.size !== [...rawLabels.matchAll(label)].length ||
       [...webviews].some((webview) => !CORE_WEBVIEW_SET.has(webview))
     ) {
-      fail('tauri_acl_inventory_invalid', command);
+      fail("tauri_acl_inventory_invalid", command);
     }
     inventory.set(command, webviews);
   }
 
   if (inventory.size === 0) {
-    fail('tauri_acl_inventory_invalid', 'empty command inventory');
+    fail("tauri_acl_inventory_invalid", "empty command inventory");
   }
   return inventory;
 }
@@ -237,7 +237,7 @@ function sameSet(left, right) {
 }
 
 function generatedPermission(command) {
-  const slug = command.replaceAll('_', '-');
+  const slug = command.replaceAll("_", "-");
   return `# Automatically generated - DO NOT EDIT!
 
 [[permission]]
@@ -253,51 +253,48 @@ commands.deny = ["${command}"]
 }
 
 function checkGeneratedPermissionBoundary(root, inventory) {
-  const requiredIgnore = '/src-tauri/permissions/autogenerated/';
-  const ignoreRules = readFileSync(path.join(root, '.gitignore'), 'utf8')
+  const requiredIgnore = "/src-tauri/permissions/autogenerated/";
+  const ignoreRules = readFileSync(path.join(root, ".gitignore"), "utf8")
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith('#'));
+    .filter((line) => line && !line.startsWith("#"));
   const permissionRules = ignoreRules.filter((rule) =>
-    rule.replace(/^!/, '').includes('src-tauri/permissions'),
+    rule.replace(/^!/, "").includes("src-tauri/permissions"),
   );
-  if (
-    permissionRules.length !== 1 ||
-    permissionRules[0] !== requiredIgnore
-  ) {
-    fail('tauri_acl_generated_permission_ignore_invalid');
+  if (permissionRules.length !== 1 || permissionRules[0] !== requiredIgnore) {
+    fail("tauri_acl_generated_permission_ignore_invalid");
   }
   const ignored = (relative) => {
     const result = spawnSync(
-      'git',
-      ['check-ignore', '--quiet', '--no-index', '--', relative],
-      { cwd: root, stdio: 'ignore' },
+      "git",
+      ["check-ignore", "--quiet", "--no-index", "--", relative],
+      { cwd: root, stdio: "ignore" },
     );
     if (result.status !== 0 && result.status !== 1) {
-      fail('tauri_acl_generated_permission_ignore_invalid', 'git probe');
+      fail("tauri_acl_generated_permission_ignore_invalid", "git probe");
     }
     return result.status === 0;
   };
   if (
-    !ignored('src-tauri/permissions/autogenerated/__probe__.toml') ||
-    ignored('src-tauri/permissions/manual.toml')
+    !ignored("src-tauri/permissions/autogenerated/__probe__.toml") ||
+    ignored("src-tauri/permissions/manual.toml")
   ) {
-    fail('tauri_acl_generated_permission_ignore_invalid', 'scope');
+    fail("tauri_acl_generated_permission_ignore_invalid", "scope");
   }
 
-  const permissionsRoot = path.join(root, 'src-tauri/permissions');
+  const permissionsRoot = path.join(root, "src-tauri/permissions");
   if (!existsSync(permissionsRoot)) return;
 
   const rootEntries = readdirSync(permissionsRoot, { withFileTypes: true });
   if (
     rootEntries.some(
-      (entry) => entry.name !== 'autogenerated' || !entry.isDirectory(),
+      (entry) => entry.name !== "autogenerated" || !entry.isDirectory(),
     )
   ) {
-    fail('tauri_acl_handwritten_permission_forbidden');
+    fail("tauri_acl_handwritten_permission_forbidden");
   }
 
-  const autogenerated = path.join(permissionsRoot, 'autogenerated');
+  const autogenerated = path.join(permissionsRoot, "autogenerated");
   if (!existsSync(autogenerated)) return;
 
   const expectedFiles = new Set(
@@ -309,54 +306,55 @@ function checkGeneratedPermissionBoundary(root, inventory) {
     entries.some((entry) => !entry.isFile()) ||
     !sameSet(actualFiles, expectedFiles)
   ) {
-    fail('tauri_acl_generated_permission_drift', 'file set');
+    fail("tauri_acl_generated_permission_drift", "file set");
   }
   for (const command of inventory.keys()) {
     const filename = `${command}.toml`;
     if (
-      readFileSync(path.join(autogenerated, filename), 'utf8') !==
+      readFileSync(path.join(autogenerated, filename), "utf8") !==
       generatedPermission(command)
     ) {
-      fail('tauri_acl_generated_permission_drift', filename);
+      fail("tauri_acl_generated_permission_drift", filename);
     }
   }
 }
 
 function attributeValue(attributes, name) {
-  const escaped = name.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escaped = name.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = attributes.match(
     new RegExp(
       `(?:^|\\s)${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>]+))`,
-      'i',
+      "i",
     ),
   );
   return match ? (match[1] ?? match[2] ?? match[3]) : undefined;
 }
 
 function hasAttribute(attributes, name) {
-  const escaped = name.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(?:^|\\s)${escaped}(?:\\s|=|$)`, 'i').test(attributes);
+  const escaped = name.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|\\s)${escaped}(?:\\s|=|$)`, "i").test(attributes);
 }
 
 function checkTrustedDocuments(root) {
   const draggable = new Set();
+  const trafficLit = new Set();
 
   for (const [identifier, document] of TRUSTED_DOCUMENTS) {
-    const relative = path.join('ui', document.filename);
-    const source = readFileSync(path.join(root, relative), 'utf8').replaceAll(
+    const relative = path.join("ui", document.filename);
+    const source = readFileSync(path.join(root, relative), "utf8").replaceAll(
       /<!--[\s\S]*?-->/g,
-      '',
+      "",
     );
     const cspTags = [...source.matchAll(/<meta\b([^>]*)>/gi)].filter(
       ([, attributes]) =>
-        attributeValue(attributes, 'http-equiv')?.toLowerCase() ===
-        'content-security-policy',
+        attributeValue(attributes, "http-equiv")?.toLowerCase() ===
+        "content-security-policy",
     );
     if (
       cspTags.length !== 1 ||
-      attributeValue(cspTags[0][1], 'content') !== EXPECTED_CSP
+      attributeValue(cspTags[0][1], "content") !== EXPECTED_CSP
     ) {
-      fail('tauri_acl_trusted_html_csp_invalid', relative);
+      fail("tauri_acl_trusted_html_csp_invalid", relative);
     }
 
     const scripts = parseClassicExternalScripts(source, relative).map(
@@ -365,10 +363,10 @@ function checkTrustedDocuments(root) {
     for (const [, , attributes] of source.matchAll(
       /<(script|link|img|iframe|source|audio|video)\b([^>]*)>/gi,
     )) {
-      for (const name of ['src', 'href', 'srcset']) {
+      for (const name of ["src", "href", "srcset"]) {
         const value = attributeValue(attributes, name);
         if (value && /(?:^|[\s,])(?:https?:)?\/\//i.test(value)) {
-          fail('tauri_acl_remote_asset_forbidden', relative);
+          fail("tauri_acl_remote_asset_forbidden", relative);
         }
       }
     }
@@ -377,7 +375,7 @@ function checkTrustedDocuments(root) {
       scripts.filter((src) => src === TRANSPORT_SCRIPT).length !== 1 ||
       scripts.filter((src) => src === document.consumer).length !== 1
     ) {
-      fail('tauri_acl_transport_order_invalid', relative);
+      fail("tauri_acl_transport_order_invalid", relative);
     }
     const transportIndex = scripts.indexOf(TRANSPORT_SCRIPT);
     if (
@@ -386,122 +384,127 @@ function checkTrustedDocuments(root) {
         (scripts.filter((src) => src === document.predecessor).length !== 1 ||
           scripts[transportIndex - 1] !== document.predecessor))
     ) {
-      fail('tauri_acl_transport_order_invalid', relative);
+      fail("tauri_acl_transport_order_invalid", relative);
     }
 
     for (const [, attributes] of source.matchAll(
       /<[a-z][a-z0-9-]*\b([^>]*)>/gi,
     )) {
-      if (hasAttribute(attributes, 'data-tauri-drag-region')) {
+      if (hasAttribute(attributes, "data-tauri-drag-region")) {
         draggable.add(identifier);
         break;
       }
     }
+
+    // свой светофор: окно само рисует закрыть/свернуть/развернуть
+    if (/\bid="winClose"/.test(source)) {
+      trafficLit.add(identifier);
+    }
   }
 
-  return draggable;
+  return { draggable, trafficLit };
 }
 
 function readCapabilities(root, enabled) {
-  const directory = path.join(root, 'src-tauri/capabilities');
+  const directory = path.join(root, "src-tauri/capabilities");
   const capabilities = new Map();
 
   for (const filename of readdirSync(directory).filter((entry) =>
-    entry.endsWith('.json'),
+    entry.endsWith(".json"),
   )) {
     const capability = readJson(
       root,
-      path.join('src-tauri/capabilities', filename),
+      path.join("src-tauri/capabilities", filename),
     );
     const identifier = capability.identifier;
-    if (typeof identifier !== 'string') {
-      fail('tauri_acl_unlisted_capability_forbidden', filename);
+    if (typeof identifier !== "string") {
+      fail("tauri_acl_unlisted_capability_forbidden", filename);
     }
     if (!enabled.has(identifier)) {
-      fail('tauri_acl_unlisted_capability_forbidden', identifier);
+      fail("tauri_acl_unlisted_capability_forbidden", identifier);
     }
     if (capabilities.has(identifier)) {
-      fail('tauri_acl_capability_duplicate', identifier);
+      fail("tauri_acl_capability_duplicate", identifier);
     }
-    if (Object.hasOwn(capability, 'remote')) {
-      fail('tauri_acl_remote_scope_forbidden', identifier);
+    if (Object.hasOwn(capability, "remote")) {
+      fail("tauri_acl_remote_scope_forbidden", identifier);
     }
     if (capability.local !== true) {
-      fail('tauri_acl_local_scope_invalid', identifier);
+      fail("tauri_acl_local_scope_invalid", identifier);
     }
-    if (Object.hasOwn(capability, 'windows')) {
-      fail('tauri_acl_window_scope_forbidden', identifier);
+    if (Object.hasOwn(capability, "windows")) {
+      fail("tauri_acl_window_scope_forbidden", identifier);
     }
     if (!Array.isArray(capability.webviews)) {
-      fail('tauri_acl_webview_scope_missing', identifier);
+      fail("tauri_acl_webview_scope_missing", identifier);
     }
     for (const webview of capability.webviews) {
       if (
-        typeof webview !== 'string' ||
-        webview.includes('*') ||
-        webview.includes('?')
+        typeof webview !== "string" ||
+        webview.includes("*") ||
+        webview.includes("?")
       ) {
-        fail('tauri_acl_webview_wildcard_forbidden', identifier);
+        fail("tauri_acl_webview_wildcard_forbidden", identifier);
       }
-      if (webview.startsWith('plugin-')) {
-        fail('tauri_acl_plugin_webview_forbidden', webview);
+      if (webview.startsWith("plugin-")) {
+        fail("tauri_acl_plugin_webview_forbidden", webview);
       }
     }
     if (
       capability.webviews.length !== 1 ||
       capability.webviews[0] !== identifier
     ) {
-      fail('tauri_acl_webview_scope_mismatch', identifier);
+      fail("tauri_acl_webview_scope_mismatch", identifier);
     }
     if (!Array.isArray(capability.permissions)) {
-      fail('tauri_acl_permissions_missing', identifier);
+      fail("tauri_acl_permissions_missing", identifier);
     }
-    if (capability.permissions.includes('core:default')) {
-      fail('tauri_acl_core_default_forbidden', identifier);
+    if (capability.permissions.includes("core:default")) {
+      fail("tauri_acl_core_default_forbidden", identifier);
     }
     capabilities.set(identifier, capability);
   }
 
   if (!sameSet(new Set(capabilities.keys()), enabled)) {
-    fail('tauri_acl_unlisted_capability_forbidden', 'enabled/file drift');
+    fail("tauri_acl_unlisted_capability_forbidden", "enabled/file drift");
   }
   return capabilities;
 }
 
 function checkDependencyPins(root) {
-  const packageJson = readJson(root, 'package.json');
+  const packageJson = readJson(root, "package.json");
   const dependencies = packageJson.devDependencies ?? {};
   if (
-    dependencies['@tauri-apps/api'] !== '2.11.1' ||
-    dependencies.esbuild !== '0.25.12' ||
-    dependencies.parse5 !== '8.0.0'
+    dependencies["@tauri-apps/api"] !== "2.11.1" ||
+    dependencies.esbuild !== "0.25.12" ||
+    dependencies.parse5 !== "8.0.0"
   ) {
-    fail('tauri_acl_dependency_pin_invalid');
+    fail("tauri_acl_dependency_pin_invalid");
   }
 }
 
 function checkConfig(root) {
-  const config = readJson(root, 'src-tauri/tauri.conf.json');
+  const config = readJson(root, "src-tauri/tauri.conf.json");
   const app = config.app ?? {};
   const security = app.security ?? {};
 
   if (app.withGlobalTauri !== false) {
-    fail('tauri_acl_global_tauri_forbidden');
+    fail("tauri_acl_global_tauri_forbidden");
   }
   if (security.csp == null) {
-    fail('tauri_acl_csp_missing');
+    fail("tauri_acl_csp_missing");
   }
   if (security.csp !== EXPECTED_CSP) {
-    fail('tauri_acl_csp_invalid');
+    fail("tauri_acl_csp_invalid");
   }
   if (security.freezePrototype !== true) {
-    fail('tauri_acl_freeze_prototype_missing');
+    fail("tauri_acl_freeze_prototype_missing");
   }
   if (
     !Array.isArray(security.capabilities) ||
-    security.capabilities.some((identifier) => typeof identifier !== 'string')
+    security.capabilities.some((identifier) => typeof identifier !== "string")
   ) {
-    fail('tauri_acl_capability_list_invalid');
+    fail("tauri_acl_capability_list_invalid");
   }
 
   const enabled = new Set(security.capabilities);
@@ -509,25 +512,25 @@ function checkConfig(root) {
     enabled.size !== security.capabilities.length ||
     !sameSet(enabled, CORE_WEBVIEW_SET)
   ) {
-    fail('tauri_acl_capability_list_invalid');
+    fail("tauri_acl_capability_list_invalid");
   }
   return enabled;
 }
 
-function checkGrants(inventory, capabilities, draggable) {
+function checkGrants(inventory, capabilities, draggable, trafficLit) {
   const actual = new Map();
   for (const command of inventory.keys()) actual.set(command, new Set());
 
   for (const [identifier, capability] of capabilities) {
     const support = new Set();
     for (const permission of capability.permissions) {
-      if (typeof permission !== 'string') {
-        fail('tauri_acl_permissions_missing', identifier);
+      if (typeof permission !== "string") {
+        fail("tauri_acl_permissions_missing", identifier);
       }
-      if (!permission.includes(':') && permission.startsWith('allow-')) {
-        const command = permission.slice('allow-'.length).replaceAll('-', '_');
+      if (!permission.includes(":") && permission.startsWith("allow-")) {
+        const command = permission.slice("allow-".length).replaceAll("-", "_");
         if (!actual.has(command)) {
-          fail('tauri_acl_command_grant_drift', permission);
+          fail("tauri_acl_command_grant_drift", permission);
         }
         actual.get(command).add(identifier);
       } else {
@@ -535,38 +538,47 @@ function checkGrants(inventory, capabilities, draggable) {
       }
     }
     const expectedSupport = new Set([
-      'core:event:allow-listen',
-      'core:event:allow-unlisten',
+      "core:event:allow-listen",
+      "core:event:allow-unlisten",
     ]);
-    if (identifier === 'main' || identifier === 'toast') {
-      expectedSupport.add('clipboard-manager:allow-write-text');
+    if (identifier === "main" || identifier === "toast") {
+      expectedSupport.add("clipboard-manager:allow-write-text");
     }
     if (draggable.has(identifier)) {
-      expectedSupport.add('core:window:allow-start-dragging');
+      expectedSupport.add("core:window:allow-start-dragging");
+    }
+    // оконные операции получает только документ со своим светофором: кнопки
+    // существуют в разметке, значит разрешение выводится из неё, а не на веру
+    if (trafficLit.has(identifier)) {
+      expectedSupport.add("core:window:allow-minimize");
+      expectedSupport.add("core:window:allow-toggle-maximize");
+      expectedSupport.add("core:window:allow-close");
+      expectedSupport.add("core:window:allow-is-fullscreen");
+      expectedSupport.add("core:window:allow-set-fullscreen");
     }
     if (!sameSet(support, expectedSupport)) {
-      fail('tauri_acl_support_permission_drift', identifier);
+      fail("tauri_acl_support_permission_drift", identifier);
     }
   }
 
   for (const [command, expectedWebviews] of inventory) {
     if (!sameSet(actual.get(command), expectedWebviews)) {
-      fail('tauri_acl_command_grant_drift', command);
+      fail("tauri_acl_command_grant_drift", command);
     }
   }
 }
 
 function checkNoGlobalTauri(root) {
-  const uiRoot = path.join(root, 'ui');
+  const uiRoot = path.join(root, "ui");
   for (const filename of [
-    'bridge.js',
-    'toast-bridge.js',
-    'onboarding.js',
-    'agent-chat.js',
+    "bridge.js",
+    "toast-bridge.js",
+    "onboarding.js",
+    "agent-chat.js",
   ]) {
-    const source = readFileSync(path.join(uiRoot, filename), 'utf8');
-    if (source.includes('window.__TAURI__')) {
-      fail('tauri_acl_global_tauri_reference_forbidden', filename);
+    const source = readFileSync(path.join(uiRoot, filename), "utf8");
+    if (source.includes("window.__TAURI__")) {
+      fail("tauri_acl_global_tauri_reference_forbidden", filename);
     }
   }
 }
@@ -577,9 +589,9 @@ export function checkTauriAcl(root = process.cwd()) {
   const inventory = parseInventory(repositoryRoot);
   checkGeneratedPermissionBoundary(repositoryRoot, inventory);
   const enabled = checkConfig(repositoryRoot);
-  const draggable = checkTrustedDocuments(repositoryRoot);
+  const { draggable, trafficLit } = checkTrustedDocuments(repositoryRoot);
   const capabilities = readCapabilities(repositoryRoot, enabled);
-  checkGrants(inventory, capabilities, draggable);
+  checkGrants(inventory, capabilities, draggable, trafficLit);
   checkNoGlobalTauri(repositoryRoot);
   return Object.freeze({
     commands: inventory.size,
@@ -591,10 +603,10 @@ const isCli =
   process.argv[1] &&
   fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
 if (isCli) {
-  const rootIndex = process.argv.indexOf('--root');
+  const rootIndex = process.argv.indexOf("--root");
   const root = rootIndex === -1 ? process.cwd() : process.argv[rootIndex + 1];
   if (!root) {
-    fail('tauri_acl_root_missing');
+    fail("tauri_acl_root_missing");
   }
   try {
     const result = checkTauriAcl(root);

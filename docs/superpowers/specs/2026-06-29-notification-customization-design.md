@@ -24,12 +24,18 @@ gitBranch). Модель — `Session.model`. Усилие/токены — из
 ```jsonc
 {
   "notify": {
-    "content": { "branch": true, "model": false, "effort": false, "tokens": false, "time": false },
-    "events":  { "done": true, "waiting": true, "limit": true },   // = бывшие notifyDone/notifyWaiting (+limit)
-    "ttlSec": 8                                                     // 0 = не прятать
+    "content": {
+      "branch": true,
+      "model": false,
+      "effort": false,
+      "tokens": false,
+      "time": false,
+    },
+    "events": { "done": true, "waiting": true, "limit": true }, // = бывшие notifyDone/notifyWaiting (+limit)
+    "ttlSec": 8, // 0 = не прятать
     // position остаётся верхнеуровневым (как сейчас)
   },
-  "voice": { "bluetoothOnly": true }                               // новый тумблер
+  "voice": { "bluetoothOnly": true }, // новый тумблер
 }
 ```
 
@@ -59,6 +65,7 @@ gitBranch). Модель — `Session.model`. Усилие/токены — из
 ## Настройки → Уведомления (renderNotify, settings2.js)
 
 Панель `notify` (заменяет текущую мини-версию):
+
 - **Превью** сверху: живая карточка-тост + переключатель статуса
   (Готово/Ждёт/Лимит) — меняет точку и пример текста.
 - **Содержимое карточки**: 5 тумблеров (Ветка/Модель/Усилие/Токены/Время) →

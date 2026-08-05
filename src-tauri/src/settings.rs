@@ -52,6 +52,19 @@ pub(crate) fn defaults() -> Value {
         "launchProxyCmd": "",             // команда, выполняемая в терминале ПЕРЕД запуском агента (опц.)
         "launchDangerous": false,         // глобальный «опасный режим»: claude --dangerously-skip-permissions / codex YOLO
         "pluginDeveloperMode": false,     // immutable локальные snapshots только после явного включения
+        // внешность (дизайн «Клевер», экран 14f «вид»)
+        "theme": "light",   // 'light' | 'dark' | 'auto' (системная)
+        "paint": "clover",  // 'clover' | 'coal' | 'raspberry' | 'custom'
+        "accent": "#0B6B44", // тон своей краски: остальное выводится из него
+        "density": "normal", // 'compact' | 'normal' | 'roomy' — высота строк
+        "radius": "normal",  // 'sharp' | 'normal' | 'soft' — скругление углов
+        "scale": 1.0,        // масштаб интерфейса, 0.85..1.4
+        "footerBottom": "limit", // что показывать внизу панели: 'limit' | 'spend'
+        // раскладка: 'overlay' — накладка ⌘J поверх всего; 'window' — обычное
+        // окно с иконкой в доке и списком слева (макет 14h)
+        "mode": "overlay",
+        "windowW": 1120,
+        "windowH": 640,
         "schemaVersion": SCHEMA_VERSION,
         "notify": {
             "content": { "branch": true, "model": false, "effort": false, "tokens": false, "time": false },

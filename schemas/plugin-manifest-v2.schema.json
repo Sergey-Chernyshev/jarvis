@@ -111,10 +111,7 @@
     "compatibility": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "jarvis",
-        "pluginApi"
-      ],
+      "required": ["jarvis", "pluginApi"],
       "properties": {
         "jarvis": {
           "$ref": "#/$defs/versionRange"
@@ -137,11 +134,7 @@
     "uiRuntime": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "kind",
-        "protocol",
-        "activationEvents"
-      ],
+      "required": ["kind", "protocol", "activationEvents"],
       "properties": {
         "kind": {
           "const": "ui-only"
@@ -199,12 +192,7 @@
     "service": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "manager",
-        "entry",
-        "survivesCoreExit"
-      ],
+      "required": ["id", "manager", "entry", "survivesCoreExit"],
       "properties": {
         "id": {
           "$ref": "#/$defs/identifier"
@@ -245,10 +233,7 @@
     "selectedPermission": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "scope"
-      ],
+      "required": ["id", "scope"],
       "properties": {
         "id": {
           "const": "projects.read"
@@ -261,11 +246,7 @@
     "mountPermission": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "scope",
-        "modes"
-      ],
+      "required": ["id", "scope", "modes"],
       "properties": {
         "id": {
           "const": "filesystem.mount"
@@ -279,10 +260,7 @@
           "maxItems": 2,
           "uniqueItems": true,
           "items": {
-            "enum": [
-              "read",
-              "write"
-            ]
+            "enum": ["read", "write"]
           }
         }
       }
@@ -290,16 +268,10 @@
     "memoryPermission": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "scope"
-      ],
+      "required": ["id", "scope"],
       "properties": {
         "id": {
-          "enum": [
-            "memory.read",
-            "memory.propose-write"
-          ]
+          "enum": ["memory.read", "memory.propose-write"]
         },
         "scope": {
           "type": "array",
@@ -307,10 +279,7 @@
           "maxItems": 2,
           "uniqueItems": true,
           "items": {
-            "enum": [
-              "global",
-              "selected-project"
-            ]
+            "enum": ["global", "selected-project"]
           }
         }
       }
@@ -318,9 +287,7 @@
     "unscopedPermission": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id"
-      ],
+      "required": ["id"],
       "properties": {
         "id": {
           "enum": [
@@ -335,10 +302,7 @@
     "credentialsPermission": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "scope"
-      ],
+      "required": ["id", "scope"],
       "properties": {
         "id": {
           "const": "credentials.request"
@@ -349,10 +313,7 @@
           "maxItems": 2,
           "uniqueItems": true,
           "items": {
-            "enum": [
-              "claude",
-              "codex"
-            ]
+            "enum": ["claude", "codex"]
           }
         }
       }
@@ -360,10 +321,7 @@
     "invocationPermission": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "scope"
-      ],
+      "required": ["id", "scope"],
       "properties": {
         "id": {
           "const": "chat.composer.text.read"
@@ -376,11 +334,7 @@
     "state": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "schemaVersion",
-        "migrations",
-        "rollbackCompatibleThrough"
-      ],
+      "required": ["schemaVersion", "migrations", "rollbackCompatibleThrough"],
       "properties": {
         "schemaVersion": {
           "type": "integer",
@@ -402,11 +356,7 @@
     "migration": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "from",
-        "to",
-        "entry"
-      ],
+      "required": ["from", "to", "entry"],
       "properties": {
         "from": {
           "type": "integer",
@@ -488,13 +438,7 @@
     "page": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "title",
-        "entry",
-        "placements",
-        "instancePolicy"
-      ],
+      "required": ["id", "title", "entry", "placements", "instancePolicy"],
       "properties": {
         "id": {
           "$ref": "#/$defs/identifier"
@@ -511,36 +455,21 @@
           "maxItems": 4,
           "uniqueItems": true,
           "items": {
-            "enum": [
-              "sidebar",
-              "commandPalette",
-              "deepLink",
-              "pluginSettings"
-            ]
+            "enum": ["sidebar", "commandPalette", "deepLink", "pluginSettings"]
           }
         },
         "paramsSchema": {
           "$ref": "#/$defs/relativePath"
         },
         "instancePolicy": {
-          "enum": [
-            "singleton",
-            "per-project",
-            "per-session"
-          ]
+          "enum": ["singleton", "per-project", "per-session"]
         }
       }
     },
     "command": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "title",
-        "risk",
-        "placements",
-        "handler"
-      ],
+      "required": ["id", "title", "risk", "placements", "handler"],
       "properties": {
         "id": {
           "$ref": "#/$defs/identifier"
@@ -587,10 +516,7 @@
     "openPageHandler": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "type",
-        "page"
-      ],
+      "required": ["type", "page"],
       "properties": {
         "type": {
           "const": "openPage"
@@ -603,10 +529,7 @@
     "runtimeCommandHandler": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "type",
-        "command"
-      ],
+      "required": ["type", "command"],
       "properties": {
         "type": {
           "const": "runtimeCommand"
@@ -619,10 +542,7 @@
     "invocationUI": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "type",
-        "defaultsFromContext"
-      ],
+      "required": ["type", "defaultsFromContext"],
       "properties": {
         "type": {
           "const": "schemaForm"
@@ -702,11 +622,7 @@
     "hotkey": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "command",
-        "default",
-        "scope"
-      ],
+      "required": ["command", "default", "scope"],
       "properties": {
         "command": {
           "$ref": "#/$defs/identifier"
@@ -740,12 +656,7 @@
     "integerSetting": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "title",
-        "type",
-        "default"
-      ],
+      "required": ["id", "title", "type", "default"],
       "properties": {
         "id": {
           "$ref": "#/$defs/identifier"
@@ -770,12 +681,7 @@
     "numberSetting": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "title",
-        "type",
-        "default"
-      ],
+      "required": ["id", "title", "type", "default"],
       "properties": {
         "id": {
           "$ref": "#/$defs/identifier"
@@ -800,12 +706,7 @@
     "booleanSetting": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "title",
-        "type",
-        "default"
-      ],
+      "required": ["id", "title", "type", "default"],
       "properties": {
         "id": {
           "$ref": "#/$defs/identifier"
@@ -824,12 +725,7 @@
     "stringSetting": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "title",
-        "type",
-        "default"
-      ],
+      "required": ["id", "title", "type", "default"],
       "properties": {
         "id": {
           "$ref": "#/$defs/identifier"
@@ -943,11 +839,7 @@
     "runtimeContracts": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "runtime",
-        "session",
-        "turn"
-      ],
+      "required": ["runtime", "session", "turn"],
       "properties": {
         "runtime": {
           "$ref": "#/$defs/contractBinding"
@@ -963,10 +855,7 @@
     "contractBinding": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "core",
-        "extension"
-      ],
+      "required": ["core", "extension"],
       "properties": {
         "core": {
           "$ref": "#/$defs/contractId"
@@ -989,13 +878,7 @@
     "entityContract": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "kind",
-        "schema",
-        "visibility",
-        "sensitivity"
-      ],
+      "required": ["id", "kind", "schema", "visibility", "sensitivity"],
       "properties": {
         "id": {
           "$ref": "#/$defs/contractId"
@@ -1007,31 +890,17 @@
           "$ref": "#/$defs/relativePath"
         },
         "visibility": {
-          "enum": [
-            "private",
-            "granted",
-            "public"
-          ]
+          "enum": ["private", "granted", "public"]
         },
         "sensitivity": {
-          "enum": [
-            "public",
-            "internal",
-            "sensitive"
-          ]
+          "enum": ["public", "internal", "sensitive"]
         }
       }
     },
     "commandContract": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "kind",
-        "argsSchema",
-        "resultSchema",
-        "risk"
-      ],
+      "required": ["id", "kind", "argsSchema", "resultSchema", "risk"],
       "properties": {
         "id": {
           "$ref": "#/$defs/contractId"
@@ -1051,11 +920,7 @@
       }
     },
     "risk": {
-      "enum": [
-        "read",
-        "control",
-        "destructive"
-      ]
+      "enum": ["read", "control", "destructive"]
     }
   }
 }

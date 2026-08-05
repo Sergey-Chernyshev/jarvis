@@ -140,4 +140,3 @@ jarvis plugin logs dev.example.hello
 `doctor` reports recoverable interrupted operations and receipt problems.
 Plugin logs redact lines likely to contain tokens, authorization values,
 passwords or secrets.
-

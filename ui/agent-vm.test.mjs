@@ -1,15 +1,15 @@
-import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import test from 'node:test';
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import test from "node:test";
 
 const require = createRequire(import.meta.url);
-const AgentVm = require('./agent-vm.js');
+const AgentVm = require("./agent-vm.js");
 
 const vm = (id, state, attrs, updatedAt = 1) => ({
   id: `vm.${id}`,
-  kind: 'vm',
-  owner: 'plugin:agent-vm',
+  kind: "vm",
+  owner: "plugin:agent-vm",
   state,
   attrs,
   updatedAt,
@@ -18,433 +18,555 @@ const vm = (id, state, attrs, updatedAt = 1) => ({
 
 const run = (id, state, attrs, updatedAt = 1) => ({
   id: `agent_run.${id}`,
-  kind: 'agent_run',
-  owner: 'plugin:agent-vm',
+  kind: "agent_run",
+  owner: "plugin:agent-vm",
   state,
   attrs: { runId: id, ...attrs },
   updatedAt,
   stale: false,
 });
 
-test('project models merge chat history with VM-only projects and latest runs', () => {
-  const history = [{
-    project: 'jarvis',
-    cwd: '/work/jarvis',
-    count: 4,
-    lastAt: 90,
-    sessions: [],
-  }];
+test("project models merge chat history with VM-only projects and latest runs", () => {
+  const history = [
+    {
+      project: "jarvis",
+      cwd: "/work/jarvis",
+      count: 4,
+      lastAt: 90,
+      sessions: [],
+    },
+  ];
   const entities = [
-    vm('jarvis-vm', 'running', {
-      projectId: 'p-jarvis',
-      project: 'jarvis',
-      cwd: '/work/jarvis',
-      shellCommand: 'avm shell jarvis-vm',
-    }, 100),
-    vm('api-vm', 'stopped', {
-      projectId: 'p-api',
-      project: 'api',
-      cwd: '/work/api',
-    }, 80),
-    run('r-old', 'completed', {
-      projectId: 'p-jarvis',
-      cwd: '/work/jarvis',
-      backend: 'claude',
-    }, 101),
-    run('r-live', 'working', {
-      projectId: 'p-jarvis',
-      cwd: '/work/jarvis',
-      backend: 'codex',
-      latestEvent: {
-        seq: 7,
-        type: 'assistant.delta',
-        payload: { text: 'Проверяю тесты' },
+    vm(
+      "jarvis-vm",
+      "running",
+      {
+        projectId: "p-jarvis",
+        project: "jarvis",
+        cwd: "/work/jarvis",
+        shellCommand: "avm shell jarvis-vm",
       },
-    }, 102),
+      100,
+    ),
+    vm(
+      "api-vm",
+      "stopped",
+      {
+        projectId: "p-api",
+        project: "api",
+        cwd: "/work/api",
+      },
+      80,
+    ),
+    run(
+      "r-old",
+      "completed",
+      {
+        projectId: "p-jarvis",
+        cwd: "/work/jarvis",
+        backend: "claude",
+      },
+      101,
+    ),
+    run(
+      "r-live",
+      "working",
+      {
+        projectId: "p-jarvis",
+        cwd: "/work/jarvis",
+        backend: "codex",
+        latestEvent: {
+          seq: 7,
+          type: "assistant.delta",
+          payload: { text: "Проверяю тесты" },
+        },
+      },
+      102,
+    ),
   ];
 
   const projects = AgentVm.deriveProjects(history, entities);
 
-  assert.deepEqual(projects.map((project) => project.cwd), ['/work/jarvis', '/work/api']);
-  assert.equal(projects[0].vm.state, 'running');
-  assert.equal(projects[0].run.attrs.runId, 'r-live');
-  assert.equal(projects[0].summary, 'Проверяю тесты');
+  assert.deepEqual(
+    projects.map((project) => project.cwd),
+    ["/work/jarvis", "/work/api"],
+  );
+  assert.equal(projects[0].vm.state, "running");
+  assert.equal(projects[0].run.attrs.runId, "r-live");
+  assert.equal(projects[0].summary, "Проверяю тесты");
   assert.equal(projects[1].history, null);
 });
 
-test('project catalog adds folders, marks favorites and preserves manual favorite order', () => {
+test("project catalog adds folders, marks favorites and preserves manual favorite order", () => {
   const projects = [
-    { cwd: '/work/beta', name: 'beta', projectId: 'project-b', updatedAt: 30 },
-    { cwd: '/work/alpha', name: 'alpha', projectId: 'project-a', updatedAt: 20 },
+    { cwd: "/work/beta", name: "beta", projectId: "project-b", updatedAt: 30 },
+    {
+      cwd: "/work/alpha",
+      name: "alpha",
+      projectId: "project-a",
+      updatedAt: 20,
+    },
   ];
   const state = {
     folders: [
-      { cwd: '/work/gamma', project: 'gamma', projectId: 'project-c' },
-      { cwd: '/work/alpha', project: 'alpha', projectId: 'project-a' },
+      { cwd: "/work/gamma", project: "gamma", projectId: "project-c" },
+      { cwd: "/work/alpha", project: "alpha", projectId: "project-a" },
     ],
-    favoriteProjectIds: ['project-c', 'project-a'],
-    view: 'cards',
+    favoriteProjectIds: ["project-c", "project-a"],
+    view: "cards",
   };
 
   const merged = AgentVm.mergeProjectCatalog(projects, state);
 
-  assert.deepEqual(merged.map((project) => project.cwd), [
-    '/work/gamma',
-    '/work/alpha',
-    '/work/beta',
-  ]);
-  assert.deepEqual(merged.map((project) => project.favoriteIndex), [0, 1, -1]);
-  assert.equal(merged[0].catalogFolder.project, 'gamma');
+  assert.deepEqual(
+    merged.map((project) => project.cwd),
+    ["/work/gamma", "/work/alpha", "/work/beta"],
+  );
+  assert.deepEqual(
+    merged.map((project) => project.favoriteIndex),
+    [0, 1, -1],
+  );
+  assert.equal(merged[0].catalogFolder.project, "gamma");
   assert.equal(merged[1].updatedAt, 20);
 });
 
-test('project search matches folder names and paths without chat metadata', () => {
+test("project search matches folder names and paths without chat metadata", () => {
   const projects = [
     {
-      cwd: '/work/alpha',
-      name: 'alpha',
-      summary: 'needle only in agent transcript',
-      history: { sessions: [{ title: 'needle only in chat' }] },
+      cwd: "/work/alpha",
+      name: "alpha",
+      summary: "needle only in agent transcript",
+      history: { sessions: [{ title: "needle only in chat" }] },
     },
-    { cwd: '/work/needle-folder', name: 'beta' },
+    { cwd: "/work/needle-folder", name: "beta" },
   ];
 
   assert.deepEqual(
-    AgentVm.filterProjects(projects, 'needle').map((project) => project.cwd),
-    ['/work/needle-folder'],
+    AgentVm.filterProjects(projects, "needle").map((project) => project.cwd),
+    ["/work/needle-folder"],
   );
-  assert.equal(AgentVm.filterProjects(projects, '  ALPHA  ').length, 1);
+  assert.equal(AgentVm.filterProjects(projects, "  ALPHA  ").length, 1);
 });
 
-test('project primary action opens existing chat history while keeping Agent VM separate', () => {
+test("project primary action opens existing chat history while keeping Agent VM separate", () => {
   assert.equal(
     AgentVm.projectPrimaryTarget({
-      cwd: '/work/with-history',
-      history: { sessions: [{ id: 'chat-1' }] },
+      cwd: "/work/with-history",
+      history: { sessions: [{ id: "chat-1" }] },
     }),
-    'history',
+    "history",
   );
   assert.equal(
     AgentVm.projectPrimaryTarget({
-      cwd: '/work/vm-only',
+      cwd: "/work/vm-only",
       history: null,
     }),
-    'agentvm',
+    "agentvm",
   );
 });
 
-test('project catalog hides ephemeral history unless the folder was explicitly added', () => {
+test("project catalog hides ephemeral history unless the folder was explicitly added", () => {
   const history = [
-    { project: 'real', cwd: '/Users/dev/work/real', exists: true, sessions: [] },
-    { project: 'gone', cwd: '/Users/dev/work/gone', exists: false, sessions: [] },
-    { project: 'scratch', cwd: '/private/tmp/scratch', exists: true, sessions: [] },
-    { project: 'home', cwd: '/Users/dev', exists: true, sessions: [] },
+    {
+      project: "real",
+      cwd: "/Users/dev/work/real",
+      exists: true,
+      sessions: [],
+    },
+    {
+      project: "gone",
+      cwd: "/Users/dev/work/gone",
+      exists: false,
+      sessions: [],
+    },
+    {
+      project: "scratch",
+      cwd: "/private/tmp/scratch",
+      exists: true,
+      sessions: [],
+    },
+    { project: "home", cwd: "/Users/dev", exists: true, sessions: [] },
   ];
   const derived = AgentVm.deriveProjects(history, []);
 
-  assert.deepEqual(derived.map((project) => project.cwd), ['/Users/dev/work/real']);
+  assert.deepEqual(
+    derived.map((project) => project.cwd),
+    ["/Users/dev/work/real"],
+  );
   assert.deepEqual(
     AgentVm.mergeProjectCatalog(derived, {
-      folders: [{
-        projectId: 'project-scratch',
-        project: 'scratch',
-        cwd: '/private/tmp/scratch',
-      }],
+      folders: [
+        {
+          projectId: "project-scratch",
+          project: "scratch",
+          cwd: "/private/tmp/scratch",
+        },
+      ],
     }).map((project) => project.cwd),
-    ['/Users/dev/work/real', '/private/tmp/scratch'],
+    ["/Users/dev/work/real", "/private/tmp/scratch"],
   );
-  assert.equal(AgentVm.displayProjectPath('/Users/dev/work/real'), '~/work/real');
+  assert.equal(
+    AgentVm.displayProjectPath("/Users/dev/work/real"),
+    "~/work/real",
+  );
 });
 
-test('Agent VM slash suggestions rank prefix matches and ignore ordinary prompts', () => {
+test("Agent VM slash suggestions rank prefix matches and ignore ordinary prompts", () => {
   const commands = [
-    { name: 'security-review', description: 'Security review', source: 'builtin' },
-    { name: 'review', description: 'Review changes', source: 'project' },
-    { name: 'resume', description: 'Resume session', source: 'builtin' },
-    { name: 'model', description: 'Change model', source: 'builtin' },
+    {
+      name: "security-review",
+      description: "Security review",
+      source: "builtin",
+    },
+    { name: "review", description: "Review changes", source: "project" },
+    { name: "resume", description: "Resume session", source: "builtin" },
+    { name: "model", description: "Change model", source: "builtin" },
   ];
 
   assert.deepEqual(
-    AgentVm.filterCommands(commands, '/re').map((command) => command.name),
-    ['resume', 'review', 'security-review'],
+    AgentVm.filterCommands(commands, "/re").map((command) => command.name),
+    ["resume", "review", "security-review"],
   );
-  assert.deepEqual(
-    AgentVm.filterCommands(commands, '/review now'),
-    [],
-  );
-  assert.deepEqual(AgentVm.filterCommands(commands, 'review'), []);
+  assert.deepEqual(AgentVm.filterCommands(commands, "/review now"), []);
+  assert.deepEqual(AgentVm.filterCommands(commands, "review"), []);
 });
 
-test('Agent VM image paths are appended to the managed prompt', () => {
+test("Agent VM image paths are appended to the managed prompt", () => {
   assert.equal(
-    AgentVm.composePrompt('Проверь интерфейс', [
-      '/home/dev.guest/.jarvis-vm/uploads/jarvis-1.png',
-      '/home/dev.guest/.jarvis-vm/uploads/jarvis-2.jpg',
+    AgentVm.composePrompt("Проверь интерфейс", [
+      "/home/dev.guest/.jarvis-vm/uploads/jarvis-1.png",
+      "/home/dev.guest/.jarvis-vm/uploads/jarvis-2.jpg",
     ]),
-    'Проверь интерфейс\n/home/dev.guest/.jarvis-vm/uploads/jarvis-1.png\n'
-      + '/home/dev.guest/.jarvis-vm/uploads/jarvis-2.jpg',
+    "Проверь интерфейс\n/home/dev.guest/.jarvis-vm/uploads/jarvis-1.png\n" +
+      "/home/dev.guest/.jarvis-vm/uploads/jarvis-2.jpg",
   );
   assert.equal(
-    AgentVm.composePrompt('', ['/home/dev.guest/.jarvis-vm/uploads/jarvis-1.png']),
-    '/home/dev.guest/.jarvis-vm/uploads/jarvis-1.png',
+    AgentVm.composePrompt("", [
+      "/home/dev.guest/.jarvis-vm/uploads/jarvis-1.png",
+    ]),
+    "/home/dev.guest/.jarvis-vm/uploads/jarvis-1.png",
   );
 });
 
-test('active environments combine VM lifecycle with the latest structured run state', () => {
+test("active environments combine VM lifecycle with the latest structured run state", () => {
   const entities = [
-    vm('ready', 'running', { projectId: 'p-ready', project: 'ready', cwd: '/p/ready' }, 30),
-    vm('work', 'running', { projectId: 'p-work', project: 'work', cwd: '/p/work' }, 20),
-    vm('wait', 'running', { projectId: 'p-wait', project: 'wait', cwd: '/p/wait' }, 10),
-    vm('off', 'stopped', { projectId: 'p-off', project: 'off', cwd: '/p/off' }, 40),
-    run('work-run', 'working', { projectId: 'p-work', cwd: '/p/work', backend: 'codex' }, 21),
-    run('wait-run', 'waiting', { projectId: 'p-wait', cwd: '/p/wait', backend: 'claude' }, 11),
+    vm(
+      "ready",
+      "running",
+      { projectId: "p-ready", project: "ready", cwd: "/p/ready" },
+      30,
+    ),
+    vm(
+      "work",
+      "running",
+      { projectId: "p-work", project: "work", cwd: "/p/work" },
+      20,
+    ),
+    vm(
+      "wait",
+      "running",
+      { projectId: "p-wait", project: "wait", cwd: "/p/wait" },
+      10,
+    ),
+    vm(
+      "off",
+      "stopped",
+      { projectId: "p-off", project: "off", cwd: "/p/off" },
+      40,
+    ),
+    run(
+      "work-run",
+      "working",
+      { projectId: "p-work", cwd: "/p/work", backend: "codex" },
+      21,
+    ),
+    run(
+      "wait-run",
+      "waiting",
+      { projectId: "p-wait", cwd: "/p/wait", backend: "claude" },
+      11,
+    ),
   ];
 
   const active = AgentVm.activeEnvironments(entities);
 
-  assert.deepEqual(active.map((item) => item.projectId), ['p-wait', 'p-work', 'p-ready']);
-  assert.deepEqual(active.map((item) => item.uiState), ['waiting', 'working', 'ready']);
+  assert.deepEqual(
+    active.map((item) => item.projectId),
+    ["p-wait", "p-work", "p-ready"],
+  );
+  assert.deepEqual(
+    active.map((item) => item.uiState),
+    ["waiting", "working", "ready"],
+  );
   assert.deepEqual(
     active.map((item) => item.run?.attrs?.runId || null),
-    ['wait-run', 'work-run', null],
+    ["wait-run", "work-run", null],
   );
 });
 
-test('a run cannot report working before its project VM exists', () => {
-  const startingRun = run('cold-start', 'starting', {
-    projectId: 'p-cold',
-    cwd: '/p/cold',
-    backend: 'claude',
+test("a run cannot report working before its project VM exists", () => {
+  const startingRun = run("cold-start", "starting", {
+    projectId: "p-cold",
+    cwd: "/p/cold",
+    backend: "claude",
   });
-  const workingRun = run('warm-run', 'working', {
-    projectId: 'p-warm',
-    cwd: '/p/warm',
-    backend: 'codex',
+  const workingRun = run("warm-run", "working", {
+    projectId: "p-warm",
+    cwd: "/p/warm",
+    backend: "codex",
   });
 
-  assert.equal(AgentVm.environmentState(null, startingRun), 'starting');
-  assert.equal(AgentVm.environmentState(null, workingRun), 'starting');
+  assert.equal(AgentVm.environmentState(null, startingRun), "starting");
+  assert.equal(AgentVm.environmentState(null, workingRun), "starting");
   assert.equal(
     AgentVm.environmentState(
-      vm('warm', 'running', { projectId: 'p-warm', cwd: '/p/warm' }),
+      vm("warm", "running", { projectId: "p-warm", cwd: "/p/warm" }),
       workingRun,
     ),
-    'working',
+    "working",
   );
 });
 
-test('a failed pre-session run is not reused but an active or resumable run is', () => {
+test("a failed pre-session run is not reused but an active or resumable run is", () => {
   assert.equal(
     AgentVm.continuationRunId(
-      run('failed-before-start', 'failed', { backend: 'claude' }),
-      'claude',
-      'failed-before-start',
+      run("failed-before-start", "failed", { backend: "claude" }),
+      "claude",
+      "failed-before-start",
     ),
-    '',
+    "",
   );
   assert.equal(
     AgentVm.continuationRunId(
-      run('active', 'working', { backend: 'claude' }),
-      'claude',
-      'active',
+      run("active", "working", { backend: "claude" }),
+      "claude",
+      "active",
     ),
-    'active',
+    "active",
   );
   assert.equal(
     AgentVm.continuationRunId(
-      run('completed', 'completed', {
-        backend: 'claude',
-        backendSessionId: 'session-safe-1',
+      run("completed", "completed", {
+        backend: "claude",
+        backendSessionId: "session-safe-1",
       }),
-      'claude',
-      'completed',
+      "claude",
+      "completed",
     ),
-    'completed',
+    "completed",
   );
   assert.equal(
     AgentVm.continuationRunId(
-      run('other-backend', 'working', { backend: 'codex' }),
-      'claude',
-      'other-backend',
+      run("other-backend", "working", { backend: "codex" }),
+      "claude",
+      "other-backend",
     ),
-    '',
+    "",
   );
 });
 
-test('configured backends follow VM modules and default only before a record exists', () => {
-  assert.deepEqual(AgentVm.configuredBackends(null), ['claude', 'codex']);
+test("configured backends follow VM modules and default only before a record exists", () => {
+  assert.deepEqual(AgentVm.configuredBackends(null), ["claude", "codex"]);
   assert.deepEqual(
-    AgentVm.configuredBackends(vm('not-created', 'absent', {
-      management: 'missing',
-      modules: [],
-    })),
-    ['claude', 'codex'],
+    AgentVm.configuredBackends(
+      vm("not-created", "absent", {
+        management: "missing",
+        modules: [],
+      }),
+    ),
+    ["claude", "codex"],
   );
   assert.deepEqual(
-    AgentVm.configuredBackends(vm('claude-only', 'running', {
-      modules: ['node', 'go', 'claude'],
-    })),
-    ['claude'],
+    AgentVm.configuredBackends(
+      vm("claude-only", "running", {
+        modules: ["node", "go", "claude"],
+      }),
+    ),
+    ["claude"],
   );
   assert.deepEqual(
-    AgentVm.configuredBackends(vm('no-agents', 'running', { modules: ['node', 'go'] })),
+    AgentVm.configuredBackends(
+      vm("no-agents", "running", { modules: ["node", "go"] }),
+    ),
     [],
   );
   assert.equal(
     AgentVm.backendAvailable(
-      vm('claude-only', 'running', { modules: ['node', 'claude'] }),
-      'codex',
+      vm("claude-only", "running", { modules: ["node", "claude"] }),
+      "codex",
     ),
     false,
   );
   assert.equal(
     AgentVm.selectBackend(
-      vm('claude-only', 'running', { modules: ['node', 'claude'] }),
-      'codex',
+      vm("claude-only", "running", { modules: ["node", "claude"] }),
+      "codex",
     ),
-    'claude',
+    "claude",
   );
   assert.equal(
     AgentVm.selectBackend(
-      vm('both', 'running', { modules: ['node', 'claude', 'codex'] }),
-      'codex',
+      vm("both", "running", { modules: ["node", "claude", "codex"] }),
+      "codex",
     ),
-    'codex',
+    "codex",
   );
 });
 
-test('run reducer deduplicates replay/live events and builds turns, tools, files and result', () => {
+test("run reducer deduplicates replay/live events and builds turns, tools, files and result", () => {
   const event = (seq, turnId, type, payload = {}) => ({
-    runId: 'run-1',
+    runId: "run-1",
     turnId,
     seq,
     at: seq,
     type,
     payload,
-    backend: 'claude',
-    vm: 'project-vm',
+    backend: "claude",
+    vm: "project-vm",
   });
   const events = [
-    event(1, 'turn-1', 'user.message', { text: 'Сделай smoke' }),
-    event(2, 'turn-1', 'assistant.delta', { text: 'Де' }),
-    event(3, 'turn-1', 'assistant.delta', { text: 'лаю' }),
-    event(3, 'turn-1', 'assistant.delta', { text: 'дубликат' }),
-    event(4, 'turn-1', 'tool.started', { id: 'tool-1', name: 'command', detail: 'npm test' }),
-    event(5, 'turn-1', 'tool.completed', { id: 'tool-1' }),
-    event(6, 'turn-1', 'file.changed', {
-      path: '/work/project/smoke.txt',
-      relativePath: 'smoke.txt',
-      change: 'created',
+    event(1, "turn-1", "user.message", { text: "Сделай smoke" }),
+    event(2, "turn-1", "assistant.delta", { text: "Де" }),
+    event(3, "turn-1", "assistant.delta", { text: "лаю" }),
+    event(3, "turn-1", "assistant.delta", { text: "дубликат" }),
+    event(4, "turn-1", "tool.started", {
+      id: "tool-1",
+      name: "command",
+      detail: "npm test",
     }),
-    event(7, 'turn-1', 'assistant.message', { text: 'Готово' }),
-    event(8, 'turn-1', 'result.completed', {
-      text: 'Smoke завершён',
-      files: [{ path: '/work/project/smoke.txt', change: 'created' }],
+    event(5, "turn-1", "tool.completed", { id: "tool-1" }),
+    event(6, "turn-1", "file.changed", {
+      path: "/work/project/smoke.txt",
+      relativePath: "smoke.txt",
+      change: "created",
+    }),
+    event(7, "turn-1", "assistant.message", { text: "Готово" }),
+    event(8, "turn-1", "result.completed", {
+      text: "Smoke завершён",
+      files: [{ path: "/work/project/smoke.txt", change: "created" }],
     }),
   ];
 
   const merged = AgentVm.mergeEvents(events.slice(0, 4), events.slice(3));
   const view = AgentVm.reduceRun(merged);
 
-  assert.deepEqual(merged.map((item) => item.seq), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.deepEqual(
+    merged.map((item) => item.seq),
+    [1, 2, 3, 4, 5, 6, 7, 8],
+  );
   assert.equal(view.turns.length, 1);
-  assert.equal(view.turns[0].assistant, 'Готово');
-  assert.equal(view.turns[0].tools[0].state, 'completed');
-  assert.equal(view.turns[0].files[0].relativePath, 'smoke.txt');
-  assert.equal(view.turns[0].result.text, 'Smoke завершён');
-  assert.equal(view.state, 'completed');
+  assert.equal(view.turns[0].assistant, "Готово");
+  assert.equal(view.turns[0].tools[0].state, "completed");
+  assert.equal(view.turns[0].files[0].relativePath, "smoke.txt");
+  assert.equal(view.turns[0].result.text, "Smoke завершён");
+  assert.equal(view.state, "completed");
 });
 
-test('operation lookup returns only terminal responses for the matching request', () => {
+test("operation lookup returns only terminal responses for the matching request", () => {
   const started = {
-    id: 'operation.agent-vm-7',
-    kind: 'operation',
-    owner: 'plugin:agent-vm',
-    state: 'started',
-    attrs: { requestId: 'agent-vm-7', command: 'runtime.send' },
+    id: "operation.agent-vm-7",
+    kind: "operation",
+    owner: "plugin:agent-vm",
+    state: "started",
+    attrs: { requestId: "agent-vm-7", command: "runtime.send" },
   };
   const done = {
     ...started,
-    state: 'done',
-    attrs: { ...started.attrs, runId: 'run-1' },
+    state: "done",
+    attrs: { ...started.attrs, runId: "run-1" },
   };
 
-  assert.equal(AgentVm.operationResult([started], 'agent-vm-7'), null);
-  assert.deepEqual(AgentVm.operationResult([done], 'agent-vm-7'), {
+  assert.equal(AgentVm.operationResult([started], "agent-vm-7"), null);
+  assert.deepEqual(AgentVm.operationResult([done], "agent-vm-7"), {
     ok: true,
     attrs: done.attrs,
   });
 });
 
-test('plugin runtime status exposes handshake, retry countdown and connected phases', () => {
+test("plugin runtime status exposes handshake, retry countdown and connected phases", () => {
   const now = 100_000;
 
   assert.deepEqual(
-    AgentVm.pluginRuntimeStatus({
-      enabled: true,
-      status: {
-        state: 'starting',
-        startedAt: 95_000,
-        handshakeDeadline: 105_000,
-        restartAttempt: 0,
+    AgentVm.pluginRuntimeStatus(
+      {
+        enabled: true,
+        status: {
+          state: "starting",
+          startedAt: 95_000,
+          handshakeDeadline: 105_000,
+          restartAttempt: 0,
+        },
       },
-    }, now),
+      now,
+    ),
     {
-      state: 'starting',
-      tone: 'starting',
+      state: "starting",
+      tone: "starting",
       step: 1,
-      label: 'Handshake с Jarvis',
-      detail: '5с · таймаут через 5с',
+      label: "Handshake с Jarvis",
+      detail: "5с · таймаут через 5с",
       retryable: false,
     },
   );
   assert.deepEqual(
-    AgentVm.pluginRuntimeStatus({
-      enabled: true,
-      status: {
-        state: 'backoff',
-        retryAt: 104_200,
-        restartAttempt: 3,
-        error: 'plugin process exited with code 1',
+    AgentVm.pluginRuntimeStatus(
+      {
+        enabled: true,
+        status: {
+          state: "backoff",
+          retryAt: 104_200,
+          restartAttempt: 3,
+          error: "plugin process exited with code 1",
+        },
       },
-    }, now),
+      now,
+    ),
     {
-      state: 'backoff',
-      tone: 'waiting',
+      state: "backoff",
+      tone: "waiting",
       step: 0,
-      label: 'Повтор через 5с',
-      detail: 'Попытка 3 · plugin process exited with code 1',
+      label: "Повтор через 5с",
+      detail: "Попытка 3 · plugin process exited with code 1",
       retryable: true,
     },
   );
   assert.deepEqual(
-    AgentVm.pluginRuntimeStatus({
-      enabled: true,
-      status: { state: 'running', registeredAt: 99_900, restartAttempt: 0 },
-    }, now),
+    AgentVm.pluginRuntimeStatus(
+      {
+        enabled: true,
+        status: { state: "running", registeredAt: 99_900, restartAttempt: 0 },
+      },
+      now,
+    ),
     {
-      state: 'running',
-      tone: 'ready',
+      state: "running",
+      tone: "ready",
       step: 2,
-      label: 'Agent VM подключена',
-      detail: 'Sidecar online',
+      label: "Agent VM подключена",
+      detail: "Sidecar online",
       retryable: false,
     },
   );
 });
 
-test('main panel exposes Agent VM workspace, bridge and keyboard contract', () => {
-  const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
-  const bridge = readFileSync(new URL('./bridge.js', import.meta.url), 'utf8');
-  const renderer = readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
-  const ipc = readFileSync(new URL('../src-tauri/src/ipc.rs', import.meta.url), 'utf8');
+test("main panel exposes Agent VM workspace, bridge and keyboard contract", () => {
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const bridge = readFileSync(new URL("./bridge.js", import.meta.url), "utf8");
+  const renderer = readFileSync(
+    new URL("./renderer.js", import.meta.url),
+    "utf8",
+  );
+  const ipc = readFileSync(
+    new URL("../src-tauri/src/ipc.rs", import.meta.url),
+    "utf8",
+  );
   const sendUi = renderer.slice(
-    renderer.indexOf('async function sendAgentVmMessage()'),
-    renderer.indexOf('async function stopAgentVmTerminal()'),
+    renderer.indexOf("async function sendAgentVmMessage()"),
+    renderer.indexOf("async function stopAgentVmTerminal()"),
   );
   const projectCardUi = renderer.slice(
-    renderer.indexOf('function renderProjectCard(project)'),
-    renderer.indexOf('async function pickProjectManagerFolder()'),
+    renderer.indexOf("function renderProjectCard(project)"),
+    renderer.indexOf("async function pickProjectManagerFolder()"),
   );
 
   assert.match(html, /id="activeEnvironments"/);
@@ -506,17 +628,26 @@ test('main panel exposes Agent VM workspace, bridge and keyboard contract', () =
   assert.match(html, /pm-card-grid\.cards/);
 });
 
-test('folder picker stays async and releases project UI after cancel or error', () => {
-  const renderer = readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
-  const ipc = readFileSync(new URL('../src-tauri/src/ipc.rs', import.meta.url), 'utf8');
-  const main = readFileSync(new URL('../src-tauri/src/main.rs', import.meta.url), 'utf8');
+test("folder picker stays async and releases project UI after cancel or error", () => {
+  const renderer = readFileSync(
+    new URL("./renderer.js", import.meta.url),
+    "utf8",
+  );
+  const ipc = readFileSync(
+    new URL("../src-tauri/src/ipc.rs", import.meta.url),
+    "utf8",
+  );
+  const main = readFileSync(
+    new URL("../src-tauri/src/main.rs", import.meta.url),
+    "utf8",
+  );
   const folderPicker = readFileSync(
-    new URL('../src-tauri/src/project_folder_picker.rs', import.meta.url),
-    'utf8',
+    new URL("../src-tauri/src/project_folder_picker.rs", import.meta.url),
+    "utf8",
   );
   const pickerUi = renderer.slice(
-    renderer.indexOf('async function pickProjectManagerFolder()'),
-    renderer.indexOf('async function setProjectManagerFavorite('),
+    renderer.indexOf("async function pickProjectManagerFolder()"),
+    renderer.indexOf("async function setProjectManagerFavorite("),
   );
 
   assert.match(folderPicker, /NSOpenPanel/);

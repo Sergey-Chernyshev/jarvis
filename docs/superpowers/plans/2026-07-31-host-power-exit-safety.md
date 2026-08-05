@@ -752,23 +752,26 @@ git commit -m "feat(power): recover expired clamshell leases"
 - [ ] **Step 1: Write a failing UI-state test**
 
 ```javascript
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { createRequire } from 'node:module';
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { repairView } = require('./power-state.js');
+const { repairView } = require("./power-state.js");
 
-test('clamshell repair state explains blocked safe restore', () => {
-  assert.deepEqual(repairView({
-    health: 'blocked_restore',
-    repairAction: 'power.repair',
-  }), {
-    visible: true,
-    message: 'Не удалось безопасно вернуть сон',
-    actionLabel: 'Починить',
-    action: 'power.repair',
-  });
+test("clamshell repair state explains blocked safe restore", () => {
+  assert.deepEqual(
+    repairView({
+      health: "blocked_restore",
+      repairAction: "power.repair",
+    }),
+    {
+      visible: true,
+      message: "Не удалось безопасно вернуть сон",
+      actionLabel: "Починить",
+      action: "power.repair",
+    },
+  );
 });
 ```
 
@@ -803,14 +806,19 @@ Implement the pure browser/Node helper:
 ```javascript
 function repairView(status) {
   const messages = {
-    blocked_restore: 'Не удалось безопасно вернуть сон',
-    helper_unavailable: 'Безопасный помощник питания недоступен',
-    corrupt_ownership: 'Состояние режима сна повреждено',
+    blocked_restore: "Не удалось безопасно вернуть сон",
+    helper_unavailable: "Безопасный помощник питания недоступен",
+    corrupt_ownership: "Состояние режима сна повреждено",
   };
   const message = status && messages[status.health];
   return message
-    ? { visible: true, message, actionLabel: 'Починить', action: status.repairAction || 'power.repair' }
-    : { visible: false, message: '', actionLabel: '', action: '' };
+    ? {
+        visible: true,
+        message,
+        actionLabel: "Починить",
+        action: status.repairAction || "power.repair",
+      }
+    : { visible: false, message: "", actionLabel: "", action: "" };
 }
 ```
 

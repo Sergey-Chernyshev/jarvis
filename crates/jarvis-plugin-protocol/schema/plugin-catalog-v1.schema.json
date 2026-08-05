@@ -14,15 +14,21 @@
     "signatures"
   ],
   "properties": {
-    "schemaVersion": { "const": 1, "type": "integer", "minimum": 1, "maximum": 1 },
-    "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "schemaVersion": {
+      "const": 1,
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
     "issuedAt": { "$ref": "#/$defs/timestamp" },
     "expiresAt": { "$ref": "#/$defs/timestamp" },
     "previousDigest": {
-      "oneOf": [
-        { "$ref": "#/$defs/digest" },
-        { "type": "null" }
-      ]
+      "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }]
     },
     "payload": { "$ref": "#/$defs/payload" },
     "signatures": {
@@ -65,10 +71,7 @@
           "items": { "$ref": "#/$defs/release" }
         },
         "rootRotation": {
-          "oneOf": [
-            { "$ref": "#/$defs/rootRotation" },
-            { "type": "null" }
-          ]
+          "oneOf": [{ "$ref": "#/$defs/rootRotation" }, { "type": "null" }]
         },
         "revokedPackageDigests": {
           "type": "array",
@@ -120,7 +123,13 @@
     "publicKey": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["keyId", "algorithm", "publicKey", "validFrom", "validUntil"],
+      "required": [
+        "keyId",
+        "algorithm",
+        "publicKey",
+        "validFrom",
+        "validUntil"
+      ],
       "properties": {
         "keyId": { "$ref": "#/$defs/keyId" },
         "algorithm": { "const": "ed25519" },
@@ -132,7 +141,13 @@
     "rootKey": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["keyId", "algorithm", "publicKey", "validFrom", "validUntil"],
+      "required": [
+        "keyId",
+        "algorithm",
+        "publicKey",
+        "validFrom",
+        "validUntil"
+      ],
       "properties": {
         "keyId": { "$ref": "#/$defs/keyId" },
         "algorithm": { "const": "ed25519" },

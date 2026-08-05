@@ -41,14 +41,14 @@ repository root unless a step gives another working directory.
 
 ### Dependency gates
 
-| Gate | Required before | Proof |
-|---|---|---|
-| A1 public protocol/SDK/test-host | B1 | `61c6fbb` is an ancestor and all three public-crate test suites pass |
-| A2 strict Manifest v2 DTO and schema | B1 GREEN | `ManifestV2.contributes` contains pages, commands, actions, hotkeys, settings and data contracts; its fixture suite passes |
-| A5–A7 receipts, operations and manager service | B9 | Plugin Manager consumes one shared manager service; it does not synthesize installed/update state |
-| A8 exact receipt resolver | B3 production activation and B9 page opening | Page assets resolve from one immutable exact-digest package instance; legacy source folders never become a UI origin |
-| P0 isolation attestation from B3 | B8 and every custom page | Raw-child hostile WKWebView suite passes for the exact pinned Tauri/Wry/WebKit support tuple |
-| Figma checkpoint after B6 | B7 and later | Required frames, components, states, screenshots and node IDs are recorded in `docs/design/plugin-platform-v2-figma.md` |
+| Gate                                           | Required before                              | Proof                                                                                                                      |
+| ---------------------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| A1 public protocol/SDK/test-host               | B1                                           | `61c6fbb` is an ancestor and all three public-crate test suites pass                                                       |
+| A2 strict Manifest v2 DTO and schema           | B1 GREEN                                     | `ManifestV2.contributes` contains pages, commands, actions, hotkeys, settings and data contracts; its fixture suite passes |
+| A5–A7 receipts, operations and manager service | B9                                           | Plugin Manager consumes one shared manager service; it does not synthesize installed/update state                          |
+| A8 exact receipt resolver                      | B3 production activation and B9 page opening | Page assets resolve from one immutable exact-digest package instance; legacy source folders never become a UI origin       |
+| P0 isolation attestation from B3               | B8 and every custom page                     | Raw-child hostile WKWebView suite passes for the exact pinned Tauri/Wry/WebKit support tuple                               |
+| Figma checkpoint after B6                      | B7 and later                                 | Required frames, components, states, screenshots and node IDs are recorded in `docs/design/plugin-platform-v2-figma.md`    |
 
 If A2 changes a name used by this plan, update the B public DTO once at B1 and regenerate all golden fixtures before
 writing host implementation. Do not add a second competing manifest model.
@@ -800,13 +800,17 @@ review every lockfile change.
 ({
   isTauri: Object.prototype.hasOwnProperty.call(window, "isTauri"),
   hasGlobal: Object.prototype.hasOwnProperty.call(window, "__TAURI__"),
-  hasInternals: Object.prototype.hasOwnProperty.call(window, "__TAURI_INTERNALS__"),
+  hasInternals: Object.prototype.hasOwnProperty.call(
+    window,
+    "__TAURI_INTERNALS__",
+  ),
   internalsConfigurable:
-    Object.getOwnPropertyDescriptor(window, "__TAURI_INTERNALS__")?.configurable ?? null,
+    Object.getOwnPropertyDescriptor(window, "__TAURI_INTERNALS__")
+      ?.configurable ?? null,
   hasInvoke:
     typeof window.__TAURI_INTERNALS__?.invoke === "function" ||
-    typeof window.__TAURI_INTERNALS__?.postMessage === "function"
-})
+    typeof window.__TAURI_INTERNALS__?.postMessage === "function",
+});
 ```
 
 The harness writes one JSON line and exits. The test expectation deliberately documents:
@@ -1155,17 +1159,17 @@ PRAGMA busy_timeout = 5000;
 - `broker_meta(singleton, schema_version, broker_revision, clean_shutdown, opened_at_ms)`;
 - `broker_migrations(version, name, sha256, applied_at_ms)`;
 - `broker_contracts(contract_id, version, schema_digest, publisher_plugin_id, publisher_key_lineage,
-  sensitivity, visibility, retention, schema_json, installed_package_digest, created_at_ms)`;
+sensitivity, visibility, retention, schema_json, installed_package_digest, created_at_ms)`;
 - `broker_entities(contract_id, contract_version, entity_id, owner_plugin_id, owner_package_digest, revision,
-  broker_revision, state, data_json, updated_at_ms, stale)`;
+broker_revision, state, data_json, updated_at_ms, stale)`;
 - `broker_entity_changes(broker_revision, contract_id, contract_version, entity_id, entity_revision, change_kind)`;
 - `broker_host_receipt_schemas(receipt_type, receipt_version, schema_digest, schema_json,
-  registered_by_core_component, created_at_ms)`;
+registered_by_core_component, created_at_ms)`;
 - `broker_host_projection_receipts(producer_namespace, batch_id, source_digest, write_set_digest, broker_revision,
-  receipt_ordinal, subject_kind, subject_id, contract_id, contract_version, entity_id, row_digest, receipt_type,
-  receipt_version, receipt_schema_digest, receipt_digest, receipt_blob, created_at_ms)`;
+receipt_ordinal, subject_kind, subject_id, contract_id, contract_version, entity_id, row_digest, receipt_type,
+receipt_version, receipt_schema_digest, receipt_digest, receipt_blob, created_at_ms)`;
 - `broker_quarantine(owner_plugin_id, contract_id, record_kind, record_key, reason_code, payload_digest,
-  payload_blob, quarantined_at_ms)`.
+payload_blob, quarantined_at_ms)`.
 
 All foreign keys include exact contract version and schema digest through a unique contract binding. Migration
 checksums are immutable. A changed historical migration is a startup error; forward migrations are one transaction.
@@ -1403,15 +1407,15 @@ Expected RED: `event_store` and `cursor_store` modules are missing.
 
 - `broker_streams(contract_id, contract_version, stream_id, next_seq, earliest_seq, latest_seq)`;
 - `broker_events(contract_id, contract_version, stream_id, seq, event_id, subject, kind, correlation_id,
-  data_json, at_ms, broker_revision, owner_plugin_id, owner_package_digest)`;
+data_json, at_ms, broker_revision, owner_plugin_id, owner_package_digest)`;
 - `broker_cursors(cursor_id, consumer_plugin_id, consumer_package_digest, contract_id, contract_version,
-  stream_id, next_seq, last_ack_ms, durable, grant_revision)`;
+stream_id, next_seq, last_ack_ms, durable, grant_revision)`;
 - `broker_outbox_receipts(owner_plugin_id, owner_package_digest, source_instance_id, outbox_id,
-  payload_digest, applied_broker_revision, applied_at_ms)`;
+payload_digest, applied_broker_revision, applied_at_ms)`;
 - `broker_projection_adapter_state(adapter_id, owner_plugin_id,
-  owner_package_digest, source_instance_id, subject_key_digest,
-  binding_schema_digest, binding_json, binding_digest, provider_revision,
-  applied_broker_revision, updated_at_ms)`;
+owner_package_digest, source_instance_id, subject_key_digest,
+binding_schema_digest, binding_json, binding_digest, provider_revision,
+applied_broker_revision, updated_at_ms)`;
 - `plugin_private_storage(plugin_id, signer_lineage, key, value_json, revision, updated_at_ms)`;
 - `plugin_private_storage_usage(plugin_id, signer_lineage, total_bytes, revision)`.
 
@@ -1644,31 +1648,31 @@ Gate v2 for a migrated command, but Gate v2 must not call legacy Gate in a way t
 `0003_grants_audit_operations.sql` creates:
 
 - `plugin_grants(grant_id, consumer_plugin_id, consumer_package_digest, provider_plugin_id,
-  provider_signer_lineage, contract_id, contract_version, schema_digest, operations_json, projects_json,
-  subjects_json, fields_json, purpose, retention, expires_at_ms, grant_revision, state, created_at_ms,
-  revoked_at_ms)`;
+provider_signer_lineage, contract_id, contract_version, schema_digest, operations_json, projects_json,
+subjects_json, fields_json, purpose, retention, expires_at_ms, grant_revision, state, created_at_ms,
+revoked_at_ms)`;
 - `plugin_audit(seq, correlation_id, principal_kind, principal_digest, namespace, method, contract_id,
-  contract_version, selected_fields_json, args_digest, result_class, risk, grant_id, grant_revision,
-  started_at_ms, finished_at_ms)`.
+contract_version, selected_fields_json, args_digest, result_class, risk, grant_id, grant_revision,
+started_at_ms, finished_at_ms)`.
 - `broker_runtime_operations(operation_id, exact_command_id,
-  command_contract_id, command_contract_version, command_schema_digest,
-  subject_contract_id, subject_contract_version, subject_schema_digest,
-  subject_id, provider_plugin_id, provider_package_digest,
-  provider_activation_generation, principal_digest, grant_id, grant_revision,
-  idempotency_key, args_digest, state, state_revision, phase, deadline_at_ms,
-  cancel_requested, error_code, created_at_ms, updated_at_ms,
-  terminal_at_ms)`;
+command_contract_id, command_contract_version, command_schema_digest,
+subject_contract_id, subject_contract_version, subject_schema_digest,
+subject_id, provider_plugin_id, provider_package_digest,
+provider_activation_generation, principal_digest, grant_id, grant_revision,
+idempotency_key, args_digest, state, state_revision, phase, deadline_at_ms,
+cancel_requested, error_code, created_at_ms, updated_at_ms,
+terminal_at_ms)`;
 - `broker_runtime_operation_payloads(operation_id PRIMARY KEY,
-  canonical_args_json, payload_digest, created_at_ms)`, private to the
+canonical_args_json, payload_digest, created_at_ms)`, private to the
   dispatcher and absent from Broker/Bridge/query/audit APIs;
 - `broker_runtime_operation_dispatch(operation_id PRIMARY KEY, attempt,
-  dispatch_state, lease_owner_digest, lease_until_ms,
-  provider_operation_receipt_digest, last_reconciled_at_ms)`;
+dispatch_state, lease_owner_digest, lease_until_ms,
+provider_operation_receipt_digest, last_reconciled_at_ms)`;
 - `broker_runtime_operation_changes(cursor INTEGER PRIMARY KEY AUTOINCREMENT,
-  operation_id, subject_contract_id, subject_contract_version, subject_id,
-  state_revision, state, phase, changed_at_ms)`.
+operation_id, subject_contract_id, subject_contract_version, subject_id,
+state_revision, state, phase, changed_at_ms)`.
 - `broker_runtime_operation_meta(singleton, earliest_cursor, latest_cursor,
-  retention_cutoff_ms)`.
+retention_cutoff_ms)`.
 
 Never persist raw arguments, result payloads, handles, paths, chat text, secret references, plugin private values or a
 full principal identifier in audit. `principal_digest` uses an application-local keyed digest so log correlation
@@ -2010,12 +2014,12 @@ Expected RED: setting registry/store modules do not exist.
 `0004_plugin_settings.sql` creates:
 
 - `plugin_setting_definitions(plugin_id, package_digest, setting_key, value_schema_json, default_json, scopes_json,
-  restart_required, runtime_reload, sensitive, manifest_revision)`;
+restart_required, runtime_reload, sensitive, manifest_revision)`;
 - `plugin_setting_values(plugin_id, signer_lineage, setting_key, scope_kind, scope_id, value_json, revision,
-  definition_package_digest, updated_at_ms)`;
+definition_package_digest, updated_at_ms)`;
 - `plugin_setting_changes(seq, plugin_id, setting_key, scope_kind, scope_id_digest, revision, changed_at_ms)`;
 - `plugin_setting_migration_receipts(plugin_id, from_version, to_version, graph_digest, result_digest,
-  applied_at_ms)`.
+applied_at_ms)`.
 
 The active A8 receipt selects definitions. `get` computes default/user/project precedence in one read transaction.
 `set/reset` enter through Gate v2, validate exact scope and current definition, update by expected revision and append
@@ -2957,9 +2961,9 @@ Expected RED: services expose independent snapshots/generations.
 `0006_platform_reconciliation.sql` creates:
 
 - `plugin_lifecycle_inbox(event_id, manager_revision, plugin_id, target_package_digest, target_state,
-  payload_digest, received_at_ms, applied_at_ms)`;
+payload_digest, received_at_ms, applied_at_ms)`;
 - `plugin_reconciliation(plugin_id, activation_generation, target_package_digest, target_state, phase,
-  last_error_code, retry_at_ms, revision)`.
+last_error_code, retry_at_ms, revision)`.
 
 A manager event is authenticated data from the shared A service, not a plugin payload. Duplicate event ID plus digest
 is idempotent; a changed payload is a hard conflict.
@@ -3310,24 +3314,24 @@ git commit -m "test(plugins): certify ui host and data broker"
 - [ ] Events are durable at-least-once with explicit cursor gap/resync; outbox replay is idempotent.
 - [ ] Gate v2 binds exact authenticated principal/digest/contract/grant and rechecks after provider work.
 - [ ] Runtime Operations are committed before provider dispatch, survive
-  restart/query by subject, expose durable cursor gap/resync, reauthorize
-  cancellation and keep terminal state immutable.
+      restart/query by subject, expose durable cursor gap/resync, reauthorize
+      cancellation and keep terminal state immutable.
 - [ ] Audit is redacted; secrets, raw paths/text, private values and handles never persist in shared/audit payloads.
 - [ ] Handles are volatile, scoped, limited and revoked on every lifecycle fence.
 - [ ] Host/custom/process settings share one canonical value/revision; secrets are credential references only.
 - [ ] Core contributions are declarative, safely rendered, deterministic and independently authorized.
 - [ ] Dynamic hotkeys/pins/visibility are Core-owned and reconciled on every lifecycle transition.
 - [ ] Opening a manager/project/plugin route produces no
-  provider/Operation/resource-handle/VM/terminal/Session side effect.
+      provider/Operation/resource-handle/VM/terminal/Session side effect.
 - [ ] Generic B modules pass the provider-neutral boundary lint.
 - [ ] Core and plugin projections prove one Broker snapshot revision.
 - [ ] Provider outbox adapters atomically create host-owned projections without
-  granting providers ownership of Core contracts.
+      granting providers ownership of Core contracts.
 - [ ] Adapter-private provenance bindings are transactionally stored outside
-  Broker query/Bridge surfaces and public projections contain no private
-  canaries.
+      Broker query/Bridge surfaces and public projections contain no private
+      canaries.
 - [ ] Rust 1.77.2 covers the complete locked protocol, SDK and test-host graphs;
-  only `tools/plugin-schema-parity` uses current stable for its JSON Schema validator graph.
+      only `tools/plugin-schema-parity` uses current stable for its JSON Schema validator graph.
 - [ ] Figma evidence and four independent review reports have no unresolved high/critical finding.
 - [ ] Final documentation says Projects ↔ Agent VM synchronization remains contingent on C and E.
 

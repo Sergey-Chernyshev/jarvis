@@ -149,8 +149,7 @@ Expected: every command exits `0`. The B tests must prove:
    at its allocated Broker revision, while none of those receipts are visible
    through plugin query/schema discovery.
 
-`broker_trusted_projection_receipts` is the exact B4 acceptance test for item
-7. Do not substitute C's Catalog tests, a provider outbox receipt test or the
+`broker_trusted_projection_receipts` is the exact B4 acceptance test for item 7. Do not substitute C's Catalog tests, a provider outbox receipt test or the
 single-row EntityStore test: the dependency gate must execute that file by
 name and keep its two-row/same-revision, rollback and privacy cases green.
 
@@ -194,26 +193,26 @@ checkpoint before its first UI task.
 This plan is based on the current implementation at the planning base, not on
 an assumed future rewrite.
 
-| Current source | Audited behavior | Required C disposition |
-|---|---|---|
-| `src-tauri/src/entities.rs` | Process-local `HashMap` EntityStore with owner strings, no durability, CAS, schema contract or shared snapshot revision | Treat as legacy import input only; all new Core reads use B Broker |
-| `src-tauri/src/capability/native/entities_cap.rs` | Every legacy upsert directly calls `agent_vm::route_transition` and emits a full store snapshot | Add no such coupling to Broker/Core; fence the old notification bridge until E/F |
-| `src-tauri/src/agent_vm.rs` and `plugins/agent-vm/src/project.rs` | Duplicate FNV-1a identity over canonical cwd; unavailable, moved or renamed roots cannot preserve identity | Freeze the algorithm only in migration fixtures; assign one opaque Catalog ID and store aliases |
-| `src-tauri/src/agent_vm.rs` | `projectManager.folders`, favorites, view and `agentVm.projects` are owned by the Agent VM module | Import idempotently into Core Catalog/preferences; keep rollback receipts |
-| `src-tauri/src/history.rs` | Chat history groups by cwd or basename and returns untyped JSON independent of VM state | Expose a typed read-only import source; never join it in UI |
-| `plugins/agent-vm/src/service.rs` | Runtime API is keyed by raw cwd and returns provider-specific snapshots | E will publish canonical provider outbox rows; C accepts only Core envelopes |
-| `plugins/agent-vm/src/run_supervisor.rs` | One active run per project, one replaceable queued Turn, JSONL journal and `runId` acting as Session | Map `runId` to a Session compatibility alias and shadow projection; do not claim managed adoption |
-| `plugins/agent-vm/src/plugin.rs` | Free-string runtime commands and transient legacy `operation` entities | Generic UI invokes B exact typed command receipts and watches durable `OperationRef` |
-| `src-tauri/src/agent_vm_terminal.rs` | Host tmux terminal is keyed by legacy projectId/backend, resolves a legacy `vm` entity and directly controls Lima/tmux | Generic Project UI never imports it; typed attach/multi-session ownership moves through D/E |
-| `src-tauri/src/launch.rs` | `agent_command` interpolates unchecked agent/session strings into shell text; unknown agent silently becomes Claude; `session_launch` accepts caller cwd | Harden behind an exact legacy provider with typed argv/ID validation; generic Project Runtime must never call `crate::launch` |
-| `src-tauri/src/project_folder_picker.rs` and `project_manager_folder_pick` | Picker returns a raw path which is later canonicalized/mutated without an fd-bound one-time selection capability | Core owns selection, binds an opened directory identity to a one-time handle and rejects raw path registration/symlink swaps |
-| `ui/agent-vm.js` | Manually merges history, legacy entities and project settings by cwd/projectId; derives state in JavaScript | Replace generic Projects data path with one canonical snapshot/store |
-| `ui/renderer.js` | Project cards always open Agent VM; opening a running VM calls terminal warm-up and `runtime.ensure`; a stopped VM calls provider `runtime.status` | Project route is read-only; runtime/session start requires an explicit confirmed action |
-| `ui/renderer.js` | Embedded Agent VM terminal polls every 350 ms and is the primary project workspace | Generic Session detail is chat/results first; copyable attach/resume is secondary |
-| `ui/bridge.js` and `src-tauri/src/ipc.rs` | Generic Projects path exposes `entities_get`, `history_get`, project-manager cwd calls, `session_launch`, raw Agent VM focus/terminal/files APIs | Add one typed Project Runtime query/action boundary; retain old calls only behind a measured rollback adapter |
-| `src-tauri/src/ipc.rs::toast_click` | Agent VM targets contain raw cwd, FNV projectId and optional runId | Resolve trusted legacy targets through alias tables into canonical routes |
-| `src-tauri/src/agent_vm.rs::Coordinator` and `notification_for` | Focus is process-local and completion/waiting notifications are derived directly from legacy entity transitions with no durable receipt | C publishes canonical state only; F owns durable notification dedupe/supersession and focus-safe delivery |
-| all current UI sources | History/settings/entities/terminal polls have unrelated update times and no common revision | Apply one coordinator/Broker snapshot and monotonic watch stream; gap means full resync |
+| Current source                                                             | Audited behavior                                                                                                                                         | Required C disposition                                                                                                        |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `src-tauri/src/entities.rs`                                                | Process-local `HashMap` EntityStore with owner strings, no durability, CAS, schema contract or shared snapshot revision                                  | Treat as legacy import input only; all new Core reads use B Broker                                                            |
+| `src-tauri/src/capability/native/entities_cap.rs`                          | Every legacy upsert directly calls `agent_vm::route_transition` and emits a full store snapshot                                                          | Add no such coupling to Broker/Core; fence the old notification bridge until E/F                                              |
+| `src-tauri/src/agent_vm.rs` and `plugins/agent-vm/src/project.rs`          | Duplicate FNV-1a identity over canonical cwd; unavailable, moved or renamed roots cannot preserve identity                                               | Freeze the algorithm only in migration fixtures; assign one opaque Catalog ID and store aliases                               |
+| `src-tauri/src/agent_vm.rs`                                                | `projectManager.folders`, favorites, view and `agentVm.projects` are owned by the Agent VM module                                                        | Import idempotently into Core Catalog/preferences; keep rollback receipts                                                     |
+| `src-tauri/src/history.rs`                                                 | Chat history groups by cwd or basename and returns untyped JSON independent of VM state                                                                  | Expose a typed read-only import source; never join it in UI                                                                   |
+| `plugins/agent-vm/src/service.rs`                                          | Runtime API is keyed by raw cwd and returns provider-specific snapshots                                                                                  | E will publish canonical provider outbox rows; C accepts only Core envelopes                                                  |
+| `plugins/agent-vm/src/run_supervisor.rs`                                   | One active run per project, one replaceable queued Turn, JSONL journal and `runId` acting as Session                                                     | Map `runId` to a Session compatibility alias and shadow projection; do not claim managed adoption                             |
+| `plugins/agent-vm/src/plugin.rs`                                           | Free-string runtime commands and transient legacy `operation` entities                                                                                   | Generic UI invokes B exact typed command receipts and watches durable `OperationRef`                                          |
+| `src-tauri/src/agent_vm_terminal.rs`                                       | Host tmux terminal is keyed by legacy projectId/backend, resolves a legacy `vm` entity and directly controls Lima/tmux                                   | Generic Project UI never imports it; typed attach/multi-session ownership moves through D/E                                   |
+| `src-tauri/src/launch.rs`                                                  | `agent_command` interpolates unchecked agent/session strings into shell text; unknown agent silently becomes Claude; `session_launch` accepts caller cwd | Harden behind an exact legacy provider with typed argv/ID validation; generic Project Runtime must never call `crate::launch` |
+| `src-tauri/src/project_folder_picker.rs` and `project_manager_folder_pick` | Picker returns a raw path which is later canonicalized/mutated without an fd-bound one-time selection capability                                         | Core owns selection, binds an opened directory identity to a one-time handle and rejects raw path registration/symlink swaps  |
+| `ui/agent-vm.js`                                                           | Manually merges history, legacy entities and project settings by cwd/projectId; derives state in JavaScript                                              | Replace generic Projects data path with one canonical snapshot/store                                                          |
+| `ui/renderer.js`                                                           | Project cards always open Agent VM; opening a running VM calls terminal warm-up and `runtime.ensure`; a stopped VM calls provider `runtime.status`       | Project route is read-only; runtime/session start requires an explicit confirmed action                                       |
+| `ui/renderer.js`                                                           | Embedded Agent VM terminal polls every 350 ms and is the primary project workspace                                                                       | Generic Session detail is chat/results first; copyable attach/resume is secondary                                             |
+| `ui/bridge.js` and `src-tauri/src/ipc.rs`                                  | Generic Projects path exposes `entities_get`, `history_get`, project-manager cwd calls, `session_launch`, raw Agent VM focus/terminal/files APIs         | Add one typed Project Runtime query/action boundary; retain old calls only behind a measured rollback adapter                 |
+| `src-tauri/src/ipc.rs::toast_click`                                        | Agent VM targets contain raw cwd, FNV projectId and optional runId                                                                                       | Resolve trusted legacy targets through alias tables into canonical routes                                                     |
+| `src-tauri/src/agent_vm.rs::Coordinator` and `notification_for`            | Focus is process-local and completion/waiting notifications are derived directly from legacy entity transitions with no durable receipt                  | C publishes canonical state only; F owns durable notification dedupe/supersession and focus-safe delivery                     |
+| all current UI sources                                                     | History/settings/entities/terminal polls have unrelated update times and no common revision                                                              | Apply one coordinator/Broker snapshot and monotonic watch stream; gap means full resync                                       |
 
 There is no durable alias table today. Existing fallback comparisons such as
 `item.projectId === target.projectId || item.cwd === target.cwd` are not
@@ -614,13 +613,13 @@ acknowledgement is durable or represented by a durable pending Operation.
 6. reads host-only `CatalogProjectionReceipt`s in that Broker transaction and
    verifies every Catalog-derived row against its own exact
    `(subjectKind, subjectId, catalogSourceRevision,
-   acknowledgedBrokerRevision, rowDigest, changeSetDigest)` receipt, with no
+acknowledgedBrokerRevision, rowDigest, changeSetDigest)` receipt, with no
    acknowledgement newer than the snapshot;
 7. selects the latest applicable CatalogPreferences receipt at or before that
    Broker revision (maximum `acknowledgedBrokerRevision <= snapshotRevision`),
    verifies the returned preferences row against it, and
    returns it as `CatalogCheckpoint { catalogSourceRevision,
-   acknowledgedBrokerRevision, payloadDigest: rowDigest }`; Project rows may
+acknowledgedBrokerRevision, payloadDigest: rowDigest }`; Project rows may
    legitimately reference older source/ack receipts;
 8. reads B's durable nonterminal runtime Operations for the returned canonical
    subjects plus the operation-change high-water cursor in that same B read
@@ -1045,20 +1044,20 @@ PRAGMA busy_timeout = 5000;
 `0001_project_catalog.sql` creates:
 
 - `catalog_meta(singleton, schema_version, catalog_revision, clean_shutdown,
-  opened_at_ms)`;
+opened_at_ms)`;
 - `catalog_migrations(version, name, sha256, applied_at_ms)`;
 - `projects(project_id, display_name, project_kind, state, revision,
-  created_at_ms, updated_at_ms, archived_at_ms)`;
+created_at_ms, updated_at_ms, archived_at_ms)`;
 - `project_roots(root_id, project_id, lexical_path, canonical_path,
-  path_digest, device_id, file_id, availability, is_primary, revision,
-  last_seen_at_ms)`;
+path_digest, device_id, file_id, availability, is_primary, revision,
+last_seen_at_ms)`;
 - `project_preferences(project_id, favorite_rank, revision, updated_at_ms)`;
 - `catalog_preferences(singleton, view_mode, revision, updated_at_ms)`;
 - `catalog_outbox(outbox_id, source_instance_id, catalog_source_revision,
-  payload_digest, payload_json, created_at_ms, acknowledged_broker_revision,
-  acknowledged_at_ms)`;
+payload_digest, payload_json, created_at_ms, acknowledged_broker_revision,
+acknowledged_at_ms)`;
 - `catalog_projection_acks(catalog_source_revision PRIMARY KEY, outbox_id,
-  payload_digest, acknowledged_broker_revision UNIQUE, acknowledged_at_ms)`.
+payload_digest, acknowledged_broker_revision UNIQUE, acknowledged_at_ms)`.
 
 Paths are private Catalog values. Logs, errors and public audit use path
 digests/display basename only.
@@ -1190,27 +1189,27 @@ Expected RED: migration/alias code does not exist.
 `0002_aliases_imports.sql` creates:
 
 - `entity_aliases(subject_kind, provider_id, alias_kind, alias_value,
-  alias_digest, canonical_id, valid_from_ms, valid_until_ms, reason,
-  source_generation, state)`;
+alias_digest, canonical_id, valid_from_ms, valid_until_ms, reason,
+source_generation, state)`;
 - `migration_sources(source_kind, source_key_digest, source_generation,
-  snapshot_watermark, input_digest, precedence, collection_state,
-  observed_at_ms)`;
+snapshot_watermark, input_digest, precedence, collection_state,
+observed_at_ms)`;
 - `migration_collection_runs(collection_id, migration_version, phase,
-  required_sources_json, source_watermarks_digest, evidence_graph_digest,
-  started_at_ms, finalized_at_ms)`, where phase is
+required_sources_json, source_watermarks_digest, evidence_graph_digest,
+started_at_ms, finalized_at_ms)`, where phase is
   `collecting | planned | finalized | conflicted`;
 - `migration_receipts(receipt_id, migration_version, source_kind,
-  source_key_digest, input_digest, canonical_subject_kind, canonical_id,
-  collection_id, source_generation, snapshot_watermark, phase, result_digest,
-  rollback_until_ms, created_at_ms, updated_at_ms)`;
+source_key_digest, input_digest, canonical_subject_kind, canonical_id,
+collection_id, source_generation, snapshot_watermark, phase, result_digest,
+rollback_until_ms, created_at_ms, updated_at_ms)`;
 - `migration_conflicts(conflict_id, alias_kind, alias_digest,
-  candidate_ids_json, reason_code, created_at_ms, resolved_at_ms,
-  resolution_receipt_id)`;
+candidate_ids_json, reason_code, created_at_ms, resolved_at_ms,
+resolution_receipt_id)`;
 - `project_runtime_rollout(singleton, mode, revision, enabled_at_ms,
-  rollback_until_ms, updated_at_ms)`, where mode is
+rollback_until_ms, updated_at_ms)`, where mode is
   `legacy | shadow | canonical`;
 - `compatibility_usage(alias_kind, alias_digest, resolution_count,
-  last_resolved_at_ms)`.
+last_resolved_at_ms)`.
 
 `alias_value` is private and bounded; telemetry/audit use `alias_digest`.
 Uniqueness prevents one live alias from resolving to two canonical IDs.
@@ -1762,10 +1761,10 @@ Core Session envelope directly.
 `0003_legacy_runtime_handoff.sql` creates:
 
 - `legacy_projection_sources(source_id, owner, source_generation,
-  last_input_digest, last_applied_broker_revision, state, updated_at_ms)`;
+last_input_digest, last_applied_broker_revision, state, updated_at_ms)`;
 - `legacy_runtime_handoffs(provider_id, project_id, legacy_source_id,
-  canonical_runtime_id, legacy_run_id_digest, canonical_session_id, phase,
-  legacy_watermark, provider_watermark, receipt_digest, updated_at_ms)`.
+canonical_runtime_id, legacy_run_id_digest, canonical_session_id, phase,
+legacy_watermark, provider_watermark, receipt_digest, updated_at_ms)`.
 
 Only one source generation may publish a canonical Runtime/Session at a time.
 E must commit `provider-caught-up` and then `legacy-fenced` before provider
@@ -2639,7 +2638,7 @@ Use a separate Jarvis dev profile and non-sensitive fixture Projects:
 8. force watch disconnect/gap and verify one full resync;
 9. restart Jarvis uncleanly and verify Catalog/outbox recovery;
 10. compare complete UI snapshot JSON bytes with headless adapter JSON,
-   Catalog preferences/checkpoint, pending Operations and both cursors;
+    Catalog preferences/checkpoint, pending Operations and both cursors;
 11. cancel a root picker and attempt a replaced/symlink-swapped fixture with no
     Catalog revision; exercise all invalid launch resume-ID classes with no
     process spawn;
@@ -2772,61 +2771,61 @@ git commit -m "docs(projects): certify runtime core increment"
 
 - [ ] A2 and all B dependency gates are committed and green before C code.
 - [ ] Core IDs are opaque, stable across rename/unavailability and never
-  derived from cwd/basename/provider.
+      derived from cwd/basename/provider.
 - [ ] FNV/path/run IDs exist only as private compatibility aliases.
 - [ ] Project Catalog mutations and outbox rows are one transaction.
 - [ ] Host picker returns only an fd-bound, one-time directory handle; raw
-  path/cwd registration, cancellation mutation and symlink/inode TOCTOU are
-  rejected.
+      path/cwd registration, cancellation mutation and symlink/inode TOCTOU are
+      rejected.
 - [ ] Every Catalog change set includes complete preferences and persists one
-  exact `catalogSourceRevision -> acknowledgedBrokerRevision` mapping.
+      exact `catalogSourceRevision -> acknowledgedBrokerRevision` mapping.
 - [ ] Every projected Project has its own immutable host-only receipt; the
-  checkpoint is the latest applicable Preferences receipt, and
-  preferences-only/single-Project mutations preserve valid mixed-source
-  snapshots with byte-identical UI/headless output.
+      checkpoint is the latest applicable Preferences receipt, and
+      preferences-only/single-Project mutations preserve valid mixed-source
+      snapshots with byte-identical UI/headless output.
 - [ ] Project, Runtime, Session and Turn readers use one Broker snapshot
-  revision.
+      revision.
 - [ ] UI and headless/CLI port serialize byte-identical complete snapshots,
-  preferences/checkpoint, pending Operations and cursors.
+      preferences/checkpoint, pending Operations and cursors.
 - [ ] Provider projections are exact-schema, exact-receipt and
-  generation/state validated.
+      generation/state validated.
 - [ ] Session public Views contain no process/attach/resume provenance;
-  host-owned fields are rejected from observations and only digests exist in
-  adapter-private state.
+      host-owned fields are rejected from observations and only digests exist in
+      adapter-private state.
 - [ ] ChangeSet/ChangedFile Views contain only opaque IDs and display metadata;
-  file/attach handles are click-only, volatile and never durable.
+      file/attach handles are click-only, volatile and never durable.
 - [ ] A Project can have many Runtimes; a Runtime many Sessions; a Session many
-  Turns.
+      Turns.
 - [ ] Generic routes and page opening create zero
-  provider/Operation/resource-handle/terminal side effects.
+      provider/Operation/resource-handle/terminal side effects.
 - [ ] Every lifecycle/session mutation is an explicit exact typed command and
-  durable B Operation committed before dispatch, recoverable/queryable by
-  subject with cursor gap/resync, authorized cancel and immutable terminal.
+      durable B Operation committed before dispatch, recoverable/queryable by
+      subject with cursor gap/resync, authorized cancel and immutable terminal.
 - [ ] Generic Projects UI imports no Agent VM/provider-private module and
-  inspects no extension data.
+      inspects no extension data.
 - [ ] The old three-source history/entities/settings merge is absent from the
-  generic Projects path.
+      generic Projects path.
 - [ ] Session UI is chat/results first; attach/resume is secondary and
-  copyable; no embedded terminal is primary.
+      copyable; no embedded terminal is primary.
 - [ ] `project.*` contribution outlets use minimized canonical context and
-  opaque handles.
+      opaque handles.
 - [ ] Legacy projector is read-only, fenced, receipt-backed and removable by E.
 - [ ] EntityStore participates in the frozen pre-allocation evidence barrier;
-  unavailable/late/conflicting generations cannot finalize, remap or duplicate
-  a Project.
+      unavailable/late/conflicting generations cannot finalize, remap or duplicate
+      a Project.
 - [ ] Legacy local CLI is an exact provider outside generic Core; hardened
-  launch rejects unknown agents and newline/`$()`/quotes/path/invalid IDs.
+      launch rejects unknown agents and newline/`$()`/quotes/path/invalid IDs.
 - [ ] Active legacy runs are shadowed as unmanaged, not falsely adopted.
 - [ ] C does not claim controller/CLI, Agent VM package migration,
-  memory/mounts or durable notifications.
+      memory/mounts or durable notifications.
 - [ ] Crash, rollback, alias conflict, watch gap and provider generation
-  recovery are proven.
+      recovery are proven.
 - [ ] Live before/after `avm`/default-Lima/Colima/process inventory is
-  exact manager/home/name/state equal; the executable trap can mutate only
-  exact receipt-bound ledger rows, no test-owned VM/process leaks and no
-  unrelated or unledgered VM was touched.
+      exact manager/home/name/state equal; the executable trap can mutate only
+      exact receipt-bound ledger rows, no test-owned VM/process leaks and no
+      unrelated or unledgered VM was touched.
 - [ ] Rust 1.77.2 is claimed/tested only for public/pure Core crates; Tauri host
-  gates use current stable unless the complete dependency graph is pinned.
+      gates use current stable unless the complete dependency graph is pinned.
 - [ ] Approved Figma nodes and keyboard/VoiceOver/200% evidence are recorded.
 - [ ] Architecture, migration, security and UI reviews have no unresolved
-  high/critical findings.
+      high/critical findings.

@@ -11,6 +11,7 @@
 **Из области этого плана исключено (Фаза 2, отдельный план):** онбординг-окно первого запуска, вынос `install/uninstall/status` в `src/install/mod.rs`. Здесь только дистрибутив.
 
 **Предусловия по секретам/иконке (приходят позже, план их не блокирует):**
+
 - Apple: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`.
 - Updater: `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (ключ генерим в Task 5, приватный храним вне репо).
 - Иконка: `src-tauri/icons/icon-source.png` 1024×1024 (в Task 2 — плейсхолдер).
@@ -34,15 +35,18 @@
 ### Task 1: Tauri CLI, universal target, npm-скрипты
 
 **Files:**
+
 - Modify: `package.json`
 
 - [ ] **Step 1: Поставить Tauri CLI как devDependency**
 
 Run:
+
 ```bash
 cd /Users/se.chernyshev/jarvis
 npm install -D @tauri-apps/cli@^2
 ```
+
 Expected: в `package.json` появляется `devDependencies.@tauri-apps/cli`, создаётся `node_modules/.bin/tauri`.
 
 - [ ] **Step 2: Universal — только в CI (локально host arm64)**
@@ -52,15 +56,18 @@ Rust здесь из Homebrew (без rustup), кросс-target `x86_64` лок
 делает CI (там rustup ставит обе арки — Task 6). Локально ничего добавлять не надо.
 
 Run (только убедиться, что хост — arm64):
+
 ```bash
 rustc -vV | grep host
 ```
+
 Expected: `host: aarch64-apple-darwin`.
 
 - [ ] **Step 3: Добавить npm-скрипты `tauri` и `bundle`**
 
 В `package.json` в объект `scripts` добавить (локальный `bundle` — host arm64,
 universal собирает CI):
+
 ```json
     "tauri": "tauri",
     "bundle": "tauri build"
@@ -69,10 +76,12 @@ universal собирает CI):
 - [ ] **Step 4: Проверить, что CLI видит проект**
 
 Run:
+
 ```bash
 npm run tauri -- --version
 npm run tauri -- info
 ```
+
 Expected: версия CLI печатается; `info` находит `src-tauri/tauri.conf.json` (раздел «App directory structure» без ошибок).
 
 - [ ] **Step 5: Commit**
@@ -87,6 +96,7 @@ git commit -m "build(tauri): добавить @tauri-apps/cli, universal target,
 ### Task 2: Плейсхолдер-иконка и генерация набора
 
 **Files:**
+
 - Create: `scripts/make-placeholder-icon.py`
 - Create: `src-tauri/icons/icon-source.png`
 - Modify: `src-tauri/icons/` (генерируемый набор)
@@ -94,6 +104,7 @@ git commit -m "build(tauri): добавить @tauri-apps/cli, universal target,
 - [ ] **Step 1: Написать генератор плейсхолдер-PNG (только stdlib)**
 
 Create `scripts/make-placeholder-icon.py`:
+
 ```python
 #!/usr/bin/env python3
 """Генерит 1024x1024 RGBA PNG: скруглённый квадрат с диагональным градиентом
@@ -150,20 +161,24 @@ if __name__ == "__main__":
 - [ ] **Step 2: Сгенерировать исходник иконки**
 
 Run:
+
 ```bash
 cd /Users/se.chernyshev/jarvis
 python3 scripts/make-placeholder-icon.py src-tauri/icons/icon-source.png
 sips -g pixelWidth -g pixelHeight src-tauri/icons/icon-source.png
 ```
+
 Expected: файл создан; `sips` показывает `pixelWidth: 1024`, `pixelHeight: 1024`.
 
 - [ ] **Step 3: Разложить набор иконок через tauri icon**
 
 Run:
+
 ```bash
 npm run tauri -- icon src-tauri/icons/icon-source.png
 ls src-tauri/icons/
 ```
+
 Expected: появились `icon.icns`, `icon.ico`, `32x32.png`, `128x128.png`, `128x128@2x.png`, набор `Square*Logo.png` и т.п.
 
 - [ ] **Step 4: Commit**
@@ -178,11 +193,13 @@ git commit -m "feat(icons): плейсхолдер-иконка 1024 + сген�
 ### Task 3: Включить бандл и собрать неподписанный DMG
 
 **Files:**
+
 - Modify: `src-tauri/tauri.conf.json`
 
 - [ ] **Step 1: Прописать bundle-секцию**
 
 В `src-tauri/tauri.conf.json` заменить `"bundle": { "active": false }` на:
+
 ```json
     "bundle": {
         "active": true,
@@ -203,15 +220,18 @@ git commit -m "feat(icons): плейсхолдер-иконка 1024 + сген�
         "createUpdaterArtifacts": true
     }
 ```
+
 Примечание: `signingIdentity`/нотаризация подхватятся из env в CI (Task 6). Без env — сборка неподписанная. `entitlements.plist` создаётся в Task 4; до него сборку с `--target` не запускаем (ниже шаг проверки делает unsigned-сборку уже после Task 4). Чтобы не блокироваться, сейчас только правим конфиг и валидируем JSON.
 
 - [ ] **Step 2: Проверить валидность конфига**
 
 Run:
+
 ```bash
 python3 -c "import json; json.load(open('src-tauri/tauri.conf.json')); print('JSON ок')"
 npm run tauri -- info
 ```
+
 Expected: «JSON ок»; `info` без ошибок парсинга конфига.
 
 - [ ] **Step 3: Commit**
@@ -226,11 +246,13 @@ git commit -m "build(tauri): включить бандл dmg+app (universal, и�
 ### Task 4: Entitlements + первая реальная сборка DMG
 
 **Files:**
+
 - Create: `src-tauri/entitlements.plist`
 
 - [ ] **Step 1: Создать entitlements.plist**
 
 Create `src-tauri/entitlements.plist`:
+
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -256,31 +278,37 @@ exist». Поэтому сначала выполни Task 5 Steps 1–4 (Cargo-
 ключ + main.rs), затем эту сборку — она даст и DMG, и updater-артефакты сразу.
 
 Run:
+
 ```bash
 cd /Users/se.chernyshev/jarvis
 export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.jarvis/jarvis-updater.key)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 npm run bundle
 ```
+
 Expected: сборка завершается успехом; в конце путь к `.dmg`. Предупреждение про отсутствие signing identity — норм (неподписанная сборка).
 
 - [ ] **Step 3: Проверить артефакты**
 
 Run:
+
 ```bash
 ls -lh src-tauri/target/release/bundle/dmg/*.dmg
 lipo -info src-tauri/target/release/bundle/macos/Jarvis.app/Contents/MacOS/jarvis
 ```
+
 Expected: есть `Jarvis_0.2.0_aarch64.dmg`; `lipo -info` показывает `arm64` (локально host; universal делает CI).
 
 - [ ] **Step 4: Дымовой тест приложения из бандла**
 
 Run:
+
 ```bash
 open src-tauri/target/release/bundle/macos/Jarvis.app
 sleep 3; pgrep -f 'Jarvis.app/Contents/MacOS/jarvis' && echo "запущено"
 osascript -e 'tell application "Jarvis" to quit' 2>/dev/null || pkill -f 'Jarvis.app/Contents/MacOS/jarvis'
 ```
+
 Expected: процесс поднялся (иконка в меню-баре), затем погашен. (Неподписанное локально из Finder может потребовать ПКМ→Открыть — это ожидаемо до нотаризации.)
 
 - [ ] **Step 5: Commit**
@@ -295,6 +323,7 @@ git commit -m "build(tauri): entitlements для hardened runtime; собира�
 ### Task 5: Updater — плагин, ключ, конфиг, проверка на старте
 
 **Files:**
+
 - Modify: `src-tauri/Cargo.toml`
 - Modify: `src-tauri/src/main.rs:42-60`
 - Modify: `src-tauri/tauri.conf.json`
@@ -302,6 +331,7 @@ git commit -m "build(tauri): entitlements для hardened runtime; собира�
 - [ ] **Step 1: Добавить зависимость плагина**
 
 В `src-tauri/Cargo.toml` в `[dependencies]` добавить строку рядом с прочими `tauri-plugin-*`:
+
 ```toml
 tauri-plugin-updater = "2"
 ```
@@ -309,15 +339,18 @@ tauri-plugin-updater = "2"
 - [ ] **Step 2: Сгенерировать updater-ключ**
 
 Run:
+
 ```bash
 cd /Users/se.chernyshev/jarvis
 npm run tauri -- signer generate -w ~/.jarvis/jarvis-updater.key
 ```
+
 Expected: печатает публичный ключ (строка `dW50cnVzdGVk...` в base64) и пишет приватный в `~/.jarvis/jarvis-updater.key`. **Приватный ключ в репозиторий НЕ коммитим**; для CI он пойдёт в secret `TAURI_SIGNING_PRIVATE_KEY`. Скопировать публичный ключ для следующего шага.
 
 - [ ] **Step 3: Прописать plugins.updater в конфиг**
 
 В `src-tauri/tauri.conf.json` добавить верхнеуровневый ключ `plugins` (рядом с `app`/`bundle`):
+
 ```json
     "plugins": {
         "updater": {
@@ -328,15 +361,19 @@ Expected: печатает публичный ключ (строка `dW50cnVzdG
         }
     }
 ```
+
 Примечание: `pubkey` — реальное значение из шага 2 (это не секрет, он публичный). URL endpoint поправить под фактический GitHub-репозиторий, если slug иной.
 
 - [ ] **Step 4: Зарегистрировать плагин и проверку обновлений в main.rs**
 
 В `src-tauri/src/main.rs` после `.plugin(tauri_plugin_clipboard_manager::init())` (строка ~60) добавить:
+
 ```rust
         .plugin(tauri_plugin_updater::Builder::new().build())
 ```
+
 И в `.setup(...)`-замыкании (либо сразу после построения демона на старте) добавить фоновую проверку — вставить рядом с другими `tauri::async_runtime::spawn` в `main.rs`:
+
 ```rust
     // updater: тихая проверка на старте; если есть свежий релиз — ставим и просим перезапуск.
     {
@@ -352,11 +389,13 @@ Expected: печатает публичный ключ (строка `dW50cnVzdG
         });
     }
 ```
+
 Примечание: точное место вставки — там, где доступен `app: &tauri::App` / `AppHandle` (в `.setup` или сразу после него). Если имя логгера иное — использовать существующий `crate::log::line` (он уже зовётся в main.rs).
 
 - [ ] **Step 5: Собрать и проверить updater-артефакты**
 
 Run:
+
 ```bash
 cd /Users/se.chernyshev/jarvis
 export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.jarvis/jarvis-updater.key)"
@@ -364,6 +403,7 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 npm run bundle 2>&1 | tail -20
 ls src-tauri/target/release/bundle/macos/*.tar.gz*
 ```
+
 Expected: компиляция с плагином проходит; рядом с `.app` появляются `Jarvis.app.tar.gz` и `Jarvis.app.tar.gz.sig`.
 
 - [ ] **Step 6: Commit**
@@ -378,11 +418,13 @@ git commit -m "feat(updater): tauri-plugin-updater + проверка обнов
 ### Task 6: CI-воркфлоу релиза (активируется секретами)
 
 **Files:**
+
 - Create: `.github/workflows/release.yml`
 
 - [ ] **Step 1: Создать воркфлоу**
 
 Create `.github/workflows/release.yml`:
+
 ```yaml
 name: release
 
@@ -442,10 +484,12 @@ jobs:
 - [ ] **Step 2: Проверить синтаксис YAML**
 
 Run:
+
 ```bash
 python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/release.yml')); print('YAML ок')" 2>/dev/null \
   || ruby -ryaml -e "YAML.load_file('.github/workflows/release.yml'); puts 'YAML ок'"
 ```
+
 Expected: «YAML ок». (Если ни python-yaml, ни ruby нет — пропустить, GitHub проверит при пуше.)
 
 - [ ] **Step 3: Commit**
@@ -460,12 +504,14 @@ git commit -m "ci: релиз на тег v* через tauri-action (подпи
 ### Task 7: README — раздел «Релиз и установка» + список секретов
 
 **Files:**
+
 - Modify: `README.md`
 
 - [ ] **Step 1: Добавить раздел в README**
 
 В `README.md` перед разделом «## Что куда пишется» добавить:
-```markdown
+
+````markdown
 ## Установка из релиза
 
 1. Скачай `Jarvis_x.y.z_universal.dmg` со страницы releases.
@@ -484,6 +530,7 @@ git commit -m "ci: релиз на тег v* через tauri-action (подпи
 git tag v0.2.1
 git push origin v0.2.1
 ```
+````
 
 CI соберёт universal DMG, подпишет Developer ID, нотаризует и создаст **черновик**
 релиза с DMG, `.app.tar.gz(.sig)` и `latest.json`. Опубликуй черновик вручную.
@@ -502,14 +549,16 @@ CI соберёт universal DMG, подпишет Developer ID, нотаризу
 
 Локальная проверка подписи/нотаризации без CI — те же переменные в окружении
 плюс `npm run bundle`.
-```
+
+````
 
 - [ ] **Step 2: Проверить, что Markdown не побит и раздел на месте**
 
 Run:
 ```bash
 grep -n "## Релиз (для мейнтейнера)" README.md && grep -n "APPLE_TEAM_ID" README.md
-```
+````
+
 Expected: обе строки находятся.
 
 - [ ] **Step 3: Commit**
@@ -524,6 +573,7 @@ git commit -m "docs(readme): разделы установки из релиза
 ## Самопроверка плана
 
 **Покрытие спеки (Фаза 1):**
+
 - Бандл-конфиг + universal + иконки → Task 1–3.
 - Подпись/нотаризация (entitlements + env-gated) → Task 4 + Task 6.
 - Updater (плагин, ключ, манифест, проверка) → Task 5.
@@ -536,4 +586,7 @@ git commit -m "docs(readme): разделы установки из релиза
 **Согласованность:** имена секретов в Task 6 и Task 7 совпадают; `createUpdaterArtifacts` (Task 3) + ключ (Task 5) + `includeUpdaterJson` (Task 6) — единая цепочка updater.
 
 **Phase 2 (онбординг)** — отдельный план после приёмки Фазы 1.
+
+```
+
 ```

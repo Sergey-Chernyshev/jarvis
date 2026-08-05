@@ -55,7 +55,10 @@ async function mergeSchemas(schemaDir) {
 
     for (const [name, definition] of Object.entries(schema.definitions ?? {})) {
       const existing = definitions[name];
-      if (existing !== undefined && stableJson(existing) !== stableJson(definition)) {
+      if (
+        existing !== undefined &&
+        stableJson(existing) !== stableJson(definition)
+      ) {
         throw new Error(`conflicting schema definition ${name} in ${filename}`);
       }
       definitions[name] = definition;
@@ -80,7 +83,9 @@ async function mergeSchemas(schemaDir) {
 function parseArguments(argumentsList) {
   const parsed = {
     schemaDir: path.resolve("schemas"),
-    typescriptOut: path.resolve("packages/jarvis-plugin-ui/src/generated/contracts.ts"),
+    typescriptOut: path.resolve(
+      "packages/jarvis-plugin-ui/src/generated/contracts.ts",
+    ),
   };
 
   for (let index = 0; index < argumentsList.length; index += 1) {
@@ -115,5 +120,8 @@ function stableJson(value) {
 }
 
 function stableNewlines(value) {
-  return `${value.replaceAll("\r\n", "\n").replace(/[ \t]+\n/g, "\n").trimEnd()}\n`;
+  return `${value
+    .replaceAll("\r\n", "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .trimEnd()}\n`;
 }

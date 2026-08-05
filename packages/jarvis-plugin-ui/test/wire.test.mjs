@@ -26,7 +26,11 @@ test("Rust and Node consume the same exact bridge golden frames", async () => {
   const fixture = JSON.parse(await readFile(fixturePath, "utf8"));
 
   assert.deepEqual(
-    [fixture.bridgeRequest.type, fixture.bridgeWelcome.type, fixture.bridgeError.type],
+    [
+      fixture.bridgeRequest.type,
+      fixture.bridgeWelcome.type,
+      fixture.bridgeError.type,
+    ],
     ["request", "welcome", "error"],
   );
   assert.deepEqual(Object.keys(fixture.bridgeError).sort(), [

@@ -36,14 +36,14 @@ Claude/Codex» появляется плагинный вариант «в VM»;
 Изучены шесть систем (Raycast, Obsidian, VS Code, Tauri v2, Stream Deck, Home Assistant).
 Выжимка уроков, применимых к Jarvis:
 
-| Система | Модель | Что берём | Что отвергаем |
-|---|---|---|---|
-| **Raycast** | Node-процессы + React-реконсайлер в нативный UI; манифест `package.json` | `preferences[]`-схема → **автогенерация UI настроек** + типизированное чтение; `tools[]` — типизированные функции, которые вызывает AI, с `Tool.Confirmation` для side-effect'ов (прямой аналог голосовых скилов с confirm-тостом) | Свой React-рендерер — оверкилл для ванильного JS UI |
-| **Obsidian** | Full-trust JS в процессе приложения | Простоту DX как ориентир | Модель доверия: полный доступ без изоляции; меж-плагинный `app.plugins.plugins[id].api` — неверсионированный reach-in |
-| **VS Code** | Отдельный extension-host-процесс; манифест `contributes` | `contributes.configuration` → авто-UI настроек; ленивая активация; `extensionDependencies` + `exports` — типизированный меж-плагинный хендшейк (опциональный escape-hatch на будущее) | Отдельный JS-host — лишний рантайм для наших задач |
-| **Tauri v2 plugins** | Rust-плагины, **компилируются в бинарь** | Дизайн permissions+capabilities ACL (у Jarvis уже есть свой аналог); `Channel`/`emit` для стриминга | Как механизм устанавливаемых плагинов непригоден: не runtime-loadable |
-| **Stream Deck** | Плагин = **отдельный процесс на любом языке**, WebSocket + регистрационный handshake (`-port -pluginUUID -registerEvent -info`) | Модель out-of-process сайдкара с handshake — шаблон для тяжёлых/нативных плагинов (avm) | Настройки как HTML-страницы плагина (у нас — схема в манифесте) |
-| **Home Assistant** | Интеграции нормализуют данные в **центральную entity-модель** (`hass.states`), любая интеграция/автоматизация читает по `entity_id`, не зная источника; `dependencies` vs `after_dependencies`; config_flow-схема → авто-UI | **Entity-store ядра — хребет меж-плагинных данных** (ровно требование №3); событийная шина; сервисы как RPC | Python-in-process full trust |
+| Система              | Модель                                                                                                                                                                                                                      | Что берём                                                                                                                                                                                                                          | Что отвергаем                                                                                                         |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| **Raycast**          | Node-процессы + React-реконсайлер в нативный UI; манифест `package.json`                                                                                                                                                    | `preferences[]`-схема → **автогенерация UI настроек** + типизированное чтение; `tools[]` — типизированные функции, которые вызывает AI, с `Tool.Confirmation` для side-effect'ов (прямой аналог голосовых скилов с confirm-тостом) | Свой React-рендерер — оверкилл для ванильного JS UI                                                                   |
+| **Obsidian**         | Full-trust JS в процессе приложения                                                                                                                                                                                         | Простоту DX как ориентир                                                                                                                                                                                                           | Модель доверия: полный доступ без изоляции; меж-плагинный `app.plugins.plugins[id].api` — неверсионированный reach-in |
+| **VS Code**          | Отдельный extension-host-процесс; манифест `contributes`                                                                                                                                                                    | `contributes.configuration` → авто-UI настроек; ленивая активация; `extensionDependencies` + `exports` — типизированный меж-плагинный хендшейк (опциональный escape-hatch на будущее)                                              | Отдельный JS-host — лишний рантайм для наших задач                                                                    |
+| **Tauri v2 plugins** | Rust-плагины, **компилируются в бинарь**                                                                                                                                                                                    | Дизайн permissions+capabilities ACL (у Jarvis уже есть свой аналог); `Channel`/`emit` для стриминга                                                                                                                                | Как механизм устанавливаемых плагинов непригоден: не runtime-loadable                                                 |
+| **Stream Deck**      | Плагин = **отдельный процесс на любом языке**, WebSocket + регистрационный handshake (`-port -pluginUUID -registerEvent -info`)                                                                                             | Модель out-of-process сайдкара с handshake — шаблон для тяжёлых/нативных плагинов (avm)                                                                                                                                            | Настройки как HTML-страницы плагина (у нас — схема в манифесте)                                                       |
+| **Home Assistant**   | Интеграции нормализуют данные в **центральную entity-модель** (`hass.states`), любая интеграция/автоматизация читает по `entity_id`, не зная источника; `dependencies` vs `after_dependencies`; config_flow-схема → авто-UI | **Entity-store ядра — хребет меж-плагинных данных** (ровно требование №3); событийная шина; сервисы как RPC                                                                                                                        | Python-in-process full trust                                                                                          |
 
 Ключевой вывод пресерча: три требования тянут к трём разным эталонам — автогенерация настроек
 (Raycast/VS Code), меж-плагинные данные (Home Assistant), тяжёлый нативный первый плагин
@@ -172,35 +172,66 @@ JS-модули грузятся в webview панели, регистрирую
   // классы риска — маппятся в Consumer::plugin(id, classes), admin недоступен
   "capabilities": ["read", "control"],
   // конкретные capability ядра, которые плагин зовёт (least-privilege внутри классов)
-  "uses": ["sessions.ingest", "notify.toast", "notify.voiced", "entities.publish"],
+  "uses": [
+    "sessions.ingest",
+    "notify.toast",
+    "notify.voiced",
+    "entities.publish",
+  ],
   // сущности, которые плагин публикует в entity-store
   "provides": [
-    { "kind": "vm", "attrs": ["state", "modules", "workspace", "resources"] }
+    { "kind": "vm", "attrs": ["state", "modules", "workspace", "resources"] },
   ],
   // данные других плагинов (пусто у первого плагина; включается грантом в UI)
   "consumes": [],
   // вклад в запуск сессий: плагин становится «средой запуска» рядом с локальной.
   // UI рендерит вариант «в VM» у кнопок запуска вкладки «Проекты» и в детали плагина
   "launchTargets": [
-    { "id": "vm", "title": "в VM (agent-vm)", "agents": ["claude", "codex"] }
+    { "id": "vm", "title": "в VM (agent-vm)", "agents": ["claude", "codex"] },
   ],
   // голосовые скилы: description — строка для меню LLM-планировщика
   "skills": [
-    { "name": "vm_status",  "risk": "read",
-      "description": "статус виртуалок: сколько запущено, что с конкретной VM" },
-    { "name": "vm_power",   "risk": "control",
+    {
+      "name": "vm_status",
+      "risk": "read",
+      "description": "статус виртуалок: сколько запущено, что с конкретной VM",
+    },
+    {
+      "name": "vm_power",
+      "risk": "control",
       "description": "запустить/остановить/перезапустить виртуалку по имени",
-      "args": { "name": "string", "op": "start|stop|restart" } }
+      "args": { "name": "string", "op": "start|stop|restart" },
+    },
   ],
   // схема настроек → автогенерация UI (типы = уже существующие компоненты settings2.js)
   "settings": [
-    { "key": "enabled",       "type": "toggle",    "title": "Включён", "default": false },
-    { "key": "announce",      "type": "toggle",    "title": "Озвучивать смену состояний VM", "default": true },
-    { "key": "pollInterval",  "type": "segmented", "title": "Опрос limactl",
-      "options": ["5s", "15s", "60s"], "default": "15s" },
-    { "key": "hooksInject",   "type": "toggle",    "title": "Внедрять хуки Claude в VM", "default": true }
+    {
+      "key": "enabled",
+      "type": "toggle",
+      "title": "Включён",
+      "default": false,
+    },
+    {
+      "key": "announce",
+      "type": "toggle",
+      "title": "Озвучивать смену состояний VM",
+      "default": true,
+    },
+    {
+      "key": "pollInterval",
+      "type": "segmented",
+      "title": "Опрос limactl",
+      "options": ["5s", "15s", "60s"],
+      "default": "15s",
+    },
+    {
+      "key": "hooksInject",
+      "type": "toggle",
+      "title": "Внедрять хуки Claude в VM",
+      "default": true,
+    },
   ],
-  "tray": true
+  "tray": true,
 }
 ```
 
@@ -232,7 +263,7 @@ JS-модули грузятся в webview панели, регистрирую
 **EntityStore** (новый модуль `src-tauri/src/entities.rs`, HA-модель, урезанная до нужного):
 
 - Сущность: `{ id: "vm.my-api", kind: "vm", owner: "plugin:agent-vm", state: "running",
-  attrs: {…}, updated_at }`. Ключ — `kind.<object_id>`, владелец — только пишущий.
+attrs: {…}, updated_at }`. Ключ — `kind.<object_id>`, владелец — только пишущий.
 - Новые capability: `entities.publish` (upsert/remove своих сущностей; Read-класс,
   плагин пишет только под своим owner), `entities.query(kind?, owner?)`,
   `entities.subscribe(kind)` (через `/plugin/events`). Панель (`Consumer::panel`) видит всё;
@@ -306,7 +337,7 @@ Control-класс остаётся за действиями плагина н�
      `vm.<name>` в состоянии `provisioning` + тост по готовности. VM остановлена → `avm start`.
   3. Плагин возвращает ядру **launch-spec** — внутреннюю команду для терминала:
      `limactl shell --workdir <guestPath> <vm> -- tmux -L jarvis new -A -s <name>
-     '<claude|codex …>'`. Ядро исполняет её существующим `launch::spawn` — терминал юзера
+'<claude|codex …>'`. Ядро исполняет её существующим `launch::spawn` — терминал юзера
      (Terminal/iTerm2/кастом) открывается как при локальном запуске. Прокси-команда хоста в
      VM не пробрасывается (среда гостя — забота модулей avm).
      Симметрия с локальным путём: там агентов оборачивает в `tmux -L jarvis` agent-shim,
@@ -321,7 +352,7 @@ Control-класс остаётся за действиями плагина н�
 - **Телеметрия агентов (хуки из VM)**: при включённом `hooksInject` плагин идемпотентно
   дописывает хуки в `~/.config/agent-vm/modules/claude/settings.json` (тем же паттерном, что
   `reconcile_hooks()` — merge, не перезапись). Хук в госте: `curl http://host.lima.internal:
-  <port>/event -H 'x-vm-token: …'` (шелл-однострочник, без бинарей в госте). Плагин держит TCP-
+<port>/event -H 'x-vm-token: …'` (шелл-однострочник, без бинарей в госте). Плагин держит TCP-
   листенер на `127.0.0.1:<port>` (гость достигает его через шлюз Lima), валидирует per-VM токен,
   нормализует payload (`host=vm:<name>`) и пересылает в ядро через `sessions.ingest`.
   Оговорки честно фиксируются в UI: хуки попадают только в VM, созданные/пересозданные после
@@ -386,7 +417,7 @@ Control-класс остаётся за действиями плагина н�
 - Ядро: юнит-тесты EntityStore (upsert/владение/stale), PluginHost (handshake, рестарт,
   снятие токена при disable), грант-фильтрация `consumes`.
 - Плагин: парсинг Record-YAML (фикстуры реальных файлов avm v0.1), парсинг `limactl list
-  --json`, идемпотентность hook-инжекта (merge существующего settings.json).
+--json`, идемпотентность hook-инжекта (merge существующего settings.json).
 - Интеграционно (ручной чек-лист, т.к. нужны Lima+avm): создание VM → сущность появилась;
   stop/start голосом с confirm; хук из гостя доходит до списка сессий.
 - Контракт-риск avm до 1.0: парсеры за отдельным модулем `avm_compat.rs` с версией-детектом;

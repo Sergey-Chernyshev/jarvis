@@ -7,6 +7,15 @@
   if (!transport) throw new Error('jarvis_core_transport_missing');
   const { invoke, listen } = transport;
   delete globalThis.__JARVIS_CORE_TRANSPORT__;
+
+  // тема и краска: окно живёт вне общего моста, поэтому подписывается само.
+  // Идёт через тот же transport, что и остальной онбординг, а не через
+  // глобальный Tauri-объект: raw invoke наружу не публикуется.
+  window.jarvis = Object.assign(window.jarvis || {}, {
+    getSettings: () => invoke('settings_get'),
+    setSettings: (patch) => invoke('settings_set', { patch }),
+    onAppearance: (cb) => { listen('appearance', (e) => cb(e.payload)); },
+  });
   const content = document.getElementById('content');
   const primary = document.getElementById('primary');
   const secondary = document.getElementById('secondary');

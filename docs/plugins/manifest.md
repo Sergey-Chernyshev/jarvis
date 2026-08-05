@@ -24,10 +24,7 @@ validation never starts a native entry.
   "runtime": {
     "kind": "ui-only",
     "protocol": 2,
-    "activationEvents": [
-      "onPage:home",
-      "onCommand:dev.example.hello-page.open"
-    ]
+    "activationEvents": ["onPage:home", "onCommand:dev.example.hello-page.open"]
   },
   "permissions": [],
   "state": {
@@ -204,7 +201,7 @@ entitlement establish ownership during installation.
 Rust `semver` crate. Multiple comparators must be comma-separated:
 
 ```json
-{"jarvis": ">=0.4.0, <0.5.0", "pluginApi": 2}
+{ "jarvis": ">=0.4.0, <0.5.0", "pluginApi": 2 }
 ```
 
 The whitespace-only form `">=0.4.0 <0.5.0"` is invalid. A structurally valid
@@ -250,14 +247,14 @@ declare one or both of the finite `read` and `write` modes.
 
 The accepted shapes are capability-specific:
 
-| Permission | Required scope | Modes |
-|---|---|---|
-| `projects.read` | `"selected"` | forbidden |
-| `filesystem.mount` | `"selected"` | unique subset of `read`, `write` |
-| `memory.read`, `memory.propose-write` | non-empty array from `global`, `selected-project` | forbidden |
-| `credentials.request` | non-empty array from `claude`, `codex` | forbidden |
-| `chat.composer.text.read` | `"invocation"` | forbidden |
-| `notifications.publish`, `process.vm-provider`, `chat.compose.contribute`, `projects.contribute` | forbidden | forbidden |
+| Permission                                                                                       | Required scope                                    | Modes                            |
+| ------------------------------------------------------------------------------------------------ | ------------------------------------------------- | -------------------------------- |
+| `projects.read`                                                                                  | `"selected"`                                      | forbidden                        |
+| `filesystem.mount`                                                                               | `"selected"`                                      | unique subset of `read`, `write` |
+| `memory.read`, `memory.propose-write`                                                            | non-empty array from `global`, `selected-project` | forbidden                        |
+| `credentials.request`                                                                            | non-empty array from `claude`, `codex`            | forbidden                        |
+| `chat.composer.text.read`                                                                        | `"invocation"`                                    | forbidden                        |
+| `notifications.publish`, `process.vm-provider`, `chat.compose.contribute`, `projects.contribute` | forbidden                                         | forbidden                        |
 
 Missing required scopes, unexpected scopes or modes, and duplicate scope or
 mode values are rejected.

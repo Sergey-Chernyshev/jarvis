@@ -9,9 +9,7 @@
       {
         "id": "example.release",
         "publisher": "example",
-        "pluginIds": [
-          "dev.example.echo"
-        ],
+        "pluginIds": ["dev.example.echo"],
         "keys": [
           {
             "keyId": "example.release:1",

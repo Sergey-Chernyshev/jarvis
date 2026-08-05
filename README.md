@@ -37,7 +37,7 @@ Running several coding agents at once turns **you** into the bottleneck. Session
 - **⚙️ Remote control** — switch model (Opus / Sonnet / Haiku) and reasoning effort from the panel; answer multi-choice agent questions with native pickers.
 - **📊 Usage, costs and limits** — token and cost tracking per model and project; when a session hits the usage limit, Jarvis shows when it resets and can auto-resume it.
 - **🗣 Jarvis speaks** — a local TTS voice reads out what a session did or what it's waiting for (Russian-first for now).
-- **🎤 "Hey Jarvis" voice assistant** *(experimental)* — say the wake word and talk to your sessions: route a reply by voice, ask what an agent did, control media/volume, ask a general question.
+- **🎤 "Hey Jarvis" voice assistant** _(experimental)_ — say the wake word and talk to your sessions: route a reply by voice, ask what an agent did, control media/volume, ask a general question.
 - **🎙 Dictation** — push-to-talk (F8): speech is transcribed locally (Whisper / Qwen3) and inserted into the active session; full dictation history with re-transcription.
 - **☕ Keep the Mac awake** — anti-sleep (a `caffeinate` equivalent) plus a guarded closed-lid mode for overnight runs.
 - **✅ Read-only task board** — live `TodoWrite` progress (done / in-progress / queued) per session.
@@ -55,7 +55,7 @@ Jarvis is a power-user tool. It pays off once you cross the pain threshold of **
 - **People who like to stay heads-down** — you keep writing code or reading while agents grind; Jarvis interrupts you only when one of them actually needs a decision, with a toast or a spoken line.
 - **Small teams standardizing agent workflows** — Jarvis is fully local per machine (no server, no accounts), so every developer just installs it and gets the same visibility.
 
-It's probably **not** for you if you run one session in one terminal (native notifications may be enough), or if you're looking for something to *spawn and plan* agents — pair Jarvis with an orchestrator for that.
+It's probably **not** for you if you run one session in one terminal (native notifications may be enough), or if you're looking for something to _spawn and plan_ agents — pair Jarvis with an orchestrator for that.
 
 ## Install
 
@@ -131,6 +131,17 @@ Click ◇ for the panel. Right-click for the menu (test notification, autostart,
 
 </details>
 
+### 🎨 Look: theme and paint
+
+The interface is a **sheet of paper**: one opaque surface, one accent colour, and monochrome status dots (working — filled, finished — outline only, waiting — accent, rate-limited — dim, asleep — pale). The bottom strip carries a waveform and the line "say «jarvis» — I'm listening"; on the right, a subscription-limit meter with the window until reset.
+
+<details>
+<summary>Details</summary>
+
+**Settings → Look**: mode (overlay / window), theme (light / dark / system), paint (Coal · Clover · Raspberry, or **your own** — pick one hue and the rest is derived from it), and what the bottom strip shows — the subscription limit or the day's spend. Below that: row **density**, corner **radius** and interface **scale** (85–140%), with a reset button. In **window mode** Jarvis is an ordinary window: sessions on the left, the conversation on the right, the limit in the title bar; it resizes, minimises, does not vanish when you click away, and lives in the Dock (the icon appears on the next launch). **Overlay** is the familiar ⌘J panel that floats above everything. Changes apply immediately across every window: panel, toasts, agent chat, onboarding. The typeface is Golos Text, bundled with the app so the UI renders identically with no network. The full visual language is documented in [`docs/superpowers/specs/2026-08-02-clover-redesign.md`](docs/superpowers/specs/2026-08-02-clover-redesign.md).
+
+</details>
+
 ### ↩️ Reply into a session & ⚙️ the remote
 
 In a session's chat the **Reply** field inserts text straight into the session's terminal — even if the window is minimized or on another Space. Below it sits the **remote**: **Model** segments (Opus / Sonnet / Haiku) and **Effort** (auto / low / med / high / xhigh) send a slash command (`/model sonnet`, `/effort high`) into the live session. When an agent asks a multiple-choice question, the panel renders native pickers (multi-select included) instead of making you type numbers into a terminal.
@@ -184,7 +195,7 @@ Menu bar: a **"Mute"** toggle and **"Test voice"**. If the engine is unavailable
 
 </details>
 
-### 🎤 "Hey Jarvis" — the voice assistant *(experimental)*
+### 🎤 "Hey Jarvis" — the voice assistant _(experimental)_
 
 Say the wake word and talk — no keyboard, no window switching:
 
@@ -239,18 +250,18 @@ All local models — TTS voices, STT engines, the wake-word detector — are man
 
 ## Jarvis vs neighbors
 
-| | **Jarvis** | Menu-bar monitors | Orchestrators | Claude Code (native) |
-|---|:---:|:---:|:---:|:---:|
-| State detection | hooks (events) | process polling | spawn their own | itself |
-| All sessions in one place | ✅ | ✅ | partial | ❌ |
-| Reply into a session | ✅ (tmux) | ❌ | ✅ | — |
-| Remote model/effort | ✅ | ❌ | partial | manual |
-| Voice (TTS + assistant) | ✅ | ❌ | ❌ | ❌ |
-| Usage & limit tracking | ✅ | partial | partial | per-session |
-| Anti-sleep + clamshell | ✅ | ❌ | ❌ | ❌ |
-| Task board | ✅ read-only | ❌ | ✅ owns it | ✅ TodoWrite |
-| Spawns agents | ❌ (by design) | ❌ | ✅ | — |
-| License | MIT | varies | varies | proprietary |
+|                           |   **Jarvis**   | Menu-bar monitors |  Orchestrators  | Claude Code (native) |
+| ------------------------- | :------------: | :---------------: | :-------------: | :------------------: |
+| State detection           | hooks (events) |  process polling  | spawn their own |        itself        |
+| All sessions in one place |       ✅       |        ✅         |     partial     |          ❌          |
+| Reply into a session      |   ✅ (tmux)    |        ❌         |       ✅        |          —           |
+| Remote model/effort       |       ✅       |        ❌         |     partial     |        manual        |
+| Voice (TTS + assistant)   |       ✅       |        ❌         |       ❌        |          ❌          |
+| Usage & limit tracking    |       ✅       |      partial      |     partial     |     per-session      |
+| Anti-sleep + clamshell    |       ✅       |        ❌         |       ❌        |          ❌          |
+| Task board                |  ✅ read-only  |        ❌         |   ✅ owns it    |     ✅ TodoWrite     |
+| Spawns agents             | ❌ (by design) |        ❌         |       ✅        |          —           |
+| License                   |      MIT       |      varies       |     varies      |     proprietary      |
 
 The closest in spirit are menu-bar monitors; their edge is zero setup. Jarvis answers with accuracy (hooks, not guessing), reply-into-session plus a remote, voice, and power management.
 
@@ -287,7 +298,7 @@ Jarvis is a solo-maintained pre-1.0 project; this is a direction, not a promise.
 
 **Voice assistant → hands-free mission control**
 
-- Create a *new* session by voice ("Jarvis, start an agent in ~/myproject") — today voice only routes into existing sessions.
+- Create a _new_ session by voice ("Jarvis, start an agent in ~/myproject") — today voice only routes into existing sessions.
 - Acoustic barge-in: interrupt Jarvis mid-sentence without the mic picking up its own speech (echo cancellation via macOS `VoiceProcessingIO`).
 - Streaming word-by-word dictation (today transcription happens on release).
 - Persistent assistant memory across conversations; a dedicated conversation-history view.
@@ -327,7 +338,7 @@ A pre-1.0 MVP, developed in the open. Deliberate boundaries and known issues:
 - **Hook schemas drift between agent versions.** If events stop arriving after a `claude` update, compare against the current hooks docs and fix `EVENTS`/the format in `src-tauri/src/bin/setup.rs`.
 - A hard-killed terminal (no `SessionEnd`) leaves a session hanging — the panel's "Clear" button removes done/idle ones.
 - **Wake-word** ("Hey Jarvis") is experimental: no speaker verification, detector model is non-commercial (see [License](#license)), off by default. The dev build (`npm start`) includes the feature flag but the detector stays inert until enabled in the panel.
-- **Agent chat** (the capability platform, MCP bridge `jarvis-mcp`) — the bridge exists, the UI isn't shipped. *In progress.*
+- **Agent chat** (the capability platform, MCP bridge `jarvis-mcp`) — the bridge exists, the UI isn't shipped. _In progress._
 
 ## Versioning
 
@@ -345,13 +356,13 @@ Jarvis's code is licensed under the **[MIT License](LICENSE)** © 2026 Sergey Ch
 
 **Model weights are downloaded, not part of the repo**, and keep their own licenses — these restrict **use** of the corresponding feature independently of the MIT code:
 
-| Artifact | Used for | License | Commercial |
-|---|---|---|:---:|
-| Silero `v4_ru` | **default voice** | CC BY-NC-SA 4.0 | ❌ |
-| Silero `v5_cis_base` / `_nostress` | voice | MIT | ✅ |
-| openWakeWord `hey_jarvis_v0.1` | **default wake-word** | CC BY-NC-SA 4.0 | ❌ |
-| whisper.cpp `ggml-*` | speech-to-text | MIT | ✅ |
-| Qwen3 (`mlx-community`) | speech-to-text | Apache-2.0 | ✅ |
+| Artifact                           | Used for              | License         | Commercial |
+| ---------------------------------- | --------------------- | --------------- | :--------: |
+| Silero `v4_ru`                     | **default voice**     | CC BY-NC-SA 4.0 |     ❌     |
+| Silero `v5_cis_base` / `_nostress` | voice                 | MIT             |     ✅     |
+| openWakeWord `hey_jarvis_v0.1`     | **default wake-word** | CC BY-NC-SA 4.0 |     ❌     |
+| whisper.cpp `ggml-*`               | speech-to-text        | MIT             |     ✅     |
+| Qwen3 (`mlx-community`)            | speech-to-text        | Apache-2.0      |     ✅     |
 
 > ⚠️ The default voice (`v4_ru`) and wake-word (`hey_jarvis`) are **non-commercial**. For commercial use: voice → Silero `v5_cis_base` (MIT); wake-word → train your own or disable it; STT → Whisper or Qwen3. The full breakdown and third-party obligations are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) (including the BSD-3 attribution for `mediaremote-adapter`).
 

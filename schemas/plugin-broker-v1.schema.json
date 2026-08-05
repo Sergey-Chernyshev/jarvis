@@ -13,16 +13,11 @@
               "x-maxJsonBytes": 262144
             },
             "type": {
-              "enum": [
-                "completed"
-              ],
+              "enum": ["completed"],
               "type": "string"
             }
           },
-          "required": [
-            "result",
-            "type"
-          ],
+          "required": ["result", "type"],
           "type": "object"
         },
         {
@@ -35,16 +30,11 @@
               "type": "string"
             },
             "type": {
-              "enum": [
-                "accepted"
-              ],
+              "enum": ["accepted"],
               "type": "string"
             }
           },
-          "required": [
-            "operationRef",
-            "type"
-          ],
+          "required": ["operationRef", "type"],
           "type": "object"
         }
       ]
@@ -69,11 +59,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "id",
-        "schemaDigest",
-        "version"
-      ],
+      "required": ["id", "schemaDigest", "version"],
       "type": "object"
     },
     "CursorGap": {
@@ -95,11 +81,7 @@
           "type": "integer"
         }
       },
-      "required": [
-        "earliestCursor",
-        "latestCursor",
-        "requestedCursor"
-      ],
+      "required": ["earliestCursor", "latestCursor", "requestedCursor"],
       "type": "object"
     },
     "EntityChange": {
@@ -114,10 +96,7 @@
           "$ref": "#/definitions/EntityEnvelope"
         }
       },
-      "required": [
-        "cursor",
-        "entity"
-      ],
+      "required": ["cursor", "entity"],
       "type": "object"
     },
     "EntityEnvelope": {
@@ -198,19 +177,11 @@
               "type": "string"
             },
             "type": {
-              "enum": [
-                "put"
-              ],
+              "enum": ["put"],
               "type": "string"
             }
           },
-          "required": [
-            "contract",
-            "data",
-            "expectedRevision",
-            "id",
-            "type"
-          ],
+          "required": ["contract", "data", "expectedRevision", "id", "type"],
           "type": "object"
         },
         {
@@ -231,18 +202,11 @@
               "type": "string"
             },
             "type": {
-              "enum": [
-                "delete"
-              ],
+              "enum": ["delete"],
               "type": "string"
             }
           },
-          "required": [
-            "contract",
-            "expectedRevision",
-            "id",
-            "type"
-          ],
+          "required": ["contract", "expectedRevision", "id", "type"],
           "type": "object"
         }
       ]
@@ -276,10 +240,7 @@
           "type": "array"
         }
       },
-      "required": [
-        "limit",
-        "selectors"
-      ],
+      "required": ["limit", "selectors"],
       "type": "object"
     },
     "EntityQuerySnapshot": {
@@ -298,10 +259,7 @@
           "type": "integer"
         }
       },
-      "required": [
-        "entities",
-        "snapshotRevision"
-      ],
+      "required": ["entities", "snapshotRevision"],
       "type": "object"
     },
     "EntitySelector": {
@@ -335,9 +293,7 @@
           "type": "array"
         }
       },
-      "required": [
-        "contract"
-      ],
+      "required": ["contract"],
       "type": "object"
     },
     "EntityWatchRequest": {
@@ -374,11 +330,7 @@
           "type": "array"
         }
       },
-      "required": [
-        "cursor",
-        "limit",
-        "selectors"
-      ],
+      "required": ["cursor", "limit", "selectors"],
       "type": "object"
     },
     "EventChange": {
@@ -393,10 +345,7 @@
           "$ref": "#/definitions/EventEnvelope"
         }
       },
-      "required": [
-        "cursor",
-        "event"
-      ],
+      "required": ["cursor", "event"],
       "type": "object"
     },
     "EventEnvelope": {
@@ -414,10 +363,7 @@
           "maxLength": 256,
           "minLength": 1,
           "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "data": {
           "description": "Serialized JSON size must not exceed 131072 bytes. Validators must enforce x-maxJsonBytes; generic Draft 7 validators ignore extension keywords.",
@@ -481,10 +427,7 @@
           "maxLength": 256,
           "minLength": 1,
           "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "data": {
           "description": "Serialized JSON size must not exceed 131072 bytes. Validators must enforce x-maxJsonBytes; generic Draft 7 validators ignore extension keywords.",
@@ -558,11 +501,7 @@
           "type": "array"
         }
       },
-      "required": [
-        "contract",
-        "cursor",
-        "limit"
-      ],
+      "required": ["contract", "cursor", "limit"],
       "type": "object"
     },
     "FieldProjection": {
@@ -580,9 +519,7 @@
           "type": "array"
         }
       },
-      "required": [
-        "fields"
-      ],
+      "required": ["fields"],
       "type": "object"
     },
     "OperationSubjectRef": {
@@ -598,10 +535,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "contract",
-        "subjectId"
-      ],
+      "required": ["contract", "subjectId"],
       "type": "object"
     },
     "OutboxAck": {
@@ -674,11 +608,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "mutations",
-        "outboxId",
-        "sourceInstanceId"
-      ],
+      "required": ["mutations", "outboxId", "sourceInstanceId"],
       "type": "object"
     },
     "OutboxMutation": {
@@ -687,19 +617,14 @@
           "additionalProperties": false,
           "properties": {
             "kind": {
-              "enum": [
-                "entity"
-              ],
+              "enum": ["entity"],
               "type": "string"
             },
             "mutation": {
               "$ref": "#/definitions/EntityMutation"
             }
           },
-          "required": [
-            "kind",
-            "mutation"
-          ],
+          "required": ["kind", "mutation"],
           "type": "object"
         },
         {
@@ -709,16 +634,11 @@
               "$ref": "#/definitions/EventMutation"
             },
             "kind": {
-              "enum": [
-                "event"
-              ],
+              "enum": ["event"],
               "type": "string"
             }
           },
-          "required": [
-            "event",
-            "kind"
-          ],
+          "required": ["event", "kind"],
           "type": "object"
         }
       ]
@@ -752,11 +672,7 @@
       "type": "string"
     },
     "Risk": {
-      "enum": [
-        "read",
-        "control",
-        "destructive"
-      ],
+      "enum": ["read", "control", "destructive"],
       "type": "string"
     },
     "RuntimeOperationCancel": {
@@ -774,10 +690,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "expectedStateRevision",
-        "operationRef"
-      ],
+      "required": ["expectedStateRevision", "operationRef"],
       "type": "object"
     },
     "RuntimeOperationChange": {
@@ -792,10 +705,7 @@
           "$ref": "#/definitions/RuntimeOperationView"
         }
       },
-      "required": [
-        "cursor",
-        "operation"
-      ],
+      "required": ["cursor", "operation"],
       "type": "object"
     },
     "RuntimeOperationError": {
@@ -805,9 +715,7 @@
           "$ref": "#/definitions/PublicErrorCode"
         }
       },
-      "required": [
-        "code"
-      ],
+      "required": ["code"],
       "type": "object"
     },
     "RuntimeOperationGap": {
@@ -829,11 +737,7 @@
           "type": "integer"
         }
       },
-      "required": [
-        "earliestCursor",
-        "latestCursor",
-        "requestedCursor"
-      ],
+      "required": ["earliestCursor", "latestCursor", "requestedCursor"],
       "type": "object"
     },
     "RuntimeOperationQuery": {
@@ -841,10 +745,7 @@
       "properties": {
         "includeTerminalSince": {
           "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": ["integer", "null"]
         },
         "limit": {
           "description": "Inclusive range: 1..=128.",
@@ -862,10 +763,7 @@
           "type": "array"
         }
       },
-      "required": [
-        "limit",
-        "subjects"
-      ],
+      "required": ["limit", "subjects"],
       "type": "object"
     },
     "RuntimeOperationState": {
@@ -971,11 +869,7 @@
           "type": "array"
         }
       },
-      "required": [
-        "cursor",
-        "limit",
-        "subjects"
-      ],
+      "required": ["cursor", "limit", "subjects"],
       "type": "object"
     },
     "TypedCommandDeclaration": {
@@ -988,10 +882,7 @@
           "$ref": "#/definitions/Risk"
         }
       },
-      "required": [
-        "command",
-        "riskFloor"
-      ],
+      "required": ["command", "riskFloor"],
       "type": "object"
     },
     "TypedCommandInvocation": {
@@ -1016,12 +907,7 @@
           "$ref": "#/definitions/OperationSubjectRef"
         }
       },
-      "required": [
-        "args",
-        "command",
-        "deadlineMs",
-        "subject"
-      ],
+      "required": ["args", "command", "deadlineMs", "subject"],
       "type": "object"
     }
   },

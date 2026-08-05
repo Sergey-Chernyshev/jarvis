@@ -141,18 +141,18 @@ Codex и исполняемые ими команды не переходят н
 
 ### 3.5 One source of truth per responsibility
 
-| Ответственность | Источник истины |
-|---|---|
-| Установленная версия плагина | Plugin install receipt |
-| Plugin package integrity | Подписанный catalog + package digest |
-| Project identity | Core Project Catalog |
-| Desired runtime/session state | Agent VM Controller DB |
-| Реальное существование VM | Lima |
-| Материализация VM | pinned `avm` Record |
-| Живая agent-сессия | guest supervisor/tmux/PID |
-| История turns/events | durable journal |
-| Межплагинный snapshot | Jarvis Data Broker |
-| Доставка уведомления | Notification Receipt |
+| Ответственность               | Источник истины                      |
+| ----------------------------- | ------------------------------------ |
+| Установленная версия плагина  | Plugin install receipt               |
+| Plugin package integrity      | Подписанный catalog + package digest |
+| Project identity              | Core Project Catalog                 |
+| Desired runtime/session state | Agent VM Controller DB               |
+| Реальное существование VM     | Lima                                 |
+| Материализация VM             | pinned `avm` Record                  |
+| Живая agent-сессия            | guest supervisor/tmux/PID            |
+| История turns/events          | durable journal                      |
+| Межплагинный snapshot         | Jarvis Data Broker                   |
+| Доставка уведомления          | Notification Receipt                 |
 
 ## 4. Контекст и контейнеры
 
@@ -190,16 +190,16 @@ flowchart LR
     LIMA --> GUEST
 ```
 
-| Компонент | Ответственность |
-|---|---|
-| Plugin Manager | catalog, install, update, rollback, disable, uninstall |
+| Компонент           | Ответственность                                                   |
+| ------------------- | ----------------------------------------------------------------- |
+| Plugin Manager      | catalog, install, update, rollback, disable, uninstall            |
 | Plugin Runtime Host | activation, handshake, heartbeat, graceful shutdown, capabilities |
-| Plugin UI Host | isolated pages, bridge, navigation, theme, contribution routing |
-| Data Broker | schemas, entities, events, commands, subscriptions, ACL, audit |
-| Project Runtime API | Project/Runtime/Session/Turn model for UI and plugins |
-| Jarvis CLI | command discovery and dispatch to core/plugin controllers |
-| Agent VM Controller | single writer, VM/session lifecycle, reconciliation, CLI attach |
-| Agent VM UI | VM Manager, project runtime, session detail, settings |
+| Plugin UI Host      | isolated pages, bridge, navigation, theme, contribution routing   |
+| Data Broker         | schemas, entities, events, commands, subscriptions, ACL, audit    |
+| Project Runtime API | Project/Runtime/Session/Turn model for UI and plugins             |
+| Jarvis CLI          | command discovery and dispatch to core/plugin controllers         |
+| Agent VM Controller | single writer, VM/session lifecycle, reconciliation, CLI attach   |
+| Agent VM UI         | VM Manager, project runtime, session detail, settings             |
 
 ## 5. Repository layout
 
@@ -312,12 +312,12 @@ Revocation запрещает activation и rollback соответствующ�
 
 ### 6.3 Publisher tiers
 
-| Tier | Источник | Возможности |
-|---|---|---|
-| Owner | Подпись владельца Jarvis | Может запросить verified native runtime |
-| Reviewed | Принятый в catalog publisher | Sandboxed UI; native только после отдельного review |
-| Local developer | `jarvis plugin link` | Работает только при включённом Developer Mode |
-| Unverified package | Внешний файл/URL | Только Developer Mode и exact-digest consent |
+| Tier               | Источник                     | Возможности                                         |
+| ------------------ | ---------------------------- | --------------------------------------------------- |
+| Owner              | Подпись владельца Jarvis     | Может запросить verified native runtime             |
+| Reviewed           | Принятый в catalog publisher | Sandboxed UI; native только после отдельного review |
+| Local developer    | `jarvis plugin link`         | Работает только при включённом Developer Mode       |
+| Unverified package | Внешний файл/URL             | Только Developer Mode и exact-digest consent        |
 
 Trust определяется подписью publisher, а не hardcode по plugin ID.
 Verified native code остаётся полным trusted code с правами текущего macOS
@@ -513,16 +513,20 @@ schema-valid Agent VM manifest; последующие короткие JSON-ф�
     ]
   },
   "permissions": [
-    {"id": "projects.read", "scope": "selected"},
-    {"id": "filesystem.mount", "scope": "selected", "modes": ["read", "write"]},
-    {"id": "memory.read", "scope": ["global", "selected-project"]},
-    {"id": "memory.propose-write", "scope": ["global", "selected-project"]},
-    {"id": "notifications.publish"},
-    {"id": "credentials.request", "scope": ["claude", "codex"]},
-    {"id": "process.vm-provider"},
-    {"id": "chat.compose.contribute"},
-    {"id": "chat.composer.text.read", "scope": "invocation"},
-    {"id": "projects.contribute"}
+    { "id": "projects.read", "scope": "selected" },
+    {
+      "id": "filesystem.mount",
+      "scope": "selected",
+      "modes": ["read", "write"]
+    },
+    { "id": "memory.read", "scope": ["global", "selected-project"] },
+    { "id": "memory.propose-write", "scope": ["global", "selected-project"] },
+    { "id": "notifications.publish" },
+    { "id": "credentials.request", "scope": ["claude", "codex"] },
+    { "id": "process.vm-provider" },
+    { "id": "chat.compose.contribute" },
+    { "id": "chat.composer.text.read", "scope": "invocation" },
+    { "id": "projects.contribute" }
   ],
   "state": {
     "schemaVersion": 1,
@@ -568,7 +572,7 @@ schema-valid Agent VM manifest; последующие короткие JSON-ф�
         "title": "Agent VM: Open VM Manager",
         "risk": "read",
         "placements": ["globalPalette"],
-        "handler": {"type": "openPage", "page": "manager"}
+        "handler": { "type": "openPage", "page": "manager" }
       },
       {
         "id": "agent-vm.new-session",
@@ -581,7 +585,7 @@ schema-valid Agent VM manifest; последующие короткие JSON-ф�
           "type": "schemaForm",
           "defaultsFromContext": ["project.id", "chat.id"]
         },
-        "handler": {"type": "runtimeCommand", "command": "session.create"}
+        "handler": { "type": "runtimeCommand", "command": "session.create" }
       },
       {
         "id": "agent-vm.attach",
@@ -593,7 +597,7 @@ schema-valid Agent VM manifest; последующие короткие JSON-ф�
           "type": "schemaForm",
           "defaultsFromContext": ["project.id", "session.id"]
         },
-        "handler": {"type": "runtimeCommand", "command": "session.attach"}
+        "handler": { "type": "runtimeCommand", "command": "session.attach" }
       }
     ],
     "actions": [
@@ -948,7 +952,7 @@ typed plugin command.
       "title": "Agent VM: Open VM Manager",
       "keywords": ["vm", "claude", "codex"],
       "risk": "read",
-      "handler": {"type": "openPage", "page": "manager"}
+      "handler": { "type": "openPage", "page": "manager" }
     },
     {
       "id": "agent-vm.new-session",
@@ -995,18 +999,18 @@ global.status
 settings.plugin
 ```
 
-| Location | Available identity context | Дополнительная capability | Cardinality |
-|---|---|---|---|
-| `chat.toolbar` | chat ID, optional project ID | `chat.contribute` | 3 visible |
-| `chat.message.context` | chat/message IDs | `chat.message.contribute` | menu |
-| `chat.composer.actions` | chat/project IDs, text handle | `chat.compose.contribute` | 3 visible |
-| `project.header` | project/runtime summary | `projects.contribute` | 2 visible |
-| `project.actions` | project ID | `projects.contribute` | menu |
-| `project.session.context` | project/runtime/session IDs | `projects.contribute` | menu |
-| `project.file.context` | project ID, file handle | `projects.files.contribute` | menu |
-| `global.sidebar` | none | `navigation.contribute` | user-pinned |
-| `global.status` | bounded status DTO | `status.contribute` | 2 visible |
-| `settings.plugin` | plugin ID | none | own plugin only |
+| Location                  | Available identity context    | Дополнительная capability   | Cardinality     |
+| ------------------------- | ----------------------------- | --------------------------- | --------------- |
+| `chat.toolbar`            | chat ID, optional project ID  | `chat.contribute`           | 3 visible       |
+| `chat.message.context`    | chat/message IDs              | `chat.message.contribute`   | menu            |
+| `chat.composer.actions`   | chat/project IDs, text handle | `chat.compose.contribute`   | 3 visible       |
+| `project.header`          | project/runtime summary       | `projects.contribute`       | 2 visible       |
+| `project.actions`         | project ID                    | `projects.contribute`       | menu            |
+| `project.session.context` | project/runtime/session IDs   | `projects.contribute`       | menu            |
+| `project.file.context`    | project ID, file handle       | `projects.files.contribute` | menu            |
+| `global.sidebar`          | none                          | `navigation.contribute`     | user-pinned     |
+| `global.status`           | bounded status DTO            | `status.contribute`         | 2 visible       |
+| `settings.plugin`         | plugin ID                     | none                        | own plugin only |
 
 Overflow всегда host-rendered. Contributions задают optional `group`, `order`
 и `priority`, но final order стабилен: user override → host group → priority →
@@ -1051,9 +1055,9 @@ Operation state.
   "schemaVersion": 1,
   "surface": "chat.composer.actions",
   "invocationId": "opaque-id",
-  "project": {"id": "project-id"},
-  "chat": {"id": "chat-id"},
-  "composer": {"textHandle": "opaque-resource-handle"}
+  "project": { "id": "project-id" },
+  "chat": { "id": "chat-id" },
+  "composer": { "textHandle": "opaque-resource-handle" }
 }
 ```
 
@@ -1772,20 +1776,20 @@ autostart policy.
 
 Минимальная drift/repair matrix:
 
-| Desired/DB | Record/Lima/guest | Результат | Допустимый repair |
-|---|---|---|---|
-| `running` + valid lease | всё совпадает | healthy | none |
-| `running` + valid lease | Record есть, Lima stopped | stopped/drifted | explicit/allowed start |
-| `stopped` | Lima stopped | healthy | none |
-| `stopped` | Lima running | unexpected-running | audited stop или change desired |
-| `destroyed` | artifacts отсутствуют | healthy terminal | none |
-| `destroyed` | artifacts остались | drifted | explicit cleanup/adopt |
-| non-destroyed | Record/Lima отсутствуют | error/missing | reprovision только с consent |
-| no runtime | Record/Lima есть | unmanaged | ignore или audited adopt |
-| any live | новый guestBootId | sessions interrupted | resume-compatible session only |
-| any | journal corrupt/gap | degraded | snapshot/resync, never fabricate |
-| any | provider receipt mismatch | blocked | install compatible provider |
-| any | external Record mutation | drifted | import diff или restore with consent |
+| Desired/DB              | Record/Lima/guest         | Результат            | Допустимый repair                    |
+| ----------------------- | ------------------------- | -------------------- | ------------------------------------ |
+| `running` + valid lease | всё совпадает             | healthy              | none                                 |
+| `running` + valid lease | Record есть, Lima stopped | stopped/drifted      | explicit/allowed start               |
+| `stopped`               | Lima stopped              | healthy              | none                                 |
+| `stopped`               | Lima running              | unexpected-running   | audited stop или change desired      |
+| `destroyed`             | artifacts отсутствуют     | healthy terminal     | none                                 |
+| `destroyed`             | artifacts остались        | drifted              | explicit cleanup/adopt               |
+| non-destroyed           | Record/Lima отсутствуют   | error/missing        | reprovision только с consent         |
+| no runtime              | Record/Lima есть          | unmanaged            | ignore или audited adopt             |
+| any live                | новый guestBootId         | sessions interrupted | resume-compatible session only       |
+| any                     | journal corrupt/gap       | degraded             | snapshot/resync, never fabricate     |
+| any                     | provider receipt mismatch | blocked              | install compatible provider          |
+| any                     | external Record mutation  | drifted              | import diff или restore with consent |
 
 `--repair` выводит planned audited actions до mutation. Implicit
 adopt/delete/recreate запрещены.
@@ -2622,15 +2626,15 @@ The delivery labels above are canonical and match the master implementation
 roadmap. Historical references elsewhere in review notes map without changing
 feature ownership:
 
-| Historical design label | Canonical delivery increment |
-|---|---|
-| B — Plugin UI Host | B — Plugin UI Host and Data Broker |
-| C — Data Broker | B — Plugin UI Host and Data Broker |
-| D — Generic Project Runtime | C — Generic Project Runtime |
-| E — Agent VM controller and CLI | D — Agent VM controller and CLI |
-| F — Agent VM plugin migration | E — Agent VM plugin migration |
+| Historical design label              | Canonical delivery increment         |
+| ------------------------------------ | ------------------------------------ |
+| B — Plugin UI Host                   | B — Plugin UI Host and Data Broker   |
+| C — Data Broker                      | B — Plugin UI Host and Data Broker   |
+| D — Generic Project Runtime          | C — Generic Project Runtime          |
+| E — Agent VM controller and CLI      | D — Agent VM controller and CLI      |
+| F — Agent VM plugin migration        | E — Agent VM plugin migration        |
 | G — memory, mounts and notifications | F — memory, mounts and notifications |
-| H — validation and release | G — validation and release |
+| H — validation and release           | G — validation and release           |
 
 Generic Broker mechanisms remain owned by B. C consumes those committed
 contracts and owns only the core Project Catalog, provider-neutral runtime
@@ -2663,7 +2667,7 @@ Plugin Platform v2 считается готовой, когда:
 16. Duplicate create и превышение resource budget блокируются.
 17. VM получает global memory и memory текущего проекта, но не других проектов.
 18. Upstream provider pinned exact tag/commit/digest и не обновляется через
-   `latest`.
+    `latest`.
 19. Update/rollback/uninstall плагина не пересоздаёт и не удаляет VM.
 20. Independent security/UI/runtime reviews и live smoke завершены.
 21. После shutdown Jarvis не остаётся ни одного Jarvis-owned механизма,

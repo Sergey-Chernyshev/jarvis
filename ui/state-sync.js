@@ -1,48 +1,64 @@
 (function (root, factory) {
   const api = factory();
-  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (typeof module === "object" && module.exports) module.exports = api;
   else root.JarvisStateSync = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
-  'use strict';
+})(typeof globalThis !== "undefined" ? globalThis : this, function () {
+  "use strict";
 
-  const SESSION_STATUSES = new Set(['working', 'waiting', 'done', 'idle', 'limit']);
-  const SESSION_AGENTS = new Set(['claude', 'codex']);
+  const SESSION_STATUSES = new Set([
+    "working",
+    "waiting",
+    "done",
+    "idle",
+    "limit",
+  ]);
+  const SESSION_AGENTS = new Set(["claude", "codex"]);
   const OPTIONAL_STRINGS = [
-    'project',
-    'cwd',
-    'detail',
-    'title',
-    'task',
-    'summary',
-    'lastPrompt',
-    'branch',
-    'model',
-    'tmuxPane',
-    'tmuxName',
-    'host',
-    'app',
-    'transcript',
+    "project",
+    "cwd",
+    "detail",
+    "title",
+    "task",
+    "summary",
+    "lastPrompt",
+    "branch",
+    "model",
+    "tmuxPane",
+    "tmuxName",
+    "host",
+    "app",
+    "transcript",
   ];
 
   function normalizeSessions(value) {
     if (!Array.isArray(value)) return null;
     const sessions = new Map();
     for (const candidate of value) {
-      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
-      const id = typeof candidate.id === 'string' ? candidate.id.trim() : '';
+      if (
+        !candidate ||
+        typeof candidate !== "object" ||
+        Array.isArray(candidate)
+      )
+        continue;
+      const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
       if (!id) continue;
 
       const session = { ...candidate, id };
       for (const key of OPTIONAL_STRINGS) {
-        if (key in session && typeof session[key] !== 'string') delete session[key];
+        if (key in session && typeof session[key] !== "string")
+          delete session[key];
       }
-      session.updatedAt = Number.isFinite(session.updatedAt) ? session.updatedAt : 0;
-      if (!SESSION_STATUSES.has(session.status)) session.status = 'idle';
-      if (typeof session.agent === 'string') session.agent = session.agent.toLowerCase();
+      session.updatedAt = Number.isFinite(session.updatedAt)
+        ? session.updatedAt
+        : 0;
+      if (!SESSION_STATUSES.has(session.status)) session.status = "idle";
+      if (typeof session.agent === "string")
+        session.agent = session.agent.toLowerCase();
       if (!SESSION_AGENTS.has(session.agent)) delete session.agent;
 
       const previous = sessions.get(id);
-      if (!previous || session.updatedAt >= previous.updatedAt) sessions.set(id, session);
+      if (!previous || session.updatedAt >= previous.updatedAt)
+        sessions.set(id, session);
     }
     return [...sessions.values()];
   }
@@ -54,7 +70,7 @@
     function report(error) {
       try {
         const result = onError(error);
-        if (result && typeof result.then === 'function') {
+        if (result && typeof result.then === "function") {
           Promise.resolve(result).catch(() => {});
         }
       } catch {}
@@ -63,7 +79,7 @@
     function applyNow(value) {
       try {
         const result = apply(value);
-        if (result && typeof result.then === 'function') {
+        if (result && typeof result.then === "function") {
           Promise.resolve(result).catch(report);
         }
       } catch (error) {

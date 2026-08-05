@@ -782,8 +782,20 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
         }
     }
 
+    const APPEARANCE_KEYS: [&str; 7] =
+        ["theme", "paint", "mode", "accent", "density", "radius", "scale"];
+    let appearance_changed = APPEARANCE_KEYS.iter().any(|k| rest.contains_key(*k));
+    let mode_changed = rest.contains_key("mode");
     if !rest.is_empty() {
         let _ = via_gate_panel(&d, "settings.set", json!({ "patch": Value::Object(rest) })).await;
+    }
+    // внешность сменили в одном окне — перекрашиваем все сразу (дизайн 14f «вид»)
+    if appearance_changed {
+        windows::broadcast_appearance(&d);
+    }
+    // накладка ⇄ окно: свойства самого окна меняем здесь, раскладку — CSS по data-mode
+    if mode_changed {
+        windows::apply_mode(&d);
     }
     // тумблер «Режим логов» применяем сразу (без перезапуска)
     crate::metrics::set_enabled(d.settings.bool("diagnostics"));

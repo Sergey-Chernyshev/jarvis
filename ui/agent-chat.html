@@ -1,98 +1,274 @@
 <!doctype html>
 <html lang="ru">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost" />
-<title>Jarvis · агент</title>
-<style>
-  :root{
-    --fg:#e9edf2; --dim:#8b93a1; --line:rgba(255,255,255,.08);
-    --user:rgba(90,140,255,.18); --bot:rgba(255,255,255,.055);
-    --accent:#5b8cff; --ok:#3ecf8e; --no:#ff6b6b; --warn:#ffcc66;
-  }
-  *{box-sizing:border-box; margin:0; padding:0}
-  html,body{height:100%}
-  body{
-    font:13px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;
-    color:var(--fg); background:transparent; overflow:hidden;
-    display:flex; flex-direction:column; -webkit-user-select:none; user-select:none;
-  }
-  /* header (draggable) */
-  header{
-    -webkit-app-region:drag; flex:0 0 auto;
-    display:flex; align-items:center; gap:8px;
-    padding:12px 14px; border-bottom:1px solid var(--line);
-  }
-  .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px var(--accent)}
-  .title{font-weight:600;letter-spacing:.2px}
-  .sub{color:var(--dim);font-size:11px;margin-left:auto}
-  /* messages */
-  #msgs{flex:1 1 auto; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px}
-  #msgs::-webkit-scrollbar{width:8px}
-  #msgs::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:8px}
-  .msg{display:flex}
-  .msg.user{justify-content:flex-end}
-  .bubble{
-    max-width:80%; padding:8px 11px; border-radius:13px;
-    background:var(--bot); border:1px solid var(--line);
-    white-space:pre-wrap; word-break:break-word; -webkit-user-select:text; user-select:text;
-  }
-  .msg.user .bubble{background:var(--user); border-color:rgba(90,140,255,.28)}
-  .msg.err .bubble{background:rgba(255,107,107,.14); border-color:rgba(255,107,107,.3)}
-  .chip{
-    font-size:11px; color:var(--dim); padding:4px 9px; border-radius:9px;
-    background:rgba(255,255,255,.04); border:1px solid var(--line); font-family:ui-monospace,monospace;
-  }
-  /* confirm card */
-  .msg.confirm{justify-content:stretch}
-  .cbox{
-    width:100%; padding:11px 12px; border-radius:13px;
-    background:rgba(255,204,102,.06); border:1px solid rgba(255,204,102,.22);
-  }
-  .ctitle{font-weight:600;margin-bottom:3px}
-  .cdesc{color:var(--fg);font-size:12px;margin-bottom:6px;-webkit-user-select:text;user-select:text}
-  .cwarn{color:var(--warn);font-size:11px;margin-bottom:7px}
-  .cbtns{display:flex;gap:8px}
-  .cbtn{
-    flex:1; padding:7px 0; border-radius:9px; border:1px solid var(--line);
-    background:rgba(255,255,255,.05); color:var(--fg); cursor:pointer; font:inherit; font-weight:600;
-  }
-  .cbtn.yes{background:rgba(62,207,142,.16);border-color:rgba(62,207,142,.35);color:var(--ok)}
-  .cbtn.no{background:rgba(255,107,107,.13);border-color:rgba(255,107,107,.3);color:var(--no)}
-  .cbtn:hover{filter:brightness(1.15)}
-  .cresult{margin-top:6px;font-size:12px;color:var(--dim)}
-  .hint{color:var(--dim);text-align:center;font-size:12px;margin:auto}
-  /* composer */
-  footer{flex:0 0 auto; padding:10px 12px; border-top:1px solid var(--line); display:flex; gap:8px; align-items:flex-end}
-  #input{
-    flex:1; resize:none; max-height:120px; min-height:38px;
-    padding:9px 11px; border-radius:11px; border:1px solid var(--line);
-    background:rgba(255,255,255,.05); color:var(--fg); font:inherit; outline:none;
-    -webkit-user-select:text; user-select:text;
-  }
-  #input:focus{border-color:rgba(91,140,255,.5)}
-  #send{
-    flex:0 0 auto; width:40px; height:38px; border-radius:11px; border:1px solid rgba(91,140,255,.4);
-    background:rgba(91,140,255,.18); color:var(--fg); font-size:15px; cursor:pointer;
-  }
-  #send:disabled{opacity:.5;cursor:default}
-</style>
-</head>
-<body>
-  <header data-tauri-drag-region>
-    <span class="dot"></span>
-    <span class="title">Jarvis · агент</span>
-    <span class="sub" id="sub">готов</span>
-  </header>
-  <div id="msgs">
-    <div class="hint">Спроси агента о сессиях, лимитах, метриках.<br/>Действия (ответ в сессию, смена настроек) он подтвердит у тебя карточкой.</div>
-  </div>
-  <footer>
-    <textarea id="input" rows="1" placeholder="Сообщение агенту…  (Enter — отправить)"></textarea>
-    <button id="send">⏎</button>
-  </footer>
-  <script src="./generated/tauri-transport.js"></script>
-  <script src="agent-chat.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost" />
+    <title>Jarvis · агент</title>
+    <link rel="stylesheet" href="./theme.css" />
+    <style>
+      /* Чат с агентом Jarvis · дизайн «Клевер» (14e): бумажная карточка, обе
+     реплики одной колонкой с подписью, вопрос — тональной карточкой внутри. */
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        font: 400 13.5px/1.6 var(--font);
+        color: var(--ink);
+        background: var(--paper);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        border-radius: var(--r-panel);
+        box-shadow: var(--shadow-panel);
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      /* шапка 56px, перетаскиваемая */
+      header {
+        -webkit-app-region: drag;
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: var(--h-head);
+        padding: 0 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--accent);
+        flex: none;
+      }
+      .title {
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      .sub {
+        color: var(--ink-mute);
+        font-size: 12.5px;
+        margin-left: auto;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* лента: подпись сверху, текст колонкой — без пузырей */
+      #msgs {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        padding: 22px 24px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+      #msgs::-webkit-scrollbar {
+        width: 0;
+      }
+      .msg {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 5px;
+      }
+      .msg::before {
+        content: "jarvis";
+        font-size: 12px;
+        color: var(--ink-mute);
+        font-weight: 400;
+      }
+      .msg.user::before {
+        content: "ты";
+      }
+      .msg.err::before {
+        content: "ошибка";
+        color: var(--danger);
+      }
+      .bubble {
+        max-width: 100%;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        font-size: 14.5px;
+        line-height: 1.6;
+        color: var(--ink);
+        white-space: pre-wrap;
+        word-break: break-word;
+        text-wrap: pretty;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      .msg.err .bubble {
+        color: var(--danger);
+      }
+      .chip {
+        font-size: 12px;
+        color: var(--ink-mute);
+        padding: 5px 10px;
+        border-radius: 8px;
+        background: var(--surface);
+        border: 0;
+        font-family: var(--mono);
+      }
+
+      /* карточка подтверждения — та же тональная плашка, что и вопрос в чате */
+      .msg.confirm {
+        align-items: stretch;
+      }
+      .msg.confirm::before {
+        content: "jarvis · подтверди";
+      }
+      .cbox {
+        width: 100%;
+        padding: 16px 18px;
+        border-radius: var(--r-card);
+        background: var(--surface);
+        border: 0;
+      }
+      .ctitle {
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 1.45;
+        margin-bottom: 4px;
+        text-wrap: pretty;
+      }
+      .cdesc {
+        color: var(--ink-mute);
+        font-size: 13px;
+        margin-bottom: 8px;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      .cwarn {
+        color: var(--warn);
+        font-size: 12.5px;
+        margin-bottom: 10px;
+      }
+      .cbtns {
+        display: flex;
+        gap: 8px;
+      }
+      .cbtn {
+        flex: 1;
+        height: 38px;
+        border-radius: var(--r-chip);
+        border: 0;
+        background: var(--paper);
+        color: var(--ink);
+        cursor: default;
+        font: 600 13.5px/1 var(--font);
+        box-shadow: var(--shadow-raised);
+      }
+      .cbtn.yes {
+        background: var(--accent);
+        color: var(--on-accent);
+        box-shadow: none;
+      }
+      .cbtn.no {
+        background: var(--accent-soft);
+        color: var(--ink);
+        box-shadow: none;
+      }
+      .cbtn:hover {
+        filter: brightness(1.04);
+      }
+      .cresult {
+        margin-top: 8px;
+        font-size: 12.5px;
+        color: var(--ink-mute);
+      }
+      .hint {
+        color: var(--ink-faint);
+        text-align: center;
+        font-size: 13px;
+        margin: auto;
+        line-height: 1.7;
+        max-width: 340px;
+      }
+
+      /* поле ответа — нижняя полоска панели */
+      footer {
+        flex: 0 0 auto;
+        padding: 14px 20px;
+        border-top: 1px solid var(--line);
+        display: flex;
+        gap: 10px;
+        align-items: flex-end;
+      }
+      #input {
+        flex: 1;
+        resize: none;
+        max-height: 132px;
+        min-height: 40px;
+        padding: 11px 14px;
+        border-radius: var(--r-card);
+        border: 0;
+        box-shadow: inset 0 0 0 1.5px var(--line-strong);
+        background: var(--paper);
+        color: var(--ink);
+        font: inherit;
+        font-size: 14px;
+        outline: none;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      #input::placeholder {
+        color: var(--ink-faint);
+      }
+      #input:focus {
+        box-shadow: inset 0 0 0 1.5px var(--accent);
+      }
+      #send {
+        flex: 0 0 auto;
+        width: 44px;
+        height: 40px;
+        border-radius: var(--r-card);
+        border: 0;
+        background: var(--accent);
+        color: var(--on-accent);
+        font-size: 15px;
+        cursor: default;
+        transition: filter var(--dur) ease;
+      }
+      #send:hover {
+        filter: brightness(1.06);
+      }
+      #send:disabled {
+        opacity: 0.45;
+      }
+    </style>
+  </head>
+  <body>
+  <!-- внешность до первой отрисовки: theme.js синхронно читает кэш
+       и ставит data-* на <html>. Прямой ребёнок body — требование ACL. -->
+  <script src="./theme.js"></script>
+    <header data-tauri-drag-region>
+      <span class="dot"></span>
+      <span class="title">Jarvis · агент</span>
+      <span class="sub" id="sub">готов</span>
+    </header>
+    <div id="msgs">
+      <div class="hint">
+        Спроси агента о сессиях, лимитах, метриках.<br />Действия (ответ в
+        сессию, смена настроек) он подтвердит у тебя карточкой.
+      </div>
+    </div>
+    <footer>
+      <textarea
+        id="input"
+        rows="1"
+        placeholder="Сообщение агенту…  (Enter — отправить)"
+      ></textarea>
+      <button id="send">⏎</button>
+    </footer>
+    <script src="./generated/tauri-transport.js"></script>
+    <script src="agent-chat.js"></script>
+  </body>
 </html>

@@ -43,16 +43,16 @@ After a catalog release has passed structural and trust selection, the native
 verifier compares exactly these ten verifier-reachable fields against the
 held-file package observation:
 
-| Exact field |
-|---|
-| `pluginId` |
-| `publisher` |
-| `version` |
-| `target` |
-| `minimumMacos` |
-| `jarvisRange` |
-| `pluginApi` |
-| `archiveDigest` |
+| Exact field              |
+| ------------------------ |
+| `pluginId`               |
+| `publisher`              |
+| `version`                |
+| `target`                 |
+| `minimumMacos`           |
+| `jarvisRange`            |
+| `pluginApi`              |
+| `archiveDigest`          |
 | `packageSignature.keyId` |
 | `packageSignature.value` |
 

@@ -127,6 +127,13 @@ function showToast(text) {
 
 /* ---------- вьюхи ---------- */
 
+const contentEl = document.getElementById('content');
+const detailEmptyEl = document.getElementById('detailEmpty');
+
+/** Оконный режим (14h) против накладки ⌘J. Источник правды — атрибут на <html>,
+ *  который ставит theme.js из настроек; так режим виден и до ответа моста. */
+const windowMode = () => document.documentElement.dataset.mode === 'window';
+
 function setView(next) {
   const previousView = view;
   if (view === 'chat' && next !== 'chat') {
@@ -142,12 +149,19 @@ function setView(next) {
   view = next;
   queryEl.placeholder = next === 'history' ? 'Найти проект или папку…' : 'Найти чат…';
   closeActions();
-  // в чате и на экране вопроса поиск и табы не нужны — чистый фокус-режим
-  const minimal = next === 'chat' || next === 'question' || next === 'agentvm';
+  // Оконный режим (14h): список слева живёт всегда, поиск и вкладки — тоже.
+  // В накладке остаётся прежний фокус-режим: чат, вопрос и рабочее место
+  // проекта занимают панель целиком.
+  const win = windowMode();
+  const minimal =
+    !win && (next === 'chat' || next === 'question' || next === 'agentvm');
   document.querySelector('.cmdrow').hidden = minimal;
   document.querySelector('.tabs').hidden = minimal;
-  listEl.hidden = next !== 'list';
+  listEl.hidden = win ? false : next !== 'list';
   if (next !== 'list') activeEnvironmentsEl.hidden = true;
+  // правая колонка окна пустует, пока сессия не выбрана
+  contentEl.hidden = win && next === 'list';
+  detailEmptyEl.hidden = !(win && next === 'list');
   chatEl.hidden = next !== 'chat';
   qviewEl.hidden = next !== 'question';
   settingsEl.hidden = next !== 'settings';
@@ -155,12 +169,16 @@ function setView(next) {
   voicehistEl.hidden = next !== 'voicehist';
   historyEl.hidden = next !== 'history';
   agentVmWorkspaceEl.hidden = next !== 'agentvm';
-  // чат и вопрос несут собственные нижние бары — парящий футер только тут
-  footerEl.hidden = next === 'chat' || next === 'question' || next === 'agentvm';
+  // чат, вопрос и рабочее место проекта несут собственные нижние бары —
+  // парящий футер только вне них. В окне полоска не парит, а стоит в сетке
+  // под обеими колонками — там она нужна всегда.
+  footerEl.hidden =
+    !win && (next === 'chat' || next === 'question' || next === 'agentvm');
   if (next === 'list') { primaryLabelEl.textContent = 'Открыть чат'; primaryKeyEl.textContent = '↵'; }
   else if (next === 'history') { primaryLabelEl.textContent = 'Открыть проект'; primaryKeyEl.textContent = '↵'; }
   else { primaryLabelEl.textContent = 'Назад'; primaryKeyEl.textContent = 'esc'; }
   tabSettingsEl.classList.toggle('active', next === 'settings');
+  document.getElementById('tlSettings').classList.toggle('active', next === 'settings');
   tabStatsEl.classList.toggle('active', next === 'stats');
   tabHistoryEl.classList.toggle('active', next === 'history' || next === 'agentvm');
   tabVoiceEl.classList.toggle('active', next === 'voicehist');
@@ -1250,7 +1268,7 @@ function renderTaskBoard(s) {
   tasksBtn.hidden = false;
   tasksBtnCount.textContent = `${done}/${total}`;
   tasksRingFg.style.strokeDashoffset = String(RING_C * (1 - (total ? done / total : 0)));
-  tasksRingFg.setAttribute('stroke', b.stopped ? '#F2A33C' : '#41C98E'); // мёртвая доска — янтарь
+  tasksRingFg.setAttribute('stroke', b.stopped ? 'var(--warn)' : 'var(--accent)'); // мёртвая доска — янтарь
   tasksBtn.classList.toggle('open', boardOpen);
   if (boardOpen) renderBoardPanel(s, b);
 }
@@ -1493,14 +1511,14 @@ function tpStatusIcon(status) {
   }
   const svg = svgEl('svg', { width: '15', height: '15', viewBox: '0 0 16 16', fill: 'none' });
   if (status === 'completed') {
-    svg.appendChild(svgEl('circle', { cx: '8', cy: '8', r: '6.6', stroke: '#41C98E', 'stroke-width': '1.4' }));
-    svg.appendChild(svgEl('path', { d: 'M5 8.2 L7.1 10.3 L11 5.8', stroke: '#41C98E', 'stroke-width': '1.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+    svg.appendChild(svgEl('circle', { cx: '8', cy: '8', r: '6.6', stroke: 'var(--accent)', 'stroke-width': '1.4' }));
+    svg.appendChild(svgEl('path', { d: 'M5 8.2 L7.1 10.3 L11 5.8', stroke: 'var(--accent)', 'stroke-width': '1.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
   } else if (status === 'interrupted') {
-    svg.appendChild(svgEl('circle', { cx: '8', cy: '8', r: '6.4', stroke: '#F2A33C', 'stroke-width': '1.4' }));
-    svg.appendChild(svgEl('path', { d: 'M5.4 8 H10.6', stroke: '#F2A33C', 'stroke-width': '1.5', 'stroke-linecap': 'round' }));
+    svg.appendChild(svgEl('circle', { cx: '8', cy: '8', r: '6.4', stroke: 'var(--warn)', 'stroke-width': '1.4' }));
+    svg.appendChild(svgEl('path', { d: 'M5.4 8 H10.6', stroke: 'var(--warn)', 'stroke-width': '1.5', 'stroke-linecap': 'round' }));
   } else {
     // pending / очередь — пунктирное кольцо
-    svg.appendChild(svgEl('circle', { cx: '8', cy: '8', r: '6.4', stroke: '#55555C', 'stroke-width': '1.4', 'stroke-dasharray': '2.5 2.5' }));
+    svg.appendChild(svgEl('circle', { cx: '8', cy: '8', r: '6.4', stroke: 'var(--ink-faint)', 'stroke-width': '1.4', 'stroke-dasharray': '2.5 2.5' }));
   }
   return svg;
 }
@@ -2082,12 +2100,168 @@ function powerSuffix() {
   return parts.length ? ' · ' + parts.join(' · ') : '';
 }
 
+/* ---------- нижняя полоска панели (дизайн 14a) ----------
+ * Слева — волна и подпись: если будящее слово включено, панель прямо говорит,
+ * как её позвать, вместо невнятного «слушаю». Справа — полоска лимита подписки
+ * с окном до сброса; в настройках «Внизу панели» переключается на расход. */
+
+const footerWaveEl = document.getElementById('footerWave');
+const footerLimitEl = document.getElementById('footerLimit');
+const footerMeterEl = document.getElementById('footerMeter');
+const footerLimitTextEl = document.getElementById('footerLimitText');
+
+let wakeStatus = null;   // { enabled, running, listening, muted }
+let footerBottom = 'limit'; // 'limit' | 'spend' — настройка «Внизу панели»
+let footerUsage = null;  // последний usage_summary (для процента и расхода)
+
 function footerText() {
+  // будящее слово слышит — говорим, как позвать (14a)
+  if (wakeStatus?.running && !wakeStatus.muted) return 'скажи «джарвис» — я услышу' + powerSuffix();
   const base = state.length
     ? `${state.length} ${plural(state.length, 'сессия', 'сессии', 'сессий')} · демон активен`
     : 'демон активен';
   return base + powerSuffix();
 }
+
+/** Волна «горит» только когда детектор реально слушает микрофон. */
+function paintFooterWave() {
+  if (!footerWaveEl) return;
+  footerWaveEl.classList.toggle('is-live', !!(wakeStatus?.listening && !wakeStatus.muted));
+}
+
+/** «лимит 62% · до 14:30» — или «$14.20 за день», если выбран расход. */
+function paintFooterLimit() {
+  if (!footerLimitEl) return;
+  const bar = footerMeterEl?.firstElementChild;
+  const sess = footerUsage?.official?.session;
+
+  if (footerBottom === 'spend') {
+    const t = footerUsage?.total;
+    if (!t) { footerLimitEl.hidden = true; return; }
+    const cost = (t.api || 0) + (t.plan || 0);
+    footerMeterEl.hidden = true;
+    footerLimitTextEl.textContent = cost > 0.005 ? `$${cost.toFixed(2)} за день` : '—';
+    footerLimitEl.hidden = false;
+    return;
+  }
+
+  if (!sess || typeof sess.pct !== 'number') { footerLimitEl.hidden = true; return; }
+  footerMeterEl.hidden = false;
+  const pct = Math.max(0, Math.min(100, Math.round(sess.pct)));
+  if (bar) bar.style.width = `${pct}%`;
+  footerMeterEl.classList.toggle('is-crit', pct > 90);
+  footerMeterEl.classList.toggle('is-warn', pct > 75 && pct <= 90);
+  // окно до сброса — часами, как в макете («до 14:30»)
+  let until = '';
+  if (sess.resetAt > Date.now()) {
+    const d = new Date(sess.resetAt);
+    until = ` · до ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+  footerLimitTextEl.textContent = `лимит ${pct}%${until}`;
+  footerLimitEl.hidden = false;
+}
+
+function refreshFooterUsage() {
+  window.jarvis.getUsage('day')
+    .then((u) => { footerUsage = u; paintFooterLimit(); paintTitlebarLimit(); })
+    .catch(() => {});
+}
+
+window.jarvis.wakeGet?.().then((w) => { wakeStatus = w; paintFooterWave(); footerLeftEl.textContent = footerText(); }).catch(() => {});
+window.jarvis.onWake?.((p) => {
+  if (!p) return;
+  if (p.state || p.listening !== undefined) { wakeStatus = { ...wakeStatus, ...p }; paintFooterWave(); }
+});
+window.jarvis.onAudioState?.((s) => {
+  wakeStatus = { ...wakeStatus, listening: s?.state === 'listening', muted: !!s?.muted };
+  paintFooterWave();
+  footerLeftEl.textContent = footerText();
+});
+refreshFooterUsage();
+setInterval(refreshFooterUsage, 60000);
+
+window.jarvis.getSettings().then((s) => {
+  footerBottom = s?.footerBottom === 'spend' ? 'spend' : 'limit';
+  paintFooterLimit();
+}).catch(() => {});
+// «Внизу панели» переключили в настройках — полоска меняется без перезапуска
+window.addEventListener('jarvis:footer-bottom', (e) => {
+  footerBottom = e.detail === 'spend' ? 'spend' : 'limit';
+  paintFooterLimit();
+});
+
+/* ---------- титульная полоса оконного режима (14h) ---------- */
+
+const tlLimitEl = document.getElementById('tlLimit');
+const tlMeterEl = document.getElementById('tlMeter');
+const tlLimitTextEl = document.getElementById('tlLimitText');
+
+// светофор: декораций у окна нет, поэтому кнопки наши. «Закрыть» = спрятать
+// (CloseRequested перехвачен в Rust — демон продолжает жить).
+// шестерёнка титульной полосы — тот же переход, что вкладка настроек
+const tlSettingsEl = document.getElementById('tlSettings');
+tlSettingsEl.addEventListener('click', () => {
+  if (view === 'settings') { setView('list'); render(); } else setView('settings');
+});
+
+document.getElementById('winClose').addEventListener('click', () => window.jarvis.winClose());
+document.getElementById('winMin').addEventListener('click', () => window.jarvis.winMinimize());
+// зелёная кнопка — фуллскрин, с Alt — зум по содержимому: ровно как в macOS
+document.getElementById('winZoom').addEventListener('click', (e) => {
+  if (e.altKey) window.jarvis.winZoom();
+  else window.jarvis.winToggleFullscreen().then(syncFullscreen).catch(() => {});
+});
+// двойной клик по титульной полосе — зум, системная привычка
+document.getElementById('titlebar').addEventListener('dblclick', (e) => {
+  if (e.target.closest('button')) return;
+  window.jarvis.winZoom();
+});
+
+/** Фуллскрин: убрать скругление и тень, иначе по углам экрана видны прорези. */
+function syncFullscreen() {
+  window.jarvis.winIsFullscreen?.()
+    .then((on) => { document.documentElement.dataset.fullscreen = on ? '1' : '0'; })
+    .catch(() => {});
+}
+// ⌃⌘F и зелёная кнопка меняют размер окна — ловим оба пути через resize
+let fsTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(fsTimer);
+  fsTimer = setTimeout(syncFullscreen, 120);
+});
+syncFullscreen();
+
+// светофор горит только у активного окна
+const paintWinFocus = (on) => { document.documentElement.dataset.winFocus = on ? '1' : '0'; };
+paintWinFocus(document.hasFocus());
+window.jarvis.onWinFocus?.(paintWinFocus);
+window.addEventListener('focus', () => paintWinFocus(true));
+window.addEventListener('blur', () => paintWinFocus(false));
+
+/** Лимит в титульной полосе — тот же расчёт, что внизу панели. */
+function paintTitlebarLimit() {
+  const sess = footerUsage?.official?.session;
+  if (!sess || typeof sess.pct !== 'number') { tlLimitEl.hidden = true; return; }
+  const pct = Math.max(0, Math.min(100, Math.round(sess.pct)));
+  const bar = tlMeterEl.firstElementChild;
+  if (bar) bar.style.width = `${pct}%`;
+  tlMeterEl.classList.toggle('is-crit', pct > 90);
+  tlMeterEl.classList.toggle('is-warn', pct > 75 && pct <= 90);
+  let until = '';
+  if (sess.resetAt > Date.now()) {
+    const d = new Date(sess.resetAt);
+    until = ` · до ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+  tlLimitTextEl.textContent = `лимит ${pct}%${until}`;
+  tlLimitEl.hidden = false;
+}
+
+// Режим переключили (здесь или в другом окне) — пересобрать раскладку под
+// новый data-mode: список из сайдбара в стопку видов и обратно.
+window.addEventListener('jarvis:appearance', () => {
+  setView(view);
+  if (view === 'list') render();
+});
 
 function srow(label, control, { dim = false, hint = '', sub = false } = {}) {
   const row = document.createElement('div');
@@ -2221,15 +2395,15 @@ function clamshellResultMessage(result, mode) {
 // маленькие глифы для карточки бодрости (через DOM — без innerHTML)
 function awakeGlyph(kind) {
   const svg = svgEl('svg', { width: '15', height: '15', viewBox: '0 0 16 16', fill: 'none' });
-  const path = (d, w) => svg.appendChild(svgEl('path', { d, stroke: '#C8C8CE', 'stroke-width': String(w || 1.3), 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+  const path = (d, w) => svg.appendChild(svgEl('path', { d, stroke: 'currentColor', 'stroke-width': String(w || 1.3), 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
   if (kind === 'coffee') {
     path('M3 6.5 H10.5 V9.5 A2.5 2.5 0 0 1 8 12 H5.5 A2.5 2.5 0 0 1 3 9.5 Z');
     path('M10.5 7 H12 A1.5 1.5 0 0 1 12 10 H10.5');
-    svg.appendChild(svgEl('path', { d: 'M5.2 2.6 V4', stroke: '#76767E', 'stroke-width': '1.2', 'stroke-linecap': 'round' }));
-    svg.appendChild(svgEl('path', { d: 'M8 2.6 V4', stroke: '#76767E', 'stroke-width': '1.2', 'stroke-linecap': 'round' }));
+    svg.appendChild(svgEl('path', { d: 'M5.2 2.6 V4', stroke: 'var(--ink-mute)', 'stroke-width': '1.2', 'stroke-linecap': 'round' }));
+    svg.appendChild(svgEl('path', { d: 'M8 2.6 V4', stroke: 'var(--ink-mute)', 'stroke-width': '1.2', 'stroke-linecap': 'round' }));
   } else if (kind === 'lid') {
     path('M2.5 10.5 Q8 4 13.5 10.5');
-    svg.appendChild(svgEl('path', { d: 'M1.5 12 H14.5', stroke: '#76767E', 'stroke-width': '1.3', 'stroke-linecap': 'round' }));
+    svg.appendChild(svgEl('path', { d: 'M1.5 12 H14.5', stroke: 'var(--ink-mute)', 'stroke-width': '1.3', 'stroke-linecap': 'round' }));
   }
   return svg;
 }
@@ -2494,10 +2668,10 @@ listEl.addEventListener('mousemove', () => { palHoverEnabled = true; });
 function cmdGlyph(kind) {
   if (kind === 'coffee' || kind === 'lid') return awakeGlyph(kind);
   const svg = svgEl('svg', { width: '15', height: '15', viewBox: '0 0 16 16', fill: 'none' });
-  const p = (d, w) => svg.appendChild(svgEl('path', { d, stroke: '#9A9AA2', 'stroke-width': String(w || 1.4), 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+  const p = (d, w) => svg.appendChild(svgEl('path', { d, stroke: 'currentColor', 'stroke-width': String(w || 1.4), 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
   if (kind === 'pos') {
     p('M2.5 3.5 H13.5 V12.5 H2.5 Z');
-    svg.appendChild(svgEl('circle', { cx: '11', cy: '6', r: '1.3', fill: '#9A9AA2' }));
+    svg.appendChild(svgEl('circle', { cx: '11', cy: '6', r: '1.3', fill: 'currentColor' }));
   } else if (kind === 'bell') {
     p('M5 7 A3 3 0 0 1 11 7 V9.5 L12 11 H4 L5 9.5 Z');
     p('M6.7 11 A1.3 1.3 0 0 0 9.3 11', 1.2);
@@ -2782,7 +2956,7 @@ function renderArgMode() {
   resrow.className = 'cpal-resrow';
   const ic = document.createElement('span');
   ic.className = 'cpal-resicon';
-  ic.appendChild((() => { const s = svgEl('svg', { width: '15', height: '15', viewBox: '0 0 16 16', fill: 'none' }); s.appendChild(svgEl('path', { d: 'M3 6.5 H10.5 V9.5 A2.5 2.5 0 0 1 8 12 H5.5 A2.5 2.5 0 0 1 3 9.5 Z M10.5 7 H12 A1.5 1.5 0 0 1 12 10 H10.5', stroke: '#FFFFFF', 'stroke-width': '1.3', 'stroke-linejoin': 'round' })); return s; })());
+  ic.appendChild((() => { const s = svgEl('svg', { width: '15', height: '15', viewBox: '0 0 16 16', fill: 'none' }); s.appendChild(svgEl('path', { d: 'M3 6.5 H10.5 V9.5 A2.5 2.5 0 0 1 8 12 H5.5 A2.5 2.5 0 0 1 3 9.5 Z M10.5 7 H12 A1.5 1.5 0 0 1 12 10 H10.5', stroke: 'currentColor', 'stroke-width': '1.3', 'stroke-linejoin': 'round' })); return s; })());
   resrow.appendChild(ic);
   argTitleEl = document.createElement('span');
   argTitleEl.className = 'cpal-restitle';
@@ -5467,7 +5641,7 @@ async function renderSttCard() {
   engRow.appendChild(engRowLabel);
   engRow.appendChild(spacer());
   const sel = document.createElement('select');
-  sel.style.cssText = 'background:transparent;border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:var(--text);font:inherit;font-size:12px;padding:3px 7px;outline:none;';
+  sel.style.cssText = 'background:transparent;border:1px solid var(--line-strong);border-radius:6px;color:var(--text);font:inherit;font-size:12px;padding:3px 7px;outline:none;';
   for (const eng of (v.engines || ['whisper-turbo', 'qwen3-0.6b', 'qwen3-1.7b'])) {
     const opt = document.createElement('option');
     opt.value = eng;
@@ -5669,6 +5843,24 @@ window.addEventListener('keydown', async (e) => {
     return;
   }
 
+  // Оконные сочетания macOS. Своего меню у нас нет, поэтому системные ⌘W / ⌘M /
+  // ⌃⌘F не привязаны сами — вешаем их руками, чтобы окно вело себя как окно.
+  if (windowMode() && e.metaKey && (e.key === 'w' || e.key === 'W')) { // ⌘W — закрыть (спрятать)
+    e.preventDefault();
+    window.jarvis.winClose();
+    return;
+  }
+  if (windowMode() && e.metaKey && !e.ctrlKey && (e.key === 'm' || e.key === 'M')) { // ⌘M — свернуть
+    e.preventDefault();
+    window.jarvis.winMinimize();
+    return;
+  }
+  if (windowMode() && e.metaKey && e.ctrlKey && (e.key === 'f' || e.key === 'F')) { // ⌃⌘F — фуллскрин
+    e.preventDefault();
+    window.jarvis.winToggleFullscreen().then(syncFullscreen).catch(() => {});
+    return;
+  }
+
   if (e.metaKey && (e.key === 'k' || e.key === 'K')) { // ⌘K — меню действий
     e.preventDefault();
     toggleActions();
@@ -5748,7 +5940,8 @@ window.addEventListener('keydown', async (e) => {
   if (e.key === 'Escape') { // raycast: Esc — назад / закрыть
     if (view === 'chat' && paletteOpen()) return; // палитру закроет обработчик поля
     if (view !== 'list') { setView('list'); render(); }
-    else window.jarvis.hidePanel();
+    // в накладке Esc из списка прячет её; окно так не закрывают — для этого ⌘W
+    else if (!windowMode()) window.jarvis.hidePanel();
     return;
   }
 

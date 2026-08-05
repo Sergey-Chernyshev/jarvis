@@ -1,14 +1,17 @@
-import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import test from 'node:test';
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
 
-const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
-const renderer = readFileSync(new URL('./renderer.js', import.meta.url), 'utf8');
+const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+const renderer = readFileSync(
+  new URL("./renderer.js", import.meta.url),
+  "utf8",
+);
 
 // Сводки ходов (chatsum v1, возврат по спеке 2026-07-18): чат — одна лента,
 // поверх которой живёт режим «Сводка» — тумблер в шапке, карточки .turnsum
 // и подписка на chat:summary. Тест стережёт НАЛИЧИЕ этой поверхности.
-test('session chat has the turn-summary surface on top of the transcript feed', () => {
+test("session chat has the turn-summary surface on top of the transcript feed", () => {
   // тумблер «Сводка/Лента» в шапке чата + стили карточек и режима
   assert.match(html, /id="sumToggle"/);
   assert.match(html, /\.turnsum\b/);
@@ -25,7 +28,7 @@ test('session chat has the turn-summary surface on top of the transcript feed', 
 // Карточка хода — ИИ-разбор результатов, а не список действий
 // (спека 2026-07-18-turn-ai-analysis-redesign): финальный ответ агента под
 // сворачиваемым блоком; строка команд и tool-лог из карточки убраны.
-test('turn card is an AI analysis with a collapsible agent reply, no command line', () => {
+test("turn card is an AI analysis with a collapsible agent reply, no command line", () => {
   // сворачиваемый «Ответ агента» из card.reply
   assert.match(renderer, /card\.reply/);
   assert.match(renderer, /Ответ агента/);
@@ -38,7 +41,7 @@ test('turn card is an AI analysis with a collapsible agent reply, no command lin
 
 // Слой «Документы», инкремент 2 (спека 2026-07-18 §3.1/§3.3): вьюер документа
 // в панели — слайд-овер, безопасный markdown-рендер, открытие с файл-чипа.
-test('doc viewer surface exists on top of the summary cards', () => {
+test("doc viewer surface exists on top of the summary cards", () => {
   assert.match(html, /id="docWrap"/);
   assert.match(html, /id="docBody"/);
   assert.match(html, /markdown\.js/);
@@ -50,7 +53,7 @@ test('doc viewer surface exists on top of the summary cards', () => {
 
 // Легаси-заготовка «саммари сессии» (chatModeSeg/chatSummaryEl/setChatMode)
 // не возвращается: v1 её заменил тумблером сводок, а не воскресил.
-test('legacy summary-mode stub stays absent', () => {
+test("legacy summary-mode stub stays absent", () => {
   assert.doesNotMatch(html, /\bchatModeSeg\b/);
   assert.doesNotMatch(html, /\.chatmode-(?:seg|btn)\b/);
   assert.doesNotMatch(html, /Саммари сессии — заготовка дизайна/);

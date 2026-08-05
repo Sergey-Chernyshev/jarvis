@@ -8,8 +8,5 @@
     "strict": true,
     "target": "ES2022"
   },
-  "include": [
-    "src/generated/contracts.ts",
-    "test/wire-types.ts"
-  ]
+  "include": ["src/generated/contracts.ts", "test/wire-types.ts"]
 }

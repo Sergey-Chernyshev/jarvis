@@ -35,13 +35,13 @@ sidecar, its v1 manifest, `externalBin`, current VM disks, settings or data in t
 Increment A creates a production-grade package/trust layer, but it does not claim that Agent VM is already migrated.
 These gates prevent the package manager from breaking the working reference plugin:
 
-| Profile state at Jarvis startup | Increment A behavior | Required future transition |
-|---|---|---|
-| Fresh profile, no receipt and bundled sidecar available | Existing bundled Agent VM is staged as the explicit `legacy-bundled-v1` source and remains usable | Increment E changes clean-install behavior after the importer exists |
-| Existing legacy `~/.jarvis/plugins/agent-vm` and no receipt | Load through the v1 bridge, preserve settings/data, expose `migrationAvailable` | Increment E imports and writes a v2 receipt |
-| Valid current v2 receipt for `agent-vm` plus legacy files | Receipt-backed immutable package wins; legacy is ignored, not deleted | Increment E verifies imported state and may retire the bridge |
-| Invalid/revoked/incompatible current v2 receipt plus legacy files | Block activation with a repair/rollback status; never downgrade to legacy automatically | User performs rollback/repair or Increment E importer repairs the receipt |
-| Developer link | Run only an immutable digest snapshot while Developer Mode is on | Increment B adds the full Developer section UI |
+| Profile state at Jarvis startup                                   | Increment A behavior                                                                              | Required future transition                                                |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Fresh profile, no receipt and bundled sidecar available           | Existing bundled Agent VM is staged as the explicit `legacy-bundled-v1` source and remains usable | Increment E changes clean-install behavior after the importer exists      |
+| Existing legacy `~/.jarvis/plugins/agent-vm` and no receipt       | Load through the v1 bridge, preserve settings/data, expose `migrationAvailable`                   | Increment E imports and writes a v2 receipt                               |
+| Valid current v2 receipt for `agent-vm` plus legacy files         | Receipt-backed immutable package wins; legacy is ignored, not deleted                             | Increment E verifies imported state and may retire the bridge             |
+| Invalid/revoked/incompatible current v2 receipt plus legacy files | Block activation with a repair/rollback status; never downgrade to legacy automatically           | User performs rollback/repair or Increment E importer repairs the receipt |
+| Developer link                                                    | Run only an immutable digest snapshot while Developer Mode is on                                  | Increment B adds the full Developer section UI                            |
 
 Additional invariants:
 
@@ -2126,6 +2126,7 @@ verification result. `quarantine.rs::reverify_for_extract` performs this sequenc
 
    Its fields are private; it owns its fd and implements neither `Clone`, `Serialize` nor `Deserialize`. It never
    enters `payload_json`, a protocol DTO or an async queue;
+
 4. validate the persisted archive name as one component, then `HeldQuarantineParent::open_archive` uses `openat` on
    that held fd with
    `RDONLY|NOFOLLOW|CLOEXEC` from that held parent fd;

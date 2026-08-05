@@ -12,6 +12,13 @@
     if (++listeners === 2) invoke('toast_ready');
   };
 
+  // theme.js ждёт window.jarvis: в окне тостов даём ему только внешность
+  window.jarvis = Object.freeze({
+    getSettings: () => invoke('settings_get'),
+    setSettings: (patch) => invoke('settings_set', { patch }),
+    onAppearance: (cb) => { listen('appearance', (e) => cb(e.payload)); },
+  });
+
   window.toast = Object.freeze({
     onAdd: (cb) => { listen('toast-add', (e) => cb(e.payload)).then(armed); },
     onUpdate: (cb) => { listen('toast-update', (e) => cb(e.payload)).then(armed); },

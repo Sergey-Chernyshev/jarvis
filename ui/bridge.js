@@ -5,10 +5,14 @@
 (() => {
   const transport = globalThis.__JARVIS_CORE_TRANSPORT__;
   if (!transport) throw new Error('jarvis_core_transport_missing');
-  const { invoke, listen } = transport;
+  const { invoke, listen, getCurrentWindow } = transport;
   delete globalThis.__JARVIS_CORE_TRANSPORT__;
 
   const on = (event, cb) => listen(event, (e) => cb(e.payload));
+
+  // собственный светофор оконного режима: декораций нет, кнопки рисуем сами.
+  // Окно берём из транспорта: глобальный Tauri-объект в проде не используется.
+  const self = () => getCurrentWindow();
 
   window.jarvis = Object.freeze({
     onState: (cb) => on('state', cb),
@@ -19,6 +23,19 @@
     clearFinished: () => invoke('state_clear'),
     hidePanel: () => invoke('panel_hide'),
     getSettings: () => invoke('settings_get'),
+    // тема/краска сменились в другом окне (демон рассылает всем)
+    onAppearance: (cb) => on('appearance', cb),
+    winMinimize: () => self().minimize(),
+    winZoom: () => self().toggleMaximize(),
+    winClose: () => self().close(),  // CloseRequested перехвачен → просто прячет
+    // зелёная кнопка macOS — фуллскрин (зум под Alt, как в системе)
+    winIsFullscreen: () => self().isFullscreen(),
+    winToggleFullscreen: async () => {
+      const w = self();
+      await w.setFullscreen(!(await w.isFullscreen()));
+    },
+    // светофор горит только у активного окна — как у системных кнопок
+    onWinFocus: (cb) => { self().onFocusChanged(({ payload }) => cb(!!payload)); },
     setSettings: (patch) => invoke('settings_set', { patch }),
     settingsHealth: () => invoke('settings_health'),
     settingsRepair: () => invoke('settings_repair'),

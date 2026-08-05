@@ -1504,3 +1504,30 @@ env_key = "SYNTHETIC_PROVIDER_SECRET"
         fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+mod live_host_probe {
+    use super::*;
+
+    /// Диагностический прогон по настоящему $HOME: показывает, что реально
+    /// уедет в VM у текущего пользователя. Не ассертит содержимое — состав
+    /// конфигурации у каждого свой; проверяет только, что сборка не падает.
+    #[test]
+    #[ignore = "diagnostic: run with --ignored to inspect the real host"]
+    fn report_real_host_snapshot() {
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME"));
+        let roots = MirrorRoots {
+            claude: home.join(".claude"),
+            codex: home.join(".codex"),
+            claude_json: home.join(".claude.json"),
+        };
+        let snapshot = build_snapshot(&roots).expect("snapshot builds on the real host");
+        let total: usize = snapshot.files.iter().map(|file| file.bytes.len()).sum();
+        eprintln!("files={} bytes={total}", snapshot.files.len());
+        for file in &snapshot.files {
+            eprintln!("  travels: {}", file.guest_path.display());
+        }
+        eprintln!("missing: {:?}", snapshot.diagnostics.missing_sources);
+        eprintln!("host-only mcp: {:?}", snapshot.diagnostics.host_only_mcp_servers);
+    }
+}

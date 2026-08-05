@@ -62,3 +62,27 @@ test("legacy summary-mode stub stays absent", () => {
   assert.doesNotMatch(renderer, /\bchatSummaryEl\b/);
   assert.doesNotMatch(renderer, /\bsetChatMode\b/);
 });
+
+// Лента действий не должна заслонять разговор: видно два чипа, остальное —
+// за тихой сворачивающейся строкой. Тулзы остаются контекстом, но чат
+// читается как чат (просьба владельца 2026-08-05).
+test("tool chips collapse behind a quiet toggle instead of flooding the feed", () => {
+  assert.match(renderer, /const TOOLS_VISIBLE = \d+/);
+  assert.match(renderer, /function paintToolsToggle\(/);
+  assert.match(renderer, /function toolsToggle\(/);
+  // переключатель именно кнопка с aria-expanded, а не div — доступность
+  assert.match(renderer, /aria-expanded/);
+  // склонение числа действий: «1 действие», «2 действия», «5 действий»
+  assert.match(renderer, /function plural\(/);
+  assert.match(html, /\.msg\.tools \.tools-more/);
+  assert.match(html, /\.tools-more:focus-visible/);
+});
+
+// Сводка — это саммаризация, а не лог: карточка хода не перечисляет тулзы.
+test("turn summary prompt asks for the outcome, not a list of actions", () => {
+  const turns = readFileSync(
+    new URL("../src-tauri/src/turns.rs", import.meta.url),
+    "utf8",
+  );
+  assert.match(turns, /Пиши про СУТЬ и ИТОГ, а не перечисляй действия/);
+});

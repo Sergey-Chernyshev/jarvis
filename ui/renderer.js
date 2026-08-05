@@ -591,13 +591,61 @@ function bumpCount(chip) {
   c.textContent = `×${n}`;
 }
 
+// Сколько инструментов показать, не сворачивая: один-два вызова читаются как
+// часть разговора, длинная лента — уже шум, из-за которого не видно реплик.
+const TOOLS_VISIBLE = 2;
+
+/** Строка-переключатель «ещё N действий» под группой чипов. */
+function toolsToggle(group) {
+  let bar = group.querySelector(':scope > .tools-more');
+  if (!bar) {
+    bar = document.createElement('button');
+    bar.type = 'button';
+    bar.className = 'tools-more';
+    bar.addEventListener('click', () => {
+      const open = group.classList.toggle('open');
+      bar.setAttribute('aria-expanded', open ? 'true' : 'false');
+      paintToolsToggle(group);
+    });
+    group.appendChild(bar);
+  } else {
+    group.appendChild(bar); // держим строку последней
+  }
+  return bar;
+}
+
+/** Прячет лишние чипы и подписывает переключатель. */
+function paintToolsToggle(group) {
+  const chips = [...group.querySelectorAll(':scope > .chip')];
+  const hidden = Math.max(0, chips.length - TOOLS_VISIBLE);
+  const open = group.classList.contains('open');
+  chips.forEach((chip, i) => {
+    chip.hidden = !open && i >= TOOLS_VISIBLE;
+  });
+  const bar = group.querySelector(':scope > .tools-more');
+  if (!bar) return;
+  if (!hidden) { bar.remove(); return; }
+  bar.textContent = open ? 'свернуть действия' : `ещё ${hidden} ${plural(hidden, 'действие', 'действия', 'действий')}`;
+}
+
+/** Русское склонение после числа: 1 действие, 2 действия, 5 действий. */
+function plural(n, one, few, many) {
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 14) return many;
+  const mod10 = n % 10;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
+}
+
 function addToolChip(label) {
   if (!toolsGroup) {
     toolsGroup = document.createElement('div');
     toolsGroup.className = 'msg tools';
     turnTarget().appendChild(toolsGroup);
   }
-  const last = toolsGroup.lastElementChild;
+  const chips = toolsGroup.querySelectorAll(':scope > .chip');
+  const last = chips[chips.length - 1];
   if (last && last.dataset.label === label) { bumpCount(last); return; }
 
   const { tool, arg } = toolParts(label);
@@ -619,6 +667,8 @@ function addToolChip(label) {
     chip.appendChild(a);
   }
   toolsGroup.appendChild(chip);
+  toolsToggle(toolsGroup);
+  paintToolsToggle(toolsGroup);
 }
 
 // epoch-мс → HH:MM локального времени (для метки времени над репликой)

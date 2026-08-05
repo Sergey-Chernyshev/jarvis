@@ -937,6 +937,22 @@
     max-width: 360px;
     min-width: 0;
   }
+  /* Свёрнутая лента действий: по умолчанию видно два чипа, остальное — за
+     тихой строкой. Тулзы важны как контекст, но не должны заслонять реплики. */
+  .msg.tools .tools-more {
+    appearance: none;
+    border: 0;
+    padding: 0;
+    background: none;
+    color: var(--ink-faint);
+    font: 400 12px/1 var(--font);
+    cursor: default;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    align-self: center;
+  }
+  .msg.tools .tools-more:hover { color: var(--ink-mute); }
+  .msg.tools .tools-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .msg.tools .chip svg { flex: none; color: var(--ink-faint); }
   .msg.tools .chip .tverb { font-size: 12px; color: var(--ink-mute); white-space: nowrap; flex: none; }
   .msg.tools .chip .targ {

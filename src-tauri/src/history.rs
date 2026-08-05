@@ -200,8 +200,11 @@ fn parse_meta(file: &Path, mtime: i64) -> Option<Meta> {
             && d.get("type").and_then(Value::as_str) == Some("user")
             && !d.get("isMeta").and_then(Value::as_bool).unwrap_or(false)
         {
-            let t = one_line(&first_user_text(d.get("message").unwrap_or(&Value::Null)));
-            if !t.is_empty() && !t.starts_with('<') {
+            let cleaned = crate::service_text::strip_service_sections(&first_user_text(
+                d.get("message").unwrap_or(&Value::Null),
+            ));
+            let t = one_line(&cleaned);
+            if !t.is_empty() {
                 first_prompt = t;
             }
         }

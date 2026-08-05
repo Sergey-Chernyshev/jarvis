@@ -46,6 +46,7 @@ mod route; // голосовая маршрутизация: скоринг → 
 mod ru;
 mod screen_prompt;
 mod server;
+mod service_text; // вырезание служебных секций агентов из текста
 mod settings;
 mod shutdown;
 #[allow(dead_code)] // STT-потребители подключаются в фазах 4-6 (инкр. 9)

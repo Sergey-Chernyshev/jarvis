@@ -1149,12 +1149,13 @@ impl Daemon {
                     // подтверждение доставки: реальный хук UserPromptSubmit сработал
                     self.last_prompt_at.lock().unwrap().insert(sid.clone(), now);
                     s.status = Status::Working;
-                    let txt = ellipsize(
-                        &one_line(p.get("prompt").and_then(Value::as_str).unwrap_or("")),
-                        140,
+                    // системные инъекции (<task-notification>, <command-…>) — не
+                    // промпт юзера; вырезаем их из текста, а не отбрасываем целиком
+                    let cleaned = crate::service_text::strip_service_sections(
+                        p.get("prompt").and_then(Value::as_str).unwrap_or(""),
                     );
-                    // системные инъекции (<task-notification>, <command-…>) — не промпт юзера
-                    if !txt.is_empty() && !txt.starts_with('<') {
+                    let txt = ellipsize(&one_line(&cleaned), 140);
+                    if !txt.is_empty() {
                         s.detail = txt.clone();
                         s.last_prompt = Some(txt); // живёт дольше detail
                                                    // саммари пересчитывается после каждого промта юзера

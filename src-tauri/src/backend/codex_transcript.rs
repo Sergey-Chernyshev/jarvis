@@ -119,12 +119,17 @@ fn message_text(payload: &Value) -> Option<String> {
                 return None;
             }
             let text = block.get("text").and_then(Value::as_str)?;
-            // Служебные инъекции: <...> (как Claude) + впрыск AGENTS.md, который
-            // Codex кладёт первым user-блоком как «# AGENTS.md instructions …».
-            if text.is_empty()
-                || text.starts_with('<')
-                || text.starts_with("# AGENTS.md instructions")
-            {
+            // Впрыск AGENTS.md, который Codex кладёт первым user-блоком как
+            // «# AGENTS.md instructions …» — целиком служебный.
+            if text.starts_with("# AGENTS.md instructions") {
+                return None;
+            }
+            // Служебные секции вырезаем ИЗ текста, а не отбрасываем блок:
+            // Codex дописывает <oai-mem-citation> в конец обычного ответа, и
+            // проверка «начинается с <» такой блок пропускала целиком вместе
+            // с тегами — их и видел пользователь в чате.
+            let text = crate::service_text::strip_service_sections(text);
+            if text.is_empty() {
                 return None;
             }
             Some(text)
@@ -354,6 +359,13 @@ pub fn full_final_reply(entries: &[Value]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Случай со скриншота владельца: Codex дописывает служебную секцию в
+    /// КОНЕЦ обычного ответа. Прежняя проверка «блок начинается с <» такой
+    /// блок пропускала целиком, и теги видел пользователь.
+
+
+
+
     use super::*;
     use serde_json::json;
 

@@ -1751,7 +1751,10 @@ pub async fn session_launch(
     let dangerous = d.settings.bool("launchDangerous");
 
     let agent_cmd = crate::launch::agent_command(&agent, session_id.as_deref(), dangerous);
-    let inner = crate::launch::inner_command(&cwd, &proxy, &agent_cmd);
+    // PATH запускаемой команды достраиваем сами: терминал выполняет её в
+    // неинтерактивном шелле, где PATH-блока Jarvis (и шима) ещё нет.
+    let path_dirs = crate::launch::launch_path_dirs();
+    let inner = crate::launch::inner_command(&cwd, &proxy, &agent_cmd, &path_dirs);
     match crate::launch::spawn(&terminal, &custom, &inner).await {
         Ok(()) => ok(),
         Err(e) => err(e),

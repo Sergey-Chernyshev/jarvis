@@ -2,8 +2,10 @@
 //! настроек, по желанию выполнить прокси-команду, затем `claude`/`codex` в
 //! директории проекта. Заменяет прежнее «скопировать команду» вкладки «Проекты».
 //!
-//! macOS-only в текущей итерации. `custom`-терминал (sh -lc по шаблону) — точка
-//! расширения под Ghostty/Warp/kitty сейчас и под Windows/Linux в будущем.
+//! Терминал выбирается настройкой: на macOS это Terminal.app/iTerm2 через
+//! AppleScript, на Linux — эмулятор из списка (или системный
+//! `x-terminal-emulator`). `custom` (sh -lc по шаблону) работает везде и
+//! остаётся точкой расширения под что угодно.
 
 use crate::util::shell_quote;
 use std::path::PathBuf;
@@ -187,35 +189,75 @@ pub fn docker_command(image: &str, cwd: &str, home: &str, agent_cmd: &str) -> St
     )
 }
 
-/// Экранирование под двойные кавычки AppleScript-строки: `\`, `"` и переводы
-/// строк (сырой `\n` внутри "…" — синтаксическая ошибка osascript).
-/// Одинарные кавычки (из shell_quote) внутри неё безопасны.
-fn applescript_escape(s: &str) -> String {
-    s.replace('\\', r"\\").replace('"', "\\\"").replace('\n', r"\n").replace('\r', r"\r")
-}
-
-async fn osascript(args: &[String]) -> Result<(), String> {
-    let out = tokio::process::Command::new("osascript")
-        .args(args)
+/// Запустить команду в фоне через `sh -lc`, не дожидаясь завершения терминала.
+/// Мгновенную смерть (опечатка в бинарнике → exit 127) ловим, иначе юзер видит
+/// «Запускаю…» при полностью нерабочем шаблоне.
+async fn spawn_detached(shell_cmd: &str) -> Result<(), String> {
+    let mut child = tokio::process::Command::new("sh")
+        .arg("-lc")
+        .arg(shell_cmd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| format!("не удалось запустить osascript: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        let msg = String::from_utf8_lossy(&out.stderr);
-        Err(if msg.trim().is_empty() { "терминал не открылся".into() } else { msg.trim().to_string() })
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("не удалось запустить терминал: {e}"))?;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    match child.try_wait() {
+        Ok(Some(status)) if !status.success() => Err(format!(
+            "команда терминала сразу завершилась ({status}) — проверь настройки «Запуск»"
+        )),
+        _ => Ok(()),
     }
 }
 
 /// Открыть терминал из настроек и выполнить в нём `inner`.
 pub async fn spawn(terminal: &str, custom_cmd: &str, inner: &str) -> Result<(), String> {
-    match terminal {
-        "iterm2" => {
-            let esc = applescript_escape(inner);
+    if terminal == "custom" {
+        let tmpl = custom_cmd.trim();
+        if tmpl.is_empty() {
+            return Err("шаблон команды терминала пуст (настройки → Запуск)".into());
+        }
+        if !tmpl.contains("{cmd}") {
+            return Err("в шаблоне нет плейсхолдера {cmd}".into());
+        }
+        return spawn_detached(&tmpl.replace("{cmd}", &shell_quote(inner))).await;
+    }
+    imp::spawn(terminal, inner).await
+}
+
+/* ================= macOS: Terminal.app / iTerm2 ================= */
+
+#[cfg(target_os = "macos")]
+mod imp {
+    use super::*;
+
+    /// Экранирование под двойные кавычки AppleScript-строки: `\`, `"` и переводы
+    /// строк (сырой `\n` внутри "…" — синтаксическая ошибка osascript).
+    /// Одинарные кавычки (из shell_quote) внутри неё безопасны.
+    pub(super) fn applescript_escape(s: &str) -> String {
+        s.replace('\\', r"\\").replace('"', "\\\"").replace('\n', r"\n").replace('\r', r"\r")
+    }
+
+    async fn osascript(args: &[String]) -> Result<(), String> {
+        let out = tokio::process::Command::new("osascript")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| format!("не удалось запустить osascript: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            let msg = String::from_utf8_lossy(&out.stderr);
+            Err(if msg.trim().is_empty() { "терминал не открылся".into() } else { msg.trim().to_string() })
+        }
+    }
+
+    pub(super) async fn spawn(terminal: &str, inner: &str) -> Result<(), String> {
+        let esc = applescript_escape(inner);
+        if terminal == "iterm2" {
             // Создаём окно с дефолт-профилем и пишем команду в его сессию.
             osascript(&[
                 "-e".into(), "tell application \"iTerm2\"".into(),
@@ -225,38 +267,8 @@ pub async fn spawn(terminal: &str, custom_cmd: &str, inner: &str) -> Result<(), 
                 "-e".into(), "end tell".into(),
             ])
             .await
-        }
-        "custom" => {
-            let tmpl = custom_cmd.trim();
-            if tmpl.is_empty() {
-                return Err("шаблон команды терминала пуст (настройки → Запуск)".into());
-            }
-            if !tmpl.contains("{cmd}") {
-                return Err("в шаблоне нет плейсхолдера {cmd}".into());
-            }
-            let expanded = tmpl.replace("{cmd}", &shell_quote(inner));
-            let mut child = tokio::process::Command::new("sh")
-                .arg("-lc")
-                .arg(&expanded)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .map_err(|e| format!("не удалось запустить терминал: {e}"))?;
-            // Терминал живёт своей жизнью — завершения не ждём. Но мгновенную
-            // смерть (опечатка в бинарнике → exit 127) ловим, иначе юзер видит
-            // «Запускаю…» при полностью нерабочем шаблоне.
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            match child.try_wait() {
-                Ok(Some(status)) if !status.success() => Err(format!(
-                    "команда терминала сразу завершилась ({status}) — проверь шаблон в настройках «Запуск»"
-                )),
-                _ => Ok(()),
-            }
-        }
-        // 'terminal-app' и любое неизвестное значение → системный Terminal.app.
-        _ => {
-            let esc = applescript_escape(inner);
+        } else {
+            // 'terminal-app' и любое неизвестное значение → системный Terminal.app.
             osascript(&[
                 "-e".into(), "tell application \"Terminal\"".into(),
                 "-e".into(), format!("do script \"{esc}\""),
@@ -264,6 +276,149 @@ pub async fn spawn(terminal: &str, custom_cmd: &str, inner: &str) -> Result<(), 
                 "-e".into(), "end tell".into(),
             ])
             .await
+        }
+    }
+}
+
+/* ================= Linux: эмуляторы терминала ================= */
+
+#[cfg(not(target_os = "macos"))]
+mod imp {
+    use super::*;
+
+    /// Кандидаты в порядке предпочтения. `x-terminal-emulator` — альтернатива
+    /// Debian/Ubuntu: указывает на терминал по умолчанию, поэтому идёт первой.
+    const CANDIDATES: &[&str] = &[
+        "x-terminal-emulator", "gnome-terminal", "konsole", "ptyxis", "xfce4-terminal",
+        "kitty", "alacritty", "wezterm", "foot", "tilix", "terminator", "mate-terminal", "xterm",
+    ];
+
+    /// Как передать эмулятору программу для запуска.
+    ///
+    /// Единственное, чем терминалы тут расходятся, — это флаг: `-e`, `--`, либо
+    /// вообще ничего. Различий в кавычках нет, потому что программа всегда одна
+    /// и та же — путь к сгенерированному скрипту, без аргументов. Это и есть
+    /// причина писать скрипт во временный файл: иначе пришлось бы угадывать,
+    /// какой из тринадцати эмуляторов ждёт строку, а какой argv.
+    fn launch_flag(term: &str) -> &'static [&'static str] {
+        match term {
+            "gnome-terminal" | "ptyxis" | "mate-terminal" => &["--"],
+            "kitty" | "foot" => &[],
+            "wezterm" => &["start", "--"],
+            _ => &["-e"], // konsole, xfce4-terminal, alacritty, tilix, terminator, xterm, x-terminal-emulator
+        }
+    }
+
+    fn exists(bin: &str) -> bool {
+        std::process::Command::new("sh")
+            .arg("-lc")
+            .arg(format!("command -v {}", shell_quote(bin)))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Каталог под скрипты запуска; заодно подчищаем прошлые старше часа.
+    /// Скрипт не удаляет себя сам: `exec "$SHELL"` в конце заменяет процесс,
+    /// и никакой `trap EXIT` уже не сработает.
+    fn launch_dir() -> std::path::PathBuf {
+        let dir = crate::util::jarvis_dir().join("launch");
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            let hour = std::time::Duration::from_secs(3600);
+            for e in rd.flatten() {
+                let stale = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map(|t| t.elapsed().map(|d| d > hour).unwrap_or(false))
+                    .unwrap_or(false);
+                if stale {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+        dir
+    }
+
+    /// Записать команду отдельным исполняемым скриптом и вернуть путь к нему.
+    fn write_script(inner: &str) -> Result<std::path::PathBuf, String> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let path = launch_dir().join(format!("run-{}-{}.sh", std::process::id(), nanos));
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o700)
+            .open(&path)
+            .map_err(|e| format!("не смог подготовить команду запуска: {e}"))?;
+        // после агента оставляем живую оболочку — иначе окно схлопнется мгновенно
+        write!(f, "#!/bin/sh\n{inner}\nexec \"$SHELL\"\n")
+            .map_err(|e| format!("не смог записать команду запуска: {e}"))?;
+        Ok(path)
+    }
+
+    pub(super) async fn spawn(terminal: &str, inner: &str) -> Result<(), String> {
+        // Значения из macOS-настроек на Linux ничего не значат — ищем сами.
+        let explicit = match terminal {
+            "terminal-app" | "iterm2" | "" => None,
+            other => Some(other),
+        };
+        let term = match explicit {
+            Some(t) if exists(t) => t.to_string(),
+            Some(t) => {
+                return Err(format!(
+                    "терминал «{t}» не найден в PATH — выбери другой в настройках «Запуск»"
+                ))
+            }
+            None => CANDIDATES
+                .iter()
+                .find(|c| exists(c))
+                .map(|c| (*c).to_string())
+                .ok_or_else(|| {
+                    "не нашёл эмулятор терминала (пробовал gnome-terminal, konsole, kitty, \
+                     alacritty, xterm и другие). Поставь любой или задай свой шаблон \
+                     в настройках «Запуск»"
+                        .to_string()
+                })?,
+        };
+
+        let script = write_script(inner)?;
+        let mut argv = vec![shell_quote(&term)];
+        argv.extend(launch_flag(&term).iter().map(|f| (*f).to_string()));
+        argv.push(shell_quote(&script.to_string_lossy()));
+        spawn_detached(&argv.join(" ")).await
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn flags_match_terminal_conventions() {
+            assert_eq!(launch_flag("gnome-terminal"), &["--"]);
+            assert_eq!(launch_flag("konsole"), &["-e"]);
+            assert_eq!(launch_flag("wezterm"), &["start", "--"]);
+            assert!(launch_flag("kitty").is_empty());
+            // незнакомый эмулятор — самый распространённый флаг
+            assert_eq!(launch_flag("something-new"), &["-e"]);
+        }
+
+        #[test]
+        fn script_is_executable_and_keeps_shell_alive() {
+            let p = write_script("cd '/tmp' && claude").expect("скрипт пишется");
+            let body = std::fs::read_to_string(&p).unwrap();
+            assert!(body.starts_with("#!/bin/sh"));
+            assert!(body.contains("cd '/tmp' && claude"));
+            assert!(body.trim_end().ends_with(r#"exec "$SHELL""#));
+            let _ = std::fs::remove_file(p);
         }
     }
 }
@@ -372,9 +527,10 @@ mod tests {
         assert!(path_prefix(&[]).is_none());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn applescript_escape_quotes_backslash_and_newlines() {
-        assert_eq!(applescript_escape(r#"a"b\c"#), r#"a\"b\\c"#);
-        assert_eq!(applescript_escape("a\nb\rc"), r"a\nb\rc");
+        assert_eq!(imp::applescript_escape(r#"a"b\c"#), r#"a\"b\\c"#);
+        assert_eq!(imp::applescript_escape("a\nb\rc"), r"a\nb\rc");
     }
 }

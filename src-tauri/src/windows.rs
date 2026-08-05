@@ -11,7 +11,7 @@ use tauri::window::{Effect, EffectState};
 use tauri::{AppHandle, Emitter, Manager, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 use crate::daemon::Daemon;
-use crate::macos;
+use crate::platform;
 
 pub const PANEL_W: f64 = 820.0;
 pub const PANEL_H: f64 = 620.0;
@@ -102,9 +102,9 @@ pub fn create_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .accept_first_mouse(true)
         .build()?;
     if window_mode {
-        macos::float_normal(&win);
+        platform::float_normal(&win);
     } else {
-        macos::float_above_everything(&win);
+        platform::float_above_everything(&win);
     }
     Ok(win)
 }
@@ -134,7 +134,7 @@ pub fn apply_mode(d: &Arc<Daemon>) {
     let _ = win.set_minimizable(window_mode);
     let _ = win.set_skip_taskbar(!window_mode);
     if window_mode {
-        macos::float_normal(&win);
+        platform::float_normal(&win);
         let (w, h) = window_size(&d.app);
         let _ = win.set_size(tauri::LogicalSize::new(w, h));
         let _ = win.center();
@@ -143,7 +143,7 @@ pub fn apply_mode(d: &Arc<Daemon>) {
     } else {
         // из фуллскрина накладку не построишь — выходим до смены геометрии
         let _ = win.set_fullscreen(false);
-        macos::float_above_everything(&win);
+        platform::float_above_everything(&win);
         let _ = win.set_size(tauri::LogicalSize::new(PANEL_W, PANEL_H));
         position_panel(d);
     }
@@ -299,7 +299,7 @@ pub fn create_toast(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .accept_first_mouse(true)
         .theme(window_theme(app))
         .build()?;
-    macos::float_above_everything(&win);
+    platform::float_above_everything(&win);
     Ok(win)
 }
 
@@ -427,7 +427,7 @@ fn toast_payload(
 
 /* ================= позиционирование и показ панели ================= */
 
-/// Панель — на дисплей с курсором (геометрия — в macos::place_panel:
+/// Панель — на дисплей с курсором (геометрия — в platform::place_panel:
 /// AppKit-поинты, без конвертаций Tauri, иначе на смешанном DPI окно
 /// уезжает на предыдущий экран).
 pub fn position_panel(d: &Arc<Daemon>) {
@@ -439,7 +439,7 @@ pub fn position_panel(d: &Arc<Daemon>) {
         return;
     }
     let corner = d.settings.string("position") == "corner";
-    macos::place_panel(&panel, PANEL_W, PANEL_H, corner);
+    platform::place_panel(&panel, PANEL_W, PANEL_H, corner);
 }
 
 /// Тихий режим: трей, клик по уведомлению — показать, не забирая фокус
@@ -458,7 +458,7 @@ pub fn show_panel(d: &Arc<Daemon>) {
     if d.settings.string("mode") == "window" {
         let _ = panel.show();
     } else {
-        macos::show_inactive(&panel);
+        platform::show_inactive(&panel);
     }
     d.push();
 }
@@ -549,9 +549,9 @@ pub fn toast_resize(d: &Arc<Daemon>, h: f64) {
         return;
     }
     let height = h.round().clamp(1.0, TOAST_MAX_H);
-    macos::place_toast(&toast, TOAST_W, height);
+    platform::place_toast(&toast, TOAST_W, height);
     if !toast.is_visible().unwrap_or(false) {
-        macos::show_inactive(&toast);
+        platform::show_inactive(&toast);
     }
 }
 

@@ -743,13 +743,13 @@ impl Daemon {
             // MediaRemote после недавнего play (напр. авто-возврат прошлой
             // диктовкой) может ещё секунду отдавать paused — одна повторная
             // проверка закрывает это окно (иначе музыка играет прямо в диктовку).
-            let mut playing = crate::macos::media_is_playing();
+            let mut playing = crate::platform::media_is_playing();
             if !playing && d.interaction.is_active() {
                 std::thread::sleep(std::time::Duration::from_millis(400));
-                playing = crate::macos::media_is_playing();
+                playing = crate::platform::media_is_playing();
             }
             if playing {
-                crate::macos::media_pause();
+                crate::platform::media_pause();
                 d.media_ducked.store(true, Ordering::SeqCst);
                 crate::log::line("[dictation] медиа на паузу (диктовка)");
                 // Короткий тап: если за время perl-шелаута диктовка уже кончилась —
@@ -769,7 +769,7 @@ impl Daemon {
     /// ручную паузу юзера). Шелаут media_play — тоже в фон (не блокируем поток вызова).
     pub fn unduck_media_for_capture(self: &std::sync::Arc<Self>) {
         if self.media_ducked.swap(false, Ordering::SeqCst) {
-            std::thread::spawn(|| crate::macos::media_play());
+            std::thread::spawn(|| crate::platform::media_play());
             crate::log::line("[dictation] медиа возобновлено");
         }
     }

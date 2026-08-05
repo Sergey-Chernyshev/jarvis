@@ -60,6 +60,10 @@ It's probably **not** for you if you run one session in one terminal (native not
 
 ## Install
 
+> **Platforms.** macOS is the primary target. There is a **Linux** port: build
+> from source; setup and the list of differences live in
+> [`docs/linux.md`](docs/linux.md).
+
 ### From a release (recommended)
 
 1. Download `Jarvis_x.y.z_aarch64.dmg` from the [releases](https://github.com/Sergey-Chernyshev/jarvis/releases) page.

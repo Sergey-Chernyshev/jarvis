@@ -29,7 +29,7 @@ mod launch; // запуск новой/возобновляемой сессии
 mod limits;
 mod log;
 mod loops; // режим «Циклы»: рутина, которую агент крутит сам — с концом и стенами
-mod macos;
+mod platform; // окна, медиа, звук: платформенное за общим API (macos.rs / linux.rs)
 mod metrics;
 mod model;
 mod onboarding;
@@ -298,6 +298,10 @@ fn main() {
             // Оконный режим (макет 14h) — обычное приложение: док, ⌘Tab, меню.
             // Политика ставится один раз на старте; смена режима на лету
             // перестраивает окно сразу, а иконку в доке — со следующего запуска.
+            // Понятие политики активации есть только у AppKit: на Linux место
+            // приложения в панели задач решает сам оконный менеджер по
+            // skip_taskbar, который выставляется при создании окна.
+            #[cfg(target_os = "macos")]
             app.set_activation_policy(if d.settings.string("mode") == "window" {
                 tauri::ActivationPolicy::Regular
             } else {
@@ -643,7 +647,7 @@ fn spawn_timers(d: &Arc<Daemon>) {
         loop {
             tokio::time::sleep(Duration::from_millis(200)).await;
             if let Some(toast) = dd.app.get_webview_window("toast") {
-                macos::poll_toast_hover(&toast);
+                platform::poll_toast_hover(&toast);
             }
         }
     });

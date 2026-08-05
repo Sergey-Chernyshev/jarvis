@@ -9,7 +9,9 @@
 //! Вставка требует разрешения Accessibility (в подписанном .app).
 //! В тестах CGEvent-вызовы не отправляются — они вырезаны через #[cfg(not(test))].
 
-/// Виртуальный кейкод 'V' (kVK_ANSI_V = 9).
+/// Виртуальный кейкод 'V' (kVK_ANSI_V = 9). Нужен только синтезу CGEvent на
+/// macOS: на Linux нажатие шлёт xdotool/wtype по имени клавиши, а не по коду.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn paste_keycode() -> u16 {
     9
 }
@@ -80,31 +82,13 @@ pub fn insert_text(text: &str, app: Option<&tauri::AppHandle>) -> Result<InsertV
             .map_err(|e| format!("[insert] clipboard set: {e}"))?;
     }
 
-    // ── 3. Синтезировать ⌘V ─────────────────────────────────────────────────
+    // ── 3. Синтезировать «вставить» ─────────────────────────────────────────
     #[cfg(not(test))]
     {
-        use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
-        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-
         // Небольшая пауза — дать приложению время принять фокус после записи
         // буфера обмена. 60 мс — эмпирически достаточно для большинства приложений.
         std::thread::sleep(std::time::Duration::from_millis(60));
-
-        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-            .map_err(|_| "[insert] CGEventSource::new failed".to_string())?;
-
-        let keycode = paste_keycode();
-
-        let down = CGEvent::new_keyboard_event(source.clone(), keycode, true)
-            .map_err(|_| "[insert] CGEvent keydown failed".to_string())?;
-        down.set_flags(CGEventFlags::CGEventFlagCommand);
-        down.post(CGEventTapLocation::HID);
-
-        let up = CGEvent::new_keyboard_event(source, keycode, false)
-            .map_err(|_| "[insert] CGEvent keyup failed".to_string())?;
-        up.set_flags(CGEventFlags::CGEventFlagCommand);
-        up.post(CGEventTapLocation::HID);
-
+        synth_paste()?;
         // Пауза после вставки — дать приложению время переработать событие
         // до восстановления буфера обмена. 120 мс — практический минимум.
         std::thread::sleep(std::time::Duration::from_millis(120));
@@ -158,6 +142,65 @@ pub fn insert_text(text: &str, app: Option<&tauri::AppHandle>) -> Result<InsertV
     } else {
         InsertVerdict::Unconfirmed
     })
+}
+
+/* ================= синтез нажатия «вставить» ================= */
+
+/// macOS: CGEvent с флагом Command — работает в любом приложении, но требует
+/// разрешения «Мониторинг ввода»/Accessibility.
+#[cfg(all(target_os = "macos", not(test)))]
+fn synth_paste() -> Result<(), String> {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| "[insert] CGEventSource::new failed".to_string())?;
+    let keycode = paste_keycode();
+
+    let down = CGEvent::new_keyboard_event(source.clone(), keycode, true)
+        .map_err(|_| "[insert] CGEvent keydown failed".to_string())?;
+    down.set_flags(CGEventFlags::CGEventFlagCommand);
+    down.post(CGEventTapLocation::HID);
+
+    let up = CGEvent::new_keyboard_event(source, keycode, false)
+        .map_err(|_| "[insert] CGEvent keyup failed".to_string())?;
+    up.set_flags(CGEventFlags::CGEventFlagCommand);
+    up.post(CGEventTapLocation::HID);
+    Ok(())
+}
+
+/// Linux: единого системного API синтеза ввода нет — под X11 это XTEST
+/// (`xdotool`), под Wayland ввод изолирован и нужен `wtype` с поддержкой
+/// протокола со стороны композитора. Пробуем оба; если ни одного нет, честно
+/// говорим об этом — текст уже лежит в буфере обмена, и юзер вставит сам.
+#[cfg(all(not(target_os = "macos"), not(test)))]
+fn synth_paste() -> Result<(), String> {
+    use std::process::{Command, Stdio};
+
+    let wayland = std::env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty());
+    // порядок по сессии: на Wayland xdotool бесполезен, на X11 — наоборот
+    let candidates: [(&str, &[&str]); 2] = if wayland {
+        [("wtype", &["-M", "ctrl", "v", "-m", "ctrl"]), ("xdotool", &["key", "--clearmodifiers", "ctrl+v"])]
+    } else {
+        [("xdotool", &["key", "--clearmodifiers", "ctrl+v"]), ("wtype", &["-M", "ctrl", "v", "-m", "ctrl"])]
+    };
+
+    for (bin, args) in candidates {
+        let ok = Command::new(bin)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return Ok(());
+        }
+    }
+    Err("[insert] нечем синтезировать Ctrl+V: поставь xdotool (X11) или wtype (Wayland) — \
+         текст уже в буфере обмена"
+        .to_string())
 }
 
 #[cfg(test)]

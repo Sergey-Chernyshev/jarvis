@@ -62,6 +62,9 @@ Jarvis — инструмент для power-пользователей. Он о
 
 ## Установка
 
+> **Платформы.** Основная — macOS. Есть порт под **Linux**: сборка из исходников,
+> инструкция и список отличий — в [`docs/linux.md`](docs/linux.md).
+
 ### Из релиза (рекомендуется)
 
 1. Скачай `Jarvis_x.y.z_aarch64.dmg` со страницы [releases](https://github.com/Sergey-Chernyshev/jarvis/releases).

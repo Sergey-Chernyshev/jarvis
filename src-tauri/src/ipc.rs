@@ -917,20 +917,72 @@ pub fn file_open(app: AppHandle, session_id: String, path: String, reveal: bool)
         Err(e) => return err(&e),
     };
     // Путь из транскрипта — недоверенный: `open evil.command` ЗАПУСТИЛ бы
-    // скрипт. Исполняемые документы не открываем — только показываем в Finder.
+    // скрипт. Исполняемые документы не открываем — только показываем в папке.
     let reveal = reveal || force_reveal(&p);
+    match open_path(&p, reveal) {
+        Ok(()) => ok(),
+        Err(e) => err(&e),
+    }
+}
+
+/// Открыть файл системным способом либо показать его в файловом менеджере.
+#[cfg(target_os = "macos")]
+fn open_path(p: &std::path::Path, reveal: bool) -> Result<(), String> {
     let mut cmd = std::process::Command::new("open");
     if reveal {
         cmd.arg("-R"); // показать в Finder
     }
-    match cmd.arg(&p).spawn() {
-        Ok(_) => ok(),
-        Err(e) => err(&format!("open: {e}")),
-    }
+    cmd.arg(p).spawn().map(|_| ()).map_err(|e| format!("open: {e}"))
 }
 
-/// Типы, которые macOS `open` ВЫПОЛНЯЕТ, а не показывает (Terminal/Automator/
-/// AppleScript и т.п.) — такие принудительно уводим в reveal.
+/// Linux: `xdg-open` открывает файл ассоциированной программой. Для «показать
+/// в папке» единого способа нет — сперва пробуем D-Bus-интерфейс
+/// `org.freedesktop.FileManager1` (его понимают Nautilus, Dolphin, Nemo,
+/// Thunar), иначе просто открываем родительскую папку.
+#[cfg(not(target_os = "macos"))]
+fn open_path(p: &std::path::Path, reveal: bool) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+
+    let quiet = |c: &mut Command| {
+        c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    };
+
+    if reveal {
+        let uri = format!("file://{}", p.display());
+        let mut dbus = Command::new("dbus-send");
+        quiet(&mut dbus);
+        let ok = dbus
+            .args([
+                "--session",
+                "--dest=org.freedesktop.FileManager1",
+                "--type=method_call",
+                "/org/freedesktop/FileManager1",
+                "org.freedesktop.FileManager1.ShowItems",
+                &format!("array:string:{uri}"),
+                "string:",
+            ])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return Ok(());
+        }
+        // не вышло — открываем папку целиком, файл юзер найдёт глазами
+        let dir = p.parent().unwrap_or(p);
+        let mut c = Command::new("xdg-open");
+        quiet(&mut c);
+        return c.arg(dir).spawn().map(|_| ()).map_err(|e| format!("xdg-open: {e}"));
+    }
+
+    let mut c = Command::new("xdg-open");
+    quiet(&mut c);
+    c.arg(p).spawn().map(|_| ()).map_err(|e| format!("xdg-open: {e}"))
+}
+
+/// Типы, которые системный «открыть» ВЫПОЛНЯЕТ, а не показывает (Terminal/
+/// Automator/AppleScript и т.п.) — такие принудительно уводим в reveal.
+/// Список маковский, но на Linux он тоже не мешает: .desktop и так не в нём,
+/// а лишняя осторожность с недоверенным путём из транскрипта не повредит.
 fn force_reveal(p: &std::path::Path) -> bool {
     const EXECUTABLE_DOCS: [&str; 8] = [
         "command", "terminal", "workflow", "webloc", "tool", "applescript", "scpt", "app",
@@ -1144,9 +1196,11 @@ pub fn url_open(url: String) -> Value {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return err("не-http ссылка");
     }
-    match std::process::Command::new("open").arg(&url).spawn() {
+    // macOS — `open`, Linux — `xdg-open`; оба принимают url одним аргументом.
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    match std::process::Command::new(opener).arg(&url).spawn() {
         Ok(_) => ok(),
-        Err(e) => err(&format!("open: {e}")),
+        Err(e) => err(&format!("{opener}: {e}")),
     }
 }
 

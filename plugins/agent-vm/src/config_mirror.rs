@@ -441,6 +441,60 @@ fn strip_secret_env(server: &mut serde_json::Value, diagnostics: &mut MirrorDiag
     }
 }
 
+/// Codex описывает MCP в TOML. Политика та же, что у Claude: решаем по форме
+/// (url/command/args), а не по именам, — конфигурации у пользователей любые.
+fn classify_codex_mcp_server(server: &toml::Value) -> McpVerdict {
+    let Some(table) = server.as_table() else {
+        return McpVerdict::HostOnly("определение сервера не является таблицей");
+    };
+    if let Some(url) = table.get("url").and_then(toml::Value::as_str) {
+        if is_guest_local_url(url) {
+            return McpVerdict::HostOnly("адрес ведёт в loopback: в VM это сама VM");
+        }
+        return McpVerdict::Portable;
+    }
+    if let Some(command) = table.get("command").and_then(toml::Value::as_str) {
+        // относительный путь тоже host-only: он резолвится от каталога хоста
+        if is_host_absolute(command) || command.starts_with("./") || command.starts_with("../") {
+            return McpVerdict::HostOnly("команда указывает на путь хоста");
+        }
+        let host_arg = table
+            .get("args")
+            .and_then(toml::Value::as_array)
+            .map(|args| {
+                args.iter()
+                    .filter_map(toml::Value::as_str)
+                    .any(is_host_absolute)
+            })
+            .unwrap_or(false);
+        if host_arg {
+            return McpVerdict::HostOnly("аргумент указывает на путь хоста");
+        }
+        return McpVerdict::Portable;
+    }
+    McpVerdict::HostOnly("не указан ни url, ни command")
+}
+
+/// TOML-версия `strip_secret_env`.
+fn strip_secret_toml_env(server: &mut toml::Value, diagnostics: &mut MirrorDiagnostics) {
+    let Some(env) = server
+        .as_table_mut()
+        .and_then(|table| table.get_mut("env"))
+        .and_then(toml::Value::as_table_mut)
+    else {
+        return;
+    };
+    let secret_keys = env
+        .keys()
+        .filter(|key| looks_like_secret_key(key))
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in secret_keys {
+        env.remove(&key);
+        diagnostics.removed_host_commands += 1;
+    }
+}
+
 /// Из `~/.claude.json` берём только user-scoped `mcpServers` и записываем их
 /// отдельным guest-файлом. Файл целиком копировать нельзя: он смешивает OAuth,
 /// project trust и кэши.
@@ -684,6 +738,28 @@ fn sanitize_codex_config(
             portable.insert(key.into(), value.clone());
         }
     }
+    // MCP-серверы Codex: раньше вырезались целиком, из-за чего MCP в VM не
+    // работал вовсе. Переносим те, что в гостье действительно поднимутся.
+    if let Some(servers) = object.get("mcp_servers").and_then(toml::Value::as_table) {
+        let mut travelling = toml::map::Map::new();
+        for (name, server) in servers {
+            match classify_codex_mcp_server(server) {
+                McpVerdict::Portable => {
+                    let mut copy = server.clone();
+                    strip_secret_toml_env(&mut copy, diagnostics);
+                    travelling.insert(name.clone(), copy);
+                }
+                McpVerdict::HostOnly(reason) => {
+                    diagnostics
+                        .host_only_mcp_servers
+                        .push(format!("{name}: {reason}"));
+                }
+            }
+        }
+        if !travelling.is_empty() {
+            portable.insert("mcp_servers".into(), toml::Value::Table(travelling));
+        }
+    }
     if let Some(features) = object.get("features").and_then(toml::Value::as_table) {
         let features = features
             .iter()
@@ -911,6 +987,58 @@ mod tests {
             .iter()
             .map(|file| file.guest_path.as_path())
             .collect()
+    }
+
+    #[test]
+    fn codex_mcp_servers_travel_when_the_guest_can_actually_reach_them() {
+        let (root, roots) = fixture("codex-mcp");
+        fs::write(
+            roots.codex.join("config.toml"),
+            r#"
+model = "synthetic"
+
+[mcp_servers.docs]
+url = "https://developers.example.com/mcp"
+
+[mcp_servers.packaged]
+command = "npx"
+args = ["-y", "@scope/server"]
+env = { LOG_LEVEL = "debug", API_TOKEN = "SYNTHETIC_CODEX_MCP_SECRET" }
+
+[mcp_servers.bundled-app]
+command = "./Some.app/Contents/MacOS/helper"
+args = ["mcp"]
+
+[mcp_servers.ide]
+url = "http://127.0.0.1:8080/mcp"
+"#,
+        )
+        .unwrap();
+
+        let snapshot = build_snapshot(&roots).unwrap();
+        let config = snapshot
+            .files
+            .iter()
+            .find(|file| file.guest_path == Path::new(".codex/config.toml"))
+            .unwrap();
+        let value =
+            toml::from_str::<toml::Value>(std::str::from_utf8(&config.bytes).unwrap()).unwrap();
+        let servers = value["mcp_servers"].as_table().unwrap();
+
+        let mut travelled = servers.keys().cloned().collect::<Vec<_>>();
+        travelled.sort();
+        assert_eq!(travelled, vec!["docs", "packaged"]);
+        assert!(servers["packaged"]["env"].get("API_TOKEN").is_none());
+        assert_eq!(
+            servers["packaged"]["env"]["LOG_LEVEL"].as_str(),
+            Some("debug")
+        );
+
+        let reported = snapshot.diagnostics.host_only_mcp_servers.join("\n");
+        assert!(reported.contains("bundled-app"), "{reported}");
+        assert!(reported.contains("ide"), "{reported}");
+        assert!(!String::from_utf8_lossy(&config.bytes).contains("SYNTHETIC_CODEX_MCP_SECRET"));
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -1273,7 +1401,13 @@ env_key = "SYNTHETIC_PROVIDER_SECRET"
         assert_eq!(value["model_reasoning_effort"].as_str(), Some("high"));
         assert_eq!(value["cli_auth_credentials_store"].as_str(), Some("file"));
         assert_eq!(value["features"]["web_search"].as_bool(), Some(true));
+        // host-абсолютная команда делает сервер непереносимым — и это объяснено
         assert!(value.get("mcp_servers").is_none());
+        assert!(snapshot
+            .diagnostics
+            .host_only_mcp_servers
+            .iter()
+            .any(|entry| entry.starts_with("private:")));
         assert!(value.get("model_providers").is_none());
         assert!(value.get("future_unknown").is_none());
         let text = String::from_utf8_lossy(&config.bytes);

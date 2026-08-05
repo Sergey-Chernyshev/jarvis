@@ -9,17 +9,20 @@
 Нужны WebKitGTK (движок webview у Tauri), GTK и appindicator (трей), ALSA
 (микрофон и воспроизведение) и cmake (whisper.cpp).
 
+`tmux` обязателен: ответ в сессию Jarvis вписывает в её tmux-пану, без него поле
+ответа не работает вовсе.
+
 ```bash
 # Debian / Ubuntu
-sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+sudo apt install tmux libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
                  librsvg2-dev libasound2-dev libxdo-dev patchelf cmake
 
 # Fedora
-sudo dnf install webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel \
+sudo dnf install tmux webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel \
                  librsvg2-devel alsa-lib-devel libxdo-devel patchelf cmake
 
 # Arch
-sudo pacman -S webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg \
+sudo pacman -S tmux webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg \
                alsa-lib xdotool patchelf cmake
 ```
 
@@ -47,7 +50,7 @@ Wake-word (`wakeword-ort`) и VAD (`stt-vad`) тянут onnxruntime и в де�
 
 ## Что отличается от macOS
 
-**Окна.** Накладка ⌘J держится поверх всего через штатный always-on-top; на
+**Окна.** Накладка (Ctrl+J) держится поверх всего через штатный always-on-top; на
 macOS для этого нужен уровень screen-saver. Показать окно, не забирая фокус,
 на X11/Wayland нельзя — политику фокуса решает оконный менеджер. Панель
 появляется на текущем/основном мониторе, а не на том, где курсор: глобальной
@@ -83,6 +86,17 @@ AT-SPI отдаёт данные только у приложений с вкл�
 системная настройка, которую приложение менять не должно. Режим честно
 отвечает «недоступен», и UI его прячет.
 
+**Клавиши.** Главный модификатор приложения на Linux — **Ctrl**, а не Super:
+Super принадлежит окружению рабочего стола (в GNOME Super+1..4 переключает
+приложения дока, и панель дралась бы с ним). Поэтому дефолты выдаются как
+`Ctrl+J`, `Ctrl+Alt+C` и т.д., подписи в интерфейсе рисуются словами
+(`Ctrl+K`, `Enter`, `Backspace`), а не символами ⌘⌥⇧. Всё это переопределяется
+в «Настройки → Горячие клавиши».
+
+Раздел «Запуск» на Linux предлагает список эмуляторов терминала вместо
+Terminal.app/iTerm2, а «Показать в Finder» называется «Папка». Модель
+Qwen3-ASR (MLX) в списке не появляется — MLX работает только на Apple Silicon.
+
 **Иконка в доке/панели задач.** `ActivationPolicy` — понятие AppKit. Место
 приложения в панели задач решает оконный менеджер по флагу `skip_taskbar`,
 который выставляется при создании окна: накладка скрыта, оконный режим виден.
@@ -103,6 +117,8 @@ AT-SPI отдаёт данные только у приложений с вкл�
 | `src-tauri/src/stt/insert.rs` | синтез «вставить» |
 | `src-tauri/src/convo/os.rs` | запуск приложений и громкость |
 | `src-tauri/src/ipc.rs` | открыть файл / показать в папке / ссылка в браузер |
+| `ui/keys.js` | подписи клавиш и системных названий под ОС |
+| `src-tauri/src/settings.rs` | дефолтные хоткеи с платформенным модификатором |
 
 Правило простое: платформенное прячется за `mod imp` с `#[cfg]`, общий код
 зовёт одну функцию и про ОС не знает.

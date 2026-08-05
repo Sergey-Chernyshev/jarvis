@@ -203,7 +203,10 @@ window.toast.onAdd((d) => {
         num.className = 'num';
         const key = document.createElement('span');
         key.className = 'key';
-        key.textContent = '⌘⌥';
+        // подпись модификаторов — под ОС (⌘⌥ на маке, Ctrl+Alt на Linux)
+        key.textContent = window.jarvisKeys
+          ? window.jarvisKeys.MOD + window.jarvisKeys.SEP + window.jarvisKeys.ALT + window.jarvisKeys.SEP
+          : '';
         num.append(key, document.createTextNode(String(i + 1)));
         const otext = document.createElement('div');
         otext.className = 'otext';

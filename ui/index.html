@@ -7,6 +7,7 @@
 <title>Jarvis</title>
 <link rel="stylesheet" href="./theme.css" />
 <script src="./theme.js"></script>
+<script src="./keys.js"></script>
 <style>
   /* ============================================================================
      Панель Jarvis · дизайн «Клевер» (Jarvis Redesign.dc.html, Turn 14).
@@ -1410,7 +1411,7 @@
   .hint.primary { color: var(--ink); font-weight: 500; }
   .hint.primary:hover, .hint.clickable:hover { background: var(--fill-2); color: var(--ink); }
 
-  /* всплывающее меню действий (⌘K) */
+  /* всплывающее меню действий (главный модификатор + K) */
   .actions-pop {
     position: absolute;
     right: 12px;
@@ -1626,12 +1627,12 @@
          Тянется за пустое место (data-tauri-drag-region), лимит справа. -->
     <div class="titlebar" id="titlebar" data-tauri-drag-region>
       <span class="tl-lights">
-        <button class="tl-dot tl-close" id="winClose" title="Закрыть · ⌘W"></button>
+        <button class="tl-dot tl-close" id="winClose" title="Закрыть"></button>
         <button class="tl-dot tl-min" id="winMin" title="Свернуть"></button>
         <button class="tl-dot tl-zoom" id="winZoom" title="Развернуть"></button>
       </span>
       <span class="spacer" data-tauri-drag-region></span>
-      <button class="tl-btn" id="tlSettings" title="Настройки · ⌘,">
+      <button class="tl-btn" id="tlSettings" title="Настройки">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
       </button>
       <span class="tl-divider"></span>
@@ -1649,14 +1650,14 @@
     </div>
 
     <div class="tabs">
-      <div class="tab active" id="tabSessions">Чаты <span class="tabkey">⌘1</span></div>
-      <div class="tab" id="tabHistory">Проекты <span class="tabkey">⌘2</span></div>
-      <div class="tab" id="tabStats">Статистика <span class="tabkey">⌘3</span></div>
-      <div class="tab" id="tabVoice">Голос <span class="tabkey">⌘4</span></div>
-      <div class="tab" id="tabLoops">Циклы <span class="tabkey">⌘5</span></div>
-      <div class="tab" id="tabBundle">Связка <span class="tabkey">⌘6</span></div>
+      <div class="tab active" id="tabSessions">Чаты <span class="tabkey" data-key="1"></span></div>
+      <div class="tab" id="tabHistory">Проекты <span class="tabkey" data-key="2"></span></div>
+      <div class="tab" id="tabStats">Статистика <span class="tabkey" data-key="3"></span></div>
+      <div class="tab" id="tabVoice">Голос <span class="tabkey" data-key="4"></span></div>
+      <div class="tab" id="tabLoops">Циклы <span class="tabkey" data-key="5"></span></div>
+      <div class="tab" id="tabBundle">Связка <span class="tabkey" data-key="6"></span></div>
       <span class="spacer"></span>
-      <div class="tab icon" id="tabSettings" title="Настройки · ⌘,">
+      <div class="tab icon" id="tabSettings" title="Настройки">
         <!-- lucide: sliders-horizontal -->
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
       </div>
@@ -1806,7 +1807,7 @@
                 <span class="tp-title doc-name" id="docTitle"></span>
                 <span class="spacer"></span>
                 <button class="tp-act" id="docEdit" title="Открыть в редакторе (системное приложение)">Редактор</button>
-                <button class="tp-act" id="docFinder" title="Показать в Finder">Finder</button>
+                <button class="tp-act" id="docFinder" title="Показать в папке">Папка</button>
                 <button class="tp-close" id="docClose" title="Закрыть · Esc">
                   <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M3 3 L11 11 M11 3 L3 11" stroke="#9A9AA2" stroke-width="1.5" stroke-linecap="round"></path></svg>
                 </button>
@@ -1848,32 +1849,32 @@
         <div class="srow">
           <span class="slabel">Глобальный хоткей</span>
           <span class="spacer"></span>
-          <button class="keycap" id="hotkey">⌘ J</button>
+          <button class="keycap" id="hotkey" data-key="J"></button>
         </div>
         <div class="srow">
           <span class="slabel">Продолжить последнюю сессию</span>
           <span class="spacer"></span>
-          <button class="keycap" id="continueHotkey" data-hk="continueHotkey">⌘ ⌥ C</button>
+          <button class="keycap" id="continueHotkey" data-hk="continueHotkey" data-key="alt:C"></button>
         </div>
         <div class="srow">
           <span class="slabel">Повторить уведомление</span>
           <span class="spacer"></span>
-          <button class="keycap" id="repeatHotkey" data-hk="repeatHotkey">⌘ ⌥ R</button>
+          <button class="keycap" id="repeatHotkey" data-hk="repeatHotkey" data-key="alt:R"></button>
         </div>
         <div class="srow">
           <span class="slabel">Без звука (mute)</span>
           <span class="spacer"></span>
-          <button class="keycap" id="muteHotkey" data-hk="muteHotkey">⌘ ⌥ M</button>
+          <button class="keycap" id="muteHotkey" data-hk="muteHotkey" data-key="alt:M"></button>
         </div>
         <div class="srow">
           <span class="slabel">Тихий режим</span>
           <span class="spacer"></span>
-          <button class="keycap" id="quietHotkey" data-hk="quietHotkey">⌘ ⌥ J</button>
+          <button class="keycap" id="quietHotkey" data-hk="quietHotkey" data-key="alt:J"></button>
         </div>
         <div class="srow shint">
           <span class="slabel">Выбор варианта в уведомлении</span>
           <span class="spacer"></span>
-          <span class="keycap static">⌘ ⌥ 1–9</span>
+          <span class="keycap static" data-key="alt:1–9"></span>
         </div>
         <div class="serror" id="hotkeyError" hidden></div>
         <div class="srow">
@@ -1943,11 +1944,11 @@
       </span>
       <div class="factions">
         <div class="hint primary" id="primaryHint">
-          <span id="primaryLabel">Открыть чат</span><span class="keycap" id="primaryKey">↵</span>
+          <span id="primaryLabel">Открыть чат</span><span class="keycap" id="primaryKey" data-keyname="enter"></span>
         </div>
         <div class="fdivider"></div>
         <div class="hint clickable" id="actionsBtn">
-          <span>Действия</span><span class="keycap">⌘K</span>
+          <span>Действия</span><span class="keycap" data-key="K"></span>
         </div>
       </div>
     </footer>

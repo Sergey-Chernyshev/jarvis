@@ -28,9 +28,14 @@
     proxyConfigured: false,
     job: { state: 'idle', kind: '', tasks: [], steps: [], failures: [] },
   };
+  // Qwen3-ASR крутится на MLX — фреймворк Apple Silicon, вне мака он не заведётся,
+  // поэтому на других системах в списке его нет.
+  const isMac = window.jarvisKeys ? window.jarvisKeys.isMac : /Mac OS X/i.test(navigator.userAgent);
   const modelMeta = [
     { key: 'whisper', id: 'whisper-turbo', title: 'Whisper large-v3-turbo', detail: 'Быстрая локальная диктовка', size: '~574 МБ', icon: 'W' },
-    { key: 'qwen', id: 'qwen3-runtime', title: 'Qwen3-ASR MLX', detail: 'Точная локальная диктовка на Apple Silicon', size: '~1–3 ГБ', icon: 'Q' },
+    ...(isMac
+      ? [{ key: 'qwen', id: 'qwen3-runtime', title: 'Qwen3-ASR MLX', detail: 'Точная локальная диктовка на Apple Silicon', size: '~1–3 ГБ', icon: 'Q' }]
+      : []),
     { key: 'wake', id: 'hey_jarvis', title: 'Голосовая активация', detail: 'Фраза «Hey Jarvis», всегда локально', size: '~4 МБ', icon: 'H' },
     { key: 'silero', id: 'silero', title: 'Silero voice', detail: 'Локальная русская озвучка', size: '~1 ГБ', icon: 'S' },
   ];
@@ -241,7 +246,7 @@
         class: 'system-note',
         text: `${(snapshot.agents || []).filter((item) => item.ready).length} agents · ${readyCount} local modules · ${online ? 'online' : 'warming'}`,
       }),
-      h('div', { class: 'shortcut' }, [h('kbd', { text: '⌘J' }), h('span', { text: 'открыть панель' })]),
+      h('div', { class: 'shortcut' }, [h('kbd', { text: window.jarvisKeys ? window.jarvisKeys.k('J') : 'Ctrl+J' }), h('span', { text: 'открыть панель' })]),
       online ? null : h('div', { class: 'notice', text: 'Если socket не станет online после запуска панели, открой диагностику: hook registration останется целым.' }),
     ];
   }

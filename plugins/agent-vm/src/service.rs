@@ -26,12 +26,26 @@ use crate::project::{ensure_project_link, is_valid_vm_name, ProjectIdentity};
 use crate::runner::{CommandRunner, CommandSpec};
 use crate::runtime_paths::RuntimePaths;
 
-const PROJECT_SPEC: &str = "\
-# Jarvis Agent VM project runtime\n\
-modules:\n\
-  - node\n\
-  - claude\n\
-  - codex\n";
+/// Шаблон `.agent-vm.yaml` для нового проекта. Ресурсы заданы явно (спека
+/// 2026-07-28 §8.1): без секции их выбирает установленная версия `avm`, и на
+/// одной машине VM разъезжаются — у владельца соседние проекты получили
+/// 6 CPU/8 GiB/80 GiB и 4/4/120 в зависимости от того, когда были созданы.
+/// Существующий файл никогда не перезаписывается, так что старые VM не
+/// затрагиваются.
+const PROJECT_SPEC: &str = concat!(
+    "# Jarvis Agent VM project runtime\n",
+    "modules:\n",
+    "  - node\n",
+    "  - claude\n",
+    "  - codex\n",
+    // ресурсы заданы явно: без секции их выбирает установленная версия avm,
+    // и соседние проекты получают разные VM (у владельца 6 CPU/8 GiB против
+    // 4/4/120 — зависит от того, когда VM была создана)
+    "resources:\n",
+    "  cpus: 4\n",
+    "  memory: 4GiB\n",
+    "  disk: 120GiB\n",
+);
 const INVENTORY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ACTIVE_VMS: usize = 8;
 const PROTECTED_ACCOUNT_MOUNT_DIRS: &[&str] = &[
@@ -1658,6 +1672,23 @@ mod tests {
         assert!(generated.contains("node"));
         assert!(generated.contains("claude"));
         assert!(generated.contains("codex"));
+        // ресурсы заданы явно: без них версия avm выбирает свои, и соседние
+        // проекты получают разные VM (6 CPU/8 GiB против 4/4/120)
+        let spec: serde_yaml::Value = serde_yaml::from_str(&generated)
+            .expect("сгенерированный project config должен быть валидным YAML");
+        let resources = spec
+            .get("resources")
+            .expect("project config задаёт resources");
+        assert_eq!(
+            resources.get("cpus").and_then(|v| v.as_u64()),
+            Some(4),
+            "resources={resources:?}"
+        );
+        assert_eq!(
+            resources.get("memory").and_then(|v| v.as_str()),
+            Some("4GiB")
+        );
+        assert_eq!(resources.get("disk").and_then(|v| v.as_str()), Some("120GiB"));
         for forbidden in ["proxy", "token", "credential", "api_key", "certificate"] {
             assert!(
                 !generated.to_ascii_lowercase().contains(forbidden),

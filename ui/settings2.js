@@ -73,6 +73,12 @@
   const SVG_NS = 'http://www.w3.org/2000/svg';
   // каждый элемент: [tag, {атрибуты}]
   const ICONS = {
+    // lucide: triangle-alert — плашка ошибки скачивания модели
+    'alert-triangle': [
+      ['path', { d: 'm21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3' }],
+      ['path', { d: 'M12 9v4' }],
+      ['path', { d: 'M12 17h.01' }],
+    ],
     // lucide: palette — раздел «Вид» (тема и краска)
     'palette': [
       ['circle', { cx: 13.5, cy: 6.5, r: 0.5, fill: 'currentColor' }],
@@ -475,7 +481,10 @@
    * глоталась и статус «сбрасывался» в «не скачана»). */
   function dlErrorNote(msg) {
     const n = el('div.s2err');
-    n.appendChild(el('span.s2err-ic', icon('alert-triangle')));
+    // el(tag, attrs, kids): иконка — третьим аргументом. Раньше она уходила
+    // вторым, то есть на место атрибутов: svg перебирался как объект, на span
+    // сыпались его DOM-свойства, а сама иконка не добавлялась никогда.
+    n.appendChild(el('span.s2err-ic', null, icon('alert-triangle')));
     n.appendChild(el('span.s2err-txt', { text: msg }));
     return n;
   }

@@ -951,7 +951,7 @@
     const style = document.createElement("style");
     style.id = "settings2-style";
     style.textContent = css;
-    const nonceSource = document.querySelector("style[nonce]");
+    const nonceSource = document.querySelector('style[nonce]');
     if (nonceSource && nonceSource.nonce) {
       style.nonce = nonceSource.nonce;
     }
@@ -2434,7 +2434,7 @@
     pane.appendChild(el("div.dsection", { text: "Сеть" }));
     const ng = el("div.dgroup");
     const proxyInput = el("input.s2-secret", {
-      id: "s2-egress-proxy",
+      id: 's2-egress-proxy',
       type: "text",
       placeholder: "http://user:pass@host:port  (пусто — из окружения)",
       autocomplete: "off",

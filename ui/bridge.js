@@ -4,7 +4,7 @@
 
 (() => {
   const transport = globalThis.__JARVIS_CORE_TRANSPORT__;
-  if (!transport) throw new Error("jarvis_core_transport_missing");
+  if (!transport) throw new Error('jarvis_core_transport_missing');
   const { invoke, listen, getCurrentWindow } = transport;
   delete globalThis.__JARVIS_CORE_TRANSPORT__;
 
@@ -15,19 +15,19 @@
   const self = () => getCurrentWindow();
 
   window.jarvis = Object.freeze({
-    onState: (cb) => on("state", cb),
-    onShown: (cb) => on("panel-shown", () => cb()),
-    onOpenSession: (cb) => on("open-session", cb),
-    onOpenAgentVm: (cb) => on("open-agent-vm", cb),
-    getState: () => invoke("state_get"),
-    clearFinished: () => invoke("state_clear"),
-    hidePanel: () => invoke("panel_hide"),
-    getSettings: () => invoke("settings_get"),
+    onState: (cb) => on('state', cb),
+    onShown: (cb) => on('panel-shown', () => cb()),
+    onOpenSession: (cb) => on('open-session', cb),
+    onOpenAgentVm: (cb) => on('open-agent-vm', cb),
+    getState: () => invoke('state_get'),
+    clearFinished: () => invoke('state_clear'),
+    hidePanel: () => invoke('panel_hide'),
+    getSettings: () => invoke('settings_get'),
     // тема/краска сменились в другом окне (демон рассылает всем)
-    onAppearance: (cb) => on("appearance", cb),
+    onAppearance: (cb) => on('appearance', cb),
     winMinimize: () => self().minimize(),
     winZoom: () => self().toggleMaximize(),
-    winClose: () => self().close(), // CloseRequested перехвачен → просто прячет
+    winClose: () => self().close(),  // CloseRequested перехвачен → просто прячет
     // зелёная кнопка macOS — фуллскрин (зум под Alt, как в системе)
     winIsFullscreen: () => self().isFullscreen(),
     winToggleFullscreen: async () => {
@@ -35,205 +35,168 @@
       await w.setFullscreen(!(await w.isFullscreen()));
     },
     // светофор горит только у активного окна — как у системных кнопок
-    onWinFocus: (cb) => {
-      self().onFocusChanged(({ payload }) => cb(!!payload));
-    },
-    setSettings: (patch) => invoke("settings_set", { patch }),
-    settingsHealth: () => invoke("settings_health"),
-    settingsRepair: () => invoke("settings_repair"),
-    openChat: (sessionId) => invoke("chat_open", { sessionId }),
-    closeChat: () => invoke("chat_close"),
-    summarizeTurn: (sessionId, turnKey) =>
-      invoke("chat_summarize", { sessionId, turnKey }),
-    openFile: (sessionId, path, reveal) =>
-      invoke("file_open", { sessionId, path, reveal: !!reveal }),
+    onWinFocus: (cb) => { self().onFocusChanged(({ payload }) => cb(!!payload)); },
+    setSettings: (patch) => invoke('settings_set', { patch }),
+    settingsHealth: () => invoke('settings_health'),
+    settingsRepair: () => invoke('settings_repair'),
+    openChat: (sessionId) => invoke('chat_open', { sessionId }),
+    closeChat: () => invoke('chat_close'),
+    summarizeTurn: (sessionId, turnKey) => invoke('chat_summarize', { sessionId, turnKey }),
+    openFile: (sessionId, path, reveal) => invoke('file_open', { sessionId, path, reveal: !!reveal }),
     // вьюер документов (спека 2026-07-18 §3.1): чтение файла из фактов сессии
-    readFile: (sessionId, path) => invoke("file_read", { sessionId, path }),
+    readFile: (sessionId, path) => invoke('file_read', { sessionId, path }),
     // дифф файла для таба «Изменения» (§3.2): git-ханки или mode:"none"
-    diffFile: (sessionId, path) => invoke("file_diff", { sessionId, path }),
+    diffFile: (sessionId, path) => invoke('file_diff', { sessionId, path }),
     // внешняя http(s)-ссылка из отрендеренного дока → системный браузер
-    openUrl: (url) => invoke("url_open", { url }),
-    onChatAppend: (cb) => on("chat:append", cb),
-    onChatSummary: (cb) => on("chat:summary", cb),
-    focusTerminal: (sessionId) => invoke("terminal_focus", { sessionId }),
-    launchSession: (cwd, agent, sessionId) =>
-      invoke("session_launch", {
-        cwd: cwd ?? null,
-        agent,
-        sessionId: sessionId ?? null,
-      }),
-    sendReply: (sessionId, text) =>
-      invoke("session_reply", { sessionId, text }),
+    openUrl: (url) => invoke('url_open', { url }),
+    onChatAppend: (cb) => on('chat:append', cb),
+    onChatSummary: (cb) => on('chat:summary', cb),
+    focusTerminal: (sessionId) => invoke('terminal_focus', { sessionId }),
+    launchSession: (cwd, agent, sessionId) => invoke('session_launch', { cwd: cwd ?? null, agent, sessionId: sessionId ?? null }),
+    sendReply: (sessionId, text) => invoke('session_reply', { sessionId, text }),
     // вставленная картинка → временный файл; путь уйдёт агенту в промпте
-    saveImage: (dataBase64, ext) =>
-      invoke("session_save_image", { dataBase64, ext }),
-    pingTerminal: (sessionId) => invoke("terminal_ping", { sessionId }),
-    answerQuestion: (sessionId, choice) =>
-      invoke("question_answer", { sessionId, choice }),
+    saveImage: (dataBase64, ext) => invoke('session_save_image', { dataBase64, ext }),
+    pingTerminal: (sessionId) => invoke('terminal_ping', { sessionId }),
+    answerQuestion: (sessionId, choice) => invoke('question_answer', { sessionId, choice }),
     // действие с доски задач → редактируемый текст-инструкция (НЕ отправка)
-    taskAction: (sessionId, taskRef, action) =>
-      invoke("task_action", { sessionId, taskRef, action }),
+    taskAction: (sessionId, taskRef, action) => invoke('task_action', { sessionId, taskRef, action }),
     // голос (инкремент 7): состояние, выбор спикера, тест, mute
-    voiceGet: () => invoke("voice_get"),
-    voiceSetSpeaker: (speaker) => invoke("voice_set_speaker", { speaker }),
-    voiceSetRate: (rate) => invoke("voice_set_rate", { rate }),
-    voiceTest: () => invoke("voice_test"),
-    voiceSetMute: (on) => invoke("voice_set_mute", { on }),
-    voiceSetDuck: (on) => invoke("voice_set_duck", { on }),
-    voiceSetBluetoothOnly: (on) => invoke("voice_set_bluetooth_only", { on }),
-    getCommands: (sessionId) => invoke("commands_get", { sessionId }),
-    setModel: (sessionId, model) =>
-      invoke("session_set_model", { sessionId, model }),
-    setEffort: (sessionId, level) =>
-      invoke("session_set_effort", { sessionId, level }),
-    setPin: (sessionId, pinned) =>
-      invoke("session_set_pin", { sessionId, pinned }),
-    getMeta: () => invoke("app_meta"),
-    updateCheckInstall: () => invoke("update_check_install"),
-    relaunch: () => invoke("app_relaunch"),
-    onPlugins: (cb) => on("plugins", cb),
-    getPlugins: () => invoke("plugins_status"),
-    pluginCmd: (id, cmd, args) =>
-      invoke("plugins_cmd", { id, cmd, args: args ?? null }),
-    pluginManagerRequest: (request) =>
-      invoke("plugin_manager_request", { request }),
-    onEntities: (cb) => on("entities", cb),
-    getEntities: () => invoke("entities_get"),
-    getAgentVmProfiles: () => invoke("agent_vm_profiles_get"),
+    voiceGet: () => invoke('voice_get'),
+    voiceSetSpeaker: (speaker) => invoke('voice_set_speaker', { speaker }),
+    voiceSetRate: (rate) => invoke('voice_set_rate', { rate }),
+    voiceTest: () => invoke('voice_test'),
+    voiceSetMute: (on) => invoke('voice_set_mute', { on }),
+    voiceSetDuck: (on) => invoke('voice_set_duck', { on }),
+    voiceSetBluetoothOnly: (on) => invoke('voice_set_bluetooth_only', { on }),
+    getCommands: (sessionId) => invoke('commands_get', { sessionId }),
+    setModel: (sessionId, model) => invoke('session_set_model', { sessionId, model }),
+    setEffort: (sessionId, level) => invoke('session_set_effort', { sessionId, level }),
+    setPin: (sessionId, pinned) => invoke('session_set_pin', { sessionId, pinned }),
+    getMeta: () => invoke('app_meta'),
+    updateCheckInstall: () => invoke('update_check_install'),
+    relaunch: () => invoke('app_relaunch'),
+    onPlugins: (cb) => on('plugins', cb),
+    getPlugins: () => invoke('plugins_status'),
+    pluginCmd: (id, cmd, args) => invoke('plugins_cmd', { id, cmd, args: args ?? null }),
+    pluginManagerRequest: (request) => invoke('plugin_manager_request', { request }),
+    onEntities: (cb) => on('entities', cb),
+    getEntities: () => invoke('entities_get'),
+    getAgentVmProfiles: () => invoke('agent_vm_profiles_get'),
     setAgentVmProfile: (cwd, startWithJarvis) =>
-      invoke("agent_vm_profile_set", {
-        cwd,
-        startWithJarvis: !!startWithJarvis,
-      }),
-    getProjectManagerState: () => invoke("project_manager_state_get"),
-    pickProjectManagerFolder: () => invoke("project_manager_folder_pick"),
+      invoke('agent_vm_profile_set', { cwd, startWithJarvis: !!startWithJarvis }),
+    getProjectManagerState: () => invoke('project_manager_state_get'),
+    pickProjectManagerFolder: () => invoke('project_manager_folder_pick'),
     setProjectManagerFavorite: (cwd, favorite) =>
-      invoke("project_manager_favorite_set", { cwd, favorite: !!favorite }),
+      invoke('project_manager_favorite_set', { cwd, favorite: !!favorite }),
     moveProjectManagerFavorite: (projectId, direction) =>
-      invoke("project_manager_favorite_move", { projectId, direction }),
-    setProjectManagerView: (view) =>
-      invoke("project_manager_view_set", { view }),
+      invoke('project_manager_favorite_move', { projectId, direction }),
+    setProjectManagerView: (view) => invoke('project_manager_view_set', { view }),
     setAgentVmFocus: (projectId, runId) =>
-      invoke("agent_vm_focus", {
-        projectId: projectId || null,
-        runId: runId || null,
-      }),
-    agentVmOperationAck: (requestId) =>
-      invoke("agent_vm_operation_ack", { requestId }),
+      invoke('agent_vm_focus', { projectId: projectId || null, runId: runId || null }),
+    agentVmOperationAck: (requestId) => invoke('agent_vm_operation_ack', { requestId }),
     getAgentVmCommands: (projectId, cwd, backend) =>
-      invoke("agent_vm_commands_get", { projectId, cwd, backend }),
+      invoke('agent_vm_commands_get', { projectId, cwd, backend }),
     agentVmTerminalEnsure: (projectId, backend, cols, rows) =>
-      invoke("agent_vm_terminal_ensure", { projectId, backend, cols, rows }),
+      invoke('agent_vm_terminal_ensure', { projectId, backend, cols, rows }),
     agentVmTerminalSnapshot: (projectId, backend) =>
-      invoke("agent_vm_terminal_snapshot", { projectId, backend }),
+      invoke('agent_vm_terminal_snapshot', { projectId, backend }),
     agentVmTerminalInput: (projectId, backend, text, submit = true) =>
-      invoke("agent_vm_terminal_input", {
-        projectId,
-        backend,
-        text,
-        submit: !!submit,
-      }),
+      invoke('agent_vm_terminal_input', { projectId, backend, text, submit: !!submit }),
     agentVmTerminalKey: (projectId, backend, key) =>
-      invoke("agent_vm_terminal_key", { projectId, backend, key }),
+      invoke('agent_vm_terminal_key', { projectId, backend, key }),
     agentVmTerminalUpload: (projectId, backend, dataBase64, extension) =>
-      invoke("agent_vm_terminal_upload", {
+      invoke('agent_vm_terminal_upload', {
         projectId,
         backend,
         dataBase64,
         extension,
       }),
     agentVmTerminalResize: (projectId, backend, cols, rows) =>
-      invoke("agent_vm_terminal_resize", { projectId, backend, cols, rows }),
+      invoke('agent_vm_terminal_resize', { projectId, backend, cols, rows }),
     agentVmTerminalStop: (projectId, backend) =>
-      invoke("agent_vm_terminal_stop", { projectId, backend }),
-    agentVmFileRead: (runId, path) =>
-      invoke("agent_vm_file_read", { runId, path }),
-    agentVmFileDiff: (runId, path) =>
-      invoke("agent_vm_file_diff", { runId, path }),
+      invoke('agent_vm_terminal_stop', { projectId, backend }),
+    agentVmFileRead: (runId, path) => invoke('agent_vm_file_read', { runId, path }),
+    agentVmFileDiff: (runId, path) => invoke('agent_vm_file_diff', { runId, path }),
     agentVmFileOpen: (runId, path, reveal) =>
-      invoke("agent_vm_file_open", { runId, path, reveal: !!reveal }),
-    getUsage: (period) => invoke("usage_summary", { period }),
-    getLimit: () => invoke("limit_get"),
-    onLimitState: (cb) => on("limit-state", cb),
-    getSessionUsage: (id) => invoke("usage_session", { id }),
-    getHistory: () => invoke("history_get"),
+      invoke('agent_vm_file_open', { runId, path, reveal: !!reveal }),
+    getUsage: (period) => invoke('usage_summary', { period }),
+    getLimit: () => invoke('limit_get'),
+    onLimitState: (cb) => on('limit-state', cb),
+    getSessionUsage: (id) => invoke('usage_session', { id }),
+    getHistory: () => invoke('history_get'),
     // интеграция и модели (настройки)
-    integrationGet: () => invoke("integration_get"),
-    integrationRemove: () => invoke("integration_remove"),
-    onboardingOpen: () => invoke("onboarding_open"),
-    modelDelete: (id) => invoke("model_delete", { id }),
-    modelsGet: () => invoke("models_get"),
-    transcriptsGet: () => invoke("transcripts_get"),
-    transcriptsClear: () => invoke("transcripts_clear"),
-    transcriptDelete: (id) => invoke("transcript_delete", { id }),
-    transcriptRetranscribe: (id) => invoke("transcript_retranscribe", { id }),
-    transcriptEnhance: (text, style) =>
-      invoke("transcript_enhance", { text, style }),
+    integrationGet: () => invoke('integration_get'),
+    integrationRemove: () => invoke('integration_remove'),
+    onboardingOpen: () => invoke('onboarding_open'),
+    modelDelete: (id) => invoke('model_delete', { id }),
+    modelsGet: () => invoke('models_get'),
+    transcriptsGet: () => invoke('transcripts_get'),
+    transcriptsClear: () => invoke('transcripts_clear'),
+    transcriptDelete: (id) => invoke('transcript_delete', { id }),
+    transcriptRetranscribe: (id) => invoke('transcript_retranscribe', { id }),
+    transcriptEnhance: (text, style) => invoke('transcript_enhance', { text, style }),
     // умные промпты: библиотека + флаг «умный режим»
-    promptsGet: () => invoke("prompts_get"),
-    promptsGetSettings: () => invoke("prompts_get_settings"),
-    promptsSetSmart: (on) => invoke("prompts_set_smart", { on }),
-    quietSet: (on) => invoke("quiet_set", { on }),
-    onGotoSettings: (cb) => on("goto-settings", cb),
-    onGotoVoicehist: (cb) => on("goto-voicehist", cb),
+    promptsGet: () => invoke('prompts_get'),
+    promptsGetSettings: () => invoke('prompts_get_settings'),
+    promptsSetSmart: (on) => invoke('prompts_set_smart', { on }),
+    quietSet: (on) => invoke('quiet_set', { on }),
+    onGotoSettings: (cb) => on('goto-settings', cb),
+    onGotoVoicehist: (cb) => on('goto-voicehist', cb),
     // STT — диктовка (инкремент 9): состояние, выбор движка, тест
-    sttGet: () => invoke("stt_get"),
-    sttSetEngine: (engine) => invoke("stt_set_engine", { engine }),
-    sttSetHotkey: (hotkey) => invoke("stt_set_hotkey", { hotkey }),
+    sttGet: () => invoke('stt_get'),
+    sttSetEngine: (engine) => invoke('stt_set_engine', { engine }),
+    sttSetHotkey: (hotkey) => invoke('stt_set_hotkey', { hotkey }),
     // Хоткеи — единый реестр действий (рекордер в настройках)
-    hotkeyBindings: () => invoke("hotkey_bindings"),
-    hotkeyAssign: (action, accel, steal) =>
-      invoke("hotkey_assign", { action, accel, steal: !!steal }),
-    hotkeysSuspend: (on) => invoke("hotkeys_suspend", { on }),
-    sttSetNoiseGate: (on) => invoke("stt_set_noise_gate", { on }),
-    sttTest: () => invoke("stt_test"),
-    sttInputDevices: () => invoke("stt_input_devices"),
-    sttSetInputDevice: (name) => invoke("stt_set_input_device", { name }),
-    sttInstallWhisper: () => invoke("stt_install_whisper"),
-    sttInstallSidecar: () => invoke("stt_install_sidecar"),
-    sttInstallQwen: (key) => invoke("stt_install_qwen", { key }),
-    onSttInstallProgress: (cb) => on("stt_install_progress", cb),
-    onSttInstallDone: (cb) => on("stt_install_done", cb),
+    hotkeyBindings: () => invoke('hotkey_bindings'),
+    hotkeyAssign: (action, accel, steal) => invoke('hotkey_assign', { action, accel, steal: !!steal }),
+    hotkeysSuspend: (on) => invoke('hotkeys_suspend', { on }),
+    sttSetNoiseGate: (on) => invoke('stt_set_noise_gate', { on }),
+    sttTest: () => invoke('stt_test'),
+    sttInputDevices: () => invoke('stt_input_devices'),
+    sttSetInputDevice: (name) => invoke('stt_set_input_device', { name }),
+    sttInstallWhisper: () => invoke('stt_install_whisper'),
+    sttInstallSidecar: () => invoke('stt_install_sidecar'),
+    sttInstallQwen: (key) => invoke('stt_install_qwen', { key }),
+    onSttInstallProgress: (cb) => on('stt_install_progress', cb),
+    onSttInstallDone: (cb) => on('stt_install_done', cb),
     // Мультизагрузка моделей (онбординг + панель): единые события по id модели.
-    modelsInstall: (ids) => invoke("models_install", { ids }),
-    onModelInstallProgress: (cb) => on("model_install_progress", cb),
-    onModelInstallDone: (cb) => on("model_install_done", cb),
-    onModelsInstallAllDone: (cb) => on("models_install_all_done", cb),
+    modelsInstall: (ids) => invoke('models_install', { ids }),
+    onModelInstallProgress: (cb) => on('model_install_progress', cb),
+    onModelInstallDone: (cb) => on('model_install_done', cb),
+    onModelsInstallAllDone: (cb) => on('models_install_all_done', cb),
 
     // «Под капотом» — служебный LLM (Claude/Codex) + установка Codex-SDK сайдкара
-    serviceGet: () => invoke("service_get"),
-    serviceSetBackend: (backend) => invoke("service_set_backend", { backend }),
-    serviceSetModel: (model) => invoke("service_set_model", { model }),
-    serviceSetEffort: (effort) => invoke("service_set_effort", { effort }),
-    serviceSetProxy: (proxy) => invoke("service_set_proxy", { proxy }),
-    serviceTest: () => invoke("service_test"),
-    claudeAuthGet: () => invoke("claude_auth_get"),
-    claudeAuthConnect: (mode, value) =>
-      invoke("claude_auth_connect", { mode, value }),
-    claudeAuthDisconnect: () => invoke("claude_auth_disconnect"),
-    codexInstallSidecar: () => invoke("codex_install_sidecar"),
-    onCodexInstallProgress: (cb) => on("codex_install_progress", cb),
-    onCodexInstallDone: (cb) => on("codex_install_done", cb),
+    serviceGet: () => invoke('service_get'),
+    serviceSetBackend: (backend) => invoke('service_set_backend', { backend }),
+    serviceSetModel: (model) => invoke('service_set_model', { model }),
+    serviceSetEffort: (effort) => invoke('service_set_effort', { effort }),
+    serviceSetProxy: (proxy) => invoke('service_set_proxy', { proxy }),
+    serviceTest: () => invoke('service_test'),
+    claudeAuthGet: () => invoke('claude_auth_get'),
+    claudeAuthConnect: (mode, value) => invoke('claude_auth_connect', { mode, value }),
+    claudeAuthDisconnect: () => invoke('claude_auth_disconnect'),
+    codexInstallSidecar: () => invoke('codex_install_sidecar'),
+    onCodexInstallProgress: (cb) => on('codex_install_progress', cb),
+    onCodexInstallDone: (cb) => on('codex_install_done', cb),
 
     // Wake-word + общий аудио-вход (инкремент 10)
-    wakeGet: () => invoke("wake_get"),
-    wakeSetEnabled: (val) => invoke("wake_set_enabled", { on: val }),
-    wakeSetThreshold: (threshold) =>
-      invoke("wake_set_threshold", { threshold }),
-    audioSetMute: (val) => invoke("audio_set_mute", { on: val }),
-    wakeInstallModels: () => invoke("wake_install_models"),
-    voiceInstallSilero: () => invoke("voice_install_silero"),
-    onAudioState: (cb) => on("audio_state", cb),
-    onWake: (cb) => on("wake", cb),
-    onWakeInstallDone: (cb) => on("wake_install_done", cb),
+    wakeGet: () => invoke('wake_get'),
+    wakeSetEnabled: (val) => invoke('wake_set_enabled', { on: val }),
+    wakeSetThreshold: (threshold) => invoke('wake_set_threshold', { threshold }),
+    audioSetMute: (val) => invoke('audio_set_mute', { on: val }),
+    wakeInstallModels: () => invoke('wake_install_models'),
+    voiceInstallSilero: () => invoke('voice_install_silero'),
+    onAudioState: (cb) => on('audio_state', cb),
+    onWake: (cb) => on('wake', cb),
+    onWakeInstallDone: (cb) => on('wake_install_done', cb),
   });
 
   // navigator.clipboard в WKWebView капризен (secure context, жесты) —
   // подменяем на надёжный плагин Tauri, API тот же.
   const writeText = (text) =>
-    invoke("plugin:clipboard-manager|write_text", { text: String(text) });
+    invoke('plugin:clipboard-manager|write_text', { text: String(text) });
   try {
-    Object.defineProperty(navigator, "clipboard", {
+    Object.defineProperty(navigator, 'clipboard', {
       value: { writeText },
       configurable: true,
     });

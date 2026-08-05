@@ -1930,7 +1930,9 @@ replyEl.addEventListener('keydown', (e) => {
 
 async function focusTerminal(sessionId, project) {
   const res = await window.jarvis.focusTerminal(sessionId);
-  if (res.ok) { window.jarvis.hidePanel(); return; }
+  // Накладка своё дело сделала — уходит с глаз. Окно так себя не ведёт:
+  // из него ушли в терминал, а не закрыли его.
+  if (res.ok) { if (!windowMode()) window.jarvis.hidePanel(); return; }
   // нижняя ступень лесенки — не ошибка, а чат сессии прямо в панели
   if (res.fallbackChat && view !== 'chat') openChat(sessionId, project);
   else showToast(res.error || 'Не нашёл терминал');

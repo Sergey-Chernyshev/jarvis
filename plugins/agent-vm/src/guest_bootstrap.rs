@@ -784,6 +784,7 @@ mod tests {
         let roots = crate::config_mirror::MirrorRoots {
             claude: root.join(".claude"),
             codex: root.join(".codex"),
+            claude_json: root.join(".claude.json"),
         };
         fs::create_dir_all(&roots.claude).unwrap();
         fs::create_dir_all(&roots.codex).unwrap();

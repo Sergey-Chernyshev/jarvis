@@ -17,6 +17,10 @@ pub const MAX_MIRROR_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 pub struct MirrorRoots {
     pub claude: PathBuf,
     pub codex: PathBuf,
+    /// Путь к `~/.claude.json`. Файл целиком не переносится (в нём OAuth,
+    /// project trust и кэши) — из него извлекается только user-scoped
+    /// `mcpServers`, см. §9.2 спеки.
+    pub claude_json: PathBuf,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -53,6 +57,8 @@ pub struct MirrorDiagnostics {
     /// snapshot неотличим от «у пользователя действительно нет памяти»:
     /// ошибка в выводе пути выглядела бы как штатная тишина.
     pub missing_sources: Vec<String>,
+    /// MCP-серверы, оставленные на хосте: их адрес в гостье ведёт в саму VM.
+    pub host_only_mcp_servers: Vec<String>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -161,6 +167,7 @@ fn build_snapshot_inner(
     if let Some((source, guest)) = project_memory {
         collect_tree(source, source, guest, &mut snapshot, &mut total_bytes)?;
     }
+    collect_user_mcp_servers(&roots.claude_json, &mut snapshot, &mut total_bytes)?;
     snapshot
         .files
         .sort_by(|left, right| left.guest_path.cmp(&right.guest_path));
@@ -334,6 +341,189 @@ fn add_open_regular_file(
         guest_path,
         bytes,
         mode,
+    });
+    Ok(())
+}
+
+/// Куда деть MCP-сервер при переносе в VM.
+#[derive(Debug, PartialEq, Eq)]
+enum McpVerdict {
+    /// Работает в гостье как есть.
+    Portable,
+    /// Остаётся на хосте; строка — причина для пользователя.
+    HostOnly(&'static str),
+}
+
+/// Хосты, которые внутри VM означают саму VM. Сервер на таком адресе молча не
+/// подключится: IDE и host-сайдкары живут на хосте, а не в гостье.
+fn is_guest_local_url(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let authority = lower.split_once("//").map_or(lower.as_str(), |(_, rest)| rest);
+    let authority = authority.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit_once('@').map_or(authority, |(_, rest)| rest);
+    // IPv6 в URL пишется в скобках: [::1]:port
+    let host = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host.split(':').next().unwrap_or("")
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0" | "[::1]")
+        || host.ends_with(".localhost")
+        || host.starts_with("127.")
+}
+
+/// Абсолютный путь хоста, которого в гостье не будет. Проектные пути сюда не
+/// попадают: project root смонтирован в VM, его переписывает вызывающий.
+fn is_host_absolute(value: &str) -> bool {
+    value.starts_with('/') || value.starts_with("~/")
+}
+
+/// Секреты не являются data contract (§19.5): ключи, похожие на токен, в гостя
+/// не уезжают, даже если пользователь положил их в MCP-конфиг.
+fn looks_like_secret_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    ["TOKEN", "SECRET", "KEY", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH", "COOKIE", "SESSION"]
+        .iter()
+        .any(|needle| upper.contains(needle))
+}
+
+/// Классифицирует произвольный MCP-сервер. Форма конфигурации у пользователей
+/// любая: stdio/http/sse/ws, свои поля, будущие типы — поэтому решение
+/// принимается по фактам (url, command, args), а не по списку известных имён.
+fn classify_mcp_server(server: &serde_json::Value) -> McpVerdict {
+    let Some(object) = server.as_object() else {
+        return McpVerdict::HostOnly("определение сервера не является объектом");
+    };
+    if let Some(url) = object.get("url").and_then(|it| it.as_str()) {
+        if is_guest_local_url(url) {
+            return McpVerdict::HostOnly("адрес ведёт в loopback: в VM это сама VM");
+        }
+        return McpVerdict::Portable;
+    }
+    if let Some(command) = object.get("command").and_then(|it| it.as_str()) {
+        if is_host_absolute(command) {
+            return McpVerdict::HostOnly("команда задана абсолютным путём хоста");
+        }
+        let host_arg = object
+            .get("args")
+            .and_then(|it| it.as_array())
+            .map(|args| {
+                args.iter()
+                    .filter_map(|arg| arg.as_str())
+                    .any(is_host_absolute)
+            })
+            .unwrap_or(false);
+        if host_arg {
+            return McpVerdict::HostOnly("аргумент указывает на путь хоста");
+        }
+        return McpVerdict::Portable;
+    }
+    McpVerdict::HostOnly("не указан ни url, ни command")
+}
+
+/// Убирает из `env` значения, похожие на секреты, оставляя остальные настройки.
+fn strip_secret_env(server: &mut serde_json::Value, diagnostics: &mut MirrorDiagnostics) {
+    let Some(env) = server
+        .as_object_mut()
+        .and_then(|object| object.get_mut("env"))
+        .and_then(|env| env.as_object_mut())
+    else {
+        return;
+    };
+    let secret_keys = env
+        .keys()
+        .filter(|key| looks_like_secret_key(key))
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in secret_keys {
+        env.remove(&key);
+        diagnostics.removed_host_commands += 1;
+    }
+}
+
+/// Из `~/.claude.json` берём только user-scoped `mcpServers` и записываем их
+/// отдельным guest-файлом. Файл целиком копировать нельзя: он смешивает OAuth,
+/// project trust и кэши.
+///
+/// Непереносимый сервер не копируется и не выбрасывается молча: он попадает в
+/// диагностику с причиной — тихо запускать сломанную конфигурацию нельзя (§9.2).
+fn collect_user_mcp_servers(
+    claude_json: &Path,
+    snapshot: &mut ConfigSnapshot,
+    total_bytes: &mut u64,
+) -> Result<(), String> {
+    let guest_path = PathBuf::from(".claude/mcp-servers.json");
+    let metadata = match fs::symlink_metadata(claude_json) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            snapshot.note_missing(&guest_path);
+            return Ok(());
+        }
+        Err(_) => return Err("не проверить ~/.claude.json".into()),
+    };
+    if metadata.file_type().is_symlink() {
+        snapshot.diagnostics.skipped_symlinks += 1;
+        return Ok(());
+    }
+    if !metadata.file_type().is_file() {
+        snapshot.diagnostics.skipped_non_regular += 1;
+        return Ok(());
+    }
+    if metadata.len() > MAX_MIRROR_FILE_BYTES {
+        snapshot.diagnostics.skipped_oversize += 1;
+        return Ok(());
+    }
+    let mut file = no_follow_file(claude_json)?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.by_ref()
+        .take(MAX_MIRROR_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "не прочитать ~/.claude.json".to_string())?;
+    let parsed = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|_| "~/.claude.json содержит invalid JSON".to_string())?;
+    bytes.zeroize();
+
+    let mut portable = serde_json::Map::new();
+    if let Some(servers) = parsed.get("mcpServers").and_then(|it| it.as_object()) {
+        for (name, server) in servers {
+            match classify_mcp_server(server) {
+                McpVerdict::HostOnly(reason) => {
+                    snapshot
+                        .diagnostics
+                        .host_only_mcp_servers
+                        .push(format!("{name}: {reason}"));
+                }
+                McpVerdict::Portable => {
+                    let mut copy = server.clone();
+                    strip_secret_env(&mut copy, &mut snapshot.diagnostics);
+                    portable.insert(name.clone(), copy);
+                }
+            }
+        }
+    }
+    if portable.is_empty() {
+        return Ok(());
+    }
+    let mut document = serde_json::Map::new();
+    document.insert("mcpServers".into(), serde_json::Value::Object(portable));
+    let rendered = serde_json::to_vec_pretty(&serde_json::Value::Object(document))
+        .map_err(|_| "не сериализовать перенесённые mcpServers".to_string())?;
+
+    validate_guest_path(&guest_path)?;
+    if snapshot.files.len() >= MAX_MIRROR_FILES {
+        return Err("config mirror превышает file-count limit".into());
+    }
+    let next_total = total_bytes
+        .checked_add(rendered.len() as u64)
+        .ok_or_else(|| "config mirror size overflow".to_string())?;
+    if next_total > MAX_MIRROR_TOTAL_BYTES {
+        return Err("config mirror превышает total-size limit".into());
+    }
+    *total_bytes = next_total;
+    snapshot.files.push(MirroredFile {
+        guest_path,
+        bytes: rendered,
+        mode: 0o600,
     });
     Ok(())
 }
@@ -704,7 +894,15 @@ mod tests {
         let codex = root.join("host/.codex");
         fs::create_dir_all(claude.join("skills/reviewer")).unwrap();
         fs::create_dir_all(codex.join("skills/planner")).unwrap();
-        (root, MirrorRoots { claude, codex })
+        let claude_json = root.join("host/.claude.json");
+        (
+            root,
+            MirrorRoots {
+                claude,
+                codex,
+                claude_json,
+            },
+        )
     }
 
     fn guest_paths(snapshot: &ConfigSnapshot) -> Vec<&Path> {
@@ -713,6 +911,96 @@ mod tests {
             .iter()
             .map(|file| file.guest_path.as_path())
             .collect()
+    }
+
+    #[test]
+    fn user_mcp_servers_travel_by_shape_not_by_known_names() {
+        let (root, roots) = fixture("mcp");
+        // произвольный набор пользователя: разные типы, свои поля, секреты
+        fs::write(
+            &roots.claude_json,
+            br#"{
+              "oauthAccount": {"emailAddress":"must-stay-host@example.com"},
+              "mcpServers": {
+                "remote-http": {"type":"http","url":"https://api.example.com/mcp"},
+                "remote-ws":   {"type":"ws","url":"wss://example.com/socket"},
+                "stdio-npx":   {"type":"stdio","command":"npx","args":["-y","@scope/server"],
+                                "env":{"LOG_LEVEL":"debug","API_TOKEN":"must-not-travel"}},
+                "ide-bridge":  {"type":"sse","url":"http://localhost:64342/sse"},
+                "loopback-ip": {"type":"http","url":"http://127.0.0.1:8080/mcp"},
+                "ipv6-local":  {"type":"http","url":"http://[::1]:9000/mcp"},
+                "host-binary": {"type":"stdio","command":"/opt/homebrew/bin/thing"},
+                "host-arg":    {"type":"stdio","command":"node","args":["/Users/someone/x.js"]},
+                "malformed":   "not-an-object"
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let snapshot = build_snapshot(&roots).unwrap();
+        let mirrored = snapshot
+            .files
+            .iter()
+            .find(|file| file.guest_path == Path::new(".claude/mcp-servers.json"))
+            .expect("перенесённые mcpServers");
+        let value: serde_json::Value = serde_json::from_slice(&mirrored.bytes).unwrap();
+        let servers = value.get("mcpServers").unwrap().as_object().unwrap();
+
+        // переносимое — по форме, а не по имени
+        let mut travelled = servers.keys().cloned().collect::<Vec<_>>();
+        travelled.sort();
+        assert_eq!(travelled, vec!["remote-http", "remote-ws", "stdio-npx"]);
+
+        // секрет вырезан, обычная настройка осталась
+        let env = servers["stdio-npx"].get("env").unwrap();
+        assert!(env.get("API_TOKEN").is_none());
+        assert_eq!(env.get("LOG_LEVEL").unwrap(), "debug");
+
+        // остальное объяснено, а не выброшено молча
+        let reported = snapshot.diagnostics.host_only_mcp_servers.join("\n");
+        for name in [
+            "ide-bridge",
+            "loopback-ip",
+            "ipv6-local",
+            "host-binary",
+            "host-arg",
+            "malformed",
+        ] {
+            assert!(reported.contains(name), "нет причины для {name}: {reported}");
+        }
+
+        // из .claude.json не утекает ничего, кроме mcpServers
+        let text = String::from_utf8_lossy(&mirrored.bytes);
+        assert!(!text.contains("must-stay-host"));
+        assert!(!text.contains("must-not-travel"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn missing_or_empty_claude_json_is_not_an_error() {
+        // у нового пользователя ~/.claude.json может не быть вовсе
+        let (root, roots) = fixture("mcp-absent");
+        let snapshot = build_snapshot(&roots).unwrap();
+        assert!(!snapshot
+            .files
+            .iter()
+            .any(|file| file.guest_path == Path::new(".claude/mcp-servers.json")));
+        assert!(snapshot
+            .diagnostics
+            .missing_sources
+            .contains(&".claude/mcp-servers.json".to_string()));
+
+        // либо файл есть, но без mcpServers — тоже штатно, пустышку не пишем
+        let (root2, roots2) = fixture("mcp-empty");
+        fs::write(&roots2.claude_json, br#"{"autoUpdates":true}"#).unwrap();
+        let snapshot2 = build_snapshot(&roots2).unwrap();
+        assert!(!snapshot2
+            .files
+            .iter()
+            .any(|file| file.guest_path == Path::new(".claude/mcp-servers.json")));
+        assert!(snapshot2.diagnostics.host_only_mcp_servers.is_empty());
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(root2).ok();
     }
 
     #[test]

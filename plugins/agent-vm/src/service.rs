@@ -199,6 +199,7 @@ impl<R: CommandRunner, S: SecretStore> SystemConfigBootstrap<R, S> {
         let roots = MirrorRoots {
             claude: self.account_home.join(".claude"),
             codex: self.account_home.join(".codex"),
+            claude_json: self.account_home.join(".claude.json"),
         };
         let snapshot = match record.workspace.host_path.as_deref() {
             Some(host_path) => {

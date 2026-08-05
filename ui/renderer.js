@@ -1,17 +1,17 @@
 /* Панель Jarvis: сессии, чат сессии, настройки. Все данные — через textContent, без innerHTML. */
 
-const panelEl = document.getElementById('panel');
-const listEl = document.getElementById('list');
-const chatEl = document.getElementById('chat');
-const chatlogEl = document.getElementById('chatlog');
-const chatTitleEl = document.getElementById('chatTitle');
-const chatChannelEl = document.getElementById('chatChannel');
-const chatModelEl = document.getElementById('chatModel');
-const chatDotEl = document.getElementById('chatDot');
-const settingsEl = document.getElementById('settings');
-const queryEl = document.getElementById('query');
-const replyEl = document.getElementById('reply');
-const chatAttachEl = document.getElementById('chatAttach');
+const panelEl = document.getElementById("panel");
+const listEl = document.getElementById("list");
+const chatEl = document.getElementById("chat");
+const chatlogEl = document.getElementById("chatlog");
+const chatTitleEl = document.getElementById("chatTitle");
+const chatChannelEl = document.getElementById("chatChannel");
+const chatModelEl = document.getElementById("chatModel");
+const chatDotEl = document.getElementById("chatDot");
+const settingsEl = document.getElementById("settings");
+const queryEl = document.getElementById("query");
+const replyEl = document.getElementById("reply");
+const chatAttachEl = document.getElementById("chatAttach");
 
 // Вставленные в поле ответа картинки, ждущие отправки. Каждая — { id, ext,
 // dataUrl } (base64 для IPC режется из dataUrl на отправке — не храним дважды).
@@ -21,79 +21,104 @@ let attachSeq = 0;
 const MAX_IMAGES = 8;
 // Расширения, с которыми session_save_image (Rust) пишет файлы на диск, — единый
 // список для чип-regex и extFromType; источник истины для записи — белый список в ipc.rs.
-const IMG_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'heic', 'tiff', 'tif'];
-const PASTED_IMG_RE = new RegExp(String.raw`(^|\s)(\/[^\s]*\/jarvis-paste\/[^\s]+\.(?:${IMG_EXTS.join('|')}))\b`, 'gi');
+const IMG_EXTS = [
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "heic",
+  "tiff",
+  "tif",
+];
+const PASTED_IMG_RE = new RegExp(
+  String.raw`(^|\s)(\/[^\s]*\/jarvis-paste\/[^\s]+\.(?:${IMG_EXTS.join("|")}))\b`,
+  "gi",
+);
 
 // Фокус в редактируемом поле? Тогда нативные текст-комбо (⌘⌫ = удалить до начала
 // строки) НЕ должны перехватываться глобальными хоткеями приложения — иначе ⌘⌫ при
 // печати в чате стирал завершённые сессии (clearFinished). См. обработчик ниже.
 function editingText(el = document.activeElement) {
   if (!el) return false;
-  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable === true;
+  return (
+    el.tagName === "INPUT" ||
+    el.tagName === "TEXTAREA" ||
+    el.isContentEditable === true
+  );
 }
-const footerLeftEl = document.getElementById('footerLeft');
-const tabSessionsEl = document.getElementById('tabSessions');
-const tabSettingsEl = document.getElementById('tabSettings');
-const voicehistEl = document.getElementById('voicehist');
-const tabVoiceEl = document.getElementById('tabVoice');
-const activeEnvironmentsEl = document.getElementById('activeEnvironments');
-const activeEnvironmentRowsEl = document.getElementById('activeEnvironmentRows');
-const activeEnvironmentCountEl = document.getElementById('activeEnvironmentCount');
-const agentVmWorkspaceEl = document.getElementById('agentVmWorkspace');
-const agentVmFeedEl = document.getElementById('agentVmFeed');
-const agentVmPromptEl = document.getElementById('agentVmPrompt');
-const agentVmSendEl = document.getElementById('agentVmSend');
-const agentVmCommandPaletteEl = document.getElementById('agentVmCommandPalette');
-const agentVmAttachmentsEl = document.getElementById('agentVmAttachments');
-const agentVmAttachEl = document.getElementById('agentVmAttach');
-const agentVmImagePickerEl = document.getElementById('agentVmImagePicker');
+const footerLeftEl = document.getElementById("footerLeft");
+const tabSessionsEl = document.getElementById("tabSessions");
+const tabSettingsEl = document.getElementById("tabSettings");
+const voicehistEl = document.getElementById("voicehist");
+const tabVoiceEl = document.getElementById("tabVoice");
+const activeEnvironmentsEl = document.getElementById("activeEnvironments");
+const activeEnvironmentRowsEl = document.getElementById(
+  "activeEnvironmentRows",
+);
+const activeEnvironmentCountEl = document.getElementById(
+  "activeEnvironmentCount",
+);
+const agentVmWorkspaceEl = document.getElementById("agentVmWorkspace");
+const agentVmFeedEl = document.getElementById("agentVmFeed");
+const agentVmPromptEl = document.getElementById("agentVmPrompt");
+const agentVmSendEl = document.getElementById("agentVmSend");
+const agentVmCommandPaletteEl = document.getElementById(
+  "agentVmCommandPalette",
+);
+const agentVmAttachmentsEl = document.getElementById("agentVmAttachments");
+const agentVmAttachEl = document.getElementById("agentVmAttach");
+const agentVmImagePickerEl = document.getElementById("agentVmImagePicker");
 
 const STATUS_LABEL = {
-  working: 'работает',
-  waiting: 'ждёт тебя',
-  done: 'готово',
-  idle: 'простаивает',
-  limit: 'лимит — ждёт сброса',
+  working: "работает",
+  waiting: "ждёт тебя",
+  done: "готово",
+  idle: "простаивает",
+  limit: "лимит — ждёт сброса",
 };
 
 let state = [];
 let sel = 0;
-let view = 'list'; // list | chat | question | history | stats | voicehist | agentvm | settings
+let view = "list"; // list | chat | question | history | stats | voicehist | agentvm | settings
 let chatSessionId = null;
 
 /* ---------- helpers ---------- */
 
-const SVG_NS = 'http://www.w3.org/2000/svg';
+const SVG_NS = "http://www.w3.org/2000/svg";
 function svgIcon(paths, size = 13) {
-  const svg = document.createElementNS(SVG_NS, 'svg');
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('width', size);
-  svg.setAttribute('height', size);
-  svg.setAttribute('fill', 'none');
-  svg.setAttribute('stroke', 'currentColor');
-  svg.setAttribute('stroke-width', '2');
-  svg.setAttribute('stroke-linecap', 'round');
-  svg.setAttribute('stroke-linejoin', 'round');
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
   for (const d of paths) {
-    const p = document.createElementNS(SVG_NS, 'path');
-    p.setAttribute('d', d);
+    const p = document.createElementNS(SVG_NS, "path");
+    p.setAttribute("d", d);
     svg.appendChild(p);
   }
   return svg;
 }
 // закладка (lucide bookmark) — чистая вертикальная иконка для закреплённых
-const BOOKMARK_PATHS = ['m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z'];
+const BOOKMARK_PATHS = ["m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"];
 
-const pad2 = (n) => String(n).padStart(2, '0');
+const pad2 = (n) => String(n).padStart(2, "0");
 
 // время старта сессии (createdAt): сегодня → ЧЧ:ММ, вчера → «вчера ЧЧ:ММ», раньше → ДД.ММ
 function startLabel(ts) {
-  if (!ts) return '';
+  if (!ts) return "";
   const d = new Date(ts);
   const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   const now = new Date();
   const sameDate = (a, b) =>
-    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
   if (sameDate(d, now)) return hm;
   const yest = new Date(now);
   yest.setDate(now.getDate() - 1);
@@ -102,13 +127,14 @@ function startLabel(ts) {
 }
 
 function startTitle(ts) {
-  if (!ts) return '';
+  if (!ts) return "";
   const d = new Date(ts);
   return `Запущена ${pad2(d.getDate())}.${pad2(d.getMonth() + 1)} в ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 function plural(n, one, few, many) {
-  const m10 = n % 10, m100 = n % 100;
+  const m10 = n % 10,
+    m100 = n % 100;
   if (m10 === 1 && m100 !== 11) return one;
   if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
   return many;
@@ -116,10 +142,10 @@ function plural(n, one, few, many) {
 
 let toastTimer = null;
 function showToast(text) {
-  document.querySelector('.toast')?.remove();
+  document.querySelector(".toast")?.remove();
   clearTimeout(toastTimer);
-  const t = document.createElement('div');
-  t.className = 'toast';
+  const t = document.createElement("div");
+  t.className = "toast";
   t.textContent = text;
   document.body.appendChild(t);
   toastTimer = setTimeout(() => t.remove(), 2200);
@@ -127,72 +153,95 @@ function showToast(text) {
 
 /* ---------- вьюхи ---------- */
 
-const contentEl = document.getElementById('content');
-const detailEmptyEl = document.getElementById('detailEmpty');
+const contentEl = document.getElementById("content");
+const detailEmptyEl = document.getElementById("detailEmpty");
 
 /** Оконный режим (14h) против накладки ⌘J. Источник правды — атрибут на <html>,
  *  который ставит theme.js из настроек; так режим виден и до ответа моста. */
-const windowMode = () => document.documentElement.dataset.mode === 'window';
+const windowMode = () => document.documentElement.dataset.mode === "window";
 
 function setView(next) {
   const previousView = view;
-  if (view === 'chat' && next !== 'chat') {
+  if (view === "chat" && next !== "chat") {
     window.jarvis.closeChat();
     chatSessionId = null;
   }
-  if (view === 'agentvm' && next !== 'agentvm') syncAgentVmFocus(null, null);
-  if (view === 'question' && next !== 'question') qSessionId = null;
-  if (next === 'history' && view !== 'history') histProject = null; // вкладка всегда открывается со списка проектов
-  if (next !== previousView && (next === 'history' || previousView === 'history')) {
-    queryEl.value = '';
+  if (view === "agentvm" && next !== "agentvm") syncAgentVmFocus(null, null);
+  if (view === "question" && next !== "question") qSessionId = null;
+  if (next === "history" && view !== "history") histProject = null; // вкладка всегда открывается со списка проектов
+  if (
+    next !== previousView &&
+    (next === "history" || previousView === "history")
+  ) {
+    queryEl.value = "";
   }
   view = next;
-  queryEl.placeholder = next === 'history' ? 'Найти проект или папку…' : 'Найти чат…';
+  queryEl.placeholder =
+    next === "history" ? "Найти проект или папку…" : "Найти чат…";
   closeActions();
   // Оконный режим (14h): список слева живёт всегда, поиск и вкладки — тоже.
   // В накладке остаётся прежний фокус-режим: чат, вопрос и рабочее место
   // проекта занимают панель целиком.
   const win = windowMode();
   const minimal =
-    !win && (next === 'chat' || next === 'question' || next === 'agentvm');
-  document.querySelector('.cmdrow').hidden = minimal;
-  document.querySelector('.tabs').hidden = minimal;
-  listEl.hidden = win ? false : next !== 'list';
-  if (next !== 'list') activeEnvironmentsEl.hidden = true;
+    !win && (next === "chat" || next === "question" || next === "agentvm");
+  document.querySelector(".cmdrow").hidden = minimal;
+  document.querySelector(".tabs").hidden = minimal;
+  listEl.hidden = win ? false : next !== "list";
+  if (next !== "list") activeEnvironmentsEl.hidden = true;
   // правая колонка окна пустует, пока сессия не выбрана
-  contentEl.hidden = win && next === 'list';
-  detailEmptyEl.hidden = !(win && next === 'list');
-  chatEl.hidden = next !== 'chat';
-  qviewEl.hidden = next !== 'question';
-  settingsEl.hidden = next !== 'settings';
-  statsEl.hidden = next !== 'stats';
-  voicehistEl.hidden = next !== 'voicehist';
-  historyEl.hidden = next !== 'history';
-  agentVmWorkspaceEl.hidden = next !== 'agentvm';
+  contentEl.hidden = win && next === "list";
+  detailEmptyEl.hidden = !(win && next === "list");
+  chatEl.hidden = next !== "chat";
+  qviewEl.hidden = next !== "question";
+  settingsEl.hidden = next !== "settings";
+  statsEl.hidden = next !== "stats";
+  voicehistEl.hidden = next !== "voicehist";
+  historyEl.hidden = next !== "history";
+  agentVmWorkspaceEl.hidden = next !== "agentvm";
   // чат, вопрос и рабочее место проекта несут собственные нижние бары —
   // парящий футер только вне них. В окне полоска не парит, а стоит в сетке
   // под обеими колонками — там она нужна всегда.
   footerEl.hidden =
-    !win && (next === 'chat' || next === 'question' || next === 'agentvm');
-  if (next === 'list') { primaryLabelEl.textContent = 'Открыть чат'; primaryKeyEl.textContent = '↵'; }
-  else if (next === 'history') { primaryLabelEl.textContent = 'Открыть проект'; primaryKeyEl.textContent = '↵'; }
-  else { primaryLabelEl.textContent = 'Назад'; primaryKeyEl.textContent = 'esc'; }
-  tabSettingsEl.classList.toggle('active', next === 'settings');
-  document.getElementById('tlSettings').classList.toggle('active', next === 'settings');
-  tabStatsEl.classList.toggle('active', next === 'stats');
-  tabHistoryEl.classList.toggle('active', next === 'history' || next === 'agentvm');
-  tabVoiceEl.classList.toggle('active', next === 'voicehist');
-  tabSessionsEl.classList.toggle('active', next === 'list' || next === 'chat');
-  if (next === 'settings') loadSettings();
-  if (next === 'stats') renderStats();
-  if (next === 'voicehist') {
-    voicehistEl.style.cssText = 'padding:0;height:100%;overflow:hidden';
-    try { window.initVoiceHistory(voicehistEl); } catch (e) { console.error('[voicehist] init:', e); }
+    !win && (next === "chat" || next === "question" || next === "agentvm");
+  if (next === "list") {
+    primaryLabelEl.textContent = "Открыть чат";
+    primaryKeyEl.textContent = "↵";
+  } else if (next === "history") {
+    primaryLabelEl.textContent = "Открыть проект";
+    primaryKeyEl.textContent = "↵";
+  } else {
+    primaryLabelEl.textContent = "Назад";
+    primaryKeyEl.textContent = "esc";
   }
-  if (next === 'history') renderHistory();
-  if (next === 'agentvm') renderAgentVmWorkspace();
-  else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
-  if (next === 'list') {
+  tabSettingsEl.classList.toggle("active", next === "settings");
+  document
+    .getElementById("tlSettings")
+    .classList.toggle("active", next === "settings");
+  tabStatsEl.classList.toggle("active", next === "stats");
+  tabHistoryEl.classList.toggle(
+    "active",
+    next === "history" || next === "agentvm",
+  );
+  tabVoiceEl.classList.toggle("active", next === "voicehist");
+  tabSessionsEl.classList.toggle("active", next === "list" || next === "chat");
+  if (next === "settings") loadSettings();
+  if (next === "stats") renderStats();
+  if (next === "voicehist") {
+    voicehistEl.style.cssText = "padding:0;height:100%;overflow:hidden";
+    try {
+      window.initVoiceHistory(voicehistEl);
+    } catch (e) {
+      console.error("[voicehist] init:", e);
+    }
+  }
+  if (next === "history") renderHistory();
+  if (next === "agentvm") renderAgentVmWorkspace();
+  else if (recording) {
+    recording = false;
+    recordingBtn.classList.remove("recording");
+  }
+  if (next === "list") {
     renderActiveEnvironments();
     queryEl.focus();
   }
@@ -209,12 +258,12 @@ function openSession(s) {
 /* ---------- список сессий ---------- */
 
 const HOST_LABEL = {
-  'iTerm.app': 'iTerm',
-  Apple_Terminal: 'Terminal',
-  vscode: 'VS Code',
-  'JetBrains-JediTerm': 'JetBrains',
-  WezTerm: 'WezTerm',
-  ghostty: 'Ghostty',
+  "iTerm.app": "iTerm",
+  Apple_Terminal: "Terminal",
+  vscode: "VS Code",
+  "JetBrains-JediTerm": "JetBrains",
+  WezTerm: "WezTerm",
+  ghostty: "Ghostty",
 };
 
 function hostLabel(s) {
@@ -233,7 +282,10 @@ function sortCmp(a, b) {
 
 // полная пересортировка — вызывается только при открытии панели
 function rebuildOrder() {
-  displayOrder = state.slice().sort(sortCmp).map((s) => s.id);
+  displayOrder = state
+    .slice()
+    .sort(sortCmp)
+    .map((s) => s.id);
 }
 
 // порядок стабилен, пока панель открыта: ушедшие выпадают, новые — в конец,
@@ -242,7 +294,8 @@ function orderedSessions() {
   const byId = new Map(state.map((s) => [s.id, s]));
   displayOrder = displayOrder.filter((id) => byId.has(id));
   const known = new Set(displayOrder);
-  for (const s of state.filter((x) => !known.has(x.id)).sort(sortCmp)) displayOrder.push(s.id);
+  for (const s of state.filter((x) => !known.has(x.id)).sort(sortCmp))
+    displayOrder.push(s.id);
   const ordered = displayOrder.map((id) => byId.get(id));
   return [
     ...ordered.filter((s) => s.pinned),
@@ -255,20 +308,26 @@ function filtered() {
   const q = queryEl.value.trim().toLowerCase();
   if (!q) return ordered;
   return ordered.filter((s) =>
-    `${s.project || ''} ${s.detail || ''} ${s.agent || ''}`.toLowerCase().includes(q));
+    `${s.project || ""} ${s.detail || ""} ${s.agent || ""}`
+      .toLowerCase()
+      .includes(q),
+  );
 }
 
 function render() {
-  if (view !== 'list') return;
+  if (view !== "list") return;
   renderActiveEnvironments();
   // hover-выбор разоружаем на каждую перерисовку: дальше его снова взведёт только
   // реальное mousemove (см. listEl.mousemove). Иначе фон-обновления (data push)
   // пересоздают строки под неподвижным курсором → mouseenter таскает выделение.
   palHoverEnabled = false;
   // палитра быстрых команд: «/» в главном поиске вместо списка сессий
-  if (argMode || queryEl.value.trim().startsWith('/')) { renderCmdPalette(); return; }
+  if (argMode || queryEl.value.trim().startsWith("/")) {
+    renderCmdPalette();
+    return;
+  }
   argMode = null;
-  listEl.textContent = '';
+  listEl.textContent = "";
 
   footerLeftEl.textContent = footerText();
 
@@ -276,72 +335,76 @@ function render() {
   sel = Math.min(sel, Math.max(0, list.length - 1));
 
   if (!list.length) {
-    const empty = document.createElement('div');
-    empty.className = 'empty';
+    const empty = document.createElement("div");
+    empty.className = "empty";
     empty.textContent = state.length
-      ? 'Ничего не найдено'
-      : 'Нет активных сессий — запусти claude в любом терминале, они появятся здесь сами.';
+      ? "Ничего не найдено"
+      : "Нет активных сессий — запусти claude в любом терминале, они появятся здесь сами.";
     listEl.appendChild(empty);
     return;
   }
 
   list.forEach((s, i) => {
-    const row = document.createElement('div');
-    row.className = `row ${s.status}${i === sel ? ' selected' : ''}`;
-    row.title = [s.cwd, s.title, ...(s.todoList || [])].filter(Boolean).join('\n');
+    const row = document.createElement("div");
+    row.className = `row ${s.status}${i === sel ? " selected" : ""}`;
+    row.title = [s.cwd, s.title, ...(s.todoList || [])]
+      .filter(Boolean)
+      .join("\n");
 
-    const dot = document.createElement('span');
-    dot.className = 'dot';
+    const dot = document.createElement("span");
+    dot.className = "dot";
 
-    const name = document.createElement('span');
-    name.className = 'name';
-    name.textContent = s.project || '?';
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = s.project || "?";
 
     let branch = null;
     if (s.branch) {
-      branch = document.createElement('span');
-      branch.className = 'gitbranch';
+      branch = document.createElement("span");
+      branch.className = "gitbranch";
       branch.textContent = `⎇ ${s.branch}`;
     }
 
     // бейдж агента: показываем только для не-claude (codex), чтобы отличать
     // сессии разных бэкендов в общем списке; для claude — как раньше (без пилла).
     let agentBadge = null;
-    if (s.agent && s.agent !== 'claude') {
-      agentBadge = document.createElement('span');
-      agentBadge.className = 'badge agent';
+    if (s.agent && s.agent !== "claude") {
+      agentBadge = document.createElement("span");
+      agentBadge.className = "badge agent";
       agentBadge.textContent = s.agent;
     }
 
-    const badge = document.createElement('span');
-    badge.className = 'badge';
+    const badge = document.createElement("span");
+    badge.className = "badge";
     // claude: s.model||'claude' (как было). codex: модель из payload, иначе «…»
     // (не дублируем «codex» — его показывает agentBadge).
-    badge.textContent = s.model || (!s.agent || s.agent === 'claude' ? 'claude' : '…');
+    badge.textContent =
+      s.model || (!s.agent || s.agent === "claude" ? "claude" : "…");
 
     const host = hostLabel(s);
     let hostBadge = null;
     if (host) {
-      hostBadge = document.createElement('span');
-      hostBadge.className = 'badge host';
+      hostBadge = document.createElement("span");
+      hostBadge.className = "badge host";
       hostBadge.textContent = host;
     }
 
-    const summary = document.createElement('span');
-    summary.className = 'summary';
+    const summary = document.createElement("span");
+    summary.className = "summary";
     // контекст по убыванию точности: текущая задача → саммари последних задач → промпт → ai-title
-    const live = s.detail || STATUS_LABEL[s.status] || '';
+    const live = s.detail || STATUS_LABEL[s.status] || "";
     const ctx = s.task
-      ? `${s.taskProgress ? s.taskProgress + ' · ' : ''}${s.task}`
-      : (s.summary || s.lastPrompt || s.title || '');
-    if (s.status === 'working' || s.status === 'waiting') {
-      summary.textContent = ctx && ctx !== live ? `${ctx} — ${live}` : (ctx || live);
+      ? `${s.taskProgress ? s.taskProgress + " · " : ""}${s.task}`
+      : s.summary || s.lastPrompt || s.title || "";
+    if (s.status === "working" || s.status === "waiting") {
+      summary.textContent =
+        ctx && ctx !== live ? `${ctx} — ${live}` : ctx || live;
     } else {
       summary.textContent = ctx || live;
     }
 
-    const time = document.createElement('span');
-    time.className = 'time';
+    const time = document.createElement("span");
+    time.className = "time";
     time.textContent = startLabel(s.createdAt);
     time.title = startTitle(s.createdAt);
 
@@ -352,23 +415,28 @@ function render() {
     if (hostBadge) row.appendChild(hostBadge);
     row.append(summary);
 
-    if (s.pinned) { // чистая метка-закладка; клик — открепить (пин ставится ⌘P)
-      const pin = document.createElement('button');
-      pin.className = 'pin on';
-      pin.title = 'Открепить';
+    if (s.pinned) {
+      // чистая метка-закладка; клик — открепить (пин ставится ⌘P)
+      const pin = document.createElement("button");
+      pin.className = "pin on";
+      pin.title = "Открепить";
       pin.appendChild(svgIcon(BOOKMARK_PATHS, 12));
-      pin.addEventListener('click', (e) => { e.stopPropagation(); window.jarvis.setPin(s.id, false); });
+      pin.addEventListener("click", (e) => {
+        e.stopPropagation();
+        window.jarvis.setPin(s.id, false);
+      });
       row.appendChild(pin);
     }
 
     row.appendChild(time);
-    row.addEventListener('mouseenter', () => {
+    row.addEventListener("mouseenter", () => {
       // hover двигает выбор только при реальном движении мыши (Raycast-стиль):
       // стрелки и фон-перерисовки выделение не теряют
       if (!palHoverEnabled || sel === i) return;
-      sel = i; render();
+      sel = i;
+      render();
     });
-    row.addEventListener('click', () => openSession(s));
+    row.addEventListener("click", () => openSession(s));
     listEl.appendChild(row);
   });
 }
@@ -380,12 +448,12 @@ function render() {
 function renderInline(el, text) {
   for (const t of text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g)) {
     if (!t) continue;
-    if (t.length > 2 && t.startsWith('`') && t.endsWith('`')) {
-      const code = document.createElement('code');
+    if (t.length > 2 && t.startsWith("`") && t.endsWith("`")) {
+      const code = document.createElement("code");
       code.textContent = t.slice(1, -1);
       el.appendChild(code);
-    } else if (t.length > 4 && t.startsWith('**') && t.endsWith('**')) {
-      const b = document.createElement('strong');
+    } else if (t.length > 4 && t.startsWith("**") && t.endsWith("**")) {
+      const b = document.createElement("strong");
       b.textContent = t.slice(2, -2);
       el.appendChild(b);
     } else {
@@ -396,11 +464,12 @@ function renderInline(el, text) {
 
 // «N заметок» с правильным русским склонением
 function notesWord(n) {
-  const d = n % 100, u = n % 10;
-  if (d >= 11 && d <= 14) return 'заметок';
-  if (u === 1) return 'заметка';
-  if (u >= 2 && u <= 4) return 'заметки';
-  return 'заметок';
+  const d = n % 100,
+    u = n % 10;
+  if (d >= 11 && d <= 14) return "заметок";
+  if (u === 1) return "заметка";
+  if (u >= 2 && u <= 4) return "заметки";
+  return "заметок";
 }
 
 function renderMarkdown(root, text) {
@@ -417,39 +486,45 @@ function renderMarkdown(root, text) {
   // финализировать Insight: посчитать заметки и подписать «· N заметок»
   const closeCallout = () => {
     if (!callout) return;
-    const n = calloutBody.querySelectorAll('li, p').length;
+    const n = calloutBody.querySelectorAll("li, p").length;
     if (n) calloutLabel.textContent = `Insight · ${n} ${notesWord(n)}`;
     callout = calloutBody = calloutLabel = null;
   };
 
   const flushPara = () => {
     if (!para.length) return;
-    const p = document.createElement('p');
+    const p = document.createElement("p");
     para.forEach((line, i) => {
-      if (i) p.appendChild(document.createElement('br'));
-      renderInline(p, line.replace(/^#+\s+/, ''));
+      if (i) p.appendChild(document.createElement("br"));
+      renderInline(p, line.replace(/^#+\s+/, ""));
     });
-    if (/^#+\s/.test(para[0])) p.classList.add('md-h');
+    if (/^#+\s/.test(para[0])) p.classList.add("md-h");
     target().appendChild(p);
     para.length = 0;
   };
   const flushCode = () => {
-    const pre = document.createElement('pre');
-    pre.textContent = code.join('\n');
+    const pre = document.createElement("pre");
+    pre.textContent = code.join("\n");
     target().appendChild(pre);
     code.length = 0;
   };
 
-  for (const raw of String(text).split('\n')) {
+  for (const raw of String(text).split("\n")) {
     const line = raw.trimEnd();
     // фенс — только строка, начинающаяся с ``` (упоминание ``` в тексте — не фенс)
     if (/^\s*```/.test(line)) {
       if (inCode) flushCode();
-      else { flushPara(); ul = null; }
+      else {
+        flushPara();
+        ul = null;
+      }
       inCode = !inCode;
       continue;
     }
-    if (inCode) { code.push(raw); continue; }
+    if (inCode) {
+      code.push(raw);
+      continue;
+    }
 
     // `★ Insight ───` → свёрнутая Insight-строка (раскрывается кликом)
     const co = line.match(/^\s*`?\s*[★✦☆]\s*([^─━`]*?)\s*[─━]{3,}\s*`?\s*$/);
@@ -457,22 +532,54 @@ function renderMarkdown(root, text) {
       flushPara();
       ul = null;
       closeCallout(); // вложенных Insight не бывает — закрываем предыдущий
-      callout = document.createElement('div');
-      callout.className = 'callout';
-      const title = document.createElement('div');
-      title.className = 'callout-title';
-      title.appendChild(svgEl('svg', { width: '11', height: '11', viewBox: '0 0 12 12', fill: 'none', class: 'istar' }))
-        .appendChild(svgEl('path', { d: 'M6 1 L7.3 4.4 L11 4.6 L8.1 6.9 L9.1 10.4 L6 8.4 L2.9 10.4 L3.9 6.9 L1 4.6 L4.7 4.4 Z', stroke: 'currentColor', 'stroke-width': '1.1', 'stroke-linejoin': 'round' }));
-      calloutLabel = document.createElement('span');
-      calloutLabel.textContent = co[1].trim() || 'Insight';
+      callout = document.createElement("div");
+      callout.className = "callout";
+      const title = document.createElement("div");
+      title.className = "callout-title";
+      title
+        .appendChild(
+          svgEl("svg", {
+            width: "11",
+            height: "11",
+            viewBox: "0 0 12 12",
+            fill: "none",
+            class: "istar",
+          }),
+        )
+        .appendChild(
+          svgEl("path", {
+            d: "M6 1 L7.3 4.4 L11 4.6 L8.1 6.9 L9.1 10.4 L6 8.4 L2.9 10.4 L3.9 6.9 L1 4.6 L4.7 4.4 Z",
+            stroke: "currentColor",
+            "stroke-width": "1.1",
+            "stroke-linejoin": "round",
+          }),
+        );
+      calloutLabel = document.createElement("span");
+      calloutLabel.textContent = co[1].trim() || "Insight";
       title.appendChild(calloutLabel);
-      const chev = svgEl('svg', { width: '9', height: '9', viewBox: '0 0 10 10', fill: 'none', class: 'ichev' });
-      chev.appendChild(svgEl('path', { d: 'M3 2 L7 5 L3 8', stroke: 'currentColor', 'stroke-width': '1.4', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+      const chev = svgEl("svg", {
+        width: "9",
+        height: "9",
+        viewBox: "0 0 10 10",
+        fill: "none",
+        class: "ichev",
+      });
+      chev.appendChild(
+        svgEl("path", {
+          d: "M3 2 L7 5 L3 8",
+          stroke: "currentColor",
+          "stroke-width": "1.4",
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round",
+        }),
+      );
       title.appendChild(chev);
-      title.addEventListener('click', () => title.parentElement.classList.toggle('open'));
+      title.addEventListener("click", () =>
+        title.parentElement.classList.toggle("open"),
+      );
       callout.appendChild(title);
-      calloutBody = document.createElement('div');
-      calloutBody.className = 'callout-body';
+      calloutBody = document.createElement("div");
+      calloutBody.className = "callout-body";
       callout.appendChild(calloutBody);
       root.appendChild(callout);
       continue;
@@ -482,16 +589,26 @@ function renderMarkdown(root, text) {
       flushPara();
       ul = null;
       if (callout) closeCallout();
-      else root.appendChild(Object.assign(document.createElement('div'), { className: 'md-hr' }));
+      else
+        root.appendChild(
+          Object.assign(document.createElement("div"), { className: "md-hr" }),
+        );
       continue;
     }
 
-    if (!line.trim()) { flushPara(); ul = null; continue; }
+    if (!line.trim()) {
+      flushPara();
+      ul = null;
+      continue;
+    }
     const m = line.match(/^\s*[-*•]\s+(.*)$/);
     if (m) {
       flushPara();
-      if (!ul) { ul = document.createElement('ul'); target().appendChild(ul); }
-      const li = document.createElement('li');
+      if (!ul) {
+        ul = document.createElement("ul");
+        target().appendChild(ul);
+      }
+      const li = document.createElement("li");
       renderInline(li, m[1]);
       ul.appendChild(li);
       continue;
@@ -516,11 +633,11 @@ const turnTarget = () => (curTurn ? curTurn.raw : chatlogEl);
 
 function startTurn(key) {
   toolsGroup = null; // чипы прошлого хода не продолжаем в новом
-  const wrap = document.createElement('div');
-  wrap.className = 'turn';
+  const wrap = document.createElement("div");
+  wrap.className = "turn";
   wrap.dataset.key = key;
-  const raw = document.createElement('div');
-  raw.className = 'turnraw';
+  const raw = document.createElement("div");
+  raw.className = "turnraw";
   wrap.appendChild(raw);
   chatlogEl.appendChild(wrap);
   curTurn = { key, wrap, raw };
@@ -528,93 +645,147 @@ function startTurn(key) {
 
 /* тумблер «Сводка/Лента» — запоминается локально, по умолчанию сводка.
  * Объявлен здесь (до openChat): const-стрелки не хойстятся. */
-const sumToggleEl = document.getElementById('sumToggle');
-const summaryModeOn = () => localStorage.getItem('chatSummary') !== '0';
+const sumToggleEl = document.getElementById("sumToggle");
+const summaryModeOn = () => localStorage.getItem("chatSummary") !== "0";
 function renderSumToggle() {
   const on = summaryModeOn();
-  sumToggleEl.classList.toggle('on', on);
-  sumToggleEl.textContent = on ? 'Сводка' : 'Лента';
-  chatlogEl.classList.toggle('sum', on);
+  sumToggleEl.classList.toggle("on", on);
+  sumToggleEl.textContent = on ? "Сводка" : "Лента";
+  chatlogEl.classList.toggle("sum", on);
 }
-sumToggleEl.addEventListener('click', () => {
-  localStorage.setItem('chatSummary', summaryModeOn() ? '0' : '1');
+sumToggleEl.addEventListener("click", () => {
+  localStorage.setItem("chatSummary", summaryModeOn() ? "0" : "1");
   renderSumToggle();
 });
 renderSumToggle();
 
 // имя тула (англ., как в транскрипте) → [русский глагол, иконка]
 const TOOL_VERB = {
-  edit: ['изменил', 'pencil'], multiedit: ['изменил', 'pencil'],
-  notebookedit: ['изменил', 'pencil'], update: ['изменил', 'pencil'],
-  write: ['создал', 'pencil'],
-  read: ['читал', 'doc'], notebookread: ['читал', 'doc'],
-  bash: ['выполнил', 'term'],
-  grep: ['искал', 'search'], glob: ['искал', 'search'],
-  search: ['искал', 'search'], websearch: ['искал', 'search'],
-  webfetch: ['загрузил', 'globe'], fetch: ['загрузил', 'globe'],
-  task: ['запустил', 'spark'], agent: ['запустил', 'spark'],
-  todowrite: ['обновил план', 'check'],
-  taskcreate: ['задача', 'check'], taskupdate: ['задача', 'check'], taskget: ['задача', 'check'],
+  edit: ["изменил", "pencil"],
+  multiedit: ["изменил", "pencil"],
+  notebookedit: ["изменил", "pencil"],
+  update: ["изменил", "pencil"],
+  write: ["создал", "pencil"],
+  read: ["читал", "doc"],
+  notebookread: ["читал", "doc"],
+  bash: ["выполнил", "term"],
+  grep: ["искал", "search"],
+  glob: ["искал", "search"],
+  search: ["искал", "search"],
+  websearch: ["искал", "search"],
+  webfetch: ["загрузил", "globe"],
+  fetch: ["загрузил", "globe"],
+  task: ["запустил", "spark"],
+  agent: ["запустил", "spark"],
+  todowrite: ["обновил план", "check"],
+  taskcreate: ["задача", "check"],
+  taskupdate: ["задача", "check"],
+  taskget: ["задача", "check"],
 };
 
 // маленькие inline-иконки тулов (через DOM — без innerHTML)
 const TOOL_ICON_PATHS = {
-  pencil: ['M8.5 1.5 L10.5 3.5 L4 10 L1.5 10.5 L2 8 Z'],
-  doc: ['M3 1.5 H7 L9 3.5 V10.5 H3 Z', 'M7 1.5 V3.5 H9'],
-  term: ['M2 3 L4.5 6 L2 9', 'M6 9.2 H10'],
-  search: ['M9.5 9.5 L7 7'],
-  globe: ['M1.5 6 H10.5', 'M6 1.5 C 3.2 3.6 3.2 8.4 6 10.5 C 8.8 8.4 8.8 3.6 6 1.5 Z'],
-  spark: ['M6 1 L7.3 4.4 L11 4.6 L8.1 6.9 L9.1 10.4 L6 8.4 L2.9 10.4 L3.9 6.9 L1 4.6 L4.7 4.4 Z'],
-  check: ['M2.5 6.5 L5 9 L9.5 3'],
+  pencil: ["M8.5 1.5 L10.5 3.5 L4 10 L1.5 10.5 L2 8 Z"],
+  doc: ["M3 1.5 H7 L9 3.5 V10.5 H3 Z", "M7 1.5 V3.5 H9"],
+  term: ["M2 3 L4.5 6 L2 9", "M6 9.2 H10"],
+  search: ["M9.5 9.5 L7 7"],
+  globe: [
+    "M1.5 6 H10.5",
+    "M6 1.5 C 3.2 3.6 3.2 8.4 6 10.5 C 8.8 8.4 8.8 3.6 6 1.5 Z",
+  ],
+  spark: [
+    "M6 1 L7.3 4.4 L11 4.6 L8.1 6.9 L9.1 10.4 L6 8.4 L2.9 10.4 L3.9 6.9 L1 4.6 L4.7 4.4 Z",
+  ],
+  check: ["M2.5 6.5 L5 9 L9.5 3"],
 };
 function toolIcon(kind) {
-  const svg = svgEl('svg', { width: '11', height: '11', viewBox: '0 0 12 12', fill: 'none' });
-  if (kind === 'search') svg.appendChild(svgEl('circle', { cx: '5', cy: '5', r: '3.2', stroke: 'currentColor', 'stroke-width': '1.2' }));
-  if (kind === 'globe') svg.appendChild(svgEl('circle', { cx: '6', cy: '6', r: '4.5', stroke: 'currentColor', 'stroke-width': '1.2' }));
+  const svg = svgEl("svg", {
+    width: "11",
+    height: "11",
+    viewBox: "0 0 12 12",
+    fill: "none",
+  });
+  if (kind === "search")
+    svg.appendChild(
+      svgEl("circle", {
+        cx: "5",
+        cy: "5",
+        r: "3.2",
+        stroke: "currentColor",
+        "stroke-width": "1.2",
+      }),
+    );
+  if (kind === "globe")
+    svg.appendChild(
+      svgEl("circle", {
+        cx: "6",
+        cy: "6",
+        r: "4.5",
+        stroke: "currentColor",
+        "stroke-width": "1.2",
+      }),
+    );
   for (const d of TOOL_ICON_PATHS[kind] || []) {
-    svg.appendChild(svgEl('path', { d, stroke: 'currentColor', 'stroke-width': '1.2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+    svg.appendChild(
+      svgEl("path", {
+        d,
+        stroke: "currentColor",
+        "stroke-width": "1.2",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      }),
+    );
   }
   return svg;
 }
 
 // "Edit · index.html" → { tool:'Edit', arg:'index.html' }
 function toolParts(label) {
-  const i = label.indexOf(' · ');
-  return i < 0 ? { tool: label, arg: '' } : { tool: label.slice(0, i), arg: label.slice(i + 3) };
+  const i = label.indexOf(" · ");
+  return i < 0
+    ? { tool: label, arg: "" }
+    : { tool: label.slice(0, i), arg: label.slice(i + 3) };
 }
 
 function bumpCount(chip) {
   const n = (Number(chip.dataset.count) || 1) + 1;
   chip.dataset.count = String(n);
-  let c = chip.querySelector('.tcount');
-  if (!c) { c = document.createElement('span'); c.className = 'tcount'; chip.appendChild(c); }
+  let c = chip.querySelector(".tcount");
+  if (!c) {
+    c = document.createElement("span");
+    c.className = "tcount";
+    chip.appendChild(c);
+  }
   c.textContent = `×${n}`;
 }
 
 function addToolChip(label) {
   if (!toolsGroup) {
-    toolsGroup = document.createElement('div');
-    toolsGroup.className = 'msg tools';
+    toolsGroup = document.createElement("div");
+    toolsGroup.className = "msg tools";
     turnTarget().appendChild(toolsGroup);
   }
   const last = toolsGroup.lastElementChild;
-  if (last && last.dataset.label === label) { bumpCount(last); return; }
+  if (last && last.dataset.label === label) {
+    bumpCount(last);
+    return;
+  }
 
   const { tool, arg } = toolParts(label);
   const [verb, icon] = TOOL_VERB[tool.toLowerCase()] || [tool, null];
 
-  const chip = document.createElement('span');
-  chip.className = 'chip';
+  const chip = document.createElement("span");
+  chip.className = "chip";
   chip.dataset.label = label;
   chip.title = label;
   if (icon) chip.appendChild(toolIcon(icon));
-  const v = document.createElement('span');
-  v.className = 'tverb';
+  const v = document.createElement("span");
+  v.className = "tverb";
   v.textContent = verb;
   chip.appendChild(v);
   if (arg) {
-    const a = document.createElement('span');
-    a.className = 'targ';
+    const a = document.createElement("span");
+    a.className = "targ";
     a.textContent = arg;
     chip.appendChild(a);
   }
@@ -623,10 +794,10 @@ function addToolChip(label) {
 
 // epoch-мс → HH:MM локального времени (для метки времени над репликой)
 function fmtClock(ts) {
-  if (!ts) return '';
+  if (!ts) return "";
   const d = new Date(ts);
-  if (isNaN(d)) return '';
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  if (isNaN(d)) return "";
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 // вытащить вложения юзера в чипы: [Image #N] и @path-упоминания файлов.
@@ -634,42 +805,75 @@ function fmtClock(ts) {
 function extractAttachments(raw) {
   const chips = [];
   let text = String(raw);
-  text = text.replace(/\[Image #(\d+)\]/g, (_, n) => { chips.push({ type: 'image', label: `Image #${n}` }); return ''; });
+  text = text.replace(/\[Image #(\d+)\]/g, (_, n) => {
+    chips.push({ type: "image", label: `Image #${n}` });
+    return "";
+  });
   // путь к картинке, вставленной из Jarvis (только наш temp-каталог jarvis-paste —
   // произвольные пути, набранные юзером руками, из текста не выдёргиваем)
-  text = text.replace(PASTED_IMG_RE, (m, pre, p) => { chips.push({ type: 'image', label: p.split('/').pop() }); return pre; });
+  text = text.replace(PASTED_IMG_RE, (m, pre, p) => {
+    chips.push({ type: "image", label: p.split("/").pop() });
+    return pre;
+  });
   // @file: только если выглядит как путь (есть точка или слэш) — не трогаем @everyone и т.п.
-  text = text.replace(/(^|\s)@([\w./\-]*[./][\w./\-]*)/g, (m, pre, p) => { chips.push({ type: 'file', label: `@${p}` }); return pre; });
-  return { chips, text: text.replace(/[ \t]{2,}/g, ' ').trim() };
+  text = text.replace(/(^|\s)@([\w./\-]*[./][\w./\-]*)/g, (m, pre, p) => {
+    chips.push({ type: "file", label: `@${p}` });
+    return pre;
+  });
+  return { chips, text: text.replace(/[ \t]{2,}/g, " ").trim() };
 }
 
 // inline-SVG картинки, собранный через DOM (без innerHTML — политика файла)
-const SVGNS = 'http://www.w3.org/2000/svg';
+const SVGNS = "http://www.w3.org/2000/svg";
 function svgEl(tag, attrs) {
   const e = document.createElementNS(SVGNS, tag);
   for (const k in attrs) e.setAttribute(k, attrs[k]);
   return e;
 }
 function makeImageIcon() {
-  const svg = svgEl('svg', { width: '11', height: '11', viewBox: '0 0 12 12', fill: 'none' });
-  svg.appendChild(svgEl('rect', { x: '1', y: '1.5', width: '10', height: '9', rx: '1.5', stroke: 'currentColor', 'stroke-width': '1.2' }));
-  svg.appendChild(svgEl('circle', { cx: '4', cy: '4.6', r: '1', fill: 'currentColor' }));
-  svg.appendChild(svgEl('path', { d: 'M1.5 9 L4.5 6.4 L7 8.6 L8.6 7.2 L10.5 9', stroke: 'currentColor', 'stroke-width': '1.2', 'stroke-linejoin': 'round' }));
+  const svg = svgEl("svg", {
+    width: "11",
+    height: "11",
+    viewBox: "0 0 12 12",
+    fill: "none",
+  });
+  svg.appendChild(
+    svgEl("rect", {
+      x: "1",
+      y: "1.5",
+      width: "10",
+      height: "9",
+      rx: "1.5",
+      stroke: "currentColor",
+      "stroke-width": "1.2",
+    }),
+  );
+  svg.appendChild(
+    svgEl("circle", { cx: "4", cy: "4.6", r: "1", fill: "currentColor" }),
+  );
+  svg.appendChild(
+    svgEl("path", {
+      d: "M1.5 9 L4.5 6.4 L7 8.6 L8.6 7.2 L10.5 9",
+      stroke: "currentColor",
+      "stroke-width": "1.2",
+      "stroke-linejoin": "round",
+    }),
+  );
   return svg;
 }
 
 function userBubble(rawText) {
   const { chips, text } = extractAttachments(rawText);
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
   if (chips.length) {
-    const wrap = document.createElement('div');
-    wrap.className = 'attachs';
+    const wrap = document.createElement("div");
+    wrap.className = "attachs";
     for (const c of chips) {
-      const chip = document.createElement('div');
-      chip.className = 'attach';
-      if (c.type === 'image') chip.appendChild(makeImageIcon());
-      const lbl = document.createElement('span');
+      const chip = document.createElement("div");
+      chip.className = "attach";
+      if (c.type === "image") chip.appendChild(makeImageIcon());
+      const lbl = document.createElement("span");
       lbl.textContent = c.label;
       chip.appendChild(lbl);
       wrap.appendChild(chip);
@@ -678,7 +882,7 @@ function userBubble(rawText) {
   }
   // если после выноса вложений остался текст — отдельным блоком под чипами
   if (text || !chips.length) {
-    const body = document.createElement('div');
+    const body = document.createElement("div");
     body.textContent = text;
     bubble.appendChild(body);
   }
@@ -686,24 +890,24 @@ function userBubble(rawText) {
 }
 
 function assistantMsg(it) {
-  const msg = document.createElement('div');
-  msg.className = 'msg assistant';
-  const head = document.createElement('div');
-  head.className = 'mhead';
-  const who = document.createElement('span');
-  who.className = 'mwho';
-  who.textContent = 'Jarvis';
+  const msg = document.createElement("div");
+  msg.className = "msg assistant";
+  const head = document.createElement("div");
+  head.className = "mhead";
+  const who = document.createElement("span");
+  who.className = "mwho";
+  who.textContent = "Jarvis";
   head.appendChild(who);
   const tm = fmtClock(it.ts);
   if (tm) {
-    const t = document.createElement('span');
-    t.className = 'mtime';
+    const t = document.createElement("span");
+    t.className = "mtime";
     t.textContent = tm;
     head.appendChild(t);
   }
   msg.appendChild(head);
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
   renderMarkdown(bubble, it.text);
   msg.appendChild(bubble);
   return msg;
@@ -712,47 +916,57 @@ function assistantMsg(it) {
 /* Карточка сводки хода. card=null → детерминированная (факты + сжатый ответ). */
 function buildCard(key, card) {
   const facts = turnFacts.get(key) || { files: [], commands: [] };
-  const box = document.createElement('div');
-  box.className = 'turnsum';
+  const box = document.createElement("div");
+  box.className = "turnsum";
 
   // kind (created|edited) — детерминированный признак из фактов; у LLM-карточек
   // из старого кэша поля может не быть — фоллбэк на факты хода по пути
-  const kindOf = (f) => f.kind || (facts.files.find((x) => x.path === f.path) || {}).kind || '';
-  let files = card ? card.files : facts.files.map((f) => ({ path: f.path, note: '', kind: f.kind }));
+  const kindOf = (f) =>
+    f.kind || (facts.files.find((x) => x.path === f.path) || {}).kind || "";
+  let files = card
+    ? card.files
+    : facts.files.map((f) => ({ path: f.path, note: "", kind: f.kind }));
   // doc-файлы (docs/** или *.md) — первыми: главный артефакт хода (§3.3)
-  files = [...files.filter((f) => JarvisMarkdown.isDocPath(f.path)), ...files.filter((f) => !JarvisMarkdown.isDocPath(f.path))];
+  files = [
+    ...files.filter((f) => JarvisMarkdown.isDocPath(f.path)),
+    ...files.filter((f) => !JarvisMarkdown.isDocPath(f.path)),
+  ];
   const sumText = card ? card.summary : detSummary(key);
   if (sumText) {
-    const s = document.createElement('div');
+    const s = document.createElement("div");
     renderMarkdown(s, sumText);
     box.appendChild(s);
   }
   if (files.length) {
-    const fl = document.createElement('div');
-    fl.className = 'tsum-files';
+    const fl = document.createElement("div");
+    fl.className = "tsum-files";
     for (const f of files) {
       const isDoc = JarvisMarkdown.isDocPath(f.path);
-      const chip = document.createElement('span');
-      chip.className = 'fchip';
+      const chip = document.createElement("span");
+      chip.className = "fchip";
       chip.title = `${f.path} — клик: посмотреть, ⌥клик: показать в Finder`;
-      const p = document.createElement('span');
-      p.textContent = (isDoc ? '📄 ' : '') + f.path.split('/').pop();
+      const p = document.createElement("span");
+      p.textContent = (isDoc ? "📄 " : "") + f.path.split("/").pop();
       chip.appendChild(p);
-      if (isDoc && kindOf(f)) { // бейдж «создан/изменён» — только на доках
-        const b = document.createElement('span');
-        b.className = 'fbadge';
-        b.textContent = kindOf(f) === 'created' ? 'создан' : 'изменён';
+      if (isDoc && kindOf(f)) {
+        // бейдж «создан/изменён» — только на доках
+        const b = document.createElement("span");
+        b.className = "fbadge";
+        b.textContent = kindOf(f) === "created" ? "создан" : "изменён";
         chip.appendChild(b);
       }
       if (f.note) {
-        const n = document.createElement('span');
-        n.className = 'fnote';
-        n.textContent = '· ' + f.note;
+        const n = document.createElement("span");
+        n.className = "fnote";
+        n.textContent = "· " + f.note;
         chip.appendChild(n);
       }
       // клик — вьюер в панели; ⌥ — Finder (открытие в редакторе — из вьюера)
-      chip.addEventListener('click', async (ev) => {
-        if (!ev.altKey) { openDocViewer(f.path, kindOf(f)); return; }
+      chip.addEventListener("click", async (ev) => {
+        if (!ev.altKey) {
+          openDocViewer(f.path, kindOf(f));
+          return;
+        }
         const res = await window.jarvis.openFile(chatSessionId, f.path, true);
         if (res && res.error) showToast(res.error);
       });
@@ -763,49 +977,61 @@ function buildCard(key, card) {
   // финальный ответ агента — под сворачиваемым блоком (фокус на разборе,
   // дословный ответ в один клик). Только у LLM-карточки с непустым reply.
   if (card && card.reply) {
-    const det = document.createElement('details');
-    det.className = 'tsum-reply';
-    const sm = document.createElement('summary');
-    sm.textContent = '💬 Ответ агента';
+    const det = document.createElement("details");
+    det.className = "tsum-reply";
+    const sm = document.createElement("summary");
+    sm.textContent = "💬 Ответ агента";
     det.appendChild(sm);
-    const body = document.createElement('div');
-    body.className = 'tsum-reply-body';
+    const body = document.createElement("div");
+    body.className = "tsum-reply-body";
     renderMarkdown(body, card.reply);
     det.appendChild(body);
     box.appendChild(det);
   }
 
-  const foot = document.createElement('div');
-  foot.className = 'tsum-foot';
+  const foot = document.createElement("div");
+  foot.className = "tsum-foot";
   // ход трогал док → CTA «Открыть документ» (первый док) — сценарий
   // «отревьюить, что агент написал» (§3.3)
   const firstDoc = files.find((f) => JarvisMarkdown.isDocPath(f.path));
   if (firstDoc) {
-    const docBtn = document.createElement('button');
-    docBtn.className = 'tsum-btn';
-    docBtn.textContent = 'Открыть документ';
-    docBtn.addEventListener('click', () => openDocViewer(firstDoc.path, kindOf(firstDoc)));
+    const docBtn = document.createElement("button");
+    docBtn.className = "tsum-btn";
+    docBtn.textContent = "Открыть документ";
+    docBtn.addEventListener("click", () =>
+      openDocViewer(firstDoc.path, kindOf(firstDoc)),
+    );
     foot.appendChild(docBtn);
   }
-  const exp = document.createElement('button');
-  exp.className = 'tsum-btn';
-  const wrapOf = () => box.closest('.turn');
-  const relabel = () => { exp.textContent = wrapOf()?.classList.contains('expanded') ? 'свернуть' : 'развернуть'; };
-  exp.addEventListener('click', () => { wrapOf()?.classList.toggle('expanded'); relabel(); });
+  const exp = document.createElement("button");
+  exp.className = "tsum-btn";
+  const wrapOf = () => box.closest(".turn");
+  const relabel = () => {
+    exp.textContent = wrapOf()?.classList.contains("expanded")
+      ? "свернуть"
+      : "развернуть";
+  };
+  exp.addEventListener("click", () => {
+    wrapOf()?.classList.toggle("expanded");
+    relabel();
+  });
   foot.appendChild(exp);
   if (!card && chatLlmOk) {
-    const gen = document.createElement('button');
-    gen.className = 'tsum-btn';
-    gen.textContent = 'Сводка';
-    gen.addEventListener('click', () => {
-      gen.textContent = 'готовлю…';
+    const gen = document.createElement("button");
+    gen.className = "tsum-btn";
+    gen.textContent = "Сводка";
+    gen.addEventListener("click", () => {
+      gen.textContent = "готовлю…";
       gen.disabled = true;
       window.jarvis.summarizeTurn(chatSessionId, key);
       // сбой/таймаут LLM события не даёт — возвращаем кнопку через 100с
       // (2 попытки × 45с + запас); гейт по isConnected: если карточка успела
       // прийти, applyCard заменил .turnsum целиком и кнопка вне DOM — не оживёт
       setTimeout(() => {
-        if (gen.isConnected) { gen.textContent = 'Сводка'; gen.disabled = false; }
+        if (gen.isConnected) {
+          gen.textContent = "Сводка";
+          gen.disabled = false;
+        }
       }, 100000);
     });
     foot.appendChild(gen);
@@ -818,18 +1044,20 @@ function buildCard(key, card) {
 // детерминированное саммари: сжатый хвост последней реплики агента в ходе
 function detSummary(key) {
   const wrap = chatlogEl.querySelector(`.turn[data-key="${CSS.escape(key)}"]`);
-  const bubbles = wrap ? wrap.querySelectorAll('.msg.assistant .bubble') : [];
-  const last = bubbles.length ? bubbles[bubbles.length - 1].textContent.trim() : '';
-  return last.length > 220 ? last.slice(0, 220) + '…' : last;
+  const bubbles = wrap ? wrap.querySelectorAll(".msg.assistant .bubble") : [];
+  const last = bubbles.length
+    ? bubbles[bubbles.length - 1].textContent.trim()
+    : "";
+  return last.length > 220 ? last.slice(0, 220) + "…" : last;
 }
 
 /* Вставить/заменить карточку хода; card=null — детерминированная. */
 function applyCard(key, card) {
   const wrap = chatlogEl.querySelector(`.turn[data-key="${CSS.escape(key)}"]`);
   if (!wrap) return;
-  wrap.querySelector('.turnsum')?.remove();
+  wrap.querySelector(".turnsum")?.remove();
   wrap.insertBefore(buildCard(key, card), wrap.firstChild);
-  wrap.classList.add('done');
+  wrap.classList.add("done");
 }
 
 // оптимистично показанные ответы юзера, ждут «эха» из транскрипта (для дедупа)
@@ -838,14 +1066,16 @@ let pendingReplies = [];
 // сразу показать отправленную реплику в ленте — иначе при занятой сессии она
 // уходит в очередь Claude и в чате до обработки не видна («ничего не происходит»)
 function appendPendingReply(text, queued) {
-  chatlogEl.querySelector('.chatempty')?.remove();
+  chatlogEl.querySelector(".chatempty")?.remove();
   toolsGroup = null;
-  const msg = document.createElement('div');
-  msg.className = 'msg user pending';
+  const msg = document.createElement("div");
+  msg.className = "msg user pending";
   msg.appendChild(userBubble(text));
-  const st = document.createElement('div');
-  st.className = 'msg-status';
-  st.textContent = queued ? 'в очереди — доставлю, как освободится' : 'отправлено';
+  const st = document.createElement("div");
+  st.className = "msg-status";
+  st.textContent = queued
+    ? "в очереди — доставлю, как освободится"
+    : "отправлено";
   msg.appendChild(st);
   chatlogEl.appendChild(msg);
   chatlogEl.scrollTop = chatlogEl.scrollHeight;
@@ -855,19 +1085,22 @@ function appendPendingReply(text, queued) {
 function appendChatItems(items) {
   const nearBottom =
     chatlogEl.scrollHeight - chatlogEl.scrollTop - chatlogEl.clientHeight < 60;
-  chatlogEl.querySelector('.chatempty')?.remove();
+  chatlogEl.querySelector(".chatempty")?.remove();
   for (const it of items) {
-    if (it.kind === 'tool') {
+    if (it.kind === "tool") {
       addToolChip(it.text);
       continue;
     }
     toolsGroup = null;
-    if (it.role === 'user') {
+    if (it.role === "user") {
       // реальная реплика из транскрипта пришла — снимаем оптимистичный дубль
       const pi = pendingReplies.findIndex((p) => p.text === it.text.trim());
-      if (pi >= 0) { pendingReplies[pi].el.remove(); pendingReplies.splice(pi, 1); }
-      const msg = document.createElement('div');
-      msg.className = 'msg user';
+      if (pi >= 0) {
+        pendingReplies[pi].el.remove();
+        pendingReplies.splice(pi, 1);
+      }
+      const msg = document.createElement("div");
+      msg.className = "msg user";
       msg.appendChild(userBubble(it.text));
       chatlogEl.appendChild(msg);
       startTurn(String(it.ts)); // ответ агента на эту реплику — новый ход
@@ -882,21 +1115,27 @@ function updateChatChannelMark() {
   const s = state.find((x) => x.id === chatSessionId);
   // модель — бейдж рядом с именем проекта (как в строке списка)
   const model = s && (s.model || s.agent);
-  chatModelEl.textContent = model || '';
+  chatModelEl.textContent = model || "";
   chatModelEl.hidden = !model;
   // tmux-сессии — без пометки; вне tmux помечаем
   chatChannelEl.hidden = !s || !!s.tmuxPane;
   // статус-точка справа — цвет по состоянию, пульс если работает
-  chatDotEl.className = `chatdot ${s ? s.status : ''}`;
+  chatDotEl.className = `chatdot ${s ? s.status : ""}`;
   // правый край: расход сессии (или ветка, пока usage грузится) — тихо, моно
-  const subEl = document.getElementById('chatSub');
-  subEl.textContent = s && s.branch ? `⎇ ${s.branch}` : '';
+  const subEl = document.getElementById("chatSub");
+  subEl.textContent = s && s.branch ? `⎇ ${s.branch}` : "";
   if (s) {
-    window.jarvis.getSessionUsage(s.id).then((us) => {
-      if (!us || chatSessionId !== s.id) return;
-      const money = (us.billing && us.billing !== 'plan') ? `$${us.cost.toFixed(2)}` : `~$${us.cost.toFixed(2)}`;
-      subEl.textContent = `${fmtTok(us.tok)} ткн · ${money}`;
-    }).catch(() => {});
+    window.jarvis
+      .getSessionUsage(s.id)
+      .then((us) => {
+        if (!us || chatSessionId !== s.id) return;
+        const money =
+          us.billing && us.billing !== "plan"
+            ? `$${us.cost.toFixed(2)}`
+            : `~$${us.cost.toFixed(2)}`;
+        subEl.textContent = `${fmtTok(us.tok)} ткн · ${money}`;
+      })
+      .catch(() => {});
   }
   gateReply(s);
   updateChatStatus(s);
@@ -904,32 +1143,48 @@ function updateChatChannelMark() {
   renderVarBtn(s);
 }
 
-const tmuxHintEl = document.getElementById('tmuxHint');
-const chatStatusEl = document.getElementById('chatStatus');
+const tmuxHintEl = document.getElementById("tmuxHint");
+const chatStatusEl = document.getElementById("chatStatus");
 
-const MODELS = [['fable', 'Fable'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku']];
+const MODELS = [
+  ["fable", "Fable"],
+  ["opus", "Opus"],
+  ["sonnet", "Sonnet"],
+  ["haiku", "Haiku"],
+];
 // Набор моделей Codex — зеркало backend/codex.rs::models(). У codex-сессии
 // `/model`-пикер не должен предлагать модели Claude (issue #10 — тот же класс
 // бага: claude-специфика в codex-сессии). Значение = id для `/model <id>`.
-const MODELS_CODEX = [['gpt-5.5', 'GPT-5.5'], ['gpt-5-codex', 'Codex'], ['gpt-5', 'GPT-5']];
+const MODELS_CODEX = [
+  ["gpt-5.5", "GPT-5.5"],
+  ["gpt-5-codex", "Codex"],
+  ["gpt-5", "GPT-5"],
+];
 
 function modelsFor(agent) {
-  return agent === 'codex' ? MODELS_CODEX : MODELS;
+  return agent === "codex" ? MODELS_CODEX : MODELS;
 }
 
 // базовые уровни приезжают из `claude --help` через демона (не отстаём от CLI);
 // ultracode в help не публикуется — это знание с живого слайдера Fable/Opus
-let effortBase = ['low', 'medium', 'high', 'xhigh', 'max'];
-window.jarvis.getMeta().then((m) => {
-  if (m && Array.isArray(m.effortLevels) && m.effortLevels.length) effortBase = m.effortLevels;
-}).catch(() => {});
+let effortBase = ["low", "medium", "high", "xhigh", "max"];
+window.jarvis
+  .getMeta()
+  .then((m) => {
+    if (m && Array.isArray(m.effortLevels) && m.effortLevels.length)
+      effortBase = m.effortLevels;
+  })
+  .catch(() => {});
 
-const EFFORT_SHORT = { medium: 'med' };
+const EFFORT_SHORT = { medium: "med" };
 
 function effortsFor(model) {
-  const m = (model || '').toLowerCase();
-  const list = [['auto', 'auto'], ...effortBase.map((l) => [l, EFFORT_SHORT[l] || l])];
-  if (m === 'fable' || m === 'opus') list.push(['ultracode', 'ultracode']);
+  const m = (model || "").toLowerCase();
+  const list = [
+    ["auto", "auto"],
+    ...effortBase.map((l) => [l, EFFORT_SHORT[l] || l]),
+  ];
+  if (m === "fable" || m === "opus") list.push(["ultracode", "ultracode"]);
   return list;
 }
 
@@ -938,52 +1193,70 @@ function gateReply(s) {
   const isTmux = !!(s && s.tmuxPane);
   tmuxHintEl.hidden = !s || isTmux;
   replyEl.disabled = !isTmux;
-  replyEl.placeholder = isTmux ? 'Ответить агенту…  ( / — команды )' : 'Сессия вне tmux';
+  replyEl.placeholder = isTmux
+    ? "Ответить агенту…  ( / — команды )"
+    : "Сессия вне tmux";
   if (!s || isTmux) return;
-  tmuxHintEl.textContent = '';
-  tmuxHintEl.appendChild(document.createTextNode('Сессия не в tmux — управлять из Jarvis нельзя. Запусти в терминале: '));
-  const code = document.createElement('code');
-  code.className = 'tmuxcmd';
+  tmuxHintEl.textContent = "";
+  tmuxHintEl.appendChild(
+    document.createTextNode(
+      "Сессия не в tmux — управлять из Jarvis нельзя. Запусти в терминале: ",
+    ),
+  );
+  const code = document.createElement("code");
+  code.className = "tmuxcmd";
   // команда возобновления зависит от агента: codex resume <id> vs claude --resume <id>.
   // Раньше было захардкожено «claude --resume» — для codex-сессий это вело не туда.
-  const resumeCmd = s.agent === 'codex' ? `codex resume ${s.id}` : `claude --resume ${s.id}`;
+  const resumeCmd =
+    s.agent === "codex" ? `codex resume ${s.id}` : `claude --resume ${s.id}`;
   code.textContent = resumeCmd;
-  code.title = 'Скопировать';
-  code.addEventListener('click', () => {
+  code.title = "Скопировать";
+  code.addEventListener("click", () => {
     navigator.clipboard?.writeText(resumeCmd);
-    showToast('Скопировано');
+    showToast("Скопировано");
   });
   tmuxHintEl.appendChild(code);
-  tmuxHintEl.appendChild(document.createTextNode(' — shim подхватит её в tmux.'));
+  tmuxHintEl.appendChild(
+    document.createTextNode(" — shim подхватит её в tmux."),
+  );
 }
 
 // индикатор: думает / выполняет тул / генерирует / ждёт
 function updateChatStatus(s) {
-  chatStatusEl.textContent = '';
-  if (!s || s.status === 'idle' || s.status === 'done') { chatStatusEl.hidden = true; return; }
-  if (s.status === 'working') {
-    chatStatusEl.className = 'chatstatus working';
-    const d = s.detail || '';
-    if (d.startsWith('▸')) {
-      chatStatusEl.appendChild(document.createTextNode(`выполняет: ${d.slice(1).trim()}`));
+  chatStatusEl.textContent = "";
+  if (!s || s.status === "idle" || s.status === "done") {
+    chatStatusEl.hidden = true;
+    return;
+  }
+  if (s.status === "working") {
+    chatStatusEl.className = "chatstatus working";
+    const d = s.detail || "";
+    if (d.startsWith("▸")) {
+      chatStatusEl.appendChild(
+        document.createTextNode(`выполняет: ${d.slice(1).trim()}`),
+      );
     } else {
-      chatStatusEl.appendChild(document.createTextNode('думает и генерирует ответ'));
-      const dots = document.createElement('span');
-      dots.className = 'dots';
+      chatStatusEl.appendChild(
+        document.createTextNode("думает и генерирует ответ"),
+      );
+      const dots = document.createElement("span");
+      dots.className = "dots";
       chatStatusEl.appendChild(dots);
     }
     chatStatusEl.hidden = false;
-  } else if (s.status === 'waiting') {
-    chatStatusEl.className = 'chatstatus waiting';
-    chatStatusEl.appendChild(document.createTextNode('ждёт твоего ответа'));
+  } else if (s.status === "waiting") {
+    chatStatusEl.className = "chatstatus waiting";
+    chatStatusEl.appendChild(document.createTextNode("ждёт твоего ответа"));
     chatStatusEl.hidden = false;
-  } else if (s.status === 'limit') {
-    chatStatusEl.className = 'chatstatus waiting';
-    chatStatusEl.appendChild(document.createTextNode(
-      limitInfo && limitInfo.active
-        ? `упёрлись в лимит · сброс через ${Math.max(0, Math.round((limitInfo.resetAt - Date.now()) / 60000))}м · продолжу сам`
-        : 'упёрлись в лимит провайдера',
-    ));
+  } else if (s.status === "limit") {
+    chatStatusEl.className = "chatstatus waiting";
+    chatStatusEl.appendChild(
+      document.createTextNode(
+        limitInfo && limitInfo.active
+          ? `упёрлись в лимит · сброс через ${Math.max(0, Math.round((limitInfo.resetAt - Date.now()) / 60000))}м · продолжу сам`
+          : "упёрлись в лимит провайдера",
+      ),
+    );
     chatStatusEl.hidden = false;
   } else {
     chatStatusEl.hidden = true;
@@ -992,25 +1265,25 @@ function updateChatStatus(s) {
 
 /* ---------- экран вопроса AskUserQuestion (клавиатурный пикер) ---------- */
 
-const qviewEl = document.getElementById('qview');
-const qOptsEl = document.getElementById('qOpts');
-const qHeaderEl = document.getElementById('qHeader');
-const qTitleEl = document.getElementById('qTitle');
-const qFootEl = document.getElementById('qFoot');
-const qCustomRowEl = document.getElementById('qCustomRow');
-const qCustomEl = document.getElementById('qCustom');
+const qviewEl = document.getElementById("qview");
+const qOptsEl = document.getElementById("qOpts");
+const qHeaderEl = document.getElementById("qHeader");
+const qTitleEl = document.getElementById("qTitle");
+const qFootEl = document.getElementById("qFoot");
+const qCustomRowEl = document.getElementById("qCustomRow");
+const qCustomEl = document.getElementById("qCustom");
 let qSessionId = null;
-let qData = null;        // текущий вопрос визарда
+let qData = null; // текущий вопрос визарда
 let qSel = 0;
 let qChosen = new Set();
-let qItems = [];         // все вопросы опроса (s.question.questions)
-let qIdx = 0;            // индекс текущего вопроса
-let qAnswers = [];       // собранные выборы по каждому вопросу: number[][]
-let qTexts = [];         // свои ответы по каждому вопросу: (string|null)[]
+let qItems = []; // все вопросы опроса (s.question.questions)
+let qIdx = 0; // индекс текущего вопроса
+let qAnswers = []; // собранные выборы по каждому вопросу: number[][]
+let qTexts = []; // свои ответы по каждому вопросу: (string|null)[]
 
 function keycap(text) {
-  const k = document.createElement('span');
-  k.className = 'keycap';
+  const k = document.createElement("span");
+  k.className = "keycap";
   k.textContent = text;
   return k;
 }
@@ -1022,7 +1295,7 @@ function openQuestion(s) {
   qAnswers = qItems.map(() => []);
   qTexts = qItems.map(() => null);
   loadQ();
-  setView('question');
+  setView("question");
   renderQuestion();
   qOptsEl.focus?.();
 }
@@ -1035,67 +1308,73 @@ function loadQ() {
 }
 
 let activeQOpts = qOptsEl; // контейнер опций: полноэкранный qview или слайд-овер вариантов
-let activeQCustom = null;  // видимое поле «Свой ответ…» активного контейнера (null — скрыто)
+let activeQCustom = null; // видимое поле «Свой ответ…» активного контейнера (null — скрыто)
 
 function paintQOptions() {
   for (const [i, btn] of [...activeQOpts.children].entries()) {
-    btn.classList.toggle('sel', i === qSel);
-    btn.classList.toggle('chosen', qChosen.has(i + 1));
+    btn.classList.toggle("sel", i === qSel);
+    btn.classList.toggle("chosen", qChosen.has(i + 1));
   }
-  activeQOpts.children[qSel]?.scrollIntoView({ block: 'nearest' });
+  activeQOpts.children[qSel]?.scrollIntoView({ block: "nearest" });
 }
 
 // Рендер списка вариантов и подсказок в заданные контейнеры — общий для
 // полноэкранного экрана вопроса и слайд-овера вариантов поверх чата.
 function renderQOpts(optsEl, footEl) {
-  optsEl.textContent = '';
+  optsEl.textContent = "";
   qData.options.forEach((o, i) => {
-    const btn = document.createElement('div');
-    btn.className = 'qopt';
-    const num = document.createElement('span');
-    num.className = 'qnum';
+    const btn = document.createElement("div");
+    btn.className = "qopt";
+    const num = document.createElement("span");
+    num.className = "qnum";
     num.textContent = String(i + 1);
-    const body = document.createElement('span');
-    body.className = 'qbody';
-    const label = document.createElement('span');
-    label.className = 'qlabel';
+    const body = document.createElement("span");
+    body.className = "qbody";
+    const label = document.createElement("span");
+    label.className = "qlabel";
     label.textContent = o.label;
     body.appendChild(label);
     if (o.description) {
-      const desc = document.createElement('span');
-      desc.className = 'qdesc';
+      const desc = document.createElement("span");
+      desc.className = "qdesc";
       desc.textContent = o.description;
       body.appendChild(desc);
     }
     btn.append(num, body);
     if (qData.multiSelect) {
-      const ck = document.createElement('span');
-      ck.className = 'qcheck';
-      ck.textContent = '✓';
+      const ck = document.createElement("span");
+      ck.className = "qcheck";
+      ck.textContent = "✓";
       btn.appendChild(ck);
     }
-    btn.addEventListener('mouseenter', () => { qSel = i; paintQOptions(); });
-    btn.addEventListener('click', () => { qSel = i; activateQ(); });
+    btn.addEventListener("mouseenter", () => {
+      qSel = i;
+      paintQOptions();
+    });
+    btn.addEventListener("click", () => {
+      qSel = i;
+      activateQ();
+    });
     optsEl.appendChild(btn);
   });
   paintQOptions();
 
-  footEl.textContent = '';
+  footEl.textContent = "";
   const hint = (cap, text) => {
-    const h = document.createElement('span');
+    const h = document.createElement("span");
     h.appendChild(keycap(cap));
     h.appendChild(document.createTextNode(text));
     return h;
   };
-  footEl.appendChild(hint('↑↓', 'выбрать'));
+  footEl.appendChild(hint("↑↓", "выбрать"));
   if (qData.multiSelect) {
-    footEl.appendChild(hint('␣', 'отметить'));
-    footEl.appendChild(hint('↵', 'отправить'));
+    footEl.appendChild(hint("␣", "отметить"));
+    footEl.appendChild(hint("↵", "отправить"));
   } else {
-    footEl.appendChild(hint('↵', 'ответить'));
-    footEl.appendChild(hint('1–9', 'быстрый выбор'));
+    footEl.appendChild(hint("↵", "ответить"));
+    footEl.appendChild(hint("1–9", "быстрый выбор"));
   }
-  footEl.appendChild(hint('esc', 'назад'));
+  footEl.appendChild(hint("esc", "назад"));
 }
 
 // Поле «Свой ответ…» под опциями — аналог строки Other пикера Claude;
@@ -1103,17 +1382,19 @@ function renderQOpts(optsEl, footEl) {
 function renderQCustom(rowEl, inputEl) {
   const s = state.find((x) => x.id === qSessionId);
   rowEl.hidden = !JarvisQuestionAnswer.customAllowed(s && s.agent);
-  inputEl.value = qTexts[qIdx] || '';
+  inputEl.value = qTexts[qIdx] || "";
   activeQCustom = rowEl.hidden ? null : inputEl;
 }
 
 function renderQuestion() {
-  qHeaderEl.textContent = qData.header || '';
+  qHeaderEl.textContent = qData.header || "";
   qHeaderEl.hidden = !qData.header;
   qTitleEl.textContent = qData.question;
-  const prog = document.getElementById('qProgress');
-  if (qItems.length > 1) { prog.textContent = `${qIdx + 1}/${qItems.length}`; prog.hidden = false; }
-  else prog.hidden = true;
+  const prog = document.getElementById("qProgress");
+  if (qItems.length > 1) {
+    prog.textContent = `${qIdx + 1}/${qItems.length}`;
+    prog.hidden = false;
+  } else prog.hidden = true;
   activeQOpts = qOptsEl;
   renderQOpts(qOptsEl, qFootEl);
   renderQCustom(qCustomRowEl, qCustomEl);
@@ -1141,7 +1422,10 @@ function commitCurrentQ() {
     sel: qSel,
     text: activeQCustom ? activeQCustom.value : qTexts[qIdx],
   });
-  if (!res) { showToast('Отметь хотя бы один вариант'); return false; }
+  if (!res) {
+    showToast("Отметь хотя бы один вариант");
+    return false;
+  }
   qAnswers[qIdx] = res.row;
   qTexts[qIdx] = res.text;
   return true;
@@ -1151,7 +1435,8 @@ function advanceQ() {
   if (qIdx + 1 < qItems.length) {
     qIdx += 1;
     loadQ();
-    if (varOpen) renderVarPanel(curSession()); else renderQuestion();
+    if (varOpen) renderVarPanel(curSession());
+    else renderQuestion();
   } else {
     finalizeQ();
   }
@@ -1163,8 +1448,11 @@ async function finalizeQ() {
   const res = await window.jarvis.answerQuestion(sid, payload);
   if (res.ok) {
     if (varOpen) closeVarPanel();
-    else { setView('list'); render(); }
-  } else showToast(res.error || 'Не удалось ответить');
+    else {
+      setView("list");
+      render();
+    }
+  } else showToast(res.error || "Не удалось ответить");
 }
 
 // Совместимость с существующими обработчиками (Enter / кнопка «Отправить»).
@@ -1172,84 +1460,108 @@ function submitQ() {
   if (commitCurrentQ()) advanceQ();
 }
 
-document.getElementById('qBack').addEventListener('click', () => { setView('list'); render(); });
+document.getElementById("qBack").addEventListener("click", () => {
+  setView("list");
+  render();
+});
 
 async function openChat(sessionId, project) {
   const res = await window.jarvis.openChat(sessionId);
-  if (!res.ok) { showToast(res.error || 'Не удалось открыть чат'); return; }
+  if (!res.ok) {
+    showToast(res.error || "Не удалось открыть чат");
+    return;
+  }
   chatSessionId = sessionId;
-  chatTitleEl.textContent = res.project || project || '';
+  chatTitleEl.textContent = res.project || project || "";
   boardExpanded = 0;
   closeBoard(); // доска прошлого чата не должна оставаться открытой
   closeVarPanel(); // и слайд-овер вариантов прошлого чата
   closeDocViewer(); // и вьюер документов
   updateChatChannelMark();
-  chatlogEl.textContent = '';
+  chatlogEl.textContent = "";
   toolsGroup = null;
   curTurn = null;
   turnFacts.clear();
   chatLlmOk = !!res.llm;
-  chatlogEl.classList.toggle('sum', summaryModeOn());
+  chatlogEl.classList.toggle("sum", summaryModeOn());
   pendingReplies = []; // оптимистичные реплики прошлого чата не тащим в новый
-  replyEl.value = ''; // черновик прошлого чата не должен уехать в этот
+  replyEl.value = ""; // черновик прошлого чата не должен уехать в этот
   autoGrowReply();
   pendingImages = []; // и вставленные картинки прошлого чата тоже не тащим
   renderAttachments();
   hidePalette();
   loadCommands();
-  setView('chat');
+  setView("chat");
   replyEl.focus();
   if (res.items.length) {
     appendChatItems(res.items);
     const sess = state.find((x) => x.id === chatSessionId);
-    const lastCompleteKey = (res.spans || []).filter((s) => s.complete).map((s) => s.key).pop();
+    const lastCompleteKey = (res.spans || [])
+      .filter((s) => s.complete)
+      .map((s) => s.key)
+      .pop();
     for (const sp of res.spans || []) {
-      if (sp.key === 'pre') continue; // частичный головной ход — только сырьё
-      turnFacts.set(sp.key, { files: sp.files || [], commands: sp.commands || [] });
+      if (sp.key === "pre") continue; // частичный головной ход — только сырьё
+      turnFacts.set(sp.key, {
+        files: sp.files || [],
+        commands: sp.commands || [],
+      });
       if (!sp.complete) continue;
       const card = (res.cards || {})[sp.key] || null;
       // живой ход не схлопываем дет-карточкой: агент ещё пишет, стрим должен быть
       // виден; карточка придёт событием chat:summary на Stop. Кэшированная
       // LLM-карточка означает, что Stop по этому ходу уже был — её применяем.
-      if (!card && sp.key === lastCompleteKey && sess && sess.status === 'working') continue;
+      if (
+        !card &&
+        sp.key === lastCompleteKey &&
+        sess &&
+        sess.status === "working"
+      )
+        continue;
       applyCard(sp.key, card);
     }
     chatlogEl.scrollTop = chatlogEl.scrollHeight;
   } else {
-    const empty = document.createElement('div');
-    empty.className = 'chatempty';
-    empty.textContent = 'Пока пусто — новые реплики появятся здесь по мере работы агента.';
+    const empty = document.createElement("div");
+    empty.className = "chatempty";
+    empty.textContent =
+      "Пока пусто — новые реплики появятся здесь по мере работы агента.";
     chatlogEl.appendChild(empty);
   }
 }
 
 window.jarvis.onChatAppend(({ sessionId, items }) => {
-  if (view === 'chat' && sessionId === chatSessionId) appendChatItems(items);
+  if (view === "chat" && sessionId === chatSessionId) appendChatItems(items);
 });
 
 window.jarvis.onChatSummary(({ sessionId, turnKey, card }) => {
-  if (view === 'chat' && sessionId === chatSessionId) applyCard(turnKey, card);
+  if (view === "chat" && sessionId === chatSessionId) applyCard(turnKey, card);
 });
 
-document.getElementById('chatBack').addEventListener('click', () => { closeBoard(); setView('list'); render(); });
+document.getElementById("chatBack").addEventListener("click", () => {
+  closeBoard();
+  setView("list");
+  render();
+});
 
 /* ---------- доска задач (инкремент 6) ----------
  * ГРАНИЦА: панель ЧИТАЕТ доску из состояния сессии (источник — оркестратор) и
  * отображает её. Кнопки доски не мутируют доску — действие лишь префилит
  * composer текстом-инструкцией; доска меняется только на следующий TodoWrite. */
 
-const tasksBtn = document.getElementById('tasksBtn');
-const tasksBtnCount = document.getElementById('tasksBtnCount');
-const tasksRingFg = document.getElementById('tasksRingFg');
-const taskWrap = document.getElementById('taskWrap');
-const tpListEl = document.getElementById('tpList');
-const tpStripEl = document.getElementById('tpStrip');
+const tasksBtn = document.getElementById("tasksBtn");
+const tasksBtnCount = document.getElementById("tasksBtnCount");
+const tasksRingFg = document.getElementById("tasksRingFg");
+const taskWrap = document.getElementById("taskWrap");
+const tpListEl = document.getElementById("tpList");
+const tpStripEl = document.getElementById("tpStrip");
 const RING_C = 2 * Math.PI * 7; // = 43.98, радиус кольца 7
 
 let boardOpen = false;
 let boardExpanded = 0; // номер раскрытой задачи (0 — ни одной)
 
-const boardOf = (s) => (s && s.board && s.board.tasks && s.board.tasks.length ? s.board : null);
+const boardOf = (s) =>
+  s && s.board && s.board.tasks && s.board.tasks.length ? s.board : null;
 
 // мс → компактная длительность: «42с» · «3м» · «1ч 12м»
 function fmtDur(ms) {
@@ -1262,14 +1574,23 @@ function fmtDur(ms) {
 
 function renderTaskBoard(s) {
   const b = boardOf(s);
-  if (!b) { tasksBtn.hidden = true; if (boardOpen) closeBoard(); return; }
+  if (!b) {
+    tasksBtn.hidden = true;
+    if (boardOpen) closeBoard();
+    return;
+  }
   const total = b.tasks.length;
-  const done = b.tasks.filter((t) => t.status === 'completed').length;
+  const done = b.tasks.filter((t) => t.status === "completed").length;
   tasksBtn.hidden = false;
   tasksBtnCount.textContent = `${done}/${total}`;
-  tasksRingFg.style.strokeDashoffset = String(RING_C * (1 - (total ? done / total : 0)));
-  tasksRingFg.setAttribute('stroke', b.stopped ? 'var(--warn)' : 'var(--accent)'); // мёртвая доска — янтарь
-  tasksBtn.classList.toggle('open', boardOpen);
+  tasksRingFg.style.strokeDashoffset = String(
+    RING_C * (1 - (total ? done / total : 0)),
+  );
+  tasksRingFg.setAttribute(
+    "stroke",
+    b.stopped ? "var(--warn)" : "var(--accent)",
+  ); // мёртвая доска — янтарь
+  tasksBtn.classList.toggle("open", boardOpen);
   if (boardOpen) renderBoardPanel(s, b);
 }
 
@@ -1278,75 +1599,101 @@ function openBoard() {
   if (!boardOf(s)) return;
   boardOpen = true;
   taskWrap.hidden = false;
-  tasksBtn.classList.add('open');
+  tasksBtn.classList.add("open");
   renderBoardPanel(s, boardOf(s));
 }
 
 function closeBoard() {
   boardOpen = false;
   taskWrap.hidden = true;
-  tasksBtn.classList.remove('open');
+  tasksBtn.classList.remove("open");
 }
 
-tasksBtn.addEventListener('click', () => (boardOpen ? closeBoard() : openBoard()));
-document.getElementById('tpClose').addEventListener('click', closeBoard);
-document.getElementById('taskScrim').addEventListener('click', closeBoard);
+tasksBtn.addEventListener("click", () =>
+  boardOpen ? closeBoard() : openBoard(),
+);
+document.getElementById("tpClose").addEventListener("click", closeBoard);
+document.getElementById("taskScrim").addEventListener("click", closeBoard);
 // Esc закрывает доску раньше, чем сработает «назад» (capture-фаза)
-window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && boardOpen) { e.preventDefault(); e.stopImmediatePropagation(); closeBoard(); }
-}, true);
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if (e.key === "Escape" && boardOpen) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      closeBoard();
+    }
+  },
+  true,
+);
 
 /* ---------- слайд-овер вариантов ответа (поверх чата, по образцу доски задач) ----------
  * Переиспользует рендер опций (renderQOpts) и логику ответа (submitQ/activateQ)
  * экрана вопроса; отличие — оверлей над чатом вместо отдельного view. */
 
-const varBtn = document.getElementById('varBtn');
-const varBtnLabel = document.getElementById('varBtnLabel');
-const qWrap = document.getElementById('qWrap');
-const qpOptsEl = document.getElementById('qpOpts');
-const qpFootEl = document.getElementById('qpFoot');
-const qpHeaderEl = document.getElementById('qpHeader');
-const qpTitleEl = document.getElementById('qpTitle');
-const qpCustomRowEl = document.getElementById('qpCustomRow');
-const qpCustomEl = document.getElementById('qpCustom');
+const varBtn = document.getElementById("varBtn");
+const varBtnLabel = document.getElementById("varBtnLabel");
+const qWrap = document.getElementById("qWrap");
+const qpOptsEl = document.getElementById("qpOpts");
+const qpFootEl = document.getElementById("qpFoot");
+const qpHeaderEl = document.getElementById("qpHeader");
+const qpTitleEl = document.getElementById("qpTitle");
+const qpCustomRowEl = document.getElementById("qpCustomRow");
+const qpCustomEl = document.getElementById("qpCustom");
 let varOpen = false;
 
 const questionOf = (s) =>
-  s && s.question && s.question.questions && s.question.questions.length ? s.question.questions[0] : null;
+  s && s.question && s.question.questions && s.question.questions.length
+    ? s.question.questions[0]
+    : null;
 
 function renderVarBtn(s) {
   const q = questionOf(s);
-  if (!q) { varBtn.hidden = true; if (varOpen) closeVarPanel(); return; }
+  if (!q) {
+    varBtn.hidden = true;
+    if (varOpen) closeVarPanel();
+    return;
+  }
   varBtn.hidden = false;
   const n = q.options.length;
-  varBtnLabel.textContent = `${n} ${plural(n, 'вариант', 'варианта', 'вариантов')}`;
-  varBtn.classList.toggle('open', varOpen);
+  varBtnLabel.textContent = `${n} ${plural(n, "вариант", "варианта", "вариантов")}`;
+  varBtn.classList.toggle("open", varOpen);
   if (varOpen) renderVarPanel(s);
 }
 
 function renderVarPanel(s) {
   const q = qItems[qIdx];
-  if (!q) { closeVarPanel(); return; }
+  if (!q) {
+    closeVarPanel();
+    return;
+  }
   qData = q;
-  const prog = qItems.length > 1 ? ` (${qIdx + 1}/${qItems.length})` : '';
-  qpHeaderEl.textContent = (q.header || '') + prog;
+  const prog = qItems.length > 1 ? ` (${qIdx + 1}/${qItems.length})` : "";
+  qpHeaderEl.textContent = (q.header || "") + prog;
   qpHeaderEl.hidden = !q.header && !prog;
   qpTitleEl.textContent = q.question;
   activeQOpts = qpOptsEl;
   renderQOpts(qpOptsEl, qpFootEl);
   renderQCustom(qpCustomRowEl, qpCustomEl);
-  if (q.multiSelect) { // мульти-выбор: клик-сабмит (на полноэкранном экране это Enter)
-    const send = document.createElement('button');
-    send.className = 'qp-send';
-    send.textContent = qIdx + 1 < qItems.length ? 'Далее' : 'Отправить';
-    send.addEventListener('click', submitQ);
+  if (q.multiSelect) {
+    // мульти-выбор: клик-сабмит (на полноэкранном экране это Enter)
+    const send = document.createElement("button");
+    send.className = "qp-send";
+    send.textContent = qIdx + 1 < qItems.length ? "Далее" : "Отправить";
+    send.addEventListener("click", submitQ);
     qpFootEl.appendChild(send);
   }
 }
 
 function openVarPanel() {
   const s = curSession();
-  if (!s || !s.question || !s.question.questions || !s.question.questions.length) return;
+  if (
+    !s ||
+    !s.question ||
+    !s.question.questions ||
+    !s.question.questions.length
+  )
+    return;
   qSessionId = s.id;
   qItems = s.question.questions;
   qIdx = 0;
@@ -1355,7 +1702,7 @@ function openVarPanel() {
   loadQ();
   varOpen = true;
   qWrap.hidden = false;
-  varBtn.classList.add('open');
+  varBtn.classList.add("open");
   replyEl.blur?.(); // освобождаем поле ввода — клавиши уходят пикеру
   renderVarPanel(s);
 }
@@ -1363,42 +1710,85 @@ function openVarPanel() {
 function closeVarPanel() {
   varOpen = false;
   qWrap.hidden = true;
-  varBtn.classList.remove('open');
+  varBtn.classList.remove("open");
   activeQOpts = qOptsEl;
 }
 
-varBtn.addEventListener('click', () => (varOpen ? closeVarPanel() : openVarPanel()));
-document.getElementById('qpClose').addEventListener('click', closeVarPanel);
-document.getElementById('qScrim').addEventListener('click', closeVarPanel);
+varBtn.addEventListener("click", () =>
+  varOpen ? closeVarPanel() : openVarPanel(),
+);
+document.getElementById("qpClose").addEventListener("click", closeVarPanel);
+document.getElementById("qScrim").addEventListener("click", closeVarPanel);
 
 // Поле «Свой ответ…» обоих контейнеров: печать не должна дёргать навигацию
 // пикера (stopPropagation режет window-обработчики); Enter — отправить,
 // Esc — вернуть клавиши пикеру.
 for (const el of [qCustomEl, qpCustomEl]) {
-  el.addEventListener('input', () => { qTexts[qIdx] = JarvisQuestionAnswer.normalizeText(el.value); });
-  el.addEventListener('keydown', (e) => {
+  el.addEventListener("input", () => {
+    qTexts[qIdx] = JarvisQuestionAnswer.normalizeText(el.value);
+  });
+  el.addEventListener("keydown", (e) => {
     e.stopPropagation();
-    if (e.key === 'Enter') { e.preventDefault(); submitQ(); }
-    else if (e.key === 'Escape') { e.preventDefault(); el.blur(); }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      submitQ();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      el.blur();
+    }
   });
 }
 
 // Клавиатура слайд-овера — capture-фаза, чтобы перехватить раньше обработчиков чата
-window.addEventListener('keydown', (e) => {
-  if (!varOpen) return;
-  if (e.target === qpCustomEl || e.target === qCustomEl) return; // печать в «Свой ответ» — клавиши полю
-  if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); closeVarPanel(); return; }
-  if (!qData) return;
-  const stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };
-  if (e.key === 'ArrowDown') { stop(); qSel = Math.min(qData.options.length - 1, qSel + 1); paintQOptions(); return; }
-  if (e.key === 'ArrowUp') { stop(); qSel = Math.max(0, qSel - 1); paintQOptions(); return; }
-  if (e.key === ' ') { stop(); if (qData.multiSelect) toggleQ(qSel); return; }
-  if (e.key === 'Enter') { stop(); submitQ(); return; }
-  if (/^[1-9]$/.test(e.key)) {
-    const n = Number(e.key);
-    if (n <= qData.options.length) { stop(); qSel = n - 1; activateQ(); }
-  }
-}, true);
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if (!varOpen) return;
+    if (e.target === qpCustomEl || e.target === qCustomEl) return; // печать в «Свой ответ» — клавиши полю
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      closeVarPanel();
+      return;
+    }
+    if (!qData) return;
+    const stop = () => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    };
+    if (e.key === "ArrowDown") {
+      stop();
+      qSel = Math.min(qData.options.length - 1, qSel + 1);
+      paintQOptions();
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      stop();
+      qSel = Math.max(0, qSel - 1);
+      paintQOptions();
+      return;
+    }
+    if (e.key === " ") {
+      stop();
+      if (qData.multiSelect) toggleQ(qSel);
+      return;
+    }
+    if (e.key === "Enter") {
+      stop();
+      submitQ();
+      return;
+    }
+    if (/^[1-9]$/.test(e.key)) {
+      const n = Number(e.key);
+      if (n <= qData.options.length) {
+        stop();
+        qSel = n - 1;
+        activateQ();
+      }
+    }
+  },
+  true,
+);
 
 /* ---------- вьюер документов (спека 2026-07-18 §3.1) ----------
  * Слайд-овер поверх чата по образцу доски задач. Тело: .md/.markdown —
@@ -1407,15 +1797,15 @@ window.addEventListener('keydown', (e) => {
  * Инкремент 3 добавит сюда табы «Изменения/Документ» — держим тело отдельным
  * контейнером, чтобы табы легли рядом без переделки. */
 
-const docWrap = document.getElementById('docWrap');
-const docTitleEl = document.getElementById('docTitle');
-const docBodyEl = document.getElementById('docBody');
-const docTruncEl = document.getElementById('docTrunc');
-const docTabsEl = document.getElementById('docTabs');
-const docDiffEl = document.getElementById('docDiff');
-const docDiffLabelEl = document.getElementById('docDiffLabel');
-const docTabDiffEl = document.getElementById('docTabDiff');
-const docTabDocEl = document.getElementById('docTabDoc');
+const docWrap = document.getElementById("docWrap");
+const docTitleEl = document.getElementById("docTitle");
+const docBodyEl = document.getElementById("docBody");
+const docTruncEl = document.getElementById("docTrunc");
+const docTabsEl = document.getElementById("docTabs");
+const docDiffEl = document.getElementById("docDiff");
+const docDiffLabelEl = document.getElementById("docDiffLabel");
+const docTabDiffEl = document.getElementById("docTabDiff");
+const docTabDocEl = document.getElementById("docTabDoc");
 let docOpen = false;
 let docPath = null; // путь открытого файла — для «Редактор»/«Finder»
 let docHasDiff = false;
@@ -1423,29 +1813,32 @@ let docHasDiff = false;
 // Переключить активный таб вьюера. «Документ» — рендер файла (docBody);
 // «Изменения» — git-дифф (docDiff). Без диффа виден только «Документ».
 function docSelectTab(tab) {
-  const diff = tab === 'diff' && docHasDiff;
+  const diff = tab === "diff" && docHasDiff;
   docBodyEl.hidden = diff;
   docDiffEl.hidden = !diff;
   docTruncEl.hidden = !docTruncEl.dataset.trunc || diff;
-  docTabDiffEl.classList.toggle('active', diff);
-  docTabDocEl.classList.toggle('active', !diff);
-  docDiffLabelEl.textContent = diff ? docDiffLabelEl.dataset.label || '' : '';
+  docTabDiffEl.classList.toggle("active", diff);
+  docTabDocEl.classList.toggle("active", !diff);
+  docDiffLabelEl.textContent = diff ? docDiffLabelEl.dataset.label || "" : "";
 }
 
 async function openDocViewer(path, kind) {
   const res = await window.jarvis.readFile(chatSessionId, path);
-  if (!res || !res.ok) { showToast((res && res.error) || 'Не удалось открыть файл'); return; }
+  if (!res || !res.ok) {
+    showToast((res && res.error) || "Не удалось открыть файл");
+    return;
+  }
   docPath = path;
-  docTitleEl.textContent = res.name || path.split('/').pop();
+  docTitleEl.textContent = res.name || path.split("/").pop();
   docTitleEl.title = path;
-  docTruncEl.dataset.trunc = res.truncated ? '1' : '';
-  docBodyEl.textContent = '';
+  docTruncEl.dataset.trunc = res.truncated ? "1" : "";
+  docBodyEl.textContent = "";
   if (JarvisMarkdown.isMarkdownPath(path)) {
     // единственный innerHTML здесь: markdown.js полностью экранирует
     // недоверенное содержимое (см. ui/markdown.test.mjs), сырой HTML не пройдёт
     docBodyEl.innerHTML = JarvisMarkdown.render(res.content);
   } else {
-    const pre = document.createElement('pre');
+    const pre = document.createElement("pre");
     pre.textContent = res.content;
     docBodyEl.appendChild(pre);
   }
@@ -1457,16 +1850,16 @@ async function openDocViewer(path, kind) {
   // (kind edited) и дифф есть, иначе сразу показываем «Документ»
   docHasDiff = false;
   docTabsEl.hidden = true;
-  docSelectTab('doc');
+  docSelectTab("doc");
   const diff = await window.jarvis.diffFile(chatSessionId, path);
   if (docPath !== path) return; // вьюер уже переключили на другой файл
-  if (diff && diff.ok && diff.mode !== 'none' && (diff.hunks || []).length) {
+  if (diff && diff.ok && diff.mode !== "none" && (diff.hunks || []).length) {
     docHasDiff = true;
-    docDiffLabelEl.dataset.label = diff.label || '';
+    docDiffLabelEl.dataset.label = diff.label || "";
     // diffview.js строит узлы через textContent (без innerHTML) — см. diffview.test.mjs
     JarvisDiffView.renderTo(docDiffEl, diff.hunks);
     docTabsEl.hidden = false;
-    docSelectTab(kind === 'edited' ? 'diff' : 'doc');
+    docSelectTab(kind === "edited" ? "diff" : "doc");
   }
 }
 
@@ -1476,49 +1869,105 @@ function closeDocViewer() {
   docPath = null;
 }
 
-docTabDiffEl.addEventListener('click', () => docSelectTab('diff'));
-docTabDocEl.addEventListener('click', () => docSelectTab('doc'));
+docTabDiffEl.addEventListener("click", () => docSelectTab("diff"));
+docTabDocEl.addEventListener("click", () => docSelectTab("doc"));
 
-document.getElementById('docClose').addEventListener('click', closeDocViewer);
-document.getElementById('docScrim').addEventListener('click', closeDocViewer);
-document.getElementById('docEdit').addEventListener('click', async () => {
+document.getElementById("docClose").addEventListener("click", closeDocViewer);
+document.getElementById("docScrim").addEventListener("click", closeDocViewer);
+document.getElementById("docEdit").addEventListener("click", async () => {
   if (!docPath) return;
   const res = await window.jarvis.openFile(chatSessionId, docPath, false);
   if (res && res.error) showToast(res.error);
 });
-document.getElementById('docFinder').addEventListener('click', async () => {
+document.getElementById("docFinder").addEventListener("click", async () => {
   if (!docPath) return;
   const res = await window.jarvis.openFile(chatSessionId, docPath, true);
   if (res && res.error) showToast(res.error);
 });
 // Esc закрывает вьюер раньше «назад» чата (capture, как доска/варианты)
-window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && docOpen) { e.preventDefault(); e.stopImmediatePropagation(); closeDocViewer(); }
-}, true);
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if (e.key === "Escape" && docOpen) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      closeDocViewer();
+    }
+  },
+  true,
+);
 // внешние http(s)-ссылки дока: настоящих href нет (навигация вебвью запрещена),
 // клик по .md-link уходит в системный браузер через ipc
-docBodyEl.addEventListener('click', (e) => {
-  const a = e.target.closest('a.md-link[data-href]');
-  if (a) { e.preventDefault(); window.jarvis.openUrl(a.dataset.href); }
+docBodyEl.addEventListener("click", (e) => {
+  const a = e.target.closest("a.md-link[data-href]");
+  if (a) {
+    e.preventDefault();
+    window.jarvis.openUrl(a.dataset.href);
+  }
 });
 
 // иконка статуса задачи (через DOM — без innerHTML)
 function tpStatusIcon(status) {
-  if (status === 'in_progress') {
-    const sp = document.createElement('span');
-    sp.className = 'tp-pulse';
+  if (status === "in_progress") {
+    const sp = document.createElement("span");
+    sp.className = "tp-pulse";
     return sp;
   }
-  const svg = svgEl('svg', { width: '15', height: '15', viewBox: '0 0 16 16', fill: 'none' });
-  if (status === 'completed') {
-    svg.appendChild(svgEl('circle', { cx: '8', cy: '8', r: '6.6', stroke: 'var(--accent)', 'stroke-width': '1.4' }));
-    svg.appendChild(svgEl('path', { d: 'M5 8.2 L7.1 10.3 L11 5.8', stroke: 'var(--accent)', 'stroke-width': '1.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
-  } else if (status === 'interrupted') {
-    svg.appendChild(svgEl('circle', { cx: '8', cy: '8', r: '6.4', stroke: 'var(--warn)', 'stroke-width': '1.4' }));
-    svg.appendChild(svgEl('path', { d: 'M5.4 8 H10.6', stroke: 'var(--warn)', 'stroke-width': '1.5', 'stroke-linecap': 'round' }));
+  const svg = svgEl("svg", {
+    width: "15",
+    height: "15",
+    viewBox: "0 0 16 16",
+    fill: "none",
+  });
+  if (status === "completed") {
+    svg.appendChild(
+      svgEl("circle", {
+        cx: "8",
+        cy: "8",
+        r: "6.6",
+        stroke: "var(--accent)",
+        "stroke-width": "1.4",
+      }),
+    );
+    svg.appendChild(
+      svgEl("path", {
+        d: "M5 8.2 L7.1 10.3 L11 5.8",
+        stroke: "var(--accent)",
+        "stroke-width": "1.5",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      }),
+    );
+  } else if (status === "interrupted") {
+    svg.appendChild(
+      svgEl("circle", {
+        cx: "8",
+        cy: "8",
+        r: "6.4",
+        stroke: "var(--warn)",
+        "stroke-width": "1.4",
+      }),
+    );
+    svg.appendChild(
+      svgEl("path", {
+        d: "M5.4 8 H10.6",
+        stroke: "var(--warn)",
+        "stroke-width": "1.5",
+        "stroke-linecap": "round",
+      }),
+    );
   } else {
     // pending / очередь — пунктирное кольцо
-    svg.appendChild(svgEl('circle', { cx: '8', cy: '8', r: '6.4', stroke: 'var(--ink-faint)', 'stroke-width': '1.4', 'stroke-dasharray': '2.5 2.5' }));
+    svg.appendChild(
+      svgEl("circle", {
+        cx: "8",
+        cy: "8",
+        r: "6.4",
+        stroke: "var(--ink-faint)",
+        "stroke-width": "1.4",
+        "stroke-dasharray": "2.5 2.5",
+      }),
+    );
   }
   return svg;
 }
@@ -1527,63 +1976,79 @@ function tpStatusIcon(status) {
 function tpRight(t, stopped) {
   const parts = [];
   if (t.model) parts.push(t.model);
-  if (t.status === 'completed' && t.durMs != null) parts.push(fmtDur(t.durMs));
-  else if (t.status === 'in_progress') parts.push(stopped ? 'прервано' : (t.startedAt ? fmtDur(Date.now() - t.startedAt) : 'идёт'));
-  else if (t.status === 'interrupted') parts.push('прервано');
-  else if (t.status === 'pending') parts.push('в очереди');
-  return parts.join(' · ');
+  if (t.status === "completed" && t.durMs != null) parts.push(fmtDur(t.durMs));
+  else if (t.status === "in_progress")
+    parts.push(
+      stopped
+        ? "прервано"
+        : t.startedAt
+          ? fmtDur(Date.now() - t.startedAt)
+          : "идёт",
+    );
+  else if (t.status === "interrupted") parts.push("прервано");
+  else if (t.status === "pending") parts.push("в очереди");
+  return parts.join(" · ");
 }
 
 // действия для задачи по её статусу. Готовой — ничего (просто заметка);
 // активной/в очереди — перейти/пропустить; прерванной — снова перейти.
 function tpActionsFor(status) {
-  if (status === 'completed') return [];
-  if (status === 'interrupted') return [['goto', 'Перейти']];
-  return [['goto', 'Перейти'], ['skip', 'Пропустить']]; // pending / in_progress
+  if (status === "completed") return [];
+  if (status === "interrupted") return [["goto", "Перейти"]];
+  return [
+    ["goto", "Перейти"],
+    ["skip", "Пропустить"],
+  ]; // pending / in_progress
 }
 
 function renderBoardPanel(s, b) {
   const total = b.tasks.length;
-  const done = b.tasks.filter((t) => t.status === 'completed').length;
-  const run = b.tasks.filter((t) => t.status === 'in_progress').length;
-  const queued = b.tasks.filter((t) => t.status === 'pending').length;
+  const done = b.tasks.filter((t) => t.status === "completed").length;
+  const run = b.tasks.filter((t) => t.status === "in_progress").length;
+  const queued = b.tasks.filter((t) => t.status === "pending").length;
 
   // шапка
-  const cnt = document.getElementById('tpCount');
+  const cnt = document.getElementById("tpCount");
   cnt.textContent = String(done);
-  const of = document.createElement('span');
-  of.className = 'tp-of';
+  const of = document.createElement("span");
+  of.className = "tp-of";
   of.textContent = `/${total}`;
   cnt.appendChild(of);
-  document.getElementById('tpAggText').textContent =
-    `выполнено · ${run} в работе · ${queued} в очереди` + (b.stopped ? ' · остановлена' : '');
-  document.getElementById('tpBarFill').style.width = `${total ? Math.round((done / total) * 100) : 0}%`;
-  const mins = Math.max(0, Math.floor((Date.now() - (s.createdAt || Date.now())) / 60000));
-  document.getElementById('tpSub').textContent = `сессия · ${mins < 60 ? mins + 'м' : Math.floor(mins / 60) + 'ч ' + (mins % 60) + 'м'}`;
+  document.getElementById("tpAggText").textContent =
+    `выполнено · ${run} в работе · ${queued} в очереди` +
+    (b.stopped ? " · остановлена" : "");
+  document.getElementById("tpBarFill").style.width =
+    `${total ? Math.round((done / total) * 100) : 0}%`;
+  const mins = Math.max(
+    0,
+    Math.floor((Date.now() - (s.createdAt || Date.now())) / 60000),
+  );
+  document.getElementById("tpSub").textContent =
+    `сессия · ${mins < 60 ? mins + "м" : Math.floor(mins / 60) + "ч " + (mins % 60) + "м"}`;
 
   // список задач
-  tpListEl.textContent = '';
+  tpListEl.textContent = "";
   for (const t of b.tasks) {
-    const row = document.createElement('div');
-    row.className = 'tp-row';
+    const row = document.createElement("div");
+    row.className = "tp-row";
 
     // строка не раскрывается; заголовок пишем целиком (перенос по строкам)
-    const main = document.createElement('div');
-    main.className = 'tp-rowmain';
-    const ic = document.createElement('span');
-    ic.className = 'tp-ic';
+    const main = document.createElement("div");
+    main.className = "tp-rowmain";
+    const ic = document.createElement("span");
+    ic.className = "tp-ic";
     ic.appendChild(tpStatusIcon(t.status));
     main.appendChild(ic);
-    const n = document.createElement('span');
-    n.className = 'tp-n';
+    const n = document.createElement("span");
+    n.className = "tp-n";
     n.textContent = `Task ${t.n}`;
     main.appendChild(n);
-    const title = document.createElement('span');
-    title.className = 'tp-title2' + (t.status === 'pending' ? ' dim' : '');
+    const title = document.createElement("span");
+    title.className = "tp-title2" + (t.status === "pending" ? " dim" : "");
     title.textContent = t.text;
     main.appendChild(title);
-    const right = document.createElement('span');
-    right.className = 'tp-right';
+    const right = document.createElement("span");
+    right.className = "tp-right";
     right.textContent = tpRight(t, b.stopped);
     main.appendChild(right);
     row.appendChild(main);
@@ -1592,13 +2057,13 @@ function renderBoardPanel(s, b) {
     // на готовой кнопок нет. Префил composer, без отправки и без мутации доски.
     const actions = b.stopped ? [] : tpActionsFor(t.status);
     if (actions.length) {
-      const acts = document.createElement('div');
-      acts.className = 'tp-acts';
+      const acts = document.createElement("div");
+      acts.className = "tp-acts";
       for (const [action, label] of actions) {
-        const btn = document.createElement('button');
-        btn.className = 'tp-act';
+        const btn = document.createElement("button");
+        btn.className = "tp-act";
         btn.textContent = label;
-        btn.addEventListener('click', () => runTaskAction(t.n, action));
+        btn.addEventListener("click", () => runTaskAction(t.n, action));
         acts.appendChild(btn);
       }
       row.appendChild(acts);
@@ -1612,19 +2077,21 @@ function renderBoardPanel(s, b) {
     tpStripEl.hidden = true;
   } else {
     tpStripEl.hidden = false;
-    tpStripEl.textContent = '';
-    const lab = document.createElement('span');
-    lab.className = 'tp-striplabel';
-    lab.textContent = 'сабагенты: ';
+    tpStripEl.textContent = "";
+    const lab = document.createElement("span");
+    lab.className = "tp-striplabel";
+    lab.textContent = "сабагенты: ";
     tpStripEl.appendChild(lab);
     const parts = subs.slice(0, 5).map((sa) => {
       const seg = [sa.kind || sa.name];
       if (sa.model) seg.push(sa.model);
-      const dur = sa.stoppedAt ? sa.stoppedAt - sa.startedAt : Date.now() - sa.startedAt;
-      seg.push(fmtDur(dur) + (sa.stoppedAt ? '' : '…'));
-      return seg.join(' · ');
+      const dur = sa.stoppedAt
+        ? sa.stoppedAt - sa.startedAt
+        : Date.now() - sa.startedAt;
+      seg.push(fmtDur(dur) + (sa.stoppedAt ? "" : "…"));
+      return seg.join(" · ");
     });
-    tpStripEl.appendChild(document.createTextNode(parts.join('   ·   ')));
+    tpStripEl.appendChild(document.createTextNode(parts.join("   ·   ")));
   }
 }
 
@@ -1632,49 +2099,71 @@ function renderBoardPanel(s, b) {
 async function runTaskAction(taskRef, action) {
   if (!chatSessionId) return;
   const res = await window.jarvis.taskAction(chatSessionId, taskRef, action);
-  if (!res || !res.ok) { showToast((res && res.error) || 'Не вышло'); return; }
+  if (!res || !res.ok) {
+    showToast((res && res.error) || "Не вышло");
+    return;
+  }
   closeBoard();
   replyEl.value = res.text;
   autoGrowReply();
   replyEl.focus();
   replyEl.setSelectionRange(replyEl.value.length, replyEl.value.length);
-  showToast('Проверь и отправь — Jarvis не шлёт сам');
+  showToast("Проверь и отправь — Jarvis не шлёт сам");
 }
 
 // живой посекундный отсчёт у in-progress задач, пока доска открыта
 setInterval(() => {
   if (!boardOpen) return;
   const b = boardOf(curSession());
-  if (b && !b.stopped && b.tasks.some((t) => t.status === 'in_progress')) {
+  if (b && !b.stopped && b.tasks.some((t) => t.status === "in_progress")) {
     renderBoardPanel(curSession(), b);
   }
 }, 1000);
 
 /* ---------- палитра команд: / в поле ответа ---------- */
 
-const cmdPaletteEl = document.getElementById('cmdPalette');
+const cmdPaletteEl = document.getElementById("cmdPalette");
 let cmdCatalog = [];
 let paletteItems = []; // обобщённые пункты: {name, hint, desc, badge, active, apply}
 let cmdSel = 0;
 
 async function loadCommands() {
-  if (!chatSessionId) { cmdCatalog = []; return; }
-  try { cmdCatalog = await window.jarvis.getCommands(chatSessionId); }
-  catch { cmdCatalog = []; }
+  if (!chatSessionId) {
+    cmdCatalog = [];
+    return;
+  }
+  try {
+    cmdCatalog = await window.jarvis.getCommands(chatSessionId);
+  } catch {
+    cmdCatalog = [];
+  }
 }
 
-function curSession() { return state.find((x) => x.id === chatSessionId); }
+function curSession() {
+  return state.find((x) => x.id === chatSessionId);
+}
 
 function srcLabel(src) {
-  return { builtin: 'встр', project: 'проект', user: 'мои', plugin: 'плагин', codex: 'codex' }[src] || '';
+  return (
+    {
+      builtin: "встр",
+      project: "проект",
+      user: "мои",
+      plugin: "плагин",
+      codex: "codex",
+    }[src] || ""
+  );
 }
 
 // /model и /effort без значения → свой пикер; иначе автокомплит команд
 function refreshPalette() {
   const v = replyEl.value;
-  if (/^\/model\s*$/i.test(v)) return buildValuePicker('model');
-  if (/^\/effort\s*$/i.test(v)) return buildValuePicker('effort');
-  if (!v.startsWith('/') || /\s/.test(v.slice(1))) { hidePalette(); return; }
+  if (/^\/model\s*$/i.test(v)) return buildValuePicker("model");
+  if (/^\/effort\s*$/i.test(v)) return buildValuePicker("effort");
+  if (!v.startsWith("/") || /\s/.test(v.slice(1))) {
+    hidePalette();
+    return;
+  }
   buildCmdItems(v.slice(1).toLowerCase());
 }
 
@@ -1685,14 +2174,15 @@ function buildCmdItems(q) {
       const ap = a.name.toLowerCase().startsWith(q) ? 0 : 1;
       const bp = b.name.toLowerCase().startsWith(q) ? 0 : 1;
       if (ap !== bp) return ap - bp;
-      if ((a.source === 'builtin') !== (b.source === 'builtin')) return a.source === 'builtin' ? -1 : 1;
+      if ((a.source === "builtin") !== (b.source === "builtin"))
+        return a.source === "builtin" ? -1 : 1;
       return a.name.localeCompare(b.name);
     })
     .slice(0, 50);
   paletteItems = matches.map((c) => ({
-    name: '/' + c.name,
+    name: "/" + c.name,
     hint: c.hint,
-    desc: c.description || '',
+    desc: c.description || "",
     badge: srcLabel(c.source),
     apply: () => completeCommand(c),
   }));
@@ -1703,78 +2193,95 @@ function buildCmdItems(q) {
 // пикер значений модели/effort вместо интерактивного слайдера TUI
 function buildValuePicker(kind) {
   const s = curSession();
-  if (kind === 'model') {
-    const cur = ((s && s.model) || '').toLowerCase();
+  if (kind === "model") {
+    const cur = ((s && s.model) || "").toLowerCase();
     paletteItems = modelsFor(s && s.agent).map(([val, label]) => ({
-      name: label, desc: 'модель сессии', active: cur === label.toLowerCase(),
-      apply: () => applyValue('setModel', val),
+      name: label,
+      desc: "модель сессии",
+      active: cur === label.toLowerCase(),
+      apply: () => applyValue("setModel", val),
     }));
   } else {
     // У Codex отдельного /effort нет — reasoning меняется в /model-пикере; не
     // показываем claude-only уровни в codex-сессии (бэкенд их всё равно отклонит).
-    if (s && s.agent === 'codex') { hidePalette(); return; }
+    if (s && s.agent === "codex") {
+      hidePalette();
+      return;
+    }
     paletteItems = effortsFor(s && s.model).map(([val, label]) => ({
-      name: label, desc: 'уровень рассуждения', active: !!(s && s.effort === val),
-      apply: () => applyValue('setEffort', val),
+      name: label,
+      desc: "уровень рассуждения",
+      active: !!(s && s.effort === val),
+      apply: () => applyValue("setEffort", val),
     }));
   }
-  cmdSel = Math.max(0, paletteItems.findIndex((i) => i.active));
+  cmdSel = Math.max(
+    0,
+    paletteItems.findIndex((i) => i.active),
+  );
   paintPalette();
 }
 
 async function applyValue(method, val) {
   if (!chatSessionId) return;
   const res = await window.jarvis[method](chatSessionId, val);
-  replyEl.value = '';
+  replyEl.value = "";
   autoGrowReply();
   hidePalette();
-  if (!res.ok) showToast(res.error || (res.needsTmux ? 'Сессия вне tmux' : 'Не удалось'));
+  if (!res.ok)
+    showToast(res.error || (res.needsTmux ? "Сессия вне tmux" : "Не удалось"));
   else replyEl.focus();
 }
 
 function paintPalette() {
-  if (!paletteItems.length) { hidePalette(); return; }
+  if (!paletteItems.length) {
+    hidePalette();
+    return;
+  }
   cmdPaletteEl.hidden = false;
-  cmdPaletteEl.textContent = '';
+  cmdPaletteEl.textContent = "";
   paletteItems.forEach((it, i) => {
-    const row = document.createElement('div');
-    row.className = 'cmdrow-item' + (i === cmdSel ? ' sel' : '');
+    const row = document.createElement("div");
+    row.className = "cmdrow-item" + (i === cmdSel ? " sel" : "");
 
-    const name = document.createElement('span');
-    name.className = 'cmdname';
+    const name = document.createElement("span");
+    name.className = "cmdname";
     name.textContent = it.name;
     row.appendChild(name);
 
     if (it.hint) {
-      const hint = document.createElement('span');
-      hint.className = 'cmdhint';
+      const hint = document.createElement("span");
+      hint.className = "cmdhint";
       hint.textContent = it.hint;
       row.appendChild(hint);
     }
     if (it.active) {
-      const ck = document.createElement('span');
-      ck.className = 'cmdhint';
-      ck.textContent = '✓ сейчас';
+      const ck = document.createElement("span");
+      ck.className = "cmdhint";
+      ck.textContent = "✓ сейчас";
       row.appendChild(ck);
     }
 
-    const desc = document.createElement('span');
-    desc.className = 'cmddesc';
-    desc.textContent = it.desc || '';
+    const desc = document.createElement("span");
+    desc.className = "cmddesc";
+    desc.textContent = it.desc || "";
     row.appendChild(desc);
 
     if (it.badge) {
-      const b = document.createElement('span');
-      b.className = 'cmdsrc';
+      const b = document.createElement("span");
+      b.className = "cmdsrc";
       b.textContent = it.badge;
       row.appendChild(b);
     }
 
-    row.addEventListener('mouseenter', () => { cmdSel = i; paintPalette(); });
-    row.addEventListener('click', () => it.apply());
+    row.addEventListener("mouseenter", () => {
+      cmdSel = i;
+      paintPalette();
+    });
+    row.addEventListener("click", () => it.apply());
     cmdPaletteEl.appendChild(row);
   });
-  cmdPaletteEl.children[cmdSel]?.scrollIntoView({ block: 'nearest' });
+  cmdPaletteEl.children[cmdSel]?.scrollIntoView({ block: "nearest" });
 }
 
 function hidePalette() {
@@ -1789,12 +2296,12 @@ function paletteOpen() {
 // команда: с подсказкой — подставить имя (model/effort → откроется пикер), иначе отправить
 function completeCommand(c) {
   if (c.hint) {
-    replyEl.value = '/' + c.name + ' ';
+    replyEl.value = "/" + c.name + " ";
     autoGrowReply();
     refreshPalette();
     replyEl.focus();
   } else {
-    replyEl.value = '/' + c.name;
+    replyEl.value = "/" + c.name;
     hidePalette();
     sendReplyNow();
   }
@@ -1812,31 +2319,37 @@ async function sendReplyNow() {
   try {
     // Картинки → временные файлы (параллельно); их абсолютные пути уходят агенту
     // в промпте (Claude/Codex читают путь и подгружают картинку), каждый с новой строки.
-    const results = await Promise.all(imgs.map((im) =>
-      window.jarvis.saveImage(im.dataUrl.slice(im.dataUrl.indexOf(',') + 1), im.ext).catch(() => null)
-    ));
+    const results = await Promise.all(
+      imgs.map((im) =>
+        window.jarvis
+          .saveImage(im.dataUrl.slice(im.dataUrl.indexOf(",") + 1), im.ext)
+          .catch(() => null),
+      ),
+    );
     const paths = [];
     for (const r of results) {
       if (r && r.ok && r.path) paths.push(r.path);
-      else showToast((r && r.error) || 'Не удалось сохранить картинку');
+      else showToast((r && r.error) || "Не удалось сохранить картинку");
     }
     // Любой сбой сохранения — не отправляем ничего: частичная отправка молча
     // теряла бы упавшие картинки (их base64 живёт только в pendingImages).
     // Текст и миниатюры остаются в поле — можно убрать битую картинку (×) и повторить.
     if (paths.length < imgs.length) return;
-    const finalText = paths.length ? (text ? text + '\n' : '') + paths.join('\n') : text;
+    const finalText = paths.length
+      ? (text ? text + "\n" : "") + paths.join("\n")
+      : text;
 
     const res = await window.jarvis.sendReply(chatSessionId, finalText);
     if (res.ok) {
-      replyEl.value = '';
+      replyEl.value = "";
       autoGrowReply();
       pendingImages = [];
       renderAttachments();
       appendPendingReply(finalText, !!res.queued); // сразу видно в ленте (снимется эхом из транскрипта)
     } else if (res.needsTmux) {
-      showToast('Сессия вне tmux — запусти команду из подсказки ниже');
+      showToast("Сессия вне tmux — запусти команду из подсказки ниже");
     } else {
-      showToast(res.error || 'Не удалось отправить');
+      showToast(res.error || "Не удалось отправить");
     }
   } finally {
     sending = false;
@@ -1848,17 +2361,18 @@ async function sendReplyNow() {
 // Авто-рост поля под многострочный текст: от одной строки до max-height,
 // дальше включается внутренний скролл (max-height задан в CSS).
 function autoGrowReply() {
-  replyEl.style.height = 'auto';
+  replyEl.style.height = "auto";
   // scrollHeight === 0, когда поле ещё скрыто (чат не показан) — не схлопываем его в 0px.
   const h = replyEl.scrollHeight;
-  replyEl.style.height = (h > 0 ? h : 18) + 'px';
+  replyEl.style.height = (h > 0 ? h : 18) + "px";
 }
 
 // Вставка переноса строки в позицию курсора (для Shift/Alt+Enter).
 function insertNewlineAtReply() {
   const start = replyEl.selectionStart ?? replyEl.value.length;
   const end = replyEl.selectionEnd ?? replyEl.value.length;
-  replyEl.value = replyEl.value.slice(0, start) + '\n' + replyEl.value.slice(end);
+  replyEl.value =
+    replyEl.value.slice(0, start) + "\n" + replyEl.value.slice(end);
   const pos = start + 1;
   replyEl.setSelectionRange(pos, pos);
   autoGrowReply();
@@ -1867,28 +2381,38 @@ function insertNewlineAtReply() {
 // ---------- вставка картинок в поле ответа ----------
 
 function extFromType(type) {
-  const m = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/bmp': 'bmp', 'image/heic': 'heic', 'image/tiff': 'tiff' };
+  const m = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/bmp": "bmp",
+    "image/heic": "heic",
+    "image/tiff": "tiff",
+  };
   if (m[type]) return m[type];
-  const sub = String(type || '').split('/')[1]?.toLowerCase();
-  return IMG_EXTS.includes(sub) ? sub : 'png'; // незнакомый тип Rust всё равно нормализует в png
+  const sub = String(type || "")
+    .split("/")[1]
+    ?.toLowerCase();
+  return IMG_EXTS.includes(sub) ? sub : "png"; // незнакомый тип Rust всё равно нормализует в png
 }
 
 function renderAttachments() {
-  chatAttachEl.textContent = '';
+  chatAttachEl.textContent = "";
   chatAttachEl.hidden = pendingImages.length === 0;
   for (const im of pendingImages) {
-    const thumb = document.createElement('div');
-    thumb.className = 'thumb';
-    const img = document.createElement('img');
+    const thumb = document.createElement("div");
+    thumb.className = "thumb";
+    const img = document.createElement("img");
     img.src = im.dataUrl;
-    img.alt = 'вставленная картинка';
+    img.alt = "вставленная картинка";
     thumb.appendChild(img);
-    const rm = document.createElement('button');
-    rm.className = 'rm';
-    rm.type = 'button';
-    rm.title = 'Убрать';
-    rm.textContent = '×';
-    rm.addEventListener('click', () => removePendingImage(im.id));
+    const rm = document.createElement("button");
+    rm.className = "rm";
+    rm.type = "button";
+    rm.title = "Убрать";
+    rm.textContent = "×";
+    rm.addEventListener("click", () => removePendingImage(im.id));
     thumb.appendChild(rm);
     chatAttachEl.appendChild(thumb);
   }
@@ -1900,43 +2424,83 @@ function removePendingImage(id) {
 }
 
 function addPendingImage(file) {
-  if (pendingImages.length >= MAX_IMAGES) { showToast(`Не больше ${MAX_IMAGES} картинок`); return; }
+  if (pendingImages.length >= MAX_IMAGES) {
+    showToast(`Не больше ${MAX_IMAGES} картинок`);
+    return;
+  }
   const reader = new FileReader();
   reader.onload = () => {
     // повторная проверка лимита: push асинхронный, и один paste с пачкой файлов
     // проходил бы синхронную проверку выше весь целиком
-    if (pendingImages.length >= MAX_IMAGES) { showToast(`Не больше ${MAX_IMAGES} картинок`); return; }
-    const dataUrl = String(reader.result || '');
-    const comma = dataUrl.indexOf(',');
+    if (pendingImages.length >= MAX_IMAGES) {
+      showToast(`Не больше ${MAX_IMAGES} картинок`);
+      return;
+    }
+    const dataUrl = String(reader.result || "");
+    const comma = dataUrl.indexOf(",");
     if (comma < 0) return;
-    pendingImages.push({ id: 'att' + (attachSeq++), ext: extFromType(file.type), dataUrl });
+    pendingImages.push({
+      id: "att" + attachSeq++,
+      ext: extFromType(file.type),
+      dataUrl,
+    });
     renderAttachments();
   };
   reader.readAsDataURL(file);
 }
 
-replyEl.addEventListener('paste', (e) => {
+replyEl.addEventListener("paste", (e) => {
   const items = e.clipboardData && e.clipboardData.items;
   if (!items) return;
-  const files = [...items].filter((it) => it.kind === 'file' && it.type.startsWith('image/'));
+  const files = [...items].filter(
+    (it) => it.kind === "file" && it.type.startsWith("image/"),
+  );
   if (!files.length) return; // обычный текстовый пейст — не вмешиваемся
   e.preventDefault();
-  for (const it of files) { const f = it.getAsFile(); if (f) addPendingImage(f); }
+  for (const it of files) {
+    const f = it.getAsFile();
+    if (f) addPendingImage(f);
+  }
 });
 
-replyEl.addEventListener('input', () => { autoGrowReply(); refreshPalette(); });
+replyEl.addEventListener("input", () => {
+  autoGrowReply();
+  refreshPalette();
+});
 
-replyEl.addEventListener('keydown', (e) => {
+replyEl.addEventListener("keydown", (e) => {
   if (e.metaKey) return; // ⌘↵ — в терминал, обрабатывается глобально
   if (paletteOpen()) {
-    if (e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); cmdSel = Math.min(paletteItems.length - 1, cmdSel + 1); paintPalette(); return; }
-    if (e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); cmdSel = Math.max(0, cmdSel - 1); paintPalette(); return; }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      e.stopPropagation();
+      cmdSel = Math.min(paletteItems.length - 1, cmdSel + 1);
+      paintPalette();
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      cmdSel = Math.max(0, cmdSel - 1);
+      paintPalette();
+      return;
+    }
     // Tab/Enter применяют команду из палитры; но Shift/Alt+Enter — это перенос строки,
     // его пропускаем дальше, к обработке ниже.
-    if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.altKey)) { e.preventDefault(); e.stopPropagation(); paletteItems[cmdSel] && paletteItems[cmdSel].apply(); return; }
-    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); hidePalette(); return; }
+    if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.altKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      paletteItems[cmdSel] && paletteItems[cmdSel].apply();
+      return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      hidePalette();
+      return;
+    }
   }
-  if (e.key === 'Enter') {
+  if (e.key === "Enter") {
     // Shift+Enter (везде) или Alt/Option+Enter (Win/Linux/Mac) — перенос строки.
     if (e.shiftKey || e.altKey) {
       e.preventDefault();
@@ -1955,10 +2519,13 @@ replyEl.addEventListener('keydown', (e) => {
 
 async function focusTerminal(sessionId, project) {
   const res = await window.jarvis.focusTerminal(sessionId);
-  if (res.ok) { window.jarvis.hidePanel(); return; }
+  if (res.ok) {
+    window.jarvis.hidePanel();
+    return;
+  }
   // нижняя ступень лесенки — не ошибка, а чат сессии прямо в панели
-  if (res.fallbackChat && view !== 'chat') openChat(sessionId, project);
-  else showToast(res.error || 'Не нашёл терминал');
+  if (res.fallbackChat && view !== "chat") openChat(sessionId, project);
+  else showToast(res.error || "Не нашёл терминал");
 }
 
 /* ---------- состояние от демона ---------- */
@@ -1966,15 +2533,18 @@ async function focusTerminal(sessionId, project) {
 function applySessionState(list) {
   const normalized = window.JarvisStateSync.normalizeSessions(list);
   if (normalized === null) {
-    console.error('[state-sync] invalid session state payload');
+    console.error("[state-sync] invalid session state payload");
     return;
   }
   state = normalized;
   render();
-  if (view === 'chat') updateChatChannelMark();
-  if (view === 'question') {
+  if (view === "chat") updateChatChannelMark();
+  if (view === "question") {
     const s = state.find((x) => x.id === qSessionId);
-    if (!s || !s.question) { setView('list'); render(); } // ответили в терминале — выходим
+    if (!s || !s.question) {
+      setView("list");
+      render();
+    } // ответили в терминале — выходим
   }
 }
 
@@ -1982,43 +2552,56 @@ const sync = window.JarvisStateSync.create({
   subscribe: (apply) => window.jarvis.onState(apply),
   read: () => window.jarvis.getState(),
   apply: applySessionState,
-  onError: (error) => console.error('[state-sync]', error),
+  onError: (error) => console.error("[state-sync]", error),
 });
 void sync.start();
 
 /* ---------- лимит-баннер ---------- */
 
-const limitBannerEl = document.getElementById('limitBanner');
+const limitBannerEl = document.getElementById("limitBanner");
 let limitInfo = null;
 
 function paintLimitBanner() {
-  if (!limitInfo || !limitInfo.active) { limitBannerEl.hidden = true; return; }
+  if (!limitInfo || !limitInfo.active) {
+    limitBannerEl.hidden = true;
+    return;
+  }
   const min = Math.max(0, Math.round((limitInfo.resetAt - Date.now()) / 60000));
   const t = min < 60 ? `${min}м` : `${Math.floor(min / 60)}ч ${min % 60}м`;
-  limitBannerEl.textContent =
-    `Claude${limitInfo.plan ? ` ${limitInfo.plan}` : ''} · лимит использования · сброс через ${t} — сессии продолжатся сами`;
+  limitBannerEl.textContent = `Claude${limitInfo.plan ? ` ${limitInfo.plan}` : ""} · лимит использования · сброс через ${t} — сессии продолжатся сами`;
   limitBannerEl.hidden = false;
 }
 
-window.jarvis.onLimitState((l) => { limitInfo = l; paintLimitBanner(); });
-window.jarvis.getLimit().then((l) => { limitInfo = l; paintLimitBanner(); }).catch(() => {});
+window.jarvis.onLimitState((l) => {
+  limitInfo = l;
+  paintLimitBanner();
+});
+window.jarvis
+  .getLimit()
+  .then((l) => {
+    limitInfo = l;
+    paintLimitBanner();
+  })
+  .catch(() => {});
 setInterval(paintLimitBanner, 30000); // тикаем обратный отсчёт
 
 /* ---------- постоянная проверка settings.json ---------- */
 
-const configBannerEl = document.getElementById('configBanner');
-const configBannerTextEl = document.getElementById('configBannerText');
-const configDetailsEl = document.getElementById('configDetails');
-const configRepairEl = document.getElementById('configRepair');
+const configBannerEl = document.getElementById("configBanner");
+const configBannerTextEl = document.getElementById("configBannerText");
+const configDetailsEl = document.getElementById("configDetails");
+const configRepairEl = document.getElementById("configRepair");
 let configHealthInfo = null;
 let configRestartRequired = false;
 let configRepairBusy = false;
-let configRepairError = '';
+let configRepairError = "";
 
 function paintConfigBanner() {
-  const issues = configHealthInfo && Array.isArray(configHealthInfo.issues)
-    ? configHealthInfo.issues : [];
-  const broken = configHealthInfo && configHealthInfo.status === 'error';
+  const issues =
+    configHealthInfo && Array.isArray(configHealthInfo.issues)
+      ? configHealthInfo.issues
+      : [];
+  const broken = configHealthInfo && configHealthInfo.status === "error";
   if (!broken && !configRestartRequired && !configRepairError) {
     configBannerEl.hidden = true;
     return;
@@ -2027,23 +2610,31 @@ function paintConfigBanner() {
   if (configRepairError) {
     configBannerTextEl.textContent = configRepairError;
   } else if (configRestartRequired) {
-    configBannerTextEl.textContent = 'Конфигурация исправлена · нужен перезапуск Jarvis';
-  } else {
     configBannerTextEl.textContent =
-      `Конфигурация Jarvis требует внимания · ${issues.length} ${plural(issues.length, 'проблема', 'проблемы', 'проблем')}`;
+      "Конфигурация исправлена · нужен перезапуск Jarvis";
+  } else {
+    configBannerTextEl.textContent = `Конфигурация Jarvis требует внимания · ${issues.length} ${plural(issues.length, "проблема", "проблемы", "проблем")}`;
   }
   configDetailsEl.hidden = configRestartRequired;
-  configRepairEl.disabled = configRepairBusy || (!configRestartRequired && !configHealthInfo?.repairable);
+  configRepairEl.disabled =
+    configRepairBusy ||
+    (!configRestartRequired && !configHealthInfo?.repairable);
   configRepairEl.textContent = configRepairBusy
-    ? 'Исправляю…'
-    : (configRestartRequired ? 'Перезапустить' : 'Исправить');
+    ? "Исправляю…"
+    : configRestartRequired
+      ? "Перезапустить"
+      : "Исправить";
 }
 
 async function refreshConfigHealth() {
   try {
     configHealthInfo = await window.jarvis.settingsHealth();
-    if (configHealthInfo && configHealthInfo.status === 'healthy' && !configRestartRequired) {
-      configRepairError = '';
+    if (
+      configHealthInfo &&
+      configHealthInfo.status === "healthy" &&
+      !configRestartRequired
+    ) {
+      configRepairError = "";
     }
   } catch {
     // Ошибка IPC не означает, что файл битый: не показываем ложную тревогу.
@@ -2051,21 +2642,21 @@ async function refreshConfigHealth() {
   paintConfigBanner();
 }
 
-configDetailsEl.addEventListener('click', () => window.jarvis.onboardingOpen());
-configRepairEl.addEventListener('click', async () => {
+configDetailsEl.addEventListener("click", () => window.jarvis.onboardingOpen());
+configRepairEl.addEventListener("click", async () => {
   if (configRestartRequired) {
     window.jarvis.relaunch();
     return;
   }
   configRepairBusy = true;
-  configRepairError = '';
+  configRepairError = "";
   paintConfigBanner();
   try {
     const outcome = await window.jarvis.settingsRepair();
     configHealthInfo = outcome.health;
     configRestartRequired = true;
   } catch (error) {
-    configRepairError = String(error || 'Не удалось исправить конфиг');
+    configRepairError = String(error || "Не удалось исправить конфиг");
     await refreshConfigHealth();
   } finally {
     configRepairBusy = false;
@@ -2083,7 +2674,7 @@ let awakeLive = false; // активен таймер «Не спать» → н
 // посекундный отсчёт в карточке бодрости — только когда настройки открыты
 // и реально тикает таймер (не жжём кадры впустую)
 setInterval(() => {
-  if (awakeLive && view === 'settings') renderPluginRows();
+  if (awakeLive && view === "settings") renderPluginRows();
 }, 1000);
 
 const pluginById = (id) => plugins.find((p) => p.id === id);
@@ -2092,12 +2683,14 @@ const pluginById = (id) => plugins.find((p) => p.id === id);
 // как Current Session Details у Amphetamine
 function powerSuffix() {
   const parts = [];
-  const ka = pluginById('keep-awake');
-  if (ka?.enabled) parts.push(ka.status?.active ? `☕ ${ka.status.line || 'вкл'}` : '☕ выкл');
-  const cs = pluginById('clamshell');
-  if (cs?.status?.pendingCleanup) parts.push('⌒ helper cleanup не завершён');
-  else if (cs?.enabled) parts.push(cs.status?.armed ? '⌒ не уснёт закрытым' : '⌒ выкл');
-  return parts.length ? ' · ' + parts.join(' · ') : '';
+  const ka = pluginById("keep-awake");
+  if (ka?.enabled)
+    parts.push(ka.status?.active ? `☕ ${ka.status.line || "вкл"}` : "☕ выкл");
+  const cs = pluginById("clamshell");
+  if (cs?.status?.pendingCleanup) parts.push("⌒ helper cleanup не завершён");
+  else if (cs?.enabled)
+    parts.push(cs.status?.armed ? "⌒ не уснёт закрытым" : "⌒ выкл");
+  return parts.length ? " · " + parts.join(" · ") : "";
 }
 
 /* ---------- нижняя полоска панели (дизайн 14a) ----------
@@ -2105,28 +2698,32 @@ function powerSuffix() {
  * как её позвать, вместо невнятного «слушаю». Справа — полоска лимита подписки
  * с окном до сброса; в настройках «Внизу панели» переключается на расход. */
 
-const footerWaveEl = document.getElementById('footerWave');
-const footerLimitEl = document.getElementById('footerLimit');
-const footerMeterEl = document.getElementById('footerMeter');
-const footerLimitTextEl = document.getElementById('footerLimitText');
+const footerWaveEl = document.getElementById("footerWave");
+const footerLimitEl = document.getElementById("footerLimit");
+const footerMeterEl = document.getElementById("footerMeter");
+const footerLimitTextEl = document.getElementById("footerLimitText");
 
-let wakeStatus = null;   // { enabled, running, listening, muted }
-let footerBottom = 'limit'; // 'limit' | 'spend' — настройка «Внизу панели»
-let footerUsage = null;  // последний usage_summary (для процента и расхода)
+let wakeStatus = null; // { enabled, running, listening, muted }
+let footerBottom = "limit"; // 'limit' | 'spend' — настройка «Внизу панели»
+let footerUsage = null; // последний usage_summary (для процента и расхода)
 
 function footerText() {
   // будящее слово слышит — говорим, как позвать (14a)
-  if (wakeStatus?.running && !wakeStatus.muted) return 'скажи «джарвис» — я услышу' + powerSuffix();
+  if (wakeStatus?.running && !wakeStatus.muted)
+    return "скажи «джарвис» — я услышу" + powerSuffix();
   const base = state.length
-    ? `${state.length} ${plural(state.length, 'сессия', 'сессии', 'сессий')} · демон активен`
-    : 'демон активен';
+    ? `${state.length} ${plural(state.length, "сессия", "сессии", "сессий")} · демон активен`
+    : "демон активен";
   return base + powerSuffix();
 }
 
 /** Волна «горит» только когда детектор реально слушает микрофон. */
 function paintFooterWave() {
   if (!footerWaveEl) return;
-  footerWaveEl.classList.toggle('is-live', !!(wakeStatus?.listening && !wakeStatus.muted));
+  footerWaveEl.classList.toggle(
+    "is-live",
+    !!(wakeStatus?.listening && !wakeStatus.muted),
+  );
 }
 
 /** «лимит 62% · до 14:30» — или «$14.20 за день», если выбран расход. */
@@ -2135,24 +2732,31 @@ function paintFooterLimit() {
   const bar = footerMeterEl?.firstElementChild;
   const sess = footerUsage?.official?.session;
 
-  if (footerBottom === 'spend') {
+  if (footerBottom === "spend") {
     const t = footerUsage?.total;
-    if (!t) { footerLimitEl.hidden = true; return; }
+    if (!t) {
+      footerLimitEl.hidden = true;
+      return;
+    }
     const cost = (t.api || 0) + (t.plan || 0);
     footerMeterEl.hidden = true;
-    footerLimitTextEl.textContent = cost > 0.005 ? `$${cost.toFixed(2)} за день` : '—';
+    footerLimitTextEl.textContent =
+      cost > 0.005 ? `$${cost.toFixed(2)} за день` : "—";
     footerLimitEl.hidden = false;
     return;
   }
 
-  if (!sess || typeof sess.pct !== 'number') { footerLimitEl.hidden = true; return; }
+  if (!sess || typeof sess.pct !== "number") {
+    footerLimitEl.hidden = true;
+    return;
+  }
   footerMeterEl.hidden = false;
   const pct = Math.max(0, Math.min(100, Math.round(sess.pct)));
   if (bar) bar.style.width = `${pct}%`;
-  footerMeterEl.classList.toggle('is-crit', pct > 90);
-  footerMeterEl.classList.toggle('is-warn', pct > 75 && pct <= 90);
+  footerMeterEl.classList.toggle("is-crit", pct > 90);
+  footerMeterEl.classList.toggle("is-warn", pct > 75 && pct <= 90);
   // окно до сброса — часами, как в макете («до 14:30»)
-  let until = '';
+  let until = "";
   if (sess.resetAt > Date.now()) {
     const d = new Date(sess.resetAt);
     until = ` · до ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
@@ -2162,92 +2766,133 @@ function paintFooterLimit() {
 }
 
 function refreshFooterUsage() {
-  window.jarvis.getUsage('day')
-    .then((u) => { footerUsage = u; paintFooterLimit(); paintTitlebarLimit(); })
+  window.jarvis
+    .getUsage("day")
+    .then((u) => {
+      footerUsage = u;
+      paintFooterLimit();
+      paintTitlebarLimit();
+    })
     .catch(() => {});
 }
 
-window.jarvis.wakeGet?.().then((w) => { wakeStatus = w; paintFooterWave(); footerLeftEl.textContent = footerText(); }).catch(() => {});
+window.jarvis
+  .wakeGet?.()
+  .then((w) => {
+    wakeStatus = w;
+    paintFooterWave();
+    footerLeftEl.textContent = footerText();
+  })
+  .catch(() => {});
 window.jarvis.onWake?.((p) => {
   if (!p) return;
-  if (p.state || p.listening !== undefined) { wakeStatus = { ...wakeStatus, ...p }; paintFooterWave(); }
+  if (p.state || p.listening !== undefined) {
+    wakeStatus = { ...wakeStatus, ...p };
+    paintFooterWave();
+  }
 });
 window.jarvis.onAudioState?.((s) => {
-  wakeStatus = { ...wakeStatus, listening: s?.state === 'listening', muted: !!s?.muted };
+  wakeStatus = {
+    ...wakeStatus,
+    listening: s?.state === "listening",
+    muted: !!s?.muted,
+  };
   paintFooterWave();
   footerLeftEl.textContent = footerText();
 });
 refreshFooterUsage();
 setInterval(refreshFooterUsage, 60000);
 
-window.jarvis.getSettings().then((s) => {
-  footerBottom = s?.footerBottom === 'spend' ? 'spend' : 'limit';
-  paintFooterLimit();
-}).catch(() => {});
+window.jarvis
+  .getSettings()
+  .then((s) => {
+    footerBottom = s?.footerBottom === "spend" ? "spend" : "limit";
+    paintFooterLimit();
+  })
+  .catch(() => {});
 // «Внизу панели» переключили в настройках — полоска меняется без перезапуска
-window.addEventListener('jarvis:footer-bottom', (e) => {
-  footerBottom = e.detail === 'spend' ? 'spend' : 'limit';
+window.addEventListener("jarvis:footer-bottom", (e) => {
+  footerBottom = e.detail === "spend" ? "spend" : "limit";
   paintFooterLimit();
 });
 
 /* ---------- титульная полоса оконного режима (14h) ---------- */
 
-const tlLimitEl = document.getElementById('tlLimit');
-const tlMeterEl = document.getElementById('tlMeter');
-const tlLimitTextEl = document.getElementById('tlLimitText');
+const tlLimitEl = document.getElementById("tlLimit");
+const tlMeterEl = document.getElementById("tlMeter");
+const tlLimitTextEl = document.getElementById("tlLimitText");
 
 // светофор: декораций у окна нет, поэтому кнопки наши. «Закрыть» = спрятать
 // (CloseRequested перехвачен в Rust — демон продолжает жить).
 // шестерёнка титульной полосы — тот же переход, что вкладка настроек
-const tlSettingsEl = document.getElementById('tlSettings');
-tlSettingsEl.addEventListener('click', () => {
-  if (view === 'settings') { setView('list'); render(); } else setView('settings');
+const tlSettingsEl = document.getElementById("tlSettings");
+tlSettingsEl.addEventListener("click", () => {
+  if (view === "settings") {
+    setView("list");
+    render();
+  } else setView("settings");
 });
 
-document.getElementById('winClose').addEventListener('click', () => window.jarvis.winClose());
-document.getElementById('winMin').addEventListener('click', () => window.jarvis.winMinimize());
+document
+  .getElementById("winClose")
+  .addEventListener("click", () => window.jarvis.winClose());
+document
+  .getElementById("winMin")
+  .addEventListener("click", () => window.jarvis.winMinimize());
 // зелёная кнопка — фуллскрин, с Alt — зум по содержимому: ровно как в macOS
-document.getElementById('winZoom').addEventListener('click', (e) => {
+document.getElementById("winZoom").addEventListener("click", (e) => {
   if (e.altKey) window.jarvis.winZoom();
-  else window.jarvis.winToggleFullscreen().then(syncFullscreen).catch(() => {});
+  else
+    window.jarvis
+      .winToggleFullscreen()
+      .then(syncFullscreen)
+      .catch(() => {});
 });
 // двойной клик по титульной полосе — зум, системная привычка
-document.getElementById('titlebar').addEventListener('dblclick', (e) => {
-  if (e.target.closest('button')) return;
+document.getElementById("titlebar").addEventListener("dblclick", (e) => {
+  if (e.target.closest("button")) return;
   window.jarvis.winZoom();
 });
 
 /** Фуллскрин: убрать скругление и тень, иначе по углам экрана видны прорези. */
 function syncFullscreen() {
-  window.jarvis.winIsFullscreen?.()
-    .then((on) => { document.documentElement.dataset.fullscreen = on ? '1' : '0'; })
+  window.jarvis
+    .winIsFullscreen?.()
+    .then((on) => {
+      document.documentElement.dataset.fullscreen = on ? "1" : "0";
+    })
     .catch(() => {});
 }
 // ⌃⌘F и зелёная кнопка меняют размер окна — ловим оба пути через resize
 let fsTimer = null;
-window.addEventListener('resize', () => {
+window.addEventListener("resize", () => {
   clearTimeout(fsTimer);
   fsTimer = setTimeout(syncFullscreen, 120);
 });
 syncFullscreen();
 
 // светофор горит только у активного окна
-const paintWinFocus = (on) => { document.documentElement.dataset.winFocus = on ? '1' : '0'; };
+const paintWinFocus = (on) => {
+  document.documentElement.dataset.winFocus = on ? "1" : "0";
+};
 paintWinFocus(document.hasFocus());
 window.jarvis.onWinFocus?.(paintWinFocus);
-window.addEventListener('focus', () => paintWinFocus(true));
-window.addEventListener('blur', () => paintWinFocus(false));
+window.addEventListener("focus", () => paintWinFocus(true));
+window.addEventListener("blur", () => paintWinFocus(false));
 
 /** Лимит в титульной полосе — тот же расчёт, что внизу панели. */
 function paintTitlebarLimit() {
   const sess = footerUsage?.official?.session;
-  if (!sess || typeof sess.pct !== 'number') { tlLimitEl.hidden = true; return; }
+  if (!sess || typeof sess.pct !== "number") {
+    tlLimitEl.hidden = true;
+    return;
+  }
   const pct = Math.max(0, Math.min(100, Math.round(sess.pct)));
   const bar = tlMeterEl.firstElementChild;
   if (bar) bar.style.width = `${pct}%`;
-  tlMeterEl.classList.toggle('is-crit', pct > 90);
-  tlMeterEl.classList.toggle('is-warn', pct > 75 && pct <= 90);
-  let until = '';
+  tlMeterEl.classList.toggle("is-crit", pct > 90);
+  tlMeterEl.classList.toggle("is-warn", pct > 75 && pct <= 90);
+  let until = "";
   if (sess.resetAt > Date.now()) {
     const d = new Date(sess.resetAt);
     until = ` · до ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
@@ -2258,27 +2903,27 @@ function paintTitlebarLimit() {
 
 // Режим переключили (здесь или в другом окне) — пересобрать раскладку под
 // новый data-mode: список из сайдбара в стопку видов и обратно.
-window.addEventListener('jarvis:appearance', () => {
+window.addEventListener("jarvis:appearance", () => {
   setView(view);
-  if (view === 'list') render();
+  if (view === "list") render();
 });
 
-function srow(label, control, { dim = false, hint = '', sub = false } = {}) {
-  const row = document.createElement('div');
-  row.className = sub ? 'srow sub' : 'srow';
-  const lab = document.createElement('span');
-  lab.className = 'slabel';
+function srow(label, control, { dim = false, hint = "", sub = false } = {}) {
+  const row = document.createElement("div");
+  row.className = sub ? "srow sub" : "srow";
+  const lab = document.createElement("span");
+  lab.className = "slabel";
   lab.textContent = label;
-  if (dim) lab.style.opacity = '0.6';
+  if (dim) lab.style.opacity = "0.6";
   row.appendChild(lab);
   if (hint) {
-    const h = document.createElement('span');
-    h.className = 'shint';
+    const h = document.createElement("span");
+    h.className = "shint";
     h.textContent = hint;
     row.appendChild(h);
   }
-  const sp = document.createElement('span');
-  sp.className = 'spacer';
+  const sp = document.createElement("span");
+  sp.className = "spacer";
   row.appendChild(sp);
   row.appendChild(control);
   return row;
@@ -2288,21 +2933,21 @@ function srow(label, control, { dim = false, hint = '', sub = false } = {}) {
  *  Состояние видно ВСЕГДА — и когда включено, и когда нет (как Current
  *  Session у Amphetamine), чтобы было ясно, держит мак сон или нет. */
 function headRow(label, stateText, on, gap = false) {
-  const row = document.createElement('div');
-  row.className = gap ? 'srow blockgap' : 'srow';
-  const lab = document.createElement('span');
-  lab.className = 'slabel';
+  const row = document.createElement("div");
+  row.className = gap ? "srow blockgap" : "srow";
+  const lab = document.createElement("span");
+  lab.className = "slabel";
   lab.textContent = label;
   row.appendChild(lab);
-  const sp = document.createElement('span');
-  sp.className = 'spacer';
+  const sp = document.createElement("span");
+  sp.className = "spacer";
   row.appendChild(sp);
-  const chip = document.createElement('span');
-  chip.className = on ? 'sval on' : 'sval';
+  const chip = document.createElement("span");
+  chip.className = on ? "sval on" : "sval";
   chip.textContent = stateText;
   row.appendChild(chip);
-  const dot = document.createElement('span');
-  dot.className = on ? 'sdot on' : 'sdot';
+  const dot = document.createElement("span");
+  dot.className = on ? "sdot on" : "sdot";
   row.appendChild(dot);
   return row;
 }
@@ -2310,64 +2955,70 @@ function headRow(label, stateText, on, gap = false) {
 /** причина текущего состояния слева + ОДНА главная кнопка справа.
  *  Кнопка всегда делает очевидное: держит → «Выключить», не держит → «Включить». */
 function actionRow(text, on, btnLabel, onClick) {
-  const row = document.createElement('div');
-  row.className = 'srow sub';
-  const val = document.createElement('span');
-  val.className = on ? 'sval on' : 'sval';
+  const row = document.createElement("div");
+  row.className = "srow sub";
+  const val = document.createElement("span");
+  val.className = on ? "sval on" : "sval";
   val.textContent = text;
   row.appendChild(val);
-  const sp = document.createElement('span');
-  sp.className = 'spacer';
+  const sp = document.createElement("span");
+  sp.className = "spacer";
   row.appendChild(sp);
-  const btn = document.createElement('button');
-  btn.className = 'keycap kbig';
+  const btn = document.createElement("button");
+  btn.className = "keycap kbig";
   btn.textContent = btnLabel;
-  btn.addEventListener('click', onClick);
+  btn.addEventListener("click", onClick);
   row.appendChild(btn);
   return row;
 }
 
 /** «› тонкая настройка» — раскрывашка для редких опций, чтобы не маячили */
 function discRow(open, onToggle) {
-  const row = document.createElement('div');
-  row.className = 'srow sub sdisc';
-  const lab = document.createElement('span');
-  lab.className = 'slabel';
-  lab.textContent = (open ? '⌄' : '›') + ' тонкая настройка';
+  const row = document.createElement("div");
+  row.className = "srow sub sdisc";
+  const lab = document.createElement("span");
+  lab.className = "slabel";
+  lab.textContent = (open ? "⌄" : "›") + " тонкая настройка";
   row.appendChild(lab);
-  row.addEventListener('click', onToggle);
+  row.addEventListener("click", onToggle);
   return row;
 }
 
 /** пресеты «включить на время» для «Не спать» */
 function presetRow() {
-  const row = document.createElement('div');
-  row.className = 'srow sub';
-  const lab = document.createElement('span');
-  lab.className = 'slabel';
-  lab.style.opacity = '0.6';
-  lab.textContent = 'Включить на время';
+  const row = document.createElement("div");
+  row.className = "srow sub";
+  const lab = document.createElement("span");
+  lab.className = "slabel";
+  lab.style.opacity = "0.6";
+  lab.textContent = "Включить на время";
   row.appendChild(lab);
-  const sp = document.createElement('span');
-  sp.className = 'spacer';
+  const sp = document.createElement("span");
+  sp.className = "spacer";
   row.appendChild(sp);
-  for (const [min, label] of [[15, '15м'], [60, '1ч'], [240, '4ч']]) {
-    const b = document.createElement('button');
-    b.className = 'keycap';
+  for (const [min, label] of [
+    [15, "15м"],
+    [60, "1ч"],
+    [240, "4ч"],
+  ]) {
+    const b = document.createElement("button");
+    b.className = "keycap";
     b.textContent = label;
-    b.addEventListener('click', () => pluginCmd('keep-awake', 'start-timer', { minutes: min }));
+    b.addEventListener("click", () =>
+      pluginCmd("keep-awake", "start-timer", { minutes: min }),
+    );
     row.appendChild(b);
   }
   return row;
 }
 
 function stoggle(checked, onChange, disabled = false) {
-  const t = document.createElement('input');
-  t.type = 'checkbox';
-  t.className = 'toggle';
+  const t = document.createElement("input");
+  t.type = "checkbox";
+  t.className = "toggle";
   t.checked = !!checked;
   t.disabled = disabled;
-  t.addEventListener('change', () => onChange(t.checked));
+  t.addEventListener("change", () => onChange(t.checked));
   return t;
 }
 
@@ -2377,33 +3028,72 @@ async function pluginCmd(id, cmd, args) {
   plugins = await window.jarvis.getPlugins();
   renderPluginRows();
   footerLeftEl.textContent = footerText();
-  if (view === 'history' && histProject == null) renderAgentVmRuntimeStatus();
+  if (view === "history" && histProject == null) renderAgentVmRuntimeStatus();
   return res;
 }
 
 function clamshellResultMessage(result, mode) {
-  if (!result) return 'Крышка: helper не вернул результат';
+  if (!result) return "Крышка: helper не вернул результат";
   if (result.pendingCleanup) {
-    return result.error || 'Крышка: точное освобождение helper lease ещё не подтверждено';
+    return (
+      result.error ||
+      "Крышка: точное освобождение helper lease ещё не подтверждено"
+    );
   }
-  if (result.ok === false) return result.error || 'Крышка: команда не выполнена';
-  return mode === 'keep'
-    ? 'Крышка: helper lease активна — закрытый мак не уснёт'
-    : 'Крышка: helper lease освобождена';
+  if (result.ok === false)
+    return result.error || "Крышка: команда не выполнена";
+  return mode === "keep"
+    ? "Крышка: helper lease активна — закрытый мак не уснёт"
+    : "Крышка: helper lease освобождена";
 }
 
 // маленькие глифы для карточки бодрости (через DOM — без innerHTML)
 function awakeGlyph(kind) {
-  const svg = svgEl('svg', { width: '15', height: '15', viewBox: '0 0 16 16', fill: 'none' });
-  const path = (d, w) => svg.appendChild(svgEl('path', { d, stroke: 'currentColor', 'stroke-width': String(w || 1.3), 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
-  if (kind === 'coffee') {
-    path('M3 6.5 H10.5 V9.5 A2.5 2.5 0 0 1 8 12 H5.5 A2.5 2.5 0 0 1 3 9.5 Z');
-    path('M10.5 7 H12 A1.5 1.5 0 0 1 12 10 H10.5');
-    svg.appendChild(svgEl('path', { d: 'M5.2 2.6 V4', stroke: 'var(--ink-mute)', 'stroke-width': '1.2', 'stroke-linecap': 'round' }));
-    svg.appendChild(svgEl('path', { d: 'M8 2.6 V4', stroke: 'var(--ink-mute)', 'stroke-width': '1.2', 'stroke-linecap': 'round' }));
-  } else if (kind === 'lid') {
-    path('M2.5 10.5 Q8 4 13.5 10.5');
-    svg.appendChild(svgEl('path', { d: 'M1.5 12 H14.5', stroke: 'var(--ink-mute)', 'stroke-width': '1.3', 'stroke-linecap': 'round' }));
+  const svg = svgEl("svg", {
+    width: "15",
+    height: "15",
+    viewBox: "0 0 16 16",
+    fill: "none",
+  });
+  const path = (d, w) =>
+    svg.appendChild(
+      svgEl("path", {
+        d,
+        stroke: "currentColor",
+        "stroke-width": String(w || 1.3),
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      }),
+    );
+  if (kind === "coffee") {
+    path("M3 6.5 H10.5 V9.5 A2.5 2.5 0 0 1 8 12 H5.5 A2.5 2.5 0 0 1 3 9.5 Z");
+    path("M10.5 7 H12 A1.5 1.5 0 0 1 12 10 H10.5");
+    svg.appendChild(
+      svgEl("path", {
+        d: "M5.2 2.6 V4",
+        stroke: "var(--ink-mute)",
+        "stroke-width": "1.2",
+        "stroke-linecap": "round",
+      }),
+    );
+    svg.appendChild(
+      svgEl("path", {
+        d: "M8 2.6 V4",
+        stroke: "var(--ink-mute)",
+        "stroke-width": "1.2",
+        "stroke-linecap": "round",
+      }),
+    );
+  } else if (kind === "lid") {
+    path("M2.5 10.5 Q8 4 13.5 10.5");
+    svg.appendChild(
+      svgEl("path", {
+        d: "M1.5 12 H14.5",
+        stroke: "var(--ink-mute)",
+        "stroke-width": "1.3",
+        "stroke-linecap": "round",
+      }),
+    );
   }
   return svg;
 }
@@ -2411,114 +3101,158 @@ function awakeGlyph(kind) {
 // остаток таймера → «59:44» / «3:59:44»
 function fmtAwakeLeft(ms) {
   const t = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
-  const p = (n) => String(n).padStart(2, '0');
+  const h = Math.floor(t / 3600),
+    m = Math.floor((t % 3600) / 60),
+    s = t % 60;
+  const p = (n) => String(n).padStart(2, "0");
   return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
 }
 
 // длительности сегмента «Не спать»: id → подпись + команда плагину
 const AWAKE_SEG = [
-  { id: 'off', label: 'Выкл', run: () => pluginCmd('keep-awake', 'stop') },
-  { id: '15m', label: '15м', run: () => pluginCmd('keep-awake', 'start-timer', { minutes: 15 }) },
-  { id: '1h', label: '1ч', run: () => pluginCmd('keep-awake', 'start-timer', { minutes: 60 }) },
-  { id: '4h', label: '4ч', run: () => pluginCmd('keep-awake', 'start-timer', { minutes: 240 }) },
-  { id: 'inf', label: '∞', run: () => pluginCmd('keep-awake', 'start-manual') },
+  { id: "off", label: "Выкл", run: () => pluginCmd("keep-awake", "stop") },
+  {
+    id: "15m",
+    label: "15м",
+    run: () => pluginCmd("keep-awake", "start-timer", { minutes: 15 }),
+  },
+  {
+    id: "1h",
+    label: "1ч",
+    run: () => pluginCmd("keep-awake", "start-timer", { minutes: 60 }),
+  },
+  {
+    id: "4h",
+    label: "4ч",
+    run: () => pluginCmd("keep-awake", "start-timer", { minutes: 240 }),
+  },
+  { id: "inf", label: "∞", run: () => pluginCmd("keep-awake", "start-manual") },
 ];
-const TIMER_LABEL_TO_SEG = { '15м': '15m', '60м': '1h', '240м': '4h' };
+const TIMER_LABEL_TO_SEG = { "15м": "15m", "60м": "1h", "240м": "4h" };
 
 // какой сегмент длительности подсвечен + текст статуса справа
 function awakeState(st) {
-  if (!st || !st.active) return { seg: 'off', active: false, status: 'спит как обычно' };
+  if (!st || !st.active)
+    return { seg: "off", active: false, status: "спит как обычно" };
   const manual = st.manual;
   const kind = manual && manual.kind;
-  if (kind === 'manual') return { seg: 'inf', active: true, status: 'не уснёт' };
-  if (kind === 'timer') {
+  if (kind === "manual")
+    return { seg: "inf", active: true, status: "не уснёт" };
+  if (kind === "timer") {
     const left = (manual.until || 0) - Date.now();
-    return { seg: TIMER_LABEL_TO_SEG[manual.label] || '', active: true, status: 'ещё ' + fmtAwakeLeft(left), live: true };
+    return {
+      seg: TIMER_LABEL_TO_SEG[manual.label] || "",
+      active: true,
+      status: "ещё " + fmtAwakeLeft(left),
+      live: true,
+    };
   }
   // активна только авто-гранта (агенты работают) или процесс — длительность не выбрана
-  return { seg: 'off', active: true, status: st.line || 'активно' };
+  return { seg: "off", active: true, status: st.line || "активно" };
 }
 
 // единая карточка «Бодрость»: статус+отсчёт, сегмент длительности,
 // под-тогглы (авто / экран), крышка. Один источник истины — статусы плагинов.
 function renderPluginRows() {
-  const box = document.getElementById('awakeCard');
+  const box = document.getElementById("awakeCard");
   if (!box) return;
-  box.textContent = '';
+  box.textContent = "";
 
-  const ka = pluginById('keep-awake');
+  const ka = pluginById("keep-awake");
   const st = ka && ka.status;
   const a = awakeState(st);
   awakeLive = !!a.live; // нужен ли посекундный тик отсчёта
 
   // шапка
-  const head = document.createElement('div');
-  head.className = 'awakehead';
-  head.appendChild(awakeGlyph('coffee'));
-  const title = document.createElement('span');
-  title.className = 'atitle';
-  title.textContent = 'Не давать маку спать';
+  const head = document.createElement("div");
+  head.className = "awakehead";
+  head.appendChild(awakeGlyph("coffee"));
+  const title = document.createElement("span");
+  title.className = "atitle";
+  title.textContent = "Не давать маку спать";
   head.appendChild(title);
-  head.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+  head.appendChild(
+    Object.assign(document.createElement("span"), { className: "spacer" }),
+  );
   if (a.active) {
-    const pulse = document.createElement('span');
-    pulse.className = 'apulse';
+    const pulse = document.createElement("span");
+    pulse.className = "apulse";
     head.appendChild(pulse);
   }
-  const status = document.createElement('span');
-  status.className = a.active ? 'astatus on' : 'astatus';
+  const status = document.createElement("span");
+  status.className = a.active ? "astatus on" : "astatus";
   status.textContent = a.status;
   head.appendChild(status);
   box.appendChild(head);
 
   // сегмент длительности
-  const seg = document.createElement('div');
-  seg.className = 'aseg';
+  const seg = document.createElement("div");
+  seg.className = "aseg";
   for (const o of AWAKE_SEG) {
-    const b = document.createElement('button');
-    b.className = 'asegbtn' + (a.seg === o.id ? ' active' : '') + (o.id === 'off' ? ' off' : '');
+    const b = document.createElement("button");
+    b.className =
+      "asegbtn" +
+      (a.seg === o.id ? " active" : "") +
+      (o.id === "off" ? " off" : "");
     b.textContent = o.label;
-    b.addEventListener('click', o.run);
+    b.addEventListener("click", o.run);
     seg.appendChild(b);
   }
   box.appendChild(seg);
 
   // под-тогглы
-  box.appendChild(arow('Держать, пока работают агенты',
-    stoggle(st && st.autoEnabled, (v) => pluginCmd('keep-awake', 'set', { auto: v })), { hairtop: true }));
-  box.appendChild(arow('Не гасить заодно и экран',
-    stoggle(st && st.keepDisplayOn, (v) => pluginCmd('keep-awake', 'set', { keepDisplayOn: v }))));
+  box.appendChild(
+    arow(
+      "Держать, пока работают агенты",
+      stoggle(st && st.autoEnabled, (v) =>
+        pluginCmd("keep-awake", "set", { auto: v }),
+      ),
+      { hairtop: true },
+    ),
+  );
+  box.appendChild(
+    arow(
+      "Не гасить заодно и экран",
+      stoggle(st && st.keepDisplayOn, (v) =>
+        pluginCmd("keep-awake", "set", { keepDisplayOn: v }),
+      ),
+    ),
+  );
 
   // крышка (clamshell) — сегмент Спать / Не спать
-  const cs = pluginById('clamshell');
+  const cs = pluginById("clamshell");
   const csStatus = (cs && cs.status) || {};
   const armed = !!csStatus.armed;
-  const lid = document.createElement('div');
-  lid.className = 'arow lid hairtop';
-  lid.appendChild(awakeGlyph('lid'));
-  const ll = document.createElement('span');
-  ll.className = 'alabel';
-  ll.textContent = 'При закрытой крышке';
+  const lid = document.createElement("div");
+  lid.className = "arow lid hairtop";
+  lid.appendChild(awakeGlyph("lid"));
+  const ll = document.createElement("span");
+  ll.className = "alabel";
+  ll.textContent = "При закрытой крышке";
   lid.appendChild(ll);
-  lid.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
-  const lidSeg = document.createElement('div');
-  lidSeg.className = 'seg';
-  for (const [val, label] of [['sleep', 'Спать'], ['keep', 'Не спать']]) {
-    const b = document.createElement('button');
-    b.className = 'segbtn' + ((val === 'keep') === armed ? ' active' : '');
+  lid.appendChild(
+    Object.assign(document.createElement("span"), { className: "spacer" }),
+  );
+  const lidSeg = document.createElement("div");
+  lidSeg.className = "seg";
+  for (const [val, label] of [
+    ["sleep", "Спать"],
+    ["keep", "Не спать"],
+  ]) {
+    const b = document.createElement("button");
+    b.className = "segbtn" + ((val === "keep") === armed ? " active" : "");
     b.textContent = label;
-    b.addEventListener('click', async () => {
-      if (val === 'keep') {
+    b.addEventListener("click", async () => {
+      if (val === "keep") {
         if (cs && !cs.enabled) {
-          const enabled = await pluginCmd('clamshell', '_enable', { on: true });
+          const enabled = await pluginCmd("clamshell", "_enable", { on: true });
           if (!enabled || enabled.ok === false) return;
         }
-        const result = await pluginCmd('clamshell', 'arm');
-        showToast(clamshellResultMessage(result, 'keep'));
+        const result = await pluginCmd("clamshell", "arm");
+        showToast(clamshellResultMessage(result, "keep"));
       } else {
-        const result = await pluginCmd('clamshell', 'disarm');
-        showToast(clamshellResultMessage(result, 'sleep'));
+        const result = await pluginCmd("clamshell", "disarm");
+        showToast(clamshellResultMessage(result, "sleep"));
       }
     });
     lidSeg.appendChild(b);
@@ -2528,51 +3262,64 @@ function renderPluginRows() {
 
   if (csStatus.pendingCleanup || csStatus.renewalError) {
     const helperState = csStatus.helperLease
-      ? 'helper lease требует точного release'
+      ? "helper lease требует точного release"
       : csStatus.helperLeaseUnknown
-        ? 'результат acquire неизвестен'
-        : 'helper lease не удерживается';
+        ? "результат acquire неизвестен"
+        : "helper lease не удерживается";
     const retryCleanup = csStatus.pendingCleanup
       ? async () => {
-        const result = await pluginCmd('clamshell', 'retry-cleanup');
-        showToast(clamshellResultMessage(result, 'sleep'));
-      }
+          const result = await pluginCmd("clamshell", "retry-cleanup");
+          showToast(clamshellResultMessage(result, "sleep"));
+        }
       : () => {};
-    box.appendChild(actionRow(
-      csStatus.renewalError ? `${helperState}: ${csStatus.renewalError}` : helperState,
-      false,
-      csStatus.pendingCleanup ? 'Повторить cleanup' : 'Понятно',
-      retryCleanup,
-    ));
+    box.appendChild(
+      actionRow(
+        csStatus.renewalError
+          ? `${helperState}: ${csStatus.renewalError}`
+          : helperState,
+        false,
+        csStatus.pendingCleanup ? "Повторить cleanup" : "Понятно",
+        retryCleanup,
+      ),
+    );
   }
-  if (cs && cs.health && cs.health.state === 'blocked' && cs.health.repairAction) {
-    box.appendChild(actionRow(
-      cs.health.message || 'Power recovery заблокирован',
-      false,
-      'Как починить',
-      () => showToast(cs.health.repairAction),
-    ));
+  if (
+    cs &&
+    cs.health &&
+    cs.health.state === "blocked" &&
+    cs.health.repairAction
+  ) {
+    box.appendChild(
+      actionRow(
+        cs.health.message || "Power recovery заблокирован",
+        false,
+        "Как починить",
+        () => showToast(cs.health.repairAction),
+      ),
+    );
   }
 
   // подсказка
-  const hint = document.createElement('div');
-  hint.className = 'ahint';
-  hint.append('Быстрее: наберите ');
-  const code = document.createElement('code');
-  code.textContent = '/amf 1ч';
-  hint.append(code, ' в поиске');
+  const hint = document.createElement("div");
+  hint.className = "ahint";
+  hint.append("Быстрее: наберите ");
+  const code = document.createElement("code");
+  code.textContent = "/amf 1ч";
+  hint.append(code, " в поиске");
   box.appendChild(hint);
 }
 
 // строка карточки: подпись слева, контрол справа
 function arow(label, control, { hairtop = false } = {}) {
-  const row = document.createElement('div');
-  row.className = 'arow' + (hairtop ? ' hairtop' : '');
-  const lab = document.createElement('span');
-  lab.className = 'alabel';
+  const row = document.createElement("div");
+  row.className = "arow" + (hairtop ? " hairtop" : "");
+  const lab = document.createElement("span");
+  lab.className = "alabel";
   lab.textContent = label;
   row.appendChild(lab);
-  row.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+  row.appendChild(
+    Object.assign(document.createElement("span"), { className: "spacer" }),
+  );
   row.appendChild(control);
   return row;
 }
@@ -2581,15 +3328,18 @@ window.jarvis.onPlugins((list) => {
   plugins = list;
   footerLeftEl.textContent = footerText();
   renderPluginRows();
-  if (view === 'history') renderHistory();
-  if (view === 'agentvm') renderAgentVmWorkspace();
+  if (view === "history") renderHistory();
+  if (view === "agentvm") renderAgentVmWorkspace();
 });
-window.jarvis.getPlugins().then((list) => {
-  plugins = list;
-  footerLeftEl.textContent = footerText();
-  if (view === 'history') renderHistory();
-  if (view === 'agentvm') renderAgentVmWorkspace();
-}).catch(() => {});
+window.jarvis
+  .getPlugins()
+  .then((list) => {
+    plugins = list;
+    footerLeftEl.textContent = footerText();
+    if (view === "history") renderHistory();
+    if (view === "agentvm") renderAgentVmWorkspace();
+  })
+  .catch(() => {});
 
 // клик по уведомлению: панель уже показана демоном — открываем чат сессии
 window.jarvis.onOpenSession(async (id) => {
@@ -2606,9 +3356,9 @@ window.jarvis.onShown(async () => {
   // перезапуск входной анимации на каждый показ: снять класс → форс-рефлоу → вернуть.
   // keyframe стартует с opacity:0 (fill both держит 0 до показа окна), поэтому
   // реверс-fade и «моргание» исключены, даже если панель уже была видима.
-  panelEl.classList.remove('entering');
+  panelEl.classList.remove("entering");
   void panelEl.offsetWidth;
-  panelEl.classList.add('entering');
+  panelEl.classList.add("entering");
   refreshConfigHealth();
   const refreshed = await sync.refresh();
   if (!refreshed) return;
@@ -2618,25 +3368,28 @@ window.jarvis.onShown(async () => {
   // мягко роняем в список.
   const sess = (id) => state.find((s) => s.id === id);
   const stale =
-    (view === 'chat' && !sess(chatSessionId)) ||
-    (view === 'question' && !sess(qSessionId)?.question);
+    (view === "chat" && !sess(chatSessionId)) ||
+    (view === "question" && !sess(qSessionId)?.question);
 
-  if (view === 'list' || stale) {
-    queryEl.value = ''; // список открывается свежим: чистый поиск + фокус
+  if (view === "list" || stale) {
+    queryEl.value = ""; // список открывается свежим: чистый поиск + фокус
     sel = 0;
     rebuildOrder();
-    setView('list');
+    setView("list");
     render();
-  } else if (view === 'agentvm') {
+  } else if (view === "agentvm") {
     syncAgentVmFocus();
   }
 });
 
-queryEl.addEventListener('input', () => {
-  if (view === 'history') { renderHistory(); return; }
+queryEl.addEventListener("input", () => {
+  if (view === "history") {
+    renderHistory();
+    return;
+  }
   sel = 0;
   cmdRootSel = 0;
-  if (!queryEl.value.trim().startsWith('/')) argMode = null;
+  if (!queryEl.value.trim().startsWith("/")) argMode = null;
   render();
 });
 
@@ -2647,133 +3400,240 @@ queryEl.addEventListener('input', () => {
 
 let cmdRootSel = 0;
 let palHoverEnabled = true; // ховер-выбор отключается на время стрелочной навигации,
-                            // иначе re-render под неподвижным курсором фолбэчит выбор назад
-let argMode = null;       // null | 'amf' (Raycast-поля Часы/Минуты)
-let argH = '';
-let argM = '';
-let argFocus = 'h';       // 'h' | 'm'
-let palSettings = null;   // кэш {position, notifyDone, notifyWaiting} для подсветки чипов
+// иначе re-render под неподвижным курсором фолбэчит выбор назад
+let argMode = null; // null | 'amf' (Raycast-поля Часы/Минуты)
+let argH = "";
+let argM = "";
+let argFocus = "h"; // 'h' | 'm'
+let palSettings = null; // кэш {position, notifyDone, notifyWaiting} для подсветки чипов
 
 const ROOT_COMMANDS = [
-  { cmd: '/amf', kind: 'amf', glyph: 'coffee', desc: 'Не давать маку спать', args: 'выкл · 15м · 1ч · 4ч · ∞' },
-  { cmd: '/lid', kind: 'lid', glyph: 'lid', desc: 'Поведение при закрытой крышке', args: 'спать · не спать' },
-  { cmd: '/pos', kind: 'pos', glyph: 'pos', desc: 'Позиция панели', args: 'центр · угол' },
-  { cmd: '/notify', kind: 'notify', glyph: 'bell', desc: 'Уведомления', args: 'вкл · выкл' },
+  {
+    cmd: "/amf",
+    kind: "amf",
+    glyph: "coffee",
+    desc: "Не давать маку спать",
+    args: "выкл · 15м · 1ч · 4ч · ∞",
+  },
+  {
+    cmd: "/lid",
+    kind: "lid",
+    glyph: "lid",
+    desc: "Поведение при закрытой крышке",
+    args: "спать · не спать",
+  },
+  {
+    cmd: "/pos",
+    kind: "pos",
+    glyph: "pos",
+    desc: "Позиция панели",
+    args: "центр · угол",
+  },
+  {
+    cmd: "/notify",
+    kind: "notify",
+    glyph: "bell",
+    desc: "Уведомления",
+    args: "вкл · выкл",
+  },
 ];
 
 // реальное движение мыши снова отдаёт выбор ховеру (после стрелок)
-listEl.addEventListener('mousemove', () => { palHoverEnabled = true; });
+listEl.addEventListener("mousemove", () => {
+  palHoverEnabled = true;
+});
 
 // глиф команды (coffee/lid — из карточки бодрости; pos/bell — здесь)
 function cmdGlyph(kind) {
-  if (kind === 'coffee' || kind === 'lid') return awakeGlyph(kind);
-  const svg = svgEl('svg', { width: '15', height: '15', viewBox: '0 0 16 16', fill: 'none' });
-  const p = (d, w) => svg.appendChild(svgEl('path', { d, stroke: 'currentColor', 'stroke-width': String(w || 1.4), 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
-  if (kind === 'pos') {
-    p('M2.5 3.5 H13.5 V12.5 H2.5 Z');
-    svg.appendChild(svgEl('circle', { cx: '11', cy: '6', r: '1.3', fill: 'currentColor' }));
-  } else if (kind === 'bell') {
-    p('M5 7 A3 3 0 0 1 11 7 V9.5 L12 11 H4 L5 9.5 Z');
-    p('M6.7 11 A1.3 1.3 0 0 0 9.3 11', 1.2);
+  if (kind === "coffee" || kind === "lid") return awakeGlyph(kind);
+  const svg = svgEl("svg", {
+    width: "15",
+    height: "15",
+    viewBox: "0 0 16 16",
+    fill: "none",
+  });
+  const p = (d, w) =>
+    svg.appendChild(
+      svgEl("path", {
+        d,
+        stroke: "currentColor",
+        "stroke-width": String(w || 1.4),
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      }),
+    );
+  if (kind === "pos") {
+    p("M2.5 3.5 H13.5 V12.5 H2.5 Z");
+    svg.appendChild(
+      svgEl("circle", { cx: "11", cy: "6", r: "1.3", fill: "currentColor" }),
+    );
+  } else if (kind === "bell") {
+    p("M5 7 A3 3 0 0 1 11 7 V9.5 L12 11 H4 L5 9.5 Z");
+    p("M6.7 11 A1.3 1.3 0 0 0 9.3 11", 1.2);
   }
   return svg;
 }
 
 function cmdMatches() {
   const q = queryEl.value.trim();
-  if (q === '/') return ROOT_COMMANDS.slice();
+  if (q === "/") return ROOT_COMMANDS.slice();
   const tok = q.split(/\s+/)[0].toLowerCase();
-  const m = ROOT_COMMANDS.filter((c) => c.cmd.startsWith(tok) || tok.startsWith(c.cmd));
+  const m = ROOT_COMMANDS.filter(
+    (c) => c.cmd.startsWith(tok) || tok.startsWith(c.cmd),
+  );
   return m.length ? m : ROOT_COMMANDS.slice();
 }
 
 /* ----- парсеры (понимают рус/англ) ----- */
 function amfArg(a) {
   a = a.toLowerCase();
-  if (['off', 'выкл', '0', 'стоп'].includes(a)) return 'off';
-  if (['15m', '15м', '15'].includes(a)) return '15m';
-  if (['1h', '1ч', '1', '60'].includes(a)) return '1h';
-  if (['4h', '4ч', '4'].includes(a)) return '4h';
-  if (['inf', '∞', 'on', 'вкл', 'всегда', 'навсегда'].includes(a)) return 'inf';
+  if (["off", "выкл", "0", "стоп"].includes(a)) return "off";
+  if (["15m", "15м", "15"].includes(a)) return "15m";
+  if (["1h", "1ч", "1", "60"].includes(a)) return "1h";
+  if (["4h", "4ч", "4"].includes(a)) return "4h";
+  if (["inf", "∞", "on", "вкл", "всегда", "навсегда"].includes(a)) return "inf";
   return null;
 }
 
 /* ----- исполнители: тот же IPC, что и карточка бодрости / настройки ----- */
 function applyAmf(mode) {
-  if (mode === 'off') pluginCmd('keep-awake', 'stop');
-  else if (mode === 'inf') pluginCmd('keep-awake', 'start-manual');
-  else pluginCmd('keep-awake', 'start-timer', { minutes: { '15m': 15, '1h': 60, '4h': 240 }[mode] });
-  showToast(mode === 'off' ? 'Сон в обычном режиме' : mode === 'inf' ? 'Не сплю, пока не выключишь' : `Не сплю ещё ${{ '15m': '15м', '1h': '1ч', '4h': '4ч' }[mode]}`);
+  if (mode === "off") pluginCmd("keep-awake", "stop");
+  else if (mode === "inf") pluginCmd("keep-awake", "start-manual");
+  else
+    pluginCmd("keep-awake", "start-timer", {
+      minutes: { "15m": 15, "1h": 60, "4h": 240 }[mode],
+    });
+  showToast(
+    mode === "off"
+      ? "Сон в обычном режиме"
+      : mode === "inf"
+        ? "Не сплю, пока не выключишь"
+        : `Не сплю ещё ${{ "15m": "15м", "1h": "1ч", "4h": "4ч" }[mode]}`,
+  );
 }
 async function applyLid(m) {
-  const cs = pluginById('clamshell');
-  if (m === 'keep' && cs && !cs.enabled) {
-    const enabled = await pluginCmd('clamshell', '_enable', { on: true });
+  const cs = pluginById("clamshell");
+  if (m === "keep" && cs && !cs.enabled) {
+    const enabled = await pluginCmd("clamshell", "_enable", { on: true });
     if (!enabled || enabled.ok === false) return;
   }
-  const result = await pluginCmd('clamshell', m === 'keep' ? 'arm' : 'disarm');
+  const result = await pluginCmd("clamshell", m === "keep" ? "arm" : "disarm");
   showToast(clamshellResultMessage(result, m));
 }
 async function applyPos(p) {
   await window.jarvis.setSettings({ position: p });
   palSettings = null;
-  showToast(p === 'corner' ? 'Панель — в правом верхнем углу' : 'Панель — по центру');
+  showToast(
+    p === "corner" ? "Панель — в правом верхнем углу" : "Панель — по центру",
+  );
 }
 async function applyNotify(on) {
   await window.jarvis.setSettings({ notifyDone: on, notifyWaiting: on });
   palSettings = null;
-  showToast(on ? 'Уведомления включены' : 'Уведомления выключены');
+  showToast(on ? "Уведомления включены" : "Уведомления выключены");
 }
 
 // текущее активное значение команды — для подсветки чипа
 function activeChip(kind) {
-  if (kind === 'amf') return awakeState(pluginById('keep-awake') && pluginById('keep-awake').status).seg;
-  if (kind === 'lid') return pluginById('clamshell') && pluginById('clamshell').status && pluginById('clamshell').status.armed ? 'keep' : 'sleep';
-  if (kind === 'pos') return palSettings ? palSettings.position : null;
-  if (kind === 'notify') return palSettings ? (palSettings.notifyDone && palSettings.notifyWaiting ? 'on' : 'off') : null;
+  if (kind === "amf")
+    return awakeState(
+      pluginById("keep-awake") && pluginById("keep-awake").status,
+    ).seg;
+  if (kind === "lid")
+    return pluginById("clamshell") &&
+      pluginById("clamshell").status &&
+      pluginById("clamshell").status.armed
+      ? "keep"
+      : "sleep";
+  if (kind === "pos") return palSettings ? palSettings.position : null;
+  if (kind === "notify")
+    return palSettings
+      ? palSettings.notifyDone && palSettings.notifyWaiting
+        ? "on"
+        : "off"
+      : null;
   return null;
 }
 
 // чипы-аргументы под выбранной командой: [{id,label,run}]
 function chipsFor(kind) {
-  if (kind === 'amf') return [['off', 'Выкл'], ['15m', '15м'], ['1h', '1ч'], ['4h', '4ч'], ['inf', '∞']].map(([id, label]) => ({ id, label, run: () => { if (id === 'amf') return; applyAmf(id); } }));
-  if (kind === 'lid') return [['sleep', 'Спать'], ['keep', 'Не спать']].map(([id, label]) => ({ id, label, run: () => applyLid(id) }));
-  if (kind === 'pos') return [['center', 'Центр'], ['corner', 'Угол']].map(([id, label]) => ({ id, label, run: () => applyPos(id) }));
-  if (kind === 'notify') return [['on', 'Вкл'], ['off', 'Выкл']].map(([id, label]) => ({ id, label, run: () => applyNotify(id === 'on') }));
+  if (kind === "amf")
+    return [
+      ["off", "Выкл"],
+      ["15m", "15м"],
+      ["1h", "1ч"],
+      ["4h", "4ч"],
+      ["inf", "∞"],
+    ].map(([id, label]) => ({
+      id,
+      label,
+      run: () => {
+        if (id === "amf") return;
+        applyAmf(id);
+      },
+    }));
+  if (kind === "lid")
+    return [
+      ["sleep", "Спать"],
+      ["keep", "Не спать"],
+    ].map(([id, label]) => ({ id, label, run: () => applyLid(id) }));
+  if (kind === "pos")
+    return [
+      ["center", "Центр"],
+      ["corner", "Угол"],
+    ].map(([id, label]) => ({ id, label, run: () => applyPos(id) }));
+  if (kind === "notify")
+    return [
+      ["on", "Вкл"],
+      ["off", "Выкл"],
+    ].map(([id, label]) => ({
+      id,
+      label,
+      run: () => applyNotify(id === "on"),
+    }));
   return [];
 }
 
 // одной строкой: «/amf 1ч», «/lid keep», «/pos угол» → исполнить, true если смогли
 function runRootCommand(q) {
   const parts = q.trim().slice(1).split(/\s+/).filter(Boolean);
-  const cmd = '/' + (parts[0] || '').toLowerCase();
+  const cmd = "/" + (parts[0] || "").toLowerCase();
   const arg = parts[1];
   if (!arg) return false;
   const a = arg.toLowerCase();
-  if (cmd === '/amf') { const m = amfArg(a); if (!m) return false; applyAmf(m); clearCmd(); return true; }
-  if (cmd === '/lid') {
-    if (['keep', 'не', 'нет', 'awake', 'бодр'].includes(a)) applyLid('keep');
-    else if (['sleep', 'спать', 'сон'].includes(a)) applyLid('sleep');
-    else return false;
-    clearCmd(); return true;
+  if (cmd === "/amf") {
+    const m = amfArg(a);
+    if (!m) return false;
+    applyAmf(m);
+    clearCmd();
+    return true;
   }
-  if (cmd === '/pos') {
-    if (['center', 'центр', 'середина'].includes(a)) applyPos('center');
-    else if (['corner', 'угол'].includes(a)) applyPos('corner');
+  if (cmd === "/lid") {
+    if (["keep", "не", "нет", "awake", "бодр"].includes(a)) applyLid("keep");
+    else if (["sleep", "спать", "сон"].includes(a)) applyLid("sleep");
     else return false;
-    clearCmd(); return true;
+    clearCmd();
+    return true;
   }
-  if (cmd === '/notify') {
-    if (['on', 'вкл', 'да'].includes(a)) applyNotify(true);
-    else if (['off', 'выкл', 'нет'].includes(a)) applyNotify(false);
+  if (cmd === "/pos") {
+    if (["center", "центр", "середина"].includes(a)) applyPos("center");
+    else if (["corner", "угол"].includes(a)) applyPos("corner");
     else return false;
-    clearCmd(); return true;
+    clearCmd();
+    return true;
+  }
+  if (cmd === "/notify") {
+    if (["on", "вкл", "да"].includes(a)) applyNotify(true);
+    else if (["off", "выкл", "нет"].includes(a)) applyNotify(false);
+    else return false;
+    clearCmd();
+    return true;
   }
   return false;
 }
 
 function clearCmd() {
-  queryEl.value = '';
+  queryEl.value = "";
   cmdRootSel = 0;
   argMode = null;
   render();
@@ -2783,67 +3643,104 @@ function clearCmd() {
 /* ----- рендер палитры команд ----- */
 function renderCmdPalette() {
   // подгружаем настройки для подсветки чипов pos/notify (один раз)
-  if (palSettings === null && (queryEl.value.includes('/pos') || queryEl.value.includes('/notify') || queryEl.value.trim() === '/')) {
+  if (
+    palSettings === null &&
+    (queryEl.value.includes("/pos") ||
+      queryEl.value.includes("/notify") ||
+      queryEl.value.trim() === "/")
+  ) {
     palSettings = {};
-    window.jarvis.getSettings().then((s) => { palSettings = { position: s.position, notifyDone: s.notifyDone, notifyWaiting: s.notifyWaiting }; if (view === 'list' && queryEl.value.startsWith('/')) renderCmdPalette(); }).catch(() => {});
+    window.jarvis
+      .getSettings()
+      .then((s) => {
+        palSettings = {
+          position: s.position,
+          notifyDone: s.notifyDone,
+          notifyWaiting: s.notifyWaiting,
+        };
+        if (view === "list" && queryEl.value.startsWith("/"))
+          renderCmdPalette();
+      })
+      .catch(() => {});
   }
-  if (argMode === 'amf') { renderArgMode(); return; }
+  if (argMode === "amf") {
+    renderArgMode();
+    return;
+  }
 
-  listEl.textContent = '';
-  const box = document.createElement('div');
-  box.className = 'cpal';
-  const lab = document.createElement('div');
-  lab.className = 'cpal-label';
-  lab.textContent = 'Быстрые команды';
+  listEl.textContent = "";
+  const box = document.createElement("div");
+  box.className = "cpal";
+  const lab = document.createElement("div");
+  lab.className = "cpal-label";
+  lab.textContent = "Быстрые команды";
   box.appendChild(lab);
 
   const matches = cmdMatches();
   cmdRootSel = Math.min(cmdRootSel, matches.length - 1);
   matches.forEach((c, i) => {
-    const row = document.createElement('div');
-    row.className = 'cpal-row' + (i === cmdRootSel ? ' sel' : '');
-    const g = document.createElement('span');
-    g.className = 'glyph';
+    const row = document.createElement("div");
+    row.className = "cpal-row" + (i === cmdRootSel ? " sel" : "");
+    const g = document.createElement("span");
+    g.className = "glyph";
     g.appendChild(cmdGlyph(c.glyph));
     row.appendChild(g);
-    const cmd = document.createElement('span');
-    cmd.className = 'cpal-cmd';
+    const cmd = document.createElement("span");
+    cmd.className = "cpal-cmd";
     cmd.textContent = c.cmd;
     row.appendChild(cmd);
-    const desc = document.createElement('span');
-    desc.className = 'cpal-desc';
+    const desc = document.createElement("span");
+    desc.className = "cpal-desc";
     desc.textContent = c.desc;
     row.appendChild(desc);
-    row.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
-    const args = document.createElement('span');
-    args.className = 'cpal-args';
+    row.appendChild(
+      Object.assign(document.createElement("span"), { className: "spacer" }),
+    );
+    const args = document.createElement("span");
+    args.className = "cpal-args";
     args.textContent = c.args;
     row.appendChild(args);
-    row.addEventListener('mouseenter', () => { if (!palHoverEnabled || cmdRootSel === i) return; cmdRootSel = i; renderCmdPalette(); });
-    row.addEventListener('click', () => { if (c.kind === 'amf') enterArg(); else { queryEl.value = c.cmd + ' '; queryEl.focus(); renderCmdPalette(); } });
+    row.addEventListener("mouseenter", () => {
+      if (!palHoverEnabled || cmdRootSel === i) return;
+      cmdRootSel = i;
+      renderCmdPalette();
+    });
+    row.addEventListener("click", () => {
+      if (c.kind === "amf") enterArg();
+      else {
+        queryEl.value = c.cmd + " ";
+        queryEl.focus();
+        renderCmdPalette();
+      }
+    });
     box.appendChild(row);
 
     if (i === cmdRootSel) {
-      const chips = document.createElement('div');
-      chips.className = 'cpal-chips';
+      const chips = document.createElement("div");
+      chips.className = "cpal-chips";
       const active = activeChip(c.kind);
       for (const ch of chipsFor(c.kind)) {
-        const chip = document.createElement('div');
-        chip.className = 'cpal-chip' + (ch.id === active ? ' active' : '');
+        const chip = document.createElement("div");
+        chip.className = "cpal-chip" + (ch.id === active ? " active" : "");
         chip.textContent = ch.label;
-        chip.addEventListener('click', () => { ch.run(); clearCmd(); });
+        chip.addEventListener("click", () => {
+          ch.run();
+          clearCmd();
+        });
         chips.appendChild(chip);
       }
       box.appendChild(chips);
     }
   });
 
-  const hint = document.createElement('div');
-  hint.className = 'cpal-hint';
-  hint.append('Например ');
-  const c1 = document.createElement('code'); c1.textContent = '/amf 1ч';
-  const c2 = document.createElement('code'); c2.textContent = '/amf off';
-  hint.append(c1, ' — не спать час · ', c2, ' — выключить · ↵ запустить');
+  const hint = document.createElement("div");
+  hint.className = "cpal-hint";
+  hint.append("Например ");
+  const c1 = document.createElement("code");
+  c1.textContent = "/amf 1ч";
+  const c2 = document.createElement("code");
+  c2.textContent = "/amf off";
+  hint.append(c1, " — не спать час · ", c2, " — выключить · ↵ запустить");
   box.appendChild(hint);
 
   listEl.appendChild(box);
@@ -2851,35 +3748,40 @@ function renderCmdPalette() {
 
 /* ----- arg-режим /amf: Raycast-поля Часы/Минуты ----- */
 function humanDur(total) {
-  const h = Math.floor(total / 60), m = total % 60;
+  const h = Math.floor(total / 60),
+    m = total % 60;
   const parts = [];
-  if (h) parts.push(h + ' ч');
-  if (m) parts.push(m + ' мин');
-  return parts.join(' ') || '0 мин';
+  if (h) parts.push(h + " ч");
+  if (m) parts.push(m + " мин");
+  return parts.join(" ") || "0 мин";
 }
 
 function enterArg() {
-  argMode = 'amf';
-  argH = '';
-  argM = '';
-  argFocus = 'h';
-  queryEl.value = '/amf ';
+  argMode = "amf";
+  argH = "";
+  argM = "";
+  argFocus = "h";
+  queryEl.value = "/amf ";
   renderArgMode();
 }
 
 function exitArgToList() {
   argMode = null;
-  queryEl.value = '/';
+  queryEl.value = "/";
   cmdRootSel = 0;
   render();
   queryEl.focus();
 }
 
 function runArg() {
-  const total = (parseInt(argH || '0', 10) || 0) * 60 + (parseInt(argM || '0', 10) || 0);
-  if (total <= 0) { showToast('Укажи время'); return; }
-  pluginCmd('keep-awake', 'start-timer', { minutes: total });
-  showToast('Не сплю ещё ' + humanDur(total));
+  const total =
+    (parseInt(argH || "0", 10) || 0) * 60 + (parseInt(argM || "0", 10) || 0);
+  if (total <= 0) {
+    showToast("Укажи время");
+    return;
+  }
+  pluginCmd("keep-awake", "start-timer", { minutes: total });
+  showToast("Не сплю ещё " + humanDur(total));
   clearCmd();
 }
 
@@ -2887,103 +3789,140 @@ let argHInput = null;
 let argMInput = null;
 let argTitleEl = null;
 
-function argTotal() { return (parseInt(argH || '0', 10) || 0) * 60 + (parseInt(argM || '0', 10) || 0); }
+function argTotal() {
+  return (
+    (parseInt(argH || "0", 10) || 0) * 60 + (parseInt(argM || "0", 10) || 0)
+  );
+}
 
 function refreshArgTitle() {
   if (argTitleEl) {
     const t = argTotal();
-    argTitleEl.textContent = t > 0 ? 'Не спать ' + humanDur(t) : 'Не спать — укажи время';
+    argTitleEl.textContent =
+      t > 0 ? "Не спать " + humanDur(t) : "Не спать — укажи время";
   }
 }
 
 function focusArgField() {
-  const el = argFocus === 'h' ? argHInput : argMInput;
+  const el = argFocus === "h" ? argHInput : argMInput;
   if (el) el.focus();
 }
 
 function renderArgMode() {
-  listEl.textContent = '';
+  listEl.textContent = "";
 
   // строка полей: глиф + «Не спать» + Часы/Минуты + хинт
-  const argrow = document.createElement('div');
-  argrow.className = 'cpal-argrow';
-  const g = document.createElement('span');
-  g.className = 'glyph';
-  g.appendChild(awakeGlyph('coffee'));
+  const argrow = document.createElement("div");
+  argrow.className = "cpal-argrow";
+  const g = document.createElement("span");
+  g.className = "glyph";
+  g.appendChild(awakeGlyph("coffee"));
   argrow.appendChild(g);
-  const nm = document.createElement('span');
-  nm.className = 'atitle';
-  nm.textContent = 'Не спать';
+  const nm = document.createElement("span");
+  nm.className = "atitle";
+  nm.textContent = "Не спать";
   argrow.appendChild(nm);
 
   const mkField = (val, ph, which) => {
-    const inp = document.createElement('input');
-    inp.className = 'cpal-field';
+    const inp = document.createElement("input");
+    inp.className = "cpal-field";
     inp.value = val;
     inp.placeholder = ph;
-    inp.inputMode = 'numeric';
+    inp.inputMode = "numeric";
     inp.spellcheck = false;
-    inp.autocomplete = 'off';
-    inp.addEventListener('focus', () => { argFocus = which; });
-    inp.addEventListener('input', () => {
-      let v = inp.value.replace(/\D/g, '').slice(0, 2);
-      if (v !== '') v = String(Math.min(which === 'h' ? 23 : 59, parseInt(v, 10)));
+    inp.autocomplete = "off";
+    inp.addEventListener("focus", () => {
+      argFocus = which;
+    });
+    inp.addEventListener("input", () => {
+      let v = inp.value.replace(/\D/g, "").slice(0, 2);
+      if (v !== "")
+        v = String(Math.min(which === "h" ? 23 : 59, parseInt(v, 10)));
       inp.value = v;
-      if (which === 'h') argH = v; else argM = v;
+      if (which === "h") argH = v;
+      else argM = v;
       refreshArgTitle();
     });
     return inp;
   };
-  argHInput = mkField(argH, 'Часы', 'h');
-  argMInput = mkField(argM, 'Минуты', 'm');
+  argHInput = mkField(argH, "Часы", "h");
+  argMInput = mkField(argM, "Минуты", "m");
   argrow.appendChild(argHInput);
   argrow.appendChild(argMInput);
-  argrow.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
-  const ah = document.createElement('span');
-  ah.className = 'cpal-arghint';
-  ah.textContent = '⇥ поле · ↵ запустить · esc назад';
+  argrow.appendChild(
+    Object.assign(document.createElement("span"), { className: "spacer" }),
+  );
+  const ah = document.createElement("span");
+  ah.className = "cpal-arghint";
+  ah.textContent = "⇥ поле · ↵ запустить · esc назад";
   argrow.appendChild(ah);
   listEl.appendChild(argrow);
 
   // Результаты: живой заголовок + аксессуар «Команда»
-  const results = document.createElement('div');
-  results.className = 'cpal-results';
-  const rl = document.createElement('div');
-  rl.className = 'cpal-label';
-  rl.textContent = 'Результаты';
+  const results = document.createElement("div");
+  results.className = "cpal-results";
+  const rl = document.createElement("div");
+  rl.className = "cpal-label";
+  rl.textContent = "Результаты";
   results.appendChild(rl);
-  const resrow = document.createElement('div');
-  resrow.className = 'cpal-resrow';
-  const ic = document.createElement('span');
-  ic.className = 'cpal-resicon';
-  ic.appendChild((() => { const s = svgEl('svg', { width: '15', height: '15', viewBox: '0 0 16 16', fill: 'none' }); s.appendChild(svgEl('path', { d: 'M3 6.5 H10.5 V9.5 A2.5 2.5 0 0 1 8 12 H5.5 A2.5 2.5 0 0 1 3 9.5 Z M10.5 7 H12 A1.5 1.5 0 0 1 12 10 H10.5', stroke: 'currentColor', 'stroke-width': '1.3', 'stroke-linejoin': 'round' })); return s; })());
+  const resrow = document.createElement("div");
+  resrow.className = "cpal-resrow";
+  const ic = document.createElement("span");
+  ic.className = "cpal-resicon";
+  ic.appendChild(
+    (() => {
+      const s = svgEl("svg", {
+        width: "15",
+        height: "15",
+        viewBox: "0 0 16 16",
+        fill: "none",
+      });
+      s.appendChild(
+        svgEl("path", {
+          d: "M3 6.5 H10.5 V9.5 A2.5 2.5 0 0 1 8 12 H5.5 A2.5 2.5 0 0 1 3 9.5 Z M10.5 7 H12 A1.5 1.5 0 0 1 12 10 H10.5",
+          stroke: "currentColor",
+          "stroke-width": "1.3",
+          "stroke-linejoin": "round",
+        }),
+      );
+      return s;
+    })(),
+  );
   resrow.appendChild(ic);
-  argTitleEl = document.createElement('span');
-  argTitleEl.className = 'cpal-restitle';
+  argTitleEl = document.createElement("span");
+  argTitleEl.className = "cpal-restitle";
   resrow.appendChild(argTitleEl);
-  resrow.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
-  const badge = document.createElement('span');
-  badge.className = 'cpal-resbadge';
-  badge.textContent = 'Команда';
+  resrow.appendChild(
+    Object.assign(document.createElement("span"), { className: "spacer" }),
+  );
+  const badge = document.createElement("span");
+  badge.className = "cpal-resbadge";
+  badge.textContent = "Команда";
   resrow.appendChild(badge);
-  resrow.addEventListener('click', runArg);
+  resrow.addEventListener("click", runArg);
   results.appendChild(resrow);
 
   // Быстро: пресеты заполняют поля
-  const pl = document.createElement('div');
-  pl.className = 'cpal-label';
-  pl.style.paddingTop = '12px';
-  pl.textContent = 'Быстро';
+  const pl = document.createElement("div");
+  pl.className = "cpal-label";
+  pl.style.paddingTop = "12px";
+  pl.textContent = "Быстро";
   results.appendChild(pl);
-  const presets = document.createElement('div');
-  presets.className = 'cpal-presets';
-  for (const [label, h, m] of [['15 мин', 0, 15], ['30 мин', 0, 30], ['1 ч', 1, 0], ['2 ч', 2, 0], ['4 ч', 4, 0]]) {
-    const chip = document.createElement('div');
-    chip.className = 'cpal-chip';
+  const presets = document.createElement("div");
+  presets.className = "cpal-presets";
+  for (const [label, h, m] of [
+    ["15 мин", 0, 15],
+    ["30 мин", 0, 30],
+    ["1 ч", 1, 0],
+    ["2 ч", 2, 0],
+    ["4 ч", 4, 0],
+  ]) {
+    const chip = document.createElement("div");
+    chip.className = "cpal-chip";
     chip.textContent = label;
-    chip.addEventListener('click', () => {
-      argH = h ? String(h) : '';
-      argM = m ? String(m) : '';
+    chip.addEventListener("click", () => {
+      argH = h ? String(h) : "";
+      argM = m ? String(m) : "";
       if (argHInput) argHInput.value = argH;
       if (argMInput) argMInput.value = argM;
       refreshArgTitle();
@@ -2999,132 +3938,197 @@ function renderArgMode() {
 
 /* ---------- футер и меню действий (⌘K) ---------- */
 
-const footerEl = document.getElementById('footer');
-const primaryLabelEl = document.getElementById('primaryLabel');
-const primaryKeyEl = document.getElementById('primaryKey');
-const actionsPopEl = document.getElementById('actionsPop');
+const footerEl = document.getElementById("footer");
+const primaryLabelEl = document.getElementById("primaryLabel");
+const primaryKeyEl = document.getElementById("primaryKey");
+const actionsPopEl = document.getElementById("actionsPop");
 let apSel = 0;
 
 function actionItems() {
-  const s = view === 'list' ? filtered()[sel]
-    : view === 'chat' ? state.find((x) => x.id === chatSessionId)
-    : null;
+  const s =
+    view === "list"
+      ? filtered()[sel]
+      : view === "chat"
+        ? state.find((x) => x.id === chatSessionId)
+        : null;
   const items = [];
   if (s) {
-    items.push({ label: 'Перейти в терминал', key: '⌘↵', run: () => focusTerminal(s.id, s.project) });
-    items.push({ label: s.pinned ? 'Открепить' : 'Закрепить', key: '⌘P', run: () => window.jarvis.setPin(s.id, !s.pinned) });
-    if (s.tmuxPane) items.push({ label: 'Где этот терминал?', key: '⌘G', run: () => window.jarvis.pingTerminal(s.id) });
+    items.push({
+      label: "Перейти в терминал",
+      key: "⌘↵",
+      run: () => focusTerminal(s.id, s.project),
+    });
+    items.push({
+      label: s.pinned ? "Открепить" : "Закрепить",
+      key: "⌘P",
+      run: () => window.jarvis.setPin(s.id, !s.pinned),
+    });
+    if (s.tmuxPane)
+      items.push({
+        label: "Где этот терминал?",
+        key: "⌘G",
+        run: () => window.jarvis.pingTerminal(s.id),
+      });
   }
-  if (view !== 'chat') items.push({ label: 'Очистить завершённые', key: '⌘⌫', run: () => window.jarvis.clearFinished() });
-  items.push({ label: 'Проекты и Agent VM', key: '⌘2', run: () => setView('history') });
-  items.push({ label: 'Статистика usage', key: '⌘3', run: () => setView('stats') });
-  items.push({ label: 'История голоса', key: '⌘4', run: () => setView('voicehist') });
-  items.push({ label: 'Настройки', key: '⌘,', run: () => setView('settings') });
+  if (view !== "chat")
+    items.push({
+      label: "Очистить завершённые",
+      key: "⌘⌫",
+      run: () => window.jarvis.clearFinished(),
+    });
+  items.push({
+    label: "Проекты и Agent VM",
+    key: "⌘2",
+    run: () => setView("history"),
+  });
+  items.push({
+    label: "Статистика usage",
+    key: "⌘3",
+    run: () => setView("stats"),
+  });
+  items.push({
+    label: "История голоса",
+    key: "⌘4",
+    run: () => setView("voicehist"),
+  });
+  items.push({ label: "Настройки", key: "⌘,", run: () => setView("settings") });
   return items;
 }
 
-function actionsOpen() { return !actionsPopEl.hidden; }
+function actionsOpen() {
+  return !actionsPopEl.hidden;
+}
 
 function closeActions() {
   actionsPopEl.hidden = true;
 }
 
 function paintActions(items) {
-  actionsPopEl.textContent = '';
+  actionsPopEl.textContent = "";
   items.forEach((it, i) => {
-    const row = document.createElement('div');
-    row.className = 'ap-item' + (i === apSel ? ' sel' : '');
-    const label = document.createElement('span');
+    const row = document.createElement("div");
+    row.className = "ap-item" + (i === apSel ? " sel" : "");
+    const label = document.createElement("span");
     label.textContent = it.label;
-    const spacer = document.createElement('span');
-    spacer.className = 'spacer';
-    const key = document.createElement('span');
-    key.className = 'keycap';
+    const spacer = document.createElement("span");
+    spacer.className = "spacer";
+    const key = document.createElement("span");
+    key.className = "keycap";
     key.textContent = it.key;
     row.append(label, spacer, key);
-    row.addEventListener('mouseenter', () => { apSel = i; paintActions(items); });
-    row.addEventListener('click', () => { closeActions(); it.run(); });
+    row.addEventListener("mouseenter", () => {
+      apSel = i;
+      paintActions(items);
+    });
+    row.addEventListener("click", () => {
+      closeActions();
+      it.run();
+    });
     actionsPopEl.appendChild(row);
   });
 }
 
 function toggleActions() {
-  if (actionsOpen()) { closeActions(); return; }
-  if (view === 'question') return; // на экране вопроса клавиатура занята пикером
+  if (actionsOpen()) {
+    closeActions();
+    return;
+  }
+  if (view === "question") return; // на экране вопроса клавиатура занята пикером
   apSel = 0;
   paintActions(actionItems());
   actionsPopEl.hidden = false;
 }
 
-document.getElementById('actionsBtn').addEventListener('click', toggleActions);
-document.getElementById('primaryHint').addEventListener('click', () => {
-  if (view === 'list') { const s = filtered()[sel]; if (s) openSession(s); }
-  else if (view === 'history' && histRows[histSel]) {
+document.getElementById("actionsBtn").addEventListener("click", toggleActions);
+document.getElementById("primaryHint").addEventListener("click", () => {
+  if (view === "list") {
+    const s = filtered()[sel];
+    if (s) openSession(s);
+  } else if (view === "history" && histRows[histSel]) {
     const row = histRows[histSel];
-    if (row.type === 'project') openAgentVmProject(row.project);
+    if (row.type === "project") openAgentVmProject(row.project);
     else launchSession(row.s.agent, row.s.id, row.cwd);
+  } else if (view === "settings") {
+    setView("list");
+    render();
   }
-  else if (view === 'settings') { setView('list'); render(); }
 });
 
-tabSessionsEl.addEventListener('click', () => { setView('list'); render(); });
+tabSessionsEl.addEventListener("click", () => {
+  setView("list");
+  render();
+});
 
 /* ---------- Agent VM: entity feed, active environments, project workspace ---------- */
 
 const AgentVmModel = window.JarvisAgentVm;
-const agentVmBackEl = document.getElementById('agentVmBack');
-const agentVmProjectTitleEl = document.getElementById('agentVmProjectTitle');
-const agentVmProjectPathEl = document.getElementById('agentVmProjectPath');
-const agentVmEnvironmentButtonEl = document.getElementById('agentVmEnvironmentButton');
-const agentVmEnvironmentLabelEl = document.getElementById('agentVmEnvironmentLabel');
-const agentVmEnvironmentEl = document.getElementById('agentVmEnvironment');
-const agentVmEnvironmentDotEl = document.getElementById('agentVmEnvironmentDot');
-const agentVmEnvironmentTitleEl = document.getElementById('agentVmEnvironmentTitle');
-const agentVmNameEl = document.getElementById('agentVmName');
-const agentVmStateValueEl = document.getElementById('agentVmStateValue');
-const agentVmResourcesEl = document.getElementById('agentVmResources');
-const agentVmModulesEl = document.getElementById('agentVmModules');
-const agentVmAutostartEl = document.getElementById('agentVmAutostart');
-const agentVmEnsureEl = document.getElementById('agentVmEnsure');
-const agentVmRestartEl = document.getElementById('agentVmRestart');
-const agentVmStopEl = document.getElementById('agentVmStop');
-const agentVmCopyShellEl = document.getElementById('agentVmCopyShell');
-const agentVmCopyResumeEl = document.getElementById('agentVmCopyResume');
-const agentVmCancelEl = document.getElementById('agentVmCancel');
-const agentVmStageEl = document.getElementById('agentVmStage');
-const agentVmStageTitleEl = document.getElementById('agentVmStageTitle');
-const agentVmStageDetailEl = document.getElementById('agentVmStageDetail');
-const agentVmStageTimeEl = document.getElementById('agentVmStageTime');
-const agentVmQueueHintEl = document.getElementById('agentVmQueueHint');
-const agentVmTerminalScreenEl = document.getElementById('agentVmTerminalScreen');
-const agentVmTerminalEmptyEl = document.getElementById('agentVmTerminalEmpty');
-const agentVmTerminalEmptyDetailEl = document.getElementById('agentVmTerminalEmptyDetail');
-const agentVmTerminalLightEl = document.getElementById('agentVmTerminalLight');
-const agentVmTerminalTitleEl = document.getElementById('agentVmTerminalTitle');
-const agentVmTerminalStateEl = document.getElementById('agentVmTerminalState');
-const agentVmFileDrawerEl = document.getElementById('agentVmFileDrawer');
-const agentVmFileTitleEl = document.getElementById('agentVmFileTitle');
-const agentVmFileDiffEl = document.getElementById('agentVmFileDiff');
-const agentVmFileBodyEl = document.getElementById('agentVmFileBody');
-const agentVmFileDiffTabEl = document.getElementById('agentVmFileDiffTab');
-const agentVmFileContentTabEl = document.getElementById('agentVmFileContentTab');
+const agentVmBackEl = document.getElementById("agentVmBack");
+const agentVmProjectTitleEl = document.getElementById("agentVmProjectTitle");
+const agentVmProjectPathEl = document.getElementById("agentVmProjectPath");
+const agentVmEnvironmentButtonEl = document.getElementById(
+  "agentVmEnvironmentButton",
+);
+const agentVmEnvironmentLabelEl = document.getElementById(
+  "agentVmEnvironmentLabel",
+);
+const agentVmEnvironmentEl = document.getElementById("agentVmEnvironment");
+const agentVmEnvironmentDotEl = document.getElementById(
+  "agentVmEnvironmentDot",
+);
+const agentVmEnvironmentTitleEl = document.getElementById(
+  "agentVmEnvironmentTitle",
+);
+const agentVmNameEl = document.getElementById("agentVmName");
+const agentVmStateValueEl = document.getElementById("agentVmStateValue");
+const agentVmResourcesEl = document.getElementById("agentVmResources");
+const agentVmModulesEl = document.getElementById("agentVmModules");
+const agentVmAutostartEl = document.getElementById("agentVmAutostart");
+const agentVmEnsureEl = document.getElementById("agentVmEnsure");
+const agentVmRestartEl = document.getElementById("agentVmRestart");
+const agentVmStopEl = document.getElementById("agentVmStop");
+const agentVmCopyShellEl = document.getElementById("agentVmCopyShell");
+const agentVmCopyResumeEl = document.getElementById("agentVmCopyResume");
+const agentVmCancelEl = document.getElementById("agentVmCancel");
+const agentVmStageEl = document.getElementById("agentVmStage");
+const agentVmStageTitleEl = document.getElementById("agentVmStageTitle");
+const agentVmStageDetailEl = document.getElementById("agentVmStageDetail");
+const agentVmStageTimeEl = document.getElementById("agentVmStageTime");
+const agentVmQueueHintEl = document.getElementById("agentVmQueueHint");
+const agentVmTerminalScreenEl = document.getElementById(
+  "agentVmTerminalScreen",
+);
+const agentVmTerminalEmptyEl = document.getElementById("agentVmTerminalEmpty");
+const agentVmTerminalEmptyDetailEl = document.getElementById(
+  "agentVmTerminalEmptyDetail",
+);
+const agentVmTerminalLightEl = document.getElementById("agentVmTerminalLight");
+const agentVmTerminalTitleEl = document.getElementById("agentVmTerminalTitle");
+const agentVmTerminalStateEl = document.getElementById("agentVmTerminalState");
+const agentVmFileDrawerEl = document.getElementById("agentVmFileDrawer");
+const agentVmFileTitleEl = document.getElementById("agentVmFileTitle");
+const agentVmFileDiffEl = document.getElementById("agentVmFileDiff");
+const agentVmFileBodyEl = document.getElementById("agentVmFileBody");
+const agentVmFileDiffTabEl = document.getElementById("agentVmFileDiffTab");
+const agentVmFileContentTabEl = document.getElementById(
+  "agentVmFileContentTab",
+);
 
 let agentVmEntities = [];
 let agentVmProfiles = [];
-let projectManagerState = { folders: [], favoriteProjectIds: [], view: 'list' };
+let projectManagerState = { folders: [], favoriteProjectIds: [], view: "list" };
 let projectManagerSaving = false;
 let agentVmCurrent = null;
 let agentVmRunId = null;
-let agentVmBackend = 'claude';
+let agentVmBackend = "claude";
 let agentVmStage = null;
 let agentVmStageStartedAt = 0;
 let agentVmFile = null;
-let agentVmFileMode = 'diff';
+let agentVmFileMode = "diff";
 let agentVmProfileSaving = false;
 let agentVmRuntimeStatusEl = null;
 let agentVmTerminalPollInFlight = false;
 let agentVmTerminalInputInFlight = false;
-let agentVmTerminalLastScreenKey = '';
+let agentVmTerminalLastScreenKey = "";
 let agentVmTerminalResizeTimer = null;
 let agentVmCommandItems = [];
 let agentVmCommandSelected = 0;
@@ -3139,52 +4143,61 @@ const agentVmCommandCatalogs = new Map();
 const agentVmOperationWaiters = new Map();
 
 function agentVmPluginReady() {
-  const plugin = pluginById('agent-vm');
-  return !!plugin?.enabled && plugin?.status?.state === 'running';
+  const plugin = pluginById("agent-vm");
+  return !!plugin?.enabled && plugin?.status?.state === "running";
 }
 
 function renderAgentVmRuntimeStatus(root = agentVmRuntimeStatusEl) {
-  const runtime = AgentVmModel.pluginRuntimeStatus(pluginById('agent-vm'));
+  const runtime = AgentVmModel.pluginRuntimeStatus(pluginById("agent-vm"));
   if (!root) return runtime;
 
   root.className = `pm-runtime ${runtime.tone}`;
-  root.setAttribute('role', 'status');
-  root.setAttribute('aria-live', 'polite');
-  root.textContent = '';
-  root.appendChild(Object.assign(document.createElement('span'), {
-    className: 'pm-runtime-signal',
-  }));
+  root.setAttribute("role", "status");
+  root.setAttribute("aria-live", "polite");
+  root.textContent = "";
+  root.appendChild(
+    Object.assign(document.createElement("span"), {
+      className: "pm-runtime-signal",
+    }),
+  );
 
-  const copy = document.createElement('span');
-  copy.className = 'pm-runtime-copy';
-  copy.appendChild(Object.assign(document.createElement('strong'), {
-    textContent: runtime.label,
-  }));
-  copy.appendChild(Object.assign(document.createElement('small'), {
-    textContent: runtime.detail,
-  }));
+  const copy = document.createElement("span");
+  copy.className = "pm-runtime-copy";
+  copy.appendChild(
+    Object.assign(document.createElement("strong"), {
+      textContent: runtime.label,
+    }),
+  );
+  copy.appendChild(
+    Object.assign(document.createElement("small"), {
+      textContent: runtime.detail,
+    }),
+  );
   root.appendChild(copy);
 
-  const steps = document.createElement('span');
-  steps.className = 'pm-runtime-steps';
-  for (const [index, label] of ['Sidecar', 'Handshake', 'Готово'].entries()) {
-    const step = document.createElement('span');
-    const done = runtime.state === 'running' ? index <= runtime.step : index < runtime.step;
-    step.className = `pm-runtime-step${done ? ' done' : index === runtime.step ? ' active' : ''}`;
+  const steps = document.createElement("span");
+  steps.className = "pm-runtime-steps";
+  for (const [index, label] of ["Sidecar", "Handshake", "Готово"].entries()) {
+    const step = document.createElement("span");
+    const done =
+      runtime.state === "running"
+        ? index <= runtime.step
+        : index < runtime.step;
+    step.className = `pm-runtime-step${done ? " done" : index === runtime.step ? " active" : ""}`;
     step.textContent = label;
     steps.appendChild(step);
   }
   root.appendChild(steps);
 
   if (runtime.retryable) {
-    const retry = Object.assign(document.createElement('button'), {
-      className: 'vm-button',
-      textContent: 'Повторить сейчас',
+    const retry = Object.assign(document.createElement("button"), {
+      className: "vm-button",
+      textContent: "Повторить сейчас",
     });
-    retry.addEventListener('click', async (event) => {
+    retry.addEventListener("click", async (event) => {
       event.stopPropagation();
       retry.disabled = true;
-      await pluginCmd('agent-vm', '_restart');
+      await pluginCmd("agent-vm", "_restart");
     });
     root.appendChild(retry);
   }
@@ -3194,8 +4207,11 @@ function renderAgentVmRuntimeStatus(root = agentVmRuntimeStatusEl) {
 function agentVmProjects() {
   const projects = AgentVmModel.deriveProjects(historyData, agentVmEntities);
   for (const profile of agentVmProfiles) {
-    let project = projects.find((item) =>
-      (item.projectId && item.projectId === profile.projectId) || item.cwd === profile.cwd);
+    let project = projects.find(
+      (item) =>
+        (item.projectId && item.projectId === profile.projectId) ||
+        item.cwd === profile.cwd,
+    );
     if (project) {
       project.projectId ||= profile.projectId;
       project.agentVmProfile = profile;
@@ -3209,7 +4225,7 @@ function agentVmProjects() {
       history: null,
       vm: null,
       run: null,
-      summary: 'Agent VM запускается вместе с Jarvis',
+      summary: "Agent VM запускается вместе с Jarvis",
       updatedAt: 0,
       agentVmProfile: profile,
     };
@@ -3224,17 +4240,27 @@ function agentVmProjectByCwd(cwd) {
 
 function agentVmProfileFor(project) {
   if (!project) return null;
-  return agentVmProfiles.find((profile) =>
-    (project.projectId && profile.projectId === project.projectId) || profile.cwd === project.cwd) || null;
+  return (
+    agentVmProfiles.find(
+      (profile) =>
+        (project.projectId && profile.projectId === project.projectId) ||
+        profile.cwd === project.cwd,
+    ) || null
+  );
 }
 
 function syncAgentVmFocus(project = agentVmCurrent, runId = null) {
   const projectId = project?.projectId || null;
-  return window.jarvis.setAgentVmFocus(projectId, projectId ? runId : null).catch(() => {});
+  return window.jarvis
+    .setAgentVmFocus(projectId, projectId ? runId : null)
+    .catch(() => {});
 }
 
 function agentVmElapsed(ts) {
-  const seconds = Math.max(0, Math.floor((Date.now() - (Number(ts) || Date.now())) / 1000));
+  const seconds = Math.max(
+    0,
+    Math.floor((Date.now() - (Number(ts) || Date.now())) / 1000),
+  );
   if (seconds < 60) return `${seconds}с`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}м`;
@@ -3255,21 +4281,23 @@ function settleAgentVmOperations() {
 function waitAgentVmOperation(requestId, timeoutMs = 10 * 60 * 1000) {
   const current = AgentVmModel.operationResult(agentVmEntities, requestId);
   if (current) {
-    return current.ok ? Promise.resolve(current.attrs) : Promise.reject(new Error(current.error));
+    return current.ok
+      ? Promise.resolve(current.attrs)
+      : Promise.reject(new Error(current.error));
   }
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       agentVmOperationWaiters.delete(requestId);
-      reject(new Error('Agent VM не ответила вовремя'));
+      reject(new Error("Agent VM не ответила вовремя"));
     }, timeoutMs);
     agentVmOperationWaiters.set(requestId, { resolve, reject, timer });
   });
 }
 
 async function agentVmCommand(command, args, timeoutMs) {
-  const accepted = await window.jarvis.pluginCmd('agent-vm', command, args);
+  const accepted = await window.jarvis.pluginCmd("agent-vm", command, args);
   if (!accepted?.ok || !accepted?.requestId) {
-    throw new Error(accepted?.error || 'Agent VM plugin недоступен');
+    throw new Error(accepted?.error || "Agent VM plugin недоступен");
   }
   try {
     return await waitAgentVmOperation(accepted.requestId, timeoutMs);
@@ -3288,58 +4316,81 @@ function ingestAgentVmEntities(list) {
     if (refreshed) agentVmCurrent = refreshed;
     const runId = agentVmCurrent.run?.attrs?.runId || null;
     if (!agentVmRunId && runId) agentVmRunId = runId;
-    if (view === 'agentvm') syncAgentVmFocus(agentVmCurrent, agentVmRunId);
+    if (view === "agentvm") syncAgentVmFocus(agentVmCurrent, agentVmRunId);
   }
 
-  if (view === 'history') renderHistProjects(queryEl.value.trim().toLowerCase());
-  if (view === 'agentvm') renderAgentVmWorkspace();
+  if (view === "history")
+    renderHistProjects(queryEl.value.trim().toLowerCase());
+  if (view === "agentvm") renderAgentVmWorkspace();
 }
 
 function renderActiveEnvironments() {
-  if (!AgentVmModel || view !== 'list') {
+  if (!AgentVmModel || view !== "list") {
     activeEnvironmentsEl.hidden = true;
     return;
   }
   const environments = AgentVmModel.activeEnvironments(agentVmEntities);
-  activeEnvironmentRowsEl.textContent = '';
-  activeEnvironmentCountEl.textContent = environments.length ? String(environments.length) : '';
+  activeEnvironmentRowsEl.textContent = "";
+  activeEnvironmentCountEl.textContent = environments.length
+    ? String(environments.length)
+    : "";
   activeEnvironmentsEl.hidden = environments.length === 0;
   for (const environment of environments) {
     const terminalProjectKey = environment.projectId || environment.cwd;
-    const liveBackend = ['claude', 'codex'].find((backend) =>
-      agentVmTerminalAlive(agentVmTerminals.get(`${terminalProjectKey}:${backend}`)));
-    const uiState = liveBackend ? 'working' : environment.uiState;
-    const row = document.createElement('div');
+    const liveBackend = ["claude", "codex"].find((backend) =>
+      agentVmTerminalAlive(
+        agentVmTerminals.get(`${terminalProjectKey}:${backend}`),
+      ),
+    );
+    const uiState = liveBackend ? "working" : environment.uiState;
+    const row = document.createElement("div");
     row.className = `vm-active-row ${uiState}`;
     row.title = environment.cwd;
-    row.appendChild(Object.assign(document.createElement('span'), { className: 'vm-active-signal' }));
-    row.appendChild(Object.assign(document.createElement('span'), {
-      className: 'vm-active-name',
-      textContent: environment.project,
-    }));
-    row.appendChild(Object.assign(document.createElement('span'), {
-      className: 'vm-active-agent',
-      textContent: liveBackend === 'codex'
-        ? 'Codex'
-        : liveBackend === 'claude'
-          ? 'Claude'
-          : environment.run?.attrs?.backend === 'codex'
-            ? 'Codex'
-            : environment.run?.attrs?.backend === 'claude' ? 'Claude' : 'VM',
-    }));
-    row.appendChild(Object.assign(document.createElement('span'), {
-      className: 'vm-active-state',
-      textContent: AgentVmModel.stateLabel(uiState),
-    }));
-    row.appendChild(Object.assign(document.createElement('span'), {
-      className: 'vm-active-time',
-      textContent: agentVmElapsed(environment.updatedAt),
-    }));
-    row.appendChild(Object.assign(document.createElement('span'), {
-      className: 'vm-active-chevron',
-      textContent: '›',
-    }));
-    row.addEventListener('click', () => {
+    row.appendChild(
+      Object.assign(document.createElement("span"), {
+        className: "vm-active-signal",
+      }),
+    );
+    row.appendChild(
+      Object.assign(document.createElement("span"), {
+        className: "vm-active-name",
+        textContent: environment.project,
+      }),
+    );
+    row.appendChild(
+      Object.assign(document.createElement("span"), {
+        className: "vm-active-agent",
+        textContent:
+          liveBackend === "codex"
+            ? "Codex"
+            : liveBackend === "claude"
+              ? "Claude"
+              : environment.run?.attrs?.backend === "codex"
+                ? "Codex"
+                : environment.run?.attrs?.backend === "claude"
+                  ? "Claude"
+                  : "VM",
+      }),
+    );
+    row.appendChild(
+      Object.assign(document.createElement("span"), {
+        className: "vm-active-state",
+        textContent: AgentVmModel.stateLabel(uiState),
+      }),
+    );
+    row.appendChild(
+      Object.assign(document.createElement("span"), {
+        className: "vm-active-time",
+        textContent: agentVmElapsed(environment.updatedAt),
+      }),
+    );
+    row.appendChild(
+      Object.assign(document.createElement("span"), {
+        className: "vm-active-chevron",
+        textContent: "›",
+      }),
+    );
+    row.addEventListener("click", () => {
       const project = agentVmProjectByCwd(environment.cwd) || {
         key: environment.cwd,
         cwd: environment.cwd,
@@ -3355,7 +4406,7 @@ function renderActiveEnvironments() {
   }
 }
 
-function setAgentVmStage(title, detail = '') {
+function setAgentVmStage(title, detail = "") {
   agentVmStage = { title, detail };
   agentVmStageStartedAt = Date.now();
   renderAgentVmWorkspace();
@@ -3373,26 +4424,40 @@ function agentVmArgs() {
   return args;
 }
 
-function agentVmTerminalKey(project = agentVmCurrent, backend = agentVmBackend) {
-  if (!project) return '';
+function agentVmTerminalKey(
+  project = agentVmCurrent,
+  backend = agentVmBackend,
+) {
+  if (!project) return "";
   return `${project.projectId || project.cwd}:${backend}`;
 }
 
-function currentAgentVmTerminal(project = agentVmCurrent, backend = agentVmBackend) {
-  return agentVmTerminals.get(agentVmTerminalKey(project, backend)) || {
-    state: 'absent',
-    screen: '',
-    backend,
-  };
+function currentAgentVmTerminal(
+  project = agentVmCurrent,
+  backend = agentVmBackend,
+) {
+  return (
+    agentVmTerminals.get(agentVmTerminalKey(project, backend)) || {
+      state: "absent",
+      screen: "",
+      backend,
+    }
+  );
 }
 
 function agentVmTerminalAlive(terminal = currentAgentVmTerminal()) {
-  return ['ready', 'working'].includes(terminal?.state);
+  return ["ready", "working"].includes(terminal?.state);
 }
 
 function agentVmTerminalSize() {
-  const width = Math.max(320, agentVmTerminalScreenEl.clientWidth || agentVmFeedEl.clientWidth);
-  const height = Math.max(180, agentVmTerminalScreenEl.clientHeight || agentVmFeedEl.clientHeight);
+  const width = Math.max(
+    320,
+    agentVmTerminalScreenEl.clientWidth || agentVmFeedEl.clientWidth,
+  );
+  const height = Math.max(
+    180,
+    agentVmTerminalScreenEl.clientHeight || agentVmFeedEl.clientHeight,
+  );
   return {
     cols: Math.max(40, Math.min(240, Math.floor((width - 30) / 6.7))),
     rows: Math.max(12, Math.min(100, Math.floor((height - 36) / 15.6))),
@@ -3400,7 +4465,12 @@ function agentVmTerminalSize() {
 }
 
 async function resizeAgentVmTerminal() {
-  if (view !== 'agentvm' || !agentVmCurrent?.projectId || !agentVmTerminalAlive()) return;
+  if (
+    view !== "agentvm" ||
+    !agentVmCurrent?.projectId ||
+    !agentVmTerminalAlive()
+  )
+    return;
   const projectId = agentVmCurrent.projectId;
   const backend = agentVmBackend;
   const key = agentVmTerminalKey();
@@ -3429,9 +4499,11 @@ function scheduleAgentVmTerminalResize() {
 function rememberAgentVmTerminal(terminal, key = agentVmTerminalKey()) {
   if (!key || !terminal) return false;
   const current = agentVmTerminals.get(key);
-  if (current?.state === terminal.state
-    && current?.screen === terminal.screen
-    && current?.terminalId === terminal.terminalId) {
+  if (
+    current?.state === terminal.state &&
+    current?.screen === terminal.screen &&
+    current?.terminalId === terminal.terminalId
+  ) {
     return false;
   }
   agentVmTerminals.set(key, terminal);
@@ -3439,12 +4511,19 @@ function rememberAgentVmTerminal(terminal, key = agentVmTerminalKey()) {
 }
 
 async function refreshAgentVmTerminal() {
-  if (view !== 'agentvm' || !agentVmCurrent?.projectId || agentVmTerminalPollInFlight) return;
-  const vmReady = ['running', 'ready', 'working'].includes(agentVmCurrent.vm?.state);
+  if (
+    view !== "agentvm" ||
+    !agentVmCurrent?.projectId ||
+    agentVmTerminalPollInFlight
+  )
+    return;
+  const vmReady = ["running", "ready", "working"].includes(
+    agentVmCurrent.vm?.state,
+  );
   if (!vmReady) {
     rememberAgentVmTerminal({
-      state: 'absent',
-      screen: '',
+      state: "absent",
+      screen: "",
       backend: agentVmBackend,
     });
     renderAgentVmWorkspace();
@@ -3455,10 +4534,14 @@ async function refreshAgentVmTerminal() {
   const backend = agentVmBackend;
   agentVmTerminalPollInFlight = true;
   try {
-    const response = await window.jarvis.agentVmTerminalSnapshot(projectId, backend);
+    const response = await window.jarvis.agentVmTerminalSnapshot(
+      projectId,
+      backend,
+    );
     if (key !== agentVmTerminalKey()) return;
     if (response?.ok && response.terminal) {
-      if (rememberAgentVmTerminal(response.terminal, key)) renderAgentVmWorkspace();
+      if (rememberAgentVmTerminal(response.terminal, key))
+        renderAgentVmWorkspace();
     }
   } finally {
     agentVmTerminalPollInFlight = false;
@@ -3471,7 +4554,10 @@ async function ensureAgentVmTerminalOnce(project, backend) {
   const existing = currentAgentVmTerminal(project, backend);
   if (agentVmTerminalAlive(existing)) return existing;
 
-  if (project.projectId && ['running', 'ready', 'working'].includes(project.vm?.state)) {
+  if (
+    project.projectId &&
+    ["running", "ready", "working"].includes(project.vm?.state)
+  ) {
     const snapshot = await window.jarvis.agentVmTerminalSnapshot(
       project.projectId,
       backend,
@@ -3483,7 +4569,7 @@ async function ensureAgentVmTerminalOnce(project, backend) {
   }
 
   const projectId = project.projectId;
-  if (!projectId) throw new Error('Agent VM не вернула projectId');
+  if (!projectId) throw new Error("Agent VM не вернула projectId");
   const size = agentVmTerminalSize();
   const started = await window.jarvis.agentVmTerminalEnsure(
     projectId,
@@ -3492,7 +4578,7 @@ async function ensureAgentVmTerminalOnce(project, backend) {
     size.rows,
   );
   if (!started?.ok || !started.terminal) {
-    throw new Error(started?.error || 'Не удалось запустить terminal session');
+    throw new Error(started?.error || "Не удалось запустить terminal session");
   }
   const resolvedKey = agentVmTerminalKey(project, backend);
   rememberAgentVmTerminal(started.terminal, resolvedKey);
@@ -3511,20 +4597,23 @@ function ensureAgentVmEnvironment(project, backend) {
   }
   const existing = agentVmEnvironmentEnsurePromises.get(key);
   if (existing) return existing;
-  const promise = agentVmCommand('runtime.ensure', {
+  const promise = agentVmCommand("runtime.ensure", {
     cwd: project.cwd,
     ...(project.projectId ? { projectId: project.projectId } : {}),
     agent: backend,
-  }).then((environment) => {
-    const projectId = environment.projectId || project.projectId;
-    if (!projectId) throw new Error('Agent VM не вернула projectId');
-    project.projectId = projectId;
-    if (agentVmCurrent?.cwd === project.cwd) agentVmCurrent.projectId = projectId;
-    agentVmSyncedProjects.add(key);
-    return environment;
-  }).finally(() => {
-    agentVmEnvironmentEnsurePromises.delete(key);
-  });
+  })
+    .then((environment) => {
+      const projectId = environment.projectId || project.projectId;
+      if (!projectId) throw new Error("Agent VM не вернула projectId");
+      project.projectId = projectId;
+      if (agentVmCurrent?.cwd === project.cwd)
+        agentVmCurrent.projectId = projectId;
+      agentVmSyncedProjects.add(key);
+      return environment;
+    })
+    .finally(() => {
+      agentVmEnvironmentEnsurePromises.delete(key);
+    });
   agentVmEnvironmentEnsurePromises.set(key, promise);
   return promise;
 }
@@ -3533,34 +4622,43 @@ function ensureAgentVmTerminal(
   project = agentVmCurrent,
   backend = agentVmBackend,
 ) {
-  if (!project) return Promise.reject(new Error('Проект не выбран'));
+  if (!project) return Promise.reject(new Error("Проект не выбран"));
   const promiseKey = `${project.cwd}:${backend}`;
   const existing = agentVmTerminalEnsurePromises.get(promiseKey);
   if (existing) return existing;
-  const promise = ensureAgentVmTerminalOnce(project, backend)
-    .finally(() => agentVmTerminalEnsurePromises.delete(promiseKey));
+  const promise = ensureAgentVmTerminalOnce(project, backend).finally(() =>
+    agentVmTerminalEnsurePromises.delete(promiseKey),
+  );
   agentVmTerminalEnsurePromises.set(promiseKey, promise);
   return promise;
 }
 
 async function warmAgentVmTerminal() {
   const project = agentVmCurrent;
-  if (!project || !agentVmPluginReady()
-    || !['running', 'ready', 'working'].includes(project.vm?.state)) return;
+  if (
+    !project ||
+    !agentVmPluginReady() ||
+    !["running", "ready", "working"].includes(project.vm?.state)
+  )
+    return;
   const backend = AgentVmModel.selectBackend(project.vm, agentVmBackend);
-  const terminalAlive = agentVmTerminalAlive(currentAgentVmTerminal(project, backend));
+  const terminalAlive = agentVmTerminalAlive(
+    currentAgentVmTerminal(project, backend),
+  );
   setAgentVmStage(
-    terminalAlive ? 'Синхронизирую настройки и memory' : 'Подключаю живой терминал',
     terminalAlive
-      ? 'VM и агент остаются запущены'
-      : 'VM готова → persistent tmux → агент',
+      ? "Синхронизирую настройки и memory"
+      : "Подключаю живой терминал",
+    terminalAlive
+      ? "VM и агент остаются запущены"
+      : "VM готова → persistent tmux → агент",
   );
   try {
     await ensureAgentVmTerminal(project, backend);
     if (agentVmCurrent?.cwd === project.cwd) await refreshAgentVmTerminal();
   } catch (error) {
     if (agentVmCurrent?.cwd === project.cwd) {
-      showToast(error.message || 'Не удалось подключить терминал');
+      showToast(error.message || "Не удалось подключить терминал");
     }
   } finally {
     if (agentVmCurrent?.cwd === project.cwd && !agentVmTerminalInputInFlight) {
@@ -3572,7 +4670,7 @@ async function warmAgentVmTerminal() {
 async function refreshAgentVmStatus() {
   if (!agentVmCurrent || !agentVmPluginReady()) return;
   try {
-    await agentVmCommand('runtime.status', agentVmArgs(), 30_000);
+    await agentVmCommand("runtime.status", agentVmArgs(), 30_000);
   } catch {
     // Inline plugin/VM state is more useful than a transient status toast.
   }
@@ -3580,22 +4678,24 @@ async function refreshAgentVmStatus() {
 
 async function runAgentVmLifecycle(command, title) {
   if (!agentVmCurrent) return;
-  setAgentVmStage(title, 'Project config → VM → настройки');
+  setAgentVmStage(title, "Project config → VM → настройки");
   try {
     const result = await agentVmCommand(command, agentVmArgs());
     if (result.projectId) agentVmCurrent.projectId = result.projectId;
-    if (command === 'runtime.stop' || command === 'runtime.restart') {
-      for (const backend of ['claude', 'codex']) {
-        agentVmSyncedProjects.delete(agentVmEnvironmentKey(agentVmCurrent, backend));
+    if (command === "runtime.stop" || command === "runtime.restart") {
+      for (const backend of ["claude", "codex"]) {
+        agentVmSyncedProjects.delete(
+          agentVmEnvironmentKey(agentVmCurrent, backend),
+        );
         rememberAgentVmTerminal(
-          { state: 'absent', screen: '', backend },
+          { state: "absent", screen: "", backend },
           agentVmTerminalKey(agentVmCurrent, backend),
         );
       }
     }
-    showToast(command === 'runtime.stop' ? 'VM остановлена' : 'Среда готова');
+    showToast(command === "runtime.stop" ? "VM остановлена" : "Среда готова");
   } catch (error) {
-    showToast(error.message || 'Agent VM operation failed');
+    showToast(error.message || "Agent VM operation failed");
   } finally {
     clearAgentVmStage();
   }
@@ -3609,11 +4709,11 @@ async function sendAgentVmMessage() {
   const images = agentVmPendingImages.slice();
   if ((!prompt && !images.length) || agentVmTerminalInputInFlight) return;
   if (!agentVmPluginReady()) {
-    showToast('Agent VM plugin ещё запускается');
+    showToast("Agent VM plugin ещё запускается");
     return;
   }
   if (!AgentVmModel.backendAvailable(agentVmCurrent.vm, agentVmBackend)) {
-    const name = agentVmBackend === 'codex' ? 'Codex' : 'Claude';
+    const name = agentVmBackend === "codex" ? "Codex" : "Claude";
     showToast(`${name} не установлен в этой VM`);
     return;
   }
@@ -3621,58 +4721,67 @@ async function sendAgentVmMessage() {
   hideAgentVmCommandPalette();
   renderAgentVmAttachments();
   agentVmQueueHintEl.hidden = false;
-  const active = project.run && ['starting', 'working', 'waiting'].includes(project.run.state);
+  const active =
+    project.run &&
+    ["starting", "working", "waiting"].includes(project.run.state);
   setAgentVmStage(
-    active ? 'Ставлю сообщение следом' : 'Запускаю управляемую задачу',
+    active ? "Ставлю сообщение следом" : "Запускаю управляемую задачу",
     active
-      ? 'В очереди может быть одно следующее сообщение'
-      : 'Project config → VM → настройки → агент',
+      ? "В очереди может быть одно следующее сообщение"
+      : "Project config → VM → настройки → агент",
   );
   try {
     const environment = await ensureAgentVmEnvironment(project, backend);
     const projectId = environment.projectId || project.projectId;
-    if (!projectId) throw new Error('Agent VM не вернула projectId');
-    const uploaded = await Promise.all(images.map(async (image) => {
-      if (image.guestPath && image.projectId === projectId) return image.guestPath;
-      const comma = image.dataUrl.indexOf(',');
-      if (comma < 0) throw new Error('Некорректное изображение');
-      const result = await window.jarvis.agentVmTerminalUpload(
-        projectId,
-        backend,
-        image.dataUrl.slice(comma + 1),
-        image.ext,
-      );
-      if (!result?.ok || !result.path) {
-        throw new Error(result?.error || 'Не удалось загрузить изображение');
-      }
-      image.guestPath = result.path;
-      image.projectId = projectId;
-      return result.path;
-    }));
+    if (!projectId) throw new Error("Agent VM не вернула projectId");
+    const uploaded = await Promise.all(
+      images.map(async (image) => {
+        if (image.guestPath && image.projectId === projectId)
+          return image.guestPath;
+        const comma = image.dataUrl.indexOf(",");
+        if (comma < 0) throw new Error("Некорректное изображение");
+        const result = await window.jarvis.agentVmTerminalUpload(
+          projectId,
+          backend,
+          image.dataUrl.slice(comma + 1),
+          image.ext,
+        );
+        if (!result?.ok || !result.path) {
+          throw new Error(result?.error || "Не удалось загрузить изображение");
+        }
+        image.guestPath = result.path;
+        image.projectId = projectId;
+        return result.path;
+      }),
+    );
     const message = AgentVmModel.composePrompt(prompt, uploaded);
     const continuation = AgentVmModel.continuationRunId(
       project.run,
       backend,
       agentVmRunId,
     );
-    const result = await agentVmCommand('runtime.send', {
-      cwd: project.cwd,
-      projectId,
-      agent: backend,
-      message,
-      ...(continuation ? { runId: continuation } : {}),
-    }, 60_000);
+    const result = await agentVmCommand(
+      "runtime.send",
+      {
+        cwd: project.cwd,
+        projectId,
+        agent: backend,
+        message,
+        ...(continuation ? { runId: continuation } : {}),
+      },
+      60_000,
+    );
     agentVmRunId = result.runId || agentVmRunId;
     agentVmQueueHintEl.hidden = !result.queued;
     await syncAgentVmFocus(project, agentVmRunId);
-    agentVmPromptEl.value = '';
-    agentVmPromptEl.style.height = '';
+    agentVmPromptEl.value = "";
+    agentVmPromptEl.style.height = "";
     agentVmPendingImages = [];
     renderAgentVmAttachments();
   } catch (error) {
     agentVmQueueHintEl.hidden = true;
     refreshAgentVmCommandPalette();
-    showToast(error.message || 'Не удалось отправить задачу');
+    showToast(error.message || "Не удалось отправить задачу");
   } finally {
     agentVmTerminalInputInFlight = false;
     renderAgentVmAttachments();
@@ -3683,11 +4792,11 @@ async function sendAgentVmMessage() {
 
 async function cancelAgentVmRun() {
   if (!agentVmRunId) return;
-  setAgentVmStage('Останавливаю агента', 'VM останется запущенной');
+  setAgentVmStage("Останавливаю агента", "VM останется запущенной");
   try {
-    await agentVmCommand('runtime.cancel', { runId: agentVmRunId }, 30_000);
+    await agentVmCommand("runtime.cancel", { runId: agentVmRunId }, 30_000);
   } catch (error) {
-    showToast(error.message || 'Не удалось остановить агента');
+    showToast(error.message || "Не удалось остановить агента");
   } finally {
     clearAgentVmStage();
   }
@@ -3696,16 +4805,20 @@ async function cancelAgentVmRun() {
 async function stopAgentVmTerminal() {
   if (!agentVmCurrent?.projectId || !agentVmTerminalAlive()) return;
   const key = agentVmTerminalKey();
-  setAgentVmStage('Завершаю агента', 'VM и файлы проекта останутся на месте');
+  setAgentVmStage("Завершаю агента", "VM и файлы проекта останутся на месте");
   try {
     const result = await window.jarvis.agentVmTerminalStop(
       agentVmCurrent.projectId,
       agentVmBackend,
     );
-    if (!result?.ok) throw new Error(result?.error || 'Terminal session не остановлена');
-    rememberAgentVmTerminal({ state: 'absent', screen: '', backend: agentVmBackend }, key);
+    if (!result?.ok)
+      throw new Error(result?.error || "Terminal session не остановлена");
+    rememberAgentVmTerminal(
+      { state: "absent", screen: "", backend: agentVmBackend },
+      key,
+    );
   } catch (error) {
-    showToast(error.message || 'Не удалось остановить агента');
+    showToast(error.message || "Не удалось остановить агента");
   } finally {
     clearAgentVmStage();
   }
@@ -3717,13 +4830,13 @@ function openAgentVmProject(project, backend = null, requestedRunId = null) {
     agentVmPendingImages = [];
   }
   agentVmCurrent = project;
-  agentVmBackend = backend || project.run?.attrs?.backend || 'claude';
+  agentVmBackend = backend || project.run?.attrs?.backend || "claude";
   agentVmRunId = requestedRunId || project.run?.attrs?.runId || null;
   agentVmQueueHintEl.hidden = true;
   agentVmEnvironmentEl.hidden = true;
   renderAgentVmAttachments();
   closeAgentVmFile();
-  setView('agentvm');
+  setView("agentvm");
   syncAgentVmFocus(project, agentVmRunId);
   renderAgentVmWorkspace();
   loadAgentVmCommands(project, agentVmBackend);
@@ -3737,62 +4850,75 @@ function closeAgentVmProject() {
   hideAgentVmCommandPalette();
   agentVmEnvironmentEl.hidden = true;
   closeAgentVmFile();
-  setView('history');
+  setView("history");
 }
 
 function agentVmTerminalUiState(vm, terminal, run) {
   const vmState = AgentVmModel.environmentState(vm, run);
-  if (!['ready', 'working'].includes(vmState)) return vmState;
-  if (vmState === 'working') return vmState;
-  if (agentVmTerminalAlive(terminal)) return 'working';
-  if (terminal?.state === 'disconnected' || terminal?.state === 'error') return 'error';
-  if (terminal?.state === 'starting') return 'starting';
-  return 'ready';
+  if (!["ready", "working"].includes(vmState)) return vmState;
+  if (vmState === "working") return vmState;
+  if (agentVmTerminalAlive(terminal)) return "working";
+  if (terminal?.state === "disconnected" || terminal?.state === "error")
+    return "error";
+  if (terminal?.state === "starting") return "starting";
+  return "ready";
 }
 
 function renderAgentVmEnvironment(project, vm, terminal, run, uiState) {
   const attrs = vm?.attrs || {};
   const runAttrs = run?.attrs || {};
   const terminalAlive = agentVmTerminalAlive(terminal);
-  const backend = runAttrs.backend || (terminalAlive ? agentVmBackend : '');
-  const backendName = backend === 'codex' ? 'Codex' : backend === 'claude' ? 'Claude' : '';
+  const backend = runAttrs.backend || (terminalAlive ? agentVmBackend : "");
+  const backendName =
+    backend === "codex" ? "Codex" : backend === "claude" ? "Claude" : "";
   const stateText = AgentVmModel.stateLabel(uiState);
   agentVmEnvironmentButtonEl.className = `vmws-env ${uiState}`;
   agentVmEnvironmentDotEl.className = `vmws-env-dot ${uiState}`;
-  agentVmEnvironmentButtonEl.classList.toggle('open', !agentVmEnvironmentEl.hidden);
-  agentVmEnvironmentLabelEl.textContent = `${stateText}${backendName ? ` · ${backendName}` : ''}`;
+  agentVmEnvironmentButtonEl.classList.toggle(
+    "open",
+    !agentVmEnvironmentEl.hidden,
+  );
+  agentVmEnvironmentLabelEl.textContent = `${stateText}${backendName ? ` · ${backendName}` : ""}`;
   agentVmEnvironmentTitleEl.textContent = stateText;
-  agentVmNameEl.textContent = vm?.id?.replace(/^vm\./, '')
-    || 'VM ещё не создана';
+  agentVmNameEl.textContent =
+    vm?.id?.replace(/^vm\./, "") || "VM ещё не создана";
   agentVmStateValueEl.textContent = stateText;
   const resources = attrs.resources || {};
-  agentVmResourcesEl.textContent = [
-    resources.cpus ? `${resources.cpus} CPU` : '',
-    resources.memory || '',
-    resources.disk || '',
-  ].filter(Boolean).join(' · ') || 'по умолчанию';
+  agentVmResourcesEl.textContent =
+    [
+      resources.cpus ? `${resources.cpus} CPU` : "",
+      resources.memory || "",
+      resources.disk || "",
+    ]
+      .filter(Boolean)
+      .join(" · ") || "по умолчанию";
   const configuredBackends = AgentVmModel.configuredBackends(vm);
   agentVmModulesEl.textContent = configuredBackends.length
-    ? configuredBackends.map((backend) => (backend === 'codex' ? 'Codex' : 'Claude')).join(' · ')
-    : 'Не установлены';
+    ? configuredBackends
+        .map((backend) => (backend === "codex" ? "Codex" : "Claude"))
+        .join(" · ")
+    : "Не установлены";
   agentVmAutostartEl.checked = !!agentVmProfileFor(project)?.startWithJarvis;
   agentVmAutostartEl.disabled = agentVmProfileSaving;
-  const running = ['running', 'ready', 'working'].includes(vm?.state);
+  const running = ["running", "ready", "working"].includes(vm?.state);
   agentVmEnsureEl.hidden = running;
   agentVmEnsureEl.disabled = !!agentVmStage;
-  agentVmEnsureEl.textContent = vm?.state === 'stopped' ? 'Запустить VM' : 'Создать VM';
+  agentVmEnsureEl.textContent =
+    vm?.state === "stopped" ? "Запустить VM" : "Создать VM";
   agentVmRestartEl.hidden = !running;
   agentVmStopEl.hidden = !running;
-  const shell = running ? attrs.shellCommand || runAttrs.shellCommand || '' : '';
+  const shell = running
+    ? attrs.shellCommand || runAttrs.shellCommand || ""
+    : "";
   agentVmCopyShellEl.disabled = !shell;
   agentVmCopyShellEl.dataset.command = shell;
-  const resume = runAttrs.resumeCommand || '';
+  const resume = runAttrs.resumeCommand || "";
   agentVmCopyResumeEl.hidden = !resume;
   agentVmCopyResumeEl.dataset.command = resume;
 }
 
 function renderAgentVmWorkspace() {
-  if (view !== 'agentvm' || !agentVmCurrent) return;
+  if (view !== "agentvm" || !agentVmCurrent) return;
   const refreshed = agentVmProjectByCwd(agentVmCurrent.cwd);
   if (refreshed) agentVmCurrent = refreshed;
   const project = agentVmCurrent;
@@ -3802,103 +4928,121 @@ function renderAgentVmWorkspace() {
   const terminal = currentAgentVmTerminal();
   const terminalAlive = agentVmTerminalAlive(terminal);
   const run = project.run?.attrs?.runId === agentVmRunId ? project.run : null;
-  const runBusy = ['starting', 'working'].includes(run?.state);
+  const runBusy = ["starting", "working"].includes(run?.state);
   const uiState = agentVmTerminalUiState(vm, terminal, run);
-  const pluginRuntime = AgentVmModel.pluginRuntimeStatus(pluginById('agent-vm'));
-  const pluginPending = pluginRuntime.state !== 'running';
-  const vmReady = ['running', 'ready', 'working'].includes(vm?.state);
+  const pluginRuntime = AgentVmModel.pluginRuntimeStatus(
+    pluginById("agent-vm"),
+  );
+  const pluginPending = pluginRuntime.state !== "running";
+  const vmReady = ["running", "ready", "working"].includes(vm?.state);
   const selectedBackendAvailable = configuredBackends.includes(agentVmBackend);
 
   agentVmProjectTitleEl.textContent = project.name;
   agentVmProjectPathEl.textContent = project.cwd;
   renderAgentVmEnvironment(project, vm, terminal, run, uiState);
   agentVmCancelEl.hidden = !runBusy || !agentVmRunId;
-  agentVmCancelEl.textContent = 'Остановить задачу';
-  agentVmSendEl.disabled = !agentVmPluginReady()
-    || !selectedBackendAvailable
-    || agentVmTerminalInputInFlight;
-  agentVmAttachEl.disabled = !agentVmPluginReady()
-    || !selectedBackendAvailable
-    || agentVmTerminalInputInFlight;
+  agentVmCancelEl.textContent = "Остановить задачу";
+  agentVmSendEl.disabled =
+    !agentVmPluginReady() ||
+    !selectedBackendAvailable ||
+    agentVmTerminalInputInFlight;
+  agentVmAttachEl.disabled =
+    !agentVmPluginReady() ||
+    !selectedBackendAvailable ||
+    agentVmTerminalInputInFlight;
   agentVmPromptEl.disabled = agentVmTerminalInputInFlight;
   renderAgentVmAttachments();
 
-  for (const button of document.querySelectorAll('[data-agent-vm-backend]')) {
+  for (const button of document.querySelectorAll("[data-agent-vm-backend]")) {
     const backend = button.dataset.agentVmBackend;
     const active = backend === agentVmBackend;
     const available = configuredBackends.includes(backend);
-    button.classList.toggle('active', active);
+    button.classList.toggle("active", active);
     button.disabled = !available;
     button.title = available
-      ? ''
+      ? ""
       : `Добавьте ${backend} в .agent-vm.yaml и пересоздайте VM`;
   }
 
-  const implicitStage = pluginPending
-    || ['starting', 'provisioning', 'creating'].includes(vm?.state)
-    || terminal?.state === 'starting';
+  const implicitStage =
+    pluginPending ||
+    ["starting", "provisioning", "creating"].includes(vm?.state) ||
+    terminal?.state === "starting";
   agentVmStageEl.hidden = !agentVmStage && !implicitStage;
   if (!agentVmStageEl.hidden) {
-    agentVmStageTitleEl.textContent = agentVmStage?.title
-      || (pluginPending
+    agentVmStageTitleEl.textContent =
+      agentVmStage?.title ||
+      (pluginPending
         ? pluginRuntime.label
-        : terminal?.state === 'starting'
-          ? vmReady ? 'Подключаю terminal session' : 'Создаю и запускаю VM'
-          : 'Подготавливаю среду');
-    agentVmStageDetailEl.textContent = agentVmStage?.detail
-      || (pluginPending
+        : terminal?.state === "starting"
+          ? vmReady
+            ? "Подключаю terminal session"
+            : "Создаю и запускаю VM"
+          : "Подготавливаю среду");
+    agentVmStageDetailEl.textContent =
+      agentVmStage?.detail ||
+      (pluginPending
         ? pluginRuntime.detail
         : vmReady
-          ? 'VM готова → persistent tmux → агент'
-          : 'Образ → запуск VM → настройки → агент');
-    const started = agentVmStageStartedAt
-      || (pluginPending ? pluginById('agent-vm')?.status?.startedAt : 0)
-      || vm?.updatedAt
-      || Date.now();
-    agentVmStageTimeEl.textContent = pluginPending && pluginRuntime.state !== 'starting'
-      ? ''
-      : agentVmElapsed(started);
+          ? "VM готова → persistent tmux → агент"
+          : "Образ → запуск VM → настройки → агент");
+    const started =
+      agentVmStageStartedAt ||
+      (pluginPending ? pluginById("agent-vm")?.status?.startedAt : 0) ||
+      vm?.updatedAt ||
+      Date.now();
+    agentVmStageTimeEl.textContent =
+      pluginPending && pluginRuntime.state !== "starting"
+        ? ""
+        : agentVmElapsed(started);
   }
 
-  const screen = typeof terminal?.screen === 'string' ? terminal.screen : '';
+  const screen = typeof terminal?.screen === "string" ? terminal.screen : "";
   const screenKey = agentVmTerminalKey();
   const showScreen = terminalAlive && !!screen;
   agentVmTerminalScreenEl.hidden = !showScreen;
   agentVmTerminalEmptyEl.hidden = showScreen;
-  agentVmTerminalLightEl.classList.toggle('live', terminalAlive);
+  agentVmTerminalLightEl.classList.toggle("live", terminalAlive);
   agentVmTerminalTitleEl.textContent = run
     ? `${run.attrs?.backend || agentVmBackend} · managed run`
     : `${agentVmBackend}@${terminal?.vmName || project.name}`;
   agentVmTerminalStateEl.textContent = run
     ? AgentVmModel.stateLabel(uiState).toLocaleLowerCase()
     : terminalAlive
-      ? 'подключён'
-      : terminal?.state === 'disconnected' ? 'нет связи' : 'не запущен';
-  if (showScreen && (agentVmTerminalLastScreenKey !== screenKey
-    || agentVmTerminalScreenEl.textContent !== screen)) {
-    const following = agentVmTerminalLastScreenKey !== screenKey
-      || agentVmTerminalScreenEl.scrollHeight
-        - agentVmTerminalScreenEl.scrollTop
-        - agentVmTerminalScreenEl.clientHeight < 48;
+      ? "подключён"
+      : terminal?.state === "disconnected"
+        ? "нет связи"
+        : "не запущен";
+  if (
+    showScreen &&
+    (agentVmTerminalLastScreenKey !== screenKey ||
+      agentVmTerminalScreenEl.textContent !== screen)
+  ) {
+    const following =
+      agentVmTerminalLastScreenKey !== screenKey ||
+      agentVmTerminalScreenEl.scrollHeight -
+        agentVmTerminalScreenEl.scrollTop -
+        agentVmTerminalScreenEl.clientHeight <
+        48;
     agentVmTerminalScreenEl.textContent = screen;
     agentVmTerminalLastScreenKey = screenKey;
-    if (following) agentVmTerminalScreenEl.scrollTop = agentVmTerminalScreenEl.scrollHeight;
+    if (following)
+      agentVmTerminalScreenEl.scrollTop = agentVmTerminalScreenEl.scrollHeight;
   }
   if (terminalAlive) scheduleAgentVmTerminalResize();
   if (!selectedBackendAvailable && vm) {
-    agentVmTerminalEmptyDetailEl.textContent =
-      `Добавь ${agentVmBackend} в .agent-vm.yaml и пересоздай VM.`;
+    agentVmTerminalEmptyDetailEl.textContent = `Добавь ${agentVmBackend} в .agent-vm.yaml и пересоздай VM.`;
   } else if (run) {
     const summary = AgentVmModel.runSummary(run);
-    agentVmTerminalEmptyDetailEl.textContent =
-      `${AgentVmModel.stateLabel(uiState)}${summary ? ` · ${summary}` : ''}`;
+    agentVmTerminalEmptyDetailEl.textContent = `${AgentVmModel.stateLabel(uiState)}${summary ? ` · ${summary}` : ""}`;
   } else if (terminalAlive) {
-    agentVmTerminalEmptyDetailEl.textContent = 'Подключаю экран живой tmux pane…';
+    agentVmTerminalEmptyDetailEl.textContent =
+      "Подключаю экран живой tmux pane…";
   } else {
     agentVmTerminalEmptyDetailEl.textContent =
-      'Первый ввод подготовит VM и запустит управляемую задачу с отслеживанием состояния и результата.';
+      "Первый ввод подготовит VM и запустит управляемую задачу с отслеживанием состояния и результата.";
   }
-  for (const button of document.querySelectorAll('[data-agent-vm-key]')) {
+  for (const button of document.querySelectorAll("[data-agent-vm-key]")) {
     button.disabled = !terminalAlive;
   }
 }
@@ -3908,7 +5052,7 @@ async function openAgentVmFile(file) {
   agentVmFile = { ...file, content: null, diff: null };
   agentVmFileTitleEl.textContent = file.relativePath || file.path;
   agentVmFileDrawerEl.hidden = false;
-  agentVmFileMode = 'diff';
+  agentVmFileMode = "diff";
   renderAgentVmFile();
   try {
     const [content, diff] = await Promise.all([
@@ -3918,34 +5062,40 @@ async function openAgentVmFile(file) {
     if (!agentVmFile || agentVmFile.path !== file.path) return;
     agentVmFile.content = content;
     agentVmFile.diff = diff;
-    if (!diff?.ok || diff.mode === 'none') agentVmFileMode = 'content';
+    if (!diff?.ok || diff.mode === "none") agentVmFileMode = "content";
     renderAgentVmFile();
   } catch {
-    showToast('Не удалось открыть файл');
+    showToast("Не удалось открыть файл");
   }
 }
 
 function renderAgentVmFile() {
   if (!agentVmFile) return;
-  const showDiff = agentVmFileMode === 'diff' && agentVmFile.diff?.ok
-    && agentVmFile.diff.mode !== 'none';
-  agentVmFileDiffTabEl.hidden = !agentVmFile.diff?.ok || agentVmFile.diff.mode === 'none';
-  agentVmFileDiffTabEl.classList.toggle('active', showDiff);
-  agentVmFileContentTabEl.classList.toggle('active', !showDiff);
+  const showDiff =
+    agentVmFileMode === "diff" &&
+    agentVmFile.diff?.ok &&
+    agentVmFile.diff.mode !== "none";
+  agentVmFileDiffTabEl.hidden =
+    !agentVmFile.diff?.ok || agentVmFile.diff.mode === "none";
+  agentVmFileDiffTabEl.classList.toggle("active", showDiff);
+  agentVmFileContentTabEl.classList.toggle("active", !showDiff);
   agentVmFileDiffEl.hidden = !showDiff;
   agentVmFileBodyEl.hidden = showDiff;
   if (showDiff) {
     JarvisDiffView.renderTo(agentVmFileDiffEl, agentVmFile.diff.hunks);
   } else {
-    agentVmFileBodyEl.textContent = '';
+    agentVmFileBodyEl.textContent = "";
     if (!agentVmFile.content) {
-      agentVmFileBodyEl.textContent = 'Загружаю файл…';
+      agentVmFileBodyEl.textContent = "Загружаю файл…";
     } else if (!agentVmFile.content.ok) {
-      agentVmFileBodyEl.textContent = agentVmFile.content.error || 'Файл недоступен';
+      agentVmFileBodyEl.textContent =
+        agentVmFile.content.error || "Файл недоступен";
     } else if (JarvisMarkdown.isMarkdownPath(agentVmFile.path)) {
-      agentVmFileBodyEl.innerHTML = JarvisMarkdown.render(agentVmFile.content.content);
+      agentVmFileBodyEl.innerHTML = JarvisMarkdown.render(
+        agentVmFile.content.content,
+      );
     } else {
-      const pre = document.createElement('pre');
+      const pre = document.createElement("pre");
       pre.textContent = agentVmFile.content.content;
       agentVmFileBodyEl.appendChild(pre);
     }
@@ -3955,35 +5105,40 @@ function renderAgentVmFile() {
 function closeAgentVmFile() {
   agentVmFile = null;
   agentVmFileDrawerEl.hidden = true;
-  agentVmFileBodyEl.textContent = '';
-  agentVmFileDiffEl.textContent = '';
+  agentVmFileBodyEl.textContent = "";
+  agentVmFileDiffEl.textContent = "";
 }
 
-function agentVmCommandCatalogKey(project = agentVmCurrent, backend = agentVmBackend) {
-  return project ? `${project.cwd}:${backend}` : '';
+function agentVmCommandCatalogKey(
+  project = agentVmCurrent,
+  backend = agentVmBackend,
+) {
+  return project ? `${project.cwd}:${backend}` : "";
 }
 
 function hideAgentVmCommandPalette() {
   agentVmCommandItems = [];
   agentVmCommandSelected = 0;
   agentVmCommandPaletteEl.hidden = true;
-  agentVmCommandPaletteEl.textContent = '';
+  agentVmCommandPaletteEl.textContent = "";
 }
 
 function agentVmCommandSourceLabel(source) {
-  return {
-    builtin: 'встроенная',
-    project: 'проект',
-    user: 'моя',
-    plugin: 'плагин',
-    codex: 'codex',
-  }[source] || '';
+  return (
+    {
+      builtin: "встроенная",
+      project: "проект",
+      user: "моя",
+      plugin: "плагин",
+      codex: "codex",
+    }[source] || ""
+  );
 }
 
 function completeAgentVmCommand(command) {
   if (!command?.name) return;
-  agentVmPromptEl.value = `/${command.name}${command.hint ? ' ' : ''}`;
-  agentVmPromptEl.style.height = 'auto';
+  agentVmPromptEl.value = `/${command.name}${command.hint ? " " : ""}`;
+  agentVmPromptEl.style.height = "auto";
   agentVmPromptEl.style.height = `${Math.min(agentVmPromptEl.scrollHeight, 104)}px`;
   agentVmPromptEl.setSelectionRange(
     agentVmPromptEl.value.length,
@@ -3998,10 +5153,12 @@ function selectAgentVmCommand(index) {
     0,
     Math.min(index, agentVmCommandItems.length - 1),
   );
-  for (const [optionIndex, option] of [...agentVmCommandPaletteEl.children].entries()) {
+  for (const [optionIndex, option] of [
+    ...agentVmCommandPaletteEl.children,
+  ].entries()) {
     const selected = optionIndex === agentVmCommandSelected;
-    option.classList.toggle('selected', selected);
-    option.setAttribute('aria-selected', String(selected));
+    option.classList.toggle("selected", selected);
+    option.setAttribute("aria-selected", String(selected));
   }
 }
 
@@ -4015,30 +5172,39 @@ function renderAgentVmCommandPalette() {
     Math.min(agentVmCommandSelected, agentVmCommandItems.length - 1),
   );
   agentVmCommandPaletteEl.hidden = false;
-  agentVmCommandPaletteEl.textContent = '';
+  agentVmCommandPaletteEl.textContent = "";
   for (const [index, command] of agentVmCommandItems.entries()) {
-    const option = document.createElement('button');
-    option.type = 'button';
-    option.className = `vm-command-option${index === agentVmCommandSelected ? ' selected' : ''}`;
-    option.setAttribute('role', 'option');
-    option.setAttribute('aria-selected', String(index === agentVmCommandSelected));
-    option.appendChild(Object.assign(document.createElement('span'), {
-      className: 'vm-command-name',
-      textContent: `/${command.name}`,
-    }));
-    option.appendChild(Object.assign(document.createElement('span'), {
-      className: 'vm-command-description',
-      textContent: command.description || command.hint || 'Команда агента',
-    }));
-    option.appendChild(Object.assign(document.createElement('span'), {
-      className: command.hint ? 'vm-command-hint' : 'vm-command-source',
-      textContent: command.hint || agentVmCommandSourceLabel(command.source),
-    }));
-    option.addEventListener('mouseenter', () => {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = `vm-command-option${index === agentVmCommandSelected ? " selected" : ""}`;
+    option.setAttribute("role", "option");
+    option.setAttribute(
+      "aria-selected",
+      String(index === agentVmCommandSelected),
+    );
+    option.appendChild(
+      Object.assign(document.createElement("span"), {
+        className: "vm-command-name",
+        textContent: `/${command.name}`,
+      }),
+    );
+    option.appendChild(
+      Object.assign(document.createElement("span"), {
+        className: "vm-command-description",
+        textContent: command.description || command.hint || "Команда агента",
+      }),
+    );
+    option.appendChild(
+      Object.assign(document.createElement("span"), {
+        className: command.hint ? "vm-command-hint" : "vm-command-source",
+        textContent: command.hint || agentVmCommandSourceLabel(command.source),
+      }),
+    );
+    option.addEventListener("mouseenter", () => {
       selectAgentVmCommand(index);
     });
-    option.addEventListener('mousedown', (event) => event.preventDefault());
-    option.addEventListener('click', () => completeAgentVmCommand(command));
+    option.addEventListener("mousedown", (event) => event.preventDefault());
+    option.addEventListener("click", () => completeAgentVmCommand(command));
     agentVmCommandPaletteEl.appendChild(option);
   }
 }
@@ -4046,12 +5212,18 @@ function renderAgentVmCommandPalette() {
 function refreshAgentVmCommandPalette() {
   const key = agentVmCommandCatalogKey();
   const commands = key ? agentVmCommandCatalogs.get(key) || [] : [];
-  agentVmCommandItems = AgentVmModel.filterCommands(commands, agentVmPromptEl.value);
+  agentVmCommandItems = AgentVmModel.filterCommands(
+    commands,
+    agentVmPromptEl.value,
+  );
   agentVmCommandSelected = 0;
   renderAgentVmCommandPalette();
 }
 
-async function loadAgentVmCommands(project = agentVmCurrent, backend = agentVmBackend) {
+async function loadAgentVmCommands(
+  project = agentVmCurrent,
+  backend = agentVmBackend,
+) {
   if (!project?.cwd) return;
   const key = agentVmCommandCatalogKey(project, backend);
   if (agentVmCommandCatalogs.has(key)) {
@@ -4061,13 +5233,18 @@ async function loadAgentVmCommands(project = agentVmCurrent, backend = agentVmBa
   agentVmCommandCatalogs.set(key, []);
   try {
     const result = await window.jarvis.getAgentVmCommands(
-      project.projectId || '',
+      project.projectId || "",
       project.cwd,
       backend,
     );
-    if (!result?.ok) throw new Error(result?.error || 'Каталог команд недоступен');
-    if (!project.projectId && result.projectId) project.projectId = result.projectId;
-    agentVmCommandCatalogs.set(key, Array.isArray(result.commands) ? result.commands : []);
+    if (!result?.ok)
+      throw new Error(result?.error || "Каталог команд недоступен");
+    if (!project.projectId && result.projectId)
+      project.projectId = result.projectId;
+    agentVmCommandCatalogs.set(
+      key,
+      Array.isArray(result.commands) ? result.commands : [],
+    );
   } catch {
     agentVmCommandCatalogs.delete(key);
   }
@@ -4076,37 +5253,42 @@ async function loadAgentVmCommands(project = agentVmCurrent, backend = agentVmBa
 
 function agentVmImageExtension(file) {
   const byType = {
-    'image/png': 'png',
-    'image/jpeg': 'jpg',
-    'image/gif': 'gif',
-    'image/webp': 'webp',
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
   };
   if (byType[file?.type]) return byType[file.type];
-  const extension = String(file?.name || '').split('.').at(-1)?.toLocaleLowerCase();
-  return ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension)
-    ? extension === 'jpeg' ? 'jpg' : extension
-    : '';
+  const extension = String(file?.name || "")
+    .split(".")
+    .at(-1)
+    ?.toLocaleLowerCase();
+  return ["png", "jpg", "jpeg", "gif", "webp"].includes(extension)
+    ? extension === "jpeg"
+      ? "jpg"
+      : extension
+    : "";
 }
 
 function renderAgentVmAttachments() {
-  agentVmAttachmentsEl.textContent = '';
+  agentVmAttachmentsEl.textContent = "";
   agentVmAttachmentsEl.hidden = agentVmPendingImages.length === 0;
   for (const image of agentVmPendingImages) {
-    const item = document.createElement('div');
-    item.className = `vmws-attachment${agentVmTerminalInputInFlight ? ' uploading' : ''}`;
-    const preview = document.createElement('img');
+    const item = document.createElement("div");
+    item.className = `vmws-attachment${agentVmTerminalInputInFlight ? " uploading" : ""}`;
+    const preview = document.createElement("img");
     preview.src = image.dataUrl;
-    preview.alt = image.name || 'Прикреплённое изображение';
+    preview.alt = image.name || "Прикреплённое изображение";
     item.appendChild(preview);
-    const remove = Object.assign(document.createElement('button'), {
-      type: 'button',
-      className: 'vmws-attachment-remove',
-      textContent: '×',
-      title: 'Убрать изображение',
+    const remove = Object.assign(document.createElement("button"), {
+      type: "button",
+      className: "vmws-attachment-remove",
+      textContent: "×",
+      title: "Убрать изображение",
       disabled: agentVmTerminalInputInFlight,
     });
-    remove.setAttribute('aria-label', remove.title);
-    remove.addEventListener('click', () => {
+    remove.setAttribute("aria-label", remove.title);
+    remove.addEventListener("click", () => {
       agentVmPendingImages = agentVmPendingImages.filter(
         (candidate) => candidate.id !== image.id,
       );
@@ -4125,12 +5307,12 @@ function addAgentVmImage(file) {
     return;
   }
   if (file.size > 25 * 1024 * 1024) {
-    showToast('Картинка больше 25 МБ');
+    showToast("Картинка больше 25 МБ");
     return;
   }
   const ext = agentVmImageExtension(file);
   if (!ext) {
-    showToast('Поддерживаются PNG, JPEG, GIF и WebP');
+    showToast("Поддерживаются PNG, JPEG, GIF и WebP");
     return;
   }
   const reader = new FileReader();
@@ -4139,38 +5321,43 @@ function addAgentVmImage(file) {
       showToast(`Не больше ${MAX_IMAGES} картинок`);
       return;
     }
-    const dataUrl = String(reader.result || '');
-    if (!dataUrl.includes(',')) return;
+    const dataUrl = String(reader.result || "");
+    if (!dataUrl.includes(",")) return;
     agentVmPendingImages.push({
       id: `agent-vm-image-${agentVmAttachmentSequence++}`,
       name: file.name || `image.${ext}`,
       ext,
       dataUrl,
-      guestPath: '',
-      projectId: '',
+      guestPath: "",
+      projectId: "",
     });
     renderAgentVmAttachments();
   };
   reader.readAsDataURL(file);
 }
 
-agentVmBackEl.addEventListener('click', closeAgentVmProject);
-agentVmEnvironmentButtonEl.addEventListener('click', (event) => {
+agentVmBackEl.addEventListener("click", closeAgentVmProject);
+agentVmEnvironmentButtonEl.addEventListener("click", (event) => {
   event.stopPropagation();
   agentVmEnvironmentEl.hidden = !agentVmEnvironmentEl.hidden;
-  agentVmEnvironmentButtonEl.setAttribute('aria-expanded', String(!agentVmEnvironmentEl.hidden));
+  agentVmEnvironmentButtonEl.setAttribute(
+    "aria-expanded",
+    String(!agentVmEnvironmentEl.hidden),
+  );
   renderAgentVmWorkspace();
 });
-agentVmEnvironmentEl.addEventListener('click', (event) => event.stopPropagation());
-document.addEventListener('click', () => {
+agentVmEnvironmentEl.addEventListener("click", (event) =>
+  event.stopPropagation(),
+);
+document.addEventListener("click", () => {
   if (!agentVmEnvironmentEl.hidden) {
     agentVmEnvironmentEl.hidden = true;
-    agentVmEnvironmentButtonEl.setAttribute('aria-expanded', 'false');
-    if (view === 'agentvm') renderAgentVmWorkspace();
+    agentVmEnvironmentButtonEl.setAttribute("aria-expanded", "false");
+    if (view === "agentvm") renderAgentVmWorkspace();
   }
 });
-for (const button of document.querySelectorAll('[data-agent-vm-backend]')) {
-  button.addEventListener('click', () => {
+for (const button of document.querySelectorAll("[data-agent-vm-backend]")) {
+  button.addEventListener("click", () => {
     agentVmBackend = button.dataset.agentVmBackend;
     renderAgentVmWorkspace();
     loadAgentVmCommands(agentVmCurrent, agentVmBackend);
@@ -4178,8 +5365,8 @@ for (const button of document.querySelectorAll('[data-agent-vm-backend]')) {
     agentVmPromptEl.focus();
   });
 }
-for (const button of document.querySelectorAll('[data-agent-vm-key]')) {
-  button.addEventListener('click', async () => {
+for (const button of document.querySelectorAll("[data-agent-vm-key]")) {
+  button.addEventListener("click", async () => {
     if (!agentVmCurrent?.projectId || !agentVmTerminalAlive()) return;
     button.disabled = true;
     try {
@@ -4188,60 +5375,63 @@ for (const button of document.querySelectorAll('[data-agent-vm-key]')) {
         agentVmBackend,
         button.dataset.agentVmKey,
       );
-      if (!result?.ok) throw new Error(result?.error || 'Клавиша не принята');
+      if (!result?.ok) throw new Error(result?.error || "Клавиша не принята");
       await refreshAgentVmTerminal();
     } catch (error) {
-      showToast(error.message || 'Не удалось отправить клавишу');
+      showToast(error.message || "Не удалось отправить клавишу");
     } finally {
       renderAgentVmWorkspace();
     }
   });
 }
-agentVmPromptEl.addEventListener('input', () => {
-  agentVmPromptEl.style.height = 'auto';
+agentVmPromptEl.addEventListener("input", () => {
+  agentVmPromptEl.style.height = "auto";
   agentVmPromptEl.style.height = `${Math.min(agentVmPromptEl.scrollHeight, 104)}px`;
   refreshAgentVmCommandPalette();
 });
-agentVmPromptEl.addEventListener('paste', (event) => {
+agentVmPromptEl.addEventListener("paste", (event) => {
   const items = event.clipboardData?.items;
   if (!items) return;
   const images = [...items].filter(
-    (item) => item.kind === 'file' && item.type.startsWith('image/'),
+    (item) => item.kind === "file" && item.type.startsWith("image/"),
   );
   if (!images.length) return;
   event.preventDefault();
   for (const item of images) addAgentVmImage(item.getAsFile());
 });
-agentVmPromptEl.addEventListener('keydown', (event) => {
+agentVmPromptEl.addEventListener("keydown", (event) => {
   if (!agentVmCommandPaletteEl.hidden) {
-    if (event.key === 'ArrowDown') {
+    if (event.key === "ArrowDown") {
       event.preventDefault();
       event.stopPropagation();
       selectAgentVmCommand(agentVmCommandSelected + 1);
       return;
     }
-    if (event.key === 'ArrowUp') {
+    if (event.key === "ArrowUp") {
       event.preventDefault();
       event.stopPropagation();
       selectAgentVmCommand(agentVmCommandSelected - 1);
       return;
     }
-    if (event.key === 'Tab') {
+    if (event.key === "Tab") {
       event.preventDefault();
       event.stopPropagation();
       completeAgentVmCommand(agentVmCommandItems[agentVmCommandSelected]);
       return;
     }
-    if (event.key === 'Escape') {
+    if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
       hideAgentVmCommandPalette();
       return;
     }
-    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       const selected = agentVmCommandItems[agentVmCommandSelected];
-      if (selected && agentVmPromptEl.value.toLocaleLowerCase()
-        !== `/${selected.name}`.toLocaleLowerCase()) {
+      if (
+        selected &&
+        agentVmPromptEl.value.toLocaleLowerCase() !==
+          `/${selected.name}`.toLocaleLowerCase()
+      ) {
         event.preventDefault();
         event.stopPropagation();
         completeAgentVmCommand(selected);
@@ -4249,127 +5439,175 @@ agentVmPromptEl.addEventListener('keydown', (event) => {
       }
     }
   }
-  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     event.stopPropagation();
     sendAgentVmMessage();
   }
 });
-agentVmAttachEl.addEventListener('click', () => agentVmImagePickerEl.click());
-agentVmImagePickerEl.addEventListener('change', () => {
+agentVmAttachEl.addEventListener("click", () => agentVmImagePickerEl.click());
+agentVmImagePickerEl.addEventListener("change", () => {
   for (const file of agentVmImagePickerEl.files || []) addAgentVmImage(file);
-  agentVmImagePickerEl.value = '';
+  agentVmImagePickerEl.value = "";
 });
-agentVmSendEl.addEventListener('click', sendAgentVmMessage);
-agentVmCancelEl.addEventListener('click', cancelAgentVmRun);
-agentVmEnsureEl.addEventListener('click', () => runAgentVmLifecycle('runtime.ensure', 'Подготавливаю среду'));
-agentVmRestartEl.addEventListener('click', () => runAgentVmLifecycle('runtime.restart', 'Перезапускаю VM'));
-agentVmStopEl.addEventListener('click', () => runAgentVmLifecycle('runtime.stop', 'Останавливаю VM'));
-agentVmAutostartEl.addEventListener('change', async () => {
+agentVmSendEl.addEventListener("click", sendAgentVmMessage);
+agentVmCancelEl.addEventListener("click", cancelAgentVmRun);
+agentVmEnsureEl.addEventListener("click", () =>
+  runAgentVmLifecycle("runtime.ensure", "Подготавливаю среду"),
+);
+agentVmRestartEl.addEventListener("click", () =>
+  runAgentVmLifecycle("runtime.restart", "Перезапускаю VM"),
+);
+agentVmStopEl.addEventListener("click", () =>
+  runAgentVmLifecycle("runtime.stop", "Останавливаю VM"),
+);
+agentVmAutostartEl.addEventListener("change", async () => {
   if (!agentVmCurrent || agentVmProfileSaving) return;
   const desired = agentVmAutostartEl.checked;
   agentVmProfileSaving = true;
   renderAgentVmWorkspace();
   try {
-    const result = await window.jarvis.setAgentVmProfile(agentVmCurrent.cwd, desired);
-    if (!result?.ok) throw new Error(result?.error || 'Не удалось сохранить профиль');
+    const result = await window.jarvis.setAgentVmProfile(
+      agentVmCurrent.cwd,
+      desired,
+    );
+    if (!result?.ok)
+      throw new Error(result?.error || "Не удалось сохранить профиль");
     agentVmProfiles = Array.isArray(result.profiles) ? result.profiles : [];
-    if (result.profile?.projectId) agentVmCurrent.projectId = result.profile.projectId;
-    showToast(desired ? 'VM будет запускаться вместе с Jarvis' : 'Автозапуск VM выключен');
-    if (view === 'history') renderHistProjects(queryEl.value.trim().toLowerCase());
+    if (result.profile?.projectId)
+      agentVmCurrent.projectId = result.profile.projectId;
+    showToast(
+      desired
+        ? "VM будет запускаться вместе с Jarvis"
+        : "Автозапуск VM выключен",
+    );
+    if (view === "history")
+      renderHistProjects(queryEl.value.trim().toLowerCase());
   } catch (error) {
     agentVmAutostartEl.checked = !desired;
-    showToast(error.message || 'Не удалось сохранить автозапуск');
+    showToast(error.message || "Не удалось сохранить автозапуск");
   } finally {
     agentVmProfileSaving = false;
     renderAgentVmWorkspace();
   }
 });
-agentVmCopyShellEl.addEventListener('click', async () => {
+agentVmCopyShellEl.addEventListener("click", async () => {
   const command = agentVmCopyShellEl.dataset.command;
   if (!command) return;
   await navigator.clipboard.writeText(command);
-  showToast('Команда входа скопирована');
+  showToast("Команда входа скопирована");
 });
-agentVmCopyResumeEl.addEventListener('click', async () => {
+agentVmCopyResumeEl.addEventListener("click", async () => {
   const command = agentVmCopyResumeEl.dataset.command;
   if (!command) return;
   await navigator.clipboard.writeText(command);
-  showToast('Команда resume скопирована');
+  showToast("Команда resume скопирована");
 });
-document.getElementById('agentVmFileClose').addEventListener('click', closeAgentVmFile);
-document.getElementById('agentVmFileFinder').addEventListener('click', () => {
+document
+  .getElementById("agentVmFileClose")
+  .addEventListener("click", closeAgentVmFile);
+document.getElementById("agentVmFileFinder").addEventListener("click", () => {
   if (agentVmFile && agentVmRunId) {
     window.jarvis.agentVmFileOpen(agentVmRunId, agentVmFile.path, true);
   }
 });
-agentVmFileDiffTabEl.addEventListener('click', () => {
-  agentVmFileMode = 'diff';
+agentVmFileDiffTabEl.addEventListener("click", () => {
+  agentVmFileMode = "diff";
   renderAgentVmFile();
 });
-agentVmFileContentTabEl.addEventListener('click', () => {
-  agentVmFileMode = 'content';
+agentVmFileContentTabEl.addEventListener("click", () => {
+  agentVmFileMode = "content";
   renderAgentVmFile();
 });
 
 window.jarvis.onEntities(ingestAgentVmEntities);
-window.jarvis.getEntities().then(ingestAgentVmEntities).catch(() => {});
-window.jarvis.getAgentVmProfiles().then((profiles) => {
-  agentVmProfiles = Array.isArray(profiles) ? profiles : [];
-  if (view === 'history') renderHistProjects(queryEl.value.trim().toLowerCase());
-  if (view === 'agentvm') renderAgentVmWorkspace();
-}).catch(() => {});
-window.jarvis.getProjectManagerState().then((state) => {
-  projectManagerState = state || projectManagerState;
-  if (view === 'history') renderHistProjects(queryEl.value.trim());
-}).catch(() => {});
+window.jarvis
+  .getEntities()
+  .then(ingestAgentVmEntities)
+  .catch(() => {});
+window.jarvis
+  .getAgentVmProfiles()
+  .then((profiles) => {
+    agentVmProfiles = Array.isArray(profiles) ? profiles : [];
+    if (view === "history")
+      renderHistProjects(queryEl.value.trim().toLowerCase());
+    if (view === "agentvm") renderAgentVmWorkspace();
+  })
+  .catch(() => {});
+window.jarvis
+  .getProjectManagerState()
+  .then((state) => {
+    projectManagerState = state || projectManagerState;
+    if (view === "history") renderHistProjects(queryEl.value.trim());
+  })
+  .catch(() => {});
 window.jarvis.onOpenAgentVm(async (target) => {
   if (!target?.cwd || !target?.projectId) return;
   if (!historyData.length) {
-    try { historyData = await window.jarvis.getHistory(); } catch {}
+    try {
+      historyData = await window.jarvis.getHistory();
+    } catch {}
   }
   if (!agentVmEntities.length) {
-    try { ingestAgentVmEntities(await window.jarvis.getEntities()); } catch {}
+    try {
+      ingestAgentVmEntities(await window.jarvis.getEntities());
+    } catch {}
   }
-  const project = agentVmProjects().find((item) =>
-    item.projectId === target.projectId || item.cwd === target.cwd) || {
+  const project = agentVmProjects().find(
+    (item) => item.projectId === target.projectId || item.cwd === target.cwd,
+  ) || {
     key: target.cwd,
     cwd: target.cwd,
-    name: target.project || target.cwd.split('/').filter(Boolean).at(-1) || 'Project',
+    name:
+      target.project ||
+      target.cwd.split("/").filter(Boolean).at(-1) ||
+      "Project",
     projectId: target.projectId,
     history: null,
     vm: null,
     run: null,
-    summary: '',
+    summary: "",
     updatedAt: 0,
   };
   project.projectId ||= target.projectId;
   openAgentVmProject(project, null, target.runId || null);
 });
-if (typeof ResizeObserver === 'function') {
-  const agentVmTerminalResizeObserver = new ResizeObserver(scheduleAgentVmTerminalResize);
+if (typeof ResizeObserver === "function") {
+  const agentVmTerminalResizeObserver = new ResizeObserver(
+    scheduleAgentVmTerminalResize,
+  );
   agentVmTerminalResizeObserver.observe(agentVmFeedEl);
 }
 setInterval(() => {
-  if (view === 'agentvm') refreshAgentVmTerminal();
+  if (view === "agentvm") refreshAgentVmTerminal();
 }, 350);
 setInterval(() => {
-  if (view === 'list') renderActiveEnvironments();
-  if (view === 'agentvm' && !agentVmStageEl.hidden) renderAgentVmWorkspace();
-  if (view === 'history' && histProject == null) renderAgentVmRuntimeStatus();
+  if (view === "list") renderActiveEnvironments();
+  if (view === "agentvm" && !agentVmStageEl.hidden) renderAgentVmWorkspace();
+  if (view === "history" && histProject == null) renderAgentVmRuntimeStatus();
 }, 1000);
 
 /* ---------- вкладка «Проекты» (история чатов по проектам) ---------- */
 
-const historyEl = document.getElementById('history');
-const projectManagerToolbarEl = document.getElementById('projectManagerToolbar');
-const projectManagerContentEl = document.getElementById('projectManagerContent');
-const projectManagerSubtitleEl = document.getElementById('projectManagerSubtitle');
-const projectManagerAddEl = document.getElementById('projectManagerAdd');
-const projectManagerListViewEl = document.getElementById('projectManagerListView');
-const projectManagerCardsViewEl = document.getElementById('projectManagerCardsView');
-const tabHistoryEl = document.getElementById('tabHistory');
-tabHistoryEl.addEventListener('click', () => setView('history'));
+const historyEl = document.getElementById("history");
+const projectManagerToolbarEl = document.getElementById(
+  "projectManagerToolbar",
+);
+const projectManagerContentEl = document.getElementById(
+  "projectManagerContent",
+);
+const projectManagerSubtitleEl = document.getElementById(
+  "projectManagerSubtitle",
+);
+const projectManagerAddEl = document.getElementById("projectManagerAdd");
+const projectManagerListViewEl = document.getElementById(
+  "projectManagerListView",
+);
+const projectManagerCardsViewEl = document.getElementById(
+  "projectManagerCardsView",
+);
+const tabHistoryEl = document.getElementById("tabHistory");
+tabHistoryEl.addEventListener("click", () => setView("history"));
 
 let historyData = [];
 let histRows = []; // плоский список выбираемых строк: проекты или чаты (для ↑↓/Enter)
@@ -4380,14 +5618,20 @@ function histTime(ts) {
   const d = new Date(ts);
   const now = new Date();
   const same = d.toDateString() === now.toDateString();
-  return same ? `${pad2(d.getHours())}:${pad2(d.getMinutes())}` : `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}`;
+  return same
+    ? `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+    : `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}`;
 }
 
 function resumeCommand(s, cwd) {
   // Подсказка для tooltip. Реальная команда собирается на бэкенде из настроек
   // «Запуска» — честно предупреждаем, что она может отличаться (прокси, dangerous-флаги).
-  const base = s.agent === 'codex' ? `codex resume ${s.id}` : `claude --resume ${s.id}`;
-  return (cwd ? `cd "${cwd}" && ${base}` : base) + '\n(+ параметры из настроек «Запуск»)';
+  const base =
+    s.agent === "codex" ? `codex resume ${s.id}` : `claude --resume ${s.id}`;
+  return (
+    (cwd ? `cd "${cwd}" && ${base}` : base) +
+    "\n(+ параметры из настроек «Запуск»)"
+  );
 }
 
 // Запуск сессии в терминале из настроек: agent='claude'|'codex'; sessionId=null —
@@ -4396,19 +5640,25 @@ function resumeCommand(s, cwd) {
 async function launchSession(agent, sessionId, cwd) {
   try {
     const r = await window.jarvis.launchSession(cwd, agent, sessionId);
-    showToast(r && r.ok ? 'Запускаю в терминале…' : ((r && r.error) || 'Не удалось запустить'));
-  } catch { showToast('Не удалось запустить'); }
+    showToast(
+      r && r.ok
+        ? "Запускаю в терминале…"
+        : (r && r.error) || "Не удалось запустить",
+    );
+  } catch {
+    showToast("Не удалось запустить");
+  }
 }
 
 function openHistProject(key) {
   histProject = key;
-  queryEl.value = ''; // фильтр списка проектов внутри проекта не нужен
-  queryEl.placeholder = 'Найти чат…';
+  queryEl.value = ""; // фильтр списка проектов внутри проекта не нужен
+  queryEl.placeholder = "Найти чат…";
   renderHistory();
 }
 
 function openProjectPrimary(project) {
-  if (AgentVmModel.projectPrimaryTarget(project) === 'history') {
+  if (AgentVmModel.projectPrimaryTarget(project) === "history") {
     openHistProject(project.cwd);
   } else {
     openAgentVmProject(project);
@@ -4416,9 +5666,13 @@ function openProjectPrimary(project) {
 }
 
 async function renderHistory() {
-  try { historyData = await window.jarvis.getHistory(); } catch { historyData = []; }
-  if (view !== 'history') return;
-  projectManagerContentEl.textContent = '';
+  try {
+    historyData = await window.jarvis.getHistory();
+  } catch {
+    historyData = [];
+  }
+  if (view !== "history") return;
+  projectManagerContentEl.textContent = "";
   agentVmRuntimeStatusEl = null;
   histRows = [];
   histSel = 0;
@@ -4432,7 +5686,7 @@ async function renderHistory() {
   }
 
   projectManagerToolbarEl.hidden = !!g;
-  queryEl.placeholder = g ? 'Найти чат…' : 'Найти проект или папку…';
+  queryEl.placeholder = g ? "Найти чат…" : "Найти проект или папку…";
   if (!g) renderHistProjects(q);
   else renderHistChats(g, q);
   paintHistSel();
@@ -4440,59 +5694,67 @@ async function renderHistory() {
 
 /* уровень 1: проекты */
 function renderHistProjects(q) {
-  primaryLabelEl.textContent = 'Открыть проект';
+  primaryLabelEl.textContent = "Открыть проект";
   const previousCwd = histRows[histSel]?.project?.cwd;
   projectManagerToolbarEl.hidden = false;
-  projectManagerContentEl.textContent = '';
+  projectManagerContentEl.textContent = "";
   histRows = [];
   const allProjects = agentVmProjects();
   const groups = AgentVmModel.filterProjects(allProjects, q);
 
-  const runtime = AgentVmModel.pluginRuntimeStatus(pluginById('agent-vm'));
-  projectManagerSubtitleEl.textContent =
-    `${groups.length} ${plural(groups.length, 'проект', 'проекта', 'проектов')}`;
-  const cards = projectManagerState.view === 'cards';
-  projectManagerListViewEl.classList.toggle('active', !cards);
-  projectManagerListViewEl.setAttribute('aria-pressed', String(!cards));
-  projectManagerCardsViewEl.classList.toggle('active', cards);
-  projectManagerCardsViewEl.setAttribute('aria-pressed', String(cards));
+  const runtime = AgentVmModel.pluginRuntimeStatus(pluginById("agent-vm"));
+  projectManagerSubtitleEl.textContent = `${groups.length} ${plural(groups.length, "проект", "проекта", "проектов")}`;
+  const cards = projectManagerState.view === "cards";
+  projectManagerListViewEl.classList.toggle("active", !cards);
+  projectManagerListViewEl.setAttribute("aria-pressed", String(!cards));
+  projectManagerCardsViewEl.classList.toggle("active", cards);
+  projectManagerCardsViewEl.setAttribute("aria-pressed", String(cards));
   projectManagerAddEl.disabled = projectManagerSaving;
 
-  if (runtime.state === 'running') {
+  if (runtime.state === "running") {
     agentVmRuntimeStatusEl = null;
   } else {
-    agentVmRuntimeStatusEl = document.createElement('div');
+    agentVmRuntimeStatusEl = document.createElement("div");
     renderAgentVmRuntimeStatus(agentVmRuntimeStatusEl);
     projectManagerContentEl.appendChild(agentVmRuntimeStatusEl);
   }
 
   if (!groups.length) {
-    projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), {
-      className: 'empty',
-      textContent: q
-        ? 'Ничего не найдено'
-        : 'Добавь папку или запусти Claude/Codex — проект появится здесь.',
-    }));
+    projectManagerContentEl.appendChild(
+      Object.assign(document.createElement("div"), {
+        className: "empty",
+        textContent: q
+          ? "Ничего не найдено"
+          : "Добавь папку или запусти Claude/Codex — проект появится здесь.",
+      }),
+    );
     return;
   }
 
-  const favoriteProjects = groups.filter((project) => project.favoriteIndex >= 0);
+  const favoriteProjects = groups.filter(
+    (project) => project.favoriteIndex >= 0,
+  );
   const regularProjects = groups.filter((project) => project.favoriteIndex < 0);
   const sections = favoriteProjects.length
-    ? [['Избранное', favoriteProjects], ['Все проекты', regularProjects]]
-    : [['', regularProjects]];
+    ? [
+        ["Избранное", favoriteProjects],
+        ["Все проекты", regularProjects],
+      ]
+    : [["", regularProjects]];
   for (const [label, projects] of sections) {
     if (!projects.length) continue;
-    const section = document.createElement('section');
-    section.className = 'pm-section';
+    const section = document.createElement("section");
+    section.className = "pm-section";
     if (label) {
-      section.appendChild(Object.assign(document.createElement('div'), {
-        className: 'pm-section-title',
-        textContent: label,
-      }));
+      section.appendChild(
+        Object.assign(document.createElement("div"), {
+          className: "pm-section-title",
+          textContent: label,
+        }),
+      );
     }
-    const grid = document.createElement('div');
-    grid.className = `pm-card-grid ${cards ? 'cards' : 'list'}`;
+    const grid = document.createElement("div");
+    grid.className = `pm-card-grid ${cards ? "cards" : "list"}`;
     for (const project of projects) {
       grid.appendChild(renderProjectCard(project));
     }
@@ -4505,104 +5767,126 @@ function renderHistProjects(q) {
 }
 
 function renderProjectCard(project) {
-    const idx = histRows.length;
-    histRows.push({ type: 'project', key: project.cwd, project });
-    const terminalProjectKey = project.projectId || project.cwd;
-    const terminalBackend = ['claude', 'codex'].find((backend) =>
-      agentVmTerminalAlive(agentVmTerminals.get(`${terminalProjectKey}:${backend}`)));
-    const uiState = terminalBackend
-      ? 'working'
-      : AgentVmModel.environmentState(project.vm, project.run);
-    const row = document.createElement('div');
-    row.className = `pm-card ${uiState}`;
-    row.dataset.idx = idx;
-    row.title = project.cwd;
+  const idx = histRows.length;
+  histRows.push({ type: "project", key: project.cwd, project });
+  const terminalProjectKey = project.projectId || project.cwd;
+  const terminalBackend = ["claude", "codex"].find((backend) =>
+    agentVmTerminalAlive(
+      agentVmTerminals.get(`${terminalProjectKey}:${backend}`),
+    ),
+  );
+  const uiState = terminalBackend
+    ? "working"
+    : AgentVmModel.environmentState(project.vm, project.run);
+  const row = document.createElement("div");
+  row.className = `pm-card ${uiState}`;
+  row.dataset.idx = idx;
+  row.title = project.cwd;
 
-    const copy = document.createElement('div');
-    copy.className = 'pm-card-copy';
-    copy.appendChild(Object.assign(document.createElement('span'), {
-      className: 'pm-card-title',
+  const copy = document.createElement("div");
+  copy.className = "pm-card-copy";
+  copy.appendChild(
+    Object.assign(document.createElement("span"), {
+      className: "pm-card-title",
       textContent: project.name,
-    }));
-    copy.appendChild(Object.assign(document.createElement('span'), {
-      className: 'pm-card-path',
+    }),
+  );
+  copy.appendChild(
+    Object.assign(document.createElement("span"), {
+      className: "pm-card-path",
       textContent: AgentVmModel.displayProjectPath(project.cwd),
-    }));
-    row.appendChild(copy);
+    }),
+  );
+  row.appendChild(copy);
 
-    const controls = document.createElement('div');
-    controls.className = 'pm-card-controls';
-    const openVm = Object.assign(document.createElement('button'), {
-      type: 'button',
-      className: 'pm-icon-button agent-vm',
-      textContent: 'VM',
-      title: 'Открыть Agent VM',
-    });
-    openVm.setAttribute('aria-label', openVm.title);
-    openVm.addEventListener('click', (event) => {
-      event.stopPropagation();
-      openAgentVmProject(project);
-    });
-    controls.appendChild(openVm);
-    const favorite = project.favoriteIndex >= 0;
-    const star = Object.assign(document.createElement('button'), {
-      className: `pm-icon-button star${favorite ? ' active' : ''}`,
-      textContent: favorite ? '★' : '☆',
-      title: favorite ? 'Убрать из избранного' : 'Добавить в избранное',
-      disabled: projectManagerSaving,
-    });
-    star.setAttribute('aria-label', star.title);
-    star.addEventListener('click', (event) => {
-      event.stopPropagation();
-      setProjectManagerFavorite(project, !favorite);
-    });
-    controls.appendChild(star);
-    if (favorite) {
-      const favoriteCount = Array.isArray(projectManagerState.favoriteProjectIds)
-        ? projectManagerState.favoriteProjectIds.length
-        : 0;
-      for (const [direction, glyph, disabled] of [
-        ['up', '↑', project.favoriteIndex === 0],
-        ['down', '↓', project.favoriteIndex === favoriteCount - 1],
-      ]) {
-        const move = Object.assign(document.createElement('button'), {
-          className: 'pm-icon-button move',
-          textContent: glyph,
-          title: direction === 'up' ? 'Выше в избранном' : 'Ниже в избранном',
-          disabled: projectManagerSaving || disabled,
-        });
-        move.setAttribute('aria-label', move.title);
-        move.addEventListener('click', (event) => {
-          event.stopPropagation();
-          moveProjectManagerFavorite(project, direction);
-        });
-        controls.appendChild(move);
-      }
+  const controls = document.createElement("div");
+  controls.className = "pm-card-controls";
+  const openVm = Object.assign(document.createElement("button"), {
+    type: "button",
+    className: "pm-icon-button agent-vm",
+    textContent: "VM",
+    title: "Открыть Agent VM",
+  });
+  openVm.setAttribute("aria-label", openVm.title);
+  openVm.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openAgentVmProject(project);
+  });
+  controls.appendChild(openVm);
+  const favorite = project.favoriteIndex >= 0;
+  const star = Object.assign(document.createElement("button"), {
+    className: `pm-icon-button star${favorite ? " active" : ""}`,
+    textContent: favorite ? "★" : "☆",
+    title: favorite ? "Убрать из избранного" : "Добавить в избранное",
+    disabled: projectManagerSaving,
+  });
+  star.setAttribute("aria-label", star.title);
+  star.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setProjectManagerFavorite(project, !favorite);
+  });
+  controls.appendChild(star);
+  if (favorite) {
+    const favoriteCount = Array.isArray(projectManagerState.favoriteProjectIds)
+      ? projectManagerState.favoriteProjectIds.length
+      : 0;
+    for (const [direction, glyph, disabled] of [
+      ["up", "↑", project.favoriteIndex === 0],
+      ["down", "↓", project.favoriteIndex === favoriteCount - 1],
+    ]) {
+      const move = Object.assign(document.createElement("button"), {
+        className: "pm-icon-button move",
+        textContent: glyph,
+        title: direction === "up" ? "Выше в избранном" : "Ниже в избранном",
+        disabled: projectManagerSaving || disabled,
+      });
+      move.setAttribute("aria-label", move.title);
+      move.addEventListener("click", (event) => {
+        event.stopPropagation();
+        moveProjectManagerFavorite(project, direction);
+      });
+      controls.appendChild(move);
     }
-    row.appendChild(controls);
+  }
+  row.appendChild(controls);
 
-    const vmState = project.vm?.state;
-    const showVmStatus = terminalBackend
-      || ['provisioning', 'creating', 'starting', 'running', 'ready', 'working', 'error']
-        .includes(vmState);
-    if (showVmStatus) {
-      const status = document.createElement('div');
-      status.className = `pm-card-status ${uiState}`;
-      status.appendChild(Object.assign(document.createElement('span'), {
-        className: 'pm-card-status-dot',
-      }));
-      status.appendChild(Object.assign(document.createElement('span'), {
+  const vmState = project.vm?.state;
+  const showVmStatus =
+    terminalBackend ||
+    [
+      "provisioning",
+      "creating",
+      "starting",
+      "running",
+      "ready",
+      "working",
+      "error",
+    ].includes(vmState);
+  if (showVmStatus) {
+    const status = document.createElement("div");
+    status.className = `pm-card-status ${uiState}`;
+    status.appendChild(
+      Object.assign(document.createElement("span"), {
+        className: "pm-card-status-dot",
+      }),
+    );
+    status.appendChild(
+      Object.assign(document.createElement("span"), {
         textContent: terminalBackend
-          ? `${terminalBackend === 'codex' ? 'Codex' : 'Claude'} работает`
-          : ['running', 'ready', 'working'].includes(vmState)
-            ? 'VM готова'
+          ? `${terminalBackend === "codex" ? "Codex" : "Claude"} работает`
+          : ["running", "ready", "working"].includes(vmState)
+            ? "VM готова"
             : AgentVmModel.stateLabel(uiState),
-      }));
-      row.appendChild(status);
-    }
-    row.addEventListener('mouseenter', () => { histSel = idx; paintHistSel(); });
-    row.addEventListener('click', () => openProjectPrimary(project));
-    return row;
+      }),
+    );
+    row.appendChild(status);
+  }
+  row.addEventListener("mouseenter", () => {
+    histSel = idx;
+    paintHistSel();
+  });
+  row.addEventListener("click", () => openProjectPrimary(project));
+  return row;
 }
 
 async function pickProjectManagerFolder() {
@@ -4611,16 +5895,18 @@ async function pickProjectManagerFolder() {
   renderHistProjects(queryEl.value.trim());
   try {
     const result = await window.jarvis.pickProjectManagerFolder();
-    if (!result?.ok) throw new Error(result?.error || 'Не удалось добавить папку');
+    if (!result?.ok)
+      throw new Error(result?.error || "Не удалось добавить папку");
     if (result.cancelled) return;
     projectManagerState = result.state || projectManagerState;
-    queryEl.value = '';
-    showToast(`${result.project?.project || 'Папка'} добавлена в проекты`);
+    queryEl.value = "";
+    showToast(`${result.project?.project || "Папка"} добавлена в проекты`);
   } catch (error) {
-    showToast(error.message || 'Не удалось добавить папку');
+    showToast(error.message || "Не удалось добавить папку");
   } finally {
     projectManagerSaving = false;
-    if (view === 'history' && histProject == null) renderHistProjects(queryEl.value.trim());
+    if (view === "history" && histProject == null)
+      renderHistProjects(queryEl.value.trim());
   }
 }
 
@@ -4629,14 +5915,19 @@ async function setProjectManagerFavorite(project, favorite) {
   projectManagerSaving = true;
   renderHistProjects(queryEl.value.trim());
   try {
-    const result = await window.jarvis.setProjectManagerFavorite(project.cwd, favorite);
-    if (!result?.ok) throw new Error(result?.error || 'Не удалось изменить избранное');
+    const result = await window.jarvis.setProjectManagerFavorite(
+      project.cwd,
+      favorite,
+    );
+    if (!result?.ok)
+      throw new Error(result?.error || "Не удалось изменить избранное");
     projectManagerState = result.state || projectManagerState;
   } catch (error) {
-    showToast(error.message || 'Не удалось изменить избранное');
+    showToast(error.message || "Не удалось изменить избранное");
   } finally {
     projectManagerSaving = false;
-    if (view === 'history' && histProject == null) renderHistProjects(queryEl.value.trim());
+    if (view === "history" && histProject == null)
+      renderHistProjects(queryEl.value.trim());
   }
 }
 
@@ -4645,124 +5936,190 @@ async function moveProjectManagerFavorite(project, direction) {
   projectManagerSaving = true;
   renderHistProjects(queryEl.value.trim());
   try {
-    const result = await window.jarvis.moveProjectManagerFavorite(project.projectId, direction);
-    if (!result?.ok) throw new Error(result?.error || 'Не удалось переместить проект');
+    const result = await window.jarvis.moveProjectManagerFavorite(
+      project.projectId,
+      direction,
+    );
+    if (!result?.ok)
+      throw new Error(result?.error || "Не удалось переместить проект");
     projectManagerState = result.state || projectManagerState;
   } catch (error) {
-    showToast(error.message || 'Не удалось переместить проект');
+    showToast(error.message || "Не удалось переместить проект");
   } finally {
     projectManagerSaving = false;
-    if (view === 'history' && histProject == null) renderHistProjects(queryEl.value.trim());
+    if (view === "history" && histProject == null)
+      renderHistProjects(queryEl.value.trim());
   }
 }
 
 async function setProjectManagerView(nextView) {
-  if (projectManagerSaving || !['list', 'cards'].includes(nextView)
-    || projectManagerState.view === nextView) return;
+  if (
+    projectManagerSaving ||
+    !["list", "cards"].includes(nextView) ||
+    projectManagerState.view === nextView
+  )
+    return;
   const previousView = projectManagerState.view;
   projectManagerState = { ...projectManagerState, view: nextView };
   projectManagerSaving = true;
   renderHistProjects(queryEl.value.trim());
   try {
     const result = await window.jarvis.setProjectManagerView(nextView);
-    if (!result?.ok) throw new Error(result?.error || 'Не удалось сохранить вид');
+    if (!result?.ok)
+      throw new Error(result?.error || "Не удалось сохранить вид");
     projectManagerState = result.state || projectManagerState;
   } catch (error) {
     projectManagerState = { ...projectManagerState, view: previousView };
-    showToast(error.message || 'Не удалось сохранить вид');
+    showToast(error.message || "Не удалось сохранить вид");
   } finally {
     projectManagerSaving = false;
-    if (view === 'history' && histProject == null) renderHistProjects(queryEl.value.trim());
+    if (view === "history" && histProject == null)
+      renderHistProjects(queryEl.value.trim());
   }
 }
 
-projectManagerAddEl.addEventListener('click', pickProjectManagerFolder);
-projectManagerListViewEl.addEventListener('click', () => setProjectManagerView('list'));
-projectManagerCardsViewEl.addEventListener('click', () => setProjectManagerView('cards'));
+projectManagerAddEl.addEventListener("click", pickProjectManagerFolder);
+projectManagerListViewEl.addEventListener("click", () =>
+  setProjectManagerView("list"),
+);
+projectManagerCardsViewEl.addEventListener("click", () =>
+  setProjectManagerView("cards"),
+);
 
 /* уровень 2: чаты проекта */
 function renderHistChats(g, q) {
-  primaryLabelEl.textContent = 'Запустить в терминале';
+  primaryLabelEl.textContent = "Запустить в терминале";
   projectManagerToolbarEl.hidden = true;
-  const head = document.createElement('div');
-  head.className = 'hgroup';
-  const back = Object.assign(document.createElement('span'), { className: 'hback', textContent: '‹ Проекты' });
-  back.addEventListener('click', () => { histProject = null; renderHistory(); });
+  const head = document.createElement("div");
+  head.className = "hgroup";
+  const back = Object.assign(document.createElement("span"), {
+    className: "hback",
+    textContent: "‹ Проекты",
+  });
+  back.addEventListener("click", () => {
+    histProject = null;
+    renderHistory();
+  });
   head.appendChild(back);
-  head.appendChild(Object.assign(document.createElement('span'), { textContent: g.project }));
+  head.appendChild(
+    Object.assign(document.createElement("span"), { textContent: g.project }),
+  );
   // новые сессии в директории проекта — отдельно для Claude и Codex; для групп
   // без известной директории («другое», g.cwd == null) новая сессия бессмысленна
   if (g.cwd) {
-    const newClaude = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Claude' });
-    newClaude.title = 'Новая сессия Claude в этой директории';
-    newClaude.addEventListener('click', (e) => { e.stopPropagation(); launchSession('claude', null, g.cwd); });
-    const newCodex = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Codex' });
-    newCodex.title = 'Новая сессия Codex в этой директории';
-    newCodex.addEventListener('click', (e) => { e.stopPropagation(); launchSession('codex', null, g.cwd); });
+    const newClaude = Object.assign(document.createElement("button"), {
+      className: "abtn small",
+      textContent: "+ Claude",
+    });
+    newClaude.title = "Новая сессия Claude в этой директории";
+    newClaude.addEventListener("click", (e) => {
+      e.stopPropagation();
+      launchSession("claude", null, g.cwd);
+    });
+    const newCodex = Object.assign(document.createElement("button"), {
+      className: "abtn small",
+      textContent: "+ Codex",
+    });
+    newCodex.title = "Новая сессия Codex в этой директории";
+    newCodex.addEventListener("click", (e) => {
+      e.stopPropagation();
+      launchSession("codex", null, g.cwd);
+    });
     head.appendChild(newClaude);
     head.appendChild(newCodex);
   }
   projectManagerContentEl.appendChild(head);
 
-  projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — запустить продолжение в терминале · + Claude / + Codex — новая сессия · esc — к проектам' }));
+  projectManagerContentEl.appendChild(
+    Object.assign(document.createElement("div"), {
+      className: "hhint",
+      textContent:
+        "↵ — запустить продолжение в терминале · + Claude / + Codex — новая сессия · esc — к проектам",
+    }),
+  );
 
-  const sessions = q ? g.sessions.filter((s) => s.title.toLowerCase().includes(q)) : g.sessions;
+  const sessions = q
+    ? g.sessions.filter((s) => s.title.toLowerCase().includes(q))
+    : g.sessions;
   if (!sessions.length) {
-    projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), { className: 'empty', textContent: 'Ничего не найдено' }));
+    projectManagerContentEl.appendChild(
+      Object.assign(document.createElement("div"), {
+        className: "empty",
+        textContent: "Ничего не найдено",
+      }),
+    );
     return;
   }
 
   for (const s of sessions) {
     const idx = histRows.length;
-    histRows.push({ type: 'chat', s, cwd: g.cwd });
-    const row = document.createElement('div');
-    row.className = 'hrow';
+    histRows.push({ type: "chat", s, cwd: g.cwd });
+    const row = document.createElement("div");
+    row.className = "hrow";
     row.dataset.idx = idx;
     row.title = `${s.title}\n${resumeCommand(s, g.cwd)}`;
 
-    const title = document.createElement('span');
-    title.className = 'htitle';
+    const title = document.createElement("span");
+    title.className = "htitle";
     title.textContent = s.title || s.id.slice(0, 8);
     row.appendChild(title);
 
-    const meta = document.createElement('span');
-    meta.className = 'hmeta';
+    const meta = document.createElement("span");
+    meta.className = "hmeta";
     const parts = [];
     if (s.model) parts.push(s.model);
     if (s.tokens) parts.push(fmtTok(s.tokens));
     parts.push(histTime(s.lastAt));
-    meta.textContent = parts.join(' · ');
+    meta.textContent = parts.join(" · ");
     row.appendChild(meta);
 
-    row.appendChild(Object.assign(document.createElement('span'), { className: 'hcopy', textContent: 'запустить ↵' }));
+    row.appendChild(
+      Object.assign(document.createElement("span"), {
+        className: "hcopy",
+        textContent: "запустить ↵",
+      }),
+    );
 
-    row.addEventListener('mouseenter', () => { histSel = idx; paintHistSel(); });
-    row.addEventListener('click', () => launchSession(s.agent, s.id, g.cwd));
+    row.addEventListener("mouseenter", () => {
+      histSel = idx;
+      paintHistSel();
+    });
+    row.addEventListener("click", () => launchSession(s.agent, s.id, g.cwd));
     projectManagerContentEl.appendChild(row);
   }
 }
 
 function paintHistSel() {
-  for (const row of projectManagerContentEl.querySelectorAll('.hrow, .pm-card')) {
-    row.classList.toggle('selected', Number(row.dataset.idx) === histSel);
+  for (const row of projectManagerContentEl.querySelectorAll(
+    ".hrow, .pm-card",
+  )) {
+    row.classList.toggle("selected", Number(row.dataset.idx) === histSel);
   }
-  projectManagerContentEl.querySelector('.hrow.selected, .pm-card.selected')?.scrollIntoView({ block: 'nearest' });
+  projectManagerContentEl
+    .querySelector(".hrow.selected, .pm-card.selected")
+    ?.scrollIntoView({ block: "nearest" });
 }
 
 /* ---------- вкладка «Статистика» ---------- */
 
-const statsEl = document.getElementById('stats');
-const tabStatsEl = document.getElementById('tabStats');
-tabStatsEl.addEventListener('click', () => setView('stats'));
-tabVoiceEl.addEventListener('click', () => setView('voicehist'));
+const statsEl = document.getElementById("stats");
+const tabStatsEl = document.getElementById("tabStats");
+tabStatsEl.addEventListener("click", () => setView("stats"));
+tabVoiceEl.addEventListener("click", () => setView("voicehist"));
 
-const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(n || 0));
+const fmtTok = (n) =>
+  n >= 1e6
+    ? `${(n / 1e6).toFixed(1)}M`
+    : n >= 1e3
+      ? `${Math.round(n / 1e3)}K`
+      : String(n || 0);
 
 function moneyLine(api, plan) {
   const parts = [];
   if (api > 0.005) parts.push({ text: `$${api.toFixed(2)} API`, api: true });
-  if (plan > 0.005) parts.push({ text: `~$${plan.toFixed(2)} план`, api: false });
-  if (!parts.length) parts.push({ text: '—', api: false });
+  if (plan > 0.005)
+    parts.push({ text: `~$${plan.toFixed(2)} план`, api: false });
+  if (!parts.length) parts.push({ text: "—", api: false });
   return parts;
 }
 
@@ -4773,17 +6130,29 @@ function el(tag, cls, text) {
   return n;
 }
 
-let statsPeriod = 'today'; // 'today' | 'week'
-let statsDim = 'projects'; // 'models' | 'projects' | 'sessions'
+let statsPeriod = "today"; // 'today' | 'week'
+let statsDim = "projects"; // 'models' | 'projects' | 'sessions'
 
-const PERIODS = [['today', 'Сегодня'], ['week', '7 дней']];
-const DIMS = [['models', 'Модели'], ['projects', 'Проекты'], ['sessions', 'Сессии'], ['billing', 'Биллинг']];
+const PERIODS = [
+  ["today", "Сегодня"],
+  ["week", "7 дней"],
+];
+const DIMS = [
+  ["models", "Модели"],
+  ["projects", "Проекты"],
+  ["sessions", "Сессии"],
+  ["billing", "Биллинг"],
+];
 
 function segRow(items, current, onPick) {
-  const seg = el('div', 'seg');
+  const seg = el("div", "seg");
   for (const [val, label] of items) {
-    const b = el('button', 'segbtn' + (val === current ? ' active' : ''), label);
-    b.addEventListener('click', () => onPick(val));
+    const b = el(
+      "button",
+      "segbtn" + (val === current ? " active" : ""),
+      label,
+    );
+    b.addEventListener("click", () => onPick(val));
     seg.appendChild(b);
   }
   return seg;
@@ -4791,25 +6160,45 @@ function segRow(items, current, onPick) {
 
 async function renderStats() {
   let u;
-  try { u = await window.jarvis.getUsage(statsPeriod); } catch { return; }
-  if (view !== 'stats') return;
-  statsEl.textContent = '';
+  try {
+    u = await window.jarvis.getUsage(statsPeriod);
+  } catch {
+    return;
+  }
+  if (view !== "stats") return;
+  statsEl.textContent = "";
 
   // управление: период и разрез
-  const controls = el('div', 'uctl');
-  controls.appendChild(segRow(PERIODS, statsPeriod, (v) => { statsPeriod = v; renderStats(); }));
-  controls.appendChild(segRow(DIMS, statsDim, (v) => { statsDim = v; renderStats(); }));
-  controls.appendChild(el('span', 'uhint', '←→ период · 1-4 разрез'));
+  const controls = el("div", "uctl");
+  controls.appendChild(
+    segRow(PERIODS, statsPeriod, (v) => {
+      statsPeriod = v;
+      renderStats();
+    }),
+  );
+  controls.appendChild(
+    segRow(DIMS, statsDim, (v) => {
+      statsDim = v;
+      renderStats();
+    }),
+  );
+  controls.appendChild(el("span", "uhint", "←→ период · 1-4 разрез"));
   statsEl.appendChild(controls);
 
   // тотал выбранного периода
-  const b = el('div', 'ubig');
-  b.appendChild(el('div', 'ulabel', statsPeriod === 'week' ? 'За 7 дней' : 'Сегодня · с 3:00 МСК'));
-  b.appendChild(el('div', 'uval', fmtTok(u.total.tok)));
-  const money = el('div', 'umoney');
+  const b = el("div", "ubig");
+  b.appendChild(
+    el(
+      "div",
+      "ulabel",
+      statsPeriod === "week" ? "За 7 дней" : "Сегодня · с 3:00 МСК",
+    ),
+  );
+  b.appendChild(el("div", "uval", fmtTok(u.total.tok)));
+  const money = el("div", "umoney");
   moneyLine(u.total.api, u.total.plan).forEach((p, i) => {
-    if (i) money.appendChild(document.createTextNode(' · '));
-    money.appendChild(el('span', p.api ? 'api' : '', p.text));
+    if (i) money.appendChild(document.createTextNode(" · "));
+    money.appendChild(el("span", p.api ? "api" : "", p.text));
   });
   b.appendChild(money);
   statsEl.appendChild(b);
@@ -4817,144 +6206,206 @@ async function renderStats() {
   // лимиты подписки — официальные (claude -p "/usage"), с планом и процентами
   if (u.official) {
     const o = u.official;
-    const head = el('div', 'usect', `Лимиты подписки${o.account.plan ? ` · ${o.account.plan}` : ''}`);
-    if (o.account.email) head.appendChild(el('span', 'uhover', o.account.email));
+    const head = el(
+      "div",
+      "usect",
+      `Лимиты подписки${o.account.plan ? ` · ${o.account.plan}` : ""}`,
+    );
+    if (o.account.email)
+      head.appendChild(el("span", "uhover", o.account.email));
     statsEl.appendChild(head);
 
     const resetText = (ts) => {
-      if (!ts) return '';
+      if (!ts) return "";
       const ms = ts - Date.now();
-      if (ms <= 0) return 'скоро сброс';
+      if (ms <= 0) return "скоро сброс";
       const min = Math.round(ms / 60000);
-      if (min < 24 * 60) return `сброс через ${Math.floor(min / 60)}ч ${min % 60}м`;
+      if (min < 24 * 60)
+        return `сброс через ${Math.floor(min / 60)}ч ${min % 60}м`;
       const d = new Date(ts);
       return `сброс ${pad2(d.getDate())}.${pad2(d.getMonth() + 1)} в ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
     };
 
     const limitRow = (label, pct, extra) => {
-      const row = el('div', 'ulim');
-      row.appendChild(el('span', 'ulim-label', label));
-      const track = el('div', 'ulim-track');
-      const fill = el('div', 'ulim-fill');
+      const row = el("div", "ulim");
+      row.appendChild(el("span", "ulim-label", label));
+      const track = el("div", "ulim-track");
+      const fill = el("div", "ulim-fill");
       fill.style.width = `${Math.min(100, pct)}%`;
-      if (pct > 90) fill.classList.add('crit');
-      else if (pct > 75) fill.classList.add('warn');
+      if (pct > 90) fill.classList.add("crit");
+      else if (pct > 75) fill.classList.add("warn");
       track.appendChild(fill);
       row.appendChild(track);
-      row.appendChild(el('span', 'ulim-pct', `${pct}%`));
-      row.appendChild(el('span', 'ulim-reset', extra || ''));
+      row.appendChild(el("span", "ulim-pct", `${pct}%`));
+      row.appendChild(el("span", "ulim-reset", extra || ""));
       statsEl.appendChild(row);
     };
 
-    if (o.session) limitRow('Сессия', o.session.pct, `${resetText(o.session.resetAt)}${o.windowTokens ? ` · ${fmtTok(o.windowTokens)} ткн` : ''}`);
-    if (o.week) limitRow('Неделя', o.week.pct, resetText(o.week.resetAt));
-    if (o.weekSonnet) limitRow('Sonnet', o.weekSonnet.pct, '');
+    if (o.session)
+      limitRow(
+        "Сессия",
+        o.session.pct,
+        `${resetText(o.session.resetAt)}${o.windowTokens ? ` · ${fmtTok(o.windowTokens)} ткн` : ""}`,
+      );
+    if (o.week) limitRow("Неделя", o.week.pct, resetText(o.week.resetAt));
+    if (o.weekSonnet) limitRow("Sonnet", o.weekSonnet.pct, "");
   } else if (u.window.resetInMs > 0) {
     // официальные данные ещё не приехали — локальная оценка
     const min = Math.round(u.window.resetInMs / 60000);
-    const win = el('div', 'uwindow');
-    win.appendChild(el('span', 'uwtok', `${fmtTok(u.window.tokens)} ткн`));
-    win.appendChild(document.createTextNode(`за 5ч-окно (локальная оценка) · ~сброс через ${Math.floor(min / 60)}ч ${min % 60}м`));
+    const win = el("div", "uwindow");
+    win.appendChild(el("span", "uwtok", `${fmtTok(u.window.tokens)} ткн`));
+    win.appendChild(
+      document.createTextNode(
+        `за 5ч-окно (локальная оценка) · ~сброс через ${Math.floor(min / 60)}ч ${min % 60}м`,
+      ),
+    );
     statsEl.appendChild(win);
   }
 
   // график периода
-  const sect = el('div', 'usect', statsPeriod === 'week' ? 'По дням' : 'По часам');
-  const hover = el('span', 'uhover', '');
+  const sect = el(
+    "div",
+    "usect",
+    statsPeriod === "week" ? "По дням" : "По часам",
+  );
+  const hover = el("span", "uhover", "");
   sect.appendChild(hover);
   statsEl.appendChild(sect);
-  const chart = el('div', 'uchart');
+  const chart = el("div", "uchart");
   const max = Math.max(1, ...u.series.map((h) => h.tok));
   for (const h of u.series) {
-    const wrap = el('div', 'ubar-wrap');
-    const bar = el('div', 'ubar');
+    const wrap = el("div", "ubar-wrap");
+    const bar = el("div", "ubar");
     bar.style.height = `${Math.max(3, Math.round((h.tok / max) * 100))}%`;
-    if (!h.tok) bar.style.opacity = '0.25';
+    if (!h.tok) bar.style.opacity = "0.25";
     wrap.appendChild(bar);
-    wrap.addEventListener('mouseenter', () => { hover.textContent = `${h.label} · ${fmtTok(h.tok)}`; });
+    wrap.addEventListener("mouseenter", () => {
+      hover.textContent = `${h.label} · ${fmtTok(h.tok)}`;
+    });
     chart.appendChild(wrap);
   }
-  chart.addEventListener('mouseleave', () => { hover.textContent = ''; });
+  chart.addEventListener("mouseleave", () => {
+    hover.textContent = "";
+  });
   statsEl.appendChild(chart);
 
   // одна таблица — выбранный разрез
-  const isApiB = (b) => b && b !== 'plan';
-  const planName = (u.official && u.official.account.plan) ? ` ${u.official.account.plan}` : '';
-  const rows = statsDim === 'models'
-    ? u.byModel.map((m) => ({ name: m.key, tok: m.tok, api: m.api, plan: m.plan }))
-    : statsDim === 'projects'
-      ? u.byProject.map((p) => ({
-          name: p.key, badge: isApiB(p.billing) ? 'API' : 'план',
-          titleAttr: isApiB(p.billing) ? p.billing.slice(4) : '',
-          tok: p.tok, api: p.api, plan: p.plan,
+  const isApiB = (b) => b && b !== "plan";
+  const planName =
+    u.official && u.official.account.plan ? ` ${u.official.account.plan}` : "";
+  const rows =
+    statsDim === "models"
+      ? u.byModel.map((m) => ({
+          name: m.key,
+          tok: m.tok,
+          api: m.api,
+          plan: m.plan,
         }))
-      : statsDim === 'sessions'
-        ? u.sessions.map((s) => ({
-            name: `${s.project} · ${s.model}`, titleAttr: s.id, tok: s.tok,
-            api: isApiB(s.billing) ? s.cost : 0, plan: isApiB(s.billing) ? 0 : s.cost,
+      : statsDim === "projects"
+        ? u.byProject.map((p) => ({
+            name: p.key,
+            badge: isApiB(p.billing) ? "API" : "план",
+            titleAttr: isApiB(p.billing) ? p.billing.slice(4) : "",
+            tok: p.tok,
+            api: p.api,
+            plan: p.plan,
           }))
-        : (u.byBilling || []).map((b) => ({
-            name: b.host || `Подписка${planName}`,
-            badge: b.host ? 'API' : 'план',
-            titleAttr: `проекты: ${b.projects.join(', ')}`,
-            tok: b.tok, api: b.api, plan: b.plan,
-          }));
+        : statsDim === "sessions"
+          ? u.sessions.map((s) => ({
+              name: `${s.project} · ${s.model}`,
+              titleAttr: s.id,
+              tok: s.tok,
+              api: isApiB(s.billing) ? s.cost : 0,
+              plan: isApiB(s.billing) ? 0 : s.cost,
+            }))
+          : (u.byBilling || []).map((b) => ({
+              name: b.host || `Подписка${planName}`,
+              badge: b.host ? "API" : "план",
+              titleAttr: `проекты: ${b.projects.join(", ")}`,
+              tok: b.tok,
+              api: b.api,
+              plan: b.plan,
+            }));
 
-  statsEl.appendChild(el('div', 'usect', DIMS.find(([v]) => v === statsDim)[1]));
-  if (!rows.length) statsEl.appendChild(el('div', 'uwindow', 'пусто за период'));
+  statsEl.appendChild(
+    el("div", "usect", DIMS.find(([v]) => v === statsDim)[1]),
+  );
+  if (!rows.length)
+    statsEl.appendChild(el("div", "uwindow", "пусто за период"));
   const maxTok = Math.max(1, ...rows.map((r) => r.tok));
   for (const r of rows) {
-    const row = el('div', 'urow');
-    const name = el('span', 'uname', r.name);
+    const row = el("div", "urow");
+    const name = el("span", "uname", r.name);
     if (r.titleAttr) name.title = r.titleAttr;
     row.appendChild(name);
-    if (r.badge) row.appendChild(el('span', 'badge host', r.badge));
-    const track = el('div', 'ubartrack');
-    const fill = el('div', 'ubarfill');
+    if (r.badge) row.appendChild(el("span", "badge host", r.badge));
+    const track = el("div", "ubartrack");
+    const fill = el("div", "ubarfill");
     fill.style.width = `${Math.round((r.tok / maxTok) * 100)}%`;
     track.appendChild(fill);
     row.appendChild(track);
-    row.appendChild(el('span', 'unum', fmtTok(r.tok)));
-    row.appendChild(el('span', `unum money${r.api > 0.005 ? ' api' : ''}`,
-      r.api > 0.005 ? `$${r.api.toFixed(2)}` : `~$${(r.plan ?? 0).toFixed(2)}`));
+    row.appendChild(el("span", "unum", fmtTok(r.tok)));
+    row.appendChild(
+      el(
+        "span",
+        `unum money${r.api > 0.005 ? " api" : ""}`,
+        r.api > 0.005
+          ? `$${r.api.toFixed(2)}`
+          : `~$${(r.plan ?? 0).toFixed(2)}`,
+      ),
+    );
     statsEl.appendChild(row);
   }
 }
-tabSettingsEl.addEventListener('click', () => {
-  if (view === 'settings') { setView('list'); render(); } else setView('settings');
+tabSettingsEl.addEventListener("click", () => {
+  if (view === "settings") {
+    setView("list");
+    render();
+  } else setView("settings");
 });
 
 // кнопка «Открыть настройки» из окна онбординга
-window.jarvis.onGotoSettings(() => setView('settings'));
-window.jarvis.onGotoVoicehist(() => setView('voicehist'));
+window.jarvis.onGotoSettings(() => setView("settings"));
+window.jarvis.onGotoVoicehist(() => setView("voicehist"));
 
 // Wake-word (инкр. 10): живой индикатор «слушаю»/срабатывание + рефреш после установки
 window.jarvis.onAudioState((p) => {
-  const pill = document.getElementById('wake-status-pill');
+  const pill = document.getElementById("wake-status-pill");
   if (!pill || !p) return;
-  let txt = 'выключено', cls = '';
-  if (p.muted || p.state === 'muted') txt = 'заглушено';
-  else if (p.state === 'denied') txt = 'нет доступа к микрофону';
-  else if (p.state === 'listening') { txt = 'слушаю'; cls = 'on'; }
-  else if (p.state === 'no-device') txt = 'нет устройства';
+  let txt = "выключено",
+    cls = "";
+  if (p.muted || p.state === "muted") txt = "заглушено";
+  else if (p.state === "denied") txt = "нет доступа к микрофону";
+  else if (p.state === "listening") {
+    txt = "слушаю";
+    cls = "on";
+  } else if (p.state === "no-device") txt = "нет устройства";
   pill.textContent = txt;
-  pill.className = 'astatus' + (cls ? ' ' + cls : '');
+  pill.className = "astatus" + (cls ? " " + cls : "");
 });
 window.jarvis.onWake((p) => {
-  if (!p || p.phase !== 'detected') return;
-  const pill = document.getElementById('wake-status-pill');
-  if (pill) { pill.textContent = 'сработало!'; pill.className = 'astatus on'; }
+  if (!p || p.phase !== "detected") return;
+  const pill = document.getElementById("wake-status-pill");
+  if (pill) {
+    pill.textContent = "сработало!";
+    pill.className = "astatus on";
+  }
 });
-window.jarvis.onWakeInstallDone(() => { try { renderWakeCard(); renderModelManager(); } catch {} });
+window.jarvis.onWakeInstallDone(() => {
+  try {
+    renderWakeCard();
+    renderModelManager();
+  } catch {}
+});
 // STT-модели качаются по запросу (кнопка в карточке) — прогресс в строку,
 // финал перерисовывает карточку, ошибку показываем тостом.
 window.jarvis.onSttInstallProgress((step) => {
-  const el = document.getElementById('stt-install-progress');
+  const el = document.getElementById("stt-install-progress");
   if (el && step && step.msg) el.textContent = step.msg;
 });
 window.jarvis.onSttInstallDone((p) => {
   try {
-    if (p && !p.ok && p.error) showToast('STT: не удалось — ' + p.error);
+    if (p && !p.ok && p.error) showToast("STT: не удалось — " + p.error);
     renderSttCard();
     renderModelManager();
   } catch {}
@@ -4962,18 +6413,18 @@ window.jarvis.onSttInstallDone((p) => {
 
 /* ---------- настройки ---------- */
 
-const hotkeyBtn = document.getElementById('hotkey');
-const hotkeyErr = document.getElementById('hotkeyError');
+const hotkeyBtn = document.getElementById("hotkey");
+const hotkeyErr = document.getElementById("hotkeyError");
 let recording = false;
-let recordingKey = 'hotkey'; // какой хоткей записываем (settings-ключ)
+let recordingKey = "hotkey"; // какой хоткей записываем (settings-ключ)
 let recordingBtn = hotkeyBtn; // кнопка, что сейчас в режиме записи
 
 // дефолты «прочих» хоткеев — чтобы кнопки показывали реальное значение
 const HK_DEFAULTS = {
-  continueHotkey: 'Command+Alt+C',
-  repeatHotkey: 'Command+Alt+R',
-  muteHotkey: 'Command+Alt+M',
-  quietHotkey: 'Command+Alt+J',
+  continueHotkey: "Command+Alt+C",
+  repeatHotkey: "Command+Alt+R",
+  muteHotkey: "Command+Alt+M",
+  quietHotkey: "Command+Alt+J",
 };
 
 function startRecording(btn, key) {
@@ -4981,15 +6432,19 @@ function startRecording(btn, key) {
   recordingKey = key;
   recordingBtn = btn;
   hotkeyErr.hidden = true;
-  btn.classList.add('recording');
-  btn.textContent = 'нажми сочетание…';
+  btn.classList.add("recording");
+  btn.textContent = "нажми сочетание…";
 }
 
 function displayHotkey(acc) {
   return acc
-    .replace('CommandOrControl', '⌘').replace('Command', '⌘')
-    .replace('Control', '⌃').replace('Option', '⌥').replace('Alt', '⌥')
-    .replace('Shift', '⇧').replaceAll('+', ' ');
+    .replace("CommandOrControl", "⌘")
+    .replace("Command", "⌘")
+    .replace("Control", "⌃")
+    .replace("Option", "⌥")
+    .replace("Alt", "⌥")
+    .replace("Shift", "⇧")
+    .replaceAll("+", " ");
 }
 
 async function loadSettings() {
@@ -4997,42 +6452,71 @@ async function loadSettings() {
   // редизайна, проводка к тем же IPC. initSettings2 сам чистит и строит host.
   // Старая разметка #settings затирается; её top-level обработчики остаются
   // привязанными к detached-узлам (безопасно), карточки no-op (нет их DOM).
-  try { plugins = await window.jarvis.getPlugins(); } catch {}
-  settingsEl.style.cssText = 'padding:0;height:100%;overflow:hidden';
+  try {
+    plugins = await window.jarvis.getPlugins();
+  } catch {}
+  settingsEl.style.cssText = "padding:0;height:100%;overflow:hidden";
   try {
     window.initSettings2(settingsEl);
   } catch (e) {
-    console.error('[settings2] init:', e);
+    console.error("[settings2] init:", e);
   }
 }
 
 /* ── карточка «История диктовки»: что я говорил + копирование/очистка ── */
 async function renderTranscriptsCard() {
-  const box = document.getElementById('transcriptsCard');
+  const box = document.getElementById("transcriptsCard");
   if (!box) return;
-  box.textContent = '';
+  box.textContent = "";
   let items = [];
-  try { const r = await window.jarvis.transcriptsGet(); items = (r && r.items) || []; } catch {}
+  try {
+    const r = await window.jarvis.transcriptsGet();
+    items = (r && r.items) || [];
+  } catch {}
 
-  const head = document.createElement('div');
-  head.className = 'awakehead';
-  head.appendChild(Object.assign(document.createElement('span'), { className: 'atitle', textContent: 'История диктовки' }));
-  head.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+  const head = document.createElement("div");
+  head.className = "awakehead";
+  head.appendChild(
+    Object.assign(document.createElement("span"), {
+      className: "atitle",
+      textContent: "История диктовки",
+    }),
+  );
+  head.appendChild(
+    Object.assign(document.createElement("span"), { className: "spacer" }),
+  );
   if (items.length) {
-    const copyAll = document.createElement('button');
-    copyAll.className = 'abtn small';
-    copyAll.textContent = 'Копировать всё';
-    copyAll.addEventListener('click', () => {
-      try { navigator.clipboard.writeText(items.map((i) => i.text).join('\n')); } catch {}
-      copyAll.textContent = 'Скопировано'; setTimeout(() => { copyAll.textContent = 'Копировать всё'; }, 1500);
+    const copyAll = document.createElement("button");
+    copyAll.className = "abtn small";
+    copyAll.textContent = "Копировать всё";
+    copyAll.addEventListener("click", () => {
+      try {
+        navigator.clipboard.writeText(items.map((i) => i.text).join("\n"));
+      } catch {}
+      copyAll.textContent = "Скопировано";
+      setTimeout(() => {
+        copyAll.textContent = "Копировать всё";
+      }, 1500);
     });
     head.appendChild(copyAll);
-    const clr = document.createElement('button');
-    clr.className = 'abtn danger small'; clr.style.marginLeft = '8px'; clr.textContent = 'Очистить';
+    const clr = document.createElement("button");
+    clr.className = "abtn danger small";
+    clr.style.marginLeft = "8px";
+    clr.textContent = "Очистить";
     let armed = false;
-    clr.addEventListener('click', async () => {
-      if (!armed) { armed = true; clr.textContent = 'Точно?'; setTimeout(() => { armed = false; clr.textContent = 'Очистить'; }, 3000); return; }
-      try { await window.jarvis.transcriptsClear(); } catch {}
+    clr.addEventListener("click", async () => {
+      if (!armed) {
+        armed = true;
+        clr.textContent = "Точно?";
+        setTimeout(() => {
+          armed = false;
+          clr.textContent = "Очистить";
+        }, 3000);
+        return;
+      }
+      try {
+        await window.jarvis.transcriptsClear();
+      } catch {}
       renderTranscriptsCard();
     });
     head.appendChild(clr);
@@ -5040,46 +6524,67 @@ async function renderTranscriptsCard() {
   box.appendChild(head);
 
   if (!items.length) {
-    const hint = document.createElement('div');
-    hint.className = 'ahint';
-    hint.textContent = 'Пока пусто. Скажи что-нибудь через диктовку (F8) или «Hey Jarvis».';
+    const hint = document.createElement("div");
+    hint.className = "ahint";
+    hint.textContent =
+      "Пока пусто. Скажи что-нибудь через диктовку (F8) или «Hey Jarvis».";
     box.appendChild(hint);
     return;
   }
 
   for (const it of items) {
-    const wrap = document.createElement('div');
-    const r = document.createElement('div');
-    r.className = 'istat hairtop on';
-    r.appendChild(Object.assign(document.createElement('span'), { className: 'dot' }));
-    const txt = document.createElement('span');
+    const wrap = document.createElement("div");
+    const r = document.createElement("div");
+    r.className = "istat hairtop on";
+    r.appendChild(
+      Object.assign(document.createElement("span"), { className: "dot" }),
+    );
+    const txt = document.createElement("span");
     txt.textContent = it.text;
-    txt.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    txt.style.cssText =
+      "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
     r.appendChild(txt);
-    r.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
-    const meta = document.createElement('span');
-    meta.className = 'sz';
+    r.appendChild(
+      Object.assign(document.createElement("span"), { className: "spacer" }),
+    );
+    const meta = document.createElement("span");
+    meta.className = "sz";
     const d = new Date((it.ts || 0) * 1000);
-    const hh = String(d.getHours()).padStart(2, '0'), mm = String(d.getMinutes()).padStart(2, '0');
-    meta.textContent = `${it.source === 'wake' ? '🎙' : '⌨'} ${hh}:${mm}`;
+    const hh = String(d.getHours()).padStart(2, "0"),
+      mm = String(d.getMinutes()).padStart(2, "0");
+    meta.textContent = `${it.source === "wake" ? "🎙" : "⌨"} ${hh}:${mm}`;
     r.appendChild(meta);
     // → Промпт: преобразовать надиктованное через LLM (ишку)
-    const enh = document.createElement('button');
-    enh.className = 'abtn small primary'; enh.style.marginLeft = '10px'; enh.textContent = '→ Промпт';
-    enh.addEventListener('click', async () => {
-      enh.disabled = true; enh.textContent = 'Думаю…';
+    const enh = document.createElement("button");
+    enh.className = "abtn small primary";
+    enh.style.marginLeft = "10px";
+    enh.textContent = "→ Промпт";
+    enh.addEventListener("click", async () => {
+      enh.disabled = true;
+      enh.textContent = "Думаю…";
       let res = null;
-      try { res = await window.jarvis.transcriptEnhance(it.text, 'prompt'); } catch (e) {}
-      enh.disabled = false; enh.textContent = '→ Промпт';
+      try {
+        res = await window.jarvis.transcriptEnhance(it.text, "prompt");
+      } catch (e) {}
+      enh.disabled = false;
+      enh.textContent = "→ Промпт";
       if (res && res.ok && res.result) showEnhanceResult(wrap, res.result);
-      else showToast('Не удалось: ' + ((res && res.error) || 'ишка недоступна'));
+      else
+        showToast("Не удалось: " + ((res && res.error) || "ишка недоступна"));
     });
     r.appendChild(enh);
-    const cp = document.createElement('button');
-    cp.className = 'abtn small'; cp.style.marginLeft = '8px'; cp.textContent = 'Копировать';
-    cp.addEventListener('click', () => {
-      try { navigator.clipboard.writeText(it.text); } catch {}
-      cp.textContent = 'OK'; setTimeout(() => { cp.textContent = 'Копировать'; }, 1200);
+    const cp = document.createElement("button");
+    cp.className = "abtn small";
+    cp.style.marginLeft = "8px";
+    cp.textContent = "Копировать";
+    cp.addEventListener("click", () => {
+      try {
+        navigator.clipboard.writeText(it.text);
+      } catch {}
+      cp.textContent = "OK";
+      setTimeout(() => {
+        cp.textContent = "Копировать";
+      }, 1200);
     });
     r.appendChild(cp);
     wrap.appendChild(r);
@@ -5089,20 +6594,28 @@ async function renderTranscriptsCard() {
 
 // показать результат преобразования (промпт) под репликой + кнопка копирования
 function showEnhanceResult(wrap, text) {
-  const old = wrap.querySelector('.enh-result');
+  const old = wrap.querySelector(".enh-result");
   if (old) old.remove();
-  const res = document.createElement('div');
-  res.className = 'enh-result';
-  res.style.cssText = 'margin:6px 0 10px 22px;padding:10px;border-radius:8px;background:rgba(108,160,255,.10);';
-  const t = document.createElement('div');
+  const res = document.createElement("div");
+  res.className = "enh-result";
+  res.style.cssText =
+    "margin:6px 0 10px 22px;padding:10px;border-radius:8px;background:rgba(108,160,255,.10);";
+  const t = document.createElement("div");
   t.textContent = text;
-  t.style.cssText = 'white-space:pre-wrap;font-size:13px;line-height:1.45;';
+  t.style.cssText = "white-space:pre-wrap;font-size:13px;line-height:1.45;";
   res.appendChild(t);
-  const cp = document.createElement('button');
-  cp.className = 'abtn small primary'; cp.style.marginTop = '8px'; cp.textContent = 'Копировать промпт';
-  cp.addEventListener('click', () => {
-    try { navigator.clipboard.writeText(text); } catch {}
-    cp.textContent = 'Скопировано'; setTimeout(() => { cp.textContent = 'Копировать промпт'; }, 1500);
+  const cp = document.createElement("button");
+  cp.className = "abtn small primary";
+  cp.style.marginTop = "8px";
+  cp.textContent = "Копировать промпт";
+  cp.addEventListener("click", () => {
+    try {
+      navigator.clipboard.writeText(text);
+    } catch {}
+    cp.textContent = "Скопировано";
+    setTimeout(() => {
+      cp.textContent = "Копировать промпт";
+    }, 1500);
   });
   res.appendChild(cp);
   wrap.appendChild(res);
@@ -5110,91 +6623,128 @@ function showEnhanceResult(wrap, text) {
 
 /* ── формат размера на диске ── */
 function fmtBytes(n) {
-  if (!n) return '0 МБ';
+  if (!n) return "0 МБ";
   const mb = n / (1024 * 1024);
-  if (mb >= 1024) return (mb / 1024).toFixed(mb >= 10240 ? 0 : 1) + ' ГБ';
-  return Math.max(1, Math.round(mb)) + ' МБ';
+  if (mb >= 1024) return (mb / 1024).toFixed(mb >= 10240 ? 0 : 1) + " ГБ";
+  return Math.max(1, Math.round(mb)) + " МБ";
 }
 
 /* ── карточка «Интеграция»: статус компонентов + удалить/переустановить ──
  *    + вложенная карточка моделей голоса (место/удаление). */
 async function renderIntegrationCard() {
-  const box = document.getElementById('integrationCard');
-  const mbox = document.getElementById('modelsCard');
+  const box = document.getElementById("integrationCard");
+  const mbox = document.getElementById("modelsCard");
   if (!box) return;
   let info = null;
-  try { info = await window.jarvis.integrationGet(); } catch {}
-  if (!info) { box.textContent = ''; return; }
+  try {
+    info = await window.jarvis.integrationGet();
+  } catch {}
+  if (!info) {
+    box.textContent = "";
+    return;
+  }
   const st = info.status || {};
   const integrated = st.hooks && st.shim;
 
-  box.textContent = '';
+  box.textContent = "";
 
   // шапка
-  const head = document.createElement('div');
-  head.className = 'awakehead';
-  const title = document.createElement('span');
-  title.className = 'atitle';
-  title.textContent = 'Claude Code';
+  const head = document.createElement("div");
+  head.className = "awakehead";
+  const title = document.createElement("span");
+  title.className = "atitle";
+  title.textContent = "Claude Code";
   head.appendChild(title);
-  head.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
-  const status = document.createElement('span');
-  status.className = integrated ? 'astatus on' : 'astatus';
-  status.textContent = integrated ? 'подключено' : 'не подключено';
+  head.appendChild(
+    Object.assign(document.createElement("span"), { className: "spacer" }),
+  );
+  const status = document.createElement("span");
+  status.className = integrated ? "astatus on" : "astatus";
+  status.textContent = integrated ? "подключено" : "не подключено";
   head.appendChild(status);
   box.appendChild(head);
 
   // строки компонентов
   const rows = [
-    ['hooks', 'Хуки событий', st.hooks],
-    ['shim', 'Шим запуска claude', st.shim],
-    ['tmux_conf', 'tmux-транспорт', st.tmux_conf],
-    ['path_block', 'PATH-блок в shell', st.path_block],
+    ["hooks", "Хуки событий", st.hooks],
+    ["shim", "Шим запуска claude", st.shim],
+    ["tmux_conf", "tmux-транспорт", st.tmux_conf],
+    ["path_block", "PATH-блок в shell", st.path_block],
   ];
   for (const [, label, ok] of rows) {
-    const r = document.createElement('div');
-    r.className = 'istat hairtop' + (ok ? ' on' : '');
-    r.appendChild(Object.assign(document.createElement('span'), { className: 'dot' }));
-    r.appendChild(Object.assign(document.createElement('span'), { textContent: label }));
-    r.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
-    r.appendChild(Object.assign(document.createElement('span'), { className: 'sz', textContent: ok ? 'есть' : '—' }));
+    const r = document.createElement("div");
+    r.className = "istat hairtop" + (ok ? " on" : "");
+    r.appendChild(
+      Object.assign(document.createElement("span"), { className: "dot" }),
+    );
+    r.appendChild(
+      Object.assign(document.createElement("span"), { textContent: label }),
+    );
+    r.appendChild(
+      Object.assign(document.createElement("span"), { className: "spacer" }),
+    );
+    r.appendChild(
+      Object.assign(document.createElement("span"), {
+        className: "sz",
+        textContent: ok ? "есть" : "—",
+      }),
+    );
     box.appendChild(r);
   }
 
   // пометка про чужие хуки
   if (info.foreign_hooks > 0) {
-    const h = document.createElement('div');
-    h.className = 'ahint';
+    const h = document.createElement("div");
+    h.className = "ahint";
     h.textContent = `При удалении сохранятся ${info.foreign_hooks} чужих хук(ов) — трогаем только свои.`;
     box.appendChild(h);
   }
 
   // тумблер тихого режима (разработчик)
-  box.appendChild(arow('Тихий режим (разработчик)',
-    stoggle(!!info.quiet, (v) => window.jarvis.quietSet(v)), { hairtop: true }));
-  const qhint = document.createElement('div');
-  qhint.className = 'ahint';
-  qhint.textContent = 'Фон копит статистику с хуков, но без тостов/голоса/показа. Тумблер — ⌘⌥J.';
+  box.appendChild(
+    arow(
+      "Тихий режим (разработчик)",
+      stoggle(!!info.quiet, (v) => window.jarvis.quietSet(v)),
+      { hairtop: true },
+    ),
+  );
+  const qhint = document.createElement("div");
+  qhint.className = "ahint";
+  qhint.textContent =
+    "Фон копит статистику с хуков, но без тостов/голоса/показа. Тумблер — ⌘⌥J.";
   box.appendChild(qhint);
 
   // кнопки
-  const brow = document.createElement('div');
-  brow.className = 'abtnrow';
-  const setup = document.createElement('button');
-  setup.className = 'abtn primary';
-  setup.textContent = integrated ? 'Переустановить' : 'Настроить';
-  setup.addEventListener('click', () => { window.jarvis.onboardingOpen(); });
+  const brow = document.createElement("div");
+  brow.className = "abtnrow";
+  const setup = document.createElement("button");
+  setup.className = "abtn primary";
+  setup.textContent = integrated ? "Переустановить" : "Настроить";
+  setup.addEventListener("click", () => {
+    window.jarvis.onboardingOpen();
+  });
   brow.appendChild(setup);
 
   if (integrated) {
-    const rm = document.createElement('button');
-    rm.className = 'abtn danger';
-    rm.textContent = 'Удалить интеграцию';
+    const rm = document.createElement("button");
+    rm.className = "abtn danger";
+    rm.textContent = "Удалить интеграцию";
     let armed = false;
-    rm.addEventListener('click', async () => {
-      if (!armed) { armed = true; rm.textContent = 'Точно удалить?'; setTimeout(() => { armed = false; rm.textContent = 'Удалить интеграцию'; }, 3000); return; }
-      rm.disabled = true; rm.textContent = 'Удаляю…';
-      try { await window.jarvis.integrationRemove(); } catch {}
+    rm.addEventListener("click", async () => {
+      if (!armed) {
+        armed = true;
+        rm.textContent = "Точно удалить?";
+        setTimeout(() => {
+          armed = false;
+          rm.textContent = "Удалить интеграцию";
+        }, 3000);
+        return;
+      }
+      rm.disabled = true;
+      rm.textContent = "Удаляю…";
+      try {
+        await window.jarvis.integrationRemove();
+      } catch {}
       renderIntegrationCard();
     });
     brow.appendChild(rm);
@@ -5208,80 +6758,136 @@ async function renderIntegrationCard() {
 /* ── карточка «Голос: модели и место» ── */
 function renderModelsCard(box, models) {
   if (!box) return;
-  box.textContent = '';
-  if (!models.length) { box.hidden = true; return; }
+  box.textContent = "";
+  if (!models.length) {
+    box.hidden = true;
+    return;
+  }
   box.hidden = false;
 
-  const head = document.createElement('div');
-  head.className = 'awakehead';
-  head.appendChild(Object.assign(document.createElement('span'), { className: 'atitle', textContent: 'Модели голоса' }));
-  head.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+  const head = document.createElement("div");
+  head.className = "awakehead";
+  head.appendChild(
+    Object.assign(document.createElement("span"), {
+      className: "atitle",
+      textContent: "Модели голоса",
+    }),
+  );
+  head.appendChild(
+    Object.assign(document.createElement("span"), { className: "spacer" }),
+  );
   const total = models.reduce((a, m) => a + (m.bytes || 0), 0);
-  head.appendChild(Object.assign(document.createElement('span'), { className: 'astatus on', textContent: fmtBytes(total) }));
+  head.appendChild(
+    Object.assign(document.createElement("span"), {
+      className: "astatus on",
+      textContent: fmtBytes(total),
+    }),
+  );
   box.appendChild(head);
 
   for (const m of models) {
-    const r = document.createElement('div');
-    r.className = 'istat hairtop on';
-    r.appendChild(Object.assign(document.createElement('span'), { className: 'dot' }));
-    r.appendChild(Object.assign(document.createElement('span'), { textContent: m.label }));
-    r.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
-    r.appendChild(Object.assign(document.createElement('span'), { className: 'sz', textContent: fmtBytes(m.bytes) }));
-    const del = document.createElement('button');
-    del.className = 'abtn danger small';
-    del.style.marginLeft = '10px';
-    del.textContent = 'Удалить';
+    const r = document.createElement("div");
+    r.className = "istat hairtop on";
+    r.appendChild(
+      Object.assign(document.createElement("span"), { className: "dot" }),
+    );
+    r.appendChild(
+      Object.assign(document.createElement("span"), { textContent: m.label }),
+    );
+    r.appendChild(
+      Object.assign(document.createElement("span"), { className: "spacer" }),
+    );
+    r.appendChild(
+      Object.assign(document.createElement("span"), {
+        className: "sz",
+        textContent: fmtBytes(m.bytes),
+      }),
+    );
+    const del = document.createElement("button");
+    del.className = "abtn danger small";
+    del.style.marginLeft = "10px";
+    del.textContent = "Удалить";
     let armed = false;
-    del.addEventListener('click', async () => {
-      if (!armed) { armed = true; del.textContent = 'Точно?'; setTimeout(() => { armed = false; del.textContent = 'Удалить'; }, 3000); return; }
-      del.disabled = true; del.textContent = '…';
-      try { await window.jarvis.modelDelete(m.id); } catch {}
+    del.addEventListener("click", async () => {
+      if (!armed) {
+        armed = true;
+        del.textContent = "Точно?";
+        setTimeout(() => {
+          armed = false;
+          del.textContent = "Удалить";
+        }, 3000);
+        return;
+      }
+      del.disabled = true;
+      del.textContent = "…";
+      try {
+        await window.jarvis.modelDelete(m.id);
+      } catch {}
       renderIntegrationCard();
     });
     r.appendChild(del);
     box.appendChild(r);
   }
 
-  const hint = document.createElement('div');
-  hint.className = 'ahint';
-  hint.textContent = 'После удаления голос недоступен, пока не переустановишь интеграцию.';
+  const hint = document.createElement("div");
+  hint.className = "ahint";
+  hint.textContent =
+    "После удаления голос недоступен, пока не переустановишь интеграцию.";
   box.appendChild(hint);
 }
 
 /* ── карточка «Модели»: единый инвентарь всех моделей (STT/голос/wake) ──
  *    Инкремент 1 — только статус и размер. Скачать/удалить/активировать — далее. */
 const MODEL_GROUPS = [
-  ['stt', 'Распознавание речи'],
-  ['voice', 'Голос'],
-  ['wake', 'Wake-word'],
-  ['runtime', 'Окружение'],
+  ["stt", "Распознавание речи"],
+  ["voice", "Голос"],
+  ["wake", "Wake-word"],
+  ["runtime", "Окружение"],
 ];
 
 async function renderModelManager() {
-  const box = document.getElementById('modelManagerCard');
+  const box = document.getElementById("modelManagerCard");
   if (!box) return;
-  box.textContent = '';
+  box.textContent = "";
   let models = [];
-  try { const r = await window.jarvis.modelsGet(); models = (r && r.models) || []; } catch {}
-  if (!models.length) { box.hidden = true; return; }
+  try {
+    const r = await window.jarvis.modelsGet();
+    models = (r && r.models) || [];
+  } catch {}
+  if (!models.length) {
+    box.hidden = true;
+    return;
+  }
   box.hidden = false;
 
   // шапка: суммарный размер на диске
-  const head = document.createElement('div');
-  head.className = 'awakehead';
-  head.appendChild(Object.assign(document.createElement('span'), { className: 'atitle', textContent: 'Все модели' }));
-  head.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+  const head = document.createElement("div");
+  head.className = "awakehead";
+  head.appendChild(
+    Object.assign(document.createElement("span"), {
+      className: "atitle",
+      textContent: "Все модели",
+    }),
+  );
+  head.appendChild(
+    Object.assign(document.createElement("span"), { className: "spacer" }),
+  );
   const total = models.reduce((a, m) => a + (m.bytes || 0), 0);
-  head.appendChild(Object.assign(document.createElement('span'), { className: 'astatus on', textContent: fmtBytes(total) }));
+  head.appendChild(
+    Object.assign(document.createElement("span"), {
+      className: "astatus on",
+      textContent: fmtBytes(total),
+    }),
+  );
   box.appendChild(head);
 
   // строки, сгруппированные по виду модели
   for (const [kind, groupLabel] of MODEL_GROUPS) {
     const items = models.filter((m) => m.kind === kind);
     if (!items.length) continue;
-    const sub = document.createElement('div');
-    sub.className = 'ahint';
-    sub.style.marginTop = '8px';
+    const sub = document.createElement("div");
+    sub.className = "ahint";
+    sub.style.marginTop = "8px";
     sub.textContent = groupLabel;
     box.appendChild(sub);
     for (const m of items) box.appendChild(modelRow(m));
@@ -5292,49 +6898,80 @@ async function renderModelManager() {
 function downloadActionFor(m) {
   if (m.present) return null;
   switch (m.id) {
-    case 'whisper-turbo': return { label: 'Скачать (~574 МБ)', run: () => window.jarvis.sttInstallWhisper() };
-    case 'qwen3-0.6b': return { label: 'Скачать (~1 ГБ)', run: () => window.jarvis.sttInstallQwen('qwen3-0.6b') };
-    case 'qwen3-1.7b': return { label: 'Скачать (~1 ГБ)', run: () => window.jarvis.sttInstallQwen('qwen3-1.7b') };
-    case 'qwen3-runtime': return { label: 'Установить (~2.6 ГБ)', run: () => window.jarvis.sttInstallSidecar() };
-    case 'hey_jarvis': return { label: 'Скачать', run: () => window.jarvis.wakeInstallModels() };
-    default: return null; // silero ставится через настройку интеграции
+    case "whisper-turbo":
+      return {
+        label: "Скачать (~574 МБ)",
+        run: () => window.jarvis.sttInstallWhisper(),
+      };
+    case "qwen3-0.6b":
+      return {
+        label: "Скачать (~1 ГБ)",
+        run: () => window.jarvis.sttInstallQwen("qwen3-0.6b"),
+      };
+    case "qwen3-1.7b":
+      return {
+        label: "Скачать (~1 ГБ)",
+        run: () => window.jarvis.sttInstallQwen("qwen3-1.7b"),
+      };
+    case "qwen3-runtime":
+      return {
+        label: "Установить (~2.6 ГБ)",
+        run: () => window.jarvis.sttInstallSidecar(),
+      };
+    case "hey_jarvis":
+      return { label: "Скачать", run: () => window.jarvis.wakeInstallModels() };
+    default:
+      return null; // silero ставится через настройку интеграции
   }
 }
 
 // можно ли удалить модель: скачана и не активный STT-движок
 function canDeleteModel(m) {
   if (!m.present) return false;
-  if (m.kind === 'stt' && m.active) return false; // активный движок не сносим
+  if (m.kind === "stt" && m.active) return false; // активный движок не сносим
   return true;
 }
 
 // одна строка модели: статус-точка + имя + (активна) + размер + [Скачать|Удалить]
 function modelRow(m) {
-  const r = document.createElement('div');
-  r.className = 'istat hairtop' + (m.present ? ' on' : '');
-  r.appendChild(Object.assign(document.createElement('span'), { className: 'dot' }));
-  r.appendChild(Object.assign(document.createElement('span'), { textContent: m.label }));
-  if (m.kind === 'stt' && m.active && m.present) {
-    const badge = Object.assign(document.createElement('span'), { className: 'astatus on', textContent: 'активна' });
-    badge.style.marginLeft = '8px';
+  const r = document.createElement("div");
+  r.className = "istat hairtop" + (m.present ? " on" : "");
+  r.appendChild(
+    Object.assign(document.createElement("span"), { className: "dot" }),
+  );
+  r.appendChild(
+    Object.assign(document.createElement("span"), { textContent: m.label }),
+  );
+  if (m.kind === "stt" && m.active && m.present) {
+    const badge = Object.assign(document.createElement("span"), {
+      className: "astatus on",
+      textContent: "активна",
+    });
+    badge.style.marginLeft = "8px";
     r.appendChild(badge);
   }
-  r.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
-  r.appendChild(Object.assign(document.createElement('span'), {
-    className: 'sz',
-    textContent: m.present ? fmtBytes(m.bytes) : 'не скачана',
-  }));
+  r.appendChild(
+    Object.assign(document.createElement("span"), { className: "spacer" }),
+  );
+  r.appendChild(
+    Object.assign(document.createElement("span"), {
+      className: "sz",
+      textContent: m.present ? fmtBytes(m.bytes) : "не скачана",
+    }),
+  );
 
   const action = downloadActionFor(m);
   if (action) {
-    const btn = document.createElement('button');
-    btn.className = 'abtn small';
-    btn.style.marginLeft = '10px';
+    const btn = document.createElement("button");
+    btn.className = "abtn small";
+    btn.style.marginLeft = "10px";
     btn.textContent = action.label;
-    btn.addEventListener('click', async () => {
+    btn.addEventListener("click", async () => {
       btn.disabled = true;
-      btn.textContent = 'Качаю…';
-      try { await action.run(); } catch {}
+      btn.textContent = "Качаю…";
+      try {
+        await action.run();
+      } catch {}
       // финал прилетит событием stt_install_done / wake_install_done → перерисует карточку
     });
     r.appendChild(btn);
@@ -5342,43 +6979,68 @@ function modelRow(m) {
   }
 
   // скачана: «Сделать активной» (только не-активный STT-движок) + «Удалить»
-  if (m.kind === 'stt' && !m.active) {
-    const act = document.createElement('button');
-    act.className = 'abtn small';
-    act.style.marginLeft = '10px';
-    act.textContent = 'Сделать активной';
-    act.addEventListener('click', async () => {
+  if (m.kind === "stt" && !m.active) {
+    const act = document.createElement("button");
+    act.className = "abtn small";
+    act.style.marginLeft = "10px";
+    act.textContent = "Сделать активной";
+    act.addEventListener("click", async () => {
       act.disabled = true;
-      act.textContent = 'Включаю…';
+      act.textContent = "Включаю…";
       try {
         const res = await window.jarvis.sttSetEngine(m.id);
         if (res && res.ok === false) {
-          showToast('Не удалось: ' + (res.error || ''));
-          act.disabled = false; act.textContent = 'Сделать активной';
+          showToast("Не удалось: " + (res.error || ""));
+          act.disabled = false;
+          act.textContent = "Сделать активной";
           return;
         }
-        showToast(res && res.restart ? 'Активна после перезапуска Jarvis' : 'Активна: ' + m.label);
+        showToast(
+          res && res.restart
+            ? "Активна после перезапуска Jarvis"
+            : "Активна: " + m.label,
+        );
         renderModelManager();
-        try { renderSttCard(); } catch {}
+        try {
+          renderSttCard();
+        } catch {}
       } catch (e) {
-        showToast('Ошибка: ' + e);
-        act.disabled = false; act.textContent = 'Сделать активной';
+        showToast("Ошибка: " + e);
+        act.disabled = false;
+        act.textContent = "Сделать активной";
       }
     });
     r.appendChild(act);
   }
   if (canDeleteModel(m)) {
-    const del = document.createElement('button');
-    del.className = 'abtn danger small';
-    del.style.marginLeft = '10px';
-    del.textContent = 'Удалить';
+    const del = document.createElement("button");
+    del.className = "abtn danger small";
+    del.style.marginLeft = "10px";
+    del.textContent = "Удалить";
     let armed = false;
-    del.addEventListener('click', async () => {
-      if (!armed) { armed = true; del.textContent = 'Точно?'; setTimeout(() => { armed = false; del.textContent = 'Удалить'; }, 3000); return; }
-      del.disabled = true; del.textContent = '…';
-      try { await window.jarvis.modelDelete(m.id); } catch (e) { showToast('Не удалось удалить: ' + e); }
+    del.addEventListener("click", async () => {
+      if (!armed) {
+        armed = true;
+        del.textContent = "Точно?";
+        setTimeout(() => {
+          armed = false;
+          del.textContent = "Удалить";
+        }, 3000);
+        return;
+      }
+      del.disabled = true;
+      del.textContent = "…";
+      try {
+        await window.jarvis.modelDelete(m.id);
+      } catch (e) {
+        showToast("Не удалось удалить: " + e);
+      }
       renderModelManager();
-      try { renderSttCard(); renderVoiceCard(); renderWakeCard(); } catch {}
+      try {
+        renderSttCard();
+        renderVoiceCard();
+        renderWakeCard();
+      } catch {}
     });
     r.appendChild(del);
   }
@@ -5387,35 +7049,45 @@ function modelRow(m) {
 
 // карточка «Голос»: движок, выбор спикера (Silero, живой), Тест, Без звука
 async function renderVoiceCard() {
-  const box = document.getElementById('voiceCard');
+  const box = document.getElementById("voiceCard");
   if (!box) return;
-  box.textContent = '';
+  box.textContent = "";
   let v = null;
-  try { v = await window.jarvis.voiceGet(); } catch {}
-  if (!v) { box.textContent = ''; const n = document.createElement('div'); n.className = 'ahint'; n.textContent = 'Голос недоступен.'; box.appendChild(n); return; }
-  const spacer = () => Object.assign(document.createElement('span'), { className: 'spacer' });
+  try {
+    v = await window.jarvis.voiceGet();
+  } catch {}
+  if (!v) {
+    box.textContent = "";
+    const n = document.createElement("div");
+    n.className = "ahint";
+    n.textContent = "Голос недоступен.";
+    box.appendChild(n);
+    return;
+  }
+  const spacer = () =>
+    Object.assign(document.createElement("span"), { className: "spacer" });
 
-  const head = document.createElement('div');
-  head.className = 'awakehead';
-  const title = document.createElement('span');
-  title.className = 'atitle';
-  title.textContent = 'Озвучка событий';
+  const head = document.createElement("div");
+  head.className = "awakehead";
+  const title = document.createElement("span");
+  title.className = "atitle";
+  title.textContent = "Озвучка событий";
   head.appendChild(title);
   head.appendChild(spacer());
-  const eng = document.createElement('span');
-  eng.className = 'astatus';
+  const eng = document.createElement("span");
+  eng.className = "astatus";
   eng.textContent = `движок: ${v.engine}`;
   head.appendChild(eng);
   box.appendChild(head);
 
-  if (v.engine === 'silero') {
-    const seg = document.createElement('div');
-    seg.className = 'aseg';
-    for (const sp of (v.speakers || [])) {
-      const b = document.createElement('button');
-      b.className = 'asegbtn' + (sp === v.speaker ? ' active' : '');
+  if (v.engine === "silero") {
+    const seg = document.createElement("div");
+    seg.className = "aseg";
+    for (const sp of v.speakers || []) {
+      const b = document.createElement("button");
+      b.className = "asegbtn" + (sp === v.speaker ? " active" : "");
       b.textContent = sp;
-      b.addEventListener('click', async () => {
+      b.addEventListener("click", async () => {
         await window.jarvis.voiceSetSpeaker(sp); // живая смена + образец голосом
         renderVoiceCard();
       });
@@ -5424,102 +7096,129 @@ async function renderVoiceCard() {
     box.appendChild(seg);
 
     // скорость речи (живая)
-    const RATE_LABELS = { slow: 'медленно', medium: 'норма', fast: 'быстро', 'x-fast': 'очень' };
-    const rrow = document.createElement('div');
-    rrow.className = 'arow hairtop';
-    const rl = document.createElement('span');
-    rl.className = 'alabel';
-    rl.textContent = 'Скорость';
+    const RATE_LABELS = {
+      slow: "медленно",
+      medium: "норма",
+      fast: "быстро",
+      "x-fast": "очень",
+    };
+    const rrow = document.createElement("div");
+    rrow.className = "arow hairtop";
+    const rl = document.createElement("span");
+    rl.className = "alabel";
+    rl.textContent = "Скорость";
     rrow.appendChild(rl);
-    rrow.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
-    const rseg = document.createElement('div');
-    rseg.className = 'seg';
-    for (const rt of (v.rates || ['slow', 'medium', 'fast', 'x-fast'])) {
-      const b = document.createElement('button');
-      b.className = 'segbtn' + (rt === v.rate ? ' active' : '');
+    rrow.appendChild(
+      Object.assign(document.createElement("span"), { className: "spacer" }),
+    );
+    const rseg = document.createElement("div");
+    rseg.className = "seg";
+    for (const rt of v.rates || ["slow", "medium", "fast", "x-fast"]) {
+      const b = document.createElement("button");
+      b.className = "segbtn" + (rt === v.rate ? " active" : "");
       b.textContent = RATE_LABELS[rt] || rt;
-      b.addEventListener('click', async () => { await window.jarvis.voiceSetRate(rt); renderVoiceCard(); });
+      b.addEventListener("click", async () => {
+        await window.jarvis.voiceSetRate(rt);
+        renderVoiceCard();
+      });
       rseg.appendChild(b);
     }
     rrow.appendChild(rseg);
     box.appendChild(rrow);
   }
 
-  const row = document.createElement('div');
-  row.className = 'arow hairtop';
-  const test = document.createElement('button');
-  test.className = 'keycap kbig';
-  test.textContent = 'Тест';
-  test.addEventListener('click', () => window.jarvis.voiceTest());
+  const row = document.createElement("div");
+  row.className = "arow hairtop";
+  const test = document.createElement("button");
+  test.className = "keycap kbig";
+  test.textContent = "Тест";
+  test.addEventListener("click", () => window.jarvis.voiceTest());
   row.appendChild(test);
   row.appendChild(spacer());
-  const ml = document.createElement('span');
-  ml.className = 'alabel';
-  ml.textContent = 'Без звука';
+  const ml = document.createElement("span");
+  ml.className = "alabel";
+  ml.textContent = "Без звука";
   row.appendChild(ml);
   row.appendChild(stoggle(v.mute, (on) => window.jarvis.voiceSetMute(on)));
   box.appendChild(row);
 
   // пауза чужого медиа на время озвучки (как Siri)
-  box.appendChild(arow('Пауза чужого звука',
-    stoggle(v.duck !== false, (on) => window.jarvis.voiceSetDuck(on)), { hairtop: true }));
+  box.appendChild(
+    arow(
+      "Пауза чужого звука",
+      stoggle(v.duck !== false, (on) => window.jarvis.voiceSetDuck(on)),
+      { hairtop: true },
+    ),
+  );
 }
 
 // ── карточка «Голосовой ввод (диктовка)» — STT (инкремент 9) ──────────────────
 // ── Wake-word (инкремент 10): тумблер, mute, порог, тест фразы, модели ──
 function wakeStatusLabel(v) {
-  if (!v) return ['нет данных', ''];
-  if (v.muted) return ['заглушено', ''];
-  if (v.audio_state === 'denied') return ['нет доступа к микрофону', ''];
-  if (v.listening) return ['слушаю', 'on'];
-  if (v.enabled) return ['включено', 'on'];
-  return ['выключено', ''];
+  if (!v) return ["нет данных", ""];
+  if (v.muted) return ["заглушено", ""];
+  if (v.audio_state === "denied") return ["нет доступа к микрофону", ""];
+  if (v.listening) return ["слушаю", "on"];
+  if (v.enabled) return ["включено", "on"];
+  return ["выключено", ""];
 }
 
 async function renderWakeCard() {
-  const box = document.getElementById('wake-card-root');
+  const box = document.getElementById("wake-card-root");
   if (!box) return;
-  box.textContent = '';
+  box.textContent = "";
 
   let v = null;
-  try { v = await window.jarvis.wakeGet(); } catch {}
+  try {
+    v = await window.jarvis.wakeGet();
+  } catch {}
 
-  const spacer = () => Object.assign(document.createElement('span'), { className: 'spacer' });
-  const row = (cls) => { const d = document.createElement('div'); d.className = cls || 'arow'; return d; };
-  const label = (t) => { const s = document.createElement('span'); s.className = 'alabel'; s.textContent = t; return s; };
+  const spacer = () =>
+    Object.assign(document.createElement("span"), { className: "spacer" });
+  const row = (cls) => {
+    const d = document.createElement("div");
+    d.className = cls || "arow";
+    return d;
+  };
+  const label = (t) => {
+    const s = document.createElement("span");
+    s.className = "alabel";
+    s.textContent = t;
+    return s;
+  };
 
   // шапка: заголовок + статус «слушаю»
-  const head = row('awakehead');
-  const title = document.createElement('span');
-  title.className = 'atitle';
-  title.textContent = 'Wake-word («Hey Jarvis»)';
+  const head = row("awakehead");
+  const title = document.createElement("span");
+  title.className = "atitle";
+  title.textContent = "Wake-word («Hey Jarvis»)";
   head.appendChild(title);
   head.appendChild(spacer());
   const [stxt, scls] = wakeStatusLabel(v);
-  const pill = document.createElement('span');
-  pill.className = 'astatus' + (scls ? ' ' + scls : '');
-  pill.id = 'wake-status-pill';
+  const pill = document.createElement("span");
+  pill.className = "astatus" + (scls ? " " + scls : "");
+  pill.id = "wake-status-pill";
   pill.textContent = stxt;
   head.appendChild(pill);
   box.appendChild(head);
 
   if (!v) {
-    const hint = document.createElement('div');
-    hint.className = 'ahint';
-    hint.textContent = 'Данные wake-word недоступны.';
+    const hint = document.createElement("div");
+    hint.className = "ahint";
+    hint.textContent = "Данные wake-word недоступны.";
     box.appendChild(hint);
     return;
   }
 
   // тумблер вкл/выкл
-  const enRow = row('arow hairtop');
-  enRow.appendChild(label('Активация по фразе'));
+  const enRow = row("arow hairtop");
+  enRow.appendChild(label("Активация по фразе"));
   enRow.appendChild(spacer());
-  const enToggle = document.createElement('input');
-  enToggle.type = 'checkbox';
-  enToggle.className = 'toggle';
+  const enToggle = document.createElement("input");
+  enToggle.type = "checkbox";
+  enToggle.className = "toggle";
   enToggle.checked = !!v.enabled;
-  enToggle.addEventListener('change', async () => {
+  enToggle.addEventListener("change", async () => {
     await window.jarvis.wakeSetEnabled(enToggle.checked);
     renderWakeCard();
   });
@@ -5527,14 +7226,14 @@ async function renderWakeCard() {
   box.appendChild(enRow);
 
   // жёсткий mute (всегда доступен — глушит микрофон у источника)
-  const muteRow = row('arow');
-  muteRow.appendChild(label('Заглушить микрофон (mute)'));
+  const muteRow = row("arow");
+  muteRow.appendChild(label("Заглушить микрофон (mute)"));
   muteRow.appendChild(spacer());
-  const muteToggle = document.createElement('input');
-  muteToggle.type = 'checkbox';
-  muteToggle.className = 'toggle';
+  const muteToggle = document.createElement("input");
+  muteToggle.type = "checkbox";
+  muteToggle.className = "toggle";
   muteToggle.checked = !!v.muted;
-  muteToggle.addEventListener('change', async () => {
+  muteToggle.addEventListener("change", async () => {
     await window.jarvis.audioSetMute(muteToggle.checked);
     renderWakeCard();
   });
@@ -5542,38 +7241,45 @@ async function renderWakeCard() {
   box.appendChild(muteRow);
 
   // порог срабатывания
-  const thRow = row('arow');
-  thRow.appendChild(label('Порог срабатывания'));
+  const thRow = row("arow");
+  thRow.appendChild(label("Порог срабатывания"));
   thRow.appendChild(spacer());
-  const thVal = document.createElement('span');
-  thVal.className = 'ahint';
-  thVal.style.marginRight = '8px';
+  const thVal = document.createElement("span");
+  thVal.className = "ahint";
+  thVal.style.marginRight = "8px";
   thVal.textContent = Number(v.threshold ?? 0.5).toFixed(2);
-  const th = document.createElement('input');
-  th.type = 'range';
-  th.min = '0'; th.max = '1'; th.step = '0.05';
+  const th = document.createElement("input");
+  th.type = "range";
+  th.min = "0";
+  th.max = "1";
+  th.step = "0.05";
   th.value = String(v.threshold ?? 0.5);
-  th.addEventListener('input', () => { thVal.textContent = Number(th.value).toFixed(2); });
-  th.addEventListener('change', async () => { await window.jarvis.wakeSetThreshold(Number(th.value)); });
+  th.addEventListener("input", () => {
+    thVal.textContent = Number(th.value).toFixed(2);
+  });
+  th.addEventListener("change", async () => {
+    await window.jarvis.wakeSetThreshold(Number(th.value));
+  });
   thRow.appendChild(thVal);
   thRow.appendChild(th);
   box.appendChild(thRow);
 
   // модели openWakeWord
-  const mRow = row('arow');
-  mRow.appendChild(label('Модели openWakeWord'));
+  const mRow = row("arow");
+  mRow.appendChild(label("Модели openWakeWord"));
   mRow.appendChild(spacer());
   if (v.model_present) {
-    const ok = document.createElement('span');
-    ok.className = 'astatus on';
-    ok.textContent = 'на месте';
+    const ok = document.createElement("span");
+    ok.className = "astatus on";
+    ok.textContent = "на месте";
     mRow.appendChild(ok);
   } else {
-    const btn = document.createElement('button');
-    btn.className = 'abtn';
-    btn.textContent = 'Скачать (~3.5 МБ)';
-    btn.addEventListener('click', async () => {
-      btn.disabled = true; btn.textContent = 'Скачиваю…';
+    const btn = document.createElement("button");
+    btn.className = "abtn";
+    btn.textContent = "Скачать (~3.5 МБ)";
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      btn.textContent = "Скачиваю…";
       await window.jarvis.wakeInstallModels();
     });
     mRow.appendChild(btn);
@@ -5581,77 +7287,90 @@ async function renderWakeCard() {
   box.appendChild(mRow);
 
   // верификация говорящего — шов (выключено)
-  const vRow = row('arow');
-  vRow.appendChild(label('Верификация говорящего'));
+  const vRow = row("arow");
+  vRow.appendChild(label("Верификация говорящего"));
   vRow.appendChild(spacer());
-  const vState = document.createElement('span');
-  vState.className = 'ahint';
-  vState.textContent = 'выключено · шов (реализация позже)';
+  const vState = document.createElement("span");
+  vState.className = "ahint";
+  vState.textContent = "выключено · шов (реализация позже)";
   vRow.appendChild(vState);
   box.appendChild(vRow);
 
   // честная подсказка
-  const hint = document.createElement('div');
-  hint.className = 'ahint';
-  hint.style.marginTop = '6px';
+  const hint = document.createElement("div");
+  hint.className = "ahint";
+  hint.style.marginTop = "6px";
   hint.textContent = v.model_present
-    ? 'Скажи «Hey Jarvis» — индикатор покажет «слушаю» при срабатывании. Работает офлайн.'
-    : 'Скачай модели, затем включи активацию. Без моделей детектор инертен.';
+    ? "Скажи «Hey Jarvis» — индикатор покажет «слушаю» при срабатывании. Работает офлайн."
+    : "Скачай модели, затем включи активацию. Без моделей детектор инертен.";
   box.appendChild(hint);
 }
 
 async function renderSttCard() {
-  const box = document.getElementById('stt-card-root');
+  const box = document.getElementById("stt-card-root");
   if (!box) return;
-  box.textContent = '';
+  box.textContent = "";
 
   let v = null;
-  try { v = await window.jarvis.sttGet(); } catch {}
+  try {
+    v = await window.jarvis.sttGet();
+  } catch {}
 
-  const spacer = () => Object.assign(document.createElement('span'), { className: 'spacer' });
+  const spacer = () =>
+    Object.assign(document.createElement("span"), { className: "spacer" });
 
   // шапка: заголовок + текущий движок
-  const head = document.createElement('div');
-  head.className = 'awakehead';
-  const title = document.createElement('span');
-  title.className = 'atitle';
-  title.textContent = 'Голосовой ввод (диктовка)';
+  const head = document.createElement("div");
+  head.className = "awakehead";
+  const title = document.createElement("span");
+  title.className = "atitle";
+  title.textContent = "Голосовой ввод (диктовка)";
   head.appendChild(title);
   head.appendChild(spacer());
-  const engLabel = document.createElement('span');
-  engLabel.className = v && v.available ? 'astatus on' : 'astatus';
-  engLabel.textContent = v ? (v.available ? 'доступен' : 'недоступен') : 'нет данных';
+  const engLabel = document.createElement("span");
+  engLabel.className = v && v.available ? "astatus on" : "astatus";
+  engLabel.textContent = v
+    ? v.available
+      ? "доступен"
+      : "недоступен"
+    : "нет данных";
   head.appendChild(engLabel);
   box.appendChild(head);
 
   if (!v) {
-    const hint = document.createElement('div');
-    hint.className = 'ahint';
-    hint.textContent = 'STT-данные недоступны.';
+    const hint = document.createElement("div");
+    hint.className = "ahint";
+    hint.textContent = "STT-данные недоступны.";
     box.appendChild(hint);
     return;
   }
 
   // выбор движка (select)
-  const engRow = document.createElement('div');
-  engRow.className = 'arow hairtop';
-  const engRowLabel = document.createElement('span');
-  engRowLabel.className = 'alabel';
-  engRowLabel.textContent = 'Движок';
+  const engRow = document.createElement("div");
+  engRow.className = "arow hairtop";
+  const engRowLabel = document.createElement("span");
+  engRowLabel.className = "alabel";
+  engRowLabel.textContent = "Движок";
   engRow.appendChild(engRowLabel);
   engRow.appendChild(spacer());
-  const sel = document.createElement('select');
-  sel.style.cssText = 'background:transparent;border:1px solid var(--line-strong);border-radius:6px;color:var(--text);font:inherit;font-size:12px;padding:3px 7px;outline:none;';
-  for (const eng of (v.engines || ['whisper-turbo', 'qwen3-0.6b', 'qwen3-1.7b'])) {
-    const opt = document.createElement('option');
+  const sel = document.createElement("select");
+  sel.style.cssText =
+    "background:transparent;border:1px solid var(--line-strong);border-radius:6px;color:var(--text);font:inherit;font-size:12px;padding:3px 7px;outline:none;";
+  for (const eng of v.engines || [
+    "whisper-turbo",
+    "qwen3-0.6b",
+    "qwen3-1.7b",
+  ]) {
+    const opt = document.createElement("option");
     opt.value = eng;
     opt.textContent = eng;
     if (eng === v.engine) opt.selected = true;
     sel.appendChild(opt);
   }
-  sel.addEventListener('change', async () => {
+  sel.addEventListener("change", async () => {
     const r = await window.jarvis.sttSetEngine(sel.value);
-    if (r && r.restart) showToast('Движок изменён — перезапусти Jarvis для применения');
+    if (r && r.restart)
+      showToast("Движок изменён — перезапусти Jarvis для применения");
     renderSttCard();
   });
   engRow.appendChild(sel);
@@ -5660,24 +7379,45 @@ async function renderSttCard() {
   // статус моделей + предложение скачать недостающее (по умолчанию ничего не
   // тянем — пользователь жмёт кнопку сам; качается в фоне через события).
   // Строка с галкой/кнопкой: если модели нет — показываем кнопку «Скачать».
-  const sttModelRow = (label, ready, onInstall, installLabel, idleLabel = '—') => {
-    const r = document.createElement('div');
-    r.className = 'istat hairtop' + (ready ? ' on' : '');
-    r.appendChild(Object.assign(document.createElement('span'), { className: 'dot' }));
-    r.appendChild(Object.assign(document.createElement('span'), { textContent: label }));
-    r.appendChild(Object.assign(document.createElement('span'), { className: 'spacer' }));
+  const sttModelRow = (
+    label,
+    ready,
+    onInstall,
+    installLabel,
+    idleLabel = "—",
+  ) => {
+    const r = document.createElement("div");
+    r.className = "istat hairtop" + (ready ? " on" : "");
+    r.appendChild(
+      Object.assign(document.createElement("span"), { className: "dot" }),
+    );
+    r.appendChild(
+      Object.assign(document.createElement("span"), { textContent: label }),
+    );
+    r.appendChild(
+      Object.assign(document.createElement("span"), { className: "spacer" }),
+    );
     if (ready || !onInstall) {
-      r.appendChild(Object.assign(document.createElement('span'), {
-        className: 'sz', textContent: ready ? 'готово' : idleLabel,
-      }));
+      r.appendChild(
+        Object.assign(document.createElement("span"), {
+          className: "sz",
+          textContent: ready ? "готово" : idleLabel,
+        }),
+      );
     } else {
-      const btn = document.createElement('button');
-      btn.className = 'abtn small';
+      const btn = document.createElement("button");
+      btn.className = "abtn small";
       btn.textContent = installLabel;
-      btn.addEventListener('click', async () => {
+      btn.addEventListener("click", async () => {
         btn.disabled = true;
-        btn.textContent = 'Качаю…';
-        try { await onInstall(); } catch (e) { showToast(String(e)); btn.disabled = false; btn.textContent = installLabel; }
+        btn.textContent = "Качаю…";
+        try {
+          await onInstall();
+        } catch (e) {
+          showToast(String(e));
+          btn.disabled = false;
+          btn.textContent = installLabel;
+        }
       });
       r.appendChild(btn);
     }
@@ -5685,76 +7425,80 @@ async function renderSttCard() {
   };
 
   sttModelRow(
-    'Модель Whisper-turbo', v.whisperReady,
-    () => window.jarvis.sttInstallWhisper(), 'Скачать (~574 МБ)',
+    "Модель Whisper-turbo",
+    v.whisperReady,
+    () => window.jarvis.sttInstallWhisper(),
+    "Скачать (~574 МБ)",
   );
   // Qwen3: «готово» = сайдкар отвечает на health; если файлов нет — предлагаем
   // установить (venv + зависимости ~2.6 ГБ, веса догрузятся при первом запросе).
   sttModelRow(
-    'Сайдкар Qwen3-ASR', v.qwen3Ready,
+    "Сайдкар Qwen3-ASR",
+    v.qwen3Ready,
     v.qwen3Installed ? null : () => window.jarvis.sttInstallSidecar(),
-    'Установить (~2.6 ГБ)',
-    v.qwen3Installed ? 'установлен' : '—',
+    "Установить (~2.6 ГБ)",
+    v.qwen3Installed ? "установлен" : "—",
   );
 
   // строка прогресса скачивания/установки STT (обновляется событиями)
-  const prog = document.createElement('div');
-  prog.id = 'stt-install-progress';
-  prog.className = 'ahint';
-  prog.style.marginTop = '4px';
+  const prog = document.createElement("div");
+  prog.id = "stt-install-progress";
+  prog.className = "ahint";
+  prog.style.marginTop = "4px";
   box.appendChild(prog);
 
   // хоткей диктовки
-  const hkRow = document.createElement('div');
-  hkRow.className = 'arow hairtop';
-  const hkLabel = document.createElement('span');
-  hkLabel.className = 'alabel';
-  hkLabel.textContent = `Зажми ${v.hotkey || 'F8'}, чтобы диктовать`;
+  const hkRow = document.createElement("div");
+  hkRow.className = "arow hairtop";
+  const hkLabel = document.createElement("span");
+  hkLabel.className = "alabel";
+  hkLabel.textContent = `Зажми ${v.hotkey || "F8"}, чтобы диктовать`;
   hkRow.appendChild(hkLabel);
   hkRow.appendChild(spacer());
-  const hkCap = document.createElement('span');
-  hkCap.className = 'keycap';
-  hkCap.textContent = v.hotkey || 'F8';
+  const hkCap = document.createElement("span");
+  hkCap.className = "keycap";
+  hkCap.textContent = v.hotkey || "F8";
   hkRow.appendChild(hkCap);
   box.appendChild(hkRow);
 
   // кнопка теста
-  const testRow = document.createElement('div');
-  testRow.className = 'abtnrow';
-  const testBtn = document.createElement('button');
-  testBtn.className = 'abtn small';
-  testBtn.textContent = 'Тест (4 сек)';
-  const resultEl = document.createElement('span');
-  resultEl.className = 'ahint';
-  resultEl.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-  testBtn.addEventListener('click', async () => {
+  const testRow = document.createElement("div");
+  testRow.className = "abtnrow";
+  const testBtn = document.createElement("button");
+  testBtn.className = "abtn small";
+  testBtn.textContent = "Тест (4 сек)";
+  const resultEl = document.createElement("span");
+  resultEl.className = "ahint";
+  resultEl.style.cssText =
+    "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+  testBtn.addEventListener("click", async () => {
     testBtn.disabled = true;
-    testBtn.textContent = 'Запись…';
-    resultEl.textContent = '';
+    testBtn.textContent = "Запись…";
+    resultEl.textContent = "";
     try {
       const res = await window.jarvis.sttTest();
       if (res && res.ok) {
-        resultEl.textContent = res.text || '(пусто)';
+        resultEl.textContent = res.text || "(пусто)";
       } else {
-        resultEl.textContent = res ? res.error : 'ошибка';
+        resultEl.textContent = res ? res.error : "ошибка";
       }
     } catch (e) {
       resultEl.textContent = String(e);
     }
     testBtn.disabled = false;
-    testBtn.textContent = 'Тест (4 сек)';
+    testBtn.textContent = "Тест (4 сек)";
   });
   testRow.appendChild(testBtn);
   testRow.appendChild(resultEl);
   box.appendChild(testRow);
 }
 
-document.getElementById('diagnostics').addEventListener('change', (e) => {
+document.getElementById("diagnostics").addEventListener("change", (e) => {
   window.jarvis.setSettings({ diagnostics: e.target.checked });
 });
 
-for (const id of ['notifyDone', 'notifyWaiting', 'autoResume']) {
-  document.getElementById(id).addEventListener('change', (e) => {
+for (const id of ["notifyDone", "notifyWaiting", "autoResume"]) {
+  document.getElementById(id).addEventListener("change", (e) => {
     window.jarvis.setSettings({ [id]: e.target.checked });
   });
 }
@@ -5762,266 +7506,431 @@ for (const id of ['notifyDone', 'notifyWaiting', 'autoResume']) {
 // Автозапуск — отдельно: macOS может отказать (LaunchAgent), поэтому после
 // переключения перечитываем РЕАЛЬНОЕ состояние из системы и честно говорим,
 // если не сработало. Иначе галка «врёт», что включила.
-document.getElementById('openAtLogin').addEventListener('change', async (e) => {
+document.getElementById("openAtLogin").addEventListener("change", async (e) => {
   const want = e.target.checked;
   await window.jarvis.setSettings({ openAtLogin: want });
   const s = await window.jarvis.getSettings();
   e.target.checked = !!s.openAtLogin; // отражаем то, что реально записалось в систему
   if (!!s.openAtLogin !== want) {
-    showToast(want ? 'macOS не дала включить автозапуск' : 'Не вышло выключить автозапуск');
+    showToast(
+      want
+        ? "macOS не дала включить автозапуск"
+        : "Не вышло выключить автозапуск",
+    );
   } else {
-    showToast(want ? 'Автозапуск включён' : 'Автозапуск выключен');
+    showToast(want ? "Автозапуск включён" : "Автозапуск выключен");
   }
 });
-document.getElementById('position').addEventListener('click', (e) => {
+document.getElementById("position").addEventListener("click", (e) => {
   const v = e.target.dataset ? e.target.dataset.v : null;
   if (!v) return;
   window.jarvis.setSettings({ position: v }).then(loadSettings);
 });
 
 /* рекордер хоткея */
-const CODE_KEYS = { Space: 'Space', Enter: 'Enter', Backspace: 'Backspace', Tab: 'Tab' };
+const CODE_KEYS = {
+  Space: "Space",
+  Enter: "Enter",
+  Backspace: "Backspace",
+  Tab: "Tab",
+};
 
 function accelFromEvent(e) {
   const mods = [];
-  if (e.metaKey) mods.push('Command');
-  if (e.ctrlKey) mods.push('Control');
-  if (e.altKey) mods.push('Option');
-  if (e.shiftKey) mods.push('Shift');
-  if (!mods.some((m) => m !== 'Shift')) return null; // нужен не-Shift модификатор
+  if (e.metaKey) mods.push("Command");
+  if (e.ctrlKey) mods.push("Control");
+  if (e.altKey) mods.push("Option");
+  if (e.shiftKey) mods.push("Shift");
+  if (!mods.some((m) => m !== "Shift")) return null; // нужен не-Shift модификатор
   let key = null;
   if (/^Key[A-Z]$/.test(e.code)) key = e.code.slice(3);
   else if (/^Digit[0-9]$/.test(e.code)) key = e.code.slice(5);
   else if (/^F([1-9]|1[0-9]|2[0-4])$/.test(e.code)) key = e.code;
   else if (CODE_KEYS[e.code]) key = CODE_KEYS[e.code];
   if (!key) return null;
-  return [...mods, key].join('+');
+  return [...mods, key].join("+");
 }
 
-hotkeyBtn.addEventListener('click', () => startRecording(hotkeyBtn, 'hotkey'));
-for (const btn of document.querySelectorAll('.keycap[data-hk]')) {
-  btn.addEventListener('click', () => startRecording(btn, btn.dataset.hk));
+hotkeyBtn.addEventListener("click", () => startRecording(hotkeyBtn, "hotkey"));
+for (const btn of document.querySelectorAll(".keycap[data-hk]")) {
+  btn.addEventListener("click", () => startRecording(btn, btn.dataset.hk));
 }
 
 /* ---------- клавиатура ---------- */
 
-window.addEventListener('keydown', async (e) => {
-  if (recording) {
-    e.preventDefault();
-    if (e.key === 'Escape') {
+window.addEventListener(
+  "keydown",
+  async (e) => {
+    if (recording) {
+      e.preventDefault();
+      if (e.key === "Escape") {
+        recording = false;
+        recordingBtn.classList.remove("recording");
+        loadSettings();
+        return;
+      }
+      const acc = accelFromEvent(e);
+      if (!acc) return; // ждём полный аккорд
       recording = false;
-      recordingBtn.classList.remove('recording');
+      recordingBtn.classList.remove("recording");
+      const res = await window.jarvis.setSettings({ [recordingKey]: acc });
+      if (!res.ok) {
+        hotkeyErr.textContent = res.error || "Не удалось назначить";
+        hotkeyErr.hidden = false;
+      }
       loadSettings();
       return;
     }
-    const acc = accelFromEvent(e);
-    if (!acc) return; // ждём полный аккорд
-    recording = false;
-    recordingBtn.classList.remove('recording');
-    const res = await window.jarvis.setSettings({ [recordingKey]: acc });
-    if (!res.ok) {
-      hotkeyErr.textContent = res.error || 'Не удалось назначить';
-      hotkeyErr.hidden = false;
-    }
-    loadSettings();
-    return;
-  }
 
-  if (view === 'chat' && e.metaKey && e.key === 'Enter') { // ⌘↵ из чата — в терминал
-    e.preventDefault();
-    e.stopPropagation();
-    if (chatSessionId) focusTerminal(chatSessionId, chatTitleEl.textContent);
-    return;
-  }
-
-  if (actionsOpen()) { // меню действий: ↑↓ выбор, ↵ выполнить, esc/⌘K закрыть
-    const items = actionItems();
-    if (e.key === 'ArrowDown') { e.preventDefault(); apSel = Math.min(items.length - 1, apSel + 1); paintActions(items); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); apSel = Math.max(0, apSel - 1); paintActions(items); }
-    else if (e.key === 'Enter') { e.preventDefault(); closeActions(); items[apSel] && items[apSel].run(); }
-    else if (e.key === 'Escape' || (e.metaKey && (e.key === 'k' || e.key === 'K'))) { e.preventDefault(); closeActions(); }
-    return;
-  }
-
-  // Оконные сочетания macOS. Своего меню у нас нет, поэтому системные ⌘W / ⌘M /
-  // ⌃⌘F не привязаны сами — вешаем их руками, чтобы окно вело себя как окно.
-  if (windowMode() && e.metaKey && (e.key === 'w' || e.key === 'W')) { // ⌘W — закрыть (спрятать)
-    e.preventDefault();
-    window.jarvis.winClose();
-    return;
-  }
-  if (windowMode() && e.metaKey && !e.ctrlKey && (e.key === 'm' || e.key === 'M')) { // ⌘M — свернуть
-    e.preventDefault();
-    window.jarvis.winMinimize();
-    return;
-  }
-  if (windowMode() && e.metaKey && e.ctrlKey && (e.key === 'f' || e.key === 'F')) { // ⌃⌘F — фуллскрин
-    e.preventDefault();
-    window.jarvis.winToggleFullscreen().then(syncFullscreen).catch(() => {});
-    return;
-  }
-
-  if (e.metaKey && (e.key === 'k' || e.key === 'K')) { // ⌘K — меню действий
-    e.preventDefault();
-    toggleActions();
-    return;
-  }
-
-  if (e.metaKey && e.key === '1') { // ⌘1 — Чаты
-    e.preventDefault();
-    setView('list');
-    render();
-    return;
-  }
-  if (e.metaKey && e.key === '2') { // ⌘2 — Project Manager
-    e.preventDefault();
-    setView('history');
-    return;
-  }
-  if (e.metaKey && e.key === '3') { // ⌘3 — Статистика
-    e.preventDefault();
-    setView('stats');
-    return;
-  }
-  if (e.metaKey && e.key === '4') { // ⌘4 — История голоса
-    e.preventDefault();
-    setView('voicehist');
-    return;
-  }
-
-  // палитра быстрых команд: «/» в главном поиске (Часть 2). Раньше generic-Esc.
-  if (view === 'list' && (argMode || queryEl.value.trim().startsWith('/'))) {
-    if (argMode === 'amf') {
-      if (e.key === 'Escape') { e.preventDefault(); exitArgToList(); return; }
-      if (e.key === 'Enter') { e.preventDefault(); runArg(); return; }
-      if (e.key === 'Tab') { e.preventDefault(); argFocus = argFocus === 'h' ? 'm' : 'h'; focusArgField(); return; }
-      return; // цифры/Backspace идут в активное поле ввода
-    }
-    const matches = cmdMatches();
-    cmdRootSel = Math.min(cmdRootSel, matches.length - 1);
-    if (e.key === 'Escape') { e.preventDefault(); clearCmd(); return; }
-    if (e.key === 'ArrowDown') { e.preventDefault(); palHoverEnabled = false; cmdRootSel = Math.min(matches.length - 1, cmdRootSel + 1); renderCmdPalette(); return; }
-    if (e.key === 'ArrowUp') { e.preventDefault(); palHoverEnabled = false; cmdRootSel = Math.max(0, cmdRootSel - 1); renderCmdPalette(); return; }
-    if (e.key === 'Tab') { e.preventDefault(); const c = matches[cmdRootSel]; if (c) { if (c.kind === 'amf') enterArg(); else { queryEl.value = c.cmd + ' '; renderCmdPalette(); } } return; }
-    if (e.key === 'Enter') { e.preventDefault(); if (runRootCommand(queryEl.value)) return; const c = matches[cmdRootSel]; if (c) { if (c.kind === 'amf') enterArg(); else { queryEl.value = c.cmd + ' '; renderCmdPalette(); } } return; }
-    return; // прочее (печать) идёт в #query
-  }
-
-  if (view === 'history') { // ↑↓ выбор · ↵ открыть проект / запустить в терминале · esc — на уровень вверх
-    if (e.key === 'ArrowDown') { e.preventDefault(); histSel = Math.min(histRows.length - 1, histSel + 1); paintHistSel(); return; }
-    if (e.key === 'ArrowUp') { e.preventDefault(); histSel = Math.max(0, histSel - 1); paintHistSel(); return; }
-    if (e.key === 'Enter' && histRows[histSel]) {
+    if (view === "chat" && e.metaKey && e.key === "Enter") {
+      // ⌘↵ из чата — в терминал
       e.preventDefault();
-      const r = histRows[histSel];
-      if (r.type === 'project') openProjectPrimary(r.project);
-      else launchSession(r.s.agent, r.s.id, r.cwd);
+      e.stopPropagation();
+      if (chatSessionId) focusTerminal(chatSessionId, chatTitleEl.textContent);
       return;
     }
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      if (histProject != null) { histProject = null; renderHistory(); }
-      else { setView('list'); render(); }
+
+    if (actionsOpen()) {
+      // меню действий: ↑↓ выбор, ↵ выполнить, esc/⌘K закрыть
+      const items = actionItems();
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        apSel = Math.min(items.length - 1, apSel + 1);
+        paintActions(items);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        apSel = Math.max(0, apSel - 1);
+        paintActions(items);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        closeActions();
+        items[apSel] && items[apSel].run();
+      } else if (
+        e.key === "Escape" ||
+        (e.metaKey && (e.key === "k" || e.key === "K"))
+      ) {
+        e.preventDefault();
+        closeActions();
+      }
       return;
     }
-    return; // прочее (печать в поиск) — пусть идёт в инпут
-  }
 
-  if (view === 'agentvm' && e.key === 'Escape') {
-    e.preventDefault();
-    if (!agentVmFileDrawerEl.hidden) closeAgentVmFile();
-    else if (!agentVmEnvironmentEl.hidden) {
-      agentVmEnvironmentEl.hidden = true;
-      agentVmEnvironmentButtonEl.setAttribute('aria-expanded', 'false');
-      renderAgentVmWorkspace();
-    } else closeAgentVmProject();
-    return;
-  }
-
-  if (e.key === 'Escape') { // raycast: Esc — назад / закрыть
-    if (view === 'chat' && paletteOpen()) return; // палитру закроет обработчик поля
-    if (view !== 'list') { setView('list'); render(); }
-    // в накладке Esc из списка прячет её; окно так не закрывают — для этого ⌘W
-    else if (!windowMode()) window.jarvis.hidePanel();
-    return;
-  }
-
-  // экран вопроса — только клавиатура
-  if (view === 'question' && qData) {
-    if (e.key === 'ArrowDown') { e.preventDefault(); qSel = Math.min(qData.options.length - 1, qSel + 1); paintQOptions(); return; }
-    if (e.key === 'ArrowUp') { e.preventDefault(); qSel = Math.max(0, qSel - 1); paintQOptions(); return; }
-    if (e.key === ' ') { e.preventDefault(); if (qData.multiSelect) toggleQ(qSel); return; }
-    if (e.key === 'Enter') { e.preventDefault(); submitQ(); return; }
-    if (/^[1-9]$/.test(e.key)) {
-      const n = Number(e.key);
-      if (n <= qData.options.length) { e.preventDefault(); qSel = n - 1; activateQ(); }
+    // Оконные сочетания macOS. Своего меню у нас нет, поэтому системные ⌘W / ⌘M /
+    // ⌃⌘F не привязаны сами — вешаем их руками, чтобы окно вело себя как окно.
+    if (windowMode() && e.metaKey && (e.key === "w" || e.key === "W")) {
+      // ⌘W — закрыть (спрятать)
+      e.preventDefault();
+      window.jarvis.winClose();
       return;
     }
-    return; // прочие клавиши экран вопроса проглатывает
-  }
-
-  if (e.metaKey && e.key === ',') { // ⌘, — настройки, как в macOS
-    e.preventDefault();
-    if (view === 'settings') { setView('list'); render(); } else setView('settings');
-    return;
-  }
-
-  if (e.metaKey && e.key === 'Backspace') { // ⌘⌫ — очистить завершённые
-    // НЕ в поле ввода: иначе ⌘⌫ (удалить до начала строки) при печати в чате
-    // молча сносил все Done/Idle сессии. В поле — отдаём комбо нативному редактору.
-    if (editingText()) return;
-    e.preventDefault();
-    window.jarvis.clearFinished();
-    return;
-  }
-
-  if (e.metaKey && (e.key === 'p' || e.key === 'P')) { // ⌘P — закрепить/открепить
-    e.preventDefault();
-    const s = view === 'list' ? filtered()[sel]
-      : view === 'chat' ? state.find((x) => x.id === chatSessionId)
-      : null;
-    if (s) window.jarvis.setPin(s.id, !s.pinned);
-    return;
-  }
-
-  if (e.metaKey && (e.key === 'g' || e.key === 'G')) { // ⌘G — «где это?»: оверлей в терминале
-    e.preventDefault();
-    const s = view === 'list' ? filtered()[sel] : state.find((x) => x.id === chatSessionId);
-    if (s) window.jarvis.pingTerminal(s.id).then((res) => {
-      if (!res.ok) showToast(res.error || 'Не получилось');
-    });
-    return;
-  }
-
-  if (view === 'stats') { // ←→ период · 1-3 разрез · ↑↓ скролл
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    if (
+      windowMode() &&
+      e.metaKey &&
+      !e.ctrlKey &&
+      (e.key === "m" || e.key === "M")
+    ) {
+      // ⌘M — свернуть
       e.preventDefault();
-      statsPeriod = statsPeriod === 'today' ? 'week' : 'today';
-      renderStats();
-    } else if (/^[1-4]$/.test(e.key)) {
-      e.preventDefault();
-      statsDim = DIMS[Number(e.key) - 1][0];
-      renderStats();
-    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      statsEl.scrollBy({ top: e.key === 'ArrowDown' ? 80 : -80, behavior: 'smooth' });
+      window.jarvis.winMinimize();
+      return;
     }
-    return;
-  }
-
-  if (view === 'list') { // навигация по списку
-    const list = filtered();
-    if (e.key === 'ArrowDown') {
+    if (
+      windowMode() &&
+      e.metaKey &&
+      e.ctrlKey &&
+      (e.key === "f" || e.key === "F")
+    ) {
+      // ⌃⌘F — фуллскрин
       e.preventDefault();
-      sel = Math.min(list.length - 1, sel + 1);
+      window.jarvis
+        .winToggleFullscreen()
+        .then(syncFullscreen)
+        .catch(() => {});
+      return;
+    }
+
+    if (e.metaKey && (e.key === "k" || e.key === "K")) {
+      // ⌘K — меню действий
+      e.preventDefault();
+      toggleActions();
+      return;
+    }
+
+    if (e.metaKey && e.key === "1") {
+      // ⌘1 — Чаты
+      e.preventDefault();
+      setView("list");
       render();
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      sel = Math.max(0, sel - 1);
-      render();
-    } else if (e.key === 'Enter' && list.length) {
-      e.preventDefault();
-      if (e.metaKey) focusTerminal(list[sel].id, list[sel].project); // ⌘↵ — прыжок в терминал
-      else openChat(list[sel].id, list[sel].project); // ↵ — чат сессии
+      return;
     }
-  }
-}, true);
+    if (e.metaKey && e.key === "2") {
+      // ⌘2 — Project Manager
+      e.preventDefault();
+      setView("history");
+      return;
+    }
+    if (e.metaKey && e.key === "3") {
+      // ⌘3 — Статистика
+      e.preventDefault();
+      setView("stats");
+      return;
+    }
+    if (e.metaKey && e.key === "4") {
+      // ⌘4 — История голоса
+      e.preventDefault();
+      setView("voicehist");
+      return;
+    }
+
+    // палитра быстрых команд: «/» в главном поиске (Часть 2). Раньше generic-Esc.
+    if (view === "list" && (argMode || queryEl.value.trim().startsWith("/"))) {
+      if (argMode === "amf") {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          exitArgToList();
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          runArg();
+          return;
+        }
+        if (e.key === "Tab") {
+          e.preventDefault();
+          argFocus = argFocus === "h" ? "m" : "h";
+          focusArgField();
+          return;
+        }
+        return; // цифры/Backspace идут в активное поле ввода
+      }
+      const matches = cmdMatches();
+      cmdRootSel = Math.min(cmdRootSel, matches.length - 1);
+      if (e.key === "Escape") {
+        e.preventDefault();
+        clearCmd();
+        return;
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        palHoverEnabled = false;
+        cmdRootSel = Math.min(matches.length - 1, cmdRootSel + 1);
+        renderCmdPalette();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        palHoverEnabled = false;
+        cmdRootSel = Math.max(0, cmdRootSel - 1);
+        renderCmdPalette();
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        const c = matches[cmdRootSel];
+        if (c) {
+          if (c.kind === "amf") enterArg();
+          else {
+            queryEl.value = c.cmd + " ";
+            renderCmdPalette();
+          }
+        }
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (runRootCommand(queryEl.value)) return;
+        const c = matches[cmdRootSel];
+        if (c) {
+          if (c.kind === "amf") enterArg();
+          else {
+            queryEl.value = c.cmd + " ";
+            renderCmdPalette();
+          }
+        }
+        return;
+      }
+      return; // прочее (печать) идёт в #query
+    }
+
+    if (view === "history") {
+      // ↑↓ выбор · ↵ открыть проект / запустить в терминале · esc — на уровень вверх
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        histSel = Math.min(histRows.length - 1, histSel + 1);
+        paintHistSel();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        histSel = Math.max(0, histSel - 1);
+        paintHistSel();
+        return;
+      }
+      if (e.key === "Enter" && histRows[histSel]) {
+        e.preventDefault();
+        const r = histRows[histSel];
+        if (r.type === "project") openProjectPrimary(r.project);
+        else launchSession(r.s.agent, r.s.id, r.cwd);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (histProject != null) {
+          histProject = null;
+          renderHistory();
+        } else {
+          setView("list");
+          render();
+        }
+        return;
+      }
+      return; // прочее (печать в поиск) — пусть идёт в инпут
+    }
+
+    if (view === "agentvm" && e.key === "Escape") {
+      e.preventDefault();
+      if (!agentVmFileDrawerEl.hidden) closeAgentVmFile();
+      else if (!agentVmEnvironmentEl.hidden) {
+        agentVmEnvironmentEl.hidden = true;
+        agentVmEnvironmentButtonEl.setAttribute("aria-expanded", "false");
+        renderAgentVmWorkspace();
+      } else closeAgentVmProject();
+      return;
+    }
+
+    if (e.key === "Escape") {
+      // raycast: Esc — назад / закрыть
+      if (view === "chat" && paletteOpen()) return; // палитру закроет обработчик поля
+      if (view !== "list") {
+        setView("list");
+        render();
+      }
+      // в накладке Esc из списка прячет её; окно так не закрывают — для этого ⌘W
+      else if (!windowMode()) window.jarvis.hidePanel();
+      return;
+    }
+
+    // экран вопроса — только клавиатура
+    if (view === "question" && qData) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        qSel = Math.min(qData.options.length - 1, qSel + 1);
+        paintQOptions();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        qSel = Math.max(0, qSel - 1);
+        paintQOptions();
+        return;
+      }
+      if (e.key === " ") {
+        e.preventDefault();
+        if (qData.multiSelect) toggleQ(qSel);
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitQ();
+        return;
+      }
+      if (/^[1-9]$/.test(e.key)) {
+        const n = Number(e.key);
+        if (n <= qData.options.length) {
+          e.preventDefault();
+          qSel = n - 1;
+          activateQ();
+        }
+        return;
+      }
+      return; // прочие клавиши экран вопроса проглатывает
+    }
+
+    if (e.metaKey && e.key === ",") {
+      // ⌘, — настройки, как в macOS
+      e.preventDefault();
+      if (view === "settings") {
+        setView("list");
+        render();
+      } else setView("settings");
+      return;
+    }
+
+    if (e.metaKey && e.key === "Backspace") {
+      // ⌘⌫ — очистить завершённые
+      // НЕ в поле ввода: иначе ⌘⌫ (удалить до начала строки) при печати в чате
+      // молча сносил все Done/Idle сессии. В поле — отдаём комбо нативному редактору.
+      if (editingText()) return;
+      e.preventDefault();
+      window.jarvis.clearFinished();
+      return;
+    }
+
+    if (e.metaKey && (e.key === "p" || e.key === "P")) {
+      // ⌘P — закрепить/открепить
+      e.preventDefault();
+      const s =
+        view === "list"
+          ? filtered()[sel]
+          : view === "chat"
+            ? state.find((x) => x.id === chatSessionId)
+            : null;
+      if (s) window.jarvis.setPin(s.id, !s.pinned);
+      return;
+    }
+
+    if (e.metaKey && (e.key === "g" || e.key === "G")) {
+      // ⌘G — «где это?»: оверлей в терминале
+      e.preventDefault();
+      const s =
+        view === "list"
+          ? filtered()[sel]
+          : state.find((x) => x.id === chatSessionId);
+      if (s)
+        window.jarvis.pingTerminal(s.id).then((res) => {
+          if (!res.ok) showToast(res.error || "Не получилось");
+        });
+      return;
+    }
+
+    if (view === "stats") {
+      // ←→ период · 1-3 разрез · ↑↓ скролл
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        e.preventDefault();
+        statsPeriod = statsPeriod === "today" ? "week" : "today";
+        renderStats();
+      } else if (/^[1-4]$/.test(e.key)) {
+        e.preventDefault();
+        statsDim = DIMS[Number(e.key) - 1][0];
+        renderStats();
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        statsEl.scrollBy({
+          top: e.key === "ArrowDown" ? 80 : -80,
+          behavior: "smooth",
+        });
+      }
+      return;
+    }
+
+    if (view === "list") {
+      // навигация по списку
+      const list = filtered();
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        sel = Math.min(list.length - 1, sel + 1);
+        render();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        sel = Math.max(0, sel - 1);
+        render();
+      } else if (e.key === "Enter" && list.length) {
+        e.preventDefault();
+        if (e.metaKey)
+          focusTerminal(list[sel].id, list[sel].project); // ⌘↵ — прыжок в терминал
+        else openChat(list[sel].id, list[sel].project); // ↵ — чат сессии
+      }
+    }
+  },
+  true,
+);

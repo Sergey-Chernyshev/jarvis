@@ -49,6 +49,10 @@ pub struct MirrorDiagnostics {
     pub skipped_non_regular: usize,
     pub skipped_oversize: usize,
     pub removed_host_commands: usize,
+    /// Записи allowlist, которых нет на хосте. Без этого счётчика пустой
+    /// snapshot неотличим от «у пользователя действительно нет памяти»:
+    /// ошибка в выводе пути выглядела бы как штатная тишина.
+    pub missing_sources: Vec<String>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -56,6 +60,17 @@ pub struct ConfigSnapshot {
     pub files: Vec<MirroredFile>,
     pub fingerprint: String,
     pub diagnostics: MirrorDiagnostics,
+}
+
+impl ConfigSnapshot {
+    /// Пишем guest-путь, а не host: диагностика уходит в journal/UI, а
+    /// host-путь несёт имя пользователя и раскладку домашнего каталога.
+    fn note_missing(&mut self, guest_path: &Path) {
+        let value = guest_path.to_string_lossy().to_string();
+        if !value.is_empty() && !self.diagnostics.missing_sources.contains(&value) {
+            self.diagnostics.missing_sources.push(value);
+        }
+    }
 }
 
 impl std::fmt::Debug for ConfigSnapshot {
@@ -111,6 +126,16 @@ fn build_snapshot_inner(
         (
             roots.codex.join("memories/memory_summary.md"),
             ".codex/memories/memory_summary.md",
+        ),
+        // Декларации плагинов Claude, а не их тела: cache/ — сотни мегабайт с
+        // host-абсолютными installPath, гость всё равно ставит плагины сам.
+        (
+            roots.claude.join("plugins/installed_plugins.json"),
+            ".claude/plugins/installed_plugins.json",
+        ),
+        (
+            roots.claude.join("plugins/known_marketplaces.json"),
+            ".claude/plugins/known_marketplaces.json",
         ),
     ] {
         collect_single(&source, Path::new(guest), &mut snapshot, &mut total_bytes)?;
@@ -177,7 +202,10 @@ fn collect_single(
 ) -> Result<(), String> {
     let metadata = match fs::symlink_metadata(source) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            snapshot.note_missing(guest_path);
+            return Ok(());
+        }
         Err(_) => return Err("не проверить allowlisted config file".into()),
     };
     if metadata.file_type().is_symlink() {
@@ -201,7 +229,10 @@ fn collect_tree(
 ) -> Result<(), String> {
     let metadata = match fs::symlink_metadata(current) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            snapshot.note_missing(guest_root);
+            return Ok(());
+        }
         Err(_) => return Err("не проверить allowlisted config tree".into()),
     };
     if metadata.file_type().is_symlink() {
@@ -319,6 +350,12 @@ fn sanitize_mirrored_bytes(
         path if path == Path::new(".codex/config.toml") => {
             sanitize_codex_config(bytes, diagnostics)
         }
+        path if path == Path::new(".claude/plugins/installed_plugins.json") => {
+            sanitize_installed_plugins(bytes, diagnostics)
+        }
+        path if path == Path::new(".claude/plugins/known_marketplaces.json") => {
+            sanitize_known_marketplaces(bytes, diagnostics)
+        }
         _ => Ok(bytes),
     }
 }
@@ -376,6 +413,57 @@ fn sanitize_claude_settings(
         return Err("guest-safe Claude settings превышают size limit".into());
     }
     Ok(sanitized)
+}
+
+/// installed_plugins.json несёт host-абсолютный `installPath` у каждой записи.
+/// Гость по нему не пойдёт: путь ведёт в несуществующий host-каталог. Оставляем
+/// только идентичность плагина, чтобы гость доставил его сам.
+fn sanitize_installed_plugins(
+    bytes: Vec<u8>,
+    diagnostics: &mut MirrorDiagnostics,
+) -> Result<Vec<u8>, String> {
+    let mut value = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|_| "installed_plugins.json содержит invalid JSON".to_string())?;
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| "installed_plugins.json должен быть JSON object".to_string())?;
+    if let Some(plugins) = root.get_mut("plugins").and_then(|it| it.as_object_mut()) {
+        for (_, entries) in plugins.iter_mut() {
+            if let Some(list) = entries.as_array_mut() {
+                for entry in list.iter_mut() {
+                    if let Some(entry) = entry.as_object_mut() {
+                        if entry.remove("installPath").is_some() {
+                            diagnostics.removed_host_commands += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    serde_json::to_vec_pretty(&value)
+        .map_err(|_| "не сериализовать installed_plugins.json".to_string())
+}
+
+/// То же для known_marketplaces.json: `installLocation` — host-путь, а
+/// `source` (github repo) переносим: по нему гость восстановит marketplace.
+fn sanitize_known_marketplaces(
+    bytes: Vec<u8>,
+    diagnostics: &mut MirrorDiagnostics,
+) -> Result<Vec<u8>, String> {
+    let mut value = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|_| "known_marketplaces.json содержит invalid JSON".to_string())?;
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| "known_marketplaces.json должен быть JSON object".to_string())?;
+    for (_, entry) in root.iter_mut() {
+        if let Some(entry) = entry.as_object_mut() {
+            if entry.remove("installLocation").is_some() {
+                diagnostics.removed_host_commands += 1;
+            }
+        }
+    }
+    serde_json::to_vec_pretty(&value)
+        .map_err(|_| "не сериализовать known_marketplaces.json".to_string())
 }
 
 fn sanitize_codex_config(
@@ -625,6 +713,76 @@ mod tests {
             .iter()
             .map(|file| file.guest_path.as_path())
             .collect()
+    }
+
+    #[test]
+    fn plugin_declarations_travel_without_host_install_paths() {
+        let (root, roots) = fixture("plugins");
+        fs::create_dir_all(roots.claude.join("plugins/cache/official/tool")).unwrap();
+        fs::write(
+            roots.claude.join("plugins/installed_plugins.json"),
+            br#"{"version":2,"plugins":{"tool@official":[{"scope":"user",
+                "installPath":"/Users/synthetic/.claude/plugins/cache/official/tool",
+                "version":"unknown"}]}}"#,
+        )
+        .unwrap();
+        fs::write(
+            roots.claude.join("plugins/known_marketplaces.json"),
+            br#"{"official":{"source":{"source":"github","repo":"anthropics/x"},
+                "installLocation":"/Users/synthetic/.claude/plugins/marketplaces/official"}}"#,
+        )
+        .unwrap();
+        // тело плагина живёт в cache/: сотни мегабайт и host-пути внутри
+        fs::write(
+            roots
+                .claude
+                .join("plugins/cache/official/tool/SKILL.md"),
+            "plugin body must stay host-only",
+        )
+        .unwrap();
+
+        let snapshot = build_snapshot(&roots).unwrap();
+        let paths = guest_paths(&snapshot);
+        assert!(paths.contains(&Path::new(".claude/plugins/installed_plugins.json")));
+        assert!(paths.contains(&Path::new(".claude/plugins/known_marketplaces.json")));
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.starts_with(".claude/plugins/cache")),
+            "тела плагинов не переносятся: {paths:?}"
+        );
+
+        let all = snapshot
+            .files
+            .iter()
+            .flat_map(|file| file.bytes.iter().copied())
+            .collect::<Vec<_>>();
+        let text = String::from_utf8_lossy(&all);
+        assert!(!text.contains("host-only"));
+        assert!(!text.contains("installPath"));
+        assert!(!text.contains("installLocation"));
+        // идентичность плагина и источник marketplace обязаны доехать
+        assert!(text.contains("tool@official"));
+        assert!(text.contains("anthropics/x"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn absent_allowlist_entries_are_reported_instead_of_silently_empty() {
+        let (root, roots) = fixture("missing");
+        // ничего не создаём поверх fixture: skills-каталоги есть, файлов нет
+        let snapshot = build_snapshot(&roots).unwrap();
+
+        assert!(snapshot.files.is_empty());
+        let missing = &snapshot.diagnostics.missing_sources;
+        assert!(
+            missing.contains(&".claude/CLAUDE.md".to_string()),
+            "отсутствие глобальной памяти должно быть видно: {missing:?}"
+        );
+        assert!(missing.contains(&".claude/plugins/installed_plugins.json".to_string()));
+        // host-пути в диагностику не попадают
+        assert!(missing.iter().all(|value| !value.contains("/host/")));
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

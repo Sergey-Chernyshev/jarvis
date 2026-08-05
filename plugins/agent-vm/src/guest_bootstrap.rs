@@ -116,7 +116,7 @@ fi
 printf 'claude=%s\ncodex=%s\n' "$claude" "$codex"
 "#;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapCredentialStatus {
     pub claude: String,

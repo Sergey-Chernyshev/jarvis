@@ -1608,6 +1608,7 @@ mod tests {
                 codex: "ready".into(),
             },
             proxy_configured: false,
+            ..Default::default()
         });
 
         supervisor

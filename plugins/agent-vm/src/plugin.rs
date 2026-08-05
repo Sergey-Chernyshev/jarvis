@@ -1087,6 +1087,7 @@ mod tests {
                 codex: "ready".into(),
             },
             proxy_configured: true,
+            ..Default::default()
         });
         let service = FakeService::new(Ok(ready));
         let host = FakeHost::default();
@@ -1152,6 +1153,7 @@ mod tests {
                 codex: "ready".into(),
             },
             proxy_configured: true,
+            ..Default::default()
         });
         let service = FakeService::new(Ok(ready));
         let host = FakeHost::default();
@@ -1207,6 +1209,7 @@ mod tests {
                 codex: "ready".into(),
             },
             proxy_configured: false,
+            ..Default::default()
         });
         let service = FakeService::new(Ok(initial));
         let host = FakeHost::default();
@@ -1227,6 +1230,7 @@ mod tests {
                     codex: "ready".into(),
                 },
                 proxy_configured: true,
+                ..Default::default()
             });
         }
 
@@ -1280,6 +1284,7 @@ mod tests {
                 codex: "ready".into(),
             },
             proxy_configured: true,
+            ..Default::default()
         });
         let service = FakeService::new(Ok(ready));
         let host = FakeHost::default();

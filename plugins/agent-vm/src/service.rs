@@ -139,12 +139,17 @@ fn account_home() -> Option<PathBuf> {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapStatus {
     pub fingerprint: String,
     pub files: usize,
     pub skipped: usize,
+    /// guest-пути записей allowlist, которых не было на хосте. Отдельно от
+    /// `skipped`: «не нашли что переносить» и «нашли, но отбросили» — разные
+    /// диагнозы, а в одном счётчике они неразличимы.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_sources: Vec<String>,
     pub credentials: BootstrapCredentialStatus,
     pub proxy_configured: bool,
 }
@@ -246,8 +251,10 @@ impl<R: CommandRunner, S: SecretStore> SystemConfigBootstrap<R, S> {
                 + snapshot.diagnostics.skipped_non_regular
                 + snapshot.diagnostics.skipped_oversize
                 + snapshot.diagnostics.removed_host_commands,
+            missing_sources: snapshot.diagnostics.missing_sources.clone(),
             credentials,
             proxy_configured,
+            ..Default::default()
         })
     }
 }
@@ -1073,6 +1080,7 @@ mod tests {
                     codex: "ready".into(),
                 },
                 proxy_configured: false,
+                ..Default::default()
             })
         }
     }

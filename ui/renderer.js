@@ -7,6 +7,7 @@ const chatlogEl = document.getElementById('chatlog');
 const chatTitleEl = document.getElementById('chatTitle');
 const chatChannelEl = document.getElementById('chatChannel');
 const chatModelEl = document.getElementById('chatModel');
+const chatRemoteEl = document.getElementById('chatRemote');
 const chatDotEl = document.getElementById('chatDot');
 const settingsEl = document.getElementById('settings');
 const queryEl = document.getElementById('query');
@@ -228,7 +229,7 @@ function filtered() {
   const q = queryEl.value.trim().toLowerCase();
   if (!q) return ordered;
   return ordered.filter((s) =>
-    `${s.project || ''} ${s.detail || ''} ${s.agent || ''}`.toLowerCase().includes(q));
+    `${s.project || ''} ${s.detail || ''} ${s.agent || ''} ${s.remote || ''}`.toLowerCase().includes(q));
 }
 
 function render() {
@@ -260,7 +261,8 @@ function render() {
   list.forEach((s, i) => {
     const row = document.createElement('div');
     row.className = `row ${s.status}${i === sel ? ' selected' : ''}`;
-    row.title = [s.cwd, s.title, ...(s.todoList || [])].filter(Boolean).join('\n');
+    row.title = [s.remote ? `узел ${s.remote}` : null, s.cwd, s.title, ...(s.todoList || [])]
+      .filter(Boolean).join('\n');
 
     const dot = document.createElement('span');
     dot.className = 'dot';
@@ -283,6 +285,16 @@ function render() {
       agentBadge = document.createElement('span');
       agentBadge.className = 'badge agent';
       agentBadge.textContent = s.agent;
+    }
+
+    // сессия живёт не на этой машине: бейдж с именем узла рядом с бейджем агента.
+    // Контурный, а не залитый — как точка «закончила»: другая машина, не другой цвет.
+    let remoteBadge = null;
+    if (s.remote) {
+      remoteBadge = document.createElement('span');
+      remoteBadge.className = 'badge remote';
+      remoteBadge.textContent = s.remote;
+      remoteBadge.title = `Агент работает на узле «${s.remote}»`;
     }
 
     const badge = document.createElement('span');
@@ -320,6 +332,7 @@ function render() {
     row.append(dot, name);
     if (branch) row.appendChild(branch);
     if (agentBadge) row.appendChild(agentBadge);
+    if (remoteBadge) row.appendChild(remoteBadge);
     row.appendChild(badge);
     if (hostBadge) row.appendChild(hostBadge);
     row.append(summary);
@@ -859,6 +872,14 @@ function updateChatChannelMark() {
   const model = s && (s.model || s.agent);
   chatModelEl.textContent = model || '';
   chatModelEl.hidden = !model;
+  // сессия с удалённого узла — имя узла в шапке, чтобы не спутать с локальной:
+  // ответы и пульт уходят туда по SSH, а не в терминал на этой машине
+  if (chatRemoteEl) {
+    const rem = s && s.remote ? String(s.remote) : '';
+    chatRemoteEl.textContent = rem;
+    chatRemoteEl.hidden = !rem;
+    chatRemoteEl.title = rem ? `Агент работает на узле «${rem}» — ответы уходят туда по SSH` : '';
+  }
   // tmux-сессии — без пометки; вне tmux помечаем
   chatChannelEl.hidden = !s || !!s.tmuxPane;
   // статус-точка справа — цвет по состоянию, пульс если работает

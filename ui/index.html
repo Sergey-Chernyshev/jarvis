@@ -223,6 +223,13 @@
   .badge.host { color: var(--ink-faint); }
   /* бейдж агента (codex и т.п.) — тональная краска, чтобы отличать бэкенды */
   .badge.agent { color: var(--accent-ink); background: var(--accent-soft); }
+  /* бейдж удалённого узла: сессия идёт не на этой машине. Контур вместо
+     заливки — как точка «закончила»: отличаем формой, а не новым цветом */
+  .badge.remote {
+    color: var(--ink-mute);
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--line-strong);
+  }
 
   .gitbranch {
     font-size: 12px;
@@ -1626,6 +1633,8 @@
           </button>
           <span class="chattitle" id="chatTitle"></span>
           <span class="badge" id="chatModel" hidden></span>
+          <!-- имя удалённого узла: агент работает не на этой машине -->
+          <span class="badge remote" id="chatRemote" hidden></span>
           <button id="sumToggle" class="sumtoggle" title="Сводка ходов / полная лента">Сводка</button>
           <span class="badge host" id="chatChannel" hidden>вне терминала</span>
           <span class="spacer"></span>

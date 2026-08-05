@@ -63,6 +63,16 @@
   function hotkeyKeys(acc) {
     return displayHotkey(acc).split(' ').filter(Boolean);
   }
+  /* Имя одиночной клавиши для подписи. Единственный источник правды —
+   * window.jarvisKeys (ui/keys.js): он знает про ОС и рисует ⌘ только там,
+   * где такая клавиша есть. Модуль могут ещё не подключить — тогда отдаём
+   * нейтральное слово, но маковских символов руками не пишем никогда. */
+  const KEY_FALLBACK = { enter: 'Enter', esc: 'Esc', del: 'Backspace', tab: 'Tab' };
+  function keyName(n) {
+    const K = window.jarvisKeys;
+    if (K && K.NAMES && K.NAMES[n]) return K.NAMES[n];
+    return KEY_FALLBACK[n] || n;
+  }
 
   /* ========================================================================
    * Инлайновые lucide-style иконки (24×24, stroke=currentColor). Данные —
@@ -122,6 +132,13 @@
       ['path', { d: 'M21 21v-2h-4' }],
       ['path', { d: 'M3 5h4V3' }],
       ['path', { d: 'M7 5a1 1 0 0 1 1 1v1a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a1 1 0 0 1 1-1V3' }],
+    ],
+    // lucide: server — раздел «Удалённые» (узлы на других машинах)
+    'server': [
+      ['rect', { width: 20, height: 8, x: 2, y: 2, rx: 2, ry: 2 }],
+      ['rect', { width: 20, height: 8, x: 2, y: 14, rx: 2, ry: 2 }],
+      ['line', { x1: 6, x2: 6.01, y1: 6, y2: 6 }],
+      ['line', { x1: 6, x2: 6.01, y1: 18, y2: 18 }],
     ],
     'info': [
       ['circle', { cx: 12, cy: 12, r: 10 }],
@@ -732,6 +749,32 @@
 #settings2 .npvmeta .ef { font:600 10px/1 var(--s2-font); color:var(--ink-mute); background:var(--surface); border:0; border-radius:5px; padding:3px 6px; }
 #settings2 .npvmeta .sp { color:var(--ink-faint); }
 #settings2 .npvbody { font-size:13px; line-height:1.55; color:var(--ink-mute); margin:7px 16px 0 20px; }
+
+/* ── Пояснительная плашка (пустое состояние вкладки) ─────────────────────
+   Тональная подложка + одна плитка краской — как .ic в сайдбаре. */
+#settings2 .s2note { display:flex; align-items:flex-start; gap:14px; padding:16px 18px;
+  border-radius:var(--r-card); background:var(--surface); margin:0 0 22px; }
+#settings2 .s2note-ic { width:30px; height:30px; border-radius:9px; flex:none; display:grid; place-items:center;
+  background:var(--accent-soft); color:var(--accent-text); }
+#settings2 .s2note-ic svg.lucide { width:16px; height:16px; }
+#settings2 .s2note-t { font-size:13.5px; font-weight:500; color:var(--ink); margin-bottom:6px; }
+#settings2 .s2note-p { font-size:12.5px; line-height:1.55; color:var(--ink-mute); max-width:520px; }
+#settings2 .s2note-p + .s2note-p { margin-top:7px; }
+#settings2 .s2note code { font:12px/1.4 var(--s2-mono); background:var(--paper); border-radius:5px; padding:1px 6px; color:var(--ink-2); }
+
+/* ── Строка узла: на узкой панели не ломается — хост режется многоточием,
+   статус не переносится, ошибка занимает всю ширину строки ─────────────── */
+#settings2 .s2rmeta { max-width:none; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#settings2 .s2rstat { white-space:nowrap; }
+#settings2 .s2rerr { max-width:none; }
+#settings2 .s2rctl { flex-wrap:wrap; justify-content:flex-end; row-gap:6px; }
+
+/* ── Форма в строке настройки: поля в ряд, на узкой панели переносятся ─── */
+#settings2 .s2form { display:flex; flex-wrap:wrap; gap:8px; margin-top:11px; }
+#settings2 .s2form input.s2-secret { flex:1 1 150px; width:auto; max-width:none; min-width:118px; }
+#settings2 .s2hint { display:flex; align-items:center; gap:7px; margin-top:9px; font-size:12px; color:var(--ink-faint); }
+#settings2 .s2hint kbd { font:500 11px/1.4 var(--s2-font); color:var(--ink-mute); background:var(--surface);
+  border-radius:var(--r-key); padding:2px 6px; }
 `;
     const style = document.createElement('style');
     style.id = 'settings2-style';
@@ -745,6 +788,7 @@
   const NAV = [
     { pane: 'general', label: 'Основное', icon: 'settings', ic: 'gray' },
     { pane: 'look', label: 'Вид', icon: 'palette', ic: 'green' },
+    { pane: 'remotes', label: 'Удалённые', icon: 'server', ic: 'teal' },
     { pane: 'stt', label: 'Голосовой ввод', icon: 'mic', ic: 'blue' },
     { pane: 'voice', label: 'Голос', icon: 'volume-2', ic: 'green' },
     { pane: 'wake', label: 'Пробуждение', icon: 'mic', ic: 'blue' },
@@ -1832,9 +1876,170 @@
     pane.appendChild(tune);
   }
 
+  /* 1c. Удалённые (remotes) — узлы на других машинах.
+   * Узел = тонкий транспорт на VPS: принимает хуки, копит события и умеет
+   * tmux send-keys; ходим к нему по SSH. Здесь — только список, проверка
+   * связи и добавление; всё остальное делает ноут своим обычным кодом.
+   *
+   * Контракт IPC: remotesList / remotesAdd / remotesRemove / remotesTest.
+   * Старая сборка без этих методов не должна ронять панель — отсюда safe()
+   * и явная проверка наличия метода перед показом формы. */
+  function remotesApiReady() {
+    try { return !!(window.jarvis && typeof window.jarvis.remotesList === 'function'); } catch (e) { return false; }
+  }
+
+  // строка одного узла: точка + имя, ssh-хост и каталог, «Проверить» / «Удалить»
+  function remoteRow(r) {
+    const dot = el('span.dot', { style: 'margin-top:5px' });
+    const grow = el('div.grow');
+    grow.appendChild(el('div.dt', { text: r.name || 'без имени' }));
+    const meta = (r.sshHost || 'ssh-хост не задан') + ' · ' + (r.jarvisDir || '~/.jarvis');
+    grow.appendChild(el('div.dd.mono.s2rmeta', { text: meta, title: meta }));
+    const errLine = el('div.s2err.s2rerr', { style: 'display:none' });
+    grow.appendChild(errLine);
+
+    const stat = el('span.sval.s2rstat');
+    // одно место, где статус превращается в точку и текст (точка — формой, не цветом)
+    const paint = (on, text, error) => {
+      dot.className = 'dot' + (on ? ' done' : '');
+      stat.className = 'sval s2rstat' + (on ? ' on' : '');
+      stat.textContent = text;
+      errLine.textContent = error || '';
+      errLine.style.display = error ? '' : 'none';
+    };
+    paint(!!r.connected,
+      r.connected ? 'на связи' : (r.error ? 'не отвечает' : 'не проверен'),
+      r.connected ? null : (r.error || null));
+
+    const test = button('Проверить', async (b) => {
+      b.disabled = true; b.textContent = 'Проверяю…';
+      const res = await safe(() => window.jarvis.remotesTest(r.name), null);
+      b.disabled = false; b.textContent = 'Проверить';
+      if (res && res.ok) {
+        const parts = [];
+        if (res.host) parts.push(res.host);
+        if (res.version) parts.push('v' + res.version);
+        paint(true, parts.length ? 'на связи · ' + parts.join(' · ') : 'на связи', null);
+      } else {
+        paint(false, 'не отвечает', (res && res.error) || 'узел не ответил — проверь ssh и что там запущен jarvis-node');
+      }
+    }, 'sm');
+
+    // удаление с подтверждением в самой кнопке (как у моделей) — без диалогов
+    const del = el('button.btn.sm.danger', { text: 'Удалить' });
+    let armed = false;
+    del.addEventListener('click', async () => {
+      if (!armed) {
+        armed = true; del.textContent = 'Точно?';
+        setTimeout(() => { armed = false; del.textContent = 'Удалить'; }, 3000);
+        return;
+      }
+      del.disabled = true; del.textContent = 'Удаляю…';
+      await safe(() => window.jarvis.remotesRemove(r.name), null);
+      reRenderPane('remotes');
+    });
+
+    return el('div.drow', null, [dot, grow, el('div.dctl.s2rctl', null, [stat, test, del])]);
+  }
+
+  // пустое состояние: что это вообще и что нужно на той стороне
+  function remotesEmptyNote() {
+    const body = el('div.grow', null, [
+      el('div.s2note-t', { text: 'Узлов пока нет' }),
+      el('div.s2note-p', { text: 'Узел — это Jarvis на чужой машине: Claude или Codex работают на VPS, '
+        + 'а видно и слышно их здесь — в общем списке, с уведомлениями и ответом прямо из панели. '
+        + 'Пока ноут спит, узел копит события и отдаёт их, когда ты вернёшься.' }),
+      el('div.s2note-p', { text: 'На той стороне нужны две вещи: SSH-доступ (ходим твоими ключами и ~/.ssh/config — '
+        + 'своих паролей Jarvis не заводит) и tmux — без него ответ в сессию не вставить, ровно как локально.' }),
+    ]);
+    const p3 = el('div.s2note-p');
+    p3.appendChild(document.createTextNode('Сам узел ставится командой '));
+    p3.appendChild(el('code', { text: 'jarvis-setup remote add <имя> <ssh-хост>' }));
+    p3.appendChild(document.createTextNode(' — здесь остаётся только прописать его.'));
+    body.appendChild(p3);
+    return el('div.s2note', null, [el('div.s2note-ic', null, icon('server')), body]);
+  }
+
+  // форма добавления: имя, ssh-хост, каталог jarvis (по умолчанию ~/.jarvis)
+  function remotesAddRow() {
+    const mk = (ph, val) => el('input.s2-secret', {
+      type: 'text', placeholder: ph, autocomplete: 'off', spellcheck: 'false', value: val || '',
+    });
+    const nameIn = mk('имя · vps');
+    const hostIn = mk('ssh-хост · dev@vps.example');
+    const dirIn = mk('~/.jarvis');
+    const err = el('div.s2err', { style: 'display:none' });
+    const showErr = (t) => { err.textContent = t || ''; err.style.display = t ? '' : 'none'; };
+
+    const add = button('Добавить', async (b) => {
+      const name = (nameIn.value || '').trim();
+      const sshHost = (hostIn.value || '').trim();
+      const jarvisDir = (dirIn.value || '').trim() || '~/.jarvis';
+      if (!name || !sshHost) { showErr('Нужны имя и ssh-хост — остальное можно оставить как есть.'); return; }
+      showErr(null);
+      b.disabled = true; b.textContent = 'Добавляю…';
+      const res = await safe(() => window.jarvis.remotesAdd({ name, sshHost, jarvisDir }), null);
+      b.disabled = false; b.textContent = 'Добавить';
+      if (res && res.ok) { nameIn.value = ''; hostIn.value = ''; dirIn.value = ''; reRenderPane('remotes'); return; }
+      showErr((res && res.error) || 'не удалось добавить узел');
+    }, 'sm primary');
+
+    for (const i of [nameIn, hostIn, dirIn]) {
+      i.addEventListener('keydown', (e) => { if (e.key === 'Enter') add.click(); });
+    }
+
+    const hint = el('div.s2hint', null, [
+      el('kbd', { text: keyName('enter') }),
+      el('span', { text: 'добавить · каталог по умолчанию ~/.jarvis' }),
+    ]);
+
+    return el('div.drow', null, [
+      el('div.grow', null, [
+        el('div.dt', { text: 'Новый узел' }),
+        el('div.dd', { text: 'Имя — как будешь звать его в списке сессий. Хост — то же, что пишешь в ssh: '
+          + 'алиас из ~/.ssh/config или user@адрес. Каталог — где на той машине живёт jarvis-node.' }),
+        el('div.s2form', null, [nameIn, hostIn, dirIn]),
+        err,
+        hint,
+      ]),
+      el('div.dctl', null, [add]),
+    ]);
+  }
+
+  async function renderRemotes(pane) {
+    pane.appendChild(el('div.dtitle', { text: 'Удалённые' }));
+    const ready = remotesApiReady();
+    const _sk = skelGroup(2); pane.appendChild(_sk);
+    // контракт — массив; принимаем и {remotes:[…]}, чтобы форма ответа не роняла вкладку
+    const raw = ready ? await safe(() => window.jarvis.remotesList(), []) : [];
+    _sk.remove();
+    const nodes = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.remotes) ? raw.remotes : []);
+
+    if (nodes.length) {
+      pane.appendChild(el('div.dsection', { text: 'узлы' }));
+      const group = el('div.dgroup');
+      for (const r of nodes) group.appendChild(remoteRow(r || {}));
+      pane.appendChild(group);
+    } else {
+      pane.appendChild(remotesEmptyNote());
+    }
+
+    if (!ready) {
+      // старый бэкенд: методов нет — честно говорим об этом вместо мёртвой формы
+      pane.appendChild(el('div.dgroup', null, [
+        drow('Узлы недоступны', 'Эта сборка Jarvis ещё не умеет удалённые узлы — обнови приложение во вкладке «О программе».', []),
+      ]));
+      return;
+    }
+
+    pane.appendChild(el('div.dsection', { text: 'добавить узел' }));
+    pane.appendChild(el('div.dgroup', null, [remotesAddRow()]));
+  }
+
   const RENDERERS = {
     general: renderGeneral,
     look: renderLook,
+    remotes: renderRemotes,
     stt: renderStt,
     voice: renderVoice,
     wake: renderWake,

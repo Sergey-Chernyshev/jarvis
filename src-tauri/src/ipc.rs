@@ -753,6 +753,7 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
         ["theme", "paint", "mode", "accent", "density", "radius", "scale"];
     let appearance_changed = APPEARANCE_KEYS.iter().any(|k| rest.contains_key(*k));
     let mode_changed = rest.contains_key("mode");
+    let remotes_changed = rest.contains_key("remotes");
     if !rest.is_empty() {
         let _ = via_gate_panel(&d, "settings.set", json!({ "patch": Value::Object(rest) })).await;
     }
@@ -763,6 +764,11 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
     // накладка ⇄ окно: свойства самого окна меняем здесь, раскладку — CSS по data-mode
     if mode_changed {
         windows::apply_mode(&d);
+    }
+    // список узлов правят не только вкладкой «Удалённые» (ещё settings.json и
+    // `jarvis-setup remote add`) — применяем сразу, как и всё в этом обработчике
+    if remotes_changed {
+        d.start_remotes();
     }
     // тумблер «Режим логов» применяем сразу (без перезапуска)
     crate::metrics::set_enabled(d.settings.bool("diagnostics"));
@@ -775,8 +781,31 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
 
 /* ================= чат сессии ================= */
 
+/// Узел + хвост его транскрипта + смещение, с которого продолжать. Узел
+/// возвращаем сюда же: живой хвост пойдёт в ТОТ ЖЕ узел, а не в найденный
+/// заново — между двумя поисками список мог смениться.
+/// Ошибки — человеческим текстом: это то, что увидит юзер вместо чата.
+async fn remote_transcript(
+    d: &std::sync::Arc<Daemon>,
+    name: &str,
+    path: &str,
+) -> Result<(std::sync::Arc<crate::remote::Node>, String, u64), String> {
+    let node = d
+        .remotes
+        .node(name)
+        .ok_or_else(|| format!("Узел «{name}» не подключён"))?;
+    let client = node.client().map_err(|e| format!("Узел «{name}»: {e}"))?;
+    match client.tail_text(path, 512 * 1024).await {
+        Ok(Some((text, next))) => Ok((node, text, next)),
+        Ok(None) => Err("Транскрипта ещё нет на узле — сессия не слала событий".into()),
+        Err(e) => Err(format!("Узел «{name}»: {e}")),
+    }
+}
+
+/// Асинхронна из-за удалённых сессий: их транскрипт приезжает по HTTP с узла.
+/// Локальная ветка осталась прежним синхронным чтением файла.
 #[tauri::command]
-pub fn chat_open(app: AppHandle, session_id: String) -> Value {
+pub async fn chat_open(app: AppHandle, session_id: String) -> Value {
     let d = Daemon::get(&app);
     let Some(s) = d.session(&session_id) else {
         return err("Сессия не найдена");
@@ -787,7 +816,23 @@ pub fn chat_open(app: AppHandle, session_id: String) -> Value {
     // Парсер транскрипта — по бэкенду сессии (Claude JSONL vs Codex rollout).
     let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
     let be = crate::backend::backend(agent);
-    let entries = be.read_entries(std::path::Path::new(&tr), 512 * 1024);
+    // Байты берём с той машины, где живёт сессия, и там же заводим живой хвост.
+    // Ниже по коду уже всё равно, откуда они приехали.
+    let entries = match &s.remote {
+        None => {
+            let e = be.read_entries(std::path::Path::new(&tr), 512 * 1024);
+            d.tail.start(app.clone(), agent, session_id.clone(), tr.clone());
+            e
+        }
+        Some(name) => match remote_transcript(&d, name, &tr).await {
+            Ok((node, text, next)) => {
+                d.tail
+                    .start_remote(app.clone(), agent, session_id.clone(), node, tr.clone(), next);
+                be.entries_from_text(&text)
+            }
+            Err(e) => return err(e),
+        },
+    };
     let (all_items, turns) = crate::turns::segment(be, &entries);
     let tail_start = all_items.len().saturating_sub(80);
     let items = &all_items[tail_start..];
@@ -808,8 +853,6 @@ pub fn chat_open(app: AppHandle, session_id: String) -> Value {
         })
         .collect();
     let cards = crate::turnsum::load_cards(&session_id);
-    d.tail
-        .start(app.clone(), agent, session_id.clone(), tr.clone());
     let llm = claude_bin::any_service_bin();
     if llm {
         d.turn_backfill(session_id.clone(), 5);
@@ -839,7 +882,7 @@ pub fn chat_summarize(app: AppHandle, session_id: String, turn_key: String) -> V
         return err("Сессия не найдена");
     }
     tauri::async_runtime::spawn(async move {
-        let Some((be, entries)) = d.turn_entries(&session_id) else { return };
+        let Some((be, entries)) = d.turn_entries(&session_id).await else { return };
         let (_items, turns) = crate::turns::segment(be, &entries);
         if let Some(t) = turns.iter().find(|t| t.span.key == turn_key) {
             d.turn_generate(&session_id, t).await;
@@ -906,10 +949,19 @@ fn resolve_user_file(cwd: Option<&str>, path: &str) -> Result<std::path::PathBuf
 /// входить в множество файлов из фактов ходов сессии — сверка по
 /// канонизированным путям, см. file_read_impl.
 #[tauri::command]
-pub fn file_read(app: AppHandle, session_id: String, path: String) -> Value {
+pub async fn file_read(app: AppHandle, session_id: String, path: String) -> Value {
     let d = Daemon::get(&app);
-    let cwd = d.session(&session_id).and_then(|s| s.cwd);
-    file_read_dispatch(d.turn_entries(&session_id).map(|(be, e)| (cwd, be, e)), &path)
+    let Some(s) = d.session(&session_id) else {
+        return file_read_dispatch(None, &path);
+    };
+    // Файлы удалённой сессии лежат на её машине. Открыть путь здесь — значит
+    // показать одноимённый файл ЭТОГО компьютера под видом того: узел отдаёт
+    // только транскрипты, и это сознательная граница (см. docs/remote.md).
+    if let Some(name) = &s.remote {
+        return err(format!("Файлы сессии — на узле «{name}», отсюда их не открыть"));
+    }
+    let entries = d.turn_entries(&session_id).await;
+    file_read_dispatch(entries.map(|(be, e)| (s.cwd, be, e)), &path)
 }
 
 /// Диспетчер file_read, отделён от команды ради тестов: None — сессии нет
@@ -994,10 +1046,18 @@ fn read_head_tail(p: &std::path::Path) -> std::io::Result<(String, bool)> {
 /// гейт по фактам, что file_read; сам дифф считает git (gitdiff.rs) от cwd
 /// сессии. Не в git / бинарь / нет cwd → mode "none" (таб просто не покажется).
 #[tauri::command]
-pub fn file_diff(app: AppHandle, session_id: String, path: String) -> Value {
+pub async fn file_diff(app: AppHandle, session_id: String, path: String) -> Value {
     let d = Daemon::get(&app);
-    let cwd = d.session(&session_id).and_then(|s| s.cwd);
-    file_diff_dispatch(d.turn_entries(&session_id).map(|(be, e)| (cwd, be, e)), &path)
+    let Some(s) = d.session(&session_id) else {
+        return file_diff_dispatch(None, &path);
+    };
+    // git-дифф считается от cwd сессии — у удалённой он на её машине (как и в
+    // file_read: чужой одноимённый репозиторий показал бы неправду)
+    if s.remote.is_some() {
+        return json!({ "ok": true, "mode": "none", "label": "", "hunks": [] });
+    }
+    let entries = d.turn_entries(&session_id).await;
+    file_diff_dispatch(entries.map(|(be, e)| (s.cwd, be, e)), &path)
 }
 
 /// Диспетчер file_diff, отделён от команды ради тестов (как file_read_dispatch).
@@ -1070,7 +1130,11 @@ pub fn commands_get(app: AppHandle, session_id: String) -> Value {
         return serde_json::to_value(crate::commands_catalog::codex_commands())
             .unwrap_or_else(|_| json!([]));
     }
-    serde_json::to_value(d.commands.get_for_cwd(s.cwd.as_deref())).unwrap_or_else(|_| json!([]))
+    // Проектные команды каталог собирает из .claude/commands по cwd — на ЭТОЙ
+    // машине. У сессии с узла её проект на той стороне, поэтому отдаём только
+    // встроенные: чужой список команд хуже пустого.
+    let cwd = s.cwd.as_deref().filter(|_| s.remote.is_none());
+    serde_json::to_value(d.commands.get_for_cwd(cwd)).unwrap_or_else(|_| json!([]))
 }
 
 #[tauri::command]
@@ -1178,13 +1242,17 @@ pub(crate) async fn set_via_slash(
         return err("Сессия не найдена");
     };
     let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
+    let target = match d.pane_target(&s) {
+        Ok(t) => t,
+        Err(e) => return err(e),
+    };
     let Some(pane) = s.tmux_pane else {
         return tmux_needed(agent, session_id);
     };
-    if !tmux::pane_alive(&pane).await {
+    if !target.pane_alive(&pane).await {
         return tmux_needed(agent, session_id);
     }
-    match tmux::paste_slash(&pane, &slash).await {
+    match target.paste_slash(&pane, &slash).await {
         Ok(()) => {
             d.with_session(session_id, apply);
             d.push();
@@ -1269,6 +1337,11 @@ pub async fn terminal_ping(app: AppHandle, session_id: String) -> Value {
     let Some(s) = d.session(&session_id) else {
         return err("Сессия не найдена");
     };
+    // popup рисуется в подключённом клиенте tmux — у удалённой сессии он на
+    // той машине, и увидит его тот, кто сидит за ней, а не мы
+    if let Some(name) = &s.remote {
+        return err(format!("Сессия идёт на узле «{name}» — показывать оверлей некому"));
+    }
     let Some(pane) = s.tmux_pane else {
         return err("Сессия не в tmux — пингануть нечем");
     };
@@ -1337,10 +1410,14 @@ pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) 
     let Some(q) = s.question.clone() else {
         return err("Вопрос уже неактуален");
     };
-    let Some(pane) = s.tmux_pane else {
+    let Some(pane) = s.tmux_pane.clone() else {
         return err("Сессия вне tmux — ответь в терминале");
     };
-    if !tmux::pane_alive(&pane).await {
+    let target = match d.pane_target(&s) {
+        Ok(t) => t,
+        Err(e) => return err(e),
+    };
+    if !target.pane_alive(&pane).await {
         return err("Пана сессии не отвечает");
     }
 
@@ -1366,7 +1443,7 @@ pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) 
     if agent == crate::backend::Agent::Codex && texts.iter().any(Option::is_some) {
         return err("Свой ответ недоступен в codex-сессии — выбери вариант");
     }
-    match tmux::answer_question(&pane, agent, &q, &answers, &texts).await {
+    match target.answer_question(&pane, agent, &q, &answers, &texts).await {
         Ok(()) => {
             // у хук-вопроса карточку закроет post-tool; у экранного — событий
             // нет, снимаем сами (детектор подтвердит по idle-экрану)
@@ -1596,9 +1673,15 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
     if prompt.is_empty() {
         return err("Пустой текст");
     }
+    // Сессия с узла — вставка уезжает туда же по ssh; дальше логика доставки
+    // (ack, очередь, ретрай) одна и та же.
+    let target = match d.pane_target(&s) {
+        Ok(t) => t,
+        Err(e) => return err(e),
+    };
 
     if let Some(pane) = s.tmux_pane {
-        if tmux::pane_alive(&pane).await {
+        if target.pane_alive(&pane).await {
             // Занята ли сессия в момент отправки. Если да — Claude Code положит
             // наш ввод в СВОЮ очередь, а prompt-хук придёт лишь когда он до него
             // дойдёт (после текущего ответа). Быстрый ack тогда невозможен — это
@@ -1608,7 +1691,7 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
             // Первая вставка.
             let t0 = now_ms();
             let t_reply = crate::metrics::now();
-            if let Err(e) = tmux::reply(&pane, &prompt).await {
+            if let Err(e) = target.reply(&pane, &prompt).await {
                 eprintln!("[jarvis] reply tmux fail: {e}");
                 return err(format!("tmux: {}", ellipsize(&one_line(&e), 120)));
             }
@@ -1663,7 +1746,7 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
             // зарегистрироваться. Один ретрай (C-u в reply() чистит строку,
             // повтор не задваивает текст).
             let t1 = now_ms();
-            if let Err(e) = tmux::reply(&pane, &prompt).await {
+            if let Err(e) = target.reply(&pane, &prompt).await {
                 return err(format!("tmux: {}", ellipsize(&one_line(&e), 120)));
             }
             if d.await_prompt_ack(&session_id, t1, std::time::Duration::from_millis(2500))
@@ -1697,6 +1780,12 @@ pub async fn terminal_focus(app: AppHandle, session_id: String) -> Value {
     let Some(s) = d.session(&session_id) else {
         return err("Сессия не найдена");
     };
+    // Терминал удалённой сессии — на другой машине. Вся лесенка ниже (tmux,
+    // tty, GUI-владелец) искала бы его здесь и в лучшем случае не нашла бы
+    // ничего, а в худшем подняла бы чужое окно с совпавшим id паны.
+    if let Some(name) = &s.remote {
+        return err(format!("Сессия идёт на узле «{name}» — её терминал не на этой машине"));
+    }
 
     // 1) tmux — точнее некуда
     if let Some(pane) = &s.tmux_pane {
@@ -2778,6 +2867,102 @@ mod tests {
         assert!(texts.is_empty());
     }
 }
+
+/* ================= удалённые узлы ================= */
+
+/// Список узлов с их живостью — вкладка «Удалённые».
+#[tauri::command]
+pub fn remotes_list(app: AppHandle) -> Value {
+    json!(Daemon::get(&app).remotes.list())
+}
+
+/// Добавить узел в настройки и поднять его. Список описывается целиком, поэтому
+/// после записи перезапускаем весь слой — точечный старт оставил бы прежние
+/// туннели жить от старого конфига.
+#[tauri::command]
+pub fn remotes_add(app: AppHandle, cfg: Value) -> Value {
+    let d = Daemon::get(&app);
+    let name = cfg.get("name").and_then(Value::as_str).unwrap_or("").trim();
+    let host = cfg.get("sshHost").and_then(Value::as_str).unwrap_or("").trim();
+    let dir = cfg.get("jarvisDir").and_then(Value::as_str).unwrap_or("").trim();
+    if name.is_empty() {
+        return err("Нужно имя узла");
+    }
+    if host.is_empty() {
+        return err("Нужен ssh-хост");
+    }
+    // Имя ходит и в ключ реестра, и в имя файла курсора — двоеточия, слэши и
+    // пробелы там либо ломают разбор, либо схлопывают два разных узла в один
+    // файл. Проще запретить на входе, чем чинить последствия.
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return err("В имени узла — только латиница, цифры, дефис и подчёркивание");
+    }
+    // Имя — ключ реестра (`<узел>:<id>`): два узла под одним именем смешали бы
+    // сессии разных машин.
+    let mut list = remotes_array(&d);
+    if list.iter().any(|v| {
+        v.get("name").and_then(Value::as_str).map(str::trim) == Some(name)
+    }) {
+        return err(format!("Узел «{name}» уже есть"));
+    }
+    let mut entry = json!({ "name": name, "sshHost": host });
+    if !dir.is_empty() {
+        entry["jarvisDir"] = json!(dir);
+    }
+    list.push(entry);
+    d.settings.set_top("remotes", Value::Array(list));
+    d.start_remotes();
+    ok()
+}
+
+/// Убрать узел: гасим туннель и забываем его сессии — иначе в списке остались
+/// бы строки машины, за которой уже никто не следит.
+#[tauri::command]
+pub fn remotes_remove(app: AppHandle, name: String) -> Value {
+    let d = Daemon::get(&app);
+    let name = name.trim();
+    let list: Vec<Value> = remotes_array(&d)
+        .into_iter()
+        .filter(|v| v.get("name").and_then(Value::as_str).map(str::trim) != Some(name))
+        .collect();
+    d.settings.set_top("remotes", Value::Array(list));
+    d.start_remotes();
+    d.forget_remote_sessions(name);
+    ok()
+}
+
+/// Проверка связи: поднят ли туннель и отвечает ли узел.
+#[tauri::command]
+pub async fn remotes_test(app: AppHandle, name: String) -> Value {
+    let d = Daemon::get(&app);
+    let Some(node) = d.remotes.node(name.trim()) else {
+        return err("Узел не найден — сохрани его и попробуй снова");
+    };
+    let client = match node.client() {
+        Ok(c) => c,
+        // туннель поднимает поллер своим циклом; здесь честно говорим, что ещё нет
+        Err(e) => return err(format!("{e} — подожди несколько секунд")),
+    };
+    match client.hello().await {
+        Ok(h) => json!({ "ok": true, "host": h.host, "version": h.version, "buffered": h.buffered }),
+        Err(e) => err(ellipsize(&one_line(&e), 160)),
+    }
+}
+
+/// Ключ `remotes` настроек как массив (что угодно другое считаем пустым: список
+/// правится и руками, и битое значение не повод терять команду).
+fn remotes_array(d: &Arc<Daemon>) -> Vec<Value> {
+    d.settings
+        .load()
+        .get("remotes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
 
 #[cfg(test)]
 mod turn_ipc_tests {

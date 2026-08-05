@@ -144,6 +144,10 @@ pub struct Session {
     /// GUI-приложение-владелец терминала (WebStorm, iTerm2…), резолвится по pid.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
+    /// Имя удалённого узла, откуда пришла сессия; None — локальная. Ключ реестра
+    /// для удалённой — `<remote>:<id>`: id с разных машин не обязаны различаться.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
 
     /// «Последняя задача» от юзера — живёт дольше detail.
     #[serde(skip_serializing_if = "Option::is_none")]

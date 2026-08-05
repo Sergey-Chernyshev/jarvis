@@ -35,6 +35,7 @@ Running several coding agents at once turns **you** into the bottleneck. Session
 - **🎛 Always-on-top ⌘J panel** — open, glance, act, dismiss (Raycast-style); never steals focus.
 - **↩️ Reply into any session** — type back into a session via tmux even if its window is minimized or on another Space; a `/` command palette included.
 - **⚙️ Remote control** — switch model (Opus / Sonnet / Haiku) and reasoning effort from the panel; answer multi-choice agent questions with native pickers.
+- **🛰 Remote sessions** — agents running on a VPS show up in the same list, over your own SSH; a thin node buffers events while the laptop sleeps ([docs/remote.md](docs/remote.md)).
 - **📊 Usage, costs and limits** — token and cost tracking per model and project; when a session hits the usage limit, Jarvis shows when it resets and can auto-resume it.
 - **🗣 Jarvis speaks** — a local TTS voice reads out what a session did or what it's waiting for (Russian-first for now).
 - **🎤 "Hey Jarvis" voice assistant** *(experimental)* — say the wake word and talk to your sessions: route a reply by voice, ask what an agent did, control media/volume, ask a general question.
@@ -167,6 +168,16 @@ If `codex` is found during setup, Jarvis wires it up too: hooks in `~/.codex/hoo
 Model and reasoning are changed via Codex's own `/model` picker (there is no separate `/effort`). **Headless `codex exec` does not fire hooks** — such runs aren't monitored (by design, same as `claude -p`). On a fresh machine Codex may ask you to trust `~/.codex/hooks.json`; Jarvis never injects the global `--dangerously-bypass-hook-trust` flag. Codex usage/cost numbers are estimates.
 
 </details>
+
+### 🛰 Remote sessions (an agent on another machine)
+
+An agent running on a VPS or an office workstation appears in the same list as your local ones — same statuses, toasts, voice, chat, reply-into-session and remote, with the node's name as a badge. A thin **node** (`jarvis-node`) lives on that machine: it receives the agents' hooks locally and **buffers the events**, so a closed laptop doesn't lose the night. Jarvis reaches it over your own SSH (`ssh -N -L` onto a unix socket) — the node opens no ports and Jarvis creates no new secrets.
+
+```bash
+jarvis-setup remote add vps dev@203.0.113.10   # uploads the node, wires the agents' hooks, sets up autostart
+```
+
+The remote machine needs SSH access, `curl`, `tmux` (the latter only for replying into a session) and a `jarvis-node` built for it (`cd src-tauri && cargo build --release -p jarvis-node`, on that machine or cross-compiled). Setup, what it looks like in the UI, diagnostics, security and boundaries: **[docs/remote.md](docs/remote.md)**.
 
 ### 📊 Usage, costs and limits
 

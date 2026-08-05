@@ -11,6 +11,12 @@
 //! поэтому часть pub-API в каждом из них «не используется» — глушим dead_code.
 #![allow(dead_code)]
 
+/// Установка узла на удалённую машину (`jarvis-setup remote add|status`). Живёт
+/// здесь, а не рядом с CLI, чтобы переиспользовать шим `jarvis-hook`, список
+/// событий и слияние хуков: конфиг агента на VPS обязан быть той же формы, что
+/// и локальный, иначе они разъедутся при первой же правке формата.
+pub mod remote;
+
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
@@ -1447,51 +1453,12 @@ fn read_settings() -> Result<(bool, Value), String> {
 fn install_hooks_into(path: &Path, label: &str, events: &[(&str, &str)], progress: &Progress) {
     match read_hooks_file(path) {
         Ok((exists, mut json)) => {
-            if !json.is_object() {
-                json = json!({});
-            }
-            if json.get("hooks").map(|h| !h.is_object()).unwrap_or(true) {
-                json["hooks"] = json!({});
-            }
-            let mut added = Vec::new();
-            let mut healed = Vec::new();
-            for (event, arg) in events {
-                let want = format!("{} {label} {arg}", hook_dst().display());
-                let hooks = json["hooks"].as_object_mut().unwrap();
-                let arr = hooks.entry(*event).or_insert_with(|| json!([]));
-                if !arr.is_array() {
-                    *arr = json!([]);
-                }
-                let arr = arr.as_array_mut().unwrap();
-
-                let has_correct = arr.iter().any(|g| group_has_cmd(g, &want));
-                let stale_present = arr.iter().any(|g| group_has_stale_ours(g, &want));
-                if has_correct && !stale_present {
-                    continue; // уже верно — не трогаем (иначе бэкап+запись на каждом старте)
-                }
-
-                // Снимаем ВСЕ наши хуки (любой путь/метка), чужие — оставляем.
-                for group in arr.iter_mut() {
-                    if let Some(gh) = group.get_mut("hooks").and_then(Value::as_array_mut) {
-                        gh.retain(|h| !is_ours(h));
-                    }
-                }
-                arr.retain(|g| {
-                    g.get("hooks")
-                        .and_then(Value::as_array)
-                        .is_some_and(|h| !h.is_empty())
-                });
-
-                // Ставим единственный правильный.
-                arr.push(json!({
-                    "hooks": [{ "type": "command", "command": want, "timeout": 5 }],
-                }));
-                if stale_present {
-                    healed.push(*event);
-                } else {
-                    added.push(*event);
-                }
-            }
+            let (added, healed) = merge_hooks(
+                &mut json,
+                &hook_dst().display().to_string(),
+                label,
+                events,
+            );
             if added.is_empty() && healed.is_empty() {
                 progress(Step::done("Хуки", format!("{label}: уже установлены")));
                 return;
@@ -1503,20 +1470,91 @@ fn install_hooks_into(path: &Path, label: &str, events: &[(&str, &str)], progres
                 let _ = fs::create_dir_all(parent);
             }
             atomic_write(path, &(serde_json::to_string_pretty(&json).unwrap() + "\n"));
-            let mut msg = String::new();
-            if !added.is_empty() {
-                msg += &format!("добавлены {}", added.join(", "));
-            }
-            if !healed.is_empty() {
-                if !msg.is_empty() {
-                    msg += "; ";
-                }
-                msg += &format!("исправлены {}", healed.join(", "));
-            }
-            progress(Step::done("Хуки", format!("{label}: {msg}")));
+            progress(Step::done(
+                "Хуки",
+                format!("{label}: {}", hooks_msg(&added, &healed)),
+            ));
         }
         Err(e) => progress(Step::warn("Хуки", format!("{e} — пропускаю хуки {label}"))),
     }
+}
+
+/// Слияние наших хуков в уже прочитанный JSON — чистая часть `install_hooks_into`.
+///
+/// Отдельно от файловых операций, потому что конфиг агента правится не только
+/// локально: `install::remote` делает ровно то же самое с файлом на VPS, читая и
+/// записывая его по ssh. Логика обязана быть ОДНА — иначе форма записи на
+/// удалённой машине разъедется с локальной при первой же правке формата.
+///
+/// Возвращает `(добавленные, исправленные)` события; обе пусты = менять нечего.
+/// `hook_bin` — путь шима на ТОЙ машине, где конфиг будет жить.
+fn merge_hooks(
+    json: &mut Value,
+    hook_bin: &str,
+    label: &str,
+    events: &[(&str, &str)],
+) -> (Vec<String>, Vec<String>) {
+    if !json.is_object() {
+        *json = json!({});
+    }
+    if json.get("hooks").map(|h| !h.is_object()).unwrap_or(true) {
+        json["hooks"] = json!({});
+    }
+    let mut added = Vec::new();
+    let mut healed = Vec::new();
+    for (event, arg) in events {
+        let want = format!("{hook_bin} {label} {arg}");
+        let hooks = json["hooks"].as_object_mut().unwrap();
+        let arr = hooks.entry(*event).or_insert_with(|| json!([]));
+        if !arr.is_array() {
+            *arr = json!([]);
+        }
+        let arr = arr.as_array_mut().unwrap();
+
+        let has_correct = arr.iter().any(|g| group_has_cmd(g, &want));
+        let stale_present = arr.iter().any(|g| group_has_stale_ours(g, &want));
+        if has_correct && !stale_present {
+            continue; // уже верно — не трогаем (иначе бэкап+запись на каждом старте)
+        }
+
+        // Снимаем ВСЕ наши хуки (любой путь/метка), чужие — оставляем.
+        for group in arr.iter_mut() {
+            if let Some(gh) = group.get_mut("hooks").and_then(Value::as_array_mut) {
+                gh.retain(|h| !is_ours(h));
+            }
+        }
+        arr.retain(|g| {
+            g.get("hooks")
+                .and_then(Value::as_array)
+                .is_some_and(|h| !h.is_empty())
+        });
+
+        // Ставим единственный правильный.
+        arr.push(json!({
+            "hooks": [{ "type": "command", "command": want, "timeout": 5 }],
+        }));
+        if stale_present {
+            healed.push((*event).to_string());
+        } else {
+            added.push((*event).to_string());
+        }
+    }
+    (added, healed)
+}
+
+/// Человеческое описание правки хуков для шага установки.
+fn hooks_msg(added: &[String], healed: &[String]) -> String {
+    let mut msg = String::new();
+    if !added.is_empty() {
+        msg += &format!("добавлены {}", added.join(", "));
+    }
+    if !healed.is_empty() {
+        if !msg.is_empty() {
+            msg += "; ";
+        }
+        msg += &format!("исправлены {}", healed.join(", "));
+    }
+    msg
 }
 
 /// Снять наши хуки (любой метки — MARKER агент-агностичен) из файла агента.

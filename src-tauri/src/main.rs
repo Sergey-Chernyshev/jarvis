@@ -30,6 +30,8 @@ mod metrics;
 mod model;
 mod onboarding;
 mod power;
+#[allow(dead_code)] // потребитель — daemon (маршрутизация удалённых сессий), следующий шаг инкремента
+mod remote; // удалённые узлы: ssh-туннель, HTTP-клиент узла, поллер событий
 mod route; // голосовая маршрутизация: скоринг → tie-break → пикер → stage-then-send
 mod ru;
 mod screen_prompt;
@@ -166,6 +168,10 @@ fn main() {
             ipc::agent_chat_open,
             ipc::terminal_focus,
             ipc::session_launch,
+            ipc::remotes_list,
+            ipc::remotes_add,
+            ipc::remotes_remove,
+            ipc::remotes_test,
             ipc::toast_resize,
             ipc::toast_ready,
             ipc::toast_click,
@@ -254,6 +260,7 @@ fn main() {
             );
 
             d.restore_state(); // реестр переживает перезапуск
+            d.start_remotes(); // ssh-туннели к удалённым узлам, если они настроены
             windows::create_panel(app.handle())?;
             windows::create_toast(app.handle())?;
             tray::init(&d)?;
@@ -378,6 +385,9 @@ fn main() {
                         windows::remember_window_size(&d, l.width, l.height);
                     }
                 }
+                // ssh-дети не должны пережить приложение: без этого туннели
+                // висят до конца сессии терминала и держат порты
+                d.remotes.stop_all();
                 power::Power::dispose(&d); // снять assertion, вернуть disablesleep
                 d.voice.dispose(); // погасить Silero-сайдкар, если был поднят
                 d.stt.dispose(); // погасить Qwen3-MLX-сайдкар, если был поднят

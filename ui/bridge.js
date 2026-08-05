@@ -21,6 +21,11 @@
     clearFinished: () => invoke('state_clear'),
     hidePanel: () => invoke('panel_hide'),
     getSettings: () => invoke('settings_get'),
+    // удалённые узлы (спека 2026-08-05): список, добавление, удаление, проверка связи
+    remotesList: () => invoke('remotes_list'),
+    remotesAdd: (cfg) => invoke('remotes_add', { cfg }),
+    remotesRemove: (name) => invoke('remotes_remove', { name }),
+    remotesTest: (name) => invoke('remotes_test', { name }),
     // тема/краска сменились в другом окне (демон рассылает всем)
     onAppearance: (cb) => on('appearance', cb),
     winMinimize: () => self().minimize(),

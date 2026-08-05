@@ -1412,6 +1412,7 @@ mod tests {
                 created_spec: false,
                 shell_command: "avm shell synthetic-project-a1b2c3d4e5f6".into(),
                 environment: self.environment.clone(),
+                disk: Default::default(),
             }
         }
     }

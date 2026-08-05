@@ -44,6 +44,20 @@ impl RuntimePaths {
         })
     }
 
+    /// Кэш скачанных образов Lima внутри приватного host-home.
+    pub fn image_cache(&self) -> PathBuf {
+        self.host_home.join("Library/Caches/lima/download")
+    }
+
+    /// Занятое место: образы запущенных VM и общий кэш загрузок. Ошибки обхода
+    /// не считаем фатальными — это диагностика, а не инвариант.
+    pub fn disk_usage(&self) -> crate::service::DiskUsage {
+        crate::service::DiskUsage {
+            images_bytes: dir_size(&self.lima_home),
+            cache_bytes: dir_size(&self.image_cache()),
+        }
+    }
+
     pub fn create_private_dirs(&self) -> Result<(), String> {
         for path in [
             &self.state_root,
@@ -354,5 +368,81 @@ avm shell 'sup-ac82ab61d14d'"
     fn socket_must_be_an_absolute_run_sock() {
         assert!(RuntimePaths::from_socket(Path::new("run.sock")).is_err());
         assert!(RuntimePaths::from_socket(Path::new("/tmp/not-run.socket")).is_err());
+    }
+}
+
+/// Суммарный размер файлов каталога. Symlink не разыменовываем: приватный
+/// runtime не должен считать чужие данные по подложенной ссылке.
+fn dir_size(root: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
+}
+
+#[cfg(test)]
+mod disk_usage_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    fn paths() -> (PathBuf, RuntimePaths) {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-disk-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let profile = root.join("profile");
+        fs::create_dir_all(&profile).unwrap();
+        let paths = RuntimePaths::from_socket(&profile.join("run.sock")).unwrap();
+        paths.create_private_dirs().unwrap();
+        (root, paths)
+    }
+
+    #[test]
+    fn disk_usage_counts_images_and_cache_separately() {
+        let (root, paths) = paths();
+        let vm = paths.lima_home.join("proj-1");
+        fs::create_dir_all(&vm).unwrap();
+        fs::write(vm.join("disk.img"), vec![7u8; 2048]).unwrap();
+        let cache = paths.image_cache().join("by-url-sha256/abc");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("data"), vec![1u8; 4096]).unwrap();
+
+        let usage = paths.disk_usage();
+        assert_eq!(usage.images_bytes, 2048);
+        assert_eq!(usage.cache_bytes, 4096);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn disk_usage_ignores_symlinks_and_missing_dirs() {
+        let (root, paths) = paths();
+        // подложенная ссылка на чужие данные не должна попасть в счёт
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("big"), vec![9u8; 8192]).unwrap();
+        std::os::unix::fs::symlink(&outside, paths.lima_home.join("link")).unwrap();
+
+        let usage = paths.disk_usage();
+        assert_eq!(usage.images_bytes, 0, "symlink не считаем");
+        assert_eq!(usage.cache_bytes, 0, "отсутствующий кэш — просто ноль");
+        fs::remove_dir_all(root).ok();
     }
 }

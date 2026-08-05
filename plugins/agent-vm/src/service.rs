@@ -366,6 +366,19 @@ pub struct RuntimeSnapshot {
     pub created_spec: bool,
     pub shell_command: String,
     pub environment: Option<BootstrapStatus>,
+    /// Сколько занимает Agent VM на диске: образы VM и общий кэш скачанных
+    /// образов. Без этого пользователь не знает, откуда десятки гигабайт.
+    pub disk: DiskUsage,
+}
+
+/// Занятое место в байтах. Кэш образов общий для всех VM и не растёт линейно с
+/// их числом, поэтому показывается отдельной строкой — удалять его дёшево по
+/// месту, но дорого по времени: следующая VM скачает образ заново.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskUsage {
+    pub images_bytes: u64,
+    pub cache_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -684,6 +697,7 @@ impl<R: CommandRunner> AgentVmService<R> {
             created_spec,
             shell_command: self.paths.shell_command(&vm_name, true),
             environment: None,
+            disk: self.paths.disk_usage(),
         })
     }
 

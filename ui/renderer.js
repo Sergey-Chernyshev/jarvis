@@ -3130,6 +3130,7 @@ const agentVmEnvironmentLabelEl = document.getElementById('agentVmEnvironmentLab
 const agentVmEnvironmentEl = document.getElementById('agentVmEnvironment');
 const agentVmEnvironmentDotEl = document.getElementById('agentVmEnvironmentDot');
 const agentVmEnvironmentTitleEl = document.getElementById('agentVmEnvironmentTitle');
+const agentVmDiskEl = document.getElementById('agentVmDisk');
 const agentVmNameEl = document.getElementById('agentVmName');
 const agentVmStateValueEl = document.getElementById('agentVmStateValue');
 const agentVmResourcesEl = document.getElementById('agentVmResources');
@@ -3569,7 +3570,13 @@ function ensureAgentVmEnvironment(project, backend) {
     const projectId = environment.projectId || project.projectId;
     if (!projectId) throw new Error('Agent VM не вернула projectId');
     project.projectId = projectId;
-    if (agentVmCurrent?.cwd === project.cwd) agentVmCurrent.projectId = projectId;
+    // занятое место приходит ответом команды: в сущности его держать нельзя —
+    // размер меняется постоянно и ломает дедупликацию публикаций
+    if (environment.disk) project.disk = environment.disk;
+    if (agentVmCurrent?.cwd === project.cwd) {
+      agentVmCurrent.projectId = projectId;
+      if (environment.disk) agentVmCurrent.disk = environment.disk;
+    }
     agentVmSyncedProjects.add(key);
     return environment;
   }).finally(() => {
@@ -3800,6 +3807,24 @@ function agentVmTerminalUiState(vm, terminal, run) {
   return 'ready';
 }
 
+/** Байты → «10,5 ГБ» (без ложной точности на мелких значениях). */
+function formatGb(bytes) {
+  const gb = bytes / 1024 ** 3;
+  if (gb >= 10) return `${Math.round(gb)} ГБ`;
+  if (gb >= 1) return `${gb.toFixed(1).replace('.', ',')} ГБ`;
+  const mb = bytes / 1024 ** 2;
+  return `${Math.max(1, Math.round(mb))} МБ`;
+}
+
+/** Строка «образы 10 ГБ · кэш 841 МБ» для строки «На диске». */
+function formatDiskUsage(disk) {
+  if (!disk || (!disk.imagesBytes && !disk.cacheBytes)) return '—';
+  const parts = [];
+  if (disk.imagesBytes) parts.push(`образы ${formatGb(disk.imagesBytes)}`);
+  if (disk.cacheBytes) parts.push(`кэш ${formatGb(disk.cacheBytes)}`);
+  return parts.join(' · ');
+}
+
 function renderAgentVmEnvironment(project, vm, terminal, run, uiState) {
   const attrs = vm?.attrs || {};
   const runAttrs = run?.attrs || {};
@@ -3821,6 +3846,9 @@ function renderAgentVmEnvironment(project, vm, terminal, run, uiState) {
     resources.memory || '',
     resources.disk || '',
   ].filter(Boolean).join(' · ') || 'по умолчанию';
+  // Занятое место: образы VM и общий кэш загрузок. Кэш показываем отдельно —
+  // он один на все VM, и его удаление стоит повторной загрузки образа.
+  agentVmDiskEl.textContent = formatDiskUsage(project?.disk);
   const configuredBackends = AgentVmModel.configuredBackends(vm);
   agentVmModulesEl.textContent = configuredBackends.length
     ? configuredBackends.map((backend) => (backend === 'codex' ? 'Codex' : 'Claude')).join(' · ')

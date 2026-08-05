@@ -223,6 +223,10 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
                         "state": snapshot.vm.as_ref().map(|vm| vm.state.as_str()).unwrap_or("absent"),
                         "shellCommand": snapshot.shell_command,
                         "createdSpec": snapshot.created_spec,
+                        // занятое место отдаём ответом операции, а не сущностью:
+                        // размер меняется постоянно и ломал бы дедупликацию
+                        // публикаций vm.* (см. same_runtime_binding)
+                        "disk": snapshot.disk,
                         "environment": snapshot.environment
                     })),
                 )
@@ -808,6 +812,7 @@ mod tests {
             created_spec: false,
             shell_command: format!("avm shell {vm_name}"),
             environment: None,
+            disk: Default::default(),
         }
     }
 

@@ -2747,11 +2747,12 @@
     group.appendChild(
       drow(
         "Тема",
-        "Светлая — как в макете; системная следует за настройкой macOS.",
+        "Светлая — как в макете; полночь — почти чёрный фон без подмеса краски; системная следует за настройкой macOS.",
         segmented(
           [
             { value: "light", label: "светлая" },
             { value: "dark", label: "тёмная" },
+            { value: "midnight", label: "полночь" },
             { value: "auto", label: "системная" },
           ],
           cur.theme,

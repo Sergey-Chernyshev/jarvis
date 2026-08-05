@@ -16,7 +16,7 @@
  * Скрипт синхронный и без зависимостей: подключается в <head> ПЕРЕД bridge.js. */
 
 (() => {
-  const THEMES = ["light", "dark", "auto"];
+  const THEMES = ["light", "dark", "midnight", "auto"];
   const PAINTS = ["clover", "coal", "raspberry", "custom"];
   const MODES = ["overlay", "window"];
   const DENSITIES = ["compact", "normal", "roomy"];
@@ -163,6 +163,9 @@
   const resolve = (theme) =>
     theme === "auto" ? (media && media.matches ? "dark" : "light") : theme;
 
+  /** Тёмная по светлоте, а не по имени: «Полночь» тоже тёмная. */
+  const isDark = (theme) => theme === "dark" || theme === "midnight";
+
   function paint() {
     const theme = resolve(choice.theme);
     root.setAttribute("data-theme", theme);
@@ -172,7 +175,7 @@
     root.setAttribute("data-density", choice.density);
     root.setAttribute("data-radius", choice.radius);
     root.style.setProperty("--ui-scale", String(choice.scale));
-    if (choice.paint === "custom") applyCustomAccent(theme === "dark");
+    if (choice.paint === "custom") applyCustomAccent(isDark(theme));
     else clearCustomAccent();
   }
 

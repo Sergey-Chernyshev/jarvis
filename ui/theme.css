@@ -373,6 +373,81 @@
   );
 }
 
+/* ── Полночь: тёмная без подмеса краски в поверхность ──────────────────────
+   Обычная тёмная выводит поверхности из краски, поэтому «Клевер» слегка
+   зеленит фон (g на 3–9 выше r). Здесь шкала нейтральная, r=g и чуть больше
+   синего, а отсчёт — от почти чёрного, как у Raycast. Краска остаётся только
+   на действии и на том, кто ждёт.                                          */
+:root[data-theme="midnight"] {
+  color-scheme: dark;
+
+  --paper: #0c0c0e;
+  --paper-2: #121215;
+  --surface: #17171b;
+  --surface-2: #1f1f24;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.15);
+
+  --ink: #f2f2f4;
+  --ink-2: #dcdce0;
+  --ink-mute: #9a9aa4;
+  --ink-faint: #6b6b75;
+
+  --accent: #34b37c;
+  --accent-text: #45c98d;
+  --accent-soft: rgba(52, 179, 124, 0.16);
+  --accent-ink: #93dcba;
+  --accent-line: rgba(52, 179, 124, 0.36);
+  --on-accent: #07130d;
+  --on-accent-dim: rgba(7, 19, 13, 0.62);
+
+  --fill-1: rgba(255, 255, 255, 0.045);
+  --fill-2: rgba(255, 255, 255, 0.08);
+  --fill-3: rgba(255, 255, 255, 0.13);
+
+  --dot-sleep: #33333b;
+
+  --warn: #e0a24d;
+  --danger: #f0537b;
+  --warn-soft: rgba(224, 162, 77, 0.15);
+  --danger-soft: rgba(240, 83, 123, 0.15);
+
+  /* на почти чёрном тень не читается — границу держит светлый волосок */
+  --shadow-panel:
+    0 0 0 1px rgba(255, 255, 255, 0.09), inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 2px 8px rgba(0, 0, 0, 0.6), 0 24px 56px rgba(0, 0, 0, 0.65);
+  --shadow-pop:
+    0 0 0 1px rgba(255, 255, 255, 0.1), 0 18px 44px rgba(0, 0, 0, 0.7);
+  --shadow-raised: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --backdrop: radial-gradient(
+    115% 90% at 72% 4%,
+    #1a1a1f 0%,
+    #121216 55%,
+    #08080a 100%
+  );
+}
+
+/* Краски на «Полночи»: та же семья, что в тёмной — поверхность их не касается. */
+:root[data-theme="midnight"][data-paint="coal"] {
+  --accent: #e8e4da;
+  --accent-text: #d6d1c4;
+  --accent-soft: rgba(232, 228, 218, 0.14);
+  --accent-ink: #c6c2b7;
+  --accent-line: rgba(232, 228, 218, 0.32);
+  --on-accent: #131311;
+  --on-accent-dim: rgba(19, 19, 17, 0.55);
+}
+
+:root[data-theme="midnight"][data-paint="raspberry"] {
+  --accent: #f0537b;
+  --accent-text: #f4708f;
+  --accent-soft: rgba(240, 83, 123, 0.17);
+  --accent-ink: #f2a9bc;
+  --accent-line: rgba(240, 83, 123, 0.36);
+  --on-accent: #1e050b;
+  --on-accent-dim: rgba(30, 5, 11, 0.6);
+}
+
 :root[data-theme="dark"][data-paint="coal"] {
   --accent: #e8e4da;
   --accent-text: #d6d1c4;

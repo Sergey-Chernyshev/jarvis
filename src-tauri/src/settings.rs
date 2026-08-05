@@ -53,7 +53,7 @@ pub(crate) fn defaults() -> Value {
         "launchDangerous": false,         // глобальный «опасный режим»: claude --dangerously-skip-permissions / codex YOLO
         "pluginDeveloperMode": false,     // immutable локальные snapshots только после явного включения
         // внешность (дизайн «Клевер», экран 14f «вид»)
-        "theme": "light",   // 'light' | 'dark' | 'auto' (системная)
+        "theme": "light",   // 'light' | 'dark' | 'midnight' | 'auto' (системная)
         "paint": "clover",  // 'clover' | 'coal' | 'raspberry' | 'custom'
         "accent": "#0B6B44", // тон своей краски: остальное выводится из него
         "density": "normal", // 'compact' | 'normal' | 'roomy' — высота строк

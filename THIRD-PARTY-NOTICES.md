@@ -49,6 +49,28 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+### Golos Text (`ui/fonts/`)
+
+The UI ships the **Golos Text** typeface (Cyrillic + Latin subsets, weights
+400/500/600/700) as `.woff2` files. Golos Text is published by Paratype under
+the **SIL Open Font License 1.1**, which permits bundling and redistribution
+inside an application as long as the font itself is not sold on its own and the
+copyright/licence notice travels with it:
+
+```
+Copyright 2021 The Golos Text Project Authors
+(https://github.com/paratype/golos-text)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This licence is available with a FAQ at: https://openfontlicense.org
+```
+
+The font is embedded rather than fetched from Google Fonts because the webview
+runs under a `default-src 'self'` Content-Security-Policy — and because Jarvis
+must render identically with no network.
+
+---
+
 ---
 
 ## 2. Compiled-in Rust crates

@@ -6,7 +6,7 @@
  *   История · Статистика · Словарь · Преобразования · Черновик.
  *
  * Дизайн 1:1 по макету docs/superpowers/mockups/whisper-section.html:
- * тёмное стекло, акцент #6ca0ff, моно для чисел/времени, сайдкарта «Умные
+ * бумажная карточка «Клевера», одна краска, моно для чисел/времени, сайдкарта «Умные
  * промпты» с тумблером, лента истории с авто-тегом ПОД временем (левая
  * колонка), карточки статистики, тепловая карта по реальным дням, ряды
  * «Преобразований» с триггер-чипами и тумблерами, большой тёмный черновик.
@@ -1261,20 +1261,16 @@
    * ══════════════════════════════════════════════════════════════════════ */
   const CSS = `
 #voicehist {
-  --accent: #6ca0ff;
-  --accent-soft: rgba(108,160,255,.14);
-  --accent-line: rgba(108,160,255,.3);
-  --done-soft: rgba(65,201,142,.12);
-  --done-line: rgba(65,201,142,.32);
-  --sidebar: #121216;
-  --card: rgba(255,255,255,0.03);
+  /* краска и поверхности — из theme.css; здесь только то, что нужно локально */
+  --sidebar: var(--paper-2);
+  --card: var(--surface);
   position: relative;
   width: 100%; height: 100%;
   display: flex; min-width: 0;
   overflow: hidden;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  font-family: var(--font);
   font-size: 13px;
-  color: var(--text);
+  color: var(--ink);
 }
 
 /* ════ Сайдбар ════ */
@@ -1286,8 +1282,8 @@
 #voicehist .brand { display: flex; align-items: center; gap: 9px; padding: 2px 8px 16px; }
 #voicehist .brand .mk {
   width: 22px; height: 22px; border-radius: 6px;
-  background: linear-gradient(135deg,#6ca0ff,#8b7ec8);
-  display: grid; place-items: center; color: #0a0a0c; font: 800 12px/1 var(--mono);
+  background: var(--accent);
+  display: grid; place-items: center; color: var(--on-accent); font: 700 12px/1 var(--font);
 }
 #voicehist .brand .nm { font-size: 15px; font-weight: 600; }
 #voicehist .brand .tag {
@@ -1300,7 +1296,7 @@
   color: var(--text-body); font-size: 13.5px; cursor: default; user-select: none;
 }
 #voicehist .nav .it:hover { background: var(--row-hover); }
-#voicehist .nav .it.on { background: rgba(255,255,255,.07); color: var(--text); }
+#voicehist .nav .it.on { background: var(--fill-2); color: var(--text); }
 #voicehist .nav .it svg { width: 17px; height: 17px; flex: none; opacity: .8; }
 #voicehist .nav .it.on svg { color: var(--accent); opacity: 1; }
 #voicehist .side .sp { flex: 1; }
@@ -1310,7 +1306,7 @@
   border: 1px solid var(--accent-line); border-radius: 11px; padding: 10px 11px; margin-bottom: 10px;
 }
 #voicehist .smartcard .ic {
-  width: 28px; height: 28px; border-radius: 8px; background: rgba(108,160,255,.2);
+  width: 28px; height: 28px; border-radius: 8px; background: var(--accent-soft);
   display: grid; place-items: center; color: var(--accent); flex: none;
 }
 #voicehist .smartcard .ic svg { width: 16px; height: 16px; }
@@ -1337,7 +1333,7 @@
   content: ""; position: absolute; top: 2px; right: 2px;
   width: 15px; height: 15px; border-radius: 50%; background: #fff; transition: .15s;
 }
-#voicehist .tg.off { background: rgba(255,255,255,.13); }
+#voicehist .tg.off { background: var(--fill-3); }
 #voicehist .tg.off::after { right: auto; left: 2px; }
 #voicehist .smartcard .tg { margin-left: auto; }
 
@@ -1426,21 +1422,21 @@
 }
 #voicehist .ent:hover .vh-acts { display: flex; }
 #voicehist .vh-acts button {
-  appearance: none; border: 1px solid var(--hairline); background: rgba(255,255,255,.04);
+  appearance: none; border: 1px solid var(--hairline); background: var(--fill-1);
   color: var(--text-body); font: 500 11px/1 inherit; padding: 5px 9px; border-radius: 6px;
   cursor: default; display: flex; align-items: center; gap: 5px; white-space: nowrap;
 }
-#voicehist .vh-acts button:hover { background: rgba(255,255,255,.09); color: var(--text); }
+#voicehist .vh-acts button:hover { background: var(--fill-2); color: var(--text); }
 #voicehist .vh-acts button.vh-primary {
   border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent);
 }
 #voicehist .vh-acts button.vh-icon { padding: 5px 7px; }
-#voicehist .vh-acts button.vh-danger:hover { border-color: rgba(242,99,99,.4); color: #f26363; }
+#voicehist .vh-acts button.vh-danger:hover { border-color: var(--danger); color: var(--danger); }
 
 /* инлайн-результат преобразования */
 #voicehist .vh-enh {
   margin: 9px 0 2px 0; border: 1px solid var(--hairline);
-  background: rgba(255,255,255,.025); border-radius: 10px; overflow: hidden;
+  background: var(--fill-1); border-radius: 10px; overflow: hidden;
 }
 #voicehist .vh-eh {
   display: flex; align-items: center; gap: 9px;
@@ -1453,10 +1449,10 @@
 }
 #voicehist .vh-eh .vh-sp { flex: 1; }
 #voicehist .vh-eh button {
-  appearance: none; border: 1px solid var(--hairline); background: rgba(255,255,255,.04);
+  appearance: none; border: 1px solid var(--hairline); background: var(--fill-1);
   color: var(--text-body); font: 500 11px/1 inherit; padding: 5px 9px; border-radius: 6px; cursor: default;
 }
-#voicehist .vh-eh button:hover { color: var(--text); background: rgba(255,255,255,.09); }
+#voicehist .vh-eh button:hover { color: var(--text); background: var(--fill-2); }
 #voicehist .vh-eh button.vh-acc {
   border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent);
 }
@@ -1467,8 +1463,7 @@
 #voicehist .vh-tmenu {
   position: absolute; right: 10px; top: 40px; z-index: 5; width: 288px;
   background: rgba(28,28,32,0.98); border: 1px solid var(--border); border-radius: 11px;
-  box-shadow: 0 18px 50px rgba(0,0,0,.6); overflow: hidden;
-  backdrop-filter: blur(30px) saturate(160%);
+  box-shadow: var(--shadow-pop); overflow: hidden;
 }
 #voicehist .vh-tmenu.vh-ovf { width: 168px; top: auto; bottom: 8px; right: 8px; }
 #voicehist .vh-tmh {
@@ -1505,14 +1500,14 @@
 #voicehist .secth .cap { margin-left: auto; font-size: 11px; color: var(--faint); font-family: var(--mono); font-weight: 400; }
 
 #voicehist .heat { display: grid; grid-template-columns: repeat(16,1fr); gap: 4px; margin-top: 14px; }
-#voicehist .heat i { aspect-ratio: 1; border-radius: 3px; background: rgba(255,255,255,.05); }
-#voicehist .heat i.l1 { background: rgba(108,160,255,.3); }
-#voicehist .heat i.l2 { background: rgba(108,160,255,.55); }
-#voicehist .heat i.l3 { background: rgba(108,160,255,.85); }
+#voicehist .heat i { aspect-ratio: 1; border-radius: 3px; background: var(--surface); }
+#voicehist .heat i.l1 { background: color-mix(in srgb, var(--accent) 30%, var(--surface)); }
+#voicehist .heat i.l2 { background: color-mix(in srgb, var(--accent) 58%, var(--surface)); }
+#voicehist .heat i.l3 { background: var(--accent); }
 
 #voicehist .bar { display: flex; align-items: center; gap: 12px; margin: 9px 0; }
 #voicehist .bar .bl { width: 150px; font-size: 12.5px; color: var(--text-body); }
-#voicehist .bar .bt { flex: 1; height: 8px; border-radius: 5px; background: rgba(255,255,255,.05); overflow: hidden; }
+#voicehist .bar .bt { flex: 1; height: 8px; border-radius: 5px; background: var(--surface); overflow: hidden; }
 #voicehist .bar .bt i { display: block; height: 100%; background: var(--accent); border-radius: 5px; }
 #voicehist .bar .bv { font-family: var(--mono); font-size: 11.5px; color: var(--muted); width: 44px; text-align: right; }
 
@@ -1527,7 +1522,7 @@
   background: var(--accent-soft); border: 1px solid var(--accent-line); color: var(--accent);
   border-radius: 9px; padding: 9px 14px; font: 500 13px/1 inherit; cursor: default;
 }
-#voicehist .btn:hover { background: rgba(108,160,255,.2); }
+#voicehist .btn:hover { background: var(--accent-soft); }
 #voicehist .lrow {
   display: flex; align-items: center; gap: 12px; padding: 12px 14px;
   border: 1px solid var(--hairline); border-radius: 11px; margin-bottom: 8px; background: var(--card);
@@ -1536,7 +1531,7 @@
 #voicehist .lrow .val { font-size: 13px; color: var(--text-body); flex: 1; }
 #voicehist .lrow .meta { font-size: 11px; color: var(--faint); font-family: var(--mono); }
 #voicehist .lrow .x { color: var(--faint); cursor: default; padding: 2px 6px; border-radius: 6px; }
-#voicehist .lrow .x:hover { color: #f26363; background: rgba(242,99,99,.1); }
+#voicehist .lrow .x:hover { color: var(--danger); background: var(--danger-soft); }
 #voicehist .vh-note {
   font-size: 12px; color: var(--muted); background: var(--accent-soft);
   border: 1px solid var(--accent-line); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; line-height: 1.5;
@@ -1552,7 +1547,7 @@
   border-color: var(--accent-line); background: var(--accent-soft); margin: 18px 24px 4px;
 }
 #voicehist .tr .ti, #voicehist .vh-smartrow .ti {
-  width: 30px; height: 30px; border-radius: 8px; background: rgba(108,160,255,.2);
+  width: 30px; height: 30px; border-radius: 8px; background: var(--accent-soft);
   color: var(--accent); display: grid; place-items: center; flex: none;
 }
 #voicehist .tr .ti svg, #voicehist .vh-smartrow .ti svg { width: 16px; height: 16px; }
@@ -1566,7 +1561,7 @@
 }
 #voicehist .trig svg { width: 11px; height: 11px; }
 #voicehist .trig.manual {
-  color: var(--muted); background: rgba(255,255,255,.05); border-color: var(--border);
+  color: var(--muted); background: var(--surface); border-color: var(--border);
 }
 #voicehist .tr .tg, #voicehist .vh-smartrow .tg {
   margin-left: auto; width: 34px; height: 20px; border-radius: 11px; margin-top: 3px;

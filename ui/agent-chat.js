@@ -6,6 +6,13 @@
   const { invoke } = window.__TAURI__.core;
   const { listen } = window.__TAURI__.event;
 
+  // тема и краска: окно живёт вне общего моста, поэтому подписывается само
+  window.jarvis = Object.assign(window.jarvis || {}, {
+    getSettings: () => invoke('settings_get'),
+    setSettings: (patch) => invoke('settings_set', { patch }),
+    onAppearance: (cb) => { listen('appearance', (e) => cb(e.payload)); },
+  });
+
   const msgs = document.getElementById('msgs');
   const input = document.getElementById('input');
   const sendBtn = document.getElementById('send');

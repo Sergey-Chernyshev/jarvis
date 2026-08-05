@@ -131,6 +131,17 @@ Click ◇ for the panel. Right-click for the menu (test notification, autostart,
 
 </details>
 
+### 🎨 Look: theme and paint
+
+The interface is a **sheet of paper**: one opaque surface, one accent colour, and monochrome status dots (working — filled, finished — outline only, waiting — accent, rate-limited — dim, asleep — pale). The bottom strip carries a waveform and the line "say «jarvis» — I'm listening"; on the right, a subscription-limit meter with the window until reset.
+
+<details>
+<summary>Details</summary>
+
+**Settings → Look**: mode (overlay / window), theme (light / dark / system), paint (Coal · Clover · Raspberry, or **your own** — pick one hue and the rest is derived from it), and what the bottom strip shows — the subscription limit or the day's spend. Below that: row **density**, corner **radius** and interface **scale** (85–140%), with a reset button. In **window mode** Jarvis is an ordinary window: sessions on the left, the conversation on the right, the limit in the title bar; it resizes, minimises, does not vanish when you click away, and lives in the Dock (the icon appears on the next launch). **Overlay** is the familiar ⌘J panel that floats above everything. Changes apply immediately across every window: panel, toasts, agent chat, onboarding. The typeface is Golos Text, bundled with the app so the UI renders identically with no network. The full visual language is documented in [`docs/superpowers/specs/2026-08-02-clover-redesign.md`](docs/superpowers/specs/2026-08-02-clover-redesign.md).
+
+</details>
+
 ### ↩️ Reply into a session & ⚙️ the remote
 
 In a session's chat the **Reply** field inserts text straight into the session's terminal — even if the window is minimized or on another Space. Below it sits the **remote**: **Model** segments (Opus / Sonnet / Haiku) and **Effort** (auto / low / med / high / xhigh) send a slash command (`/model sonnet`, `/effort high`) into the live session. When an agent asks a multiple-choice question, the panel renders native pickers (multi-select included) instead of making you type numbers into a terminal.

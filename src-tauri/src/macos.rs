@@ -13,6 +13,10 @@ use tauri::{Emitter, Manager, WebviewWindow};
 const NS_SCREEN_SAVER_WINDOW_LEVEL: isize = 1000;
 /// NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary
 const COLLECTION_BEHAVIOR: usize = (1 << 0) | (1 << 8);
+/// Поведение обычного окна: Managed | ParticipatesInCycle | FullScreenPrimary.
+/// FullScreenPrimary обязателен — без него AppKit не пускает окно в фуллскрин
+/// (зелёная кнопка и ⌃⌘F молча не работают).
+const COLLECTION_BEHAVIOR_WINDOW: usize = (1 << 2) | (1 << 5) | (1 << 7);
 
 /* CGPoint/CGRect для msg_send — свои repr(C), чтобы не тянуть objc2-foundation */
 
@@ -63,6 +67,21 @@ pub fn float_above_everything(win: &WebviewWindow) {
         let _: () = msg_send![w, setLevel: NS_SCREEN_SAVER_WINDOW_LEVEL];
         let _: () = msg_send![w, setCollectionBehavior: COLLECTION_BEHAVIOR];
         let _: () = msg_send![w, setHidesOnDeactivate: false];
+    });
+}
+
+/// Обычное окно: нормальный уровень и поведение — оконный режим (макет 14h).
+/// Антипод `float_above_everything`: окно участвует в ⌘`-цикле, умеет в
+/// фуллскрин и не висит поверх чужих окон.
+pub fn float_normal(win: &WebviewWindow) {
+    on_main(win, |w| unsafe {
+        let _: () = msg_send![w, setLevel: 0isize];
+        let _: () = msg_send![w, setCollectionBehavior: COLLECTION_BEHAVIOR_WINDOW];
+        let _: () = msg_send![w, setHidesOnDeactivate: false];
+        // фуллскрин и зелёная кнопка живут в стайл-маске: без Resizable AppKit
+        // не даёт ни того, ни другого, даже когда tao просит toggleFullScreen:
+        let mask: usize = msg_send![w, styleMask];
+        let _: () = msg_send![w, setStyleMask: mask | (1 << 3)]; // NSWindowStyleMaskResizable
     });
 }
 

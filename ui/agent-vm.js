@@ -774,6 +774,68 @@
     return { ok: true, attrs: asObject(entity.attrs) };
   }
 
+  // Стадии запуска среды — ровно те, что делает плагин в service.rs::ensure.
+  // Порядок и состав зависят от того, есть ли уже VM (plan_ensure): для новой
+  // это create, для остановленной — start, для готовой ничего из этого не
+  // происходит и остаётся только подготовка агента.
+  //
+  // Важно, чего здесь НЕТ: процентов и обещаний времени. Плагин — один
+  // последовательный цикл (poll_and_reconcile обрабатывает события по одному),
+  // и пока идёт runtime.ensure, он не отвечает даже на runtime.status. Данных
+  // о прогрессе не существует, поэтому шкала была бы выдумкой: при затыке на
+  // «avm create» она бы всё равно доехала до конца. Показываем список шагов и
+  // время — по нему видно, где встало.
+  const ENSURE_STEPS = {
+    create: [
+      { key: "spec", label: "Описание проекта" },
+      { key: "vm", label: "Создаю виртуальную машину", slow: true },
+      { key: "mounts", label: "Проверяю доступ к файлам" },
+      { key: "config", label: "Переношу настройки и ключи" },
+      { key: "agent", label: "Поднимаю агента" },
+    ],
+    start: [
+      { key: "mounts", label: "Проверяю доступ к файлам" },
+      { key: "vm", label: "Запускаю виртуальную машину", slow: true },
+      { key: "config", label: "Переношу настройки и ключи" },
+      { key: "agent", label: "Поднимаю агента" },
+    ],
+    ready: [
+      { key: "config", label: "Сверяю настройки" },
+      { key: "agent", label: "Поднимаю агента" },
+    ],
+  };
+
+  /** Что сделает ensure с этой VM — та же таблица, что plan_ensure в service.rs. */
+  function ensurePlan(vm) {
+    const state = asString(asObject(vm).state);
+    const management = asString(asObject(vm).attrs && asObject(vm).attrs.management);
+    if (!vm) return "create";
+    if (management === "orphaned") return "ready";
+    if (state === "stopped" || state === "off") return "start";
+    if (state === "running" || state === "ready" || state === "working") return "ready";
+    return "ready";
+  }
+
+  /**
+   * Шаги запуска с отметкой пройденного. Активный шаг — первый непройденный;
+   * «сделано» ставим только тому, что действительно закончилось, поэтому
+   * зависший шаг так и остаётся активным, а не уезжает в «готово».
+   */
+  function ensureSteps(vm, { done = 0, failedAt = -1 } = {}) {
+    const steps = ENSURE_STEPS[ensurePlan(vm)] || ENSURE_STEPS.ready;
+    return steps.map((step, i) => ({
+      ...step,
+      state:
+        i === failedAt
+          ? "failed"
+          : i < done
+            ? "done"
+            : i === done
+              ? "active"
+              : "waiting",
+    }));
+  }
+
   function stateLabel(state) {
     return (
       {
@@ -806,6 +868,8 @@
     continuationRunId,
     deriveProjects,
     displayProjectPath,
+    ensurePlan,
+    ensureSteps,
     environmentState,
     filterCommands,
     filterProjects,

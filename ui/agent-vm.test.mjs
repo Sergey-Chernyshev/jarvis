@@ -965,3 +965,55 @@ test("folder picker stays async and releases project UI after cancel or error", 
     );
   }
 });
+
+// Стадии запуска должны соответствовать тому, что плагин реально делает
+// (service.rs::plan_ensure), иначе экран рассказывает про шаги, которых нет.
+test("план запуска зависит от состояния VM, как plan_ensure", () => {
+  assert.equal(AgentVm.ensurePlan(null), "create", "нет VM → создаём");
+  assert.equal(AgentVm.ensurePlan({ state: "stopped" }), "start");
+  assert.equal(AgentVm.ensurePlan({ state: "running" }), "ready");
+  assert.equal(
+    AgentVm.ensurePlan({ state: "running", attrs: { management: "orphaned" } }),
+    "ready",
+    "чужую VM мы не трогаем — ждём",
+  );
+});
+
+test("у новой VM шаг создания есть, у запущенной — нет", () => {
+  const fresh = AgentVm.ensureSteps(null).map((s) => s.key);
+  assert.deepEqual(fresh, ["spec", "vm", "mounts", "config", "agent"]);
+  const ready = AgentVm.ensureSteps({ state: "running" }).map((s) => s.key);
+  assert.deepEqual(ready, ["config", "agent"], "готовой VM не создают заново");
+});
+
+// Главное свойство: зависший шаг остаётся активным. Если бы «сделано» ставилось
+// по времени, затык на «avm create» доехал бы до «готово» и соврал.
+test("активен первый непройденный шаг, а зависший не уезжает в «готово»", () => {
+  const start = AgentVm.ensureSteps(null, { done: 0 });
+  assert.equal(start[0].state, "active");
+  assert.equal(start[1].state, "waiting");
+
+  const stuck = AgentVm.ensureSteps(null, { done: 1 });
+  assert.equal(stuck[0].state, "done");
+  assert.equal(stuck[1].state, "active", "шаг остаётся активным сколько нужно");
+  assert.equal(
+    stuck.filter((s) => s.state === "done").length,
+    1,
+    "готовым считается только то, что закончилось",
+  );
+});
+
+test("упавший шаг помечен ошибкой, а не тишиной", () => {
+  const steps = AgentVm.ensureSteps(null, { done: 1, failedAt: 1 });
+  assert.equal(steps[1].state, "failed");
+  assert.equal(steps[2].state, "waiting", "после ошибки дальше не идём");
+});
+
+// Долгий шаг помечен в модели, чтобы интерфейс мог заранее сказать «это может
+// занять минуту» — вместо того чтобы пользователь думал, что всё зависло.
+test("шаг с виртуальной машиной помечен как долгий", () => {
+  const vm = AgentVm.ensureSteps(null).find((s) => s.key === "vm");
+  assert.equal(vm.slow, true);
+  const config = AgentVm.ensureSteps(null).find((s) => s.key === "config");
+  assert.notEqual(config.slow, true);
+});

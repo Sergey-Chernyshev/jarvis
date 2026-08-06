@@ -2294,6 +2294,93 @@
   .vmws-stage-time { font-family: var(--mono); font-size: 10px; color: var(--faint); }
   @keyframes vmSpin { to { transform: rotate(360deg); } }
 
+  /* ---------- запуск среды: список шагов ----------
+     Вместо пустого экрана с одной строкой — что происходит и на каком шаге.
+     Процентов здесь нет намеренно: плагин во время runtime.ensure не отвечает
+     (последовательный цикл poll_and_reconcile), данных о прогрессе не
+     существует, и шкала была бы выдумкой — при затыке на «avm create» она бы
+     всё равно доехала до конца. Поэтому «сделано» ставится только тому, что
+     закончилось, активный шаг крутится сколько нужно, а рядом идёт время: по
+     нему виден затык. */
+  .vm-boot {
+    flex: none;
+    display: grid;
+    gap: 1px;
+    padding: 13px 18px 15px;
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 12%, transparent);
+    background:
+      radial-gradient(120% 100% at 0% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 62%),
+      color-mix(in srgb, var(--accent) 4%, transparent);
+  }
+  .vm-boot-head { display: flex; align-items: baseline; gap: 9px; margin-bottom: 8px; }
+  .vm-boot-title { font-size: 12px; font-weight: 600; color: var(--ink); }
+  .vm-boot-elapsed {
+    margin-left: auto; font-family: var(--mono); font-size: 10.5px;
+    color: var(--ink-faint); font-variant-numeric: tabular-nums;
+  }
+  .vm-boot-step {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 9px;
+    padding: 3px 0;
+    font-size: 11.5px;
+    color: var(--ink-faint);
+    /* Шаги проявляются по очереди: видно последовательность, а не список,
+       нарисованный разом. */
+    animation: vmBootIn .26s ease-out both;
+  }
+  .vm-boot-mark {
+    justify-self: center;
+    width: 11px; height: 11px; border-radius: 50%;
+    border: 1.5px solid var(--line-strong);
+    display: grid; place-items: center;
+  }
+  .vm-boot-step.done { color: var(--ink-mute); }
+  .vm-boot-step.done .vm-boot-mark { border-color: transparent; background: var(--accent); }
+  /* Галочка рамкой — без иконочного шрифта и без SVG на каждый шаг */
+  .vm-boot-step.done .vm-boot-mark::after {
+    content: "";
+    width: 5px; height: 2.5px;
+    border: 1.5px solid var(--on-accent);
+    border-top: 0; border-right: 0;
+    transform: rotate(-45deg) translate(0, -1px);
+  }
+  .vm-boot-step.active { color: var(--ink); }
+  .vm-boot-step.active .vm-boot-mark {
+    border-color: var(--accent);
+    border-top-color: transparent;
+    animation: vmSpin .7s linear infinite;
+  }
+  .vm-boot-step.failed { color: var(--danger); }
+  .vm-boot-step.failed .vm-boot-mark {
+    border-color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
+  }
+  .vm-boot-step.waiting { opacity: .5; }
+  /* Причина ошибки под упавшим шагом: тост уйдёт, а это останется */
+  .vm-boot-reason {
+    margin: 1px 0 3px 25px;
+    font-size: 10.5px;
+    line-height: 1.45;
+    color: color-mix(in srgb, var(--danger) 78%, var(--ink));
+  }
+  .vm-boot-hint {
+    font-family: var(--mono); font-size: 10px; color: var(--ink-faint);
+    font-variant-numeric: tabular-nums;
+  }
+  /* Долгий шаг заранее говорит, сколько ждать: иначе минута тишины читается
+     как «зависло». */
+  .vm-boot-step.active.slow .vm-boot-hint { color: var(--warn); }
+  @keyframes vmBootIn {
+    from { opacity: 0; transform: translateY(-3px); }
+    to { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .vm-boot-step { animation: none; }
+    .vm-boot-step.active .vm-boot-mark { animation: none; border-top-color: var(--accent); }
+  }
+
   .vmws-feed {
     position: relative;
     flex: 1;
@@ -3171,6 +3258,13 @@
             <span>⌄</span>
           </button>
         </header>
+        <div class="vm-boot" id="agentVmBoot" hidden>
+          <div class="vm-boot-head">
+            <span class="vm-boot-title" id="agentVmBootTitle">Готовлю среду проекта</span>
+            <span class="vm-boot-elapsed" id="agentVmBootElapsed"></span>
+          </div>
+          <div id="agentVmBootSteps"></div>
+        </div>
         <div class="vmws-stage" id="agentVmStage" hidden>
           <span class="vmws-stage-spinner"></span>
           <div>

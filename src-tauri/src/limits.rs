@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::daemon::Daemon;
 use crate::model::Status;
 use crate::util::{fmt_reset_in, now_ms};
-use crate::{tmux, windows};
+use crate::windows;
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -212,11 +212,17 @@ async fn run_auto_resume(d: &Arc<Daemon>) {
         tauri::async_runtime::spawn(async move {
             // стаггер 2 мин — не сжигаем свежее окно залпом
             tokio::time::sleep(Duration::from_millis(i as u64 * 120_000)).await;
-            let still_waiting = d2.session(&sid).is_some_and(|s| s.limit_wait);
-            if !still_waiting || !tmux::pane_alive(&pane).await {
+            // Сессию перечитываем: за 2 минуты стаггера она могла и ответить,
+            // и уехать. Заодно отсюда берётся машина — «продолжай» удалённой
+            // сессии должно уехать на её узел, а не в локальный tmux.
+            let Some(s) = d2.session(&sid).filter(|s| s.limit_wait) else {
+                return;
+            };
+            let Ok(target) = d2.pane_target(&s) else { return };
+            if !target.pane_alive(&pane).await {
                 return;
             }
-            if tmux::reply(&pane, "продолжай").await.is_ok() {
+            if target.reply(&pane, "продолжай").await.is_ok() {
                 d2.with_session(&sid, |s| s.limit_wait = false);
                 d2.mark_prompt_sent(&sid, "продолжай (авто после сброса лимита)");
                 println!("[jarvis] авто-продолжил {project}");

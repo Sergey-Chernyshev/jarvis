@@ -21,8 +21,24 @@ use crate::util::jarvis_dir;
 pub const SCHEMA_VERSION: u64 = 1;
 
 pub struct Store {
-    cache: Mutex<Option<Value>>,
+    /// Разобранные настройки + отпечаток файла, с которого они прочитаны.
+    /// Отпечаток нужен потому, что settings.json правит не только приложение:
+    /// `jarvis-setup remote add` дописывает узел, и человек редактирует файл
+    /// руками. Без сверки приложение записало бы поверх свой устаревший
+    /// снимок — то есть молча стёрло бы чужую правку.
+    cache: Mutex<Option<(Value, Stamp)>>,
     path: PathBuf,
+}
+
+/// Отпечаток файла: время правки и размер. Не содержимое — читать файл ради
+/// сравнения означало бы отказаться от кэша вовсе, а stat дёшев. Размер идёт
+/// в пару к mtime, потому что на файловых системах с секундной гранулярностью
+/// две правки внутри одной секунды имеют одинаковое время.
+type Stamp = Option<(std::time::SystemTime, u64)>;
+
+fn stamp_of(path: &Path) -> Stamp {
+    let m = fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
 }
 
 fn defaults() -> Value {
@@ -44,7 +60,12 @@ fn defaults() -> Value {
         "launchTerminal": "terminal-app", // 'terminal-app' | 'iterm2' | 'custom'
         "launchCustomCmd": "",            // шаблон для 'custom', плейсхолдер {cmd}
         "launchProxyCmd": "",             // команда, выполняемая в терминале ПЕРЕД запуском агента (опц.)
-        "launchDangerous": false,         // глобальный «опасный режим»: claude --dangerously-skip-permissions / codex YOLO
+        // Глобальный «опасный режим» (claude --dangerously-skip-permissions /
+        // codex --dangerously-bypass-approvals-and-sandbox) включён по умолчанию:
+        // Jarvis запускает агентов в СВОИХ проектах, и подтверждать каждое
+        // действие руками — ровно та работа, ради отсутствия которой его и
+        // ставят. Выключается тумблером в «Запуске».
+        "launchDangerous": true,
         // внешность (дизайн «Клевер», экран 14f «вид»)
         "theme": "light",   // 'light' | 'dark' | 'auto' (системная)
         "paint": "clover",  // 'clover' | 'coal' | 'raspberry' | 'custom'
@@ -58,6 +79,9 @@ fn defaults() -> Value {
         "mode": "overlay",
         "windowW": 1120,
         "windowH": 640,
+        // удалённые узлы (VPS/рабочая станция): [{name, sshHost, jarvisDir}].
+        // Пусто — удалённый слой выключен целиком: ни ssh-туннелей, ни поллеров.
+        "remotes": [],
         "schemaVersion": SCHEMA_VERSION,
         "notify": {
             "content": { "branch": true, "model": false, "effort": false, "tokens": false, "time": false },
@@ -159,12 +183,18 @@ impl Store {
         }
     }
 
-    fn current_locked(&self, cache: &mut Option<Value>) -> Value {
-        if let Some(value) = cache.as_ref() {
-            return value.clone();
+    fn current_locked(&self, cache: &mut Option<(Value, Stamp)>) -> Value {
+        let stamp = stamp_of(&self.path);
+        if let Some((value, at)) = cache.as_ref() {
+            if *at == stamp {
+                return value.clone();
+            }
+            // Файл сменился под нами — перечитываем. Иначе следующая же запись
+            // (любой тумблер в панели) вернула бы файл к нашему снимку.
+            crate::log::line("[settings] файл изменился снаружи — перечитываю");
         }
         let value = read_merged(&self.path);
-        *cache = Some(value.clone());
+        *cache = Some((value.clone(), stamp));
         value
     }
 
@@ -178,7 +208,9 @@ impl Store {
 
         match atomic_write(&self.path, &next) {
             Ok(()) => {
-                *cache = Some(next.clone());
+                // Отпечаток снимаем ПОСЛЕ записи — с того файла, что теперь на
+                // диске, иначе следующее чтение сочло бы свою же запись чужой.
+                *cache = Some((next.clone(), stamp_of(&self.path)));
                 next
             }
             Err(err) => {
@@ -366,10 +398,11 @@ mod migration_tests {
 mod proxy_tests {
     use super::*;
 
-    // load() отдаёт кэш, если он есть, минуя файл — подменяем его напрямую.
+    // load() отдаёт кэш, если отпечаток файла совпал — подменяем и то, и другое.
     fn store_with(v: Value) -> Store {
         let s = Store::new();
-        *s.cache.lock().unwrap() = Some(v);
+        let stamp = stamp_of(&s.path);
+        *s.cache.lock().unwrap() = Some((v, stamp));
         s
     }
 
@@ -426,6 +459,37 @@ mod persistence_tests {
 
     fn store_at(dir: &Path) -> Store {
         Store::with_path(dir.join("settings.json"))
+    }
+
+    #[test]
+    fn external_edit_is_not_overwritten_by_a_stale_cache() {
+        // Реальный сценарий: `jarvis-setup remote add` дописывает узел в
+        // settings.json, пока приложение работает. Приложение обязано увидеть
+        // правку до своей следующей записи, иначе оно молча её сотрёт.
+        let dir = temp_dir("external-edit");
+        let store = store_at(&dir);
+        store.set_top("theme", Value::from("dark")); // кэш прогрет и записан
+
+        // ...кто-то правит файл мимо нас
+        let path = dir.join("settings.json");
+        let mut disk: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        disk["remotes"] = json!([{ "name": "vps", "sshHost": "dev@vps" }]);
+        // Отпечаток — пара (mtime, размер), и здесь ловится любой из двух:
+        // ключ добавился, значит размер точно другой. Пауза лишь разводит
+        // mtime там, где файловая система его различает.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&path, serde_json::to_string_pretty(&disk).unwrap() + "\n").unwrap();
+
+        store.set_top("quietMode", Value::from(true)); // следующая запись приложения
+
+        let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            after["remotes"][0]["name"],
+            Value::from("vps"),
+            "чужая правка обязана пережить нашу запись"
+        );
+        assert_eq!(after["quietMode"], Value::from(true), "и наша тоже");
+        assert_eq!(after["theme"], Value::from("dark"), "и прежняя наша");
     }
 
     #[test]

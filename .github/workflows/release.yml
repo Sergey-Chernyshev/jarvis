@@ -50,3 +50,44 @@ jobs:
           releaseDraft: false
           prerelease: false
           uploadUpdaterJson: true
+
+  # Узел удалённых агентов. Приложение ставит его на VPS само, и брать бинарь
+  # ему неоткуда: у человека с установленным .app нет ни исходников, ни
+  # линкера под Linux. Поэтому кладём готовые сборки в тот же релиз — панель
+  # качает их прямо на удалённую машину (см. install::remote::release_url).
+  node:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            packages: ""
+          - target: aarch64-unknown-linux-gnu
+            packages: gcc-aarch64-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cross-линкер
+        if: matrix.packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+
+      - name: Сборка узла
+        working-directory: src-tauri/node
+        env:
+          # Имя переменной задаёт cargo: TARGET в верхнем регистре, дефисы → _
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+          mv target/${{ matrix.target }}/release/jarvis-node jarvis-node-${{ matrix.target }}
+
+      - name: В релиз
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: src-tauri/node/jarvis-node-${{ matrix.target }}

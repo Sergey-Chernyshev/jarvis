@@ -74,6 +74,21 @@ pub fn build_meta(content: &Value, session: &Session, now_ms: i64) -> Vec<Value>
             out.push(serde_json::json!({ "kind": "br", "text": format!("⎇ {}", br) }));
         }
     }
+    // Какой именно чат: в одном проекте тредов много, и без этого непонятно,
+    // к какому из них относится уведомление. Показываем заголовок треда, а если
+    // его ещё нет — короткий id, по которому тред находится в списке.
+    if flag("thread") {
+        let thread = session
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(|title| crate::util::ellipsize(title, 40))
+            .unwrap_or_else(|| session.id.chars().take(8).collect());
+        if !thread.is_empty() {
+            out.push(serde_json::json!({ "kind": "th", "text": thread }));
+        }
+    }
     if flag("model") {
         if let Some(md) = session.model.as_deref().filter(|s| !s.is_empty()) {
             out.push(serde_json::json!({ "kind": "md", "text": md }));
@@ -3372,6 +3387,44 @@ mod tests {
         let content = serde_json::json!({ "branch": false });
         let meta = build_meta(&content, &s, 0);
         assert!(meta.is_empty());
+    }
+
+    #[test]
+    fn build_meta_thread_names_the_chat_the_notification_belongs_to() {
+        // В проекте тредов много: без этого сегмента непонятно, чей это тост.
+        let mut s = Session::new("sid1".into(), 0);
+        s.title = Some("починить сборку на CI".into());
+        let content = serde_json::json!({ "thread": true });
+
+        let meta = build_meta(&content, &s, 0);
+
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta[0]["kind"], "th");
+        assert_eq!(meta[0]["text"], "починить сборку на CI");
+    }
+
+    #[test]
+    fn build_meta_thread_falls_back_to_a_short_id_and_respects_the_toggle() {
+        // Заголовка ещё нет — показываем короткий id, по нему тред находится.
+        let s = Session::new("0123456789abcdef".into(), 0);
+        let meta = build_meta(&serde_json::json!({ "thread": true }), &s, 0);
+        assert_eq!(meta[0]["text"], "01234567");
+
+        // Выключенный тумблер сегмент не добавляет.
+        assert!(build_meta(&serde_json::json!({ "thread": false }), &s, 0).is_empty());
+    }
+
+    #[test]
+    fn build_meta_thread_title_is_trimmed_to_stay_on_one_line() {
+        let mut s = Session::new("sid1".into(), 0);
+        s.title = Some("я".repeat(120));
+
+        let meta = build_meta(&serde_json::json!({ "thread": true }), &s, 0);
+
+        // Обрезка по символам: кириллица не должна рваться посреди символа.
+        let text = meta[0]["text"].as_str().unwrap();
+        assert_eq!(text.chars().count(), 40);
+        assert!(text.chars().all(|ch| ch == 'я'));
     }
 
     #[test]

@@ -190,6 +190,15 @@
         color: var(--ink-faint);
         font-size: 11.5px;
       }
+      /* какой чат: заголовок треда — главный различитель, когда в проекте
+         несколько тредов, поэтому акцентом; длинный обрезаем многоточием */
+      .meta .th {
+        color: var(--accent-text);
+        max-width: 190px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       .meta .md {
         color: var(--ink-mute);
       }

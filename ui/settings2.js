@@ -943,6 +943,7 @@
 #settings2 .npvmeta { margin:6px 16px 0 20px; font-size:12px; color:var(--ink-mute); display:flex; gap:7px; flex-wrap:wrap; align-items:center; }
 #settings2 .npvmeta:empty { display:none; }
 #settings2 .npvmeta .br { color:var(--ink-faint); font-size:11.5px; }
+#settings2 .npvmeta .th { color:var(--accent-text); max-width:190px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #settings2 .npvmeta .md { color:var(--ink-mute); }
 #settings2 .npvmeta .ef { font:600 10px/1 var(--s2-font); color:var(--ink-mute); background:var(--surface); border:0; border-radius:5px; padding:3px 6px; }
 #settings2 .npvmeta .sp { color:var(--ink-faint); }
@@ -1612,6 +1613,7 @@
     // ── живое превью карточки (та же вёрстка, что у реального тоста) ──
     const SAMPLE = {
       br: "⎇ feat/voice-settings",
+      th: "починить сборку на CI",
       md: "Opus 4.8",
       ef: "low",
       time: "14:32",
@@ -1630,6 +1632,7 @@
       pvMeta.textContent = "";
       const segs = [];
       if (content.branch) segs.push(["br", SAMPLE.br]);
+      if (content.thread) segs.push(["th", SAMPLE.th]);
       if (content.model) segs.push(["md", SAMPLE.md]);
       if (content.effort) segs.push(["ef", SAMPLE.ef]);
       if (content.time) segs.push(["", SAMPLE.time]);
@@ -1662,6 +1665,13 @@
         "Текущая ветка",
         "⎇ рядом с проектом — удобно прыгать между задачами",
         toggle(content.branch, (on) => saveContent("branch", on)),
+      ),
+    );
+    cg.appendChild(
+      drow(
+        "Какой чат",
+        "заголовок треда — если в проекте их несколько",
+        toggle(content.thread, (on) => saveContent("thread", on)),
       ),
     );
     cg.appendChild(

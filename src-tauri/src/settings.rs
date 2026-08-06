@@ -67,7 +67,9 @@ pub(crate) fn defaults() -> Value {
         "windowH": 640,
         "schemaVersion": SCHEMA_VERSION,
         "notify": {
-            "content": { "branch": true, "model": false, "effort": false, "tokens": false, "time": false },
+            // thread по умолчанию включён: в проекте с несколькими тредами без
+            // него непонятно, к какому чату относится уведомление
+            "content": { "branch": true, "thread": true, "model": false, "effort": false, "tokens": false, "time": false },
             "events":  { "done": true, "waiting": true, "limit": true },
             "ttlSec": 8
         },

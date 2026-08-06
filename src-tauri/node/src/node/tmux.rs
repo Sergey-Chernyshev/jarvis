@@ -18,6 +18,9 @@ use tokio::time::sleep;
 /// Пауза между клавишами плана ответа: пикеру нужно перерисоваться, иначе
 /// следующая цифра прилетает в ещё не обновлённый экран.
 const KEY_STEP: Duration = Duration::from_millis(140);
+/// Сколько ждать первый экран агента, прежде чем смотреть, не спрашивает ли он
+/// про доверие к каталогу. Меньше — увидим пустой экран, больше — человек ждёт.
+const TRUST_PROMPT_WAIT: Duration = Duration::from_millis(1500);
 
 /// Дать TUI дожевать bracketed-paste, иначе Enter обгоняет вставку и текст
 /// остаётся в строке ввода неотправленным.
@@ -142,16 +145,77 @@ pub async fn play_keys(pane: &str, keys: &[Key]) -> Result<(), String> {
 /// Команда уходит через `bash -lc`: неинтерактивная оболочка не читает профиль,
 /// и `claude`, поставленный через nvm или в `~/.local/bin`, оказался бы «не
 /// найден» ровно там, где он есть.
-pub async fn launch(cwd: &str, cmd: &str, name: Option<&str>) -> Result<(), String> {
+pub async fn launch(cwd: &str, cmd: &str, name: Option<&str>) -> Result<(String, String), String> {
     // std, а не tokio::fs: фича "fs" узлу больше нигде не нужна, а тянуть её
     // ради одного mkdir — лишний вес там, где вес и есть смысл крейта.
     std::fs::create_dir_all(cwd).map_err(|e| format!("не создал {cwd}: {e}"))?;
     let session = session_name(cwd, name);
-    tmux_j(&[
-        "new-session", "-d", "-s", &session, "-c", cwd, "bash", "-lc", cmd,
+    // `-P -F` заставляет tmux напечатать пану. Без неё запустивший остаётся
+    // ни с чем: сессия агента ещё не зарегистрирована (хук придёт позже, а на
+    // первом запуске в новом каталоге Claude сначала спрашивает, доверять ли
+    // ему), и показать человеку происходящее было бы нечем.
+    let wrapped = with_agent_path(cmd);
+    let pane = tmux_j(&[
+        "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", &session, "-c", cwd,
+        "bash", "-lc", &wrapped,
     ])
-    .await
-    .map(|_| ())
+    .await?;
+    let pane = pane.trim().to_string();
+
+    // Первый запуск в новом каталоге Claude встречает вопросом «доверяешь ли
+    // ты этой папке?» — и до ответа не стартует, то есть не шлёт ни одного
+    // хука. Снаружи это выглядит как «запустил, а сессии нет»: терминала на
+    // той машине никто не видит, а в списке пусто.
+    //
+    // Подтверждаем сами, и вот почему это не самоуправство: каталог назвал
+    // человек, попросив именно в нём поднять агента. Отказ доверять папке,
+    // которую ты сам только что завёл, не имеет смысла — а вопрос остаётся
+    // висеть. Тот же приём уже используется для подтверждения `/model`.
+    sleep(TRUST_PROMPT_WAIT).await;
+    if let Ok(screen) = tmux_j(&["capture-pane", "-t", &pane, "-p"]).await {
+        if needs_trust(&screen) {
+            tmux_j(&["send-keys", "-t", &pane, "Enter"]).await?;
+        }
+    }
+    Ok((session, pane))
+}
+
+/// Дополнить PATH местами, где реально живут агенты.
+///
+/// Узел работает под systemd, и `bash -lc` ему не помогает: логин-шелл читает
+/// `~/.profile`, а npm/nvm/нативный установщик Claude Code дописывают себя в
+/// `~/.bashrc`, который неинтерактивная оболочка не читает вовсе. Итог —
+/// `claude` находится (шим лежит в PATH), запускается и падает с кодом 127,
+/// не найдя за собой настоящий бинарь. Снаружи это выглядит как «сессия
+/// поднялась и сразу исчезла»: пана есть ровно мгновение.
+///
+/// Дописываем в НАЧАЛО: шим Jarvis должен оставаться первым, если он есть, но
+/// настоящий бинарь обязан находиться за ним.
+fn with_agent_path(cmd: &str) -> String {
+    format!(
+        "export PATH=\"$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:\
+         $HOME/.local/share/pnpm:$HOME/.claude/local:/usr/local/bin:/opt/homebrew/bin:$PATH\"\n{cmd}"
+    )
+}
+
+/// Стоит ли пана на вопросе о доверии к каталогу.
+///
+/// Ищем связку признаков, а не одну фразу: заголовок вопроса и вариант «да».
+/// Одиночное «trust» встречается и в обычном выводе агента, а ошибиться здесь —
+/// значит нажать Enter там, где спрашивали совсем о другом.
+fn needs_trust(screen: &str) -> bool {
+    let tail: String = screen.lines().rev().take(20).collect::<Vec<_>>().join("\n").to_lowercase();
+    tail.contains("trust this folder") && tail.contains("do you trust")
+        || tail.contains("trust this folder") && tail.contains("yes, i trust")
+}
+
+/// Видимый экран паны — то, что увидел бы человек, подключившись к ней.
+///
+/// Нужен ровно для случая «запустил, а сессии нет»: агент жив, но стоит на
+/// вопросе (например, «доверять этому каталогу?») и потому ещё не прислал ни
+/// одного хука. Без экрана это неотличимо от «ничего не запустилось».
+pub async fn screen(pane: &str) -> Result<String, String> {
+    tmux_j(&["capture-pane", "-t", pane, "-p"]).await
 }
 
 /// Имя tmux-сессии: человекочитаемое и уникальное. Совпадение имён tmux не
@@ -329,5 +393,24 @@ mod tests {
         // получиться другое имя, иначе она просто не создастся
         assert!(session_name("/srv/x", Some("явное имя")).starts_with("явное-имя-"));
         assert!(session_name("/", None).starts_with("project-"));
+    }
+
+    #[test]
+    fn trust_prompt_is_recognised_but_not_guessed() {
+        let real = "Quick safety check: Is this a project you created or one you trust?\n                    Claude Code'll be able to read, edit, and execute files here.\n                    > 1. Yes, I trust this folder\n  2. No, exit\n Enter to confirm";
+        assert!(needs_trust(real));
+        // «trust» в обычном выводе — не повод жать Enter вслепую
+        assert!(!needs_trust("Я не стал бы trust этому коду, надо проверить"));
+        assert!(!needs_trust("Do you trust the output of this tool?"));
+        assert!(!needs_trust(""));
+    }
+
+    #[test]
+    fn launch_command_carries_agent_paths() {
+        let out = with_agent_path("claude --dangerously-skip-permissions");
+        assert!(out.starts_with("export PATH="), "PATH дополняем ДО запуска");
+        assert!(out.contains("$HOME/.local/bin"), "нативный установщик Claude Code кладёт сюда");
+        assert!(out.contains(":$PATH\""), "прежний PATH обязан сохраниться");
+        assert!(out.ends_with("claude --dangerously-skip-permissions"));
     }
 }

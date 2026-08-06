@@ -11,6 +11,7 @@
 //! | `POST /keys` | `{pane, keys}` → план клавиш в пикер вопроса |
 //! | `GET /projects` | оглавление проектов машины (каталоги, сессии, время) |
 //! | `POST /launch` | `{cwd, cmd}` → создать каталог и поднять сессию в tmux |
+//! | `GET /screen?pane=` | видимый экран паны — «что там на самом деле» |
 //! | `GET /panes` | живые паны `tmux -L jarvis` |
 //! | `POST <прочее>` | конверт от jarvis-hook |
 //!
@@ -50,6 +51,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/keys", post(keys))
         .route("/projects", get(projects))
         .route("/launch", post(launch))
+        .route("/screen", get(screen))
         // POST на любой прочий путь — конверт от хука. jarvis-hook бьёт в
         // /event, но привязываться к одному пути не за что: у демона ровно так же.
         .fallback(fallback)
@@ -197,7 +199,28 @@ async fn launch(body: Bytes) -> Response {
     if !cwd.starts_with('/') || cmd.is_empty() {
         return json_err(StatusCode::BAD_REQUEST, "нужен абсолютный cwd и непустая команда");
     }
-    tmux_result(tmux::launch(cwd, cmd, v.get("name").and_then(Value::as_str)).await)
+    match tmux::launch(cwd, cmd, v.get("name").and_then(Value::as_str)).await {
+        // Пану возвращаем сразу: сессия агента ещё не зарегистрирована, и это
+        // единственная ниточка, по которой запустивший может увидеть, что там
+        // происходит, и ответить на первый вопрос.
+        Ok((session, pane)) => json_ok(&json!({ "ok": true, "session": session, "pane": pane })),
+        Err(msg) => json_err(StatusCode::BAD_GATEWAY, &msg),
+    }
+}
+
+/// GET /screen?pane=%N — что видно в пане прямо сейчас.
+async fn screen(req: Request) -> Response {
+    let pane = params(req.uri().query())
+        .get("pane")
+        .cloned()
+        .unwrap_or_default();
+    if pane.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "нужен pane");
+    }
+    match tmux::screen(&pane).await {
+        Ok(text) => json_ok(&json!({ "pane": pane, "screen": text })),
+        Err(msg) => json_ok(&json!({ "pane": pane, "screen": "", "error": msg })),
+    }
 }
 
 /// POST <прочее> — конверт от jarvis-hook; GET <прочее> — признак жизни.

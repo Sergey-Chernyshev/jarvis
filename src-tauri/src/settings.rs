@@ -60,7 +60,12 @@ fn defaults() -> Value {
         "launchTerminal": "terminal-app", // 'terminal-app' | 'iterm2' | 'custom'
         "launchCustomCmd": "",            // шаблон для 'custom', плейсхолдер {cmd}
         "launchProxyCmd": "",             // команда, выполняемая в терминале ПЕРЕД запуском агента (опц.)
-        "launchDangerous": false,         // глобальный «опасный режим»: claude --dangerously-skip-permissions / codex YOLO
+        // Глобальный «опасный режим» (claude --dangerously-skip-permissions /
+        // codex --dangerously-bypass-approvals-and-sandbox) включён по умолчанию:
+        // Jarvis запускает агентов в СВОИХ проектах, и подтверждать каждое
+        // действие руками — ровно та работа, ради отсутствия которой его и
+        // ставят. Выключается тумблером в «Запуске».
+        "launchDangerous": true,
         // внешность (дизайн «Клевер», экран 14f «вид»)
         "theme": "light",   // 'light' | 'dark' | 'auto' (системная)
         "paint": "clover",  // 'clover' | 'coal' | 'raspberry' | 'custom'

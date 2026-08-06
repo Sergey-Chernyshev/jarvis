@@ -19,6 +19,7 @@
 //! ноут пробрасывается через `ssh -L`: аутентификация — обычная SSH,
 //! собственных секретов Jarvis не заводит.
 
+pub mod agent;
 pub mod files;
 pub mod http;
 pub mod projects;

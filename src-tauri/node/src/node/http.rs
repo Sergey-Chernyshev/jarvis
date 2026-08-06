@@ -12,6 +12,7 @@
 //! | `GET /projects` | оглавление проектов машины (каталоги, сессии, время) |
 //! | `POST /launch` | `{cwd, cmd}` → создать каталог и поднять сессию в tmux |
 //! | `GET /screen?pane=` | видимый экран паны — «что там на самом деле» |
+//! | `GET /usage` | лимиты аккаунта: текст `claude /usage` как есть |
 //! | `GET /panes` | живые паны `tmux -L jarvis` |
 //! | `POST <прочее>` | конверт от jarvis-hook |
 //!
@@ -30,7 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::ring::{Recorded, Slice};
-use super::{files, projects, tmux, Node};
+use super::{agent, files, projects, tmux, Node};
 
 /// Потолок long-poll. 25с, а не «до последнего»: SSH-туннель и NAT рвут
 /// молчащее соединение без предупреждения, и лучше отдать пустой ответ, чем
@@ -52,6 +53,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/projects", get(projects))
         .route("/launch", post(launch))
         .route("/screen", get(screen))
+        .route("/usage", get(usage))
         // POST на любой прочий путь — конверт от хука. jarvis-hook бьёт в
         // /event, но привязываться к одному пути не за что: у демона ровно так же.
         .fallback(fallback)
@@ -109,14 +111,25 @@ async fn file(State(node): State<Arc<Node>>, req: Request) -> Response {
     let q = params(req.uri().query());
     let path = q.get("path").map(String::as_str).unwrap_or("");
     let from = q.get("from").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-    let real = match files::resolve(path, node.roots()) {
+    // Корни транскриптов плюс рабочие каталоги ЖИВЫХ пан. Второе нужно, чтобы
+    // показать артефакты работы агента — файлы, которые он только что правил.
+    //
+    // Это по-прежнему проверка на стороне узла, а не доверие клиенту: «каталог,
+    // где прямо сейчас работает агент» узел выясняет сам у tmux. Пропадёт
+    // пана — пропадёт и доступ.
+    let mut roots = node.roots().to_vec();
+    roots.extend(tmux::live_cwds().await);
+    let real = match files::resolve(path, &roots) {
         Ok(p) => p,
         // 404 — «свежая сессия, транскрипта ещё нет», это ожидание, а не отказ
         Err(files::Denial::Missing) => {
-            return json_err(StatusCode::NOT_FOUND, "транскрипта ещё нет")
+            return json_err(StatusCode::NOT_FOUND, "файла ещё нет")
         }
         Err(files::Denial::Outside) => {
-            return json_err(StatusCode::FORBIDDEN, "путь вне корней транскриптов")
+            return json_err(
+                StatusCode::FORBIDDEN,
+                "путь вне корней: узел отдаёт транскрипты и файлы из каталогов, где работает агент",
+            )
         }
     };
     match files::read_chunk(&real, from) {
@@ -206,6 +219,12 @@ async fn launch(body: Bytes) -> Response {
         Ok((session, pane)) => json_ok(&json!({ "ok": true, "session": session, "pane": pane })),
         Err(msg) => json_err(StatusCode::BAD_GATEWAY, &msg),
     }
+}
+
+/// GET /usage — лимиты аккаунта. `?fresh=1` минует кэш.
+async fn usage(req: Request) -> Response {
+    let fresh = params(req.uri().query()).get("fresh").is_some_and(|v| v == "1");
+    json_ok(&agent::usage(fresh).await)
 }
 
 /// GET /screen?pane=%N — что видно в пане прямо сейчас.

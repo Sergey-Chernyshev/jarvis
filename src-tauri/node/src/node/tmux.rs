@@ -191,7 +191,7 @@ pub async fn launch(cwd: &str, cmd: &str, name: Option<&str>) -> Result<(String,
 ///
 /// Дописываем в НАЧАЛО: шим Jarvis должен оставаться первым, если он есть, но
 /// настоящий бинарь обязан находиться за ним.
-fn with_agent_path(cmd: &str) -> String {
+pub fn with_agent_path(cmd: &str) -> String {
     format!(
         "export PATH=\"$HOME/.local/bin:$HOME/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:\
          $HOME/.local/share/pnpm:$HOME/.claude/local:/usr/local/bin:/opt/homebrew/bin:$PATH\"\n{cmd}"
@@ -207,6 +207,22 @@ fn needs_trust(screen: &str) -> bool {
     let tail: String = screen.lines().rev().take(20).collect::<Vec<_>>().join("\n").to_lowercase();
     tail.contains("trust this folder") && tail.contains("do you trust")
         || tail.contains("trust this folder") && tail.contains("yes, i trust")
+}
+
+/// Рабочие каталоги живых пан — те места, где прямо сейчас работает агент.
+///
+/// Служат корнями доступа к файлам наравне с каталогами транскриптов: артефакт
+/// работы (файл, который агент только что правил) лежит именно там. Список
+/// узел выясняет сам, поэтому это по-прежнему его проверка, а не доверие
+/// клиенту: не стало паны — не стало и доступа.
+pub async fn live_cwds() -> Vec<std::path::PathBuf> {
+    list_panes()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p.cwd.starts_with('/'))
+        .filter_map(|p| std::fs::canonicalize(&p.cwd).ok())
+        .collect()
 }
 
 /// Видимый экран паны — то, что увидел бы человек, подключившись к ней.

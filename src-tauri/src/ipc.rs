@@ -2951,10 +2951,13 @@ pub async fn remotes_test(app: AppHandle, name: String) -> Value {
             .unwrap_or(crate::remote::TunnelState::Failed);
         if state == crate::remote::TunnelState::Failed {
             let why = node.why();
+            let host = &node.cfg.ssh_host;
+            // Ровно та команда, которой это проверяется за пять секунд: без неё
+            // человек остаётся один на один с «не работает».
             return err(if why.is_empty() {
-                "ssh не поднял туннель — проверь `ssh <хост> true` в терминале".to_string()
+                format!("ssh не поднял туннель. Проверь руками: ssh {host} true")
             } else {
-                format!("туннель не поднялся: {why}")
+                format!("туннель не поднялся: {why}\nПроверь руками: ssh {host} true")
             });
         }
         // форвард открывается не мгновенно после старта ssh

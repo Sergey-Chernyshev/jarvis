@@ -1254,6 +1254,26 @@ pub fn add(progress: &Progress, name: &str, ssh_host: &str, dir: Option<&str>) -
         )),
     }
 
+    // Каталог узла не должен совпадать с каталогом ЛОКАЛЬНОГО Jarvis той
+    // машины: узел кладёт туда свой `bin/jarvis-hook` (тот стучится в
+    // node.sock вместо run.sock) и молча ломает её собственную интеграцию.
+    // Дешевле отказать и попросить другой каталог, чем чинить это потом.
+    if let Ok(out) = run_ssh(
+        ssh_host,
+        &format!(
+            "d={q}\n[ -d \"$d/shims\" ] && printf 'host=yes\\n'\n[ -S \"$d/run.sock\" ] && printf 'host=yes\\n'\nexit 0",
+            q = sh_quote(&dir)
+        ),
+    ) {
+        if out.contains("host=yes") {
+            return Err(format!(
+                "в {dir} уже живёт свой Jarvis (там shims/ или run.sock). Узел кладёт \
+                 туда свой jarvis-hook и сломал бы её собственную интеграцию.\n\
+                 Возьми другой каталог, например ~/jarvis-node."
+            ));
+        }
+    }
+
     // 3. Сам узел.
     progress(Step::start(PHASE_NODE));
     let triples = target_triples(&remote.os, &remote.arch);

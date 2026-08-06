@@ -983,9 +983,23 @@ fn remote_hooks(
 
 /* ================= автозапуск ================= */
 
+/// Порт узла на петле по умолчанию. Нужен мобильному клиенту: форвард на
+/// unix-сокет — расширение OpenSSH, которого SSH-библиотеки под Android не
+/// умеют, а обычный TCP-форвард умеют все.
+pub const DEFAULT_TCP_PORT: u16 = 7717;
+
 /// Юнит systemd --user. Кавычки вокруг путей — на случай пробелов в домашнем
 /// каталоге: systemd разбирает строку сам и без них споткнулся бы.
-fn unit_text(dir: &str) -> String {
+///
+/// `tcp` — порт на петле или `None`. Наружу он не открывает ничего: узел
+/// откажется стартовать на любом адресе кроме петли. Разница с сокетом одна:
+/// сокет закрыт правами 0600, а к порту на петле может подключиться любой
+/// пользователь ТОЙ машины — поэтому это выключаемо (`--no-tcp`).
+fn unit_text(dir: &str, tcp: Option<u16>) -> String {
+    let tcp_line = match tcp {
+        Some(port) => format!("Environment=\"JARVIS_NODE_TCP=127.0.0.1:{port}\"\n"),
+        None => String::new(),
+    };
     format!(
         "[Unit]\n\
          Description=Jarvis node — приём хуков агентов для удалённого Jarvis\n\
@@ -995,6 +1009,7 @@ fn unit_text(dir: &str) -> String {
          [Service]\n\
          Type=simple\n\
          Environment=\"JARVIS_DIR={dir}\"\n\
+         {tcp_line}\
          ExecStart=\"{dir}/bin/jarvis-node\"\n\
          Restart=always\n\
          RestartSec=2\n\
@@ -1006,16 +1021,26 @@ fn unit_text(dir: &str) -> String {
 
 /// Автозапуск узла. Своего супервизора не изобретаем: есть systemd --user —
 /// пользуемся им, нет — честно говорим и показываем ручной путь.
-fn install_service(progress: &Progress, host: &str, remote: &Remote, dir: &str) -> bool {
+fn install_service(
+    progress: &Progress,
+    host: &str,
+    remote: &Remote,
+    dir: &str,
+    tcp: Option<u16>,
+) -> bool {
     if !remote.has("systemd-user") {
         progress(Step::warn(
             PHASE_BOOT,
             "systemctl --user на той стороне недоступен (нет systemd, нет сессии \
              пользователя или запрещён linger) — автозапуск не настроен",
         ));
+        let env = match tcp {
+            Some(port) => format!("JARVIS_NODE_TCP=127.0.0.1:{port} "),
+            None => String::new(),
+        };
         progress(Step::info(
             PHASE_BOOT,
-            format!("запустить сейчас:  nohup {dir}/bin/jarvis-node >> {dir}/node.log 2>&1 &"),
+            format!("запустить сейчас:  {env}nohup {dir}/bin/jarvis-node >> {dir}/node.log 2>&1 &"),
         ));
         progress(Step::info(
             PHASE_BOOT,
@@ -1026,7 +1051,7 @@ fn install_service(progress: &Progress, host: &str, remote: &Remote, dir: &str) 
         return false;
     }
     let path = format!("{}/.config/systemd/user/{UNIT}", remote.home);
-    if let Err(e) = put_file(host, &path, unit_text(dir).as_bytes(), Some("644"), false) {
+    if let Err(e) = put_file(host, &path, unit_text(dir, tcp).as_bytes(), Some("644"), false) {
         progress(Step::warn(PHASE_BOOT, format!("юнит не записан: {e}")));
         return false;
     }
@@ -1180,7 +1205,16 @@ fn from_settings(name: &str) -> Result<(String, String), String> {
 /* ================= команды ================= */
 
 /// `jarvis-setup remote add <name> <ssh-host> [--dir <путь>]`.
-pub fn add(progress: &Progress, name: &str, ssh_host: &str, dir: Option<&str>) -> Result<(), String> {
+/// `tcp` — порт узла на петле (`None` — не поднимать). По умолчанию включён:
+/// без него мобильный клиент к узлу не подключится вовсе, а форвард на
+/// unix-сокет SSH-библиотеки под Android не умеют. Выключается `--no-tcp`.
+pub fn add(
+    progress: &Progress,
+    name: &str,
+    ssh_host: &str,
+    dir: Option<&str>,
+    tcp: Option<u16>,
+) -> Result<(), String> {
     let name = name.trim();
     let ssh_host = ssh_host.trim();
     if name.is_empty() || ssh_host.is_empty() {
@@ -1313,7 +1347,7 @@ pub fn add(progress: &Progress, name: &str, ssh_host: &str, dir: Option<&str>) -
 
     // 5. Автозапуск.
     progress(Step::start(PHASE_BOOT));
-    let supervised = install_service(progress, ssh_host, &remote, &dir);
+    let supervised = install_service(progress, ssh_host, &remote, &dir, tcp);
 
     // 6. Проверка: узел должен ответить своей версией и открыть сокет.
     progress(Step::start(PHASE_CHECK));
@@ -1347,6 +1381,17 @@ pub fn add(progress: &Progress, name: &str, ssh_host: &str, dir: Option<&str>) -
             }
         }
         Err(e) => progress(Step::warn(PHASE_CHECK, format!("проверка не удалась: {e}"))),
+    }
+
+    if let Some(port) = tcp {
+        progress(Step::done(
+            PHASE_BOOT,
+            format!(
+                "узел слушает и 127.0.0.1:{port} — для мобильного клиента. \
+                 Наружу это ничего не открывает, но к порту на петле может \
+                 подключиться любой пользователь той машины: не нужен — ставь с --no-tcp"
+            ),
+        ));
     }
 
     // 7. Настройки ноута + памятка.
@@ -1639,9 +1684,15 @@ mod tests {
 
     #[test]
     fn unit_quotes_paths_and_restarts_always() {
-        let u = unit_text("/home/bob/.jarvis");
+        let u = unit_text("/home/bob/.jarvis", Some(DEFAULT_TCP_PORT));
         assert!(u.contains("ExecStart=\"/home/bob/.jarvis/bin/jarvis-node\""));
         assert!(u.contains("Environment=\"JARVIS_DIR=/home/bob/.jarvis\""));
+        // порт для телефона — в юните, и только на петле
+        assert!(u.contains("Environment=\"JARVIS_NODE_TCP=127.0.0.1:7717\""));
+        assert!(
+            !unit_text("/home/bob/.jarvis", None).contains("JARVIS_NODE_TCP"),
+            "--no-tcp обязан убирать строку целиком, а не выставлять пустое значение"
+        );
         assert!(u.contains("Restart=always"));
         assert!(u.contains("WantedBy=default.target"));
     }

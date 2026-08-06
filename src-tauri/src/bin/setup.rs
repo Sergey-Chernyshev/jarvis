@@ -22,7 +22,7 @@ const USAGE: &str = "\
   jarvis-setup uninstall                  вычистить интеграцию
   jarvis-setup status                     показать, что установлено
   jarvis-setup repair                     починить интеграцию агентов (хуки + шим)
-  jarvis-setup remote add <имя> <ssh-хост> [--dir <путь>]
+  jarvis-setup remote add <имя> <ssh-хост> [--dir <путь>] [--no-tcp]
                                           поставить узел на удалённую машину
   jarvis-setup remote status <имя>        жив ли узел на той стороне
 ";
@@ -35,6 +35,8 @@ const REMOTE_USAGE: &str = "\
       <имя>      как узел будет называться в списке сессий (латиница/цифры/.-_)
       <ssh-хост> то же, что пишешь в ssh: алиас из ~/.ssh/config или user@адрес
       --dir      каталог Jarvis на той стороне (по умолчанию ~/.jarvis)
+      --tcp=N    порт узла на петле для мобильного клиента (по умолчанию 7717)
+      --no-tcp   не поднимать этот порт (машиной пользуешься не только ты)
 
   jarvis-setup remote status <имя>
       Процесс узла, сокет, версия, состояние юнита и живые паны tmux.
@@ -69,6 +71,7 @@ fn die(msg: &str) -> ! {
 fn remote(args: &[String]) {
     let mut positional: Vec<&str> = Vec::new();
     let mut dir: Option<String> = None;
+    let mut tcp: Option<u16> = Some(install::remote::DEFAULT_TCP_PORT);
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -76,6 +79,15 @@ fn remote(args: &[String]) {
                 Some(value) => dir = Some(value.clone()),
                 None => die("--dir без пути"),
             },
+            // Порт на петле для мобильного клиента ставится по умолчанию;
+            // выключаем там, где машиной пользуется не только владелец.
+            "--no-tcp" => tcp = None,
+            other if other.starts_with("--tcp=") => {
+                match other.trim_start_matches("--tcp=").parse::<u16>() {
+                    Ok(p) if p > 0 => tcp = Some(p),
+                    _ => die("--tcp= ждёт номер порта"),
+                }
+            }
             other if other.starts_with("--dir=") => {
                 dir = Some(other.trim_start_matches("--dir=").to_string())
             }
@@ -85,7 +97,7 @@ fn remote(args: &[String]) {
     }
     match positional.split_first() {
         Some((&"add", [name, host])) => {
-            finish(install::remote::add(&print_step, name, host, dir.as_deref()))
+            finish(install::remote::add(&print_step, name, host, dir.as_deref(), tcp))
         }
         Some((&"status", [name])) => finish(install::remote::status(&print_step, name)),
         Some((&"add", _)) => die("remote add ждёт ровно два аргумента: <имя> <ssh-хост>"),

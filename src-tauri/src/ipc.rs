@@ -3206,6 +3206,10 @@ pub fn remotes_install(app: AppHandle, cfg: Value) -> Value {
                 &name,
                 &host,
                 dir.as_deref(),
+                // Порт для телефона поднимаем сразу: узнать, что его не хватает,
+                // человек может только на чужом устройстве и уже без панели.
+                // Кому не нужен — `jarvis-setup remote add --no-tcp`.
+                Some(crate::install::remote::DEFAULT_TCP_PORT),
             )
         }));
         let res = match outcome {

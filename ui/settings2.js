@@ -784,6 +784,7 @@
 #settings2 .s2rctl { flex-wrap:wrap; justify-content:flex-end; row-gap:6px; }
 /* вторая дорога на машину (пароль) — равноправная с ключом, поэтому отделена
    линией, а не спрятана мелким шрифтом под ней */
+#settings2 .s2rold { color:var(--warn); }
 #settings2 .s2rpass { margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }
 #settings2 .s2rpass .s2rbtns { align-items:center; }
 #settings2 .s2rpass input.s2-secret { flex:1 1 220px; min-width:0; }
@@ -1961,6 +1962,17 @@
     const errLine = el('div.s2err.s2rerr', { style: 'display:none' });
     grow.appendChild(errLine);
 
+    // Версия узла и отставание: узел ставится приложением и живёт на чужой
+    // машине месяцами. Без явной отметки человек не узнает, что половина
+    // починенного до него просто не доехала.
+    if (r.version) {
+      grow.appendChild(el('div.dd' + (r.outdated ? '.s2rold' : ''), {
+        text: r.outdated
+          ? 'узел v' + r.version + ' — старее приложения, переустанови его'
+          : 'узел v' + r.version,
+      }));
+    }
+
     const stat = el('span.sval.s2rstat');
     // одно место, где статус превращается в точку и текст (точка — формой, не цветом)
     const paint = (on, text, error) => {
@@ -1988,6 +2000,18 @@
       }
     }, 'sm');
 
+    // Переустановка — тот же установщик, что и при добавлении: он идемпотентен
+    // и перезальёт бинарь с хуками. Это единственный способ довезти до чужой
+    // машины то, что починили здесь.
+    const again = button('Переустановить', (b) => {
+      if (!remotesWizardReady()) { paint(false, 'нужна свежая сборка', null); return; }
+      b.disabled = true; b.textContent = 'Ставлю…';
+      remoteWizReset();
+      remoteWiz.host = r.sshHost || ''; remoteWiz.name = r.name; remoteWiz.dir = r.jarvisDir || '~/.jarvis';
+      startRemoteInstall();
+      reRenderPane('remotes');
+    }, 'sm');
+
     // удаление с подтверждением в самой кнопке (как у моделей) — без диалогов
     const del = el('button.btn.sm.danger', { text: 'Удалить' });
     let armed = false;
@@ -2002,7 +2026,7 @@
       reRenderPane('remotes');
     });
 
-    return el('div.drow', null, [dot, grow, el('div.dctl.s2rctl', null, [stat, test, del])]);
+    return el('div.drow', null, [dot, grow, el('div.dctl.s2rctl', null, [stat, test, again, del])]);
   }
 
   // пустое состояние: что это вообще и что нужно на той стороне

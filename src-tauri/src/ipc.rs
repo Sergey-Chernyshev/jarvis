@@ -3126,7 +3126,15 @@ pub async fn remotes_test(app: AppHandle, name: String) -> Value {
         Err(e) => return err(format!("{e}: {}", node.why())),
     };
     match client.hello().await {
-        Ok(h) => json!({ "ok": true, "host": h.host, "version": h.version, "buffered": h.buffered }),
+        Ok(h) => {
+            // «Проверить» — тоже рукопожатие: пусть строка узла сразу узнает
+            // его версию, не дожидаясь круга поллера.
+            node.saw_version(&h.version);
+            json!({
+                "ok": true, "host": h.host, "version": h.version,
+                "buffered": h.buffered, "outdated": node.outdated(),
+            })
+        }
         // Узел не ответил при живом ssh — почти всегда это «сокета нет»:
         // узел не запущен на той стороне. Подсказываем, чем это проверить.
         Err(e) => err(format!(

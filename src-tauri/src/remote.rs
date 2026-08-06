@@ -840,6 +840,13 @@ pub struct RemoteStatus {
     /// Локальный порт туннеля; 0 — туннеля нет.
     pub port: u16,
     pub cursor: u64,
+    /// Версия узла с последнего рукопожатия. Пусто — ещё не здоровались.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub version: String,
+    /// Узел старее приложения. Он ставится приложением и живёт на чужой машине
+    /// месяцами: без явной отметки об этом человек не узнает, что половина
+    /// починенного до него просто не доехала.
+    pub outdated: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub error: String,
 }
@@ -856,6 +863,8 @@ pub struct Node {
     /// Подряд неудачных кругов поллера — множитель backoff.
     fails: AtomicU64,
     last_error: Mutex<String>,
+    /// Версия узла с последнего рукопожатия.
+    version: Mutex<String>,
 }
 
 impl Node {
@@ -868,6 +877,7 @@ impl Node {
             online: AtomicBool::new(false),
             fails: AtomicU64::new(0),
             last_error: Mutex::new(String::new()),
+            version: Mutex::new(String::new()),
             cfg,
         }
     }
@@ -901,6 +911,8 @@ impl Node {
             connected: self.online.load(Ordering::SeqCst),
             port: self.tunnel.port(),
             cursor: self.cursor(),
+            version: self.version.lock().unwrap().clone(),
+            outdated: self.outdated(),
             error: self.why(),
         }
     }
@@ -909,6 +921,22 @@ impl Node {
     /// ЧТО не вышло («туннель не поднялся»), жалоба ssh — ПОЧЕМУ («Permission
     /// denied», «administratively prohibited»). По отдельности каждая половина
     /// бесполезна, поэтому отдаём обе.
+    /// Отстал ли узел от приложения. Сравниваем строки как есть: версии у них
+    /// общие по построению (выпускаются вместе), и «не равно» здесь честнее
+    /// любого разбора на компоненты — расхождение в любую сторону означает,
+    /// что узел ставился другой сборкой.
+    pub fn outdated(&self) -> bool {
+        let v = self.version.lock().unwrap();
+        !v.is_empty() && *v != env!("CARGO_PKG_VERSION")
+    }
+
+    /// Запомнить версию с рукопожатия.
+    pub fn saw_version(&self, v: &str) {
+        if !v.is_empty() {
+            *self.version.lock().unwrap() = v.to_string();
+        }
+    }
+
     pub fn why(&self) -> String {
         let own = self.last_error.lock().unwrap().clone();
         let ssh = self.tunnel.last_stderr();
@@ -991,14 +1019,25 @@ async fn poll_loop(node: Arc<Node>, sink: Sink) {
                 Err(e) => Err(e),
             };
             match hello {
-                Ok(h) => crate::log::line(&format!(
-                    "[remote] {}: узел {} v{} (uptime {}с, в буфере {})",
-                    node.cfg.name,
-                    h.host,
-                    h.version,
-                    h.uptime_ms / 1000,
-                    h.buffered
-                )),
+                Ok(h) => {
+                    node.saw_version(&h.version);
+                    if node.outdated() {
+                        crate::log::line(&format!(
+                            "[remote] {}: узел v{} старее приложения v{} — переустанови его",
+                            node.cfg.name,
+                            h.version,
+                            env!("CARGO_PKG_VERSION"),
+                        ));
+                    }
+                    crate::log::line(&format!(
+                        "[remote] {}: узел {} v{} (uptime {}с, в буфере {})",
+                        node.cfg.name,
+                        h.host,
+                        h.version,
+                        h.uptime_ms / 1000,
+                        h.buffered
+                    ));
+                }
                 Err(e) => {
                     let pause = node.fail(&e);
                     let n = node.clone();

@@ -3169,9 +3169,11 @@
           </label>
           <div class="vm-env-actions">
             <button class="vm-button primary" id="agentVmEnsure">Запустить VM</button>
+            <button class="vm-button" id="agentVmConnect" hidden>Подключить терминал</button>
             <button class="vm-button" id="agentVmCopyShell" disabled>Копировать вход</button>
             <button class="vm-button" id="agentVmCopyResume" hidden>Копировать resume</button>
             <button class="vm-button" id="agentVmRestart" hidden>Перезапустить</button>
+            <button class="vm-button danger" id="agentVmStopAgent" hidden>Завершить агента</button>
             <button class="vm-button danger" id="agentVmStop" hidden>Остановить</button>
           </div>
           <div class="vm-env-note">Agent VM получает весь каталог проекта. Изменения сразу видны на Mac. Секреты доставляются отдельно и не лежат в project mount.</div>

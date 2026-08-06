@@ -349,6 +349,19 @@
     return "ready";
   }
 
+  // Снимок терминала обновляется только пока открыт экран проекта. Вне его
+  // обновлять снимок некому, поэтому старая запись — не доказательство жизни
+  // сессии: иначе карточка проекта показывает «работает» у мёртвого терминала.
+  const TERMINAL_SNAPSHOT_TTL_MS = 4000;
+
+  function terminalSnapshotLive(snapshot, now = Date.now()) {
+    const entry = asObject(snapshot);
+    if (!["ready", "working"].includes(asString(entry.state))) return false;
+    const seenAt = Number(entry.seenAt);
+    if (!Number.isFinite(seenAt) || seenAt <= 0) return false;
+    return now - seenAt < TERMINAL_SNAPSHOT_TTL_MS;
+  }
+
   function pluginRuntimeStatus(plugin, now = Date.now()) {
     if (!plugin) {
       return {
@@ -696,5 +709,6 @@
     runSummary,
     selectBackend,
     stateLabel,
+    terminalSnapshotLive,
   };
 });

@@ -3137,7 +3137,9 @@ const agentVmResourcesEl = document.getElementById('agentVmResources');
 const agentVmModulesEl = document.getElementById('agentVmModules');
 const agentVmAutostartEl = document.getElementById('agentVmAutostart');
 const agentVmEnsureEl = document.getElementById('agentVmEnsure');
+const agentVmConnectEl = document.getElementById('agentVmConnect');
 const agentVmRestartEl = document.getElementById('agentVmRestart');
+const agentVmStopAgentEl = document.getElementById('agentVmStopAgent');
 const agentVmStopEl = document.getElementById('agentVmStop');
 const agentVmCopyShellEl = document.getElementById('agentVmCopyShell');
 const agentVmCopyResumeEl = document.getElementById('agentVmCopyResume');
@@ -3358,7 +3360,8 @@ function renderActiveEnvironments() {
   for (const environment of environments) {
     const terminalProjectKey = environment.projectId || environment.cwd;
     const liveBackend = ['claude', 'codex'].find((backend) =>
-      agentVmTerminalAlive(agentVmTerminals.get(`${terminalProjectKey}:${backend}`)));
+      AgentVmModel.terminalSnapshotLive(
+        agentVmTerminals.get(`${terminalProjectKey}:${backend}`)));
     const uiState = liveBackend ? 'working' : environment.uiState;
     const row = document.createElement('div');
     row.className = `vm-active-row ${uiState}`;
@@ -3480,12 +3483,17 @@ function scheduleAgentVmTerminalResize() {
 function rememberAgentVmTerminal(terminal, key = agentVmTerminalKey()) {
   if (!key || !terminal) return false;
   const current = agentVmTerminals.get(key);
+  // seenAt обновляем всегда, даже когда снимок не изменился: это отметка
+  // «сейчас проверено», по ней экраны вне проекта отличают живую сессию от
+  // протухшего снимка (см. AgentVmModel.terminalSnapshotLive).
+  const seen = { ...terminal, seenAt: Date.now() };
   if (current?.state === terminal.state
     && current?.screen === terminal.screen
     && current?.terminalId === terminal.terminalId) {
+    agentVmTerminals.set(key, seen);
     return false;
   }
-  agentVmTerminals.set(key, terminal);
+  agentVmTerminals.set(key, seen);
   return true;
 }
 
@@ -3860,6 +3868,12 @@ function renderAgentVmEnvironment(project, vm, terminal, run, uiState) {
   agentVmEnsureEl.disabled = !!agentVmStage;
   agentVmEnsureEl.textContent = vm?.state === 'stopped' ? 'Запустить VM' : 'Создать VM';
   agentVmRestartEl.hidden = !running;
+  // Живой tmux-терминал: подключаем, пока агент не запущен, и даём завершить
+  // его, не трогая VM. До этого обе операции были написаны, но недостижимы.
+  agentVmConnectEl.hidden = !running || terminalAlive;
+  agentVmConnectEl.disabled = !!agentVmStage;
+  agentVmStopAgentEl.hidden = !terminalAlive;
+  agentVmStopAgentEl.disabled = !!agentVmStage;
   agentVmStopEl.hidden = !running;
   const shell = running ? attrs.shellCommand || runAttrs.shellCommand || '' : '';
   agentVmCopyShellEl.disabled = !shell;
@@ -4341,7 +4355,9 @@ agentVmImagePickerEl.addEventListener('change', () => {
 agentVmSendEl.addEventListener('click', sendAgentVmMessage);
 agentVmCancelEl.addEventListener('click', cancelAgentVmRun);
 agentVmEnsureEl.addEventListener('click', () => runAgentVmLifecycle('runtime.ensure', 'Подготавливаю среду'));
+agentVmConnectEl.addEventListener('click', () => warmAgentVmTerminal());
 agentVmRestartEl.addEventListener('click', () => runAgentVmLifecycle('runtime.restart', 'Перезапускаю VM'));
+agentVmStopAgentEl.addEventListener('click', () => stopAgentVmTerminal());
 agentVmStopEl.addEventListener('click', () => runAgentVmLifecycle('runtime.stop', 'Останавливаю VM'));
 agentVmAutostartEl.addEventListener('change', async () => {
   if (!agentVmCurrent || agentVmProfileSaving) return;
@@ -4587,7 +4603,8 @@ function renderProjectCard(project) {
     histRows.push({ type: 'project', key: project.cwd, project });
     const terminalProjectKey = project.projectId || project.cwd;
     const terminalBackend = ['claude', 'codex'].find((backend) =>
-      agentVmTerminalAlive(agentVmTerminals.get(`${terminalProjectKey}:${backend}`)));
+      AgentVmModel.terminalSnapshotLive(
+        agentVmTerminals.get(`${terminalProjectKey}:${backend}`)));
     const uiState = terminalBackend
       ? 'working'
       : AgentVmModel.environmentState(project.vm, project.run);

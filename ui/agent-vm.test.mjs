@@ -304,6 +304,39 @@ test("active environments combine VM lifecycle with the latest structured run st
   );
 });
 
+test("a stale terminal snapshot stops proving the session is alive", () => {
+  const now = 100_000;
+  // Снимок обновляется только на экране проекта; вне его свежесть и решает.
+  assert.equal(
+    AgentVm.terminalSnapshotLive({ state: "ready", seenAt: now - 500 }, now),
+    true,
+  );
+  assert.equal(
+    AgentVm.terminalSnapshotLive({ state: "working", seenAt: now - 500 }, now),
+    true,
+  );
+  assert.equal(
+    AgentVm.terminalSnapshotLive({ state: "ready", seenAt: now - 60_000 }, now),
+    false,
+    "снимок часовой давности не доказывает, что терминал жив",
+  );
+  // Мёртвые состояния не оживают даже свежим снимком.
+  assert.equal(
+    AgentVm.terminalSnapshotLive(
+      { state: "disconnected", seenAt: now - 100 },
+      now,
+    ),
+    false,
+  );
+  assert.equal(
+    AgentVm.terminalSnapshotLive({ state: "absent", seenAt: now }, now),
+    false,
+  );
+  // Записи без отметки времени (и отсутствующие) живыми не считаются.
+  assert.equal(AgentVm.terminalSnapshotLive({ state: "ready" }, now), false);
+  assert.equal(AgentVm.terminalSnapshotLive(undefined, now), false);
+});
+
 test("a run cannot report working before its project VM exists", () => {
   const startingRun = run("cold-start", "starting", {
     projectId: "p-cold",
@@ -606,6 +639,18 @@ test("main panel exposes Agent VM workspace, bridge and keyboard contract", () =
   assert.match(renderer, /renderAgentVmWorkspace/);
   assert.match(renderer, /ensureAgentVmTerminal/);
   assert.match(renderer, /warmAgentVmTerminal/);
+  // Подключение и завершение терминала были написаны, но недостижимы из UI:
+  // кнопки должны существовать и быть привязаны к обработчикам.
+  assert.match(html, /id="agentVmConnect"/);
+  assert.match(html, /id="agentVmStopAgent"/);
+  assert.match(
+    renderer,
+    /agentVmConnectEl\.addEventListener\('click', \(\) => warmAgentVmTerminal\(\)\)/,
+  );
+  assert.match(
+    renderer,
+    /agentVmStopAgentEl\.addEventListener\('click', \(\) => stopAgentVmTerminal\(\)\)/,
+  );
   assert.match(renderer, /agentVmTerminalEnsurePromises/);
   assert.match(renderer, /agentVmTerminalInput/);
   assert.match(renderer, /ResizeObserver/);

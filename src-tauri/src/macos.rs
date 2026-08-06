@@ -13,9 +13,6 @@ use tauri::{Emitter, Manager, WebviewWindow};
 const NS_SCREEN_SAVER_WINDOW_LEVEL: isize = 1000;
 /// NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary
 const COLLECTION_BEHAVIOR: usize = (1 << 0) | (1 << 8);
-/// NSWindowCollectionBehaviorMoveToActiveSpace — показать окно на ТЕКУЩЕМ
-/// Space вместо переключения пользователя на «родной».
-const COLLECTION_BEHAVIOR_ACTIVE_SPACE: usize = 1 << 1;
 /// Поведение обычного окна: Managed | ParticipatesInCycle | FullScreenPrimary.
 /// FullScreenPrimary обязателен — без него AppKit не пускает окно в фуллскрин
 /// (зелёная кнопка и ⌃⌘F молча не работают).
@@ -100,14 +97,12 @@ pub fn float_normal(win: &WebviewWindow) {
 /// Показать окно, не активируя приложение (аналог showInactive в Electron):
 /// orderFrontRegardless выводит окно на экран, не делая его key.
 ///
-/// MoveToActiveSpace на время показа: без него AppKit возвращает окно на тот
-/// Space, где оно было упорядочено в прошлый раз, и переключает пользователя
-/// туда — то есть показ тоста/HUD уносил с текущего рабочего стола. Ставим
-/// поведение ДО orderFront, иначе решение о Space уже принято.
+/// Space здесь НЕ трогаем: `MoveToActiveSpace` несовместим с
+/// `CanJoinAllSpaces` (взаимоисключающие биты NSWindowCollectionBehavior) —
+/// AppKit уходит в assert, и падение прилетает внутри did_finish_launching,
+/// где его нельзя размотать. Проверено: приложение не стартует вовсе.
 pub fn show_inactive(win: &WebviewWindow) {
     on_main(win, |w| unsafe {
-        let behavior: usize = msg_send![w, collectionBehavior];
-        let _: () = msg_send![w, setCollectionBehavior: behavior | COLLECTION_BEHAVIOR_ACTIVE_SPACE];
         let _: () = msg_send![w, orderFrontRegardless];
         // Прозрачное окно: форму тени AppKit кэширует по непрозрачным пикселям
         // на момент отрисовки. Без сброса от прошлого размера остаётся контур —

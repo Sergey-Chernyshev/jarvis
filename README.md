@@ -173,11 +173,9 @@ Model and reasoning are changed via Codex's own `/model` picker (there is no sep
 
 An agent running on a VPS or an office workstation appears in the same list as your local ones — same statuses, toasts, voice, chat, reply-into-session and remote, with the node's name as a badge. A thin **node** (`jarvis-node`) lives on that machine: it receives the agents' hooks locally and **buffers the events**, so a closed laptop doesn't lose the night. Jarvis reaches it over your own SSH (`ssh -N -L` onto a unix socket) — the node opens no ports and Jarvis creates no new secrets.
 
-```bash
-jarvis-setup remote add vps dev@203.0.113.10   # uploads the node, wires the agents' hooks, sets up autostart
-```
+Set up straight from the panel: **Settings → «Удалённые»** → enter the ssh host → "Проверить машину" (shows what's there) → "Установить". Jarvis delivers the node itself, wires the agents' hooks and sets up autostart, showing each step as it goes. If ssh doesn't let it in yet, the panel offers the public key to add on that side. Same thing from a terminal — `jarvis-setup remote add vps dev@203.0.113.10`.
 
-The remote machine needs SSH access, `curl`, `tmux` (the latter only for replying into a session) and a `jarvis-node` built for it (`cd src-tauri && cargo build --release -p jarvis-node`, on that machine or cross-compiled). Setup, what it looks like in the UI, diagnostics, security and boundaries: **[docs/remote.md](docs/remote.md)**.
+The remote machine needs SSH access, `curl` (used by the hooks, and to fetch the node) and `tmux` — the latter only for replying into a session and the remote control. Setup, what it looks like in the UI, diagnostics, security and boundaries: **[docs/remote.md](docs/remote.md)**.
 
 ### 📊 Usage, costs and limits
 

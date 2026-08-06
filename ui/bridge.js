@@ -26,6 +26,13 @@
     remotesAdd: (cfg) => invoke('remotes_add', { cfg }),
     remotesRemove: (name) => invoke('remotes_remove', { name }),
     remotesTest: (name) => invoke('remotes_test', { name }),
+    // установка узла с нуля: разведка машины, сама установка (ход едет
+    // событиями) и публичный ssh-ключ для машин, куда доступа ещё нет
+    remotesPreflight: (sshHost, jarvisDir) => invoke('remotes_preflight', { sshHost, jarvisDir }),
+    remotesInstall: (cfg) => invoke('remotes_install', { cfg }),
+    remotesSshKey: (create) => invoke('remotes_ssh_key', { create }),
+    onRemoteInstallStep: (cb) => on('remote_install_progress', cb),
+    onRemoteInstallDone: (cb) => on('remote_install_done', cb),
     // тема/краска сменились в другом окне (демон рассылает всем)
     onAppearance: (cb) => on('appearance', cb),
     winMinimize: () => self().minimize(),

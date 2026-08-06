@@ -2952,6 +2952,146 @@ pub async fn remotes_test(app: AppHandle, name: String) -> Value {
     }
 }
 
+/// Идёт ли установка узла прямо сейчас. Две параллельные писали бы в один и тот
+/// же каталог на той машине и мешали бы друг другу заливать бинарь.
+static REMOTE_INSTALL_BUSY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Разведка машины до установки: ОС, что там есть и как туда попадёт узел.
+/// Долгая (ssh), поэтому в блокирующем потоке — иначе подвисает вся панель.
+#[tauri::command]
+pub async fn remotes_preflight(ssh_host: String, jarvis_dir: Option<String>) -> Value {
+    let out = tokio::task::spawn_blocking(move || {
+        crate::install::remote::preflight(&ssh_host, jarvis_dir.as_deref())
+    })
+    .await;
+    match out {
+        Ok(Ok(p)) => match serde_json::to_value(p) {
+            Ok(Value::Object(mut m)) => {
+                m.insert("ok".into(), Value::Bool(true));
+                Value::Object(m)
+            }
+            _ => err("не смог разобрать ответ разведки"),
+        },
+        Ok(Err(e)) => err(e),
+        Err(_) => err("разведка прервалась"),
+    }
+}
+
+/// Поставить узел на машину с нуля: бинарь, шим, хуки, автозапуск, запись в
+/// настройки. Возвращается сразу — ход установки едет событиями
+/// `remote_install_progress`, конец — `remote_install_done`.
+///
+/// Не блокирующая команда, потому что это минуты: ssh-заходы, а иногда и сборка
+/// на той стороне. Панель всё это время должна оставаться живой.
+#[tauri::command]
+pub fn remotes_install(app: AppHandle, cfg: Value) -> Value {
+    use std::sync::atomic::Ordering;
+    let d = Daemon::get(&app);
+    let name = cfg.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let host = cfg.get("sshHost").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let dir = cfg
+        .get("jarvisDir")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if name.is_empty() {
+        return err("Нужно имя узла");
+    }
+    if host.is_empty() {
+        return err("Нужен ssh-хост");
+    }
+    if REMOTE_INSTALL_BUSY.swap(true, Ordering::SeqCst) {
+        return err("Уже ставлю другой узел — дождись конца");
+    }
+
+    std::thread::spawn(move || {
+        // Паника внутри установки не должна оставить панель с вечным «ставлю»:
+        // ловим её и отдаём как обычный отказ.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::install::remote::add(
+                &|step| windows::emit_to_panel(&app, "remote_install_progress", &step),
+                &name,
+                &host,
+                dir.as_deref(),
+            )
+        }));
+        let res = match outcome {
+            Ok(r) => r,
+            Err(_) => Err("установщик аварийно остановился — повтори, это безопасно".into()),
+        };
+        // Замок снимаем сразу, как только установщик отработал: всё, что ниже,
+        // к чужой машине уже не ходит, и падать там нечему — но если бы упало,
+        // вечное «уже ставлю другой узел» пережило бы саму ошибку.
+        REMOTE_INSTALL_BUSY.store(false, Ordering::SeqCst);
+        if res.is_ok() {
+            // Узел уже в settings.json (его записал установщик) — поднимаем
+            // туннель и поллер, чтобы сессии поехали без перезапуска панели.
+            d.start_remotes();
+            d.push();
+        }
+        windows::emit_to_panel(
+            &app,
+            "remote_install_done",
+            &match &res {
+                Ok(()) => json!({ "ok": true, "name": name }),
+                Err(e) => json!({ "ok": false, "name": name, "error": e }),
+            },
+        );
+    });
+    ok()
+}
+
+/// Публичный ssh-ключ этой машины — его человек вставляет в панель VPS, когда
+/// доступа ещё нет. `create: true` — завести ed25519, если ключей нет вовсе.
+///
+/// Своего ключа Jarvis не заводит без спроса и чужие не трогает: доступ к чужим
+/// машинам остаётся решением человека.
+#[tauri::command]
+pub fn remotes_ssh_key(create: bool) -> Value {
+    let dir = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => std::path::PathBuf::from(h).join(".ssh"),
+        _ => return err("не знаю домашний каталог"),
+    };
+    // Порядок — по предпочтительности: ed25519 короче и современнее, rsa
+    // остаётся ради машин со старым sshd.
+    for name in ["id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"] {
+        let path = dir.join(name);
+        if let Ok(key) = std::fs::read_to_string(&path) {
+            let key = key.trim();
+            if !key.is_empty() {
+                return json!({
+                    "ok": true, "created": false,
+                    "path": path.display().to_string(), "publicKey": key,
+                });
+            }
+        }
+    }
+    if !create {
+        return json!({ "ok": true, "created": false, "publicKey": "" });
+    }
+    let key = dir.join("id_ed25519");
+    let out = std::process::Command::new("ssh-keygen")
+        .args(["-t", "ed25519", "-N", "", "-C", "jarvis", "-f"])
+        .arg(&key)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => match std::fs::read_to_string(key.with_extension("pub")) {
+            Ok(pub_key) => json!({
+                "ok": true, "created": true,
+                "path": key.with_extension("pub").display().to_string(),
+                "publicKey": pub_key.trim(),
+            }),
+            Err(e) => err(format!("ключ создан, но не прочитался: {e}")),
+        },
+        Ok(o) => err(format!(
+            "ssh-keygen: {}",
+            ellipsize(&one_line(&String::from_utf8_lossy(&o.stderr)), 160)
+        )),
+        Err(e) => err(format!("не запустился ssh-keygen: {e}")),
+    }
+}
+
 /// Ключ `remotes` настроек как массив (что угодно другое считаем пустым: список
 /// правится и руками, и битое значение не повод терять команду).
 fn remotes_array(d: &Arc<Daemon>) -> Vec<Value> {

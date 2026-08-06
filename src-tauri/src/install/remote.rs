@@ -22,10 +22,11 @@
 //! проверка. Хуки без узла бессмысленны, а автозапуск без бинаря — это юнит,
 //! который вечно перезапускает несуществующий файл.
 
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use super::{Progress, Step};
@@ -183,6 +184,9 @@ printf 'codex_home=%s\n' "${CODEX_HOME:-$HOME/.codex}"
 for b in tmux curl claude codex systemctl; do
   command -v "$b" >/dev/null 2>&1 && printf 'have=%s\n' "$b"
 done
+# cargo ищем и по PATH, и в ~/.cargo/bin: rustup дописывает его в ~/.profile,
+# а неинтерактивный ssh профиль не читает — «нет в PATH» тут не значит «нет»
+{ command -v cargo >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cargo" ]; } && printf 'have=%s\n' cargo
 [ -d "${CODEX_HOME:-$HOME/.codex}" ] && printf 'have=%s\n' codex-home
 systemctl --user show-environment >/dev/null 2>&1 && printf 'have=%s\n' systemd-user
 exit 0"#;
@@ -224,6 +228,92 @@ fn probe(host: &str) -> Result<Remote, String> {
             .filter(|(k, _)| *k == "have")
             .map(|(_, v)| v.trim().to_string())
             .collect(),
+    })
+}
+
+/* ================= разведка для панели ================= */
+
+/// Что панель показывает про машину ДО установки.
+///
+/// Разведка та же, что у установщика, но результат — не текст в терминале, а
+/// данные: человек должен увидеть, чего на той стороне не хватает, прежде чем
+/// запускать установку, а не узнать это из середины лога.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Preflight {
+    pub os: String,
+    pub arch: String,
+    pub home: String,
+    /// Куда встанет узел с учётом запрошенного каталога (`~` уже развёрнут).
+    pub dir: String,
+    pub tmux: bool,
+    pub curl: bool,
+    pub claude: bool,
+    pub codex: bool,
+    pub systemd: bool,
+    pub cargo: bool,
+    /// Как сюда попадёт бинарь узла: `local` | `download` | `build` | `none`.
+    pub node_source: String,
+    pub node_note: String,
+}
+
+/// Сходить на машину и рассказать, что там. Ошибка — только недоступность:
+/// нехватка tmux, агента или curl это состояние машины, а не отказ.
+pub fn preflight(ssh_host: &str, dir: Option<&str>) -> Result<Preflight, String> {
+    let ssh_host = ssh_host.trim();
+    if ssh_host.is_empty() {
+        return Err("нужен ssh-хост".into());
+    }
+    let remote = probe(ssh_host)?;
+    let triples = target_triples(&remote.os, &remote.arch);
+    // Текст — для человека, а не для лога: ссылку целиком тут показывать незачем
+    // (она длинная и в строку панели не влезает), важно откуда и подо что.
+    let (node_source, node_note) = match resolve_node(&remote, &triples) {
+        Ok(NodeSource::Local(p)) => (
+            "local".to_string(),
+            format!(
+                "залью готовый бинарь с этой машины: {}",
+                p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
+            ),
+        ),
+        Ok(NodeSource::Download(_)) => (
+            "download".to_string(),
+            format!(
+                "скачаю прямо на ту машину из релиза v{} (сборка {}) — там есть curl, собирать ничего не придётся",
+                env!("CARGO_PKG_VERSION"),
+                triples.first().map(String::as_str).unwrap_or("?"),
+            ),
+        ),
+        Ok(NodeSource::Build) => (
+            "build".to_string(),
+            "готовой сборки под эту платформу нет — соберу узел прямо там через cargo; \
+             первый раз это несколько минут"
+                .to_string(),
+        ),
+        Err(_) => (
+            "none".to_string(),
+            "взять узел неоткуда: нет ни curl (скачать), ни cargo (собрать). \
+             Поставь на ту машину curl — он всё равно нужен хукам"
+                .to_string(),
+        ),
+    };
+    let requested = dir
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .unwrap_or(DEFAULT_DIR);
+    Ok(Preflight {
+        dir: remote.expand(requested.trim_end_matches('/')),
+        tmux: remote.has("tmux"),
+        curl: remote.has("curl"),
+        claude: remote.has("claude"),
+        codex: remote.has("codex") || remote.has("codex-home"),
+        systemd: remote.has("systemd-user"),
+        cargo: remote.has("cargo"),
+        os: remote.os,
+        arch: remote.arch,
+        home: remote.home,
+        node_source,
+        node_note,
     })
 }
 
@@ -332,6 +422,84 @@ fn binary_fits(kind: Option<(&str, &str)>, os: &str, arch: &str) -> bool {
     }
 }
 
+/// Откуда возьмётся `jarvis-node` для той машины.
+///
+/// Порядок выбора — от самого быстрого и предсказуемого к самому долгому.
+/// Собранный локально бинарь есть только у разработчика; у человека с
+/// установленным приложением его нет и быть не может, поэтому основной путь —
+/// скачать готовый на самой удалённой машине. Сборка на той стороне — последний
+/// рубеж: она честно работает, но требует там rust и нескольких минут.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeSource {
+    /// Готовый файл на ЭТОЙ машине (dev-сборка или явный `JARVIS_NODE_BIN`).
+    Local(PathBuf),
+    /// Скачать на ТОЙ стороне из релиза этой же версии.
+    Download(String),
+    /// Собрать на той стороне из исходников — там нашёлся cargo.
+    Build,
+}
+
+impl NodeSource {
+    /// Короткий тег для панели.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            NodeSource::Local(_) => "local",
+            NodeSource::Download(_) => "download",
+            NodeSource::Build => "build",
+        }
+    }
+}
+
+/// Ссылка на бинарь узла в релизе. Версия — та же, что у приложения: узел и
+/// демон говорят по одному протоколу, и разъезд версий лечится ровно тем, что
+/// они выпускаются вместе.
+fn release_url(triple: &str) -> String {
+    format!(
+        "https://github.com/Sergey-Chernyshev/jarvis/releases/download/v{}/jarvis-node-{triple}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Выбрать способ доставки. Ошибка — только когда не остаётся ни одного:
+/// незнакомая платформа без cargo на той стороне.
+fn resolve_node(remote: &Remote, triples: &[String]) -> Result<NodeSource, String> {
+    // Локальный бинарь берём, только если он ГОДИТСЯ для той машины: залить
+    // mac-сборку на Linux — самая частая ошибка установки, и молчать о ней
+    // нельзя (в логе systemd это выглядит как «cannot execute binary file»).
+    for path in node_candidates(triples) {
+        if !path.is_file() {
+            continue;
+        }
+        let head = read_head(&path);
+        if binary_fits(binary_kind(&head), &remote.os, &remote.arch) {
+            return Ok(NodeSource::Local(path));
+        }
+    }
+    if let Some(triple) = triples.first() {
+        if remote.has("curl") {
+            return Ok(NodeSource::Download(release_url(triple)));
+        }
+    }
+    if remote.has("cargo") {
+        return Ok(NodeSource::Build);
+    }
+    Err(String::new()) // текст соберёт вызывающий: ему видны все три причины
+}
+
+/// Первые байты файла — по ним `binary_kind` отличает ELF от Mach-O. Читаем
+/// голову, а не файл целиком: кандидатов несколько, а весит узел мегабайты.
+fn read_head(path: &Path) -> Vec<u8> {
+    use std::io::Read;
+    let mut buf = vec![0u8; 32];
+    match fs::File::open(path).and_then(|mut f| f.read(&mut buf)) {
+        Ok(n) => {
+            buf.truncate(n);
+            buf
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Инструкция вместо бинаря. Печатается один раз и должна быть достаточной:
 /// человек ушёл собирать, вернулся, повторил команду.
 fn build_hint(remote: &Remote, triples: &[String], tried: &[PathBuf]) -> String {
@@ -355,6 +523,148 @@ fn build_hint(remote: &Remote, triples: &[String], tried: &[PathBuf]) -> String 
         remote.arch,
         tried.join("\n  "),
     )
+}
+
+/// Исходники узла, вшитые в приложение. Нужны, когда бинарь взять негде, а на
+/// той машине есть cargo: крейт крошечный (три зависимости), и собрать его там
+/// быстрее и честнее, чем требовать от человека кросс-компиляцию.
+///
+/// `include_str!` — по той же причине, что и у остальных шимов: установщик не
+/// должен зависеть от того, лежит ли рядом дерево исходников.
+const NODE_SRC: [(&str, &str); 7] = [
+    ("Cargo.toml", include_str!("../../node/Cargo.toml")),
+    ("src/main.rs", include_str!("../../node/src/main.rs")),
+    ("src/node/mod.rs", include_str!("../../node/src/node/mod.rs")),
+    ("src/node/ring.rs", include_str!("../../node/src/node/ring.rs")),
+    ("src/node/files.rs", include_str!("../../node/src/node/files.rs")),
+    ("src/node/http.rs", include_str!("../../node/src/node/http.rs")),
+    ("src/node/tmux.rs", include_str!("../../node/src/node/tmux.rs")),
+];
+
+/// Положить `jarvis-node` в `<dir>/bin` тем способом, который выбрал
+/// [`resolve_node`]. Все три пути заканчиваются одинаково: рабочий бинарь на
+/// боевом месте — и проверяются тоже одинаково, запуском `--version`.
+fn deliver_node(
+    progress: &Progress,
+    host: &str,
+    dir: &str,
+    remote: &Remote,
+    src: &NodeSource,
+) -> Result<(), String> {
+    let dst = format!("{dir}/bin/jarvis-node");
+    match src {
+        NodeSource::Local(path) => {
+            let bytes =
+                fs::read(path).map_err(|e| format!("не смог прочитать {}: {e}", path.display()))?;
+            if binary_kind(&bytes).is_none() {
+                progress(Step::info(
+                    PHASE_NODE,
+                    format!("формат {} не распознал — заливаю как есть", path.display()),
+                ));
+            }
+            put_file(host, &dst, &bytes, Some("755"), false)?;
+            progress(Step::done(
+                PHASE_NODE,
+                format!("{dst} ← {} ({} КБ)", path.display(), bytes.len() / 1024),
+            ));
+        }
+        NodeSource::Download(url) => {
+            progress(Step::info(PHASE_NODE, format!("качаю на той стороне: {url}")));
+            download_node(host, &dst, url)?;
+            progress(Step::done(
+                PHASE_NODE,
+                format!("{dst} ← релиз v{}", env!("CARGO_PKG_VERSION")),
+            ));
+        }
+        NodeSource::Build => {
+            progress(Step::info(
+                PHASE_NODE,
+                "собираю узел на той машине — в первый раз это пара минут: cargo тянет зависимости",
+            ));
+            build_node(host, dir, &dst)?;
+            progress(Step::done(
+                PHASE_NODE,
+                format!("{dst} ← собран на той стороне"),
+            ));
+        }
+    }
+    // Одна проверка на все три пути: файл на месте и ЗАПУСКАЕТСЯ там. Скачанный
+    // мог оказаться страницей 404, собранный — не тем таргетом, залитый —
+    // сборкой под другую архитектуру. Все три случая выглядят одинаково: узел
+    // молчит, а причина всплывает только в логе systemd.
+    let out = run_ssh(host, &format!("set -e\nchmod +x {f}\n{f} --version\n", f = sh_quote(&dst)))
+        .map_err(|e| {
+            format!(
+                "узел лёг на место, но не запускается на {} {}: {e}\n\
+                 Так выглядит бинарь не под ту платформу или оборванная закачка.",
+                remote.os, remote.arch
+            )
+        })?;
+    progress(Step::done(PHASE_NODE, out.trim().to_string()));
+    Ok(())
+}
+
+/// Скачать бинарь на удалённой машине.
+///
+/// `-f` обязателен: без него curl бодро сохраняет страницу «404 Not Found» под
+/// именем узла, и ошибка всплыла бы уже в логе systemd, а не здесь.
+fn download_node(host: &str, dst: &str, url: &str) -> Result<(), String> {
+    let script = format!(
+        r#"set -e
+f={dst}
+mkdir -p "$(dirname "$f")"
+t="$f.jarvis-new.$$"
+curl -fsSL --max-time 300 -o "$t" {url}
+chmod 755 "$t"
+mv -f "$t" "$f"
+"#,
+        dst = sh_quote(dst),
+        url = sh_quote(url),
+    );
+    run_ssh(host, &script).map(|_| ()).map_err(|e| {
+        format!(
+            "не скачался {url}: {e}\n\
+             Релиза этой версии может ещё не быть. Тогда: поставить на ту машину rust \
+             (узел соберётся там сам) или собрать бинарь самому и указать его через \
+             JARVIS_NODE_BIN."
+        )
+    })
+}
+
+/// Собрать узел из вшитых исходников прямо на той машине.
+///
+/// Без `--locked`: lock-файла у нас с собой нет (в репозитории он общий на весь
+/// воркспейс приложения и этому крейту не подходит), поэтому cargo разрешает
+/// версии сам — зависимостей три, и все с полуоткрытыми границами.
+fn build_node(host: &str, dir: &str, dst: &str) -> Result<(), String> {
+    let src_dir = format!("{dir}/src/jarvis-node");
+    // Каталог пересоздаём: остатки прошлой попытки (или другой версии узла)
+    // дали бы сборку неизвестно чего.
+    run_ssh(
+        host,
+        &format!("set -e\nrm -rf {d}\nmkdir -p {d}/src/node\n", d = sh_quote(&src_dir)),
+    )
+    .map_err(|e| format!("не подготовил каталог сборки: {e}"))?;
+    for (rel, body) in NODE_SRC {
+        put_file(host, &format!("{src_dir}/{rel}"), body.as_bytes(), Some("644"), false)?;
+    }
+    // PATH дополняем руками: rustup прописывает себя в ~/.profile, который
+    // неинтерактивный ssh не читает — без этой строки cargo «не найден» на
+    // машине, где он стоит.
+    let script = format!(
+        r#"set -e
+export PATH="$HOME/.cargo/bin:$PATH"
+cd {src}
+cargo build --release 2>&1 | tail -30
+cp -f target/release/jarvis-node {dst}
+chmod 755 {dst}
+"#,
+        src = sh_quote(&src_dir),
+        dst = sh_quote(dst),
+    );
+    run_ssh(host, &script)
+        .map(|_| ())
+        .map_err(|e| format!("сборка на той стороне не удалась: {e}"))
 }
 
 /* ================= файлы на той стороне ================= */
@@ -728,40 +1038,9 @@ pub fn add(progress: &Progress, name: &str, ssh_host: &str, dir: Option<&str>) -
     // 3. Сам узел.
     progress(Step::start(PHASE_NODE));
     let triples = target_triples(&remote.os, &remote.arch);
-    let tried = node_candidates(&triples);
-    let src = tried
-        .iter()
-        .find(|p| p.is_file())
-        .ok_or_else(|| build_hint(&remote, &triples, &tried))?;
-    let bytes = fs::read(src).map_err(|e| format!("не смог прочитать {}: {e}", src.display()))?;
-    let kind = binary_kind(&bytes);
-    if !binary_fits(kind, &remote.os, &remote.arch) {
-        let (bin_os, bin_arch) = kind.unwrap_or(("?", "?"));
-        return Err(format!(
-            "{} — сборка под {bin_os}/{bin_arch}, а на той стороне {}/{}: такой бинарь \
-             там не запустится.\n{}",
-            src.display(),
-            remote.os,
-            remote.arch,
-            build_hint(&remote, &triples, &tried)
-        ));
-    }
-    if kind.is_none() {
-        progress(Step::info(
-            PHASE_NODE,
-            format!("формат {} не распознал — заливаю как есть", src.display()),
-        ));
-    }
-    let node_path = format!("{dir}/bin/jarvis-node");
-    put_file(ssh_host, &node_path, &bytes, Some("755"), false)?;
-    progress(Step::done(
-        PHASE_NODE,
-        format!(
-            "{node_path} ← {} ({} КБ)",
-            src.display(),
-            bytes.len() / 1024
-        ),
-    ));
+    let src = resolve_node(&remote, &triples)
+        .map_err(|_| build_hint(&remote, &triples, &node_candidates(&triples)))?;
+    deliver_node(progress, ssh_host, &dir, &remote, &src)?;
     let hook_path = format!("{dir}/bin/jarvis-hook");
     put_file(ssh_host, &hook_path, node_hook_src()?.as_bytes(), Some("755"), false)?;
     progress(Step::done(PHASE_NODE, format!("{hook_path} (→ {dir}/node.sock)")));
@@ -966,6 +1245,70 @@ mod tests {
             codex_home: format!("{home}/.codex"),
             tools: vec!["tmux".into(), "curl".into()],
         }
+    }
+
+    /// Свой каталог под тест: кандидаты на бинарь узла ищутся в том числе
+    /// относительно текущего, и мусор от соседнего теста сбивал бы выбор.
+    fn sandbox(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("jarvis-remote-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Копия `remote()` без инструментов — для проверок выбора источника узла.
+    fn bare(tools: &[&str]) -> Remote {
+        let mut r = remote("/home/bob");
+        r.tools = tools.iter().map(|t| (*t).to_string()).collect();
+        r
+    }
+
+    #[test]
+    fn node_source_falls_back_from_download_to_build() {
+        let triples = target_triples("linux", "x86_64");
+        // curl есть → качаем готовый: это быстрее и не требует там rust
+        match resolve_node(&bare(&["curl", "cargo"]), &triples) {
+            Ok(NodeSource::Download(url)) => {
+                assert!(url.contains("x86_64-unknown-linux-gnu"), "{url}");
+                assert!(url.contains(env!("CARGO_PKG_VERSION")), "версия узла = версия приложения");
+            }
+            other => panic!("ждал скачивание, получил {other:?}"),
+        }
+        // без curl остаётся сборка на месте
+        assert_eq!(resolve_node(&bare(&["cargo"]), &triples), Ok(NodeSource::Build));
+        // не осталось ничего — вызывающий подставит развёрнутую инструкцию
+        assert!(resolve_node(&bare(&["tmux"]), &triples).is_err());
+    }
+
+    #[test]
+    fn node_source_ignores_a_binary_for_the_wrong_platform() {
+        // Главная ошибка установки: залить mac-сборку на Linux-VPS. Локальный
+        // кандидат должен отсеиваться ДО заливки, а не всплывать в логе systemd.
+        let dir = sandbox("wrong-arch");
+        let bin = dir.join("jarvis-node");
+        // Mach-O 64: magic feedfacf + cputype arm64
+        fs::write(&bin, [0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01]).unwrap();
+        std::env::set_var("JARVIS_NODE_BIN", &bin);
+        let got = resolve_node(&bare(&["curl"]), &target_triples("linux", "x86_64"));
+        std::env::remove_var("JARVIS_NODE_BIN");
+        assert!(
+            matches!(got, Ok(NodeSource::Download(_))),
+            "mac-бинарь не годится для linux — ждал скачивание, получил {got:?}"
+        );
+    }
+
+    #[test]
+    fn embedded_node_sources_are_complete() {
+        // include_str! молча возьмёт любой файл по пути: если крейт узла
+        // переедет, сборка на той стороне сломается не здесь, а на VPS.
+        let (name, cargo) = NODE_SRC[0];
+        assert_eq!(name, "Cargo.toml");
+        assert!(cargo.contains("name = \"jarvis-node\""), "это не манифест узла");
+        assert!(NODE_SRC.iter().all(|(_, body)| !body.trim().is_empty()));
+        assert!(
+            NODE_SRC.iter().any(|(n, _)| *n == "src/main.rs"),
+            "без main.rs cargo соберёт пустоту"
+        );
     }
 
     #[test]

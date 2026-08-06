@@ -340,6 +340,37 @@
     font-size: 12px; color: var(--accent-text); flex: none; visibility: hidden;
   }
   .hrow.selected .hcopy, .hrow:hover .hcopy { visibility: visible; }
+  /* Строка чата: заголовку — вся ширина, справа только то, что различает
+     строки. На реальных данных 82% заголовков повторяются (59 раз «Слушай, я
+     недавно добавлял агента…»), поэтому различает именно время, а агент важен
+     тем, что от него зависит поведение ↵: claude --resume против codex resume.
+     Длительность сюда не годится — firstAt..lastAt это стенные часы, а не
+     работа: чат, продолженный назавтра, «идёт» сутки. */
+  .hrow.chat {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    align-items: center;
+    gap: 0 10px;
+    height: auto; padding: 10px 16px;
+  }
+  .hrow.chat .htitle { flex: none; }
+  .hrow.chat .hagent {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .04em;
+    color: var(--ink-faint); text-transform: uppercase;
+  }
+  .hrow.chat.codex .hagent { color: var(--warn); opacity: .75; }
+  .hrow.chat .hmeta { min-width: 42px; text-align: right; font-family: var(--mono); font-size: 11.5px; }
+  .hrow.chat:hover .hmeta { color: var(--ink-mute); }
+  /* Разделитель дня: убирает повтор даты в каждой строке — в строке остаётся
+     только время, которое и различает соседние чаты. */
+  .hday {
+    display: flex; align-items: center; gap: 10px;
+    margin: 14px 8px 4px; font-family: var(--mono);
+    font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .hday:first-child { margin-top: 2px; }
+  .hday::after { content: ""; flex: 1; height: 1px; background: var(--line); }
   /* бейдж VM-чата: тот же акцент, что и у прочих признаков Agent VM */
   .hrow .hbadge {
     font-size: 10.5px; font-weight: 600; letter-spacing: .04em; flex: none;

@@ -4543,21 +4543,27 @@ function renderHistLevel() {
   renderHistory();
 }
 
-// «17:15» сегодня, «вчера» вчера, дальше — дата. Время суток у прошлогодней
-// сессии ничего не значит, а «вчера» читается быстрее, чем «05.08».
-function histTime(ts) {
+// Заголовок дня для списка чатов: «Сегодня» / «Вчера» / «04 августа».
+// Дата живёт здесь, поэтому в самой строке остаётся только время — а именно оно
+// и различает соседние чаты с одинаковым заголовком.
+function histDay(ts) {
   const d = new Date(ts);
   const now = new Date();
-  if (d.toDateString() === now.toDateString()) {
-    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  }
+  if (d.toDateString() === now.toDateString()) return 'Сегодня';
   const yesterday = new Date(now);
   yesterday.setDate(now.getDate() - 1);
-  if (d.toDateString() === yesterday.toDateString()) return 'вчера';
-  const sameYear = d.getFullYear() === now.getFullYear();
-  return sameYear
-    ? `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}`
-    : `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()}`;
+  if (d.toDateString() === yesterday.toDateString()) return 'Вчера';
+  const opts = { day: '2-digit', month: 'long' };
+  if (d.getFullYear() !== now.getFullYear()) opts.year = 'numeric';
+  return d.toLocaleDateString('ru-RU', opts);
+}
+
+// Время внутри дня — «17:15». Дату не повторяем: она уже стоит в заголовке дня
+// над строкой, а под ним девять строк «04.08» съедали единственное, что
+// различает соседние чаты с одинаковым заголовком.
+function histTime(ts) {
+  const d = new Date(ts);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 function resumeCommand(s, cwd) {
@@ -4997,13 +5003,26 @@ function renderHistChats(g, q) {
     return;
   }
 
+  let lastDay = '';
   for (const chat of chats) {
+    // Заголовок дня — перед первой строкой этого дня. Дата уезжает сюда, и в
+    // строке остаётся только время: именно оно различает соседние чаты, у
+    // которых заголовок совпадает (а совпадает он у 82% строк).
+    const day = histDay(chat.lastAt);
+    if (day !== lastDay) {
+      lastDay = day;
+      projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), {
+        className: 'hday',
+        textContent: day,
+      }));
+    }
+
     const idx = histRows.length;
     // s остаётся ради существующих обработчиков (resume в терминале)
     const s = { id: chat.id, title: chat.title, agent: chat.agent };
     histRows.push({ type: 'chat', s, chat, cwd: g.cwd });
     const row = document.createElement('div');
-    row.className = `hrow${chat.kind === 'vm' ? ' vm' : ''}`;
+    row.className = `hrow chat${chat.kind === 'vm' ? ' vm' : ''}${chat.agent === 'codex' ? ' codex' : ''}`;
     row.dataset.idx = idx;
     row.title = chat.kind === 'vm'
       ? `${chat.title}\nAgent VM · ${chat.vm || 'VM'}${chat.changedFiles ? ` · изменено файлов: ${chat.changedFiles}` : ''}`
@@ -5022,21 +5041,20 @@ function renderHistChats(g, q) {
       }));
     }
 
+    // Агент — не украшение: от него зависит, что сделает ↵ (claude --resume
+    // против codex resume), поэтому он в строке, а не только в подсказке.
+    row.appendChild(Object.assign(document.createElement('span'), {
+      className: 'hagent',
+      textContent: chat.agent === 'codex' ? 'codex' : (chat.model || 'claude').toLowerCase(),
+    }));
+
     const meta = document.createElement('span');
     meta.className = 'hmeta';
-    const parts = [];
-    if (chat.kind === 'vm') {
-      if (chat.state) parts.push(AgentVmModel.stateLabel(chat.state));
-      if (chat.changedFiles) parts.push(`${chat.changedFiles} ${plural(chat.changedFiles, 'файл', 'файла', 'файлов')}`);
-    } else if (chat.model) {
-      // Токены здесь не показываем: на реальных данных 99.7% этого числа —
-      // cache read, то есть один и тот же контекст, перечитанный на каждом
-      // ходу. «191.8M» ранжировало чаты по числу ходов под видом объёма и
-      // ничего не говорило о самом чате.
-      parts.push(chat.model);
-    }
-    parts.push(histTime(chat.lastAt));
-    meta.textContent = parts.join(' · ');
+    // У VM-чата состояние важнее времени: он может идти прямо сейчас.
+    const vmState = chat.kind === 'vm' && chat.state
+      ? AgentVmModel.stateLabel(chat.state)
+      : '';
+    meta.textContent = vmState || histTime(chat.lastAt);
     row.appendChild(meta);
 
     row.appendChild(Object.assign(document.createElement('span'), {

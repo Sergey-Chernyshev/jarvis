@@ -25,32 +25,31 @@ function extract(name) {
 
 const context = { pad2: (n) => String(n).padStart(2, "0") };
 vm.createContext(context);
-new vm.Script(`${extract("histTime")}`).runInContext(context);
-const { histTime } = context;
+new vm.Script(`${extract("histTime")}\n${extract("histDay")}`).runInContext(context);
+const { histTime, histDay } = context;
 
 const at = (y, m, d, h = 12, min = 0) => new Date(y, m - 1, d, h, min).getTime();
 
-test("сегодняшний чат подписан временем суток", () => {
+test("строка чата подписана временем суток — дату несёт заголовок дня", () => {
   const now = new Date();
-  const today = at(
-    now.getFullYear(),
-    now.getMonth() + 1,
-    now.getDate(),
-    17,
-    15,
-  );
+  const today = at(now.getFullYear(), now.getMonth() + 1, now.getDate(), 17, 15);
   assert.equal(histTime(today), "17:15");
+  // Важное: у давнего чата тоже время, а не «04.08». Иначе под заголовком
+  // «04 августа» девять строк повторяли бы эту же дату, а различает их время.
+  assert.equal(histTime(at(2026, 8, 4, 3, 22)), "03:22");
+  assert.equal(histTime(at(2024, 12, 31, 9, 5)), "09:05");
 });
 
-test("вчерашний чат читается словом, а не датой", () => {
-  const yesterday = new Date();
-  yesterday.setDate(yesterday.getDate() - 1);
-  yesterday.setHours(16, 57, 0, 0);
-  assert.equal(histTime(yesterday.getTime()), "вчера");
+test("заголовок дня: сегодня и вчера — словами", () => {
+  const now = new Date();
+  assert.equal(histDay(now.getTime()), "Сегодня");
+  const y = new Date();
+  y.setDate(y.getDate() - 1);
+  assert.equal(histDay(y.getTime()), "Вчера");
 });
 
-// «вчера» должно выживать на переходе через месяц и год: 1 января подпись
-// обязана указывать на 31 декабря, а не на «31.12» прошлого года.
+// «Вчера» должно выживать на переходе через месяц и год: 1 января заголовок
+// обязан сказать «Вчера» про 31 декабря, а не показать дату.
 test("вчера остаётся вчера на границе месяца и года", () => {
   const realDate = Date;
   const pinned = (y, m, d) =>
@@ -62,21 +61,21 @@ test("вчера остаётся вчера на границе месяца и
 
   try {
     context.Date = pinned(2027, 1, 1);
-    assert.equal(histTime(at(2026, 12, 31, 23, 30)), "вчера");
+    assert.equal(histDay(at(2026, 12, 31, 23, 30)), "Вчера");
     context.Date = pinned(2026, 3, 1);
-    assert.equal(histTime(at(2026, 2, 28, 9, 0)), "вчера");
+    assert.equal(histDay(at(2026, 2, 28, 9, 0)), "Вчера");
   } finally {
     context.Date = realDate;
   }
 });
 
-test("давние чаты — дата, а прошлогодние — с годом", () => {
+// Год в заголовке дня нужен только у прошлогодних: иначе «04 августа» из 2024
+// и из этого года выглядят одинаково, а список отсортирован по времени.
+test("заголовок дня показывает год только у прошлогодних", () => {
   const now = new Date();
-  const thisYear = at(now.getFullYear(), 1, 5, 9, 0);
-  // 5 января этого года: если сегодня рядом с этой датой, тест сравнивал бы
-  // «вчера» — поэтому берём заведомо далёкий день того же года.
+  assert.match(histDay(at(now.getFullYear() - 2, 8, 4)), new RegExp(String(now.getFullYear() - 2)));
+  const thisYear = at(now.getFullYear(), 1, 15);
   if (Math.abs(now.getTime() - thisYear) > 3 * 24 * 60 * 60 * 1000) {
-    assert.equal(histTime(thisYear), "05.01");
+    assert.doesNotMatch(histDay(thisYear), /\d{4}/);
   }
-  assert.equal(histTime(at(now.getFullYear() - 2, 8, 3, 9, 0)), `03.08.${now.getFullYear() - 2}`);
 });

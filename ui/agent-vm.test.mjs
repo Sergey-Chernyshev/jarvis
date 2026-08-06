@@ -747,6 +747,20 @@ test("main panel exposes Agent VM workspace, bridge and keyboard contract", () =
     /openAgentVmProject\(project, row\.chat\.agent, row\.chat\.runId\)/,
   );
   assert.match(html, /\.hrow \.hbadge/);
+  // Обновление сущностей/профилей не должно выбрасывать из открытого проекта
+  // обратно в список проектов: уровень выбирает renderHistLevel.
+  assert.match(renderer, /function renderHistLevel\(\)/);
+  assert.doesNotMatch(
+    renderer,
+    /if \(view === 'history'\) renderHistProjects\(/,
+    "перерисовка уровня 1 в обход renderHistLevel роняет список чатов",
+  );
+  // Список прогонов перезапрашивается при каждом входе в проект.
+  const openUi = renderer.slice(
+    renderer.indexOf("function openHistProject(key)"),
+    renderer.indexOf("function openProjectPrimary(project)"),
+  );
+  assert.match(openUi, /histRuns\.delete\(key\)/);
   // Кэш образов освобождается вручную: автоудаление стоило бы повторной
   // загрузки образа, поэтому нужна именно кнопка.
   assert.match(html, /id="agentVmReleaseCache"/);

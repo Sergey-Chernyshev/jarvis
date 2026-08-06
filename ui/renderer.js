@@ -3345,7 +3345,7 @@ function ingestAgentVmEntities(list) {
     if (view === 'agentvm') syncAgentVmFocus(agentVmCurrent, agentVmRunId);
   }
 
-  if (view === 'history') renderHistProjects(queryEl.value.trim().toLowerCase());
+  if (view === 'history') renderHistLevel();
   if (view === 'agentvm') renderAgentVmWorkspace();
 }
 
@@ -4398,7 +4398,7 @@ agentVmAutostartEl.addEventListener('change', async () => {
     agentVmProfiles = Array.isArray(result.profiles) ? result.profiles : [];
     if (result.profile?.projectId) agentVmCurrent.projectId = result.profile.projectId;
     showToast(desired ? 'VM будет запускаться вместе с Jarvis' : 'Автозапуск VM выключен');
-    if (view === 'history') renderHistProjects(queryEl.value.trim().toLowerCase());
+    if (view === 'history') renderHistLevel();
   } catch (error) {
     agentVmAutostartEl.checked = !desired;
     showToast(error.message || 'Не удалось сохранить автозапуск');
@@ -4438,12 +4438,12 @@ window.jarvis.onEntities(ingestAgentVmEntities);
 window.jarvis.getEntities().then(ingestAgentVmEntities).catch(() => {});
 window.jarvis.getAgentVmProfiles().then((profiles) => {
   agentVmProfiles = Array.isArray(profiles) ? profiles : [];
-  if (view === 'history') renderHistProjects(queryEl.value.trim().toLowerCase());
+  if (view === 'history') renderHistLevel();
   if (view === 'agentvm') renderAgentVmWorkspace();
 }).catch(() => {});
 window.jarvis.getProjectManagerState().then((state) => {
   projectManagerState = state || projectManagerState;
-  if (view === 'history') renderHistProjects(queryEl.value.trim());
+  if (view === 'history') renderHistLevel();
 }).catch(() => {});
 window.jarvis.onOpenAgentVm(async (target) => {
   if (!target?.cwd || !target?.projectId) return;
@@ -4523,6 +4523,19 @@ async function loadHistRuns(cwd) {
   }
 }
 
+// Перерисовать текущий уровень вкладки «Проекты», не роняя пользователя из
+// открытого проекта. Раньше обновления сущностей звали renderHistProjects
+// напрямую и выкидывали из списка чатов обратно к проектам.
+function renderHistLevel() {
+  if (view !== 'history') return;
+  if (histProject == null) {
+    renderHistProjects(queryEl.value.trim().toLowerCase());
+    paintHistSel();
+    return;
+  }
+  renderHistory();
+}
+
 function histTime(ts) {
   const d = new Date(ts);
   const now = new Date();
@@ -4549,6 +4562,10 @@ async function launchSession(agent, sessionId, cwd) {
 
 function openHistProject(key) {
   histProject = key;
+  // Прогоны кэшируются на время просмотра одного проекта, но при каждом входе
+  // список запрашивается заново: иначе завершившийся с прошлого раза прогон
+  // остался бы «работает», а новый вовсе не появился бы.
+  histRuns.delete(key);
   queryEl.value = ''; // фильтр списка проектов внутри проекта не нужен
   queryEl.placeholder = 'Найти чат…';
   renderHistory();

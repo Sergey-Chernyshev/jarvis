@@ -304,6 +304,72 @@ test("active environments combine VM lifecycle with the latest structured run st
   );
 });
 
+test("project chats merge ordinary sessions with VM runs, newest first", () => {
+  const sessions = [
+    { id: "chat-old", title: "старый разговор", agent: "claude", lastAt: 10 },
+    { id: "chat-new", title: "свежий разговор", agent: "codex", lastAt: 40 },
+  ];
+  const runs = [
+    {
+      runId: "run-1",
+      project: "jarvis",
+      backend: "claude",
+      vm: "jarvis-vm",
+      state: "completed",
+      lastAt: 30,
+      changedFiles: 3,
+    },
+  ];
+
+  const chats = AgentVm.mergeProjectChats(sessions, runs);
+
+  assert.deepEqual(
+    chats.map((chat) => chat.key),
+    ["session:chat-new", "vm:run-1", "session:chat-old"],
+  );
+  // VM-чат и обычный различимы: по этому полю рисуется бейдж.
+  assert.deepEqual(
+    chats.map((chat) => chat.kind),
+    ["session", "vm", "session"],
+  );
+  const vmChat = chats.find((chat) => chat.kind === "vm");
+  assert.equal(vmChat.runId, "run-1");
+  assert.equal(vmChat.vm, "jarvis-vm");
+  assert.equal(vmChat.state, "completed");
+  assert.equal(vmChat.changedFiles, 3);
+});
+
+test("a VM run visible in host history is shown once, marked as a VM chat", () => {
+  // Транскрипты гостя обычно не доходят до хоста, но если дошли — не двоим.
+  const sessions = [
+    { id: "sid-42", title: "задача из VM", agent: "claude", lastAt: 10 },
+  ];
+  const runs = [
+    { runId: "run-42", backend: "claude", vm: "jarvis-vm", state: "working", lastAt: 50 },
+  ];
+
+  const chats = AgentVm.mergeProjectChats(sessions, runs, {
+    linkedSessions: { "run-42": "sid-42" },
+  });
+
+  assert.equal(chats.length, 1, "один чат, а не две строки об одном и том же");
+  assert.equal(chats[0].kind, "vm");
+  assert.equal(chats[0].title, "задача из VM", "заголовок из истории сохраняется");
+  assert.equal(chats[0].runId, "run-42");
+  assert.equal(chats[0].state, "working");
+  assert.equal(chats[0].lastAt, 50, "берём более свежую отметку времени");
+});
+
+test("project chats survive missing, malformed and empty inputs", () => {
+  assert.deepEqual(AgentVm.mergeProjectChats(undefined, undefined), []);
+  assert.deepEqual(AgentVm.mergeProjectChats(null, []), []);
+  // Записи без идентификатора не превращаются в безымянные строки.
+  assert.deepEqual(AgentVm.mergeProjectChats([{ title: "нет id" }], [{}]), []);
+  const chats = AgentVm.mergeProjectChats([{ id: "x" }], []);
+  assert.equal(chats[0].title, "x", "без заголовка показываем идентификатор");
+  assert.equal(chats[0].agent, "claude");
+});
+
 test("a stale terminal snapshot stops proving the session is alive", () => {
   const now = 100_000;
   // Снимок обновляется только на экране проекта; вне его свежесть и решает.
@@ -659,6 +725,28 @@ test("main panel exposes Agent VM workspace, bridge and keyboard contract", () =
   assert.doesNotMatch(renderer, /runtime\.replay/);
   assert.match(projectCardUi, /openProjectPrimary\(project\)/);
   assert.match(projectCardUi, /openAgentVmProject\(project\)/);
+  // Проект открывается своими чатами, а не пультом VM.
+  const primaryUi = renderer.slice(
+    renderer.indexOf("function openProjectPrimary(project)"),
+    renderer.indexOf("async function renderHistory()"),
+  );
+  assert.match(primaryUi, /openHistProject\(project\.cwd\)/);
+  assert.doesNotMatch(primaryUi, /openAgentVmProject/);
+  // Список чатов проекта объединяет обычные сессии с прогонами Agent VM,
+  // помечает VM-строку бейджем и ведёт в рабочее место на нужном прогоне.
+  const chatsUi = renderer.slice(
+    renderer.indexOf("function renderHistChats(g, q)"),
+    renderer.indexOf("function paintHistSel()"),
+  );
+  assert.match(chatsUi, /AgentVmModel\.mergeProjectChats\(g\.sessions/);
+  assert.match(chatsUi, /className: 'hbadge vm'/);
+  assert.match(chatsUi, /loadHistRuns\(g\.cwd\)/);
+  assert.match(renderer, /agentVmCommand\('runtime\.runs'/);
+  assert.match(
+    renderer,
+    /openAgentVmProject\(project, row\.chat\.agent, row\.chat\.runId\)/,
+  );
+  assert.match(html, /\.hrow \.hbadge/);
   assert.match(renderer, /onOpenAgentVm/);
   assert.match(renderer, /requestedRunId/);
   assert.match(renderer, /renderAgentVmRuntimeStatus/);

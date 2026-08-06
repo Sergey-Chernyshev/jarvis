@@ -3111,8 +3111,8 @@ document.getElementById('primaryHint').addEventListener('click', () => {
   if (view === 'list') { const s = filtered()[sel]; if (s) openSession(s); }
   else if (view === 'history' && histRows[histSel]) {
     const row = histRows[histSel];
-    if (row.type === 'project') openAgentVmProject(row.project);
-    else launchSession(row.s.agent, row.s.id, row.cwd);
+    if (row.type === 'project') openProjectPrimary(row.project);
+    else openHistChat(row);
   }
   else if (view === 'settings') { setView('list'); render(); }
 });
@@ -4469,6 +4469,31 @@ let historyData = [];
 let histRows = []; // плоский список выбираемых строк: проекты или чаты (для ↑↓/Enter)
 let histSel = 0;
 let histProject = null; // ключ открытого проекта (cwd) — null = список проектов
+const histRuns = new Map(); // cwd → прогоны Agent VM для списка чатов проекта
+let histRunsInFlight = null;
+
+// Прогоны проекта живут в журналах на хосте и приходят ответом команды, а не
+// сущностью: список нужен только на этом экране, держать его в EntityStore
+// незачем. Ответ асинхронный, поэтому список чатов рисуется сразу, а VM-строки
+// добавляются, когда команда ответит.
+async function loadHistRuns(cwd) {
+  if (!cwd || histRuns.has(cwd) || histRunsInFlight === cwd) return;
+  if (!agentVmPluginReady()) return;
+  histRunsInFlight = cwd;
+  try {
+    const project = agentVmProjectByCwd(cwd);
+    const result = await agentVmCommand('runtime.runs', {
+      cwd,
+      ...(project?.projectId ? { projectId: project.projectId } : {}),
+    }, 15_000);
+    histRuns.set(cwd, Array.isArray(result?.runs) ? result.runs : []);
+    if (view === 'history' && histProject === cwd) renderHistory();
+  } catch {
+    histRuns.set(cwd, []); // без прогонов список чатов всё равно осмыслен
+  } finally {
+    histRunsInFlight = null;
+  }
+}
 
 function histTime(ts) {
   const d = new Date(ts);
@@ -4501,12 +4526,11 @@ function openHistProject(key) {
   renderHistory();
 }
 
+// Проект открывается своими чатами, а не пультом VM: пульт живёт в
+// environment popover внутри рабочего места, куда ведёт конкретный VM-чат.
 function openProjectPrimary(project) {
-  if (AgentVmModel.projectPrimaryTarget(project) === 'history') {
-    openHistProject(project.cwd);
-  } else {
-    openAgentVmProject(project);
-  }
+  if (!project?.cwd) return;
+  openHistProject(project.cwd);
 }
 
 async function renderHistory() {
@@ -4522,7 +4546,17 @@ async function renderHistory() {
   let g = null;
   if (histProject != null) {
     g = historyData.find((x) => (x.cwd || x.project) === histProject);
-    if (!g) histProject = null; // проект исчез с диска — назад к списку
+    // У проекта может не быть истории на хосте — например, он работал только
+    // в VM (транскрипты гостя наружу не выходят). Экран чатов всё равно нужен:
+    // его наполнят прогоны из runtime.runs.
+    if (!g) {
+      const known = agentVmProjectByCwd(histProject);
+      if (known) {
+        g = { project: known.name, cwd: known.cwd, count: 0, lastAt: 0, sessions: [] };
+      } else {
+        histProject = null; // проект исчез с диска — назад к списку
+      }
+    }
   }
 
   projectManagerToolbarEl.hidden = !!g;
@@ -4776,9 +4810,25 @@ projectManagerListViewEl.addEventListener('click', () => setProjectManagerView('
 projectManagerCardsViewEl.addEventListener('click', () => setProjectManagerView('cards'));
 
 /* уровень 2: чаты проекта */
+
+// Открыть выбранный чат: обычный — продолжением в терминале, VM-чат — рабочим
+// местом проекта на этом прогоне. Единая точка, чтобы клик, ↵ и подсказка внизу
+// не разошлись между собой.
+function openHistChat(row) {
+  if (!row) return;
+  if (row.chat?.kind === 'vm') {
+    const project = agentVmProjectByCwd(row.cwd);
+    if (!project) { showToast('Проект недоступен'); return; }
+    openAgentVmProject(project, row.chat.agent, row.chat.runId);
+    return;
+  }
+  launchSession(row.s.agent, row.s.id, row.cwd);
+}
+
 function renderHistChats(g, q) {
-  primaryLabelEl.textContent = 'Запустить в терминале';
+  primaryLabelEl.textContent = 'Открыть чат';
   projectManagerToolbarEl.hidden = true;
+  loadHistRuns(g.cwd);
   const head = document.createElement('div');
   head.className = 'hgroup';
   const back = Object.assign(document.createElement('span'), { className: 'hback', textContent: '‹ Проекты' });
@@ -4799,40 +4849,68 @@ function renderHistChats(g, q) {
   }
   projectManagerContentEl.appendChild(head);
 
-  projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — запустить продолжение в терминале · + Claude / + Codex — новая сессия · esc — к проектам' }));
+  projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — открыть чат · VM-чат откроется рабочим местом проекта · + Claude / + Codex — новая сессия · esc — к проектам' }));
 
-  const sessions = q ? g.sessions.filter((s) => s.title.toLowerCase().includes(q)) : g.sessions;
-  if (!sessions.length) {
-    projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), { className: 'empty', textContent: 'Ничего не найдено' }));
+  const all = AgentVmModel.mergeProjectChats(g.sessions, histRuns.get(g.cwd) || []);
+  const chats = q ? all.filter((chat) => chat.title.toLowerCase().includes(q)) : all;
+  if (!chats.length) {
+    projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), {
+      className: 'empty',
+      textContent: q
+        ? 'Ничего не найдено'
+        : histRuns.has(g.cwd)
+          ? 'Чатов пока нет — запусти Claude или Codex в этой папке.'
+          : 'Загружаю чаты…',
+    }));
     return;
   }
 
-  for (const s of sessions) {
+  for (const chat of chats) {
     const idx = histRows.length;
-    histRows.push({ type: 'chat', s, cwd: g.cwd });
+    // s остаётся ради существующих обработчиков (resume в терминале)
+    const s = { id: chat.id, title: chat.title, agent: chat.agent };
+    histRows.push({ type: 'chat', s, chat, cwd: g.cwd });
     const row = document.createElement('div');
-    row.className = 'hrow';
+    row.className = `hrow${chat.kind === 'vm' ? ' vm' : ''}`;
     row.dataset.idx = idx;
-    row.title = `${s.title}\n${resumeCommand(s, g.cwd)}`;
+    row.title = chat.kind === 'vm'
+      ? `${chat.title}\nAgent VM · ${chat.vm || 'VM'}${chat.changedFiles ? ` · изменено файлов: ${chat.changedFiles}` : ''}`
+      : `${chat.title}\n${resumeCommand(s, g.cwd)}`;
 
     const title = document.createElement('span');
     title.className = 'htitle';
-    title.textContent = s.title || s.id.slice(0, 8);
+    title.textContent = chat.title;
     row.appendChild(title);
+
+    // Бейдж отличает чат в VM от обычного: у них разное поведение по ↵.
+    if (chat.kind === 'vm') {
+      row.appendChild(Object.assign(document.createElement('span'), {
+        className: 'hbadge vm',
+        textContent: 'VM',
+      }));
+    }
 
     const meta = document.createElement('span');
     meta.className = 'hmeta';
     const parts = [];
-    if (s.model) parts.push(s.model);
-    if (s.tokens) parts.push(fmtTok(s.tokens));
-    parts.push(histTime(s.lastAt));
+    if (chat.kind === 'vm') {
+      if (chat.state) parts.push(AgentVmModel.stateLabel(chat.state));
+      if (chat.changedFiles) parts.push(`${chat.changedFiles} ${plural(chat.changedFiles, 'файл', 'файла', 'файлов')}`);
+    } else {
+      if (chat.model) parts.push(chat.model);
+      if (chat.tokens) parts.push(fmtTok(chat.tokens));
+    }
+    parts.push(histTime(chat.lastAt));
     meta.textContent = parts.join(' · ');
     row.appendChild(meta);
 
-    row.appendChild(Object.assign(document.createElement('span'), { className: 'hcopy', textContent: 'запустить ↵' }));
+    row.appendChild(Object.assign(document.createElement('span'), {
+      className: 'hcopy',
+      textContent: chat.kind === 'vm' ? 'открыть ↵' : 'запустить ↵',
+    }));
 
     row.addEventListener('mouseenter', () => { histSel = idx; paintHistSel(); });
-    row.addEventListener('click', () => launchSession(s.agent, s.id, g.cwd));
+    row.addEventListener('click', () => openHistChat(histRows[idx]));
     projectManagerContentEl.appendChild(row);
   }
 }
@@ -6009,7 +6087,7 @@ window.addEventListener('keydown', async (e) => {
       e.preventDefault();
       const r = histRows[histSel];
       if (r.type === 'project') openProjectPrimary(r.project);
-      else launchSession(r.s.agent, r.s.id, r.cwd);
+      else openHistChat(r);
       return;
     }
     if (e.key === 'Escape') {

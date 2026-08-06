@@ -349,6 +349,82 @@
     return "ready";
   }
 
+  // Чаты проекта: обычные сессии из истории + прогоны Agent VM.
+  //
+  // Транскрипты гостя не покидают VM (config_mirror исключает `sessions`),
+  // поэтому VM-чат — это, как правило, отдельная строка из runtime.runs, а не
+  // бейдж на строке истории. backendSessionId нужен только чтобы не показать
+  // один и тот же чат дважды в редком случае, когда сессия всё же видна хосту.
+  function mergeProjectChats(sessions, runs, options = {}) {
+    const bySession = new Map();
+    for (const raw of Array.isArray(sessions) ? sessions : []) {
+      const entry = asObject(raw);
+      const id = asString(entry.id);
+      if (!id) continue;
+      bySession.set(id, {
+        kind: "session",
+        key: `session:${id}`,
+        id,
+        title: asString(entry.title) || id.slice(0, 8),
+        agent: asString(entry.agent) || "claude",
+        model: asString(entry.model),
+        tokens: Number(entry.tokens) || 0,
+        lastAt: Number(entry.lastAt) || 0,
+        vm: "",
+        state: "",
+        runId: "",
+        changedFiles: 0,
+      });
+    }
+
+    const linkedSessions = asObject(options).linkedSessions;
+    const linked =
+      linkedSessions instanceof Map
+        ? linkedSessions
+        : new Map(Object.entries(asObject(linkedSessions)));
+
+    const vmRows = [];
+    for (const raw of Array.isArray(runs) ? runs : []) {
+      const entry = asObject(raw);
+      const runId = asString(entry.runId);
+      if (!runId) continue;
+      // Прогон и сессия истории — один и тот же чат: показываем один раз,
+      // помечая строку истории как VM-чат.
+      const sessionId = asString(linked.get(runId));
+      const existing = sessionId ? bySession.get(sessionId) : null;
+      const state = asString(entry.state);
+      const lastAt = Number(entry.lastAt) || 0;
+      if (existing) {
+        existing.kind = "vm";
+        existing.key = `vm:${runId}`;
+        existing.runId = runId;
+        existing.vm = asString(entry.vm);
+        existing.state = state;
+        existing.changedFiles = Number(entry.changedFiles) || 0;
+        existing.lastAt = Math.max(existing.lastAt, lastAt);
+        continue;
+      }
+      vmRows.push({
+        kind: "vm",
+        key: `vm:${runId}`,
+        id: runId,
+        title: asString(entry.project) || runId.slice(0, 8),
+        agent: asString(entry.backend) || "claude",
+        model: "",
+        tokens: 0,
+        lastAt,
+        vm: asString(entry.vm),
+        state,
+        runId,
+        changedFiles: Number(entry.changedFiles) || 0,
+      });
+    }
+
+    return [...bySession.values(), ...vmRows].sort(
+      (left, right) => right.lastAt - left.lastAt || left.key.localeCompare(right.key),
+    );
+  }
+
   // Снимок терминала обновляется только пока открыт экран проекта. Вне его
   // обновлять снимок некому, поэтому старая запись — не доказательство жизни
   // сессии: иначе карточка проекта показывает «работает» у мёртвого терминала.
@@ -701,6 +777,7 @@
     filterCommands,
     filterProjects,
     mergeProjectCatalog,
+    mergeProjectChats,
     mergeEvents,
     operationResult,
     pluginRuntimeStatus,

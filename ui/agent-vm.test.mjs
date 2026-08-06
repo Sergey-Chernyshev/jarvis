@@ -797,6 +797,17 @@ test("main panel exposes Agent VM workspace, bridge and keyboard contract", () =
     renderer.indexOf("function openProjectPrimary(project)"),
   );
   assert.match(openUi, /histRuns\.delete\(key\)/);
+  // Без Agent VM «прогонов нет» — это ответ, а не «ещё грузим»: иначе список
+  // чатов у обычного пользователя навсегда остаётся в состоянии загрузки.
+  const loadUi = renderer.slice(
+    renderer.indexOf("async function loadHistRuns(cwd)"),
+    renderer.indexOf("function renderHistLevel()"),
+  );
+  assert.match(
+    loadUi,
+    /if \(!agentVmPluginReady\(\)\) \{\s*\n\s*histRuns\.set\(cwd, \[\]\);/,
+    "при неподнятом плагине список должен получить пустой результат",
+  );
   // Кэш образов освобождается вручную: автоудаление стоило бы повторной
   // загрузки образа, поэтому нужна именно кнопка.
   assert.match(html, /id="agentVmReleaseCache"/);

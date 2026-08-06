@@ -4506,7 +4506,13 @@ let histRunsInFlight = null;
 // добавляются, когда команда ответит.
 async function loadHistRuns(cwd) {
   if (!cwd || histRuns.has(cwd) || histRunsInFlight === cwd) return;
-  if (!agentVmPluginReady()) return;
+  // Плагин не поднят — прогонов нет, и это законный ответ, а не «ещё грузим».
+  // Без этой записи список у пользователя без Agent VM вечно висел бы
+  // в «Загружаю чаты…». Когда плагин поднимется, вход в проект перезапросит.
+  if (!agentVmPluginReady()) {
+    histRuns.set(cwd, []);
+    return;
+  }
   histRunsInFlight = cwd;
   try {
     const project = agentVmProjectByCwd(cwd);

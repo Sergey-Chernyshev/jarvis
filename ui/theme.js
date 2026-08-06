@@ -89,6 +89,55 @@
   const rgba = ({ r, g, b }, a) =>
     `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${a})`;
 
+  /** Насыщенность HSL: 0 — чистый серый, 1 — предельно цветной. */
+  function saturation({ r, g, b }) {
+    const max = Math.max(r, g, b) / 255;
+    const min = Math.min(r, g, b) / 255;
+    if (max === min) return 0;
+    const l = (max + min) / 2;
+    return (max - min) / (l > 0.5 ? 2 - max - min : max + min);
+  }
+
+  /**
+   * Не дать акценту схлопнуться в серость. Осветление почти-серого тона даёт
+   * ровно такой же серый — интерфейс остаётся бесцветным, и различить
+   * «работает / ждёт / ошибка» нечем. Поэтому у обесцвеченного тона поднимаем
+   * насыщенность к минимально читаемой, сохраняя выбранный оттенок; у чистого
+   * серого (оттенка нет вовсе) берём оттенок краски по умолчанию.
+   */
+  const MIN_ACCENT_SATURATION = 0.28;
+
+  function ensureChromatic(color) {
+    if (saturation(color) >= MIN_ACCENT_SATURATION) return color;
+    // Оттенок берём из самого тона; если его нет вовсе (чистый серый) —
+    // из краски по умолчанию, а не выдумываем свой.
+    const source =
+      Math.max(color.r, color.g, color.b) === Math.min(color.r, color.g, color.b)
+        ? parseHex(DEFAULTS.accent)
+        : color;
+    // Раздвигаем каналы вокруг собственной светлоты: так яркость (а значит и
+    // контраст текста на заливке) сохраняется, а насыщенность становится ровно
+    // требуемой — смешивание с чужим цветом до неё не дотягивало.
+    const grey = (source.r + source.g + source.b) / 3;
+    const spread = Math.max(
+      Math.abs(source.r - grey),
+      Math.abs(source.g - grey),
+      Math.abs(source.b - grey),
+    );
+    if (spread === 0) return color;
+    // У почти белого/чёрного раздвигать каналы некуда: клампинг вывернул бы
+    // тон (белый → едко-голубой). Подтягиваем светлоту к середине, где место
+    // для цвета есть, и уже там задаём насыщенность.
+    const mid = Math.min(216, Math.max(40, (color.r + color.g + color.b) / 3));
+    const scale = (MIN_ACCENT_SATURATION * 255) / (2 * spread);
+    const clamp = (v) => Math.min(255, Math.max(0, v));
+    return {
+      r: clamp(mid + (source.r - grey) * scale),
+      g: clamp(mid + (source.g - grey) * scale),
+      b: clamp(mid + (source.b - grey) * scale),
+    };
+  }
+
   /**
    * Своя краска: из одного тона выводим всю акцентную семью так же, как она
    * устроена у готовых красок — заливка, тональная подложка, цифра на ней,
@@ -101,9 +150,10 @@
     const ink = dark ? { r: 239, g: 242, b: 239 } : { r: 23, g: 32, b: 26 };
     const paper = dark ? { r: 30, g: 33, b: 31 } : white;
 
-    // на тёмном тёмный тон не читается — подтягиваем к светлому
-    const accent =
-      dark && luminance(base) < 0.18 ? mix(base, white, 0.38) : base;
+    // на тёмном тёмный тон не читается — подтягиваем к светлому; но одного
+    // осветления мало: серый так и останется серым, поэтому возвращаем цвет
+    const lifted = dark && luminance(base) < 0.18 ? mix(base, white, 0.38) : base;
+    const accent = ensureChromatic(lifted);
     // текст акцентом на бумаге: слишком светлый тон притемняем
     const accentText =
       !dark && luminance(accent) > 0.45 ? mix(accent, ink, 0.35) : accent;

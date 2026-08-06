@@ -157,8 +157,52 @@ fn hostname() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+/// Необязательный TCP-слушатель на петле: `JARVIS_NODE_TCP=127.0.0.1:7717`.
+///
+/// Нужен не для удобства. Ноутбук ходит к узлу через `ssh -L порт:unix-сокет`,
+/// но такой форвард — расширение OpenSSH (`direct-streamlocal`), и SSH-библиотеки
+/// под Android его почти поголовно не умеют. Обычный TCP-форвард умеют все,
+/// поэтому мобильному клиенту узел должен уметь ответить и по TCP.
+///
+/// Наружу это по-прежнему ничего не открывает: адрес обязан быть петлёй, иначе
+/// узел откажется стартовать. Разница с сокетом одна и её стоит знать: unix-сокет
+/// закрыт правами 0600, а к порту на петле может подключиться любой пользователь
+/// ТОЙ машины. На машине, где ты не один, оставь TCP выключенным.
+fn tcp_addr() -> Option<String> {
+    let raw = std::env::var("JARVIS_NODE_TCP").ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let addr = if raw.contains(':') { raw.to_string() } else { format!("127.0.0.1:{raw}") };
+    if !is_loopback(&addr) {
+        eprintln!(
+            "[jarvis-node] JARVIS_NODE_TCP={addr} — это не петля. Узел наружу не слушает: \
+             используй 127.0.0.1:<порт> и ssh-форвард."
+        );
+        std::process::exit(1);
+    }
+    Some(addr)
+}
+
+/// Петля ли это. Проверяем сами и до bind: «слушать наружу» — не та ошибка,
+/// которую можно позволить себе заметить постфактум.
+fn is_loopback(addr: &str) -> bool {
+    let host = match addr.rsplit_once(':') {
+        Some((h, _)) => h.trim_matches(['[', ']']),
+        None => return false,
+    };
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => host == "localhost",
+    }
+}
+
 /// Поднять сокет и слушать до сигнала завершения.
 pub async fn run() {
+    // Разбираем адрес TCP первым делом: «слушать наружу» — ошибка настройки,
+    // и сказать о ней надо до того, как узел отрапортует, что он слушает.
+    let tcp_addr = tcp_addr();
     let sock = sock_path();
     if let Some(dir) = sock.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -193,10 +237,36 @@ pub async fn run() {
         node.stats().capacity
     );
 
-    if let Err(err) = axum::serve(listener, http::router(node))
-        .with_graceful_shutdown(terminate())
-        .await
-    {
+    let app = http::router(node);
+    // TCP поднимаем ДО unix-сокета: не открылся порт — это ошибка настройки,
+    // и узнать о ней надо на старте, а не когда телефон не сможет подключиться.
+    let tcp = match tcp_addr {
+        Some(addr) => match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => {
+                println!("[jarvis-node] слушаю также {addr} (для мобильного клиента)");
+                Some(l)
+            }
+            Err(err) => {
+                eprintln!("[jarvis-node] не смог открыть {addr}: {err}");
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+
+    let serve_unix = axum::serve(listener, app.clone()).with_graceful_shutdown(terminate());
+    let result = match tcp {
+        Some(l) => {
+            let serve_tcp = axum::serve(l, app).with_graceful_shutdown(terminate());
+            // оба слушателя равноправны: падение любого — конец работы узла
+            tokio::select! {
+                r = serve_unix => r,
+                r = serve_tcp => r,
+            }
+        }
+        None => serve_unix.await,
+    };
+    if let Err(err) = result {
         eprintln!("[jarvis-node] сервер остановлен: {err}");
     }
     // за собой убираем: jarvis-hook проверяет `[ -S socket ]` и на осиротевшем
@@ -266,5 +336,16 @@ mod tests {
             .expect("звонок должен разбудить ожидающего")
             .expect("отправитель жив, пока жив узел");
         assert_eq!(n.stats().buffered, 1);
+    }
+
+    #[test]
+    fn only_loopback_counts_as_loopback() {
+        // «слушать наружу» — та ошибка, которую нельзя заметить постфактум
+        assert!(is_loopback("127.0.0.1:7717"));
+        assert!(is_loopback("localhost:7717"));
+        assert!(is_loopback("[::1]:7717"));
+        assert!(!is_loopback("0.0.0.0:7717"), "это весь мир, а не петля");
+        assert!(!is_loopback("192.168.1.10:7717"));
+        assert!(!is_loopback("7717"), "без хоста адрес неполон");
     }
 }

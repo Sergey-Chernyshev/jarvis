@@ -162,6 +162,9 @@ pub fn remember_window_size(d: &Arc<Daemon>, w: f64, h: f64) {
 /// меню — показать и сфокусировать существующее, а не плодить копии.
 pub fn create_onboarding(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     if let Some(win) = app.get_webview_window("onboarding") {
+        // окно живёт на своём Space — без этого set_focus утащил бы туда
+        // пользователя вместо того, чтобы показать окно здесь
+        macos::move_to_active_space(&win);
         let _ = win.show();
         let _ = win.set_focus();
         return Ok(win);
@@ -188,6 +191,7 @@ pub fn create_onboarding(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             .theme(window_theme(app))
             .accept_first_mouse(true)
             .build()?;
+    macos::move_to_active_space(&win);
     let _ = win.set_focus();
     Ok(win)
 }
@@ -196,6 +200,9 @@ pub fn create_onboarding(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 /// вызов — показать существующее, а не плодить копии.
 pub fn create_agent_chat(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     if let Some(win) = app.get_webview_window("agent-chat") {
+        // окно живёт на своём Space — без этого set_focus утащил бы туда
+        // пользователя вместо того, чтобы показать окно здесь
+        macos::move_to_active_space(&win);
         let _ = win.show();
         let _ = win.set_focus();
         return Ok(win);
@@ -223,6 +230,7 @@ pub fn create_agent_chat(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             .theme(window_theme(app))
             .accept_first_mouse(true)
             .build()?;
+    macos::move_to_active_space(&win);
     let _ = win.set_focus();
     Ok(win)
 }

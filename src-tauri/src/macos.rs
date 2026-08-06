@@ -13,6 +13,10 @@ use tauri::{Emitter, Manager, WebviewWindow};
 const NS_SCREEN_SAVER_WINDOW_LEVEL: isize = 1000;
 /// NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary
 const COLLECTION_BEHAVIOR: usize = (1 << 0) | (1 << 8);
+/// NSWindowCollectionBehaviorMoveToActiveSpace: окно переезжает на текущий
+/// Space вместо переключения пользователя на «родной». НЕСОВМЕСТИМ с
+/// CanJoinAllSpaces — вместе валят AppKit ассертом на старте.
+const NS_COLLECTION_BEHAVIOR_MOVE_TO_ACTIVE_SPACE: usize = 1 << 1;
 /// Поведение обычного окна: Managed | ParticipatesInCycle | FullScreenPrimary.
 /// FullScreenPrimary обязателен — без него AppKit не пускает окно в фуллскрин
 /// (зелёная кнопка и ⌃⌘F молча не работают).
@@ -76,6 +80,19 @@ pub fn float_above_everything(win: &WebviewWindow) {
         let _: () = msg_send![w, setHidesOnDeactivate: false];
         let mask: usize = msg_send![w, styleMask];
         let _: () = msg_send![w, setStyleMask: mask & !(1 << 3)]; // без Resizable
+    });
+}
+
+/// Показывать окно на ТЕКУЩЕМ рабочем столе, а не утаскивать пользователя на
+/// тот, где окно было создано. Для окон чата агента и онбординга: они живут на
+/// своём Space, и `set_focus` заставлял macOS переключать Space целиком.
+///
+/// Только для окон БЕЗ `CanJoinAllSpaces`: эти биты взаимоисключающие, и вместе
+/// роняют AppKit ассертом. Панели и тостам это не нужно — они и так на всех
+/// Spaces (см. `float_above_everything`).
+pub fn move_to_active_space(win: &WebviewWindow) {
+    on_main(win, |w| unsafe {
+        let _: () = msg_send![w, setCollectionBehavior: NS_COLLECTION_BEHAVIOR_MOVE_TO_ACTIVE_SPACE];
     });
 }
 

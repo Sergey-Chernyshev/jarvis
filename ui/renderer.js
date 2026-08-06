@@ -4913,10 +4913,28 @@ function renderHistChats(g, q) {
     newCodex.addEventListener('click', (e) => { e.stopPropagation(); launchSession('codex', null, g.cwd); });
     head.appendChild(newClaude);
     head.appendChild(newCodex);
+    // Вход в Agent VM: раньше он был только на карточке проекта — то есть
+    // на уровне выше, откуда пользователь уже ушёл. Пока VM нет, отсюда её и
+    // создают; когда есть — сюда же возвращаются к её рабочему месту.
+    const project = agentVmProjectByCwd(g.cwd);
+    const vmReady = ['running', 'ready', 'working'].includes(project?.vm?.state);
+    const openVm = Object.assign(document.createElement('button'), {
+      className: 'abtn small',
+      textContent: vmReady ? 'Agent VM' : '+ Agent VM',
+    });
+    openVm.title = vmReady
+      ? 'Открыть рабочее место Agent VM этого проекта'
+      : 'Создать среду Agent VM для этого проекта';
+    openVm.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (project) openAgentVmProject(project);
+      else showToast('Проект недоступен');
+    });
+    head.appendChild(openVm);
   }
   projectManagerContentEl.appendChild(head);
 
-  projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — открыть чат · VM-чат откроется рабочим местом проекта · + Claude / + Codex — новая сессия · esc — к проектам' }));
+  projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — открыть чат · VM-чат откроется рабочим местом проекта · + Claude / + Codex — новая сессия · Agent VM — среда проекта · esc — к проектам' }));
 
   const all = AgentVmModel.mergeProjectChats(g.sessions, histRuns.get(g.cwd) || []);
   const chats = q ? all.filter((chat) => chat.title.toLowerCase().includes(q)) : all;

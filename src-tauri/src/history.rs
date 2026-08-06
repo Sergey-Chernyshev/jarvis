@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use crate::util::*;
 
 /// Первый промпт начинается с этого → наш служебный вызов, в историю не берём.
-const SERVICE_PREFIXES: [&str; 7] = [
+const SERVICE_PREFIXES: [&str; 9] = [
     "Ответ агента:",
     "Хвост диалога",
     "Диалог рабочей сессии:",
@@ -26,6 +26,9 @@ const SERVICE_PREFIXES: [&str; 7] = [
     "Суммаризируй",
     "сожми этот ответ",
     "Задача: выдай",
+    // промпты ревью-агента Codex: у владельца забили список чатов проекта
+    "The following is the Codex agent history",
+    "Ты пишешь разбор результатов",
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -122,6 +125,11 @@ fn parse_codex_meta(file: &Path, mtime: i64) -> Option<Meta> {
     if session_id.is_empty() {
         return None;
     }
+    // Прежнее допущение «служебные codex exec идут с --ephemeral и rollout
+    // не пишут» неверно: 60 rollout'ов со служебными промптами засоряли список
+    // чатов проекта. Проверяем те же префиксы, что и у Claude, — по первой
+    // реплике, до подстановки заглушки «Codex-сессия».
+    let service = is_service_prompt(&title);
     Some(Meta {
         mtime,
         session_id,
@@ -135,9 +143,18 @@ fn parse_codex_meta(file: &Path, mtime: i64) -> Option<Meta> {
         model: crate::backend::backend(crate::backend::Agent::Codex).friendly_model(&model),
         first_at,
         last_at,
-        service: false,
+        service,
         agent: crate::backend::Agent::Codex.label().to_string(),
     })
+}
+
+/// Служебный ли это промпт (наш собственный вызов агента, не разговор человека).
+/// Одна проверка для обоих бэкендов: второй список неизбежно разъедется с первым.
+fn is_service_prompt(first_prompt: &str) -> bool {
+    // [0-9A-Za-z_], не \w: в Rust \w юникодный и скрывал бы кириллические команды
+    let single_slash = regex::Regex::new(r"^/[0-9A-Za-z_]+$").unwrap();
+    SERVICE_PREFIXES.iter().any(|p| first_prompt.starts_with(p))
+        || single_slash.is_match(first_prompt)
 }
 
 fn first_user_text(msg: &Value) -> String {
@@ -251,10 +268,7 @@ fn parse_meta(file: &Path, mtime: i64) -> Option<Meta> {
         }
     }
 
-    // [0-9A-Za-z_], не \w: в Rust \w юникодный и скрывал бы кириллические команды
-    let single_slash = regex::Regex::new(r"^/[0-9A-Za-z_]+$").unwrap();
-    meta.service = SERVICE_PREFIXES.iter().any(|p| first_prompt.starts_with(p))
-        || single_slash.is_match(&first_prompt); // одиночная слэш-команда
+    meta.service = is_service_prompt(&first_prompt);
     meta.project = Some(
         meta.cwd
             .as_deref()
@@ -518,6 +532,48 @@ mod tests {
         let m = parse_codex_meta(&codex, 1).expect("codex meta");
         assert_eq!(m.agent, "codex");
         assert_eq!(m.session_id, "abc");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Служебные промпты codex тоже помечаются служебными: раньше ветка codex
+    /// жёстко ставила service=false, и 60 таких rollout'ов забивали список
+    /// чатов проекта строками «The following is the Codex agent history…».
+    #[test]
+    fn codex_service_prompts_are_marked_service_and_hidden_from_projects() {
+        let dir = std::env::temp_dir().join("jarvis-history-codex-service");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let rollout = |name: &str, text: &str| {
+            let path = dir.join(name);
+            fs::write(
+                &path,
+                format!(
+                    concat!(
+                        r#"{{"type":"session_meta","timestamp":"2026-08-05T10:00:00.000Z","payload":{{"id":"{}","cwd":"/tmp/proj"}}}}"#,
+                        "\n",
+                        r#"{{"type":"response_item","timestamp":"2026-08-05T10:00:01.000Z","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{}"}}]}}}}"#,
+                        "\n"
+                    ),
+                    name, text
+                ),
+            )
+            .unwrap();
+            parse_codex_meta(&path, 1).expect("codex meta")
+        };
+
+        let service = rollout(
+            "svc",
+            "The following is the Codex agent history whose request action you are assessing.",
+        );
+        assert!(service.service, "служебный промпт ревью-агента скрыт");
+
+        let human = rollout("human", "почини сборку на CI пожалуйста");
+        assert!(!human.service, "живой разговор остаётся в истории");
+
+        let slash = rollout("slash", "/compact");
+        assert!(slash.service, "одиночная слэш-команда — служебная");
 
         let _ = fs::remove_dir_all(&dir);
     }

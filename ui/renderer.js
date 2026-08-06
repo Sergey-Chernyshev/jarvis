@@ -4543,11 +4543,21 @@ function renderHistLevel() {
   renderHistory();
 }
 
+// «17:15» сегодня, «вчера» вчера, дальше — дата. Время суток у прошлогодней
+// сессии ничего не значит, а «вчера» читается быстрее, чем «05.08».
 function histTime(ts) {
   const d = new Date(ts);
   const now = new Date();
-  const same = d.toDateString() === now.toDateString();
-  return same ? `${pad2(d.getHours())}:${pad2(d.getMinutes())}` : `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}`;
+  if (d.toDateString() === now.toDateString()) {
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return 'вчера';
+  const sameYear = d.getFullYear() === now.getFullYear();
+  return sameYear
+    ? `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}`
+    : `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()}`;
 }
 
 function resumeCommand(s, cwd) {
@@ -4934,7 +4944,9 @@ function renderHistChats(g, q) {
   // новые сессии в директории проекта — отдельно для Claude и Codex; для групп
   // без известной директории («другое», g.cwd == null) новая сессия бессмысленна
   if (g.cwd) {
-    const newClaude = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Claude' });
+    // Три равнозначные кнопки заставляли выбирать там, где выбор почти всегда
+    // один. Новый чат Claude — главное действие, остальные тише.
+    const newClaude = Object.assign(document.createElement('button'), { className: 'abtn small primary', textContent: '+ Claude' });
     newClaude.title = 'Новая сессия Claude в этой директории';
     newClaude.addEventListener('click', (e) => { e.stopPropagation(); launchSession('claude', null, g.cwd); });
     const newCodex = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Codex' });
@@ -4963,7 +4975,13 @@ function renderHistChats(g, q) {
   }
   projectManagerContentEl.appendChild(head);
 
-  projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — открыть чат · VM-чат откроется рабочим местом проекта · + Claude / + Codex — новая сессия · Agent VM — среда проекта · esc — к проектам' }));
+  // Подсказка в шесть пунктов через точки соревновалась за внимание с самими
+  // чатами и объясняла кнопки, которые подписаны. Оставляем две клавиши;
+  // назначение кнопок живёт в их title.
+  projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), {
+    className: 'hhint',
+    textContent: '↵ — открыть · esc — к проектам',
+  }));
 
   const all = AgentVmModel.mergeProjectChats(g.sessions, histRuns.get(g.cwd) || []);
   const chats = q ? all.filter((chat) => chat.title.toLowerCase().includes(q)) : all;
@@ -5010,9 +5028,12 @@ function renderHistChats(g, q) {
     if (chat.kind === 'vm') {
       if (chat.state) parts.push(AgentVmModel.stateLabel(chat.state));
       if (chat.changedFiles) parts.push(`${chat.changedFiles} ${plural(chat.changedFiles, 'файл', 'файла', 'файлов')}`);
-    } else {
-      if (chat.model) parts.push(chat.model);
-      if (chat.tokens) parts.push(fmtTok(chat.tokens));
+    } else if (chat.model) {
+      // Токены здесь не показываем: на реальных данных 99.7% этого числа —
+      // cache read, то есть один и тот же контекст, перечитанный на каждом
+      // ходу. «191.8M» ранжировало чаты по числу ходов под видом объёма и
+      // ничего не говорило о самом чате.
+      parts.push(chat.model);
     }
     parts.push(histTime(chat.lastAt));
     meta.textContent = parts.join(' · ');

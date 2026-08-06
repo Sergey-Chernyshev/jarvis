@@ -297,6 +297,22 @@ fn friendly_model_or_empty(id: &str) -> String {
     }
 }
 
+/// Модель, взятая из учёта расхода, когда транскрипт её не назвал.
+///
+/// Учёт хранит уже свёрнутую для показа подпись: всё не-Anthropic он сложил
+/// в «другая» (`usage.rs::friendly_model_or_other`) и записал в usage.json —
+/// в строке чата это читается как название модели, хотя моделью не является.
+/// Своей пустой строкой история говорит честнее: сегмент просто не покажем.
+/// Чинить здесь, а не на записи: подпись уже лежит в 1000+ записях, а по ней
+/// группируется экран «Статистика» — смена формата на входе разъедет агрегаты.
+fn borrowed_usage_model(label: &str) -> String {
+    if label == "другая" {
+        String::new()
+    } else {
+        label.to_string()
+    }
+}
+
 impl History {
     pub fn load() -> Self {
         let cache = fs::read_to_string(cache_file())
@@ -456,10 +472,7 @@ impl History {
             });
             let u = usage.for_session(&meta.session_id).unwrap_or(Value::Null);
             let model = if meta.model.is_empty() {
-                u.get("model")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string()
+                borrowed_usage_model(u.get("model").and_then(Value::as_str).unwrap_or(""))
             } else {
                 meta.model.clone()
             };
@@ -500,6 +513,17 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// «другая» — это подпись для показа, а не модель: в строке чата она
+    /// читается как название. Такую занятую у учёта подпись не берём.
+    #[test]
+    fn borrowed_model_drops_display_placeholder() {
+        assert_eq!(borrowed_usage_model("другая"), "");
+        assert_eq!(borrowed_usage_model(""), "");
+        // Настоящие названия проходят как есть — и Anthropic, и чужие.
+        assert_eq!(borrowed_usage_model("Opus"), "Opus");
+        assert_eq!(borrowed_usage_model("GPT-5"), "GPT-5");
+    }
 
     /// История метит сессию агентом, чтобы фронт скопировал верную команду resume
     /// (issue #10: codex-сессия не должна давать `claude --resume`).

@@ -543,6 +543,19 @@ pub fn is_dictation_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
         .unwrap_or(false)
 }
 
+/// Совпал ли сработавший shortcut с хоткеем панели (⌘J по умолчанию).
+///
+/// Нужен именно как проверка, а не как «всё остальное»: панель открывается с
+/// фокусом, а `set_focus` активирует приложение — macOS в этот момент уводит
+/// пользователя на Space, где лежит окно. Пока это был `else` без условия,
+/// туда попадал любой незнакомый хоткей, включая голосовой ввод.
+pub fn is_panel_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
+    action_accel(d, HkAction::Panel)
+        .and_then(|accel| accel.parse::<Shortcut>().ok())
+        .map(|s| &s == shortcut)
+        .unwrap_or(false)
+}
+
 /// Зарегистрировать хоткей диктовки на старте (best-effort).
 pub fn register_dictation_hotkey(d: &Arc<Daemon>) {
     let accel = dictation_accelerator(d);
@@ -3388,6 +3401,43 @@ mod tests {
             accel_from_raw("", HkAction::Dictation),
             Some("F8".to_string())
         );
+    }
+
+    /// Голосовой ввод не должен открывать панель. Панель показывается с
+    /// фокусом, а `set_focus` активирует приложение — macOS в этот момент
+    /// уводит пользователя на Space, где лежит окно. Пока в обработчике стоял
+    /// `else` без условия, туда попадал любой незнакомый хоткей: человек жал
+    /// ⌘K для диктовки, а его выбрасывало на другой рабочий стол.
+    ///
+    /// Проверяем разделение на уровне акселераторов: хоткей панели и хоткей
+    /// диктовки — разные сочетания, и «диктовка» не совпадает с «панелью».
+    #[test]
+    fn dictation_and_panel_hotkeys_are_distinct_actions() {
+        let panel = accel_from_raw("", HkAction::Panel).expect("панель назначена");
+        let dictation = accel_from_raw("Command+K", HkAction::Dictation).expect("диктовка назначена");
+        assert_ne!(
+            panel, dictation,
+            "хоткей диктовки не должен совпадать с хоткеем панели"
+        );
+        // Оба разбираются в Shortcut — иначе сравнение в обработчике всегда
+        // ложно, и хоткей проваливается в ветку «ничего не делаем».
+        assert!(panel.parse::<Shortcut>().is_ok(), "панель: {panel}");
+        assert!(dictation.parse::<Shortcut>().is_ok(), "диктовка: {dictation}");
+    }
+
+    /// Незнакомое сочетание не закреплено ни за одним действием: раньше оно
+    /// доставалось панели по умолчанию.
+    #[test]
+    fn unknown_shortcut_matches_no_action() {
+        let unknown: Shortcut = "Command+Alt+Shift+F12".parse().expect("разобрано");
+        for action in HkAction::ALL {
+            let Some(accel) = accel_from_raw("", action) else { continue };
+            let Ok(bound) = accel.parse::<Shortcut>() else { continue };
+            assert_ne!(
+                bound, unknown,
+                "{action:?} не должно ловить чужое сочетание"
+            );
+        }
     }
 
     #[test]

@@ -142,8 +142,18 @@ fn main() {
                         d.toggle_mute();
                     } else if let Some(n) = ipc::is_select_hotkey(&d, shortcut) {
                         d.answer_question_hotkey(n);
-                    } else {
+                    } else if ipc::is_panel_hotkey(&d, shortcut) {
                         windows::toggle_hotkey_panel(&d);
+                    } else {
+                        // Раньше здесь был `else` без условия, и ЛЮБОЙ незнакомый
+                        // хоткей открывал панель с фокусом. Это ровно то, из-за
+                        // чего голосовой ввод уносил на другой рабочий стол:
+                        // `set_focus` активирует приложение, и macOS переключает
+                        // Space на тот, где лежит окно. Чужой хоткей теперь
+                        // просто игнорируется — панель открывает только свой.
+                        crate::log::line(&format!(
+                            "[hotkey] сочетание {shortcut:?} ни за чем не закреплено — игнорирую"
+                        ));
                     }
                 })
                 .build(),

@@ -291,6 +291,38 @@
     return asObject(project).history ? "history" : "agentvm";
   }
 
+  // На реальных данных владельца каталог — это 38 папок, из которых живых 10:
+  // нужное тонет среди прошлогодних домашек и разовых прогонов. Прячем давно
+  // забытые под «Показать ещё», но НИКОГДА не прячем то, что пользователь
+  // выбрал сам или где сейчас что-то происходит — иначе спрячем как раз важное.
+  // catalogFolder здесь обязателен: папку, добавленную кнопкой «+», история
+  // ещё не знает (updatedAt = 0), и без этой проверки она исчезала сразу после
+  // добавления.
+  const STALE_PROJECT_MS = 30 * 24 * 60 * 60 * 1000;
+
+  function splitStaleProjects(projects, now = Date.now()) {
+    const list = Array.isArray(projects) ? projects : [];
+    const active = [];
+    const stale = [];
+    for (const project of list) {
+      const item = asObject(project);
+      const updatedAt = Number(item.updatedAt) || 0;
+      const keep =
+        item.favoriteIndex >= 0 ||
+        !!item.vm ||
+        !!item.run ||
+        !!item.agentVmProfile ||
+        !!item.catalogFolder ||
+        (updatedAt > 0 && now - updatedAt < STALE_PROJECT_MS);
+      (keep ? active : stale).push(project);
+    }
+    // Пустой экран с подписью «0 проектов» над непустым каталогом читается как
+    // потеря данных. Прятать имеет смысл только когда что-то остаётся видно:
+    // если активного нет вовсе (вернулся после отпуска), показываем всё.
+    if (!active.length) return { active: stale, stale: [] };
+    return { active, stale };
+  }
+
   function filterCommands(commands, input, limit = 12) {
     const value = asString(input);
     if (!value.startsWith("/") || /\s/.test(value.slice(1))) return [];
@@ -786,6 +818,7 @@
     reduceRun,
     runSummary,
     selectBackend,
+    splitStaleProjects,
     stateLabel,
     terminalSnapshotLive,
   };

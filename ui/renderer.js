@@ -4497,6 +4497,7 @@ let historyData = [];
 let histRows = []; // плоский список выбираемых строк: проекты или чаты (для ↑↓/Enter)
 let histSel = 0;
 let histProject = null; // ключ открытого проекта (cwd) — null = список проектов
+let projectManagerShowAll = false; // показывать и давно забытые папки
 const histRuns = new Map(); // cwd → прогоны Agent VM для списка чатов проекта
 let histRunsInFlight = null;
 
@@ -4628,8 +4629,6 @@ function renderHistProjects(q) {
   const groups = AgentVmModel.filterProjects(allProjects, q);
 
   const runtime = AgentVmModel.pluginRuntimeStatus(pluginById('agent-vm'));
-  projectManagerSubtitleEl.textContent =
-    `${groups.length} ${plural(groups.length, 'проект', 'проекта', 'проектов')}`;
   const cards = projectManagerState.view === 'cards';
   projectManagerListViewEl.classList.toggle('active', !cards);
   projectManagerListViewEl.setAttribute('aria-pressed', String(!cards));
@@ -4655,8 +4654,17 @@ function renderHistProjects(q) {
     return;
   }
 
-  const favoriteProjects = groups.filter((project) => project.favoriteIndex >= 0);
-  const regularProjects = groups.filter((project) => project.favoriteIndex < 0);
+  // Забытые папки прячем: на данных владельца это 38 строк, из которых живых
+  // 10 — нужное тонет. Поиск идёт по всем: фильтр сворачивает только общий
+  // список, найти давнюю папку по имени можно всегда.
+  const { active, stale } = q || projectManagerShowAll
+    ? { active: groups, stale: [] }
+    : AgentVmModel.splitStaleProjects(groups);
+  // Счётчик считает видимое, иначе «38 проектов» стоит над списком из десяти
+  projectManagerSubtitleEl.textContent =
+    `${active.length} ${plural(active.length, 'проект', 'проекта', 'проектов')}`;
+  const favoriteProjects = active.filter((project) => project.favoriteIndex >= 0);
+  const regularProjects = active.filter((project) => project.favoriteIndex < 0);
   const sections = favoriteProjects.length
     ? [['Избранное', favoriteProjects], ['Все проекты', regularProjects]]
     : [['', regularProjects]];
@@ -4678,8 +4686,29 @@ function renderHistProjects(q) {
     section.appendChild(grid);
     projectManagerContentEl.appendChild(section);
   }
-  const restored = groups.findIndex((project) => project.cwd === previousCwd);
-  histSel = restored >= 0 ? restored : Math.min(histSel, groups.length - 1);
+  // Разворот обратимый: иначе один клик за старой папкой навсегда возвращает
+  // свалку из 38 строк, и свернуть её уже нечем.
+  const hiddenCount = projectManagerShowAll && !q
+    ? groups.length - AgentVmModel.splitStaleProjects(groups).active.length
+    : stale.length;
+  if (hiddenCount > 0) {
+    const more = Object.assign(document.createElement('button'), {
+      className: 'pm-show-all',
+      type: 'button',
+      textContent: projectManagerShowAll
+        ? 'Свернуть папки без активности'
+        : `Показать ещё ${hiddenCount} ${plural(hiddenCount, 'папку', 'папки', 'папок')} без активности`,
+    });
+    more.addEventListener('click', () => {
+      projectManagerShowAll = !projectManagerShowAll;
+      renderHistProjects(queryEl.value.trim().toLowerCase());
+    });
+    projectManagerContentEl.appendChild(more);
+  }
+  // Курсор держим на том же проекте, что и до перерисовки: строки нумеруются по
+  // видимым карточкам, поэтому искать надо в active, а не в полном списке.
+  const restored = active.findIndex((project) => project.cwd === previousCwd);
+  histSel = restored >= 0 ? restored : Math.min(histSel, active.length - 1);
   paintHistSel();
 }
 

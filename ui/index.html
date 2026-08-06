@@ -1667,7 +1667,7 @@
   }
   .vm-active-count {
     margin-left: auto;
-    color: rgba(155, 138, 251, .72);
+    color: color-mix(in srgb, var(--accent) 72%, transparent);
     font-variant-numeric: tabular-nums;
   }
   .vm-active-row {
@@ -1683,17 +1683,17 @@
     cursor: default;
   }
   .vm-active-row:hover,
-  .vm-active-row.selected { background: rgba(155, 138, 251, .08); }
+  .vm-active-row.selected { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .vm-active-signal {
     width: 7px;
     height: 7px;
     border-radius: 50%;
     background: var(--vm);
-    box-shadow: 0 0 0 3px rgba(155, 138, 251, .08);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 8%, transparent);
   }
   .vm-active-row.working .vm-active-signal {
     animation: vmPulse 1.8s ease-in-out infinite;
-    box-shadow: 0 0 10px rgba(155, 138, 251, .55);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 55%, transparent);
   }
   .vm-active-row.waiting .vm-active-signal { background: var(--waiting); }
   .vm-active-row.error .vm-active-signal { background: var(--danger); }
@@ -1708,7 +1708,7 @@
   .vm-active-agent {
     font-family: var(--mono);
     font-size: 9.5px;
-    color: rgba(155, 138, 251, .9);
+    color: color-mix(in srgb, var(--accent) 90%, transparent);
     text-transform: uppercase;
   }
   .vm-active-state {
@@ -1782,7 +1782,24 @@
   .pm-view-button:hover,
   .pm-icon-button:hover {
     color: var(--text);
-    background: rgba(255, 255, 255, .075);
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  }
+  /* «VM» — действие, а не подпись: рядом с обычным текстом кнопка должна
+     читаться как кнопка. Проявляется сильнее, когда карточка под курсором. */
+  .pm-icon-button.agent-vm {
+    padding: 0 9px;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    color: var(--accent-text);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .pm-card:hover .pm-icon-button.agent-vm {
+    color: var(--on-accent);
+    background: var(--accent);
+    border-color: var(--accent);
   }
   .pm-add:disabled,
   .pm-view-button:disabled,
@@ -1804,8 +1821,8 @@
   }
   .pm-view-button.active {
     color: #d9d3ff;
-    background: rgba(155, 138, 251, .15);
-    box-shadow: inset 0 0 0 1px rgba(155, 138, 251, .16);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .pm-runtime {
     display: grid;
@@ -1819,7 +1836,7 @@
     border: 1px solid rgba(255, 255, 255, .075);
     border-radius: 11px;
     background:
-      linear-gradient(110deg, rgba(155, 138, 251, .08), rgba(255, 255, 255, .025) 52%),
+      linear-gradient(110deg, color-mix(in srgb, var(--accent) 8%, transparent), rgba(255, 255, 255, .025) 52%),
       rgba(12, 12, 17, .5);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
   }
@@ -1844,7 +1861,7 @@
   }
   .pm-runtime.starting .pm-runtime-signal {
     background: var(--vm);
-    box-shadow: 0 0 0 3px rgba(155, 138, 251, .1), 0 0 12px rgba(155, 138, 251, .2);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent), 0 0 12px color-mix(in srgb, var(--accent) 20%, transparent);
     animation: vmPulse 1.15s ease-in-out infinite;
   }
   .pm-runtime.waiting .pm-runtime-signal {
@@ -1899,7 +1916,7 @@
   .pm-runtime.ready .pm-runtime-step.done { color: rgba(154, 222, 188, .88); }
   .pm-runtime-step.active {
     color: var(--text);
-    text-shadow: 0 0 9px rgba(155, 138, 251, .35);
+    text-shadow: 0 0 9px color-mix(in srgb, var(--accent) 35%, transparent);
   }
   .pm-runtime > .vm-button { justify-self: end; white-space: nowrap; }
   .pm-section { margin: 0 1px 11px; }
@@ -1932,10 +1949,51 @@
     background: rgba(255, 255, 255, .012);
     cursor: default;
   }
-  .pm-card:hover { background: rgba(255, 255, 255, .03); }
+  /* Наведение и выбор должны быть ВИДНЫ: 3% белого на почти чёрном фоне —
+     ниже порога различимости. Красим краской и добавляем полоску слева:
+     цвет читается даже там, где разница в яркости почти незаметна. */
+  .pm-card::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 2px;
+    height: 0;
+    border-radius: 0 2px 2px 0;
+    background: var(--accent);
+    transform: translateY(-50%);
+    transition: height .12s ease;
+  }
+  .pm-card:hover {
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .pm-card:hover::before { height: 46%; }
   .pm-card.selected {
-    background: rgba(255, 255, 255, .045);
-    border-color: rgba(155, 138, 251, .14);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+  }
+  .pm-card.selected::before { height: 62%; }
+  /* «Показать ещё N папок» — тихая ссылка: она не должна спорить с проектами */
+  .pm-show-all {
+    appearance: none;
+    display: block;
+    width: 100%;
+    margin: 6px 0 2px;
+    padding: 9px 11px;
+    border: 1px dashed color-mix(in srgb, var(--accent) 20%, transparent);
+    border-radius: 11px;
+    background: transparent;
+    color: var(--ink-faint);
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    cursor: default;
+  }
+  .pm-show-all:hover {
+    color: var(--accent-text);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
   }
   .pm-card-copy {
     display: flex;
@@ -2024,13 +2082,13 @@
       rgba(10, 10, 14, .54);
   }
   .pm-card-grid.cards .pm-card:hover {
-    border-color: rgba(155, 138, 251, .13);
+    border-color: color-mix(in srgb, var(--accent) 13%, transparent);
     background:
-      linear-gradient(145deg, rgba(155, 138, 251, .055), rgba(255, 255, 255, .012)),
+      linear-gradient(145deg, color-mix(in srgb, var(--accent) 6%, transparent), rgba(255, 255, 255, .012)),
       rgba(10, 10, 14, .62);
   }
   .pm-card-grid.cards .pm-card.selected {
-    border-color: rgba(155, 138, 251, .26);
+    border-color: color-mix(in srgb, var(--accent) 26%, transparent);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, .035);
   }
   .pm-card-grid.cards .pm-card-copy {
@@ -2068,19 +2126,19 @@
     cursor: default;
   }
   .vm-pill { font-family: var(--mono); font-size: 9.5px; }
-  .vm-pill.ready, .vm-pill.working { color: #b9adff; border-color: rgba(155, 138, 251, .24); }
+  .vm-pill.ready, .vm-pill.working { color: #b9adff; border-color: color-mix(in srgb, var(--accent) 24%, transparent); }
   .vm-pill.waiting { color: var(--waiting); border-color: rgba(242, 163, 60, .25); }
   .vm-pill.error { color: var(--danger); border-color: rgba(230, 106, 114, .25); }
   .vm-pill.autostart {
     color: rgba(185, 173, 255, .82);
-    border-color: rgba(155, 138, 251, .16);
-    background: rgba(155, 138, 251, .055);
+    border-color: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
   }
   .vm-button:hover { color: var(--text); background: rgba(255, 255, 255, .08); }
   .vm-button.primary {
     color: #ddd8ff;
-    background: rgba(155, 138, 251, .13);
-    border-color: rgba(155, 138, 251, .28);
+    background: color-mix(in srgb, var(--accent) 13%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 28%, transparent);
   }
   .vm-button.danger { color: var(--danger); }
   .vm-button:disabled { opacity: .38; }
@@ -2145,15 +2203,15 @@
     gap: 7px;
     max-width: 210px;
     padding: 6px 9px;
-    border: 1px solid rgba(155, 138, 251, .18);
+    border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
     border-radius: 9px;
-    background: rgba(155, 138, 251, .065);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
     color: var(--muted);
     font: inherit;
     cursor: default;
   }
   .vmws-env:hover,
-  .vmws-env.open { background: rgba(155, 138, 251, .12); color: var(--text); }
+  .vmws-env.open { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--text); }
   .vmws-env-dot {
     width: 7px;
     height: 7px;
@@ -2185,13 +2243,13 @@
     gap: 10px;
     align-items: center;
     padding: 9px 18px;
-    border-bottom: 1px solid rgba(155, 138, 251, .12);
-    background: rgba(155, 138, 251, .055);
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 12%, transparent);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
   }
   .vmws-stage-spinner {
     width: 13px;
     height: 13px;
-    border: 1.5px solid rgba(155, 138, 251, .22);
+    border: 1.5px solid color-mix(in srgb, var(--accent) 22%, transparent);
     border-top-color: var(--vm);
     border-radius: 50%;
     animation: vmSpin .8s linear infinite;
@@ -2217,14 +2275,14 @@
     bottom: 22px;
     left: 28px;
     width: 1px;
-    background: linear-gradient(to bottom, rgba(155, 138, 251, .7), rgba(155, 138, 251, .06));
+    background: linear-gradient(to bottom, color-mix(in srgb, var(--accent) 70%, transparent), color-mix(in srgb, var(--accent) 6%, transparent));
   }
   .vmws-feed.terminal-mode {
     display: flex;
     padding: 14px;
     overflow: hidden;
     background:
-      radial-gradient(circle at 72% -20%, rgba(155, 138, 251, .09), transparent 42%),
+      radial-gradient(circle at 72% -20%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 42%),
       rgba(5, 5, 7, .58);
   }
   .vmws-feed.terminal-mode::before { display: none; }
@@ -2259,7 +2317,7 @@
   }
   .vm-terminal-light.live {
     background: var(--vm);
-    box-shadow: 0 0 10px rgba(155, 138, 251, .42);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 42%, transparent);
   }
   .vm-terminal-title {
     min-width: 0;
@@ -2349,7 +2407,7 @@
     width: 28px;
     height: 28px;
     margin-bottom: 16px;
-    border: 1px solid rgba(155, 138, 251, .32);
+    border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
     border-radius: 9px;
   }
   .vmws-empty-mark::before,
@@ -2393,7 +2451,7 @@
     border: 2px solid rgba(10, 10, 12, .95);
     border-radius: 50%;
     background: var(--vm);
-    box-shadow: 0 0 0 1px rgba(155, 138, 251, .3);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .vm-turn.waiting::before { background: var(--waiting); }
   .vm-turn.failed::before { background: var(--danger); }
@@ -2449,7 +2507,7 @@
     font-size: 9.5px;
   }
   button.vm-file { cursor: default; }
-  button.vm-file:hover { color: #c9c2ff; border-color: rgba(155, 138, 251, .26); }
+  button.vm-file:hover { color: #c9c2ff; border-color: color-mix(in srgb, var(--accent) 26%, transparent); }
   .vm-tool-state { width: 5px; height: 5px; border-radius: 50%; background: var(--done); flex: none; }
   .vm-tool.working .vm-tool-state { background: var(--working); animation: vmPulse 1.8s ease-in-out infinite; }
   .vm-tool.failed .vm-tool-state { background: var(--danger); }
@@ -2498,7 +2556,7 @@
     max-height: 262px;
     overflow: auto;
     padding: 5px;
-    border: 1px solid rgba(155, 138, 251, .24);
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
     border-radius: 10px;
     background: rgba(17, 16, 22, .97);
     box-shadow: 0 16px 42px rgba(0, 0, 0, .42);
@@ -2520,7 +2578,7 @@
   }
   .vm-command-option.selected,
   .vm-command-option:hover {
-    background: rgba(155, 138, 251, .12);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
     color: var(--text);
   }
   .vm-command-name {
@@ -2556,8 +2614,8 @@
     transition: border-color 120ms ease, background 120ms ease;
   }
   .vmws-composebox:focus-within {
-    border-color: rgba(155, 138, 251, .3);
-    background: rgba(155, 138, 251, .045);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    background: color-mix(in srgb, var(--accent) 4%, transparent);
   }
   .vmws-prompt-mark {
     align-self: start;
@@ -2580,7 +2638,7 @@
   }
   .vm-attach:hover {
     color: #cec8ff;
-    background: rgba(155, 138, 251, .11);
+    background: color-mix(in srgb, var(--accent) 11%, transparent);
   }
   .vm-attach:disabled { opacity: .32; }
   .vmws-attachments {
@@ -2646,7 +2704,7 @@
     padding: 5px 7px;
   }
   .vm-agent-option.active {
-    background: rgba(155, 138, 251, .14);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
     color: #d4ceff;
   }
   .vm-agent-option:disabled {
@@ -2675,12 +2733,12 @@
     place-items: center;
     width: 30px;
     height: 30px;
-    border: 1px solid rgba(155, 138, 251, .3);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
     border-radius: 8px;
-    background: rgba(155, 138, 251, .16);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
     color: #e3dfff;
   }
-  .vm-send:hover { background: rgba(155, 138, 251, .24); }
+  .vm-send:hover { background: color-mix(in srgb, var(--accent) 24%, transparent); }
   .vm-send:disabled { opacity: .35; }
   .vmws-composehint {
     display: flex;
@@ -2730,7 +2788,7 @@
     right: 13px;
     width: 310px;
     padding: 13px;
-    border: 1px solid rgba(155, 138, 251, .2);
+    border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
     border-radius: 12px;
     background: rgba(22, 21, 29, .97);
     box-shadow: 0 18px 48px rgba(0, 0, 0, .48);
@@ -2755,9 +2813,9 @@
     gap: 12px;
     margin: -2px 0 11px;
     padding: 9px 10px;
-    border: 1px solid rgba(155, 138, 251, .12);
+    border: 1px solid color-mix(in srgb, var(--accent) 12%, transparent);
     border-radius: 9px;
-    background: rgba(155, 138, 251, .045);
+    background: color-mix(in srgb, var(--accent) 4%, transparent);
     cursor: default;
   }
   .vm-env-autostart-copy { min-width: 0; flex: 1; }
@@ -2773,7 +2831,7 @@
     color: var(--faint);
     font-size: 9px;
   }
-  .vm-env-autostart .toggle:checked { background: rgba(155, 138, 251, .88); }
+  .vm-env-autostart .toggle:checked { background: color-mix(in srgb, var(--accent) 88%, transparent); }
   .vm-env-actions { display: flex; flex-wrap: wrap; gap: 6px; }
   .vm-env-note { margin-top: 10px; color: var(--faint); font-size: 9.5px; line-height: 1.45; }
 
@@ -2784,7 +2842,7 @@
     display: flex;
     flex-direction: column;
     width: min(560px, 76%);
-    border-left: 1px solid rgba(155, 138, 251, .18);
+    border-left: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
     background: rgba(15, 15, 19, .985);
     box-shadow: -18px 0 50px rgba(0, 0, 0, .45);
     animation: vmDrawerIn 160ms ease-out;
@@ -2836,7 +2894,7 @@
   .vm-file-diff { padding: 9px 0 24px; font-family: var(--mono); font-size: 10.5px; }
 
   :is(.vm-button, .vmws-back, .vmws-iconbtn, .vmws-env, .vm-agent-option, .vm-attach, .vm-send, .vm-file, .vm-file-tab):focus-visible {
-    outline: 2px solid rgba(155, 138, 251, .7);
+    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
     outline-offset: 2px;
   }
   @media (prefers-reduced-motion: reduce) {

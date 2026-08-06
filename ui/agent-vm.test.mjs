@@ -304,6 +304,84 @@ test("active environments combine VM lifecycle with the latest structured run st
   );
 });
 
+test("forgotten folders are hidden, but never anything the user still needs", () => {
+  const now = 1_800_000_000_000;
+  const day = 24 * 60 * 60 * 1000;
+  const projects = [
+    { cwd: "/fresh", favoriteIndex: -1, updatedAt: now - 2 * day },
+    { cwd: "/old", favoriteIndex: -1, updatedAt: now - 200 * day },
+    // Забыт давно, но в избранном — прятать нельзя.
+    { cwd: "/starred", favoriteIndex: 0, updatedAt: now - 200 * day },
+    // Забыт давно, но у него есть VM — это рабочая среда.
+    { cwd: "/has-vm", favoriteIndex: -1, updatedAt: now - 200 * day, vm: { state: "stopped" } },
+    // Прямо сейчас идёт прогон.
+    { cwd: "/running", favoriteIndex: -1, updatedAt: 0, run: { state: "working" } },
+    // Есть профиль автозапуска VM — это рабочая среда, не свалка.
+    { cwd: "/pinned", favoriteIndex: -1, updatedAt: 0, agentVmProfile: {} },
+    // Папка добавлена кнопкой «+»: история её ещё не знает (updatedAt = 0),
+    // но пользователь выбрал её сам — спрятать сразу после добавления нельзя.
+    { cwd: "/just-added", favoriteIndex: -1, updatedAt: 0, catalogFolder: {} },
+    // Ни истории, ни VM, ни времени — разовая папка вроде orch_planner_*.
+    { cwd: "/junk", favoriteIndex: -1, updatedAt: 0 },
+  ];
+
+  const { active, stale } = AgentVm.splitStaleProjects(projects, now);
+
+  assert.deepEqual(
+    active.map((p) => p.cwd),
+    ["/fresh", "/starred", "/has-vm", "/running", "/pinned", "/just-added"],
+  );
+  assert.deepEqual(
+    stale.map((p) => p.cwd),
+    ["/old", "/junk"],
+  );
+});
+
+// Тест на стык, а не на поле: папка проходит настоящий путь «нажал +» —
+// mergeProjectCatalog по folders из настроек, — и только потом фильтр. Проверка
+// поля в отрыве от этого пути уже один раз соврала: фильтр держал
+// agentVmProfile, которого на этом пути не бывает, и папка исчезала.
+test("a folder just added by hand stays visible before it has any history", () => {
+  const projects = AgentVm.mergeProjectCatalog([], {
+    folders: [
+      { projectId: "a".repeat(24), project: "just-added", cwd: "/Users/me/just-added" },
+    ],
+    favoriteProjectIds: [],
+  });
+  const { active, stale } = AgentVm.splitStaleProjects(projects, 1_800_000_000_000);
+
+  assert.deepEqual(
+    active.map((p) => p.cwd),
+    ["/Users/me/just-added"],
+    "папка, добавленную кнопкой, нельзя прятать сразу после добавления",
+  );
+  assert.equal(stale.length, 0);
+});
+
+// Иначе вернувшийся после отпуска увидит «0 проектов» над пустым списком и
+// решит, что каталог потерян.
+test("nothing is hidden when there would be nothing left to show", () => {
+  const now = 1_800_000_000_000;
+  const day = 24 * 60 * 60 * 1000;
+  const forgotten = [
+    { cwd: "/a", favoriteIndex: -1, updatedAt: now - 200 * day },
+    { cwd: "/b", favoriteIndex: -1, updatedAt: now - 300 * day },
+  ];
+
+  const { active, stale } = AgentVm.splitStaleProjects(forgotten, now);
+
+  assert.deepEqual(active.map((p) => p.cwd), ["/a", "/b"]);
+  assert.deepEqual(stale, [], "нечего сворачивать, если список станет пустым");
+});
+
+test("stale split survives missing and malformed input", () => {
+  assert.deepEqual(AgentVm.splitStaleProjects(undefined), { active: [], stale: [] });
+  assert.deepEqual(AgentVm.splitStaleProjects(null), { active: [], stale: [] });
+  const { active, stale } = AgentVm.splitStaleProjects([null, {}], 1_800_000_000_000);
+  assert.equal(active.length, 2, "мусор всё равно показываем: скрывать нечего");
+  assert.equal(stale.length, 0);
+});
+
 test("project chats merge ordinary sessions with VM runs, newest first", () => {
   const sessions = [
     { id: "chat-old", title: "старый разговор", agent: "claude", lastAt: 10 },

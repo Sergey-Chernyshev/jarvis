@@ -360,6 +360,21 @@ test("a VM run visible in host history is shown once, marked as a VM chat", () =
   assert.equal(chats[0].lastAt, 50, "берём более свежую отметку времени");
 });
 
+test("merging chats never mutates the caller's history objects", () => {
+  // История переиспользуется между перерисовками: порча её объектов означала бы
+  // накопление VM-полей на обычных сессиях.
+  const session = { id: "sid-7", title: "разговор", agent: "claude", lastAt: 5 };
+  const sessions = [session];
+  const snapshot = JSON.stringify(session);
+
+  AgentVm.mergeProjectChats(sessions, [
+    { runId: "run-7", backend: "codex", vm: "vm-1", state: "failed", lastAt: 9 },
+  ], { linkedSessions: { "run-7": "sid-7" } });
+
+  assert.equal(JSON.stringify(session), snapshot, "исходная сессия не тронута");
+  assert.equal(sessions.length, 1);
+});
+
 test("project chats survive missing, malformed and empty inputs", () => {
   assert.deepEqual(AgentVm.mergeProjectChats(undefined, undefined), []);
   assert.deepEqual(AgentVm.mergeProjectChats(null, []), []);

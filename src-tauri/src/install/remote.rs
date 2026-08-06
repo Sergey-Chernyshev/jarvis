@@ -181,13 +181,39 @@ const PROBE: &str = r#"printf 'home=%s\n' "$HOME"
 printf 'os=%s\n' "$(uname -s 2>/dev/null)"
 printf 'arch=%s\n' "$(uname -m 2>/dev/null)"
 printf 'codex_home=%s\n' "${CODEX_HOME:-$HOME/.codex}"
-for b in tmux curl claude codex systemctl; do
+
+# Ищем в три захода, и это не перестраховка: неинтерактивный ssh получает
+# урезанный PATH — без nvm, ~/.local/bin и homebrew. Claude Code почти всегда
+# оказывается ровно там, поэтому одного `command -v` мало: он честно отвечает
+# «нет» про установленный агент.
+WANT="tmux curl claude codex cargo"
+
+# 1. PATH как есть.
+for b in $WANT systemctl; do
   command -v "$b" >/dev/null 2>&1 && printf 'have=%s\n' "$b"
 done
-# cargo ищем и по PATH, и в ~/.cargo/bin: rustup дописывает его в ~/.profile,
-# а неинтерактивный ssh профиль не читает — «нет в PATH» тут не значит «нет»
-{ command -v cargo >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cargo" ]; } && printf 'have=%s\n' cargo
+
+# 2. Известные места установки. Дубли не мешают: ноут проверяет вхождение.
+for p in "$HOME/.local/bin" "$HOME/bin" "$HOME/.cargo/bin" "$HOME/.bun/bin" \
+         "$HOME/.claude/local" "$HOME/.npm-global/bin" "$HOME/.local/share/pnpm" \
+         /usr/local/bin /opt/homebrew/bin /snap/bin; do
+  for b in $WANT; do
+    [ -x "$p/$b" ] && printf 'have=%s\n' "$b"
+  done
+done
+
+# 3. Логин-шелл — он прочитает профиль и подхватит nvm/fnm/asdf/mise. Под
+# таймаутом: чужой профиль может ждать ввода или уходить в сеть, а разведка
+# зависать не имеет права.
+LSH="${SHELL:-/bin/sh}"
+T=""
+command -v timeout >/dev/null 2>&1 && T="timeout 10"
+if [ -x "$LSH" ]; then
+  $T "$LSH" -lc 'for b in tmux curl claude codex cargo; do command -v $b >/dev/null 2>&1 && printf "have=%s\n" "$b"; done' 2>/dev/null
+fi
+
 [ -d "${CODEX_HOME:-$HOME/.codex}" ] && printf 'have=%s\n' codex-home
+[ -d "$HOME/.claude" ] && printf 'have=%s\n' claude-home
 systemctl --user show-environment >/dev/null 2>&1 && printf 'have=%s\n' systemd-user
 exit 0"#;
 
@@ -229,6 +255,131 @@ fn probe(host: &str) -> Result<Remote, String> {
             .map(|(_, v)| v.trim().to_string())
             .collect(),
     })
+}
+
+/* ================= вход по паролю (разовый) ================= */
+
+/// Положить наш публичный ключ в `authorized_keys`, войдя по паролю.
+///
+/// Пароль — только для этого одного раза, и вот почему. Туннель к узлу живёт
+/// в фоне и переподнимается сам: после сна ноута, смены сети, перезагрузки
+/// VPS. Спросить пароль в этот момент не у кого — значит транспорт обязан
+/// работать по ключу. Пароль здесь ровно затем, чтобы ключ там появился.
+///
+/// Пароль не пишется на диск и не попадает в argv (его увидел бы любой `ps`):
+/// ssh забирает его через `SSH_ASKPASS`, а помощник читает переменную окружения
+/// нашего же процесса.
+pub fn authorize_key(
+    progress: &Progress,
+    ssh_host: &str,
+    password: &str,
+    public_key: &str,
+) -> Result<(), String> {
+    let ssh_host = ssh_host.trim();
+    let key = public_key.trim();
+    if ssh_host.is_empty() {
+        return Err("нужен ssh-хост".into());
+    }
+    if !key.starts_with("ssh-") && !key.starts_with("ecdsa-") {
+        return Err("это не похоже на публичный ключ (ожидаю строку вида ssh-ed25519 AAAA…)".into());
+    }
+    if password.is_empty() {
+        return Err("нужен пароль пользователя на той машине".into());
+    }
+    progress(Step::start(PHASE_LINK));
+
+    // grep -qxF по целой строке: дважды класть тот же ключ незачем, а
+    // подстрочное совпадение приняло бы чужой ключ с нашим префиксом.
+    let script = format!(
+        r#"set -e
+umask 077
+mkdir -p "$HOME/.ssh"
+touch "$HOME/.ssh/authorized_keys"
+chmod 700 "$HOME/.ssh"
+chmod 600 "$HOME/.ssh/authorized_keys"
+k={key}
+grep -qxF "$k" "$HOME/.ssh/authorized_keys" || printf '%s\n' "$k" >> "$HOME/.ssh/authorized_keys"
+printf 'ok\n'
+"#,
+        key = sh_quote(key),
+    );
+    ssh_with_password(ssh_host, password, &script)?;
+    progress(Step::done(PHASE_LINK, "ключ добавлен в ~/.ssh/authorized_keys"));
+
+    // Проверяем именно то, чем будем пользоваться дальше: вход по ключу без
+    // пароля. Успешная запись ключа ещё не значит, что sshd его примет —
+    // PubkeyAuthentication может быть выключен, а домашний каталог доступен
+    // на запись группе (тогда sshd молча игнорирует authorized_keys).
+    run_ssh(ssh_host, "true").map_err(|e| {
+        format!(
+            "ключ записан, но вход по ключу всё равно не работает: {e}\n\
+             Обычно это одно из двух: в sshd выключен PubkeyAuthentication либо \
+             у $HOME или ~/.ssh слишком широкие права (sshd такие каталоги игнорирует; \
+             лечится chmod go-w \"$HOME\" и chmod 700 ~/.ssh)."
+        )
+    })?;
+    progress(Step::done(PHASE_LINK, "вход по ключу работает — пароль больше не нужен"));
+    Ok(())
+}
+
+/// Один заход по паролю. Помощник для `SSH_ASKPASS` кладём во временный файл
+/// с правами 0700 и убираем сразу после — он нужен ровно на время вызова.
+fn ssh_with_password(host: &str, password: &str, script: &str) -> Result<String, String> {
+    let helper = write_askpass()?;
+    let out = Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=no",
+            // Иначе ssh перебирает ключи, упирается в отказ и до пароля не
+            // доходит — а мы сюда попали именно потому, что ключи не приняты.
+            "-o",
+            "PubkeyAuthentication=no",
+            "-o",
+            "PreferredAuthentications=password,keyboard-interactive",
+            "-o",
+            "NumberOfPasswordPrompts=1",
+            // accept-new, а не «yes»: новый хост принимаем (человек только что
+            // ввёл для него пароль — он знает, куда идёт), а вот СМЕНУ
+            // известного ключа по-прежнему отвергаем. Именно смена, а не первое
+            // знакомство, — признак подмены.
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ConnectTimeout=15",
+        ])
+        .arg(host)
+        .arg(script)
+        .env("SSH_ASKPASS", &helper)
+        // без force ssh спросит пароль у терминала, которого у нас нет
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("DISPLAY", ":0") // старые сборки ssh требуют его для askpass
+        .env("JARVIS_SSH_PASS", password)
+        .stdin(Stdio::null())
+        .output();
+    let _ = fs::remove_file(&helper);
+    let out = out.map_err(|e| format!("не смог запустить ssh: {e}"))?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    Err(if err.contains("Permission denied") {
+        format!("{host}: пароль не подошёл (или на сервере запрещён вход по паролю)")
+    } else if err.is_empty() {
+        format!("ssh вернул код {}", out.status.code().unwrap_or(-1))
+    } else {
+        err
+    })
+}
+
+/// Помощник, который отдаёт ssh пароль из переменной окружения.
+fn write_askpass() -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::env::temp_dir().join(format!(".jarvis-askpass-{}", std::process::id()));
+    fs::write(&path, "#!/bin/sh\nprintf '%s\\n' \"$JARVIS_SSH_PASS\"\n")
+        .map_err(|e| format!("не смог подготовить askpass: {e}"))?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("не смог выставить права askpass: {e}"))?;
+    Ok(path)
 }
 
 /* ================= разведка для панели ================= */
@@ -305,7 +456,7 @@ pub fn preflight(ssh_host: &str, dir: Option<&str>) -> Result<Preflight, String>
         dir: remote.expand(requested.trim_end_matches('/')),
         tmux: remote.has("tmux"),
         curl: remote.has("curl"),
-        claude: remote.has("claude"),
+        claude: remote.has("claude") || remote.has("claude-home"),
         codex: remote.has("codex") || remote.has("codex-home"),
         systemd: remote.has("systemd-user"),
         cargo: remote.has("cargo"),
@@ -462,7 +613,8 @@ fn release_url(triple: &str) -> String {
 
 /// Выбрать способ доставки. Ошибка — только когда не остаётся ни одного:
 /// незнакомая платформа без cargo на той стороне.
-fn resolve_node(remote: &Remote, triples: &[String]) -> Result<NodeSource, String> {
+fn node_sources(remote: &Remote, triples: &[String]) -> Vec<NodeSource> {
+    let mut out = Vec::new();
     // Локальный бинарь берём, только если он ГОДИТСЯ для той машины: залить
     // mac-сборку на Linux — самая частая ошибка установки, и молчать о ней
     // нельзя (в логе systemd это выглядит как «cannot execute binary file»).
@@ -472,18 +624,28 @@ fn resolve_node(remote: &Remote, triples: &[String]) -> Result<NodeSource, Strin
         }
         let head = read_head(&path);
         if binary_fits(binary_kind(&head), &remote.os, &remote.arch) {
-            return Ok(NodeSource::Local(path));
+            out.push(NodeSource::Local(path));
+            break;
         }
     }
     if let Some(triple) = triples.first() {
         if remote.has("curl") {
-            return Ok(NodeSource::Download(release_url(triple)));
+            out.push(NodeSource::Download(release_url(triple)));
         }
     }
     if remote.has("cargo") {
-        return Ok(NodeSource::Build);
+        out.push(NodeSource::Build);
     }
-    Err(String::new()) // текст соберёт вызывающий: ему видны все три причины
+    out
+}
+
+/// Первый способ из списка — его показывает разведка как «план». Текст ошибки
+/// пустой: развёрнутую инструкцию собирает вызывающий, ему видны все причины.
+fn resolve_node(remote: &Remote, triples: &[String]) -> Result<NodeSource, String> {
+    node_sources(remote, triples)
+        .into_iter()
+        .next()
+        .ok_or_else(String::new)
 }
 
 /// Первые байты файла — по ним `binary_kind` отличает ELF от Mach-O. Читаем
@@ -549,9 +711,52 @@ fn deliver_node(
     host: &str,
     dir: &str,
     remote: &Remote,
-    src: &NodeSource,
+    sources: &[NodeSource],
 ) -> Result<(), String> {
     let dst = format!("{dir}/bin/jarvis-node");
+    let mut why: Vec<String> = Vec::new();
+    for (i, src) in sources.iter().enumerate() {
+        match try_source(progress, host, dir, remote, &dst, src) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // Отказ одного способа — не конец: релиза этой версии может не
+                // быть, а rust на машине есть (и наоборот). Пробуем следующий,
+                // а причины копим — если не выйдет ни один, человеку нужны все.
+                let last = i + 1 == sources.len();
+                if !last {
+                    progress(Step::warn(PHASE_NODE, one_line_short(&e)));
+                }
+                why.push(e);
+            }
+        }
+    }
+    Err(if why.is_empty() {
+        "узел взять неоткуда".to_string()
+    } else {
+        why.join("\n\n")
+    })
+}
+
+/// Первая строка ошибки — для строки лога; полный текст уходит в итоговый отказ.
+fn one_line_short(e: &str) -> String {
+    let first = e.lines().next().unwrap_or(e).trim();
+    if first.chars().count() > 160 {
+        format!("{}…", first.chars().take(159).collect::<String>())
+    } else {
+        first.to_string()
+    }
+}
+
+/// Один способ доставки целиком: положить бинарь и убедиться, что он там живой.
+fn try_source(
+    progress: &Progress,
+    host: &str,
+    dir: &str,
+    remote: &Remote,
+    dst: &str,
+    src: &NodeSource,
+) -> Result<(), String> {
+    let dst = dst.to_string();
     match src {
         NodeSource::Local(path) => {
             let bytes =
@@ -651,13 +856,24 @@ fn build_node(host: &str, dir: &str, dst: &str) -> Result<(), String> {
     // PATH дополняем руками: rustup прописывает себя в ~/.profile, который
     // неинтерактивный ssh не читает — без этой строки cargo «не найден» на
     // машине, где он стоит.
+    // Вывод сборки — в файл, а не в пайп: `set -e` не видит код cargo сквозь
+    // `| tail`, и провалившаяся сборка выглядела бы удачной ровно до `cp`.
+    // Хвост лога при отказе печатаем сами — без него «не собралось» бесполезно.
+    // После удачной сборки чистим за собой: `target` тянет сотни мегабайт, и
+    // оставлять их на чужой VPS ради редкой переустановки невежливо.
     let script = format!(
         r#"set -e
 export PATH="$HOME/.cargo/bin:$PATH"
 cd {src}
-cargo build --release 2>&1 | tail -30
+if ! cargo build --release > build.log 2>&1; then
+  echo "--- хвост сборки ---" >&2
+  tail -40 build.log >&2
+  exit 1
+fi
 cp -f target/release/jarvis-node {dst}
 chmod 755 {dst}
+cd /
+rm -rf {src}
 "#,
         src = sh_quote(&src_dir),
         dst = sh_quote(dst),
@@ -1015,7 +1231,10 @@ pub fn add(progress: &Progress, name: &str, ssh_host: &str, dir: Option<&str>) -
              не получит НИЧЕГО (apt install curl)",
         ));
     }
-    match (remote.has("claude"), remote.has("codex")) {
+    match (
+        remote.has("claude") || remote.has("claude-home"),
+        remote.has("codex") || remote.has("codex-home"),
+    ) {
         (false, false) => progress(Step::warn(
             PHASE_ENV,
             "ни claude, ни codex не нашёл (или они не в PATH неинтерактивного ssh) — \
@@ -1038,9 +1257,11 @@ pub fn add(progress: &Progress, name: &str, ssh_host: &str, dir: Option<&str>) -
     // 3. Сам узел.
     progress(Step::start(PHASE_NODE));
     let triples = target_triples(&remote.os, &remote.arch);
-    let src = resolve_node(&remote, &triples)
-        .map_err(|_| build_hint(&remote, &triples, &node_candidates(&triples)))?;
-    deliver_node(progress, ssh_host, &dir, &remote, &src)?;
+    let sources = node_sources(&remote, &triples);
+    if sources.is_empty() {
+        return Err(build_hint(&remote, &triples, &node_candidates(&triples)));
+    }
+    deliver_node(progress, ssh_host, &dir, &remote, &sources)?;
     let hook_path = format!("{dir}/bin/jarvis-hook");
     put_file(ssh_host, &hook_path, node_hook_src()?.as_bytes(), Some("755"), false)?;
     progress(Step::done(PHASE_NODE, format!("{hook_path} (→ {dir}/node.sock)")));

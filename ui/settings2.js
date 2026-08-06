@@ -782,6 +782,11 @@
 #settings2 .s2rstat { white-space:nowrap; }
 #settings2 .s2rerr { max-width:none; }
 #settings2 .s2rctl { flex-wrap:wrap; justify-content:flex-end; row-gap:6px; }
+/* вторая дорога на машину (пароль) — равноправная с ключом, поэтому отделена
+   линией, а не спрятана мелким шрифтом под ней */
+#settings2 .s2rpass { margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }
+#settings2 .s2rpass .s2rbtns { align-items:center; }
+#settings2 .s2rpass input.s2-secret { flex:1 1 220px; min-width:0; }
 
 /* ── Форма в строке настройки: поля в ряд, на узкой панели переносятся ─── */
 #settings2 .s2form { display:flex; flex-wrap:wrap; gap:8px; margin-top:11px; }
@@ -2041,11 +2046,13 @@
     formErr: null,
     install: null,    // {name, steps:[…], pct, running, error}
     flash: null,      // «узел X установлен» — одна строка после успеха
+    authErr: null,    // отказ входа по паролю; сам пароль тут НЕ живёт
   };
   function remoteWizReset() {
     remoteWiz.host = ''; remoteWiz.name = ''; remoteWiz.dir = '';
     remoteWiz.probe = null; remoteWiz.probeErr = null; remoteWiz.busy = false;
     remoteWiz.formErr = null; remoteWiz.install = null; remoteWiz.manual = false;
+    remoteWiz.authErr = null;
   }
   // имя по умолчанию из ssh-хоста: dev@vps.example:22 → vps
   function remoteGuessName(host) {
@@ -2130,6 +2137,74 @@
       repaintRemoteWiz();
     });
   }
+  // Разведка отдельной функцией: её дёргает и кнопка, и удачный вход по паролю
+  // (после него человек не должен жать «Проверить машину» ещё раз).
+  function runRemoteProbe() {
+    const w = remoteWiz;
+    const host = (w.host || '').trim();
+    if (!host) { w.formErr = 'Нужен ssh-хост — алиас из ~/.ssh/config или user@адрес.'; repaintRemoteWiz(); return; }
+    if (w.busy) return;
+    w.formErr = null; w.busy = true; w.probe = null; w.probeErr = null; w.flash = null;
+    repaintRemoteWiz();
+    safe(() => window.jarvis.remotesPreflight(host, (w.dir || '').trim() || '~/.jarvis'), null).then((res) => {
+      w.busy = false;
+      if (res && res.ok) {
+        w.probe = res;
+        if (!(w.name || '').trim()) w.name = remoteGuessName(host);
+      } else {
+        w.probeErr = (res && res.error) || 'Не удалось сходить на машину: ssh не ответил.';
+      }
+      repaintRemoteWiz();
+    });
+  }
+
+  function remoteAuthorizeApi() {
+    try { return !!(window.jarvis && typeof window.jarvis.remotesSshAuthorize === 'function'); } catch (e) { return false; }
+  }
+
+  /* Вторая дорога на машину, куда ключ ещё не положен: войти по паролю и
+   * положить его самим. Пароль живёт только в этом поле — ни в состоянии
+   * мастера, ни в логах его нет, и на сервер он уходит один раз. Иначе и
+   * нельзя: туннель к узлу переподнимается сам после сна и смены сети, и
+   * спросить пароль в этот момент не у кого. */
+  function remotePasswordBlock() {
+    const w = remoteWiz;
+    const box = el('div.s2rpass');
+    box.appendChild(el('div.dt', { text: 'Или войти по паролю' }));
+    box.appendChild(el('div.dd', { text: 'Пароль пользователя на той машине. Нужен один раз: Jarvis положит '
+      + 'туда свой ключ и дальше будет ходить без пароля — пароль никуда не сохраняется.' }));
+    const pass = el('input.s2-secret', {
+      type: 'password', placeholder: 'пароль на сервере', autocomplete: 'off', spellcheck: 'false',
+    });
+    const note = el('div.dd');
+    const go = button('Войти по паролю', (b) => {
+      const value = pass.value;
+      if (!value) { note.textContent = 'Пустой пароль'; return; }
+      b.disabled = true; pass.disabled = true; b.textContent = 'Захожу…';
+      note.textContent = ''; w.authErr = null;
+      safe(() => window.jarvis.remotesSshAuthorize((w.host || '').trim(), value), null).then((res) => {
+        b.disabled = false; pass.disabled = false; b.textContent = 'Войти по паролю';
+        if (res && res.ok) {
+          pass.value = ''; // дальше он не нужен — не держим его в DOM
+          w.probeErr = null;
+          w.flash = res.createdKey
+            ? 'Ключ создан и добавлен на машину — дальше без пароля.'
+            : 'Ключ добавлен на машину — дальше без пароля.';
+          runRemoteProbe(); // сразу показываем разведку, второй клик не нужен
+          return;
+        }
+        // пароль оставляем: чаще всего это опечатка, а не отказ сервера
+        w.authErr = (res && res.error) || 'Не вышло войти по паролю.';
+        repaintRemoteWiz();
+      });
+    }, 'sm primary');
+    pass.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !go.disabled) go.click(); });
+    box.appendChild(el('div.s2rbtns', null, [pass, go]));
+    if (w.authErr) box.appendChild(el('div.s2rpre.bad', { text: w.authErr }));
+    box.appendChild(note);
+    return box;
+  }
+
   function remoteSshHelpCard() {
     const w = remoteWiz;
     const grow = el('div.grow');
@@ -2162,6 +2237,7 @@
         grow.appendChild(el('div.s2rbtns', null, [mkkey]));
       }
     }
+    if (remoteAuthorizeApi()) grow.appendChild(remotePasswordBlock());
     return el('div.drow', null, [
       el('div.s2note-ic', { style: 'align-self:flex-start;margin-top:2px' }, icon('key')), grow,
     ]);
@@ -2268,20 +2344,7 @@
       const dirIn = mk('~/.jarvis', 'dir');
 
       const probe = button(w.busy ? 'Проверяю…' : 'Проверить машину', () => {
-        const host = (w.host || '').trim();
-        if (!host) { w.formErr = 'Нужен ssh-хост — алиас из ~/.ssh/config или user@адрес.'; repaintRemoteWiz(); return; }
-        w.formErr = null; w.busy = true; w.probe = null; w.probeErr = null; w.flash = null;
-        repaintRemoteWiz();
-        safe(() => window.jarvis.remotesPreflight(host, (w.dir || '').trim() || '~/.jarvis'), null).then((res) => {
-          w.busy = false;
-          if (res && res.ok) {
-            w.probe = res;
-            if (!(w.name || '').trim()) w.name = remoteGuessName(host);
-          } else {
-            w.probeErr = (res && res.error) || 'Не удалось сходить на машину: ssh не ответил.';
-          }
-          repaintRemoteWiz();
-        });
+        runRemoteProbe();
       }, 'sm' + (w.probe ? '' : ' primary'));
       probe.disabled = w.busy || running;
       for (const i of [hostIn, nameIn, dirIn]) {

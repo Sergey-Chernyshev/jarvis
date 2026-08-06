@@ -3049,46 +3049,80 @@ pub fn remotes_install(app: AppHandle, cfg: Value) -> Value {
 /// машинам остаётся решением человека.
 #[tauri::command]
 pub fn remotes_ssh_key(create: bool) -> Value {
+    match public_ssh_key(create) {
+        Ok((key, path, created)) => json!({
+            "ok": true, "created": created, "path": path, "publicKey": key,
+        }),
+        Err(e) => err(e),
+    }
+}
+
+/// Публичный ключ этой машины: `(ключ, путь, только что создан)`. Пустой ключ —
+/// ключей нет, а заводить не просили.
+fn public_ssh_key(create: bool) -> Result<(String, String, bool), String> {
     let dir = match std::env::var("HOME") {
         Ok(h) if !h.is_empty() => std::path::PathBuf::from(h).join(".ssh"),
-        _ => return err("не знаю домашний каталог"),
+        _ => return Err("не знаю домашний каталог".into()),
     };
     // Порядок — по предпочтительности: ed25519 короче и современнее, rsa
     // остаётся ради машин со старым sshd.
     for name in ["id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"] {
         let path = dir.join(name);
         if let Ok(key) = std::fs::read_to_string(&path) {
-            let key = key.trim();
+            let key = key.trim().to_string();
             if !key.is_empty() {
-                return json!({
-                    "ok": true, "created": false,
-                    "path": path.display().to_string(), "publicKey": key,
-                });
+                return Ok((key, path.display().to_string(), false));
             }
         }
     }
     if !create {
-        return json!({ "ok": true, "created": false, "publicKey": "" });
+        return Ok((String::new(), String::new(), false));
     }
     let key = dir.join("id_ed25519");
     let out = std::process::Command::new("ssh-keygen")
         .args(["-t", "ed25519", "-N", "", "-C", "jarvis", "-f"])
         .arg(&key)
-        .output();
-    match out {
-        Ok(o) if o.status.success() => match std::fs::read_to_string(key.with_extension("pub")) {
-            Ok(pub_key) => json!({
-                "ok": true, "created": true,
-                "path": key.with_extension("pub").display().to_string(),
-                "publicKey": pub_key.trim(),
-            }),
-            Err(e) => err(format!("ключ создан, но не прочитался: {e}")),
-        },
-        Ok(o) => err(format!(
+        .output()
+        .map_err(|e| format!("не запустился ssh-keygen: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
             "ssh-keygen: {}",
-            ellipsize(&one_line(&String::from_utf8_lossy(&o.stderr)), 160)
-        )),
-        Err(e) => err(format!("не запустился ssh-keygen: {e}")),
+            ellipsize(&one_line(&String::from_utf8_lossy(&out.stderr)), 160)
+        ));
+    }
+    let pub_path = key.with_extension("pub");
+    let text = std::fs::read_to_string(&pub_path)
+        .map_err(|e| format!("ключ создан, но не прочитался: {e}"))?;
+    Ok((text.trim().to_string(), pub_path.display().to_string(), true))
+}
+
+/// Разовый вход по паролю: положить туда наш публичный ключ, чтобы дальше
+/// ходить без пароля. Ключа нет — заводим (человек уже согласился, нажав
+/// «войти по паролю»).
+///
+/// Пароль нужен ровно один раз и никуда не сохраняется. Иначе и нельзя:
+/// туннель к узлу переподнимается сам после сна и смены сети, спросить пароль
+/// в этот момент не у кого — транспорт обязан работать по ключу.
+#[tauri::command]
+pub async fn remotes_ssh_authorize(app: AppHandle, ssh_host: String, password: String) -> Value {
+    let out = tokio::task::spawn_blocking(move || {
+        let (key, _, created) = public_ssh_key(true)?;
+        if key.is_empty() {
+            return Err("не нашёл и не смог создать ssh-ключ".to_string());
+        }
+        crate::install::remote::authorize_key(
+            &|step| windows::emit_to_panel(&app, "remote_install_progress", &step),
+            &ssh_host,
+            &password,
+            &key,
+        )?;
+        Ok::<bool, String>(created)
+    })
+    .await;
+    match out {
+        Ok(Ok(created)) => json!({ "ok": true, "createdKey": created }),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("вход по паролю прервался"),
     }
 }
 

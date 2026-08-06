@@ -175,6 +175,7 @@ fn main() {
             ipc::remotes_preflight,
             ipc::remotes_install,
             ipc::remotes_ssh_key,
+            ipc::remotes_ssh_authorize,
             ipc::toast_resize,
             ipc::toast_ready,
             ipc::toast_click,

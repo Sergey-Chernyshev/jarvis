@@ -31,6 +31,8 @@
     remotesPreflight: (sshHost, jarvisDir) => invoke('remotes_preflight', { sshHost, jarvisDir }),
     remotesInstall: (cfg) => invoke('remotes_install', { cfg }),
     remotesSshKey: (create) => invoke('remotes_ssh_key', { create }),
+    // разовый вход по паролю: кладём наш ключ в authorized_keys той машины
+    remotesSshAuthorize: (sshHost, password) => invoke('remotes_ssh_authorize', { sshHost, password }),
     onRemoteInstallStep: (cb) => on('remote_install_progress', cb),
     onRemoteInstallDone: (cb) => on('remote_install_done', cb),
     // тема/краска сменились в другом окне (демон рассылает всем)

@@ -334,6 +334,11 @@ test("project chats merge ordinary sessions with VM runs, newest first", () => {
   );
   const vmChat = chats.find((chat) => chat.kind === "vm");
   assert.equal(vmChat.runId, "run-1");
+  assert.equal(
+    vmChat.title,
+    "jarvis",
+    "без первой реплики заголовком остаётся имя проекта",
+  );
   assert.equal(vmChat.vm, "jarvis-vm");
   assert.equal(vmChat.state, "completed");
   assert.equal(vmChat.changedFiles, 3);
@@ -358,6 +363,22 @@ test("a VM run visible in host history is shown once, marked as a VM chat", () =
   assert.equal(chats[0].runId, "run-42");
   assert.equal(chats[0].state, "working");
   assert.equal(chats[0].lastAt, 50, "берём более свежую отметку времени");
+});
+
+test("a VM chat is titled by its first prompt, like an ordinary chat", () => {
+  // Иначе все прогоны одного проекта выглядят одинаково — именем проекта.
+  const chats = AgentVm.mergeProjectChats([], [
+    {
+      runId: "run-9",
+      project: "sup",
+      title: "почини сборку на CI",
+      backend: "claude",
+      state: "completed",
+      lastAt: 7,
+    },
+  ]);
+
+  assert.equal(chats[0].title, "почини сборку на CI");
 });
 
 test("merging chats never mutates the caller's history objects", () => {

@@ -346,6 +346,9 @@ impl<H: HostApi> RunSupervisor<H> {
                     "runId": summary.run_id,
                     "projectId": summary.project_id,
                     "project": summary.project,
+                    // заголовок = первая реплика пользователя: без него все
+                    // прогоны проекта выглядят в списке одинаково
+                    "title": summary.title,
                     "cwd": summary.cwd,
                     "backend": summary.backend.as_str(),
                     "vm": summary.vm,

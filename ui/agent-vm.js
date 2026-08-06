@@ -408,7 +408,8 @@
         kind: "vm",
         key: `vm:${runId}`,
         id: runId,
-        title: asString(entry.project) || runId.slice(0, 8),
+        title:
+          asString(entry.title) || asString(entry.project) || runId.slice(0, 8),
         agent: asString(entry.backend) || "claude",
         model: "",
         tokens: 0,

@@ -22,6 +22,9 @@ pub struct RunSummary {
     pub backend: Backend,
     pub vm: String,
     pub backend_session_id: Option<String>,
+    /// Первая реплика пользователя — заголовок прогона в списке чатов проекта.
+    /// Без неё все прогоны одного проекта выглядят одинаково (имя проекта).
+    pub title: String,
     pub last_turn_id: String,
     pub last_seq: u64,
     pub last_at: i64,
@@ -154,6 +157,7 @@ impl RunStore {
                 backend: event.backend,
                 vm: event.vm.clone(),
                 backend_session_id: None,
+                title: String::new(),
                 last_turn_id: String::new(),
                 last_seq: 0,
                 last_at: event.at,
@@ -186,6 +190,17 @@ impl RunStore {
             }
             if let Some(cwd) = event.payload.get("cwd").and_then(serde_json::Value::as_str) {
                 summary.cwd = cwd.into();
+            }
+            // Заголовок берём из первой реплики пользователя и больше не
+            // трогаем: последующие сообщения того же прогона его не переписывают.
+            if summary.title.is_empty() && event.event_type == "user.message" {
+                if let Some(text) = event
+                    .payload
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    summary.title = run_title(text);
+                }
             }
             if let Some(session_id) = event
                 .payload
@@ -269,6 +284,18 @@ impl RunStore {
     fn path(&self, run_id: &str) -> Result<PathBuf, String> {
         validate_run_id(run_id)?;
         Ok(self.root.join(format!("{run_id}.jsonl")))
+    }
+}
+
+/// Заголовок прогона из первой реплики: одна строка, обрезанная по символам.
+/// Режем по кодпоинтам, а не по байтам — иначе русский текст рвётся посреди
+/// символа. Ограничение то же, что у заголовков истории.
+fn run_title(text: &str) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= 100 {
+        one_line
+    } else {
+        one_line.chars().take(100).collect()
     }
 }
 
@@ -595,6 +622,75 @@ mod tests {
             summaries[0].files.get("/synthetic/project/smoke.txt"),
             Some(&"created".to_string())
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn summary_title_comes_from_the_first_user_message_only() {
+        let (root, store) = fixture();
+        for value in [
+            event(
+                1,
+                "run.started",
+                json!({"projectId":"project-a","cwd":"/synthetic/project"}),
+            ),
+            event(
+                2,
+                "user.message",
+                json!({"text":"  почини\n  сборку  на  CI  "}),
+            ),
+            event(3, "assistant.delta", json!({"text":"сейчас"})),
+            // Вторая реплика того же прогона заголовок не переписывает.
+            event(4, "user.message", json!({"text":"а теперь тесты"})),
+        ] {
+            store.append(&value).unwrap();
+        }
+
+        let summaries = store.summaries().unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].title, "почини сборку на CI");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn summary_title_survives_long_multibyte_text_and_missing_prompt() {
+        let (root, store) = fixture();
+        // Кириллица: обрезка по байтам порвала бы символ.
+        let long = "я".repeat(250);
+        for value in [
+            event(
+                1,
+                "run.started",
+                json!({"projectId":"project-a","cwd":"/synthetic/project"}),
+            ),
+            event(2, "user.message", json!({"text":long})),
+        ] {
+            store.append(&value).unwrap();
+        }
+
+        let summaries = store.summaries().unwrap();
+        assert_eq!(summaries[0].title.chars().count(), 100);
+        assert!(summaries[0].title.chars().all(|ch| ch == 'я'));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn summary_without_a_user_message_has_an_empty_title() {
+        let (root, store) = fixture();
+        for value in [
+            event(
+                1,
+                "run.started",
+                json!({"projectId":"project-a","cwd":"/synthetic/project"}),
+            ),
+            event(2, "assistant.delta", json!({"text":"без вопроса"})),
+        ] {
+            store.append(&value).unwrap();
+        }
+
+        // Пустой заголовок допустим: UI подставит имя проекта.
+        assert_eq!(store.summaries().unwrap()[0].title, "");
         fs::remove_dir_all(root).unwrap();
     }
 

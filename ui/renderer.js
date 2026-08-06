@@ -4762,6 +4762,18 @@ function renderProjectCard(project) {
     return row;
 }
 
+// Ошибка записи не значит, что запись не применилась: ответ мог потеряться уже
+// после сохранения. Гадать нельзя — спрашиваем актуальное состояние у бэкенда,
+// иначе каталог проектов навсегда расходится с диском.
+async function resyncProjectManagerState() {
+  try {
+    const state = await window.jarvis.getProjectManagerState();
+    if (state) projectManagerState = state;
+  } catch {
+    // Бэкенд недоступен — оставляем прежнее состояние до следующей попытки.
+  }
+}
+
 async function pickProjectManagerFolder() {
   if (projectManagerSaving) return;
   projectManagerSaving = true;
@@ -4775,6 +4787,7 @@ async function pickProjectManagerFolder() {
     showToast(`${result.project?.project || 'Папка'} добавлена в проекты`);
   } catch (error) {
     showToast(error.message || 'Не удалось добавить папку');
+    await resyncProjectManagerState();
   } finally {
     projectManagerSaving = false;
     if (view === 'history' && histProject == null) renderHistProjects(queryEl.value.trim());
@@ -4791,6 +4804,7 @@ async function setProjectManagerFavorite(project, favorite) {
     projectManagerState = result.state || projectManagerState;
   } catch (error) {
     showToast(error.message || 'Не удалось изменить избранное');
+    await resyncProjectManagerState();
   } finally {
     projectManagerSaving = false;
     if (view === 'history' && histProject == null) renderHistProjects(queryEl.value.trim());
@@ -4807,6 +4821,7 @@ async function moveProjectManagerFavorite(project, direction) {
     projectManagerState = result.state || projectManagerState;
   } catch (error) {
     showToast(error.message || 'Не удалось переместить проект');
+    await resyncProjectManagerState();
   } finally {
     projectManagerSaving = false;
     if (view === 'history' && histProject == null) renderHistProjects(queryEl.value.trim());
@@ -4827,6 +4842,7 @@ async function setProjectManagerView(nextView) {
   } catch (error) {
     projectManagerState = { ...projectManagerState, view: previousView };
     showToast(error.message || 'Не удалось сохранить вид');
+    await resyncProjectManagerState();
   } finally {
     projectManagerSaving = false;
     if (view === 'history' && histProject == null) renderHistProjects(queryEl.value.trim());

@@ -799,4 +799,30 @@ test("folder picker stays async and releases project UI after cancel or error", 
   assert.match(pickerUi, /if \(result\.cancelled\) return;/);
   assert.match(pickerUi, /catch \(error\)/);
   assert.match(pickerUi, /finally\s*\{\s*projectManagerSaving = false;/);
+
+  // Ошибка записи не доказывает, что запись не применилась: ответ мог
+  // потеряться уже после сохранения. Каждая запись каталога обязана
+  // пересинхронизироваться с бэкендом, иначе UI навсегда расходится с диском.
+  assert.match(renderer, /async function resyncProjectManagerState\(\)/);
+  assert.match(
+    renderer,
+    /projectManagerState = state;/,
+    "пересинхронизация берёт состояние у бэкенда, а не угадывает его",
+  );
+  const writers = [
+    ["async function pickProjectManagerFolder()", "async function setProjectManagerFavorite("],
+    ["async function setProjectManagerFavorite(", "async function moveProjectManagerFavorite("],
+    ["async function moveProjectManagerFavorite(", "async function setProjectManagerView("],
+    ["async function setProjectManagerView(", "projectManagerAddEl.addEventListener"],
+  ];
+  for (const [from, to] of writers) {
+    const start = renderer.indexOf(from);
+    const end = renderer.indexOf(to);
+    assert.ok(start >= 0 && end > start, `не найден блок ${from}`);
+    assert.match(
+      renderer.slice(start, end),
+      /await resyncProjectManagerState\(\);/,
+      `${from} должен пересинхронизироваться после ошибки`,
+    );
+  }
 });

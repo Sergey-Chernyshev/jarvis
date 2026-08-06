@@ -966,8 +966,8 @@ test("folder picker stays async and releases project UI after cancel or error", 
   }
 });
 
-// Стадии запуска должны соответствовать тому, что плагин реально делает
-// (service.rs::plan_ensure), иначе экран рассказывает про шаги, которых нет.
+// Фазы запуска должны соответствовать тому, что плагин реально делает
+// (service.rs::plan_ensure), иначе экран рассказывает про работу, которой нет.
 test("план запуска зависит от состояния VM, как plan_ensure", () => {
   assert.equal(AgentVm.ensurePlan(null), "create", "нет VM → создаём");
   assert.equal(AgentVm.ensurePlan({ state: "stopped" }), "start");
@@ -975,45 +975,40 @@ test("план запуска зависит от состояния VM, как 
   assert.equal(
     AgentVm.ensurePlan({ state: "running", attrs: { management: "orphaned" } }),
     "ready",
-    "чужую VM мы не трогаем — ждём",
+    "чужую VM мы не трогаем",
   );
 });
 
-test("у новой VM шаг создания есть, у запущенной — нет", () => {
-  const fresh = AgentVm.ensureSteps(null).map((s) => s.key);
-  assert.deepEqual(fresh, ["spec", "vm", "mounts", "config", "agent"]);
-  const ready = AgentVm.ensureSteps({ state: "running" }).map((s) => s.key);
-  assert.deepEqual(ready, ["config", "agent"], "готовой VM не создают заново");
+// Текст не должен обещать работу, которой не будет: у готовой VM ничего не
+// «собирается», иначе экран врёт при каждом втором запуске.
+test("строки запуска соответствуют тому, что делают с этой VM", () => {
+  const fresh = AgentVm.bootLines(null).join(" ");
+  assert.match(fresh, /виртуальную машину/);
+  const ready = AgentVm.bootLines({ state: "running" }).join(" ");
+  assert.doesNotMatch(
+    ready,
+    /Собираю|Раскладываю образ/,
+    "готовую VM не собирают заново",
+  );
+  assert.deepEqual(AgentVm.bootLines(null, "agent"), AgentVm.bootLines({ state: "running" }, "agent"));
 });
 
-// Главное свойство: зависший шаг остаётся активным. Если бы «сделано» ставилось
-// по времени, затык на «avm create» доехал бы до «готово» и соврал.
-test("активен первый непройденный шаг, а зависший не уезжает в «готово»", () => {
-  const start = AgentVm.ensureSteps(null, { done: 0 });
-  assert.equal(start[0].state, "active");
-  assert.equal(start[1].state, "waiting");
-
-  const stuck = AgentVm.ensureSteps(null, { done: 1 });
-  assert.equal(stuck[0].state, "done");
-  assert.equal(stuck[1].state, "active", "шаг остаётся активным сколько нужно");
+test("строка перебирается по кругу и не выходит за пределы фазы", () => {
+  const lines = AgentVm.bootLines(null);
+  assert.equal(AgentVm.bootLine(null, "env", 0), lines[0]);
+  assert.equal(AgentVm.bootLine(null, "env", 1), lines[1]);
   assert.equal(
-    stuck.filter((s) => s.state === "done").length,
-    1,
-    "готовым считается только то, что закончилось",
+    AgentVm.bootLine(null, "env", lines.length),
+    lines[0],
+    "после последней строки начинаем заново",
   );
+  // Мусорный тик не должен ломать показ.
+  assert.equal(AgentVm.bootLine(null, "env", -5), lines[0]);
+  assert.equal(AgentVm.bootLine(null, "env", NaN), lines[0]);
 });
 
-test("упавший шаг помечен ошибкой, а не тишиной", () => {
-  const steps = AgentVm.ensureSteps(null, { done: 1, failedAt: 1 });
-  assert.equal(steps[1].state, "failed");
-  assert.equal(steps[2].state, "waiting", "после ошибки дальше не идём");
-});
-
-// Долгий шаг помечен в модели, чтобы интерфейс мог заранее сказать «это может
-// занять минуту» — вместо того чтобы пользователь думал, что всё зависло.
-test("шаг с виртуальной машиной помечен как долгий", () => {
-  const vm = AgentVm.ensureSteps(null).find((s) => s.key === "vm");
-  assert.equal(vm.slow, true);
-  const config = AgentVm.ensureSteps(null).find((s) => s.key === "config");
-  assert.notEqual(config.slow, true);
+test("фаза агента не показывает строки про создание машины", () => {
+  const agent = AgentVm.bootLine(null, "agent", 0);
+  assert.match(agent, /агента/);
+  assert.doesNotMatch(agent, /виртуальную машину/);
 });

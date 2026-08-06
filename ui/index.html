@@ -2294,91 +2294,106 @@
   .vmws-stage-time { font-family: var(--mono); font-size: 10px; color: var(--faint); }
   @keyframes vmSpin { to { transform: rotate(360deg); } }
 
-  /* ---------- запуск среды: список шагов ----------
-     Вместо пустого экрана с одной строкой — что происходит и на каком шаге.
-     Процентов здесь нет намеренно: плагин во время runtime.ensure не отвечает
-     (последовательный цикл poll_and_reconcile), данных о прогрессе не
-     существует, и шкала была бы выдумкой — при затыке на «avm create» она бы
-     всё равно доехала до конца. Поэтому «сделано» ставится только тому, что
-     закончилось, активный шаг крутится сколько нужно, а рядом идёт время: по
-     нему виден затык. */
+  /* ---------- запуск среды: живая машина ----------
+     Не шкала и не чеклист: машина работает, а текст под ней меняется. Шкалы
+     нет намеренно — плагин во время runtime.ensure не отвечает даже на
+     runtime.status (последовательный цикл poll_and_reconcile), прогресса взять
+     негде, и проценты при затыке на «avm create» всё равно доехали бы до
+     конца. Фаза текста настоящая (границы команд), внутри фазы строки идут по
+     кругу; время рядом — по нему виден затык. */
   .vm-boot {
     flex: none;
     display: grid;
-    gap: 1px;
-    padding: 13px 18px 15px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0 14px;
+    padding: 15px 18px;
     border-bottom: 1px solid color-mix(in srgb, var(--accent) 12%, transparent);
     background:
-      radial-gradient(120% 100% at 0% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 62%),
+      radial-gradient(120% 130% at 0% 0%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 60%),
       color-mix(in srgb, var(--accent) 4%, transparent);
   }
-  .vm-boot-head { display: flex; align-items: baseline; gap: 9px; margin-bottom: 8px; }
+
+  /* Корпус: экран со «бегущими строками» и мигающая лампа питания. Всё рамками
+     и градиентами — без картинок и иконочных шрифтов. */
+  .vm-boot-machine {
+    position: relative;
+    width: 42px; height: 34px;
+    border: 1.5px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    overflow: hidden;
+  }
+  /* «Ножка» монитора */
+  .vm-boot-machine::after {
+    content: "";
+    position: absolute; left: 50%; bottom: -5px;
+    width: 14px; height: 2px; border-radius: 1px;
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    transform: translateX(-50%);
+  }
+  /* Строки «кода», бегущие по экрану снизу вверх */
+  .vm-boot-scan {
+    position: absolute; inset: 4px 5px;
+    background-image:
+      linear-gradient(var(--accent) 0 0), linear-gradient(var(--accent) 0 0),
+      linear-gradient(var(--accent) 0 0), linear-gradient(var(--accent) 0 0),
+      linear-gradient(var(--accent) 0 0);
+    background-repeat: no-repeat;
+    background-size: 60% 2px, 85% 2px, 45% 2px, 72% 2px, 55% 2px;
+    background-position: 0 0, 0 5px, 0 10px, 0 15px, 0 20px;
+    opacity: .75;
+    animation: vmBootScan 1.5s linear infinite;
+  }
+  .vm-boot-lamp {
+    position: absolute; right: 3px; bottom: 2px;
+    width: 3px; height: 3px; border-radius: 50%;
+    background: var(--accent);
+    animation: vmBootBlink 1.1s steps(1, end) infinite;
+  }
+  @keyframes vmBootScan {
+    /* Строки уезжают вверх и появляются снизу — машина «печатает» без конца */
+    from { background-position: 0 26px, 0 31px, 0 36px, 0 41px, 0 46px; }
+    to   { background-position: 0 -4px, 0 1px, 0 6px, 0 11px, 0 16px; }
+  }
+  @keyframes vmBootBlink { 0%, 60% { opacity: 1; } 61%, 100% { opacity: .25; } }
+
+  .vm-boot-copy { min-width: 0; }
   .vm-boot-title { font-size: 12px; font-weight: 600; color: var(--ink); }
+  /* Строка сменяется мягко: новая заезжает, старой не видно. Ключ анимации
+     переставляется в JS, поэтому каждая смена проигрывается заново. */
+  .vm-boot-line {
+    margin-top: 3px;
+    font-size: 11.5px;
+    color: var(--ink-mute);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    animation: vmBootLine .32s ease-out;
+  }
+  @keyframes vmBootLine {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: none; }
+  }
   .vm-boot-elapsed {
-    margin-left: auto; font-family: var(--mono); font-size: 10.5px;
+    align-self: center;
+    font-family: var(--mono); font-size: 10.5px;
     color: var(--ink-faint); font-variant-numeric: tabular-nums;
   }
-  .vm-boot-step {
-    display: grid;
-    grid-template-columns: 16px minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 9px;
-    padding: 3px 0;
-    font-size: 11.5px;
-    color: var(--ink-faint);
-    /* Шаги проявляются по очереди: видно последовательность, а не список,
-       нарисованный разом. */
-    animation: vmBootIn .26s ease-out both;
+
+  /* Ошибка: машина гаснет, причина остаётся на экране — тост уйдёт, а это нет */
+  .vm-boot.failed {
+    border-bottom-color: color-mix(in srgb, var(--danger) 30%, transparent);
+    background: color-mix(in srgb, var(--danger) 7%, transparent);
   }
-  .vm-boot-mark {
-    justify-self: center;
-    width: 11px; height: 11px; border-radius: 50%;
-    border: 1.5px solid var(--line-strong);
-    display: grid; place-items: center;
+  .vm-boot.failed .vm-boot-machine {
+    border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
-  .vm-boot-step.done { color: var(--ink-mute); }
-  .vm-boot-step.done .vm-boot-mark { border-color: transparent; background: var(--accent); }
-  /* Галочка рамкой — без иконочного шрифта и без SVG на каждый шаг */
-  .vm-boot-step.done .vm-boot-mark::after {
-    content: "";
-    width: 5px; height: 2.5px;
-    border: 1.5px solid var(--on-accent);
-    border-top: 0; border-right: 0;
-    transform: rotate(-45deg) translate(0, -1px);
-  }
-  .vm-boot-step.active { color: var(--ink); }
-  .vm-boot-step.active .vm-boot-mark {
-    border-color: var(--accent);
-    border-top-color: transparent;
-    animation: vmSpin .7s linear infinite;
-  }
-  .vm-boot-step.failed { color: var(--danger); }
-  .vm-boot-step.failed .vm-boot-mark {
-    border-color: var(--danger);
-    background: color-mix(in srgb, var(--danger) 18%, transparent);
-  }
-  .vm-boot-step.waiting { opacity: .5; }
-  /* Причина ошибки под упавшим шагом: тост уйдёт, а это останется */
-  .vm-boot-reason {
-    margin: 1px 0 3px 25px;
-    font-size: 10.5px;
-    line-height: 1.45;
-    color: color-mix(in srgb, var(--danger) 78%, var(--ink));
-  }
-  .vm-boot-hint {
-    font-family: var(--mono); font-size: 10px; color: var(--ink-faint);
-    font-variant-numeric: tabular-nums;
-  }
-  /* Долгий шаг заранее говорит, сколько ждать: иначе минута тишины читается
-     как «зависло». */
-  .vm-boot-step.active.slow .vm-boot-hint { color: var(--warn); }
-  @keyframes vmBootIn {
-    from { opacity: 0; transform: translateY(-3px); }
-    to { opacity: 1; transform: none; }
-  }
+  .vm-boot.failed .vm-boot-scan { animation: none; opacity: .28; }
+  .vm-boot.failed .vm-boot-lamp { animation: none; background: var(--danger); }
+  .vm-boot.failed .vm-boot-line { color: color-mix(in srgb, var(--danger) 78%, var(--ink)); white-space: normal; }
+
   @media (prefers-reduced-motion: reduce) {
-    .vm-boot-step { animation: none; }
-    .vm-boot-step.active .vm-boot-mark { animation: none; border-top-color: var(--accent); }
+    .vm-boot-scan, .vm-boot-lamp, .vm-boot-line { animation: none; }
   }
 
   .vmws-feed {
@@ -3259,11 +3274,15 @@
           </button>
         </header>
         <div class="vm-boot" id="agentVmBoot" hidden>
-          <div class="vm-boot-head">
-            <span class="vm-boot-title" id="agentVmBootTitle">Готовлю среду проекта</span>
-            <span class="vm-boot-elapsed" id="agentVmBootElapsed"></span>
+          <span class="vm-boot-machine" aria-hidden="true">
+            <span class="vm-boot-scan"></span>
+            <span class="vm-boot-lamp"></span>
+          </span>
+          <div class="vm-boot-copy">
+            <div class="vm-boot-title" id="agentVmBootTitle">Готовлю среду проекта</div>
+            <div class="vm-boot-line" id="agentVmBootLine" aria-live="polite"></div>
           </div>
-          <div id="agentVmBootSteps"></div>
+          <span class="vm-boot-elapsed" id="agentVmBootElapsed"></span>
         </div>
         <div class="vmws-stage" id="agentVmStage" hidden>
           <span class="vmws-stage-spinner"></span>

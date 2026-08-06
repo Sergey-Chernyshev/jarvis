@@ -3152,7 +3152,7 @@ const agentVmStageTimeEl = document.getElementById('agentVmStageTime');
 const agentVmBootEl = document.getElementById('agentVmBoot');
 const agentVmBootTitleEl = document.getElementById('agentVmBootTitle');
 const agentVmBootElapsedEl = document.getElementById('agentVmBootElapsed');
-const agentVmBootStepsEl = document.getElementById('agentVmBootSteps');
+const agentVmBootLineEl = document.getElementById('agentVmBootLine');
 const agentVmQueueHintEl = document.getElementById('agentVmQueueHint');
 const agentVmTerminalScreenEl = document.getElementById('agentVmTerminalScreen');
 const agentVmTerminalEmptyEl = document.getElementById('agentVmTerminalEmpty');
@@ -3427,64 +3427,71 @@ function clearAgentVmStage() {
   renderAgentVmWorkspace();
 }
 
-/* ---------- запуск среды: показать шаги, а не пустой экран ----------
+/* ---------- запуск среды: живая машина и меняющийся текст ----------
    Плагин на время runtime.ensure перестаёт отвечать (последовательный цикл),
-   поэтому спросить «где ты сейчас» нельзя. Шаги берём из модели — она повторяет
-   service.rs::ensure, — и продвигаем по факту завершения команды, а не по
-   таймеру: иначе затык на «avm create» доехал бы до «готово» и соврал. Что
-   действительно честно на каждом кадре — прошедшее время. */
+   поэтому спросить «где ты сейчас» нельзя, и шкалы здесь нет: она двигалась бы
+   по таймеру и при затыке всё равно доехала бы до конца. Что показываем:
+   работающую машину, текст текущей фазы (фаза настоящая — граница команды) и
+   время. Строки внутри фазы идут по кругу, но ни одна не обещает того, что ещё
+   не началось. */
 let agentVmBoot = null;
 let agentVmBootTimer = 0;
+let agentVmBootClock = 0;
 
 function startAgentVmBoot(vm, title) {
-  const steps = AgentVmModel.ensureSteps(vm);
-  agentVmBoot = { steps, done: 0, failedAt: -1, startedAt: Date.now(), title, vm };
-  if (!agentVmBootTimer) {
-    // Только для счётчика времени: шаги от таймера не двигаются.
-    agentVmBootTimer = setInterval(paintAgentVmBootElapsed, 1000);
-  }
+  agentVmBoot = { vm, title, phase: 'env', tick: 0, startedAt: Date.now(), failed: false, reason: '' };
+  // Два разных ритма: строка сменяется неспешно, чтобы её успевали прочитать, а
+  // часы идут раз в секунду — иначе время прыгало бы через три.
+  if (!agentVmBootTimer) agentVmBootTimer = setInterval(tickAgentVmBoot, 2600);
+  if (!agentVmBootClock) agentVmBootClock = setInterval(paintAgentVmBootElapsed, 1000);
   renderAgentVmBoot();
 }
 
-// Шаг закончился — единственный способ продвинуться вперёд.
-function advanceAgentVmBoot(step) {
-  if (!agentVmBoot) return;
-  const index = agentVmBoot.steps.findIndex((item) => item.key === step);
-  if (index < 0) return;
-  agentVmBoot.done = Math.max(agentVmBoot.done, index + 1);
+function tickAgentVmBoot() {
+  if (!agentVmBoot || agentVmBoot.failed) return;
+  agentVmBoot.tick += 1;
   renderAgentVmBoot();
+}
+
+/** Среда готова — дальше поднимаем агента. Фаза меняется по факту команды. */
+function advanceAgentVmBoot(phase) {
+  if (!agentVmBoot || agentVmBoot.failed) return;
+  if (phase === 'agent' && agentVmBoot.phase !== 'agent') {
+    agentVmBoot.phase = 'agent';
+    agentVmBoot.tick = 0;
+    renderAgentVmBoot();
+  }
 }
 
 function failAgentVmBoot(reason = '') {
   if (!agentVmBoot) return;
-  agentVmBoot.failedAt = agentVmBoot.done;
-  // Причина рядом с упавшим шагом: тост исчезнет, а этот текст останется — и
-  // сразу видно, ЧТО именно не получилось, а не только «operation failed».
-  agentVmBoot.reason = reason;
+  agentVmBoot.failed = true;
+  // Причину оставляем на экране: тост исчезнет через секунды, а прочитать нужно
+  // именно её — по ней понятно, что делать.
+  agentVmBoot.reason = reason || 'Не удалось подготовить среду';
   renderAgentVmBoot();
 }
 
 function stopAgentVmBoot() {
   agentVmBoot = null;
-  if (agentVmBootTimer) {
-    clearInterval(agentVmBootTimer);
-    agentVmBootTimer = 0;
-  }
+  clearAgentVmBootTimers();
   if (agentVmBootEl) agentVmBootEl.hidden = true;
+}
+
+function clearAgentVmBootTimers() {
+  if (agentVmBootTimer) { clearInterval(agentVmBootTimer); agentVmBootTimer = 0; }
+  if (agentVmBootClock) { clearInterval(agentVmBootClock); agentVmBootClock = 0; }
 }
 
 /**
  * Конец запуска. Успех убираем сразу — дальше говорит сам терминал. Ошибку
- * оставляем на экране: упавший шаг это единственное место, где сказано, ЧТО
- * не получилось, и прятать его вместе с остальным значит оставить пользователя
- * с одним тостом «operation failed».
+ * оставляем на экране: это единственное место, где сказано, что не получилось.
  */
 function finishAgentVmBoot() {
-  if (agentVmBoot?.failedAt >= 0) {
-    if (agentVmBootTimer) {
-      clearInterval(agentVmBootTimer);
-      agentVmBootTimer = 0;
-    }
+  if (agentVmBoot?.failed) {
+    // Панель остаётся с причиной, но время замирает: секунды после падения
+    // ничего не значат.
+    clearAgentVmBootTimers();
     return;
   }
   stopAgentVmBoot();
@@ -3502,39 +3509,21 @@ function renderAgentVmBoot() {
   if (!agentVmBootEl) return;
   if (!agentVmBoot) { agentVmBootEl.hidden = true; return; }
   agentVmBootEl.hidden = false;
-  const steps = AgentVmModel.ensureSteps(agentVmBoot.vm, {
-    done: agentVmBoot.done,
-    failedAt: agentVmBoot.failedAt,
-  });
-  const active = steps.findIndex((step) => step.state === 'active');
-  // «шаг 2 из 5» — сколько всего впереди, видно сразу; при ошибке номер шага
-  // уже неважен, важно что упало.
-  agentVmBootTitleEl.textContent = agentVmBoot.failedAt >= 0
-    ? agentVmBoot.title
-    : `${agentVmBoot.title} · шаг ${Math.min(active < 0 ? steps.length : active + 1, steps.length)} из ${steps.length}`;
+  agentVmBootEl.classList.toggle('failed', agentVmBoot.failed);
+  agentVmBootTitleEl.textContent = agentVmBoot.failed
+    ? 'Не получилось подготовить среду'
+    : agentVmBoot.title;
+  const line = agentVmBoot.failed
+    ? agentVmBoot.reason
+    : AgentVmModel.bootLine(agentVmBoot.vm, agentVmBoot.phase, agentVmBoot.tick);
+  if (agentVmBootLineEl.textContent !== line) {
+    agentVmBootLineEl.textContent = line;
+    // Перезапуск анимации появления: без сброса второй кадр не проигрывается.
+    agentVmBootLineEl.style.animation = 'none';
+    void agentVmBootLineEl.offsetWidth;
+    agentVmBootLineEl.style.animation = '';
+  }
   paintAgentVmBootElapsed();
-  agentVmBootStepsEl.textContent = '';
-  steps.forEach((step, i) => {
-    const row = document.createElement('div');
-    row.className = `vm-boot-step ${step.state}${step.slow ? ' slow' : ''}`;
-    // Шаги проявляются по очереди — задержка растёт с номером.
-    row.style.animationDelay = `${i * 55}ms`;
-    row.appendChild(Object.assign(document.createElement('span'), { className: 'vm-boot-mark' }));
-    row.appendChild(Object.assign(document.createElement('span'), { textContent: step.label }));
-    // Подсказка только у активного долгого шага: заранее сказать, что минута
-    // тишины — это норма, а не «зависло».
-    row.appendChild(Object.assign(document.createElement('span'), {
-      className: 'vm-boot-hint',
-      textContent: step.state === 'active' && step.slow ? 'до пары минут' : '',
-    }));
-    agentVmBootStepsEl.appendChild(row);
-    if (step.state === 'failed' && agentVmBoot.reason) {
-      agentVmBootStepsEl.appendChild(Object.assign(document.createElement('div'), {
-        className: 'vm-boot-reason',
-        textContent: agentVmBoot.reason,
-      }));
-    }
-  });
 }
 
 function agentVmArgs() {
@@ -3702,11 +3691,9 @@ function ensureAgentVmEnvironment(project, backend) {
       if (environment.disk) agentVmCurrent.disk = environment.disk;
     }
     agentVmSyncedProjects.add(key);
-    // runtime.ensure — одна команда, которая внутри делает spec → VM → mounts →
-    // настройки. Раздельных сигналов плагин не даёт, поэтому отмечаем всё это
-    // сделанным ровно в момент её успеха: остаётся агент, и он идёт отдельным
-    // вызовом (terminal.ensure), так что последний шаг честно живёт своей жизнью.
-    advanceAgentVmBoot('config');
+    // Среда готова — переводим текст в фазу агента. Это настоящая граница:
+    // runtime.ensure вернулась, дальше идёт отдельный вызов.
+    advanceAgentVmBoot('agent');
     return environment;
   }).catch((error) => {
     failAgentVmBoot(error.message);
@@ -3799,7 +3786,6 @@ async function runAgentVmLifecycle(command, title) {
   }
   try {
     const result = await agentVmCommand(command, agentVmArgs());
-    advanceAgentVmBoot('config');
     if (result.projectId) agentVmCurrent.projectId = result.projectId;
     if (command === 'runtime.stop' || command === 'runtime.restart') {
       for (const backend of ['claude', 'codex']) {
@@ -3810,9 +3796,6 @@ async function runAgentVmLifecycle(command, title) {
         );
       }
     }
-    // Здесь агента не поднимаем — это делает отправка сообщения. Шаг закрываем,
-    // чтобы список не остался с вечно крутящейся последней строкой.
-    advanceAgentVmBoot('agent');
     showToast(command === 'runtime.stop' ? 'VM остановлена' : 'Среда готова');
   } catch (error) {
     failAgentVmBoot(error.message);

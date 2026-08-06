@@ -253,7 +253,11 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
         }
         if !matches!(
             name,
-            "runtime.send" | "runtime.cancel" | "runtime.replay" | "runtime.commands"
+            "runtime.send"
+                | "runtime.cancel"
+                | "runtime.replay"
+                | "runtime.commands"
+                | "runtime.runs"
         ) {
             return None;
         }
@@ -319,6 +323,23 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
             "runtime.commands" => {
                 required_string(args, "runId").and_then(|run_id| supervisor.commands(&run_id))
             }
+            // Список прогонов проекта — источник для экрана «чаты проекта».
+            // projectId выводим из canonical cwd, а не принимаем от UI: так же,
+            // как остальные runtime.* (спека §16 — путь канонизирует backend).
+            "runtime.runs" => (|| {
+                let cwd = required_string(args, "cwd")?;
+                let project = crate::project::ProjectIdentity::from_path(Path::new(&cwd))?;
+                crate::service::validate_project_id(
+                    &project,
+                    args.get("projectId").and_then(Value::as_str),
+                )?;
+                let limit: usize = args
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(50)
+                    .clamp(1, 200) as usize;
+                supervisor.project_runs(&project.project_id, limit)
+            })(),
             _ => unreachable!(),
         })
     }
@@ -1858,6 +1879,61 @@ mod tests {
             operation.attrs["resumeCommand"],
             "claude --resume 018f0000-0000-7000-8000-000000000099"
         );
+        drop(publications);
+
+        // Список прогонов проекта — источник экрана «чаты проекта».
+        let mut runs = command("runtime.runs", &root);
+        runs.payload.args = json!({"cwd":root,"projectId":identity.project_id});
+        dispatcher.process(runs).unwrap();
+
+        let publications = host.publications.lock().unwrap();
+        let operation = publications
+            .iter()
+            .rev()
+            .find(|item| {
+                item.kind == "operation"
+                    && item.state == "done"
+                    && item.attrs["command"] == "runtime.runs"
+            })
+            .unwrap();
+        let listed = operation.attrs["runs"].as_array().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["runId"], json!(run_id));
+        assert_eq!(listed[0]["projectId"], json!(identity.project_id));
+        assert_eq!(listed[0]["backend"], json!("claude"));
+        assert_eq!(listed[0]["state"], json!("completed"));
+        // transport-идентичность прогона наружу не уходит (спека v2 §13.3)
+        assert!(listed[0].get("backendSessionId").is_none());
+        assert!(listed[0].get("resumeCommand").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runs_listing_rejects_project_id_that_does_not_match_cwd() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-runs-guard-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let service = FakeService::new(Ok(snapshot(&root)));
+        let host = FakeHost::default();
+        let store = RunStore::new(root.join("private/runs"));
+        let supervisor = RunSupervisor::new(host.clone(), store, Arc::new(NoopExecutor));
+        let mut dispatcher = Dispatcher::with_supervisor(service, host.clone(), supervisor);
+
+        // UI не может подсунуть чужой projectId: он сверяется с каноническим cwd.
+        let mut runs = command("runtime.runs", &root);
+        runs.payload.args = json!({"cwd":root,"projectId":"someone-else-0123456789ab"});
+        dispatcher.process(runs).unwrap();
+
+        let publications = host.publications.lock().unwrap();
+        assert!(publications.iter().any(|item| item.kind == "operation"
+            && item.state == "error"
+            && item.attrs["command"] == "runtime.runs"));
+        assert!(!publications.iter().any(|item| item.kind == "operation"
+            && item.state == "done"
+            && item.attrs["command"] == "runtime.runs"));
+        drop(publications);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

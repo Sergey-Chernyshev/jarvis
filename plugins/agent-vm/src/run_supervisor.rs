@@ -327,6 +327,39 @@ impl<H: HostApi> RunSupervisor<H> {
         }))
     }
 
+    /// Прогоны одного проекта, новые сверху. Это источник для списка «чаты
+    /// проекта»: журналы прогонов лежат на хосте (`runs/`), поэтому вытягивать
+    /// что-либо из гостя не нужно — транскрипт остаётся внутри VM.
+    pub fn project_runs(&self, project_id: &str, limit: usize) -> Result<Value, String> {
+        let mut summaries = self
+            .store
+            .summaries()?
+            .into_iter()
+            .filter(|summary| summary.project_id == project_id)
+            .collect::<Vec<_>>();
+        summaries.sort_by(|left, right| right.last_at.cmp(&left.last_at));
+        summaries.truncate(limit);
+        let runs = summaries
+            .into_iter()
+            .map(|summary| {
+                json!({
+                    "runId": summary.run_id,
+                    "projectId": summary.project_id,
+                    "project": summary.project,
+                    "cwd": summary.cwd,
+                    "backend": summary.backend.as_str(),
+                    "vm": summary.vm,
+                    "state": summary.state,
+                    "lastAt": summary.last_at,
+                    "changedFiles": summary.files.len(),
+                    // resume-команду и backendSessionId наружу не отдаём:
+                    // это transport-идентичность прогона (спека v2 §13.3)
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({ "projectId": project_id, "runs": runs }))
+    }
+
     pub fn recover(&self) -> Result<usize, String> {
         let mut latest_by_project = HashMap::<String, RunSummary>::new();
         for summary in self.store.summaries()? {

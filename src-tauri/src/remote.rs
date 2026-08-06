@@ -133,6 +133,14 @@ pub fn ssh_args(ssh_host: &str, port: u16, sock: &str) -> Vec<String> {
     ]
 }
 
+/// Болтовня ssh, которая не является причиной отказа. Показать её как ошибку
+/// значит увести человека не туда: туннель после такой строки прекрасно живёт.
+fn is_ssh_noise(line: &str) -> bool {
+    line.starts_with("Warning: Permanently added")
+        || line.starts_with("Pseudo-terminal")
+        || line.contains("setlocale")
+}
+
 /// Пауза перед следующей попыткой: 1,2,4,8,16,30…с. Растёт от числа подряд
 /// неудачных кругов — недоступный VPS не должен превращаться в шторм ssh.
 pub fn backoff_secs(fails: u64) -> u64 {
@@ -161,7 +169,12 @@ fn resolve_home(ssh_host: &str, dir: &str) -> Option<String> {
             "-o",
             "ConnectTimeout=10",
             ssh_host,
-            "printf %s \"$HOME\"",
+            // Метка, а не голый $HOME: чужой ~/.bashrc любит печатать в stdout
+            // (баннер, приветствие, вывод чужой утилиты). Без метки этот мусор
+            // становился «домашним каталогом», проверка на «/» его отбрасывала
+            // — и туннель молча уходил в цикл переподъёма без единого слова
+            // о причине.
+            "printf 'JARVIS_HOME=%s\\n' \"$HOME\"",
         ])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -170,15 +183,24 @@ fn resolve_home(ssh_host: &str, dir: &str) -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    let home = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if home.is_empty() || !home.starts_with('/') {
-        return None;
-    }
+    let home = parse_home(&String::from_utf8_lossy(&out.stdout))?;
     Some(if rest.is_empty() {
         home
     } else {
         format!("{}/{rest}", home.trim_end_matches('/'))
     })
+}
+
+/// Достать `$HOME` из ответа той стороны: берём помеченную строку, всё
+/// остальное — чужой вывод, который не наше дело фильтровать по одному.
+fn parse_home(out: &str) -> Option<String> {
+    let home = out
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("JARVIS_HOME="))?
+        .trim();
+    // Хвостовой слэш не трогаем: его снимает вызывающий, а «/» как $HOME
+    // (бывает у root) обрезкой превратился бы в пустую строку.
+    (home.starts_with('/')).then(|| home.to_string())
 }
 
 /// Что случилось с туннелем на этом круге супервизора.
@@ -204,6 +226,10 @@ pub struct Tunnel {
     child: Mutex<Option<Child>>,
     /// Должен ли туннель работать. `stop()` снимает — супервизор не воскрешает.
     active: AtomicBool,
+    /// Последняя внятная строка stderr от ssh. Живёт здесь, а не только в логе:
+    /// лог выключен по умолчанию, а «почему туннель не поднялся» — это ровно то,
+    /// что человек должен увидеть в панели, не включая режим диагностики.
+    stderr_tail: Arc<Mutex<String>>,
 }
 
 impl Tunnel {
@@ -214,7 +240,18 @@ impl Tunnel {
             port: AtomicU16::new(0),
             child: Mutex::new(None),
             active: AtomicBool::new(false),
+            stderr_tail: Arc::new(Mutex::new(String::new())),
         }
+    }
+
+    /// Последняя жалоба ssh — пустая строка, если он молчал.
+    pub fn last_stderr(&self) -> String {
+        self.stderr_tail.lock().unwrap().clone()
+    }
+
+    /// Забыть прошлую жалобу: связь наладилась, старая причина только путает.
+    pub fn clear_stderr(&self) {
+        self.stderr_tail.lock().unwrap().clear();
     }
 
     pub fn port(&self) -> u16 {
@@ -252,6 +289,12 @@ impl Tunnel {
 
     /// Поднять туннель, если он не жив. Не ждёт готовности форварда — это
     /// делает рукопожатие поллера (`/hello`).
+    /// Записать причину, по которой туннель не поднялся, — её покажет панель.
+    fn note(&self, why: &str) {
+        crate::log::line(&format!("[remote] {}: {why}", self.ssh_host));
+        *self.stderr_tail.lock().unwrap() = why.to_string();
+    }
+
     pub fn ensure_started(&self) -> TunnelState {
         self.active.store(true, Ordering::SeqCst);
         if self.is_up() {
@@ -264,8 +307,18 @@ impl Tunnel {
         self.port.store(0, Ordering::SeqCst);
 
         let dir = self.remote_dir(); // может сходить по ssh — до захвата лока
+        // `~` в `-L` не раскрывает никто: ни ssh, ни sshd на той стороне. Такой
+        // туннель поднимется и будет молча отдавать «connection reset» на каждый
+        // запрос — худший вид поломки. Лучше не поднимать вовсе и сказать почему.
+        if dir.starts_with('~') {
+            self.note(
+                "не смог узнать $HOME на той машине (ssh не ответил на рукопожатие) — \
+                 проверь `ssh <хост> true` или впиши абсолютный каталог узла вместо ~",
+            );
+            return TunnelState::Failed;
+        }
         let Some(port) = free_port() else {
-            crate::log::line("[remote] не нашёл свободный порт для туннеля");
+            self.note("не нашёл свободный порт на этой машине");
             return TunnelState::Failed;
         };
         let args = ssh_args(&self.ssh_host, port, &node_sock(&dir));
@@ -292,12 +345,16 @@ impl Tunnel {
                 }
                 if let Some(err) = c.stderr.take() {
                     let host = self.ssh_host.clone();
+                    let tail = self.stderr_tail.clone();
                     std::thread::spawn(move || {
                         use std::io::{BufRead, BufReader};
                         for line in BufReader::new(err).lines().map_while(Result::ok) {
-                            if !line.trim().is_empty() {
-                                crate::log::line(&format!("[remote] ssh {host}: {line}"));
+                            let line = line.trim().to_string();
+                            if line.is_empty() || is_ssh_noise(&line) {
+                                continue;
                             }
+                            crate::log::line(&format!("[remote] ssh {host}: {line}"));
+                            *tail.lock().unwrap() = line;
                         }
                     });
                 }
@@ -310,7 +367,7 @@ impl Tunnel {
                 TunnelState::Spawned
             }
             Err(e) => {
-                crate::log::line(&format!("[remote] ssh не запустился ({}): {e}", self.ssh_host));
+                self.note(&format!("ssh не запустился: {e} (он вообще установлен?)"));
                 TunnelState::Failed
             }
         }
@@ -798,7 +855,22 @@ impl Node {
             connected: self.online.load(Ordering::SeqCst),
             port: self.tunnel.port(),
             cursor: self.cursor(),
-            error: self.last_error.lock().unwrap().clone(),
+            error: self.why(),
+        }
+    }
+
+    /// Человеческая причина «почему не работает». Причина поллера отвечает
+    /// ЧТО не вышло («туннель не поднялся»), жалоба ssh — ПОЧЕМУ («Permission
+    /// denied», «administratively prohibited»). По отдельности каждая половина
+    /// бесполезна, поэтому отдаём обе.
+    pub fn why(&self) -> String {
+        let own = self.last_error.lock().unwrap().clone();
+        let ssh = self.tunnel.last_stderr();
+        match (own.is_empty(), ssh.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => ssh,
+            (false, true) => own,
+            (false, false) => format!("{own} · ssh: {ssh}"),
         }
     }
 
@@ -806,6 +878,7 @@ impl Node {
     fn ok(&self) {
         self.fails.store(0, Ordering::SeqCst);
         self.last_error.lock().unwrap().clear();
+        self.tunnel.clear_stderr(); // связь есть — прошлая жалоба только путает
         if !self.online.swap(true, Ordering::SeqCst) {
             crate::log::line(&format!("[remote] {}: связь есть", self.cfg.name));
         }
@@ -1208,6 +1281,36 @@ mod cursor_path_tests {
         let p = cursor_path("../evil");
         assert_eq!(p.parent().unwrap(), jarvis_dir().join("remotes"));
         assert_eq!(p.file_name().unwrap(), ".._evil.cursor");
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn home_survives_a_chatty_shell() {
+        // чужой ~/.bashrc печатает в stdout — раньше это молча убивало туннель
+        let out = "Добро пожаловать!\nОбновлений: 3\nJARVIS_HOME=/home/bob\n";
+        assert_eq!(parse_home(out).as_deref(), Some("/home/bob"));
+        assert_eq!(parse_home("JARVIS_HOME=/srv/x/\n").as_deref(), Some("/srv/x/"));
+        assert_eq!(parse_home("JARVIS_HOME=/\n").as_deref(), Some("/"), "root тоже человек");
+    }
+
+    #[test]
+    fn home_without_the_marker_is_not_a_home() {
+        assert_eq!(parse_home("/home/bob\n"), None, "голый вывод больше не принимаем");
+        assert_eq!(parse_home("JARVIS_HOME=relative/path"), None);
+        assert_eq!(parse_home(""), None);
+    }
+
+    #[test]
+    fn ssh_chatter_is_not_a_failure() {
+        // из-за этих строк человек искал бы поломку там, где её нет
+        assert!(is_ssh_noise("Warning: Permanently added '1.2.3.4' (ED25519) to the list of known hosts."));
+        assert!(is_ssh_noise("bash: warning: setlocale: LC_ALL: cannot change locale (en_GB.UTF-8)"));
+        assert!(!is_ssh_noise("Permission denied (publickey)."));
+        assert!(!is_ssh_noise("channel 2: open failed: administratively prohibited"));
     }
 }
 

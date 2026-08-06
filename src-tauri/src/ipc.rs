@@ -2941,14 +2941,37 @@ pub async fn remotes_test(app: AppHandle, name: String) -> Value {
     let Some(node) = d.remotes.node(name.trim()) else {
         return err("Узел не найден — сохрани его и попробуй снова");
     };
+    // Туннеля нет — поднимаем сами, а не отсылаем человека ждать поллер.
+    // «Проверить» должно ОТВЕЧАТЬ, почему не работает, иначе кнопка бесполезна
+    // ровно тогда, когда нужна.
+    if node.client().is_err() {
+        let n = node.clone();
+        let state = tokio::task::spawn_blocking(move || n.tunnel.ensure_started())
+            .await
+            .unwrap_or(crate::remote::TunnelState::Failed);
+        if state == crate::remote::TunnelState::Failed {
+            let why = node.why();
+            return err(if why.is_empty() {
+                "ssh не поднял туннель — проверь `ssh <хост> true` в терминале".to_string()
+            } else {
+                format!("туннель не поднялся: {why}")
+            });
+        }
+        // форвард открывается не мгновенно после старта ssh
+        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+    }
     let client = match node.client() {
         Ok(c) => c,
-        // туннель поднимает поллер своим циклом; здесь честно говорим, что ещё нет
-        Err(e) => return err(format!("{e} — подожди несколько секунд")),
+        Err(e) => return err(format!("{e}: {}", node.why())),
     };
     match client.hello().await {
         Ok(h) => json!({ "ok": true, "host": h.host, "version": h.version, "buffered": h.buffered }),
-        Err(e) => err(ellipsize(&one_line(&e), 160)),
+        // Узел не ответил при живом ssh — почти всегда это «сокета нет»:
+        // узел не запущен на той стороне. Подсказываем, чем это проверить.
+        Err(e) => err(format!(
+            "{}\nУзел не ответил. На той машине: systemctl --user status jarvis-node",
+            ellipsize(&one_line(&e), 160)
+        )),
     }
 }
 

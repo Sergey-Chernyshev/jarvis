@@ -1331,8 +1331,11 @@ pub fn add(progress: &Progress, name: &str, ssh_host: &str, dir: Option<&str>) -
 
     // 7. Настройки ноута + памятка.
     progress(Step::start(PHASE_DONE));
-    let line = format!("{{ \"name\": \"{name}\", \"sshHost\": \"{ssh_host}\", \"jarvisDir\": \"{dir_raw}\" }}");
-    match record(name, ssh_host, &dir_raw) {
+    // Каталог сохраняем РАЗВЁРНУТЫМ. `~` в `-L` не раскрывает никто, и туннелю
+    // пришлось бы спрашивать $HOME по ssh при каждом подъёме — лишняя точка
+    // отказа там, где ответ уже получен разведкой и не меняется.
+    let line = format!("{{ \"name\": \"{name}\", \"sshHost\": \"{ssh_host}\", \"jarvisDir\": \"{dir}\" }}");
+    match record(name, ssh_host, &dir) {
         Ok(Recorded::Added) => progress(Step::done(
             PHASE_DONE,
             format!("узел записан в {}: {line}", super::jarvis_settings_path().display()),

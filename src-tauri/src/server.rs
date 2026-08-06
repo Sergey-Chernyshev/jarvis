@@ -446,6 +446,10 @@ mod tests {
         assert!(allowed_agent_vm_control("runtime.stop"));
         assert!(!allowed_agent_vm_control("runtime.send"));
         assert!(!allowed_agent_vm_control("_restart"));
+        // Разрушительные и не привязанные к проекту команды по HTTP недоступны:
+        // освобождение кэша образов делается только из UI.
+        assert!(!allowed_agent_vm_control("runtime.releaseCache"));
+        assert!(!allowed_agent_vm_control("runtime.runs"));
     }
 
     #[test]

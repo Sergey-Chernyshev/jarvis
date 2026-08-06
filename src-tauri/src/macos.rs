@@ -13,6 +13,9 @@ use tauri::{Emitter, Manager, WebviewWindow};
 const NS_SCREEN_SAVER_WINDOW_LEVEL: isize = 1000;
 /// NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary
 const COLLECTION_BEHAVIOR: usize = (1 << 0) | (1 << 8);
+/// NSWindowCollectionBehaviorMoveToActiveSpace — показать окно на ТЕКУЩЕМ
+/// Space вместо переключения пользователя на «родной».
+const COLLECTION_BEHAVIOR_ACTIVE_SPACE: usize = 1 << 1;
 /// Поведение обычного окна: Managed | ParticipatesInCycle | FullScreenPrimary.
 /// FullScreenPrimary обязателен — без него AppKit не пускает окно в фуллскрин
 /// (зелёная кнопка и ⌃⌘F молча не работают).
@@ -96,9 +99,20 @@ pub fn float_normal(win: &WebviewWindow) {
 
 /// Показать окно, не активируя приложение (аналог showInactive в Electron):
 /// orderFrontRegardless выводит окно на экран, не делая его key.
+///
+/// MoveToActiveSpace на время показа: без него AppKit возвращает окно на тот
+/// Space, где оно было упорядочено в прошлый раз, и переключает пользователя
+/// туда — то есть показ тоста/HUD уносил с текущего рабочего стола. Ставим
+/// поведение ДО orderFront, иначе решение о Space уже принято.
 pub fn show_inactive(win: &WebviewWindow) {
     on_main(win, |w| unsafe {
+        let behavior: usize = msg_send![w, collectionBehavior];
+        let _: () = msg_send![w, setCollectionBehavior: behavior | COLLECTION_BEHAVIOR_ACTIVE_SPACE];
         let _: () = msg_send![w, orderFrontRegardless];
+        // Прозрачное окно: форму тени AppKit кэширует по непрозрачным пикселям
+        // на момент отрисовки. Без сброса от прошлого размера остаётся контур —
+        // это и есть «артефакты теней вокруг».
+        let _: () = msg_send![w, invalidateShadow];
     });
 }
 
@@ -168,6 +182,9 @@ pub fn place_panel(win: &WebviewWindow, w: f64, h: f64, corner: bool) {
             size: CGSize { width: pw, height: ph },
         };
         let _: () = msg_send![window, setFrame: frame, display: false];
+        // Панель тоже прозрачная и меняет размер под дисплей — без сброса тени
+        // на экране остаётся контур от прежней геометрии.
+        let _: () = msg_send![window, invalidateShadow];
     });
 }
 
@@ -221,6 +238,10 @@ pub fn place_toast(win: &WebviewWindow, w: f64, h: f64) {
             size: CGSize { width: w, height: h },
         };
         let _: () = msg_send![window, setFrame: frame, display: true];
+        // Стек тостов меняет высоту на каждой карточке. У прозрачного окна тень
+        // кэшируется по прежней форме, поэтому вокруг остаются контуры старого
+        // размера — сбрасываем её после каждого изменения кадра.
+        let _: () = msg_send![window, invalidateShadow];
     });
 }
 

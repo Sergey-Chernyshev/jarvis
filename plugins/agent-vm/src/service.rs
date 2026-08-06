@@ -723,6 +723,14 @@ pub trait RuntimeService: Clone + Send + Sync + 'static {
     fn ensure(&self, cwd: &Path) -> Result<RuntimeSnapshot, String>;
     fn stop(&self, cwd: &Path) -> Result<RuntimeSnapshot, String>;
     fn restart(&self, cwd: &Path) -> Result<RuntimeSnapshot, String>;
+    /// Освободить кэш скачанных образов и вернуть, сколько байт освободилось.
+    /// Реализация по умолчанию — для тестовых дублей, которым диск не нужен.
+    fn release_image_cache(&self) -> Result<u64, String> {
+        Ok(0)
+    }
+    fn disk_usage(&self) -> DiskUsage {
+        DiskUsage::default()
+    }
     fn shell_command(&self, vm_name: &str, managed: bool) -> String {
         let executable = if managed { "avm" } else { "limactl" };
         format!("{executable} shell {vm_name}")
@@ -748,6 +756,14 @@ impl<R: CommandRunner> RuntimeService for AgentVmService<R> {
 
     fn restart(&self, cwd: &Path) -> Result<RuntimeSnapshot, String> {
         AgentVmService::restart(self, cwd)
+    }
+
+    fn release_image_cache(&self) -> Result<u64, String> {
+        self.paths.release_image_cache()
+    }
+
+    fn disk_usage(&self) -> DiskUsage {
+        self.paths.disk_usage()
     }
 
     fn shell_command(&self, vm_name: &str, managed: bool) -> String {

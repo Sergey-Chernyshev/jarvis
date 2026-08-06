@@ -3138,6 +3138,7 @@ const agentVmModulesEl = document.getElementById('agentVmModules');
 const agentVmAutostartEl = document.getElementById('agentVmAutostart');
 const agentVmEnsureEl = document.getElementById('agentVmEnsure');
 const agentVmConnectEl = document.getElementById('agentVmConnect');
+const agentVmReleaseCacheEl = document.getElementById('agentVmReleaseCache');
 const agentVmRestartEl = document.getElementById('agentVmRestart');
 const agentVmStopAgentEl = document.getElementById('agentVmStopAgent');
 const agentVmStopEl = document.getElementById('agentVmStop');
@@ -3634,6 +3635,25 @@ async function warmAgentVmTerminal() {
   }
 }
 
+// Освобождение кэша образов. Операция не привязана к проекту — кэш общий, — но
+// вызывается из popover проекта, потому что там показан его размер.
+async function releaseAgentVmCache() {
+  if (!agentVmPluginReady()) return;
+  setAgentVmStage('Освобождаю кэш образов', 'Существующие VM не пострадают');
+  try {
+    const result = await agentVmCommand('runtime.releaseCache', {}, 60_000);
+    if (result.disk && agentVmCurrent) agentVmCurrent.disk = result.disk;
+    showToast(result.freedBytes
+      ? `Освобождено ${formatGb(result.freedBytes)}`
+      : 'Кэш уже пуст');
+    renderAgentVmWorkspace();
+  } catch (error) {
+    showToast(error.message || 'Не удалось освободить кэш');
+  } finally {
+    clearAgentVmStage();
+  }
+}
+
 async function refreshAgentVmStatus() {
   if (!agentVmCurrent || !agentVmPluginReady()) return;
   try {
@@ -3857,6 +3877,13 @@ function renderAgentVmEnvironment(project, vm, terminal, run, uiState) {
   // Занятое место: образы VM и общий кэш загрузок. Кэш показываем отдельно —
   // он один на все VM, и его удаление стоит повторной загрузки образа.
   agentVmDiskEl.textContent = formatDiskUsage(project?.disk);
+  // Кэш общий на все VM и хранит единственную копию образа: чистим только по
+  // явной просьбе, поэтому кнопка появляется, лишь когда есть что освобождать.
+  agentVmReleaseCacheEl.hidden = !(project?.disk?.cacheBytes > 0);
+  agentVmReleaseCacheEl.disabled = !!agentVmStage;
+  agentVmReleaseCacheEl.title = project?.disk?.cacheBytes
+    ? `Освободить ${formatGb(project.disk.cacheBytes)}. Существующие VM не пострадают, следующая скачает образ заново.`
+    : '';
   const configuredBackends = AgentVmModel.configuredBackends(vm);
   agentVmModulesEl.textContent = configuredBackends.length
     ? configuredBackends.map((backend) => (backend === 'codex' ? 'Codex' : 'Claude')).join(' · ')
@@ -4356,6 +4383,7 @@ agentVmSendEl.addEventListener('click', sendAgentVmMessage);
 agentVmCancelEl.addEventListener('click', cancelAgentVmRun);
 agentVmEnsureEl.addEventListener('click', () => runAgentVmLifecycle('runtime.ensure', 'Подготавливаю среду'));
 agentVmConnectEl.addEventListener('click', () => warmAgentVmTerminal());
+agentVmReleaseCacheEl.addEventListener('click', releaseAgentVmCache);
 agentVmRestartEl.addEventListener('click', () => runAgentVmLifecycle('runtime.restart', 'Перезапускаю VM'));
 agentVmStopAgentEl.addEventListener('click', () => stopAgentVmTerminal());
 agentVmStopEl.addEventListener('click', () => runAgentVmLifecycle('runtime.stop', 'Останавливаю VM'));

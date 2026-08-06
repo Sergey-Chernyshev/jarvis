@@ -747,6 +747,14 @@ test("main panel exposes Agent VM workspace, bridge and keyboard contract", () =
     /openAgentVmProject\(project, row\.chat\.agent, row\.chat\.runId\)/,
   );
   assert.match(html, /\.hrow \.hbadge/);
+  // Кэш образов освобождается вручную: автоудаление стоило бы повторной
+  // загрузки образа, поэтому нужна именно кнопка.
+  assert.match(html, /id="agentVmReleaseCache"/);
+  assert.match(renderer, /agentVmCommand\('runtime\.releaseCache'/);
+  assert.match(
+    renderer,
+    /agentVmReleaseCacheEl\.addEventListener\('click', releaseAgentVmCache\)/,
+  );
   assert.match(renderer, /onOpenAgentVm/);
   assert.match(renderer, /requestedRunId/);
   assert.match(renderer, /renderAgentVmRuntimeStatus/);

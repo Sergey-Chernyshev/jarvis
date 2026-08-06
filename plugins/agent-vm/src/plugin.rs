@@ -192,6 +192,29 @@ impl<S: RuntimeService, H: HostApi> Dispatcher<S, H> {
             );
         }
 
+        // Освобождение кэша образов не привязано к проекту: кэш общий для всех
+        // VM. Чистим только по явной просьбе — существующие VM не пострадают,
+        // но следующая скачает образ заново.
+        if name == "runtime.releaseCache" {
+            return match self.service.release_image_cache() {
+                Ok(freed) => {
+                    let disk = self.service.disk_usage();
+                    self.publish_operation(
+                        &request_id,
+                        &name,
+                        "done",
+                        operation_attrs(&context, json!({"freedBytes":freed,"disk":disk})),
+                    )
+                }
+                Err(error) => self.publish_operation(
+                    &request_id,
+                    &name,
+                    "error",
+                    operation_attrs(&context, json!({"error": public_error(&error)})),
+                ),
+            };
+        }
+
         if let Some(result) = self.dispatch_supervisor_command(&name, &event.payload.args) {
             return match result {
                 Ok(attrs) => self.publish_operation(
@@ -674,6 +697,7 @@ mod tests {
         result: Arc<Mutex<Result<RuntimeSnapshot, String>>>,
         calls: Arc<Mutex<Vec<String>>>,
         inventory: Arc<(Mutex<InventoryControl>, Condvar)>,
+        paths: Arc<Mutex<Option<crate::runtime_paths::RuntimePaths>>>,
     }
 
     impl FakeService {
@@ -682,7 +706,13 @@ mod tests {
                 result: Arc::new(Mutex::new(result)),
                 calls: Arc::new(Mutex::new(Vec::new())),
                 inventory: Arc::new((Mutex::new(InventoryControl::default()), Condvar::new())),
+                paths: Arc::new(Mutex::new(None)),
             }
+        }
+
+        fn with_paths(self, paths: crate::runtime_paths::RuntimePaths) -> Self {
+            *self.paths.lock().unwrap() = Some(paths);
+            self
         }
 
         fn set_inventory_error(&self, error: &str) {
@@ -769,6 +799,23 @@ mod tests {
         fn restart(&self, _cwd: &Path) -> Result<RuntimeSnapshot, String> {
             self.calls.lock().unwrap().push("restart".into());
             self.result.lock().unwrap().clone()
+        }
+
+        // Кэш освобождается на настоящем каталоге, если он задан: иначе тест
+        // проверял бы заглушку, а не реальное освобождение места.
+        fn release_image_cache(&self) -> Result<u64, String> {
+            self.calls.lock().unwrap().push("releaseCache".into());
+            match self.paths.lock().unwrap().as_ref() {
+                Some(paths) => paths.release_image_cache(),
+                None => Ok(0),
+            }
+        }
+
+        fn disk_usage(&self) -> crate::service::DiskUsage {
+            match self.paths.lock().unwrap().as_ref() {
+                Some(paths) => paths.disk_usage(),
+                None => crate::service::DiskUsage::default(),
+            }
         }
     }
 
@@ -1906,6 +1953,53 @@ mod tests {
         assert!(listed[0].get("backendSessionId").is_none());
         assert!(listed[0].get("resumeCommand").is_none());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn releasing_image_cache_frees_space_and_reports_new_usage() {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-agent-vm-release-cache-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let profile = root.join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let paths =
+            crate::runtime_paths::RuntimePaths::from_socket(&profile.join("run.sock")).unwrap();
+        paths.create_private_dirs().unwrap();
+        // Кэш образа и образ существующей VM: чистка должна тронуть только кэш.
+        let cache = paths.image_cache().join("by-url-sha256/abc");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("data"), vec![1u8; 4096]).unwrap();
+        let vm_dir = paths.lima_home.join("proj-1");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        std::fs::write(vm_dir.join("disk.img"), vec![7u8; 2048]).unwrap();
+
+        let service = FakeService::new(Ok(snapshot(&root))).with_paths(paths);
+        let host = FakeHost::default();
+        let mut dispatcher = Dispatcher::new(service, host.clone());
+        dispatcher
+            .process(command("runtime.releaseCache", &root))
+            .unwrap();
+
+        let publications = host.publications.lock().unwrap();
+        let operation = publications
+            .iter()
+            .rev()
+            .find(|item| {
+                item.kind == "operation"
+                    && item.state == "done"
+                    && item.attrs["command"] == "runtime.releaseCache"
+            })
+            .expect("освобождение кэша должно завершиться успешно");
+        assert_eq!(operation.attrs["freedBytes"], json!(4096));
+        assert_eq!(operation.attrs["disk"]["cacheBytes"], json!(0));
+        assert_eq!(
+            operation.attrs["disk"]["imagesBytes"],
+            json!(2048),
+            "образы существующих VM остаются на месте"
+        );
+        drop(publications);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

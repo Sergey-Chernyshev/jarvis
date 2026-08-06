@@ -58,6 +58,31 @@ impl RuntimePaths {
         }
     }
 
+    /// Освободить кэш скачанных образов. Кэш общий для всех VM и содержит
+    /// единственную копию образа, поэтому чистка только явная: существующие VM
+    /// не пострадают, но следующая скачает образ заново. Внутрь каталога
+    /// `by-url-sha256` не заглядываем — Lima сама пересоздаёт его содержимое.
+    pub fn release_image_cache(&self) -> Result<u64, String> {
+        let cache = self.image_cache();
+        let freed = dir_size(&cache);
+        if freed == 0 && !cache.exists() {
+            return Ok(0);
+        }
+        // Симлинк вместо каталога — чужая подмена: не идём по нему.
+        let meta = fs::symlink_metadata(&cache)
+            .map_err(|err| format!("не прочитать кэш образов: {err}"))?;
+        if !meta.is_dir() {
+            return Err("кэш образов не является каталогом".into());
+        }
+        fs::remove_dir_all(&cache)
+            .map_err(|err| format!("не удалить кэш образов: {err}"))?;
+        fs::create_dir_all(&cache)
+            .map_err(|err| format!("не пересоздать кэш образов: {err}"))?;
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o700))
+            .map_err(|err| format!("не защитить кэш образов: {err}"))?;
+        Ok(freed)
+    }
+
     pub fn create_private_dirs(&self) -> Result<(), String> {
         for path in [
             &self.state_root,
@@ -443,6 +468,50 @@ mod disk_usage_tests {
         let usage = paths.disk_usage();
         assert_eq!(usage.images_bytes, 0, "symlink не считаем");
         assert_eq!(usage.cache_bytes, 0, "отсутствующий кэш — просто ноль");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn releasing_cache_frees_it_without_touching_vm_images() {
+        let (root, paths) = paths();
+        let vm = paths.lima_home.join("proj-1");
+        fs::create_dir_all(&vm).unwrap();
+        fs::write(vm.join("disk.img"), vec![7u8; 2048]).unwrap();
+        let cache = paths.image_cache().join("by-url-sha256/abc");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("data"), vec![1u8; 4096]).unwrap();
+
+        let freed = paths.release_image_cache().unwrap();
+
+        assert_eq!(freed, 4096);
+        assert_eq!(paths.disk_usage().cache_bytes, 0);
+        assert_eq!(
+            paths.disk_usage().images_bytes,
+            2048,
+            "образы существующих VM трогать нельзя"
+        );
+        assert!(paths.image_cache().is_dir(), "каталог кэша остаётся на месте");
+        // Повторный вызов не ошибка: освобождать уже нечего.
+        assert_eq!(paths.release_image_cache().unwrap(), 0);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn releasing_cache_refuses_to_follow_a_planted_symlink() {
+        let (root, paths) = paths();
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("precious"), vec![9u8; 512]).unwrap();
+        let cache = paths.image_cache();
+        fs::remove_dir_all(&cache).ok();
+        fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &cache).unwrap();
+
+        assert!(paths.release_image_cache().is_err());
+        assert!(
+            outside.join("precious").exists(),
+            "подменённая цель не должна быть удалена"
+        );
         fs::remove_dir_all(root).ok();
     }
 }

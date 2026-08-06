@@ -40,9 +40,11 @@ const HTTP_TIMEOUT_SECS: u64 = 10;
 const POLL_TIMEOUT_SECS: u64 = 35;
 /// Потолок backoff: мёртвый VPS переспрашиваем раз в полминуты, не чаще.
 const MAX_BACKOFF_SECS: u64 = 30;
-/// Пауза после подъёма ssh, прежде чем стучаться в туннель: форвард открывается
-/// не мгновенно, и первый запрос иначе гарантированно ловит connection refused.
-const TUNNEL_WARMUP_MS: u64 = 700;
+/// Сколько ждать, пока форвард начнёт принимать. Раньше здесь была глухая пауза
+/// в 700 мс — и на любой связи, где ssh не успевал за неё аутентифицироваться,
+/// туннель не поднимался НИКОГДА: рукопожатие падало, супервизор ронял ssh и
+/// уходил в паузу, круг за кругом. Теперь ждём событие, а не угадываем тайминг.
+const TUNNEL_READY_SECS: u64 = 15;
 /// Минимальная пауза между кругами поллера. Узел без long-poll (или отдавший
 /// пустую страницу мгновенно) не должен превращать поллер в busy-loop.
 const POLL_FLOOR_MS: u64 = 1000;
@@ -261,6 +263,32 @@ impl Tunnel {
     /// База HTTP поверх туннеля.
     pub fn base(&self) -> String {
         format!("http://127.0.0.1:{}", self.port())
+    }
+
+    /// Дождаться, пока форвард начнёт принимать соединения.
+    ///
+    /// ssh открывает локальный порт только ПОСЛЕ аутентификации, поэтому
+    /// успешный connect — точный признак готовности, а не догадка о таймингах.
+    /// Блокирующая: вызывать из `spawn_blocking`.
+    pub fn wait_ready(&self, timeout: Duration) -> bool {
+        let port = self.port();
+        if port == 0 {
+            return false;
+        }
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if !self.is_up() {
+                return false; // ssh умер (не пустили, форвард запрещён) — ждать нечего
+            }
+            if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(120));
+        }
     }
 
     /// Жив ли процесс ssh (для бейджа и гейта запросов).
@@ -924,7 +952,22 @@ async fn poll_loop(node: Arc<Node>, sink: Sink) {
         // 2. Рукопожатие после свежего подъёма: форвард открывается не мгновенно,
         // да и версия узла в логе экономит час разбирательств при рассинхроне.
         if state == TunnelState::Spawned {
-            tokio::time::sleep(Duration::from_millis(TUNNEL_WARMUP_MS)).await;
+            let n = node.clone();
+            let ready = tokio::task::spawn_blocking(move || {
+                n.tunnel.wait_ready(Duration::from_secs(TUNNEL_READY_SECS))
+            })
+            .await
+            .unwrap_or(false);
+            if !ready {
+                // Форвард так и не открылся: ssh либо не пустили, либо форвард
+                // запрещён на той стороне. Причину, если ssh её назвал, уже
+                // держит туннель — она уедет в панель вместе с этой.
+                let pause = node.fail("ssh не открыл туннель за 15 секунд");
+                let n = node.clone();
+                let _ = tokio::task::spawn_blocking(move || n.tunnel.kick()).await;
+                tokio::time::sleep(pause).await;
+                continue;
+            }
             let hello = match node.client() {
                 Ok(c) => c.hello().await,
                 Err(e) => Err(e),

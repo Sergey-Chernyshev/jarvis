@@ -210,6 +210,19 @@ pub struct Session {
 }
 
 impl Session {
+    /// Идентификатор сессии в том виде, в котором её знает САМ агент.
+    ///
+    /// Ключ реестра у сессии с узла — `<узел>:<id>`: id с разных машин не
+    /// обязаны различаться. Но `claude --resume` на той машине про наш префикс
+    /// ничего не знает, и подсказка с ним отправляет человека выполнять
+    /// команду, которая заведомо не сработает.
+    pub fn agent_id(&self) -> &str {
+        match &self.remote {
+            Some(node) => self.id.strip_prefix(&format!("{node}:")).unwrap_or(&self.id),
+            None => &self.id,
+        }
+    }
+
     pub fn new(id: String, now: i64) -> Self {
         Session {
             id,
@@ -228,4 +241,25 @@ pub fn sort_snapshot(list: &mut [Session]) {
             .cmp(&b.status.order())
             .then(b.updated_at.cmp(&a.updated_at))
     });
+}
+
+#[cfg(test)]
+mod id_tests {
+    use super::*;
+
+    #[test]
+    fn agent_id_drops_the_node_prefix() {
+        let mut s = Session::new("vps:abc-123".into(), 0);
+        s.remote = Some("vps".into());
+        assert_eq!(s.agent_id(), "abc-123", "агенту его собственный id, без нашего ключа");
+
+        // локальная сессия префикса не имеет — трогать нечего
+        let l = Session::new("abc-123".into(), 0);
+        assert_eq!(l.agent_id(), "abc-123");
+
+        // двоеточие внутри самого id: снимаем ровно префикс узла, не больше
+        let mut odd = Session::new("vps:a:b".into(), 0);
+        odd.remote = Some("vps".into());
+        assert_eq!(odd.agent_id(), "a:b");
+    }
 }

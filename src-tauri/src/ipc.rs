@@ -26,9 +26,21 @@ fn err(msg: impl Into<String>) -> Value {
 /// Вне tmux мы не вставляем текст — сессией нельзя управлять, пока она не в
 /// tmux. Подсказываем команду resume по агенту: shim завернёт её в наш сервер
 /// (`claude --resume …` либо `codex resume …`).
-fn tmux_needed(agent: crate::backend::Agent, session_id: &str) -> Value {
-    let cmd = crate::backend::backend(agent).resume_cmd(session_id);
-    json!({ "ok": false, "needsTmux": true, "resumeCmd": cmd })
+/// «Сессия вне tmux» + команда, которой её можно поднять заново уже в tmux.
+///
+/// Команда собирается по `agent_id`, а не по ключу реестра: у сессии с узла
+/// ключ выглядит как `<узел>:<id>`, и `claude --resume` с ним на той машине не
+/// найдёт ничего. Для удалённой сессии добавляем, ГДЕ её выполнять — иначе
+/// человек честно выполнит её у себя и не поймёт, почему не помогло.
+fn tmux_needed(s: &crate::model::Session) -> Value {
+    let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
+    let cmd = crate::backend::backend(agent).resume_cmd(s.agent_id());
+    match &s.remote {
+        Some(node) => json!({
+            "ok": false, "needsTmux": true, "resumeCmd": cmd, "onNode": node,
+        }),
+        None => json!({ "ok": false, "needsTmux": true, "resumeCmd": cmd }),
+    }
 }
 
 /* ================= состояние и панель ================= */
@@ -1241,16 +1253,15 @@ pub(crate) async fn set_via_slash(
     let Some(s) = d.session(session_id) else {
         return err("Сессия не найдена");
     };
-    let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
     let target = match d.pane_target(&s) {
         Ok(t) => t,
         Err(e) => return err(e),
     };
-    let Some(pane) = s.tmux_pane else {
-        return tmux_needed(agent, session_id);
+    let Some(pane) = s.tmux_pane.clone() else {
+        return tmux_needed(&s);
     };
     if !target.pane_alive(&pane).await {
-        return tmux_needed(agent, session_id);
+        return tmux_needed(&s);
     }
     match target.paste_slash(&pane, &slash).await {
         Ok(()) => {
@@ -1764,11 +1775,10 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
         d.with_session(&session_id, |s| s.tmux_pane = None); // пана умерла
         d.push();
     }
-    let agent = d
-        .session(&session_id)
-        .map(|s| crate::backend::Agent::from_opt(s.agent.as_deref()))
-        .unwrap_or_default();
-    tmux_needed(agent, &session_id)
+    match d.session(&session_id) {
+        Some(s) => tmux_needed(&s),
+        None => err("Сессия не найдена"),
+    }
 }
 
 /// Лесенка «показать терминал»: tmux → вкладка по tty (Terminal/iTerm2) →
@@ -2944,7 +2954,10 @@ pub async fn remotes_test(app: AppHandle, name: String) -> Value {
     // Туннеля нет — поднимаем сами, а не отсылаем человека ждать поллер.
     // «Проверить» должно ОТВЕЧАТЬ, почему не работает, иначе кнопка бесполезна
     // ровно тогда, когда нужна.
-    if node.client().is_err() {
+    // Поднимаем и когда порта нет, и когда ssh умер, а порт от него остался:
+    // во втором случае в туннель просто некому отвечать, и «проверить» без
+    // переподъёма честно врало бы «узел недоступен».
+    if node.client().is_err() || !node.tunnel.is_up() {
         let n = node.clone();
         let state = tokio::task::spawn_blocking(move || n.tunnel.ensure_started())
             .await
@@ -2960,8 +2973,21 @@ pub async fn remotes_test(app: AppHandle, name: String) -> Value {
                 format!("туннель не поднялся: {why}\nПроверь руками: ssh {host} true")
             });
         }
-        // форвард открывается не мгновенно после старта ssh
-        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+        // ждём, пока форвард начнёт принимать, а не гадаем о таймингах
+        let n = node.clone();
+        let ready = tokio::task::spawn_blocking(move || {
+            n.tunnel.wait_ready(std::time::Duration::from_secs(15))
+        })
+        .await
+        .unwrap_or(false);
+        if !ready {
+            let why = node.why();
+            let host = &node.cfg.ssh_host;
+            return err(format!(
+                "ssh не открыл туннель за 15 секунд{}\nПроверь руками: ssh {host} true",
+                if why.is_empty() { String::new() } else { format!(": {why}") }
+            ));
+        }
     }
     let client = match node.client() {
         Ok(c) => c,

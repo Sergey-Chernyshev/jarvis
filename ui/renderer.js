@@ -937,12 +937,17 @@ function gateReply(s) {
   replyEl.placeholder = isTmux ? 'Ответить агенту…  ( / — команды )' : 'Сессия вне tmux';
   if (!s || isTmux) return;
   tmuxHintEl.textContent = '';
-  tmuxHintEl.appendChild(document.createTextNode('Сессия не в tmux — управлять из Jarvis нельзя. Запусти в терминале: '));
+  const where = s.remote ? `Сессия на узле «${s.remote}» не в tmux — управлять из Jarvis нельзя. Запусти ТАМ: `
+    : 'Сессия не в tmux — управлять из Jarvis нельзя. Запусти в терминале: ';
+  tmuxHintEl.appendChild(document.createTextNode(where));
   const code = document.createElement('code');
   code.className = 'tmuxcmd';
+  // id, под которым сессию знает САМ агент: у сессии с узла ключ реестра
+  // выглядит как «<узел>:<id>», и `--resume` с ним не найдёт ничего
+  const sid = s.remote && s.id.startsWith(s.remote + ':') ? s.id.slice(s.remote.length + 1) : s.id;
   // команда возобновления зависит от агента: codex resume <id> vs claude --resume <id>.
   // Раньше было захардкожено «claude --resume» — для codex-сессий это вело не туда.
-  const resumeCmd = s.agent === 'codex' ? `codex resume ${s.id}` : `claude --resume ${s.id}`;
+  const resumeCmd = s.agent === 'codex' ? `codex resume ${sid}` : `claude --resume ${sid}`;
   code.textContent = resumeCmd;
   code.title = 'Скопировать';
   code.addEventListener('click', () => {
@@ -950,7 +955,9 @@ function gateReply(s) {
     showToast('Скопировано');
   });
   tmuxHintEl.appendChild(code);
-  tmuxHintEl.appendChild(document.createTextNode(' — shim подхватит её в tmux.'));
+  tmuxHintEl.appendChild(document.createTextNode(s.remote
+    ? ' — под tmux -L jarvis, иначе Jarvis до неё не дотянется.'
+    : ' — shim подхватит её в tmux.'));
 }
 
 // индикатор: думает / выполняет тул / генерирует / ждёт

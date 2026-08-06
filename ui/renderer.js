@@ -5057,11 +5057,6 @@ function renderHistChats(g, q) {
     meta.textContent = vmState || histTime(chat.lastAt);
     row.appendChild(meta);
 
-    row.appendChild(Object.assign(document.createElement('span'), {
-      className: 'hcopy',
-      textContent: chat.kind === 'vm' ? 'открыть ↵' : 'запустить ↵',
-    }));
-
     row.addEventListener('mouseenter', () => { histSel = idx; paintHistSel(); });
     row.addEventListener('click', () => openHistChat(histRows[idx]));
     projectManagerContentEl.appendChild(row);

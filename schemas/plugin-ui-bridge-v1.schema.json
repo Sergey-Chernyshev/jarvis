@@ -13,19 +13,27 @@
               "type": "integer"
             },
             "type": {
-              "enum": ["hello"],
+              "enum": [
+                "hello"
+              ],
               "type": "string"
             },
             "v": {
               "description": "Must equal 1.",
-              "enum": [1],
+              "enum": [
+                1
+              ],
               "format": "uint32",
               "maximum": 1.0,
               "minimum": 1.0,
               "type": "integer"
             }
           },
-          "required": ["generation", "type", "v"],
+          "required": [
+            "generation",
+            "type",
+            "v"
+          ],
           "type": "object"
         },
         {
@@ -63,12 +71,16 @@
             },
             "params": true,
             "type": {
-              "enum": ["request"],
+              "enum": [
+                "request"
+              ],
               "type": "string"
             },
             "v": {
               "description": "Must equal 1.",
-              "enum": [1],
+              "enum": [
+                1
+              ],
               "format": "uint32",
               "maximum": 1.0,
               "minimum": 1.0,
@@ -101,19 +113,28 @@
               "type": "integer"
             },
             "type": {
-              "enum": ["poll"],
+              "enum": [
+                "poll"
+              ],
               "type": "string"
             },
             "v": {
               "description": "Must equal 1.",
-              "enum": [1],
+              "enum": [
+                1
+              ],
               "format": "uint32",
               "maximum": 1.0,
               "minimum": 1.0,
               "type": "integer"
             }
           },
-          "required": ["cursor", "generation", "type", "v"],
+          "required": [
+            "cursor",
+            "generation",
+            "type",
+            "v"
+          ],
           "type": "object"
         },
         {
@@ -131,19 +152,28 @@
               "type": "string"
             },
             "type": {
-              "enum": ["cancel"],
+              "enum": [
+                "cancel"
+              ],
               "type": "string"
             },
             "v": {
               "description": "Must equal 1.",
-              "enum": [1],
+              "enum": [
+                1
+              ],
               "format": "uint32",
               "maximum": 1.0,
               "minimum": 1.0,
               "type": "integer"
             }
           },
-          "required": ["generation", "id", "type", "v"],
+          "required": [
+            "generation",
+            "id",
+            "type",
+            "v"
+          ],
           "type": "object"
         },
         {
@@ -161,19 +191,28 @@
               "type": "string"
             },
             "type": {
-              "enum": ["unsubscribe"],
+              "enum": [
+                "unsubscribe"
+              ],
               "type": "string"
             },
             "v": {
               "description": "Must equal 1.",
-              "enum": [1],
+              "enum": [
+                1
+              ],
               "format": "uint32",
               "maximum": 1.0,
               "minimum": 1.0,
               "type": "integer"
             }
           },
-          "required": ["generation", "subscriptionId", "type", "v"],
+          "required": [
+            "generation",
+            "subscriptionId",
+            "type",
+            "v"
+          ],
           "type": "object"
         }
       ]
@@ -218,12 +257,16 @@
               "type": "string"
             },
             "type": {
-              "enum": ["welcome"],
+              "enum": [
+                "welcome"
+              ],
               "type": "string"
             },
             "v": {
               "description": "Must equal 1.",
-              "enum": [1],
+              "enum": [
+                1
+              ],
               "format": "uint32",
               "maximum": 1.0,
               "minimum": 1.0,
@@ -257,19 +300,29 @@
             },
             "result": true,
             "type": {
-              "enum": ["response"],
+              "enum": [
+                "response"
+              ],
               "type": "string"
             },
             "v": {
               "description": "Must equal 1.",
-              "enum": [1],
+              "enum": [
+                1
+              ],
               "format": "uint32",
               "maximum": 1.0,
               "minimum": 1.0,
               "type": "integer"
             }
           },
-          "required": ["generation", "id", "result", "type", "v"],
+          "required": [
+            "generation",
+            "id",
+            "result",
+            "type",
+            "v"
+          ],
           "type": "object"
         },
         {
@@ -298,12 +351,16 @@
               "type": "string"
             },
             "type": {
-              "enum": ["subscribeResult"],
+              "enum": [
+                "subscribeResult"
+              ],
               "type": "string"
             },
             "v": {
               "description": "Must equal 1.",
-              "enum": [1],
+              "enum": [
+                1
+              ],
               "format": "uint32",
               "maximum": 1.0,
               "minimum": 1.0,
@@ -341,12 +398,16 @@
               "type": "string"
             },
             "type": {
-              "enum": ["event"],
+              "enum": [
+                "event"
+              ],
               "type": "string"
             },
             "v": {
               "description": "Must equal 1.",
-              "enum": [1],
+              "enum": [
+                1
+              ],
               "format": "uint32",
               "maximum": 1.0,
               "minimum": 1.0,
@@ -393,12 +454,16 @@
               "type": "string"
             },
             "type": {
-              "enum": ["gap"],
+              "enum": [
+                "gap"
+              ],
               "type": "string"
             },
             "v": {
               "description": "Must equal 1.",
-              "enum": [1],
+              "enum": [
+                1
+              ],
               "format": "uint32",
               "maximum": 1.0,
               "minimum": 1.0,
@@ -428,19 +493,28 @@
               "type": "integer"
             },
             "type": {
-              "enum": ["close"],
+              "enum": [
+                "close"
+              ],
               "type": "string"
             },
             "v": {
               "description": "Must equal 1.",
-              "enum": [1],
+              "enum": [
+                1
+              ],
               "format": "uint32",
               "maximum": 1.0,
               "minimum": 1.0,
               "type": "integer"
             }
           },
-          "required": ["code", "generation", "type", "v"],
+          "required": [
+            "code",
+            "generation",
+            "type",
+            "v"
+          ],
           "type": "object"
         },
         {
@@ -454,7 +528,10 @@
               "maxLength": 128,
               "minLength": 1,
               "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "generation": {
               "format": "uint64",
@@ -466,22 +543,34 @@
               "maxLength": 128,
               "minLength": 1,
               "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "type": {
-              "enum": ["error"],
+              "enum": [
+                "error"
+              ],
               "type": "string"
             },
             "v": {
               "description": "Must equal 1.",
-              "enum": [1],
+              "enum": [
+                1
+              ],
               "format": "uint32",
               "maximum": 1.0,
               "minimum": 1.0,
               "type": "integer"
             }
           },
-          "required": ["code", "generation", "type", "v"],
+          "required": [
+            "code",
+            "generation",
+            "type",
+            "v"
+          ],
           "type": "object"
         }
       ]
@@ -523,7 +612,10 @@
       "$ref": "#/definitions/BridgeHostFrame"
     }
   },
-  "required": ["clientFrame", "hostFrame"],
+  "required": [
+    "clientFrame",
+    "hostFrame"
+  ],
   "title": "BridgeContractV1",
   "type": "object"
 }

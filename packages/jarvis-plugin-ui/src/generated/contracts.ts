@@ -231,8 +231,7 @@ export type ActionLocation =
 export type CommandPlacement = "globalPalette";
 export type HotkeyScope = "global";
 export type InstancePolicy = "singleton" | "per-project" | "per-session";
-export type PagePlacement =
-  "sidebar" | "commandPalette" | "deepLink" | "pluginSettings";
+export type PagePlacement = "sidebar" | "commandPalette" | "deepLink" | "pluginSettings";
 export type SettingRecord =
   | {
       key: string;

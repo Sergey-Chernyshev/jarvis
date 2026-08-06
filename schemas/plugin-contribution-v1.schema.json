@@ -11,7 +11,9 @@
       "type": "string"
     },
     "CommandPlacement": {
-      "enum": ["globalPalette"],
+      "enum": [
+        "globalPalette"
+      ],
       "type": "string"
     },
     "ContextReference": {
@@ -26,11 +28,16 @@
               "type": "string"
             },
             "type": {
-              "enum": ["project"],
+              "enum": [
+                "project"
+              ],
               "type": "string"
             }
           },
-          "required": ["id", "type"],
+          "required": [
+            "id",
+            "type"
+          ],
           "type": "object"
         },
         {
@@ -43,11 +50,16 @@
               "type": "string"
             },
             "type": {
-              "enum": ["chat"],
+              "enum": [
+                "chat"
+              ],
               "type": "string"
             }
           },
-          "required": ["id", "type"],
+          "required": [
+            "id",
+            "type"
+          ],
           "type": "object"
         },
         {
@@ -60,11 +72,16 @@
               "type": "string"
             },
             "type": {
-              "enum": ["runtime"],
+              "enum": [
+                "runtime"
+              ],
               "type": "string"
             }
           },
-          "required": ["id", "type"],
+          "required": [
+            "id",
+            "type"
+          ],
           "type": "object"
         },
         {
@@ -77,25 +94,41 @@
               "type": "string"
             },
             "type": {
-              "enum": ["session"],
+              "enum": [
+                "session"
+              ],
               "type": "string"
             }
           },
-          "required": ["id", "type"],
+          "required": [
+            "id",
+            "type"
+          ],
           "type": "object"
         }
       ]
     },
     "HotkeyScope": {
-      "enum": ["global"],
+      "enum": [
+        "global"
+      ],
       "type": "string"
     },
     "InstancePolicy": {
-      "enum": ["singleton", "per-project", "per-session"],
+      "enum": [
+        "singleton",
+        "per-project",
+        "per-session"
+      ],
       "type": "string"
     },
     "PagePlacement": {
-      "enum": ["sidebar", "commandPalette", "deepLink", "pluginSettings"],
+      "enum": [
+        "sidebar",
+        "commandPalette",
+        "deepLink",
+        "pluginSettings"
+      ],
       "type": "string"
     },
     "ResolvedActionContribution": {
@@ -141,7 +174,13 @@
           "x-maxUtf8Bytes": 256
         }
       },
-      "required": ["command", "id", "locations", "riskFloor", "title"],
+      "required": [
+        "command",
+        "id",
+        "locations",
+        "riskFloor",
+        "title"
+      ],
       "type": "object"
     },
     "ResolvedCommandContribution": {
@@ -181,7 +220,12 @@
           "x-maxUtf8Bytes": 256
         }
       },
-      "required": ["id", "placements", "riskFloor", "title"],
+      "required": [
+        "id",
+        "placements",
+        "riskFloor",
+        "title"
+      ],
       "type": "object"
     },
     "ResolvedHotkeyContribution": {
@@ -205,7 +249,11 @@
           "x-maxUtf8Bytes": 128
         }
       },
-      "required": ["command", "scope", "shortcut"],
+      "required": [
+        "command",
+        "scope",
+        "shortcut"
+      ],
       "type": "object"
     },
     "ResolvedPageContribution": {
@@ -237,11 +285,20 @@
           "x-maxUtf8Bytes": 256
         }
       },
-      "required": ["id", "instancePolicy", "placements", "title"],
+      "required": [
+        "id",
+        "instancePolicy",
+        "placements",
+        "title"
+      ],
       "type": "object"
     },
     "Risk": {
-      "enum": ["read", "control", "destructive"],
+      "enum": [
+        "read",
+        "control",
+        "destructive"
+      ],
       "type": "string"
     }
   },

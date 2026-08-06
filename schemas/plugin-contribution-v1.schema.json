@@ -1,0 +1,341 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "ActionLocation": {
+      "enum": [
+        "chat.composer.actions",
+        "project.actions",
+        "project.session.context"
+      ],
+      "type": "string"
+    },
+    "CommandPlacement": {
+      "enum": [
+        "globalPalette"
+      ],
+      "type": "string"
+    },
+    "ContextReference": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/-]+$",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "project"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/-]+$",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "chat"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/-]+$",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "runtime"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/-]+$",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "session"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HotkeyScope": {
+      "enum": [
+        "global"
+      ],
+      "type": "string"
+    },
+    "InstancePolicy": {
+      "enum": [
+        "singleton",
+        "per-project",
+        "per-session"
+      ],
+      "type": "string"
+    },
+    "PagePlacement": {
+      "enum": [
+        "sidebar",
+        "commandPalette",
+        "deepLink",
+        "pluginSettings"
+      ],
+      "type": "string"
+    },
+    "ResolvedActionContribution": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
+          "type": "string"
+        },
+        "context": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ContextReference"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
+          "type": "string"
+        },
+        "locations": {
+          "items": {
+            "$ref": "#/definitions/ActionLocation"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "type": "array"
+        },
+        "riskFloor": {
+          "$ref": "#/definitions/Risk"
+        },
+        "title": {
+          "description": "UTF-8 byte length: 1..=256. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.",
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+          "type": "string",
+          "x-maxUtf8Bytes": 256
+        }
+      },
+      "required": [
+        "command",
+        "id",
+        "locations",
+        "riskFloor",
+        "title"
+      ],
+      "type": "object"
+    },
+    "ResolvedCommandContribution": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ContextReference"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
+          "type": "string"
+        },
+        "placements": {
+          "items": {
+            "$ref": "#/definitions/CommandPlacement"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "type": "array"
+        },
+        "riskFloor": {
+          "$ref": "#/definitions/Risk"
+        },
+        "title": {
+          "description": "UTF-8 byte length: 1..=256. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.",
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+          "type": "string",
+          "x-maxUtf8Bytes": 256
+        }
+      },
+      "required": [
+        "id",
+        "placements",
+        "riskFloor",
+        "title"
+      ],
+      "type": "object"
+    },
+    "ResolvedHotkeyContribution": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/definitions/HotkeyScope"
+        },
+        "shortcut": {
+          "description": "UTF-8 byte length: 1..=128. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+          "type": "string",
+          "x-maxUtf8Bytes": 128
+        }
+      },
+      "required": [
+        "command",
+        "scope",
+        "shortcut"
+      ],
+      "type": "object"
+    },
+    "ResolvedPageContribution": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
+          "type": "string"
+        },
+        "instancePolicy": {
+          "$ref": "#/definitions/InstancePolicy"
+        },
+        "placements": {
+          "items": {
+            "$ref": "#/definitions/PagePlacement"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "type": "array"
+        },
+        "title": {
+          "description": "UTF-8 byte length: 1..=256. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.",
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+          "type": "string",
+          "x-maxUtf8Bytes": 256
+        }
+      },
+      "required": [
+        "id",
+        "instancePolicy",
+        "placements",
+        "title"
+      ],
+      "type": "object"
+    },
+    "Risk": {
+      "enum": [
+        "read",
+        "control",
+        "destructive"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "actions": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/ResolvedActionContribution"
+      },
+      "maxItems": 512,
+      "type": "array"
+    },
+    "commands": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/ResolvedCommandContribution"
+      },
+      "maxItems": 512,
+      "type": "array"
+    },
+    "hotkeys": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/ResolvedHotkeyContribution"
+      },
+      "maxItems": 512,
+      "type": "array"
+    },
+    "pages": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/ResolvedPageContribution"
+      },
+      "maxItems": 512,
+      "type": "array"
+    }
+  },
+  "title": "ResolvedContributions",
+  "type": "object"
+}

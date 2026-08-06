@@ -6,13 +6,14 @@
 //! `SCHEMA_VERSION`, добавь шаг в `run_migrations`, вызови `migrate_on_startup`.
 //! Политика целиком — docs/release/versioning-and-migration.md.
 
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::util::jarvis_dir;
 
@@ -20,12 +21,17 @@ use crate::util::jarvis_dir;
 /// (не при простом добавлении полей), добавляя шаг в `run_migrations`.
 pub const SCHEMA_VERSION: u64 = 1;
 
+#[derive(Clone)]
 pub struct Store {
+    inner: Arc<StoreInner>,
+}
+
+struct StoreInner {
     cache: Mutex<Option<Value>>,
     path: PathBuf,
 }
 
-fn defaults() -> Value {
+pub(crate) fn defaults() -> Value {
     json!({
         "hotkey": "Command+J",
         "quietHotkey": "Command+Alt+J",
@@ -45,8 +51,9 @@ fn defaults() -> Value {
         "launchCustomCmd": "",            // шаблон для 'custom', плейсхолдер {cmd}
         "launchProxyCmd": "",             // команда, выполняемая в терминале ПЕРЕД запуском агента (опц.)
         "launchDangerous": false,         // глобальный «опасный режим»: claude --dangerously-skip-permissions / codex YOLO
+        "pluginDeveloperMode": false,     // immutable локальные snapshots только после явного включения
         // внешность (дизайн «Клевер», экран 14f «вид»)
-        "theme": "light",   // 'light' | 'dark' | 'auto' (системная)
+        "theme": "light",   // 'light' | 'dark' | 'midnight' | 'auto' (системная)
         "paint": "clover",  // 'clover' | 'coal' | 'raspberry' | 'custom'
         "accent": "#0B6B44", // тон своей краски: остальное выводится из него
         "density": "normal", // 'compact' | 'normal' | 'roomy' — высота строк
@@ -60,7 +67,9 @@ fn defaults() -> Value {
         "windowH": 640,
         "schemaVersion": SCHEMA_VERSION,
         "notify": {
-            "content": { "branch": true, "model": false, "effort": false, "tokens": false, "time": false },
+            // thread по умолчанию включён: в проекте с несколькими тредами без
+            // него непонятно, к какому чату относится уведомление
+            "content": { "branch": true, "thread": true, "model": false, "effort": false, "tokens": false, "time": false },
             "events":  { "done": true, "waiting": true, "limit": true },
             "ttlSec": 8
         },
@@ -127,6 +136,36 @@ fn atomic_write(path: &Path, value: &Value) -> io::Result<()> {
     result
 }
 
+fn write_private_backup(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    static NEXT_BACKUP: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("settings");
+    let stamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S-%3fZ");
+    let backup = parent.join(format!(
+        "{stem}.invalid-{stamp}-{}.json",
+        NEXT_BACKUP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&backup)?;
+    output.write_all(bytes)?;
+    output.sync_all()?;
+    Ok(backup)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairOutcome {
+    pub backup_path: PathBuf,
+    pub health: crate::config_health::ConfigHealth,
+}
+
 /// Чистая миграция настроек: применяет шаги от версии `from` до SCHEMA_VERSION.
 /// Идемпотентна и ТОЛЬКО ВПЕРЁД; пользовательские поля сохраняются. Каждый новый
 /// ломающий формат = новый блок `if v < N { …; v = N; }` с тестом.
@@ -146,16 +185,20 @@ fn run_migrations(mut obj: Map<String, Value>, from: u64) -> Map<String, Value> 
 impl Store {
     pub fn new() -> Self {
         Self {
-            cache: Mutex::new(None),
-            path: file(),
+            inner: Arc::new(StoreInner {
+                cache: Mutex::new(None),
+                path: file(),
+            }),
         }
     }
 
     #[cfg(test)]
-    fn with_path(path: PathBuf) -> Self {
+    pub(crate) fn with_path(path: PathBuf) -> Self {
         Self {
-            cache: Mutex::new(None),
-            path,
+            inner: Arc::new(StoreInner {
+                cache: Mutex::new(None),
+                path,
+            }),
         }
     }
 
@@ -163,7 +206,7 @@ impl Store {
         if let Some(value) = cache.as_ref() {
             return value.clone();
         }
-        let value = read_merged(&self.path);
+        let value = read_merged(&self.inner.path);
         *cache = Some(value.clone());
         value
     }
@@ -171,12 +214,12 @@ impl Store {
     /// Execute one read-modify-write transaction while holding the cache
     /// mutex. Cache advances only after the atomic rename has succeeded.
     fn update(&self, mutate: impl FnOnce(&mut Map<String, Value>)) -> Value {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.inner.cache.lock().unwrap();
         let current = self.current_locked(&mut cache);
         let mut next = current.clone();
         mutate(next.as_object_mut().unwrap());
 
-        match atomic_write(&self.path, &next) {
+        match atomic_write(&self.inner.path, &next) {
             Ok(()) => {
                 *cache = Some(next.clone());
                 next
@@ -192,11 +235,18 @@ impl Store {
     /// бэкап + прогон миграций + перезапись. Актуальный/отсутствующий/битый файл
     /// не трогаем. Вызывать ОДИН раз при инициализации, до чтения настроек.
     pub fn migrate_on_startup(&self) {
-        let mut cache = self.cache.lock().unwrap();
-        let path = &self.path;
-        let Ok(raw) = fs::read_to_string(path) else { return }; // нет файла → дефолты
-        let Ok(Value::Object(disk)) = serde_json::from_str::<Value>(&raw) else { return }; // битый → не трогаем
-        let from = disk.get("schemaVersion").and_then(Value::as_u64).unwrap_or(0);
+        let mut cache = self.inner.cache.lock().unwrap();
+        let path = &self.inner.path;
+        let Ok(raw) = fs::read_to_string(path) else {
+            return;
+        }; // нет файла → дефолты
+        let Ok(Value::Object(disk)) = serde_json::from_str::<Value>(&raw) else {
+            return;
+        }; // битый → не трогаем
+        let from = disk
+            .get("schemaVersion")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         if from >= SCHEMA_VERSION {
             return; // уже актуально
         }
@@ -207,14 +257,78 @@ impl Store {
         let migrated = Value::Object(run_migrations(disk, from));
         if atomic_write(path, &migrated).is_ok() {
             *cache = None; // сбросить кэш — перечитается мигрированным
-            crate::log::line(&format!("[settings] миграция схемы {from} → {SCHEMA_VERSION}"));
+            crate::log::line(&format!(
+                "[settings] миграция схемы {from} → {SCHEMA_VERSION}"
+            ));
         }
+    }
+
+    /// Проверяет именно байты на диске. `load()` намеренно остаётся fail-safe,
+    /// поэтому его merged-кэш для диагностики использовать нельзя.
+    pub fn health(&self) -> crate::config_health::ConfigHealth {
+        let path = self.inner.path.to_string_lossy().into_owned();
+        match fs::read_to_string(&self.inner.path) {
+            Ok(raw) => {
+                crate::config_health::validate_raw(Some(&raw), &defaults(), SCHEMA_VERSION, path)
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                crate::config_health::validate_raw(None, &defaults(), SCHEMA_VERSION, path)
+            }
+            Err(_) => crate::config_health::ConfigHealth {
+                status: crate::config_health::HealthStatus::Error,
+                path,
+                issues: vec![crate::config_health::ConfigIssue {
+                    path: "$".into(),
+                    code: "read_error".into(),
+                    severity: crate::config_health::IssueSeverity::Error,
+                    message: "Jarvis не может прочитать файл конфигурации.".into(),
+                    repair: crate::config_health::RepairMode::Preserve,
+                }],
+                repairable: false,
+                restart_required: false,
+            },
+        }
+    }
+
+    /// Явное безопасное исправление: точный backup → нормализация известных
+    /// полей → атомарная запись → повторная проверка. Весь цикл сериализован тем
+    /// же mutex, что и обычные настройки.
+    pub fn repair(&self) -> Result<RepairOutcome, String> {
+        let mut cache = self
+            .inner
+            .cache
+            .lock()
+            .map_err(|_| "Хранилище настроек временно недоступно".to_string())?;
+        let original = fs::read(&self.inner.path)
+            .map_err(|err| format!("Не удалось прочитать settings.json: {err}"))?;
+        let raw = std::str::from_utf8(&original).unwrap_or_default();
+        let repaired = if raw.is_empty() && !original.is_empty() {
+            defaults()
+        } else {
+            crate::config_health::repair_raw(raw, &defaults(), SCHEMA_VERSION)?
+        };
+
+        let backup_path = write_private_backup(&self.inner.path, &original)
+            .map_err(|err| format!("Не удалось создать резервную копию: {err}"))?;
+        atomic_write(&self.inner.path, &repaired)
+            .map_err(|err| format!("Не удалось записать исправленный конфиг: {err}"))?;
+        *cache = None;
+        drop(cache);
+
+        let health = self.health();
+        if health.has_errors() {
+            return Err("Исправленный конфиг не прошёл повторную проверку".into());
+        }
+        Ok(RepairOutcome {
+            backup_path,
+            health,
+        })
     }
 
     /// Настройки целиком (дефолты ⊕ диск). Значения — динамический JSON:
     /// схема расширяется плагинами, жёсткая структура тут только мешала бы.
     pub fn load(&self) -> Value {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.inner.cache.lock().unwrap();
         self.current_locked(&mut cache)
     }
 
@@ -229,7 +343,10 @@ impl Store {
     /* -------- типизированные шорткаты для частых полей -------- */
 
     pub fn bool(&self, key: &str) -> bool {
-        self.load().get(key).and_then(Value::as_bool).unwrap_or(false)
+        self.load()
+            .get(key)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     }
 
     pub fn string(&self, key: &str) -> String {
@@ -278,6 +395,18 @@ impl Store {
         });
     }
 
+    /// Save the canonical service proxy and remove the legacy top-level value
+    /// in the same atomic update, so clearing cannot reactivate the fallback.
+    pub fn set_service_proxy(&self, proxy: &str) {
+        self.update(|root| {
+            let service = root.entry("service").or_insert_with(|| json!({}));
+            if let Some(service) = service.as_object_mut() {
+                service.insert("proxy".into(), Value::String(proxy.to_string()));
+            }
+            root.remove("proxy");
+        });
+    }
+
     /// Установить верхнеуровневый ключ (merge поверх остального).
     pub fn set_top(&self, key: &str, value: Value) {
         let mut root = Map::new();
@@ -289,7 +418,9 @@ impl Store {
     pub fn set_voice(&self, patch: Map<String, Value>) {
         self.update(|root| {
             let voice = root.entry("voice").or_insert_with(|| json!({}));
-            let Some(obj) = voice.as_object_mut() else { return };
+            let Some(obj) = voice.as_object_mut() else {
+                return;
+            };
             for (k, v) in patch {
                 obj.insert(k, v);
             }
@@ -300,7 +431,9 @@ impl Store {
     pub fn set_stt(&self, patch: Map<String, Value>) {
         self.update(|root| {
             let stt = root.entry("stt").or_insert_with(|| json!({}));
-            let Some(obj) = stt.as_object_mut() else { return };
+            let Some(obj) = stt.as_object_mut() else {
+                return;
+            };
             for (k, v) in patch {
                 obj.insert(k, v);
             }
@@ -312,9 +445,35 @@ impl Store {
     pub fn set_block(&self, block: &str, patch: Map<String, Value>) {
         self.update(|root| {
             let block = root.entry(block).or_insert_with(|| json!({}));
-            let Some(obj) = block.as_object_mut() else { return };
+            let Some(obj) = block.as_object_mut() else {
+                return;
+            };
             for (k, v) in patch {
                 obj.insert(k, v);
+            }
+        });
+    }
+
+    /// Deep-set полей и одновременное удаление legacy-ключей в одном atomic
+    /// settings transaction. Используется при переносе credential в Keychain:
+    /// на диске никогда не появляется новая версия с обновлённым mode, но старым
+    /// plaintext secret.
+    pub fn set_block_with_removals(
+        &self,
+        block: &str,
+        patch: Map<String, Value>,
+        removals: &[&str],
+    ) {
+        self.update(|root| {
+            let block = root.entry(block).or_insert_with(|| json!({}));
+            let Some(obj) = block.as_object_mut() else {
+                return;
+            };
+            for (key, value) in patch {
+                obj.insert(key, value);
+            }
+            for key in removals {
+                obj.remove(*key);
             }
         });
     }
@@ -322,9 +481,13 @@ impl Store {
     pub fn set_plugin(&self, id: &str, patch: Map<String, Value>) {
         self.update(|root| {
             let plugins = root.entry("plugins").or_insert_with(|| json!({}));
-            let Some(plugins) = plugins.as_object_mut() else { return };
+            let Some(plugins) = plugins.as_object_mut() else {
+                return;
+            };
             let plugin = plugins.entry(id.to_string()).or_insert_with(|| json!({}));
-            let Some(obj) = plugin.as_object_mut() else { return };
+            let Some(obj) = plugin.as_object_mut() else {
+                return;
+            };
             for (k, v) in patch {
                 obj.insert(k, v);
             }
@@ -344,7 +507,10 @@ mod migration_tests {
         m.insert("voice".into(), json!({ "tts": "silero" }));
         let out = run_migrations(m, 0);
         // версия проставлена
-        assert_eq!(out.get("schemaVersion").and_then(Value::as_u64), Some(SCHEMA_VERSION));
+        assert_eq!(
+            out.get("schemaVersion").and_then(Value::as_u64),
+            Some(SCHEMA_VERSION)
+        );
         // пользовательские поля целы (настройки не теряются)
         assert_eq!(out.get("hotkey").and_then(Value::as_str), Some("Command+K"));
         assert_eq!(out.get("notifyDone").and_then(Value::as_bool), Some(false));
@@ -357,7 +523,10 @@ mod migration_tests {
         m.insert("schemaVersion".into(), Value::from(SCHEMA_VERSION));
         m.insert("stt".into(), json!({ "model": "qwen3-0.6b" }));
         let out = run_migrations(m.clone(), SCHEMA_VERSION);
-        assert_eq!(out.get("schemaVersion").and_then(Value::as_u64), Some(SCHEMA_VERSION));
+        assert_eq!(
+            out.get("schemaVersion").and_then(Value::as_u64),
+            Some(SCHEMA_VERSION)
+        );
         assert_eq!(out.get("stt"), m.get("stt"));
     }
 }
@@ -369,7 +538,7 @@ mod proxy_tests {
     // load() отдаёт кэш, если он есть, минуя файл — подменяем его напрямую.
     fn store_with(v: Value) -> Store {
         let s = Store::new();
-        *s.cache.lock().unwrap() = Some(v);
+        *s.inner.cache.lock().unwrap() = Some(v);
         s
     }
 
@@ -399,8 +568,14 @@ mod proxy_tests {
     #[test]
     fn empty_or_missing_is_none() {
         assert_eq!(store_with(json!({})).proxy(), None);
-        assert_eq!(store_with(json!({ "service": { "proxy": "" } })).proxy(), None);
-        assert_eq!(store_with(json!({ "service": { "proxy": "   " } })).proxy(), None);
+        assert_eq!(
+            store_with(json!({ "service": { "proxy": "" } })).proxy(),
+            None
+        );
+        assert_eq!(
+            store_with(json!({ "service": { "proxy": "   " } })).proxy(),
+            None
+        );
     }
 }
 
@@ -415,10 +590,8 @@ mod persistence_tests {
     fn temp_dir(tag: &str) -> PathBuf {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "jarvis-settings-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("jarvis-settings-{tag}-{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -482,6 +655,29 @@ mod persistence_tests {
     }
 
     #[test]
+    fn set_service_proxy_replaces_and_clears_legacy_proxy_atomically() {
+        let dir = temp_dir("service-proxy");
+        let store = store_at(&dir);
+        store.set_top("proxy", Value::from("http://legacy:8080"));
+
+        store.set_service_proxy("http://current:9090");
+        assert_eq!(store.proxy().as_deref(), Some("http://current:9090"));
+        assert!(store.load().get("proxy").is_none());
+
+        store.set_service_proxy("");
+        assert_eq!(store.proxy(), None);
+        assert!(store.load().get("proxy").is_none());
+        assert_eq!(
+            store
+                .load()
+                .pointer("/service/proxy")
+                .and_then(Value::as_str),
+            Some("")
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn persisted_file_is_valid_json_and_owner_only() {
         let dir = temp_dir("atomic");
         let store = store_at(&dir);
@@ -490,8 +686,14 @@ mod persistence_tests {
         let path = dir.join("settings.json");
         let raw = fs::read_to_string(&path).unwrap();
         let parsed: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(parsed.get("hotkey").and_then(Value::as_str), Some("Command+K"));
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            parsed.get("hotkey").and_then(Value::as_str),
+            Some("Command+K")
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert_eq!(
             fs::read_dir(&dir)
                 .unwrap()
@@ -531,6 +733,79 @@ mod persistence_tests {
                 .count(),
             0
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn health_reads_raw_file_instead_of_default_merged_cache() {
+        let dir = temp_dir("health-raw");
+        let path = dir.join("settings.json");
+        fs::write(&path, "{ broken").unwrap();
+        let store = store_at(&dir);
+
+        // load() остаётся fail-safe, но health() обязан увидеть исходную ошибку.
+        assert_eq!(
+            store.load().get("hotkey").and_then(Value::as_str),
+            defaults().get("hotkey").and_then(Value::as_str)
+        );
+        let health = store.health();
+        assert!(health.has_errors());
+        assert_eq!(health.issues[0].code, "invalid_json");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repair_backs_up_exact_bytes_and_preserves_unknown_fields() {
+        let dir = temp_dir("repair-preserve");
+        let path = dir.join("settings.json");
+        let raw = concat!(
+            "{\n",
+            "  \"schemaVersion\": 1,\n",
+            "  \"notifyDone\": \"yes\",\n",
+            "  \"hotkey\": \"Command+K\",\n",
+            "  \"pluginSecret\": { \"token\": \"keep-me\" }\n",
+            "}\n"
+        );
+        fs::write(&path, raw).unwrap();
+        let store = store_at(&dir);
+
+        let outcome = store.repair().unwrap();
+        assert_eq!(fs::read_to_string(&outcome.backup_path).unwrap(), raw);
+        assert_eq!(
+            fs::metadata(&outcome.backup_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let repaired: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(repaired["notifyDone"], true);
+        assert_eq!(repaired["hotkey"], "Command+K");
+        assert_eq!(repaired["pluginSecret"]["token"], "keep-me");
+        assert!(!outcome.health.has_errors());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repair_recreates_malformed_file_after_backup() {
+        let dir = temp_dir("repair-malformed");
+        let path = dir.join("settings.json");
+        let raw = "{ definitely broken";
+        fs::write(&path, raw).unwrap();
+        let store = store_at(&dir);
+
+        let outcome = store.repair().unwrap();
+        assert_eq!(fs::read_to_string(outcome.backup_path).unwrap(), raw);
+        assert_eq!(
+            serde_json::from_str::<Value>(&fs::read_to_string(path).unwrap()).unwrap(),
+            defaults()
+        );
+        assert!(!outcome.health.has_errors());
         let _ = fs::remove_dir_all(dir);
     }
 }

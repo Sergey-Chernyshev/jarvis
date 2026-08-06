@@ -17,14 +17,14 @@
 
 ## Модели в обороте
 
-| Ключ | Вид | Источник | Где на диске | Размер |
-|---|---|---|---|---|
-| `whisper-turbo` | STT | `ggerganov/whisper.cpp` (HF, 1 файл) | `~/.jarvis/stt/ggml-large-v3-turbo-q5_0.bin` | ~574 МБ |
-| `qwen3-0.6b` | STT | `mlx-community/Qwen3-ASR-0.6B-8bit` (HF repo) | `~/.jarvis/stt-mlx/models/qwen3-0.6b/` | ~1 ГБ |
-| `qwen3-1.7b` | STT | `mlx-community/Qwen3-ASR-1.7B-4bit` (HF repo) | `~/.jarvis/stt-mlx/models/qwen3-1.7b/` | ~1 ГБ |
-| qwen venv | STT runtime | PyPI | `~/.jarvis/stt-mlx/venv` | ~2.6 ГБ |
-| `silero` | Голос | torch.hub | `~/.jarvis/silero` + `~/.cache/torch/hub` | сотни МБ |
-| `hey_jarvis` | Wake | `dscripka/openWakeWord` (GitHub releases) | `~/.jarvis/wakeword/*.onnx` | ~3.5 МБ |
+| Ключ            | Вид         | Источник                                      | Где на диске                                 | Размер   |
+| --------------- | ----------- | --------------------------------------------- | -------------------------------------------- | -------- |
+| `whisper-turbo` | STT         | `ggerganov/whisper.cpp` (HF, 1 файл)          | `~/.jarvis/stt/ggml-large-v3-turbo-q5_0.bin` | ~574 МБ  |
+| `qwen3-0.6b`    | STT         | `mlx-community/Qwen3-ASR-0.6B-8bit` (HF repo) | `~/.jarvis/stt-mlx/models/qwen3-0.6b/`       | ~1 ГБ    |
+| `qwen3-1.7b`    | STT         | `mlx-community/Qwen3-ASR-1.7B-4bit` (HF repo) | `~/.jarvis/stt-mlx/models/qwen3-1.7b/`       | ~1 ГБ    |
+| qwen venv       | STT runtime | PyPI                                          | `~/.jarvis/stt-mlx/venv`                     | ~2.6 ГБ  |
+| `silero`        | Голос       | torch.hub                                     | `~/.jarvis/silero` + `~/.cache/torch/hub`    | сотни МБ |
+| `hey_jarvis`    | Wake        | `dscripka/openWakeWord` (GitHub releases)     | `~/.jarvis/wakeword/*.onnx`                  | ~3.5 МБ  |
 
 ## Scope
 
@@ -37,6 +37,7 @@
 ### A. Гибридная загрузка (на `reqwest`, не curl)
 
 Низкий уровень `fetch_to_file(url, dst, proxy, progress, expected_size)` в `install/mod.rs`:
+
 - Два клиента: `Client::builder().proxy(Proxy::all(p))` и `…​.no_proxy()` (образец — `voice/engine.rs:42`).
 - `redirect(Policy::none())`, ручная проходка хопов. Выбор канала **по хосту**: пока хост ∈ {`huggingface.co`} → прокси-клиент; как только Location ведёт на CDN-хост из allowlist (`*.cdn.hf.co`, `cdn-lfs*.huggingface.co`, `*.xethub.hf.co`, `objects.githubusercontent.com`) → прямой клиент без прокси.
 - Резюм: при наличии `.tmp` слать `Range: bytes=<n>-`, принимать только `206`. На `403`/истёкшей подписи — **пере-резолв** свежего Location и продолжить с `Range`. Целостность — по `expected_size` (из HF tree API) до `rename`.
@@ -73,12 +74,12 @@
 
 ## Инкременты (порядок реализации, каждый проверяем)
 
-1. **Единый статус (read-only).** `install::status()`+`models_get`+карточка «Модели». Аддитивно. *Тест:* сериализация статуса/артефактов, детект активного движка; ручная проверка раздела.
-2. **Гибридный загрузчик (reqwest).** `fetch_to_file`+`hf_tree`+`hf_download_repo`; переключить whisper/wakeword/preload_qwen. *Тест:* парсинг Location→хост, выбор канала, маппинг ключ→путь, skip-if-config; ручной смоук на сети пользователя.
-3. **Удаление + место.** Расширить `delete_model` (whisper, qwen веса/venv, wake); запрет удаления активного. *Тест:* id→path, неизвестный id→Err, guard активного.
-4. **Смена движка с рестартом + гейт.** UI-действие; запрет Qwen без весов. *Тест:* валидация allow-list + предикат «веса есть».
-5. **Безопасность прокси.** chmod 0600 + маскирование. *Тест:* маскирование строки.
-6. **Горячая смена STT (без рестарта).** Рефактор `SttService` под локи + `transition`; `set_engine`; `transcribe` clone-out; `tick` под `transition`; `stt_set_engine`→`restart:false`. *Тест:* `MockEngine` — reconfigure меняет `engine_name`, transcribe после смены работает, `in_use` не разъезжается, `sidecar=None`→no-op. Чинить юнит-тесты, строящие `SttService` литералом (`stt/mod.rs:188`), в том же коммите.
+1. **Единый статус (read-only).** `install::status()`+`models_get`+карточка «Модели». Аддитивно. _Тест:_ сериализация статуса/артефактов, детект активного движка; ручная проверка раздела.
+2. **Гибридный загрузчик (reqwest).** `fetch_to_file`+`hf_tree`+`hf_download_repo`; переключить whisper/wakeword/preload_qwen. _Тест:_ парсинг Location→хост, выбор канала, маппинг ключ→путь, skip-if-config; ручной смоук на сети пользователя.
+3. **Удаление + место.** Расширить `delete_model` (whisper, qwen веса/venv, wake); запрет удаления активного. _Тест:_ id→path, неизвестный id→Err, guard активного.
+4. **Смена движка с рестартом + гейт.** UI-действие; запрет Qwen без весов. _Тест:_ валидация allow-list + предикат «веса есть».
+5. **Безопасность прокси.** chmod 0600 + маскирование. _Тест:_ маскирование строки.
+6. **Горячая смена STT (без рестарта).** Рефактор `SttService` под локи + `transition`; `set_engine`; `transcribe` clone-out; `tick` под `transition`; `stt_set_engine`→`restart:false`. _Тест:_ `MockEngine` — reconfigure меняет `engine_name`, transcribe после смены работает, `in_use` не разъезжается, `sidecar=None`→no-op. Чинить юнит-тесты, строящие `SttService` литералом (`stt/mod.rs:188`), в том же коммите.
 
 Поставка ценности — после 1–4. 5 сквозной. 6 — отдельной итерацией (самый регрессоопасный).
 

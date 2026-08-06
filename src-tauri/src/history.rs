@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use crate::util::*;
 
 /// Первый промпт начинается с этого → наш служебный вызов, в историю не берём.
-const SERVICE_PREFIXES: [&str; 7] = [
+const SERVICE_PREFIXES: [&str; 9] = [
     "Ответ агента:",
     "Хвост диалога",
     "Диалог рабочей сессии:",
@@ -26,6 +26,9 @@ const SERVICE_PREFIXES: [&str; 7] = [
     "Суммаризируй",
     "сожми этот ответ",
     "Задача: выдай",
+    // промпты ревью-агента Codex: у владельца забили список чатов проекта
+    "The following is the Codex agent history",
+    "Ты пишешь разбор результатов",
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -75,8 +78,14 @@ fn parse_codex_meta(file: &Path, mtime: i64) -> Option<Meta> {
     let mut first_at = 0i64;
     let mut last_at = 0i64;
     for line in raw.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        if let Some(t) = v.get("timestamp").and_then(Value::as_str).and_then(crate::transcript::parse_ts) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(t) = v
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(crate::transcript::parse_ts)
+        {
             if first_at == 0 {
                 first_at = t;
             }
@@ -85,12 +94,20 @@ fn parse_codex_meta(file: &Path, mtime: i64) -> Option<Meta> {
         match v.get("type").and_then(Value::as_str) {
             Some("session_meta") => {
                 if let Some(p) = v.get("payload") {
-                    session_id = p.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                    session_id = p
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
                     cwd = p.get("cwd").and_then(Value::as_str).map(String::from);
                 }
             }
             Some("turn_context") => {
-                if let Some(m) = v.get("payload").and_then(|p| p.get("model")).and_then(Value::as_str) {
+                if let Some(m) = v
+                    .get("payload")
+                    .and_then(|p| p.get("model"))
+                    .and_then(Value::as_str)
+                {
                     model = m.to_string();
                 }
             }
@@ -108,18 +125,36 @@ fn parse_codex_meta(file: &Path, mtime: i64) -> Option<Meta> {
     if session_id.is_empty() {
         return None;
     }
+    // Прежнее допущение «служебные codex exec идут с --ephemeral и rollout
+    // не пишут» неверно: 60 rollout'ов со служебными промптами засоряли список
+    // чатов проекта. Проверяем те же префиксы, что и у Claude, — по первой
+    // реплике, до подстановки заглушки «Codex-сессия».
+    let service = is_service_prompt(&title);
     Some(Meta {
         mtime,
         session_id,
         cwd: cwd.clone(),
         project: cwd.as_deref().map(crate::util::basename),
-        title: if title.is_empty() { "Codex-сессия".into() } else { title },
+        title: if title.is_empty() {
+            "Codex-сессия".into()
+        } else {
+            title
+        },
         model: crate::backend::backend(crate::backend::Agent::Codex).friendly_model(&model),
         first_at,
         last_at,
-        service: false,
+        service,
         agent: crate::backend::Agent::Codex.label().to_string(),
     })
+}
+
+/// Служебный ли это промпт (наш собственный вызов агента, не разговор человека).
+/// Одна проверка для обоих бэкендов: второй список неизбежно разъедется с первым.
+fn is_service_prompt(first_prompt: &str) -> bool {
+    // [0-9A-Za-z_], не \w: в Rust \w юникодный и скрывал бы кириллические команды
+    let single_slash = regex::Regex::new(r"^/[0-9A-Za-z_]+$").unwrap();
+    SERVICE_PREFIXES.iter().any(|p| first_prompt.starts_with(p))
+        || single_slash.is_match(first_prompt)
 }
 
 fn first_user_text(msg: &Value) -> String {
@@ -151,7 +186,10 @@ fn parse_meta(file: &Path, mtime: i64) -> Option<Meta> {
 
     let mut meta = Meta {
         mtime,
-        session_id: file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+        session_id: file
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         last_at: mtime,
         agent: crate::backend::Agent::Claude.label().to_string(),
         ..Default::default()
@@ -162,7 +200,9 @@ fn parse_meta(file: &Path, mtime: i64) -> Option<Meta> {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(d) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(d) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if meta.cwd.is_none() {
             meta.cwd = d.get("cwd").and_then(Value::as_str).map(String::from);
         }
@@ -177,8 +217,11 @@ fn parse_meta(file: &Path, mtime: i64) -> Option<Meta> {
             && d.get("type").and_then(Value::as_str) == Some("user")
             && !d.get("isMeta").and_then(Value::as_bool).unwrap_or(false)
         {
-            let t = one_line(&first_user_text(d.get("message").unwrap_or(&Value::Null)));
-            if !t.is_empty() && !t.starts_with('<') {
+            let cleaned = crate::service_text::strip_service_sections(&first_user_text(
+                d.get("message").unwrap_or(&Value::Null),
+            ));
+            let t = one_line(&cleaned);
+            if !t.is_empty() {
                 first_prompt = t;
             }
         }
@@ -193,8 +236,14 @@ fn parse_meta(file: &Path, mtime: i64) -> Option<Meta> {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(d) = serde_json::from_str::<Value>(line) else { continue };
-        if let Some(ts) = d.get("timestamp").and_then(Value::as_str).and_then(crate::transcript::parse_ts) {
+        let Ok(d) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(ts) = d
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(crate::transcript::parse_ts)
+        {
             meta.last_at = meta.last_at.max(ts);
         }
         match d.get("type").and_then(Value::as_str) {
@@ -219,12 +268,18 @@ fn parse_meta(file: &Path, mtime: i64) -> Option<Meta> {
         }
     }
 
-    // [0-9A-Za-z_], не \w: в Rust \w юникодный и скрывал бы кириллические команды
-    let single_slash = regex::Regex::new(r"^/[0-9A-Za-z_]+$").unwrap();
-    meta.service = SERVICE_PREFIXES.iter().any(|p| first_prompt.starts_with(p))
-        || single_slash.is_match(&first_prompt); // одиночная слэш-команда
-    meta.project = Some(meta.cwd.as_deref().map(basename).unwrap_or_else(|| "другое".into()));
-    let title_src = if ai_title.is_empty() { &first_prompt } else { &ai_title };
+    meta.service = is_service_prompt(&first_prompt);
+    meta.project = Some(
+        meta.cwd
+            .as_deref()
+            .map(basename)
+            .unwrap_or_else(|| "другое".into()),
+    );
+    let title_src = if ai_title.is_empty() {
+        &first_prompt
+    } else {
+        &ai_title
+    };
     meta.title = ellipsize(title_src, 100);
     if meta.first_at == 0 {
         meta.first_at = mtime;
@@ -272,12 +327,16 @@ impl History {
 
     fn list_files() -> Vec<PathBuf> {
         let mut out = Vec::new();
-        let Ok(dirs) = fs::read_dir(projects_dir()) else { return out };
+        let Ok(dirs) = fs::read_dir(projects_dir()) else {
+            return out;
+        };
         for d in dirs.filter_map(|e| e.ok()) {
             if !d.path().is_dir() {
                 continue;
             }
-            let Ok(files) = fs::read_dir(d.path()) else { continue };
+            let Ok(files) = fs::read_dir(d.path()) else {
+                continue;
+            };
             for f in files.filter_map(|e| e.ok()) {
                 let p = f.path();
                 if p.extension().is_some_and(|x| x == "jsonl") {
@@ -313,7 +372,9 @@ impl History {
         for file in Self::list_files() {
             let key = file.to_string_lossy().into_owned();
             seen.insert(key.clone());
-            let Ok(st) = fs::metadata(&file) else { continue };
+            let Ok(st) = fs::metadata(&file) else {
+                continue;
+            };
             if st.len() < 200 {
                 continue; // пустые/обрывки
             }
@@ -342,7 +403,9 @@ impl History {
         for file in Self::list_codex_files() {
             let key = file.to_string_lossy().into_owned();
             seen.insert(key.clone());
-            let Ok(st) = fs::metadata(&file) else { continue };
+            let Ok(st) = fs::metadata(&file) else {
+                continue;
+            };
             if st.len() < 200 {
                 continue;
             }
@@ -393,7 +456,10 @@ impl History {
             });
             let u = usage.for_session(&meta.session_id).unwrap_or(Value::Null);
             let model = if meta.model.is_empty() {
-                u.get("model").and_then(Value::as_str).unwrap_or("").to_string()
+                u.get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
             } else {
                 meta.model.clone()
             };
@@ -412,12 +478,14 @@ impl History {
         let mut out: Vec<Value> = by_project
             .into_values()
             .map(|mut g| {
-                g.sessions.sort_by_key(|s| -s.get("lastAt").and_then(Value::as_i64).unwrap_or(0));
+                g.sessions
+                    .sort_by_key(|s| -s.get("lastAt").and_then(Value::as_i64).unwrap_or(0));
                 let count = g.sessions.len();
                 g.sessions.truncate(40); // на проект — последние 40
                 serde_json::json!({
                     "project": g.project,
                     "cwd": g.cwd,
+                    "exists": g.cwd.as_deref().is_some_and(|cwd| Path::new(cwd).is_dir()),
                     "count": count,
                     "lastAt": g.last_at,
                     "sessions": g.sessions,
@@ -464,6 +532,48 @@ mod tests {
         let m = parse_codex_meta(&codex, 1).expect("codex meta");
         assert_eq!(m.agent, "codex");
         assert_eq!(m.session_id, "abc");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Служебные промпты codex тоже помечаются служебными: раньше ветка codex
+    /// жёстко ставила service=false, и 60 таких rollout'ов забивали список
+    /// чатов проекта строками «The following is the Codex agent history…».
+    #[test]
+    fn codex_service_prompts_are_marked_service_and_hidden_from_projects() {
+        let dir = std::env::temp_dir().join("jarvis-history-codex-service");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let rollout = |name: &str, text: &str| {
+            let path = dir.join(name);
+            fs::write(
+                &path,
+                format!(
+                    concat!(
+                        r#"{{"type":"session_meta","timestamp":"2026-08-05T10:00:00.000Z","payload":{{"id":"{}","cwd":"/tmp/proj"}}}}"#,
+                        "\n",
+                        r#"{{"type":"response_item","timestamp":"2026-08-05T10:00:01.000Z","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{}"}}]}}}}"#,
+                        "\n"
+                    ),
+                    name, text
+                ),
+            )
+            .unwrap();
+            parse_codex_meta(&path, 1).expect("codex meta")
+        };
+
+        let service = rollout(
+            "svc",
+            "The following is the Codex agent history whose request action you are assessing.",
+        );
+        assert!(service.service, "служебный промпт ревью-агента скрыт");
+
+        let human = rollout("human", "почини сборку на CI пожалуйста");
+        assert!(!human.service, "живой разговор остаётся в истории");
+
+        let slash = rollout("slash", "/compact");
+        assert!(slash.service, "одиночная слэш-команда — служебная");
 
         let _ = fs::remove_dir_all(&dir);
     }

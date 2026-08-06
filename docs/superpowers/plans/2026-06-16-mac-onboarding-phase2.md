@@ -28,6 +28,7 @@
 **Files:** Create `src-tauri/src/install/mod.rs`; Modify `src-tauri/src/main.rs`.
 
 Интерфейс (самодостаточный, без зависимостей от модулей приложения):
+
 ```rust
 //! Установка интеграции Jarvis ⇄ Claude Code: общая логика для CLI и приложения.
 use serde::Serialize;
@@ -56,6 +57,7 @@ pub type Progress<'a> = dyn Fn(Step) + 'a;
 ```
 
 Шаги:
+
 - [ ] Перенести из `setup.rs` все пути-хелперы, `MARKER`, `EVENTS`, `include_str!`-ассеты (HOOK/SHIM/TMUX/SILERO), хелперы `atomic_write`/`backup`/`read_settings`/`event_installed`/`merge_block`/`remove_block`/rc-логику, Silero-инсталл. Пути `include_str!` не меняются (та же глубина каталога).
 - [ ] Реализовать `pub fn status() -> Status` (без печати — проверяет файлы/хуки).
 - [ ] В `main.rs` добавить `mod install;` (рядом с прочими `mod`).
@@ -92,6 +94,7 @@ pub fn onboarding_run(app: AppHandle) {
     });
 }
 ```
+
 - [ ] `mod onboarding;` в main.rs; добавить обе команды в `invoke_handler![]`.
 - [ ] `cargo build -p jarvis` зелёный. Commit.
 
@@ -124,6 +127,7 @@ pub fn onboarding_run(app: AppHandle) {
 ---
 
 ## Самопроверка
+
 - Вынос логики (спека §Фаза2.1) → Task 1–2. Окно+прогресс (§2.2) → Task 3–5. Пункт меню (§2.3) → Task 4.
 - Риск: перенос ~400 строк из setup.rs. Митигация: переносим как есть, тесты setup переезжают и должны пройти без изменений (Task 2).
 - `#[path]`-include в setup.rs не дублирует код и сохраняет один источник истины install-логики.

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "threshold": 1,
+  "keys": [
+    {
+      "keyId": "jarvis.root:1",
+      "algorithm": "ed25519",
+      "publicKey": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "validFrom": "2026-01-01T00:00:00Z",
+      "validUntil": "2027-08-01T00:00:00Z"
+    }
+  ]
+}

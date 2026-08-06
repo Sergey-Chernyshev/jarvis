@@ -74,6 +74,21 @@ pub fn build_meta(content: &Value, session: &Session, now_ms: i64) -> Vec<Value>
             out.push(serde_json::json!({ "kind": "br", "text": format!("⎇ {}", br) }));
         }
     }
+    // Какой именно чат: в одном проекте тредов много, и без этого непонятно,
+    // к какому из них относится уведомление. Показываем заголовок треда, а если
+    // его ещё нет — короткий id, по которому тред находится в списке.
+    if flag("thread") {
+        let thread = session
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(|title| crate::util::ellipsize(title, 40))
+            .unwrap_or_else(|| session.id.chars().take(8).collect());
+        if !thread.is_empty() {
+            out.push(serde_json::json!({ "kind": "th", "text": thread }));
+        }
+    }
     if flag("model") {
         if let Some(md) = session.model.as_deref().filter(|s| !s.is_empty()) {
             out.push(serde_json::json!({ "kind": "md", "text": md }));
@@ -115,6 +130,7 @@ struct LastToast {
     kind: String,
     speak: String,
     question: Option<Value>,
+    target: Option<Value>,
 }
 
 pub struct Daemon {
@@ -159,8 +175,22 @@ pub struct Daemon {
     pub caps: crate::capability::DaemonRegistry,
     /// Реестр сущностей плагинов (спека plugin-system §6.4): vm.*, agent.* …
     pub entities: crate::entities::EntityStore,
+    /// UI-фокус и lifecycle routing project runtime Agent VM.
+    pub agent_vm: crate::agent_vm::Coordinator,
+    /// Внешние плагины: discovery, process supervision и wire-очереди.
+    pub plugins: std::sync::Arc<crate::plugins::PluginHost>,
+    /// Единая typed boundary для Plugin Manager UI и standalone CLI.
+    /// Ошибка инициализации сохраняется как fail-closed состояние, чтобы
+    /// недоступный plugin profile не мешал запуску остального Jarvis.
+    pub plugin_manager: Result<
+        std::sync::Arc<crate::plugin_manager_api::PluginManagerEndpoint>,
+        crate::plugin_manager_api::ManagerApiError,
+    >,
+    /// Durable Plugin Platform state. Startup failures leave plugin data
+    /// unavailable without weakening the legacy host or blocking Jarvis UI.
+    pub(crate) plugin_broker: Option<crate::plugin_platform::broker::Broker>,
     /// Токены потребителей сокета (R2): резолв token → Consumer (panel недостижим).
-    pub tokens: crate::capability::tokens::TokenStore,
+    pub tokens: std::sync::Arc<crate::capability::tokens::TokenStore>,
     /// Реестр ожидающих подтверждений агента (R4) — вне локов Daemon.
     pub pending: std::sync::Arc<crate::capability::confirm_panel::PendingConfirms>,
     /// STT-сервис (инкремент 9): распознавание речи. Fail-safe.
@@ -199,6 +229,15 @@ enum Effect {
     ResolveTmuxName {
         sid: String,
         pane: String,
+    },
+    BindTmuxSession {
+        sid: String,
+        pane: String,
+        marker: String,
+    },
+    UnbindTmuxSession {
+        pane: String,
+        marker: String,
     },
     ResolveGuiApp {
         sid: String,
@@ -250,6 +289,54 @@ impl Daemon {
         let settings = settings::Store::new();
         crate::metrics::set_enabled(settings.bool("diagnostics"));
         crate::log::set_enabled(settings.bool("diagnostics"));
+        let root = settings.load();
+        let plugin_roots = crate::plugins::roots_from_settings(&root);
+        let plugin_paths = crate::plugins::package_manager::paths::PluginPaths::new(jarvis_dir());
+        let catalog_compatibility = crate::plugins::trust::catalog::CatalogCompatibility::parse(
+            env!("CARGO_PKG_VERSION"),
+            jarvis_plugin_protocol::manifest::PLUGIN_API_VERSION,
+            crate::plugins::current_package_target(),
+            "13.0.0",
+        )
+        .expect("production catalog compatibility constants are valid");
+        let catalog_provider = std::sync::Arc::new(
+            crate::plugins::trust::provider::ProductionCatalogProvider::for_profile(
+                plugin_paths,
+                catalog_compatibility,
+                std::sync::Arc::new(crate::plugins::package_manager::manager::SystemClock),
+            ),
+        );
+        let plugins = std::sync::Arc::new(crate::plugins::PluginHost::new(
+            plugin_roots,
+            catalog_provider.clone(),
+        ));
+        let tokens = std::sync::Arc::new(crate::capability::tokens::TokenStore::new());
+        let plugin_broker = match crate::plugin_platform::broker::Broker::open(
+            &jarvis_dir().join("plugin-platform"),
+            crate::util::now_ms(),
+        ) {
+            Ok(broker) => Some(broker),
+            Err(error) => {
+                crate::log::line(&format!(
+                    "[plugin-platform] broker unavailable code={} error={error}",
+                    error.code()
+                ));
+                None
+            }
+        };
+        let plugin_manager = crate::plugin_manager_api::PluginManagerEndpoint::new_with_host(
+            settings.clone(),
+            plugins.clone(),
+            tokens.clone(),
+            catalog_provider,
+        )
+        .map(std::sync::Arc::new);
+        if let Err(error) = &plugin_manager {
+            crate::log::line(&format!(
+                "[plugin-manager] unavailable code={} error={error}",
+                error.code
+            ));
+        }
         let quiet0 = settings.bool("quietMode"); // читаем до move в литерал
         let vcfg = crate::voice::config::VoiceConfig::from_settings(&settings.load());
         let voice = crate::voice::Voice::new(&vcfg, jarvis_dir().join("silero"), app.clone());
@@ -259,7 +346,6 @@ impl Daemon {
             std::thread::spawn(move || v.warmup());
         }
         // STT-сервис + общий аудио-вход + PTT-диктовка + wake-word (инкр. 9–10)
-        let root = settings.load();
         let stt_cfg = crate::stt::config::SttConfig::from_settings(&root);
         let audio_device = stt_cfg.audio_device.clone();
         let stt = crate::stt::SttService::new(stt_cfg);
@@ -326,7 +412,11 @@ impl Daemon {
             voice,
             caps: crate::capability::build_registry(),
             entities: crate::entities::EntityStore::new(),
-            tokens: crate::capability::tokens::TokenStore::new(),
+            agent_vm: crate::agent_vm::Coordinator::default(),
+            plugins,
+            plugin_manager,
+            plugin_broker,
+            tokens,
             pending: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
             stt,
             dictation,
@@ -374,7 +464,7 @@ impl Daemon {
         crate::ipc::set_select_hotkeys(self, list.iter().any(|s| s.question.is_some()));
         self.power.on_sessions(self, &list); // плагины первыми — бейджи к трею уже свежие
         windows::emit_to_panel(&self.app, "state", &list);
-        windows::emit_to_panel(&self.app, "plugins", &self.power.statuses(self));
+        crate::plugins::emit_statuses(self);
         crate::tray::update(self, &list);
         self.persist();
     }
@@ -554,6 +644,20 @@ impl Daemon {
         kind: &str,
         speak: Option<&str>,
     ) {
+        self.notify_id_voiced_target(id, title, body, session_id, kind, speak, None);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn notify_id_voiced_target(
+        &self,
+        id: &str,
+        title: &str,
+        body: &str,
+        session_id: Option<&str>,
+        kind: &str,
+        speak: Option<&str>,
+        target: Option<&Value>,
+    ) {
         crate::log::line(&format!(
             "[toast:{kind}] id={id} sid={} «{}» / {}",
             session_id.unwrap_or("-"),
@@ -622,6 +726,7 @@ impl Daemon {
             kind: kind.to_string(),
             speak: speak_text.clone(),
             question: question.clone(),
+            target: target.cloned(),
         });
 
         // мета-сегменты карточки (ветка, модель, effort, время) из настроек notify.content
@@ -642,7 +747,7 @@ impl Daemon {
         if self.is_quiet() {
             return;
         }
-        windows::toast_add(
+        windows::toast_add_target(
             self,
             id,
             title,
@@ -651,6 +756,7 @@ impl Daemon {
             kind,
             question.as_ref(),
             &meta_val,
+            target,
         );
 
         // голос (инкремент 7): озвучиваем уведомление. Одна точка на все события;
@@ -661,6 +767,7 @@ impl Daemon {
             "done" => vcfg.ev_stop,
             "waiting" => vcfg.ev_notification,
             "limit" => vcfg.ev_stop_failure,
+            "error" => vcfg.ev_stop_failure,
             _ => false,
         };
         if on {
@@ -753,7 +860,7 @@ impl Daemon {
     /// last_toast (повторять смену режима незачем).
     pub fn mode_toast(self: &std::sync::Arc<Self>, icon: &str, label: &str) {
         let id = format!("mode-{}", self.toast_seq.fetch_add(1, Ordering::SeqCst) + 1);
-        windows::toast_add(
+        windows::toast_add_target(
             self,
             &id,
             &format!("{icon}  {label}"),
@@ -762,6 +869,7 @@ impl Daemon {
             "mode",
             None,
             &serde_json::Value::Array(vec![]),
+            None,
         );
     }
 
@@ -789,7 +897,7 @@ impl Daemon {
             "repeat-{}",
             self.toast_seq.fetch_add(1, Ordering::SeqCst) + 1
         );
-        windows::toast_add(
+        windows::toast_add_target(
             self,
             &id,
             &lt.title,
@@ -798,6 +906,7 @@ impl Daemon {
             &lt.kind,
             lt.question.as_ref(),
             &serde_json::Value::Array(vec![]),
+            lt.target.as_ref(),
         );
         // переозвучка по явному запросу (mute внутри speak_text всё равно уважается)
         self.voice
@@ -916,8 +1025,11 @@ impl Daemon {
             let mut sessions = self.sessions.lock().unwrap();
 
             if event == "session-end" {
-                sessions.remove(&sid);
+                if let Some((pane, marker)) = end_session(&mut sessions, &sid) {
+                    effects.push(Effect::UnbindTmuxSession { pane, marker });
+                }
                 drop(sessions);
+                self.run_effects(effects);
                 self.push();
                 return;
             }
@@ -1006,6 +1118,30 @@ impl Daemon {
                 }
             }
 
+            // Hook transport remains the primary source, but the exact binding is
+            // mirrored into the pane itself. A restarted/different Jarvis profile
+            // can then recover a live chat even if it missed SessionStart.
+            if let (Some(pane), Some(cwd), Some(pid)) = (s.tmux_pane.clone(), s.cwd.clone(), s.pid)
+            {
+                let marker = tmux::PaneSessionMarker {
+                    session_id: sid.clone(),
+                    agent: agent.label().to_string(),
+                    cwd,
+                    transcript: s.transcript.clone(),
+                    pid,
+                };
+                if let Ok(encoded) = tmux::encode_pane_session_marker(&marker) {
+                    if s.tmux_marker.as_deref() != Some(encoded.as_str()) {
+                        s.tmux_marker = Some(encoded.clone());
+                        effects.push(Effect::BindTmuxSession {
+                            sid: sid.clone(),
+                            pane,
+                            marker: encoded,
+                        });
+                    }
+                }
+            }
+
             /* ---- сам переход ---- */
             match event {
                 "session-start" => {
@@ -1028,12 +1164,13 @@ impl Daemon {
                     // подтверждение доставки: реальный хук UserPromptSubmit сработал
                     self.last_prompt_at.lock().unwrap().insert(sid.clone(), now);
                     s.status = Status::Working;
-                    let txt = ellipsize(
-                        &one_line(p.get("prompt").and_then(Value::as_str).unwrap_or("")),
-                        140,
+                    // системные инъекции (<task-notification>, <command-…>) — не
+                    // промпт юзера; вырезаем их из текста, а не отбрасываем целиком
+                    let cleaned = crate::service_text::strip_service_sections(
+                        p.get("prompt").and_then(Value::as_str).unwrap_or(""),
                     );
-                    // системные инъекции (<task-notification>, <command-…>) — не промпт юзера
-                    if !txt.is_empty() && !txt.starts_with('<') {
+                    let txt = ellipsize(&one_line(&cleaned), 140);
+                    if !txt.is_empty() {
                         s.detail = txt.clone();
                         s.last_prompt = Some(txt); // живёт дольше detail
                                                    // саммари пересчитывается после каждого промта юзера
@@ -1229,6 +1366,29 @@ impl Daemon {
                         }
                     });
                 }
+                Effect::BindTmuxSession { sid, pane, marker } => {
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = tmux::mark_pane_session(&pane, &marker).await {
+                            d.with_session(&sid, |session| {
+                                if session.tmux_marker.as_deref() == Some(marker.as_str()) {
+                                    session.tmux_marker = None;
+                                }
+                            });
+                            crate::log::line(&format!(
+                                "[session-discovery] pane marker failed pane={pane}: {error}"
+                            ));
+                        }
+                    });
+                }
+                Effect::UnbindTmuxSession { pane, marker } => {
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = tmux::unmark_pane_session(&pane, &marker).await {
+                            crate::log::line(&format!(
+                                "[session-discovery] pane marker cleanup failed pane={pane}: {error}"
+                            ));
+                        }
+                    });
+                }
                 Effect::ResolveGuiApp { sid, pid } => {
                     tauri::async_runtime::spawn(async move {
                         if let Some(app) = crate::terminal::gui_ancestor_app(pid).await {
@@ -1286,9 +1446,13 @@ impl Daemon {
             if d.tail.active_session().as_deref() != Some(sid.as_str()) {
                 return;
             }
-            let Some((be, entries)) = d.turn_entries(&sid) else { return };
+            let Some((be, entries)) = d.turn_entries(&sid) else {
+                return;
+            };
             let (_items, turns) = crate::turns::segment(be, &entries);
-            let Some(t) = turns.iter().rev().find(|t| t.span.complete) else { return };
+            let Some(t) = turns.iter().rev().find(|t| t.span.complete) else {
+                return;
+            };
             if crate::turnsum::load_cards(&sid).contains_key(&t.span.key) {
                 return;
             }
@@ -1335,11 +1499,14 @@ impl Daemon {
             }
             let prompt = crate::turns::build_prompt(&t.user_prompt, &t.facts);
             for _attempt in 0..2 {
-                let Some(out) = claude_bin::run_service_llm(&prompt, Duration::from_secs(45)).await
+                // 60с: разбор длиннее прежней выжимки — даём модели дописать
+                let Some(out) = claude_bin::run_service_llm(&prompt, Duration::from_secs(60)).await
                 else {
                     continue;
                 };
-                let Some(card) = crate::turns::parse_card(&out, &t.facts) else { continue };
+                let Some(card) = crate::turns::parse_card(&out, &t.facts) else {
+                    continue;
+                };
                 if !ru::has_cyrillic(&card.summary) {
                     continue; // модель съехала в английский — ретрай
                 }
@@ -1363,7 +1530,9 @@ impl Daemon {
     pub(crate) fn turn_backfill(self: &std::sync::Arc<Self>, sid: String, max: usize) {
         let d = self.clone();
         tauri::async_runtime::spawn(async move {
-            let Some((be, entries)) = d.turn_entries(&sid) else { return };
+            let Some((be, entries)) = d.turn_entries(&sid) else {
+                return;
+            };
             let (_items, turns) = crate::turns::segment(be, &entries);
             let cards = crate::turnsum::load_cards(&sid);
             let todo: Vec<crate::turns::Turn> = turns
@@ -1864,19 +2033,28 @@ impl Daemon {
      * working-сессии без событий 15 минут считаем потерянными. */
 
     pub async fn reconcile_sessions(self: &std::sync::Arc<Self>) {
-        // Сверка с живым tmux: удаляем сессии, чья пана умерла (жёстко убитый
-        // терминал не шлёт SessionEnd); working без событий 15 минут — потеряна.
-        // Сессии заводятся ТОЛЬКО из хуков — здесь ничего не подхватываем.
-        let alive: Option<std::collections::HashSet<String>> = match tmux::list_panes_meta().await {
-            Ok(Some(panes)) => Some(panes.iter().map(|p| p.pane_id.clone()).collect()),
-            Ok(None) => None, // tmux не установлен — реестр не трогаем
-            Err(()) => Some(std::collections::HashSet::new()), // ошибка = сервер пуст
+        // Сверка с живым tmux: marker восстанавливает пропущенный SessionStart,
+        // затем мёртвые pid/pane выселяются как раньше.
+        let panes = match tmux::list_panes_meta().await {
+            Ok(Some(panes)) => Some(panes),
+            Ok(None) => None,            // tmux не установлен — реестр не трогаем
+            Err(()) => Some(Vec::new()), // ошибка = сервер пуст
         };
+        let alive: Option<std::collections::HashSet<String>> = panes
+            .as_ref()
+            .map(|panes| panes.iter().map(|pane| pane.pane_id.clone()).collect());
 
         let mut changed = false;
+        let mut recovered = Vec::new();
+        let mut bindings = Vec::new();
         {
             let mut sessions = self.sessions.lock().unwrap();
             let now = now_ms();
+            if let Some(panes) = panes.as_deref() {
+                let adoption = adopt_marked_panes(&mut sessions, panes, now);
+                changed |= adoption.changed;
+                recovered = adoption.newly_discovered;
+            }
             sessions.retain(|_, s| {
                 // Жив ли claude? Главный критерий — его процесс (pid = $PPID хука).
                 // Ловит и не-tmux сессии (IDE-терминал, pane=None), и фантомы из
@@ -1910,10 +2088,25 @@ impl Daemon {
                     freeze_board(s); // оборванная связь — задачи «в работе» прерваны
                     changed = true;
                 }
+                if let Some((pane, marker)) = pane_binding_for_session(s) {
+                    if s.tmux_marker.as_deref() != Some(marker.as_str()) {
+                        s.tmux_marker = Some(marker.clone());
+                        bindings.push((s.id.clone(), pane, marker));
+                    }
+                }
             }
         }
         if changed {
             self.push();
+        }
+        self.run_effects(
+            bindings
+                .into_iter()
+                .map(|(sid, pane, marker)| Effect::BindTmuxSession { sid, pane, marker })
+                .collect(),
+        );
+        for sid in recovered {
+            self.refresh_meta(sid);
         }
     }
 
@@ -2390,6 +2583,85 @@ fn pid_alive(pid: i64) -> bool {
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+#[cfg(target_os = "macos")]
+fn process_parent_pid(pid: i64) -> Option<i64> {
+    let pid = i32::try_from(pid).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let expected = std::mem::size_of::<libc::proc_bsdinfo>();
+    let received = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            i32::try_from(expected).ok()?,
+        )
+    };
+    if usize::try_from(received).ok()? != expected {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    if info.pbi_pid != u32::try_from(pid).ok()? {
+        return None;
+    }
+    let parent = i64::from(info.pbi_ppid);
+    (parent > 0).then_some(parent)
+}
+
+#[cfg(target_os = "linux")]
+fn process_parent_pid(pid: i64) -> Option<i64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_name = stat.get(stat.rfind(')')? + 1..)?;
+    let mut fields = after_name.split_whitespace();
+    fields.next()?; // process state
+    fields
+        .next()?
+        .parse::<i64>()
+        .ok()
+        .filter(|parent| *parent > 0)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_parent_pid(_pid: i64) -> Option<i64> {
+    None
+}
+
+fn pid_is_descendant_or_same(pid: i64, ancestor: i64) -> bool {
+    if pid <= 0 || ancestor <= 0 || !pid_alive(pid) || !pid_alive(ancestor) {
+        return false;
+    }
+    if pid == ancestor {
+        return true;
+    }
+
+    let mut current = pid;
+    let mut seen = HashSet::new();
+    seen.insert(current);
+    for _ in 0..64 {
+        let Some(parent) = process_parent_pid(current) else {
+            return false;
+        };
+        if parent == ancestor {
+            return true;
+        }
+        if parent <= 1 || !seen.insert(parent) {
+            return false;
+        }
+        current = parent;
+    }
+    false
+}
+
+fn same_session_cwd(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    std::fs::canonicalize(left)
+        .ok()
+        .zip(std::fs::canonicalize(right).ok())
+        .is_some_and(|(left, right)| left == right)
+}
+
 /// Инвариант «одна tmux-пана — одна сессия».
 ///
 /// Когда событие из паны `pane` приходит для `keep_sid`, любая ДРУГАЯ сессия,
@@ -2410,9 +2682,139 @@ fn evict_pane(sessions: &mut HashMap<String, Session>, keep_sid: &str, pane: &st
     ghosts
 }
 
+fn end_session(sessions: &mut HashMap<String, Session>, sid: &str) -> Option<(String, String)> {
+    let session = sessions.remove(sid)?;
+    Some((session.tmux_pane?, session.tmux_marker?))
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PaneAdoption {
+    newly_discovered: Vec<String>,
+    changed: bool,
+}
+
+fn pane_binding_for_session(session: &Session) -> Option<(String, String)> {
+    let pane = session.tmux_pane.clone()?;
+    let cwd = session.cwd.clone()?;
+    let pid = session.pid.filter(|pid| pid_alive(*pid))?;
+    let agent = crate::backend::Agent::from_opt(session.agent.as_deref());
+    let marker = tmux::PaneSessionMarker {
+        session_id: session.id.clone(),
+        agent: agent.label().to_string(),
+        cwd,
+        transcript: session.transcript.clone(),
+        pid,
+    };
+    tmux::encode_pane_session_marker(&marker)
+        .ok()
+        .map(|encoded| (pane, encoded))
+}
+
+/// Merge authenticated-by-user-tmux markers into the in-memory registry.
+/// Existing rich chat fields win; only transport identity is refreshed.
+fn adopt_marked_panes(
+    sessions: &mut HashMap<String, Session>,
+    panes: &[tmux::PaneInfo],
+    now: i64,
+) -> PaneAdoption {
+    let mut result = PaneAdoption::default();
+    for pane in panes {
+        let Some(marker) = pane.marker.as_ref() else {
+            continue;
+        };
+        if !same_session_cwd(&pane.cwd, &marker.cwd)
+            || !pid_is_descendant_or_same(marker.pid, pane.pid)
+        {
+            continue;
+        }
+        if sessions.get(&marker.session_id).is_some_and(|session| {
+            session
+                .cwd
+                .as_deref()
+                .is_some_and(|cwd| !same_session_cwd(cwd, &marker.cwd))
+        }) {
+            continue;
+        }
+        if !evict_pane(sessions, &marker.session_id, &pane.pane_id).is_empty() {
+            result.changed = true;
+        }
+
+        match sessions.entry(marker.session_id.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let mut session = Session::new(marker.session_id.clone(), now);
+                session.status = Status::Idle;
+                session.detail = "подключено из живого терминала".into();
+                session.cwd = Some(marker.cwd.clone());
+                session.project = Some(basename(&marker.cwd));
+                session.agent = Some(marker.agent.clone());
+                session.tmux_pane = Some(pane.pane_id.clone());
+                session.tmux_name =
+                    (!pane.session_name.is_empty()).then(|| pane.session_name.clone());
+                session.transcript = marker.transcript.clone();
+                session.pid = Some(marker.pid);
+                session.tmux_marker = tmux::encode_pane_session_marker(marker).ok();
+                entry.insert(session);
+                result.newly_discovered.push(marker.session_id.clone());
+                result.changed = true;
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let session = entry.get_mut();
+                let mut transport_changed = false;
+                let mut set = |slot: &mut Option<String>, value: Option<String>| {
+                    if value.is_some() && *slot != value {
+                        *slot = value;
+                        transport_changed = true;
+                    }
+                };
+                set(&mut session.cwd, Some(marker.cwd.clone()));
+                set(&mut session.project, Some(basename(&marker.cwd)));
+                set(&mut session.agent, Some(marker.agent.clone()));
+                set(&mut session.tmux_pane, Some(pane.pane_id.clone()));
+                set(
+                    &mut session.tmux_name,
+                    (!pane.session_name.is_empty()).then(|| pane.session_name.clone()),
+                );
+                set(&mut session.transcript, marker.transcript.clone());
+                let pid = Some(marker.pid);
+                if pid.is_some() && session.pid != pid {
+                    session.pid = pid;
+                    transport_changed = true;
+                }
+                session.tmux_marker = tmux::encode_pane_session_marker(marker).ok();
+                result.changed |= transport_changed;
+            }
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestChild(std::process::Child);
+
+    impl TestChild {
+        fn sleeping() -> Self {
+            Self(
+                std::process::Command::new("/bin/sleep")
+                    .arg("10")
+                    .spawn()
+                    .expect("spawn test child"),
+            )
+        }
+
+        fn pid(&self) -> i64 {
+            i64::from(self.0.id())
+        }
+    }
+
+    impl Drop for TestChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
 
     fn sess(id: &str, pane: Option<&str>) -> Session {
         let mut s = Session::new(id.to_string(), 0);
@@ -2450,6 +2852,248 @@ mod tests {
             2,
             "две параллельные сессии в разных панах живут обе"
         );
+    }
+
+    #[test]
+    fn marked_live_pane_recovers_session_when_hook_event_was_missed() {
+        let pane_pid = std::process::id() as i64;
+        let agent = TestChild::sleeping();
+        let live_pid = agent.pid();
+        let mut sessions = HashMap::new();
+        let panes = vec![crate::tmux::PaneInfo {
+            pane_id: "%4".into(),
+            session_name: "project-8123".into(),
+            cwd: "/Users/example/work/project".into(),
+            pid: pane_pid,
+            marker: Some(crate::tmux::PaneSessionMarker {
+                session_id: "019fc8de-763a-7800-bfd4-f1c270a1eac6".into(),
+                agent: "codex".into(),
+                cwd: "/Users/example/work/project".into(),
+                transcript: Some(
+                    "/Users/example/.codex/sessions/2026/08/03/rollout-session.jsonl".into(),
+                ),
+                pid: live_pid,
+            }),
+        }];
+
+        let adoption = adopt_marked_panes(&mut sessions, &panes, 1_000);
+
+        assert_eq!(
+            adoption.newly_discovered,
+            vec!["019fc8de-763a-7800-bfd4-f1c270a1eac6".to_string()]
+        );
+        assert!(adoption.changed);
+        let session = sessions.values().next().expect("recovered session");
+        assert_eq!(session.agent.as_deref(), Some("codex"));
+        assert_eq!(session.cwd.as_deref(), Some("/Users/example/work/project"));
+        assert_eq!(session.project.as_deref(), Some("project"));
+        assert_eq!(session.tmux_pane.as_deref(), Some("%4"));
+        assert_eq!(session.tmux_name.as_deref(), Some("project-8123"));
+        assert_eq!(session.pid, Some(live_pid));
+        assert_eq!(session.status, Status::Idle);
+    }
+
+    #[test]
+    fn restored_session_can_seed_pane_marker_without_waiting_for_next_hook() {
+        let mut session = sess("019fc8de-763a-7800-bfd4-f1c270a1eac6", Some("%4"));
+        session.cwd = Some("/Users/example/work/project".into());
+        session.agent = Some("codex".into());
+        session.transcript =
+            Some("/Users/example/.codex/sessions/2026/08/03/rollout-session.jsonl".into());
+        session.pid = Some(std::process::id() as i64);
+
+        let (pane, encoded) = pane_binding_for_session(&session).expect("binding");
+        let line = format!(
+            "%4\tproject-8123\t{}\t{encoded}\t/Users/example/work/project",
+            std::process::id()
+        );
+
+        assert_eq!(pane, "%4");
+        let recovered = crate::tmux::parse_pane_info(&line)
+            .and_then(|pane| pane.marker)
+            .expect("marker round-trip");
+        assert_eq!(recovered.session_id, session.id);
+        assert_eq!(recovered.pid, std::process::id() as i64);
+    }
+
+    #[test]
+    fn marked_pane_refreshes_transport_without_erasing_richer_session_state() {
+        let live_pid = std::process::id() as i64;
+        let sid = "019fc8de-763a-7800-bfd4-f1c270a1eac6";
+        let mut original = sess(sid, Some("%old"));
+        original.title = Some("Keep this title".into());
+        original.last_prompt = Some("Keep this prompt".into());
+        original.status = Status::Working;
+        original.updated_at = 900;
+        let mut sessions = HashMap::from([(sid.to_string(), original)]);
+        let panes = vec![crate::tmux::PaneInfo {
+            pane_id: "%7".into(),
+            session_name: "project-9000".into(),
+            cwd: "/Users/example/work/project".into(),
+            pid: live_pid,
+            marker: Some(crate::tmux::PaneSessionMarker {
+                session_id: sid.into(),
+                agent: "codex".into(),
+                cwd: "/Users/example/work/project".into(),
+                transcript: None,
+                pid: live_pid,
+            }),
+        }];
+
+        let adoption = adopt_marked_panes(&mut sessions, &panes, 1_000);
+
+        assert!(
+            adoption.newly_discovered.is_empty(),
+            "existing session is refreshed, not re-created"
+        );
+        assert!(adoption.changed);
+        let session = sessions.get(sid).unwrap();
+        assert_eq!(session.tmux_pane.as_deref(), Some("%7"));
+        assert_eq!(session.pid, Some(live_pid));
+        assert_eq!(session.title.as_deref(), Some("Keep this title"));
+        assert_eq!(session.last_prompt.as_deref(), Some("Keep this prompt"));
+        assert_eq!(session.status, Status::Working);
+        assert_eq!(
+            session.updated_at, 900,
+            "30-second inventory polling must not reorder active chats"
+        );
+    }
+
+    #[test]
+    fn stale_pane_marker_does_not_resurrect_finished_agent() {
+        let sid = "019fc8de-763a-7800-bfd4-f1c270a1eac6";
+        let mut sessions = HashMap::new();
+        let panes = vec![crate::tmux::PaneInfo {
+            pane_id: "%7".into(),
+            session_name: "shell-still-alive".into(),
+            cwd: "/Users/example/work/project".into(),
+            pid: std::process::id() as i64,
+            marker: Some(crate::tmux::PaneSessionMarker {
+                session_id: sid.into(),
+                agent: "codex".into(),
+                cwd: "/Users/example/work/project".into(),
+                transcript: None,
+                pid: 2_000_000_000,
+            }),
+        }];
+
+        let adoption = adopt_marked_panes(&mut sessions, &panes, 1_000);
+
+        assert!(adoption.newly_discovered.is_empty());
+        assert!(!adoption.changed);
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn live_but_unrelated_marker_pid_does_not_resurrect_session() {
+        let sid = "019fc8de-763a-7800-bfd4-f1c270a1eac6";
+        let cwd = std::env::current_dir()
+            .expect("current dir")
+            .to_string_lossy()
+            .into_owned();
+        let child = TestChild::sleeping();
+        let mut sessions = HashMap::new();
+        let panes = vec![crate::tmux::PaneInfo {
+            pane_id: "%7".into(),
+            session_name: "reused-pane".into(),
+            cwd: cwd.clone(),
+            pid: child.pid(),
+            marker: Some(crate::tmux::PaneSessionMarker {
+                session_id: sid.into(),
+                agent: "codex".into(),
+                cwd,
+                transcript: None,
+                pid: std::process::id() as i64,
+            }),
+        }];
+
+        let adoption = adopt_marked_panes(&mut sessions, &panes, 1_000);
+
+        assert!(adoption.newly_discovered.is_empty());
+        assert!(!adoption.changed);
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn marker_cwd_must_match_pane_cwd() {
+        let sid = "019fc8de-763a-7800-bfd4-f1c270a1eac6";
+        let mut sessions = HashMap::new();
+        let marker = crate::tmux::PaneSessionMarker {
+            session_id: sid.into(),
+            agent: "codex".into(),
+            cwd: "/Users/example/work/reused".into(),
+            transcript: None,
+            pid: std::process::id() as i64,
+        };
+        let panes = [crate::tmux::PaneInfo {
+            pane_id: "%7".into(),
+            session_name: "reused-pane".into(),
+            cwd: "/Users/example/work/other-pane".into(),
+            pid: marker.pid,
+            marker: Some(marker),
+        }];
+
+        let adoption = adopt_marked_panes(&mut sessions, &panes, 1_000);
+
+        assert!(adoption.newly_discovered.is_empty());
+        assert!(!adoption.changed);
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn marker_cwd_cannot_replace_existing_session_cwd() {
+        let sid = "019fc8de-763a-7800-bfd4-f1c270a1eac6";
+        let mut existing = sess(sid, Some("%old"));
+        existing.cwd = Some("/Users/example/work/original".into());
+        let mut sessions = HashMap::from([(sid.to_string(), existing)]);
+        let pid = std::process::id() as i64;
+        let panes = [crate::tmux::PaneInfo {
+            pane_id: "%7".into(),
+            session_name: "reused-pane".into(),
+            cwd: "/Users/example/work/reused".into(),
+            pid,
+            marker: Some(crate::tmux::PaneSessionMarker {
+                session_id: sid.into(),
+                agent: "codex".into(),
+                cwd: "/Users/example/work/reused".into(),
+                transcript: None,
+                pid,
+            }),
+        }];
+
+        let adoption = adopt_marked_panes(&mut sessions, &panes, 1_000);
+
+        assert!(adoption.newly_discovered.is_empty());
+        assert!(!adoption.changed);
+        let session = sessions.get(sid).expect("original session");
+        assert_eq!(session.cwd.as_deref(), Some("/Users/example/work/original"));
+        assert_eq!(session.tmux_pane.as_deref(), Some("%old"));
+    }
+
+    #[test]
+    fn session_end_removes_live_session_and_requests_marker_cleanup() {
+        let sid = "019fc8de-763a-7800-bfd4-f1c270a1eac6";
+        let mut session = sess(sid, Some("%7"));
+        session.tmux_marker = Some("bound-marker".into());
+        session.pid = Some(std::process::id() as i64);
+        let mut sessions = HashMap::from([(sid.to_string(), session)]);
+
+        assert_eq!(
+            end_session(&mut sessions, sid),
+            Some(("%7".into(), "bound-marker".into()))
+        );
+        assert!(sessions.is_empty());
+
+        let panes = vec![crate::tmux::PaneInfo {
+            pane_id: "%7".into(),
+            session_name: "shell-still-alive".into(),
+            cwd: "/Users/example/work/project".into(),
+            pid: std::process::id() as i64,
+            marker: None,
+        }];
+        let adoption = adopt_marked_panes(&mut sessions, &panes, 1_000);
+        assert!(adoption.newly_discovered.is_empty());
+        assert!(sessions.is_empty());
     }
 
     #[test]
@@ -2743,6 +3387,44 @@ mod tests {
         let content = serde_json::json!({ "branch": false });
         let meta = build_meta(&content, &s, 0);
         assert!(meta.is_empty());
+    }
+
+    #[test]
+    fn build_meta_thread_names_the_chat_the_notification_belongs_to() {
+        // В проекте тредов много: без этого сегмента непонятно, чей это тост.
+        let mut s = Session::new("sid1".into(), 0);
+        s.title = Some("починить сборку на CI".into());
+        let content = serde_json::json!({ "thread": true });
+
+        let meta = build_meta(&content, &s, 0);
+
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta[0]["kind"], "th");
+        assert_eq!(meta[0]["text"], "починить сборку на CI");
+    }
+
+    #[test]
+    fn build_meta_thread_falls_back_to_a_short_id_and_respects_the_toggle() {
+        // Заголовка ещё нет — показываем короткий id, по нему тред находится.
+        let s = Session::new("0123456789abcdef".into(), 0);
+        let meta = build_meta(&serde_json::json!({ "thread": true }), &s, 0);
+        assert_eq!(meta[0]["text"], "01234567");
+
+        // Выключенный тумблер сегмент не добавляет.
+        assert!(build_meta(&serde_json::json!({ "thread": false }), &s, 0).is_empty());
+    }
+
+    #[test]
+    fn build_meta_thread_title_is_trimmed_to_stay_on_one_line() {
+        let mut s = Session::new("sid1".into(), 0);
+        s.title = Some("я".repeat(120));
+
+        let meta = build_meta(&serde_json::json!({ "thread": true }), &s, 0);
+
+        // Обрезка по символам: кириллица не должна рваться посреди символа.
+        let text = meta[0]["text"].as_str().unwrap();
+        assert_eq!(text.chars().count(), 40);
+        assert!(text.chars().all(|ch| ch == 'я'));
     }
 
     #[test]

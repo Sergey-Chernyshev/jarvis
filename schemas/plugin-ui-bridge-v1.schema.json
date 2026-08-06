@@ -1,0 +1,621 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "BridgeClientFrame": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "hello"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "description": "Must equal 1.",
+              "enum": [
+                1
+              ],
+              "format": "uint32",
+              "maximum": 1.0,
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "generation",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "deadlineMs": {
+              "description": "Inclusive range: 1..=30000.",
+              "format": "uint64",
+              "maximum": 30000.0,
+              "minimum": 1.0,
+              "type": "integer"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
+              "type": "string"
+            },
+            "method": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!\\.\\.?$)[a-z0-9._-]+$",
+              "type": "string"
+            },
+            "namespace": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!\\.\\.?$)[a-z0-9._-]+$",
+              "type": "string"
+            },
+            "params": true,
+            "type": {
+              "enum": [
+                "request"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "description": "Must equal 1.",
+              "enum": [
+                1
+              ],
+              "format": "uint32",
+              "maximum": 1.0,
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "deadlineMs",
+            "generation",
+            "id",
+            "method",
+            "namespace",
+            "params",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "poll"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "description": "Must equal 1.",
+              "enum": [
+                1
+              ],
+              "format": "uint32",
+              "maximum": 1.0,
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "cursor",
+            "generation",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "cancel"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "description": "Must equal 1.",
+              "enum": [
+                1
+              ],
+              "format": "uint32",
+              "maximum": 1.0,
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "generation",
+            "id",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "subscriptionId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "unsubscribe"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "description": "Must equal 1.",
+              "enum": [
+                1
+              ],
+              "format": "uint32",
+              "maximum": 1.0,
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "generation",
+            "subscriptionId",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BridgeHostFrame": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "grants": {
+              "items": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^(?!\\.\\.?$)[a-z0-9._-]+$",
+                "type": "string"
+              },
+              "maxItems": 256,
+              "minItems": 0,
+              "type": "array"
+            },
+            "packageDigest": {
+              "maxLength": 71,
+              "minLength": 1,
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "pageId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
+              "type": "string"
+            },
+            "pluginId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "welcome"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "description": "Must equal 1.",
+              "enum": [
+                1
+              ],
+              "format": "uint32",
+              "maximum": 1.0,
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "generation",
+            "grants",
+            "packageDigest",
+            "pageId",
+            "pluginId",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
+              "type": "string"
+            },
+            "result": true,
+            "type": {
+              "enum": [
+                "response"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "description": "Must equal 1.",
+              "enum": [
+                1
+              ],
+              "format": "uint32",
+              "maximum": 1.0,
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "generation",
+            "id",
+            "result",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
+              "type": "string"
+            },
+            "subscriptionId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "subscribeResult"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "description": "Must equal 1.",
+              "enum": [
+                1
+              ],
+              "format": "uint32",
+              "maximum": 1.0,
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "cursor",
+            "generation",
+            "id",
+            "subscriptionId",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cursor": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "event": true,
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "subscriptionId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "event"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "description": "Must equal 1.",
+              "enum": [
+                1
+              ],
+              "format": "uint32",
+              "maximum": 1.0,
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "cursor",
+            "event",
+            "generation",
+            "subscriptionId",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "earliestCursor": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "latestCursor": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "requestedCursor": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "subscriptionId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "gap"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "description": "Must equal 1.",
+              "enum": [
+                1
+              ],
+              "format": "uint32",
+              "maximum": 1.0,
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "earliestCursor",
+            "generation",
+            "latestCursor",
+            "requestedCursor",
+            "subscriptionId",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "$ref": "#/definitions/PublicErrorCode"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "close"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "description": "Must equal 1.",
+              "enum": [
+                1
+              ],
+              "format": "uint32",
+              "maximum": 1.0,
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "code",
+            "generation",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "$ref": "#/definitions/PublicErrorCode"
+            },
+            "correlationId": {
+              "default": null,
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "id": {
+              "default": null,
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/@-]+$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "error"
+              ],
+              "type": "string"
+            },
+            "v": {
+              "description": "Must equal 1.",
+              "enum": [
+                1
+              ],
+              "format": "uint32",
+              "maximum": 1.0,
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "code",
+            "generation",
+            "type",
+            "v"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PublicErrorCode": {
+      "enum": [
+        "bridge_protocol_incompatible",
+        "bridge_message_too_large",
+        "bridge_rate_limited",
+        "bridge_in_flight_limit",
+        "bridge_subscription_limit",
+        "bridge_deadline",
+        "bridge_cancelled",
+        "page_binding_missing",
+        "page_generation_stale",
+        "package_digest_stale",
+        "grant_revoked",
+        "grant_scope_denied",
+        "contract_not_found",
+        "contract_incompatible",
+        "schema_invalid",
+        "revision_conflict",
+        "cursor_gap",
+        "resource_handle_invalid",
+        "resource_handle_expired",
+        "resource_handle_exhausted",
+        "operation_pending",
+        "provider_unavailable",
+        "plugin_ui_isolation_unavailable"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "clientFrame": {
+      "$ref": "#/definitions/BridgeClientFrame"
+    },
+    "hostFrame": {
+      "$ref": "#/definitions/BridgeHostFrame"
+    }
+  },
+  "required": [
+    "clientFrame",
+    "hostFrame"
+  ],
+  "title": "BridgeContractV1",
+  "type": "object"
+}

@@ -1,0 +1,11 @@
+[package]
+name = "jarvis-power-core"
+version = "0.1.0"
+description = "Closed protocol and crash-safe state machine for the Jarvis power helper"
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.2"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

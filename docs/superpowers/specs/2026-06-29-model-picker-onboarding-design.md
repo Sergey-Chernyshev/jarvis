@@ -23,21 +23,23 @@
 `id`, `kind` (`stt` | `wake` | `voice` | `runtime`), человекочитаемый `label`,
 примерный размер, и какой существующий загрузчик её ставит:
 
-| id            | kind    | загрузчик                              | размер   |
-|---------------|---------|----------------------------------------|----------|
-| `whisper-turbo` | stt   | `install_whisper`                      | ~574 МБ  |
-| `qwen3-0.6b`  | stt     | `install_stt_sidecar` + `preload_qwen` | ~1 ГБ(+venv) |
-| `qwen3-1.7b`  | stt     | `install_stt_sidecar` + `preload_qwen` | ~1 ГБ(+venv) |
-| `hey_jarvis`  | wake    | `install_wakeword`                     | ~3.5 МБ  |
-| `silero`      | voice   | `install_silero`                       | ~1 ГБ    |
+| id              | kind  | загрузчик                              | размер       |
+| --------------- | ----- | -------------------------------------- | ------------ |
+| `whisper-turbo` | stt   | `install_whisper`                      | ~574 МБ      |
+| `qwen3-0.6b`    | stt   | `install_stt_sidecar` + `preload_qwen` | ~1 ГБ(+venv) |
+| `qwen3-1.7b`    | stt   | `install_stt_sidecar` + `preload_qwen` | ~1 ГБ(+venv) |
+| `hey_jarvis`    | wake  | `install_wakeword`                     | ~3.5 МБ      |
+| `silero`        | voice | `install_silero`                       | ~1 ГБ        |
 
 **Планировщик (чистая функция, тестируемая):** `plan_install(ids) -> Vec<Task>`.
+
 - Раскрывает зависимости: выбор `qwen3-*` добавляет рантайм-venv первым шагом
   (если ещё не установлен).
 - Канонический порядок: рантаймы/venv → веса → мелочь.
 - Дедуп: уже установленное не включается.
 
 **Команда `models_install(app, ids: Vec<String>)`:** один фоновый поток.
+
 - `let proxy = d.settings.proxy();` (исправленный читатель).
 - Идёт по `plan_install(ids)`; для каждой задачи зовёт её загрузчик с
   progress-замыканием, которое эмитит `model_install_progress { id, pct, state, msg }`.
@@ -52,6 +54,7 @@
 ### Frontend
 
 **Онбординг — шаг «Модели».** После ядра (хуки/транспорт) — чеклист с размерами:
+
 - ☑ Whisper large-v3-turbo (~574 МБ)
 - ☐ Qwen3-ASR + радио 0.6B / 1.7B (~1 ГБ)
 - ☑ Голосовая активация / wake-word (~3.5 МБ)

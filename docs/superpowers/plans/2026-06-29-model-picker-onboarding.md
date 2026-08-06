@@ -24,6 +24,7 @@
 ## Task 1: Чистый планировщик `plan_install` (Rust, TDD)
 
 **Files:**
+
 - Modify: `src-tauri/src/install/mod.rs` (рядом со `status()`/загрузчиками)
 - Test: тот же файл, `#[cfg(test)] mod plan_tests`
 
@@ -146,6 +147,7 @@ git commit -m "feat(install): чистый планировщик plan_install �
 ## Task 2: `installed_state()` + `run_install_task()` (Rust)
 
 **Files:**
+
 - Modify: `src-tauri/src/install/mod.rs`
 
 - [ ] **Step 1: Реализовать обёртки над статусом и загрузчиками**
@@ -197,6 +199,7 @@ git commit -m "feat(install): installed_state + run_install_task для орке
 ## Task 3: Команда `models_install` + единые события (Rust)
 
 **Files:**
+
 - Modify: `src-tauri/src/onboarding.rs`
 - Modify: `src-tauri/src/main.rs:192-200` (регистрация)
 
@@ -259,6 +262,7 @@ git commit -m "feat(onboarding): команда models_install + единые с
 ## Task 4: JS-API в `bridge.js`
 
 **Files:**
+
 - Modify: `ui/bridge.js` (рядом с другими model-install методами и подписками)
 
 - [ ] **Step 1: Добавить метод и подписки**
@@ -296,6 +300,7 @@ git commit -m "feat(ui): bridge API modelsInstall + подписки на еди
 ## Task 5: Маршрутизация прогресса по `id` в панели «Модели»
 
 **Files:**
+
 - Modify: `ui/settings2.js` (подписки в `subscribeOnce`, ~1512-1544; строки моделей ~876-908, ~991-995)
 
 - [ ] **Step 1: Подписать единые события (по id, без `activeDownload`)**
@@ -303,28 +308,34 @@ git commit -m "feat(ui): bridge API modelsInstall + подписки на еди
 В `subscribeOnce()` добавить (рядом с существующими `onSttInstall*`):
 
 ```js
-    try {
-      window.jarvis.onModelInstallProgress(({ id, step }) => {
-        if (!currentRoot || !id) return;
-        const h = currentRoot.querySelector('[data-model="' + id + '"]');
-        if (!h) return;
-        h.textContent = '';
-        if (step && step.msg) h.appendChild(el('span.loadcap', { text: step.msg }));
-        const pct = step && typeof step.pct === 'number' ? step.pct : null;
-        if (pct != null) h.appendChild(progressBar(pct));
-      });
-    } catch (e) {}
-    try {
-      window.jarvis.onModelInstallDone(({ id, ok, error }) => {
-        if (!ok) dlState[id] = { error: error || 'неизвестная ошибка (подробности в ~/.jarvis/jarvis.log)' };
-        else delete dlState[id];
-      });
-    } catch (e) {}
-    try {
-      window.jarvis.onModelsInstallAllDone(() => {
-        reRenderPane('stt'); reRenderPane('wake'); reRenderPane('voice');
-      });
-    } catch (e) {}
+try {
+  window.jarvis.onModelInstallProgress(({ id, step }) => {
+    if (!currentRoot || !id) return;
+    const h = currentRoot.querySelector('[data-model="' + id + '"]');
+    if (!h) return;
+    h.textContent = "";
+    if (step && step.msg) h.appendChild(el("span.loadcap", { text: step.msg }));
+    const pct = step && typeof step.pct === "number" ? step.pct : null;
+    if (pct != null) h.appendChild(progressBar(pct));
+  });
+} catch (e) {}
+try {
+  window.jarvis.onModelInstallDone(({ id, ok, error }) => {
+    if (!ok)
+      dlState[id] = {
+        error:
+          error || "неизвестная ошибка (подробности в ~/.jarvis/jarvis.log)",
+      };
+    else delete dlState[id];
+  });
+} catch (e) {}
+try {
+  window.jarvis.onModelsInstallAllDone(() => {
+    reRenderPane("stt");
+    reRenderPane("wake");
+    reRenderPane("voice");
+  });
+} catch (e) {}
 ```
 
 - [ ] **Step 2: Перевести кнопки строк на `modelsInstall([id])`**
@@ -332,11 +343,12 @@ git commit -m "feat(ui): bridge API modelsInstall + подписки на еди
 В `modelRow` (≈882) заменить обработчик клика кнопки: вместо `activeDownload = m.id; … await safe(action.run, …)` использовать:
 
 ```js
-      btn.addEventListener('click', async () => {
-        delete dlState[m.id];
-        btn.disabled = true; btn.replaceChildren(document.createTextNode('Качаю…'));
-        await safe(() => window.jarvis.modelsInstall([m.id]), null);
-      });
+btn.addEventListener("click", async () => {
+  delete dlState[m.id];
+  btn.disabled = true;
+  btn.replaceChildren(document.createTextNode("Качаю…"));
+  await safe(() => window.jarvis.modelsInstall([m.id]), null);
+});
 ```
 
 Аналогично для wake-кнопки (≈993): `await safe(() => window.jarvis.modelsInstall(['hey_jarvis']), null)`. Поле `activeDownload` и `finishDownload` больше не используются этим путём — оставить старые `onSttInstallDone`/`onWakeInstallDone` подписки можно, но новые `done` маршрутизируют по id.
@@ -346,17 +358,21 @@ git commit -m "feat(ui): bridge API modelsInstall + подписки на еди
 В `render*` секции моделей (где строятся группы, ≈832): для не-установленных моделей добавить чекбокс в строку и кнопку группы. Минимально:
 
 ```js
-    const selected = new Set();
-    function bulkBar(groupIds) {
-      const b = el('button.btn.sm', null, [iconSpan('download'), document.createTextNode('Скачать выбранное')]);
-      b.addEventListener('click', async () => {
-        const ids = groupIds.filter((id) => selected.has(id));
-        if (!ids.length) return;
-        b.disabled = true; b.replaceChildren(document.createTextNode('Качаю…'));
-        await safe(() => window.jarvis.modelsInstall(ids), null);
-      });
-      return b;
-    }
+const selected = new Set();
+function bulkBar(groupIds) {
+  const b = el("button.btn.sm", null, [
+    iconSpan("download"),
+    document.createTextNode("Скачать выбранное"),
+  ]);
+  b.addEventListener("click", async () => {
+    const ids = groupIds.filter((id) => selected.has(id));
+    if (!ids.length) return;
+    b.disabled = true;
+    b.replaceChildren(document.createTextNode("Качаю…"));
+    await safe(() => window.jarvis.modelsInstall(ids), null);
+  });
+  return b;
+}
 ```
 
 В `modelRow` для не-установленной модели добавить перед кнопкой чекбокс, который кладёт/убирает `m.id` в `selected`. Кнопку `bulkBar([...не-установленные id...])` положить в заголовок группы (≈835).
@@ -378,6 +394,7 @@ git commit -m "feat(ui): мультивыбор моделей + прогрес�
 ## Task 6: Шаг выбора моделей в онбординге
 
 **Files:**
+
 - Modify: `ui/onboarding.html` (новая секция чеклиста)
 - Modify: `ui/onboarding.js` (рендер чеклиста, кнопка «Скачать выбранное», прогресс по id)
 
@@ -387,12 +404,29 @@ git commit -m "feat(ui): мультивыбор моделей + прогрес�
 
 ```html
 <div id="models" hidden>
-  <div class="models-title">Модели (можно скачать сейчас или позже в настройках)</div>
-  <label class="mrow"><input type="checkbox" id="m-whisper" checked> Whisper large-v3-turbo <span class="msize">~574 МБ</span></label>
-  <label class="mrow"><input type="checkbox" id="m-qwen"> Qwen3-ASR <span class="msize">~1 ГБ</span>
-    <select id="m-qwen-size"><option value="qwen3-0.6b">0.6B</option><option value="qwen3-1.7b">1.7B</option></select></label>
-  <label class="mrow"><input type="checkbox" id="m-wake" checked> Голосовая активация <span class="msize">~3.5 МБ</span></label>
-  <label class="mrow"><input type="checkbox" id="m-silero" checked> Голос Silero <span class="msize">~1 ГБ</span></label>
+  <div class="models-title">
+    Модели (можно скачать сейчас или позже в настройках)
+  </div>
+  <label class="mrow"
+    ><input type="checkbox" id="m-whisper" checked /> Whisper large-v3-turbo
+    <span class="msize">~574 МБ</span></label
+  >
+  <label class="mrow"
+    ><input type="checkbox" id="m-qwen" /> Qwen3-ASR
+    <span class="msize">~1 ГБ</span>
+    <select id="m-qwen-size">
+      <option value="qwen3-0.6b">0.6B</option>
+      <option value="qwen3-1.7b">1.7B</option>
+    </select></label
+  >
+  <label class="mrow"
+    ><input type="checkbox" id="m-wake" checked /> Голосовая активация
+    <span class="msize">~3.5 МБ</span></label
+  >
+  <label class="mrow"
+    ><input type="checkbox" id="m-silero" checked /> Голос Silero
+    <span class="msize">~1 ГБ</span></label
+  >
   <button id="models-go" class="btn">Скачать выбранное</button>
   <div id="models-progress"></div>
 </div>
@@ -410,7 +444,8 @@ const modelsProg = document.getElementById("models-progress");
 function selectedModelIds() {
   const ids = [];
   if (document.getElementById("m-whisper").checked) ids.push("whisper-turbo");
-  if (document.getElementById("m-qwen").checked) ids.push(document.getElementById("m-qwen-size").value);
+  if (document.getElementById("m-qwen").checked)
+    ids.push(document.getElementById("m-qwen-size").value);
   if (document.getElementById("m-wake").checked) ids.push("hey_jarvis");
   if (document.getElementById("m-silero").checked) ids.push("silero");
   return ids;
@@ -418,23 +453,37 @@ function selectedModelIds() {
 modelsGo.addEventListener("click", () => {
   const ids = selectedModelIds();
   if (!ids.length) return;
-  modelsGo.disabled = true; modelsGo.textContent = "Качаю…";
+  modelsGo.disabled = true;
+  modelsGo.textContent = "Качаю…";
   invoke("models_install", { ids });
 });
 listen("model_install_progress", (e) => {
   const { id, step } = e.payload;
   let row = modelsProg.querySelector('[data-mid="' + id + '"]');
-  if (!row) { row = document.createElement("div"); row.dataset.mid = id; modelsProg.appendChild(row); }
+  if (!row) {
+    row = document.createElement("div");
+    row.dataset.mid = id;
+    modelsProg.appendChild(row);
+  }
   const pct = step && typeof step.pct === "number" ? step.pct : null;
-  row.textContent = id + ": " + (step.msg || "") + (pct != null ? " " + pct + "%" : "");
+  row.textContent =
+    id + ": " + (step.msg || "") + (pct != null ? " " + pct + "%" : "");
 });
 listen("model_install_done", (e) => {
   const { id, ok, error } = e.payload;
   let row = modelsProg.querySelector('[data-mid="' + id + '"]');
-  if (!row) { row = document.createElement("div"); row.dataset.mid = id; modelsProg.appendChild(row); }
-  row.textContent = id + ": " + (ok ? "готово ✓" : "ошибка — " + (error || "см. логи"));
+  if (!row) {
+    row = document.createElement("div");
+    row.dataset.mid = id;
+    modelsProg.appendChild(row);
+  }
+  row.textContent =
+    id + ": " + (ok ? "готово ✓" : "ошибка — " + (error || "см. логи"));
 });
-listen("models_install_all_done", () => { modelsGo.disabled = false; modelsGo.textContent = "Скачать выбранное"; });
+listen("models_install_all_done", () => {
+  modelsGo.disabled = false;
+  modelsGo.textContent = "Скачать выбранное";
+});
 ```
 
 В `showDone()` добавить `modelsEl.hidden = false;` (показать чеклист после ядра).

@@ -1,22 +1,24 @@
 /* Мост window.jarvis: тот же контракт, что у Electron-preload, но поверх
- * Tauri IPC. renderer.js не знает, что под ним сменился рантайм.
- *
- * Каналы 'ns:method' стали командами 'ns_method'; payload событий — без
- * изменений. Требует withGlobalTauri (см. tauri.conf.json). */
+ * явного bundled Tauri transport. renderer.js не знает, что под ним сменился
+ * рантайм; raw invoke после bootstrap наружу не публикуется. */
 
 (() => {
-  const { invoke } = window.__TAURI__.core;
-  const { listen } = window.__TAURI__.event;
+  const transport = globalThis.__JARVIS_CORE_TRANSPORT__;
+  if (!transport) throw new Error('jarvis_core_transport_missing');
+  const { invoke, listen, getCurrentWindow } = transport;
+  delete globalThis.__JARVIS_CORE_TRANSPORT__;
 
-  const on = (event, cb) => { listen(event, (e) => cb(e.payload)); };
+  const on = (event, cb) => listen(event, (e) => cb(e.payload));
 
-  // собственный светофор оконного режима: декораций нет, кнопки рисуем сами
-  const self = () => window.__TAURI__.window.getCurrentWindow();
+  // собственный светофор оконного режима: декораций нет, кнопки рисуем сами.
+  // Окно берём из транспорта: глобальный Tauri-объект в проде не используется.
+  const self = () => getCurrentWindow();
 
-  window.jarvis = {
+  window.jarvis = Object.freeze({
     onState: (cb) => on('state', cb),
     onShown: (cb) => on('panel-shown', () => cb()),
     onOpenSession: (cb) => on('open-session', cb),
+    onOpenAgentVm: (cb) => on('open-agent-vm', cb),
     getState: () => invoke('state_get'),
     clearFinished: () => invoke('state_clear'),
     hidePanel: () => invoke('panel_hide'),
@@ -35,6 +37,8 @@
     // светофор горит только у активного окна — как у системных кнопок
     onWinFocus: (cb) => { self().onFocusChanged(({ payload }) => cb(!!payload)); },
     setSettings: (patch) => invoke('settings_set', { patch }),
+    settingsHealth: () => invoke('settings_health'),
+    settingsRepair: () => invoke('settings_repair'),
     openChat: (sessionId) => invoke('chat_open', { sessionId }),
     closeChat: () => invoke('chat_close'),
     summarizeTurn: (sessionId, turnKey) => invoke('chat_summarize', { sessionId, turnKey }),
@@ -74,6 +78,47 @@
     onPlugins: (cb) => on('plugins', cb),
     getPlugins: () => invoke('plugins_status'),
     pluginCmd: (id, cmd, args) => invoke('plugins_cmd', { id, cmd, args: args ?? null }),
+    pluginManagerRequest: (request) => invoke('plugin_manager_request', { request }),
+    onEntities: (cb) => on('entities', cb),
+    getEntities: () => invoke('entities_get'),
+    getAgentVmProfiles: () => invoke('agent_vm_profiles_get'),
+    setAgentVmProfile: (cwd, startWithJarvis) =>
+      invoke('agent_vm_profile_set', { cwd, startWithJarvis: !!startWithJarvis }),
+    getProjectManagerState: () => invoke('project_manager_state_get'),
+    pickProjectManagerFolder: () => invoke('project_manager_folder_pick'),
+    setProjectManagerFavorite: (cwd, favorite) =>
+      invoke('project_manager_favorite_set', { cwd, favorite: !!favorite }),
+    moveProjectManagerFavorite: (projectId, direction) =>
+      invoke('project_manager_favorite_move', { projectId, direction }),
+    setProjectManagerView: (view) => invoke('project_manager_view_set', { view }),
+    setAgentVmFocus: (projectId, runId) =>
+      invoke('agent_vm_focus', { projectId: projectId || null, runId: runId || null }),
+    agentVmOperationAck: (requestId) => invoke('agent_vm_operation_ack', { requestId }),
+    getAgentVmCommands: (projectId, cwd, backend) =>
+      invoke('agent_vm_commands_get', { projectId, cwd, backend }),
+    agentVmTerminalEnsure: (projectId, backend, cols, rows) =>
+      invoke('agent_vm_terminal_ensure', { projectId, backend, cols, rows }),
+    agentVmTerminalSnapshot: (projectId, backend) =>
+      invoke('agent_vm_terminal_snapshot', { projectId, backend }),
+    agentVmTerminalInput: (projectId, backend, text, submit = true) =>
+      invoke('agent_vm_terminal_input', { projectId, backend, text, submit: !!submit }),
+    agentVmTerminalKey: (projectId, backend, key) =>
+      invoke('agent_vm_terminal_key', { projectId, backend, key }),
+    agentVmTerminalUpload: (projectId, backend, dataBase64, extension) =>
+      invoke('agent_vm_terminal_upload', {
+        projectId,
+        backend,
+        dataBase64,
+        extension,
+      }),
+    agentVmTerminalResize: (projectId, backend, cols, rows) =>
+      invoke('agent_vm_terminal_resize', { projectId, backend, cols, rows }),
+    agentVmTerminalStop: (projectId, backend) =>
+      invoke('agent_vm_terminal_stop', { projectId, backend }),
+    agentVmFileRead: (runId, path) => invoke('agent_vm_file_read', { runId, path }),
+    agentVmFileDiff: (runId, path) => invoke('agent_vm_file_diff', { runId, path }),
+    agentVmFileOpen: (runId, path, reveal) =>
+      invoke('agent_vm_file_open', { runId, path, reveal: !!reveal }),
     getUsage: (period) => invoke('usage_summary', { period }),
     getLimit: () => invoke('limit_get'),
     onLimitState: (cb) => on('limit-state', cb),
@@ -144,7 +189,7 @@
     onAudioState: (cb) => on('audio_state', cb),
     onWake: (cb) => on('wake', cb),
     onWakeInstallDone: (cb) => on('wake_install_done', cb),
-  };
+  });
 
   // navigator.clipboard в WKWebView капризен (secure context, жесты) —
   // подменяем на надёжный плагин Tauri, API тот же.

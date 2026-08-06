@@ -3,11 +3,14 @@
   'use strict';
 
   const State = window.JarvisOnboardingState;
-  const tauri = window.__TAURI__;
-  const invoke = tauri && tauri.core ? tauri.core.invoke : async () => null;
-  const listen = tauri && tauri.event ? tauri.event.listen : async () => () => {};
+  const transport = globalThis.__JARVIS_CORE_TRANSPORT__;
+  if (!transport) throw new Error('jarvis_core_transport_missing');
+  const { invoke, listen } = transport;
+  delete globalThis.__JARVIS_CORE_TRANSPORT__;
 
-  // тема и краска: окно живёт вне общего моста, поэтому подписывается само
+  // тема и краска: окно живёт вне общего моста, поэтому подписывается само.
+  // Идёт через тот же transport, что и остальной онбординг, а не через
+  // глобальный Tauri-объект: raw invoke наружу не публикуется.
   window.jarvis = Object.assign(window.jarvis || {}, {
     getSettings: () => invoke('settings_get'),
     setSettings: (patch) => invoke('settings_set', { patch }),
@@ -26,6 +29,7 @@
     capabilities: [],
     warnings: [],
     proxyConfigured: false,
+    configHealth: { status: 'healthy', path: '', issues: [], repairable: false, restartRequired: false },
     job: { state: 'idle', kind: '', tasks: [], steps: [], failures: [] },
   };
   const modelMeta = [
@@ -39,6 +43,8 @@
   let screen = 'welcome';
   let proxyValue = '';
   let proxyTouched = false;
+  let configBypassed = false;
+  let configRepair = null;
   const selection = { whisper: false, qwen: false, wake: false, silero: false, qwenSize: 'qwen3-0.6b' };
 
   function h(tag, attrs, children) {
@@ -89,11 +95,58 @@
     return h('ul', { class: 'warnings' }, values.map((value) => h('li', { text: value })));
   }
 
+  function shortPath(value) {
+    return String(value || '').replace(/^\/Users\/[^/]+/, '~');
+  }
+
+  function renderConfig() {
+    const health = snapshot.configHealth || EMPTY.configHealth;
+    const issues = Array.isArray(health.issues) ? health.issues : [];
+    const nodes = [
+      eyebrow('Config check'),
+      ...heading(
+        'Проверь конфигурацию Jarvis',
+        'Нашёл ошибки в settings.json. Jarvis уже работает на безопасных значениях, а исправление затронет только повреждённые известные поля.',
+      ),
+      h('div', { class: 'config-path', text: shortPath(health.path) }),
+      h('div', { class: 'config-issues' }, issues.map((item) => h('div', { class: 'config-issue' }, [
+        h('span', { class: 'status-icon', text: '!' }),
+        h('div', {}, [
+          h('div', { class: 'item-title', text: item.path || '$' }),
+          h('div', { class: 'item-detail', text: item.message || 'Некорректное значение' }),
+        ]),
+      ]))),
+      h('div', {
+        class: 'notice',
+        text: 'Перед изменением Jarvis сохранит точную резервную копию. Валидные, неизвестные и plugin-настройки останутся без изменений.',
+      }),
+    ];
+    if (configRepair && configRepair.error) {
+      nodes.push(h('div', { class: 'inline-error', text: configRepair.error }));
+    }
+    return nodes;
+  }
+
+  function renderConfigRepaired() {
+    return [
+      eyebrow('Config repaired'),
+      h('div', { class: 'compact-status ok', text: '✓', 'aria-hidden': 'true' }),
+      ...heading(
+        'Конфигурация исправлена',
+        'Проверка пройдена. Перезапусти Jarvis, чтобы голос, hotkeys и сервисы перечитали настройки целиком.',
+      ),
+      h('div', { class: 'backup-card' }, [
+        h('span', { text: 'Резервная копия' }),
+        h('code', { text: shortPath(configRepair && configRepair.backupPath) }),
+      ]),
+    ];
+  }
+
   function renderWelcome() {
     const proxyWrap = h('div', { hidden: '' });
     const proxyButton = h('button', {
       class: 'proxy-toggle', type: 'button',
-      text: snapshot && snapshot.proxyConfigured ? 'Сетевой прокси сохранён · изменить' : 'Нужен корпоративный прокси?',
+      text: snapshot && snapshot.proxyConfigured ? 'Прокси сохранён · изменить' : 'Нужен прокси?',
       onclick: () => {
         proxyWrap.hidden = !proxyWrap.hidden;
         if (!proxyWrap.hidden) proxyWrap.querySelector('input').focus();
@@ -109,7 +162,7 @@
     return [
       eyebrow('System readiness'),
       h('div', { class: 'hero-mark', text: 'J', 'aria-hidden': 'true' }),
-      ...heading('Один центр управления агентами', 'Jarvis соединит уже установленные Claude Code и Codex с уведомлениями, диктовкой и живыми сессиями. Сначала — только быстрое локальное ядро.'),
+      ...heading('Один центр управления агентами', 'Подключим установленные Claude Code и Codex к уведомлениям, диктовке и живым сессиям. Сначала проверим только локальную часть.'),
       h('div', { class: 'system-note', text: 'Private · local · models on demand' }),
       proxyButton,
       proxyWrap,
@@ -120,7 +173,7 @@
     return [
       eyebrow('Reading local signals'),
       h('div', { class: 'hero-mark', text: 'J', 'aria-hidden': 'true' }),
-      ...heading('Собираю состояние системы', 'Проверяю CLI, hook-контракты, runtime socket, transport и локальные модели. Никаких сетевых запросов на этом шаге.'),
+      ...heading('Проверяю локальную систему', 'Ищу агентов, события, локальный канал связи и установленные модели. Сеть на этом шаге не используется.'),
       h('div', { class: 'progress-card', role: 'status', 'aria-live': 'polite' }, [
         h('div', { class: 'progress-head' }, [h('span', { class: 'spinner', 'aria-hidden': 'true' }), h('span', { text: 'Локальная диагностика' })]),
         h('div', { class: 'progress-line', text: 'Сверяю фактическое состояние, а не сохранённый флаг установки' }),
@@ -132,7 +185,7 @@
   function renderAgents() {
     const nodes = [
       eyebrow(snapshot.coreReady ? 'Core online' : 'Connection check'),
-      ...heading('Подключим то, что уже есть', 'Jarvis регистрирует lifecycle hooks отдельно для каждого найденного агента. Чужие hooks сохраняются.'),
+      ...heading('Подключим то, что уже есть', 'Jarvis добавит свои события для каждого найденного агента. Сторонние настройки останутся без изменений.'),
       h('div', { class: 'section-title', text: 'Агенты' }),
       h('div', { class: 'list' }, (snapshot.agents || []).map(readinessItem)),
       h('div', { class: 'section-title', text: 'Транспорт' }),
@@ -213,14 +266,15 @@
       disk: ['Недостаточно места на диске', 'Освободи место и повтори. Частичный файл не считается готовой моделью и не повредит runtime.'],
       permission: ['Нужно подтверждение доступа', 'Claude/Codex могут ждать trust для hooks, а macOS — Accessibility или Microphone. Jarvis не обходит эти разрешения скрыто.'],
       hooks: ['Контур hooks повреждён', 'Jarvis перепишет только собственные регистрации; сторонние hooks останутся нетронутыми.'],
-      unknown: ['Модуль ответил неожиданно', 'Рабочая часть системы сохранена. Повтор идемпотентен, точная причина остаётся ниже.'],
+      environment: ['Не хватает данных окружения', 'Jarvis не получил системный путь, необходимый для безопасной настройки агентов. Ниже указана точная причина.'],
+      unknown: ['Не удалось завершить настройку', 'Уже готовые части сохранены. Причина указана ниже; этот шаг можно безопасно повторить.'],
     }[kind || 'unknown'];
     return [
       eyebrow(`Recovery · ${kind || 'unknown'}`),
-      h('div', { class: 'hero-mark', text: '!', 'aria-hidden': 'true' }),
+      h('div', { class: 'compact-status', text: '!', 'aria-hidden': 'true' }),
       ...heading(recovery[0], recovery[1]),
       warningList(failures.length ? failures : snapshot.warnings),
-      h('div', { class: 'notice', text: 'Проверь сеть, PATH и доступность Claude/Codex. Секреты прокси и токены в этот экран и operational logs не выводятся.' }),
+      h('div', { class: 'notice', text: 'Данные доступа здесь не показываются. Повтор изменяет только собственные файлы Jarvis и его регистрации.' }),
     ];
   }
 
@@ -249,6 +303,8 @@
   function effectiveScreen() {
     const derived = State.derive(snapshot);
     if (derived.screen === 'checking') return 'checking';
+    if (configRepair && !configRepair.error) return 'config-repaired';
+    if (derived.screen === 'config' && !configBypassed) return 'config';
     if (derived.screen === 'installing' || derived.screen === 'degraded') return derived.screen;
     if (screen === 'agents' && snapshot.coreReady) return 'agents';
     if ((screen === 'capabilities' || screen === 'ready') && !snapshot.coreReady) return 'agents';
@@ -256,7 +312,7 @@
   }
 
   function setRail(active) {
-    const logical = active === 'installing'
+    const logical = (active === 'config' || active === 'config-repaired') ? 'welcome' : active === 'installing'
       ? ((snapshot && snapshot.job && snapshot.job.kind) === 'models' ? 'capabilities' : 'agents')
       : (active === 'degraded' ? ((snapshot && snapshot.job && snapshot.job.kind) === 'models' ? 'capabilities' : 'agents') : active);
     const order = ['welcome', 'agents', 'capabilities', 'ready'];
@@ -265,7 +321,7 @@
     for (const button of rail.querySelectorAll('.rail-step')) {
       const itemIndex = order.indexOf(button.dataset.screen);
       button.dataset.state = itemIndex < index ? 'done' : (itemIndex === index ? 'active' : 'pending');
-      button.disabled = effectiveScreen() === 'installing';
+      button.disabled = ['installing', 'config', 'config-repaired'].includes(effectiveScreen());
     }
   }
 
@@ -278,6 +334,13 @@
       primary.textContent = 'Проверяю…';
       primary.disabled = true;
       secondary.hidden = true;
+    } else if (active === 'config') {
+      primary.textContent = configRepair && configRepair.error ? 'Попробовать ещё раз' : 'Исправить конфиг';
+      primary.disabled = !(snapshot.configHealth && snapshot.configHealth.repairable);
+      secondary.textContent = 'Продолжить без исправления';
+    } else if (active === 'config-repaired') {
+      primary.textContent = 'Перезапустить Jarvis';
+      secondary.textContent = 'Позже';
     } else if (active === 'welcome') {
       primary.textContent = 'Проверить систему';
       secondary.hidden = true;
@@ -308,6 +371,8 @@
     const active = effectiveScreen();
     let nodes;
     if (active === 'checking') nodes = renderChecking();
+    else if (active === 'config') nodes = renderConfig();
+    else if (active === 'config-repaired') nodes = renderConfigRepaired();
     else if (active === 'welcome') nodes = renderWelcome();
     else if (active === 'agents') nodes = renderAgents();
     else if (active === 'capabilities') nodes = renderCapabilities();
@@ -336,6 +401,25 @@
 
   primary.addEventListener('click', async () => {
     const active = effectiveScreen();
+    if (active === 'config') {
+      primary.disabled = true;
+      primary.dataset.busy = 'true';
+      primary.textContent = 'Исправляю…';
+      const outcome = await invoke('settings_repair').catch((error) => ({ error: String(error) }));
+      delete primary.dataset.busy;
+      if (outcome && !outcome.error) {
+        configRepair = outcome;
+        snapshot = { ...snapshot, configHealth: outcome.health || EMPTY.configHealth };
+      } else {
+        configRepair = { error: (outcome && outcome.error) || 'Не удалось исправить конфиг' };
+      }
+      render();
+      return;
+    }
+    if (active === 'config-repaired') {
+      await invoke('app_relaunch').catch(() => {});
+      return;
+    }
     if (active === 'welcome') {
       screen = 'agents';
       render();
@@ -381,7 +465,14 @@
 
   secondary.addEventListener('click', async () => {
     const active = effectiveScreen();
-    if (active === 'agents') screen = 'welcome';
+    if (active === 'config') {
+      configBypassed = true;
+      screen = snapshot.coreReady ? 'capabilities' : 'welcome';
+    } else if (active === 'config-repaired') {
+      await invoke('onboarding_open_panel').catch(() => {});
+      await closeWindow();
+      return;
+    } else if (active === 'agents') screen = 'welcome';
     else if (active === 'capabilities') screen = 'agents';
     else if (active === 'installing') return closeWindow();
     else if (active === 'degraded' || active === 'ready') {

@@ -1,226 +1,307 @@
 <!doctype html>
 <html lang="ru">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:" />
-  <title>Jarvis · Инициализация</title>
-  <link rel="stylesheet" href="./theme.css" />
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost" />
+    <title>Jarvis · Инициализация</title>
+    <link rel="stylesheet" href="./theme.css" />
+    <style>
+          /* Онбординг · дизайн «Клевер». Тот же язык, что панель: бумажная карточка,
+             одна краска, строки 52px, никаких свечений и сканлайнов. */
+
+          /* скругление окна онбординга: у него нет титульной полосы, поэтому
+             радиус задаётся здесь, а не берётся из --r-panel панели */
+          :root { --window-radius: 18px; }
+
+          * { box-sizing: border-box; }
+          html, body {
+            width: 100%; height: 100%; margin: 0; overflow: hidden;
+            border-radius: var(--window-radius); background: transparent;
+          }
+          body {
+            overflow: hidden;
+            color: var(--ink);
+            font-family: var(--font);
+            font-size: 13.5px;
+            -webkit-font-smoothing: antialiased;
+            user-select: none;
+          }
+          button, input, select { font: inherit; }
+          button { color: inherit; }
+          [hidden] { display: none !important; }
+          .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+          .shell {
+            position: relative;
+            isolation: isolate;
+            height: 100vh;
+            display: grid;
+            grid-template-rows: 44px minmax(0, 1fr) 76px;
+            overflow: hidden;
+            border: 0;
+            border-radius: var(--r-panel);
+            background: var(--paper);
+            box-shadow: var(--shadow-panel);
+          }
+          .shell::before, .shell::after { content: none; }
+
+          .titlebar { position: relative; display: flex; align-items: center; padding: 0 20px; }
+          .brand {
+            display: flex; align-items: center; gap: 9px;
+            color: var(--ink-mute); font: 500 12.5px/1 var(--font); letter-spacing: 0;
+          }
+          .brand-signal { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+          .brand span:last-child { display: none; }
+          .close {
+            position: absolute; top: 15px; right: 16px; width: 14px; height: 14px; padding: 0;
+            border: 0; border-radius: 50%; background: var(--surface-2); cursor: default;
+            transition: background .16s;
+          }
+          .close:hover { background: var(--danger); }
+
+          .workspace { min-height: 0; display: grid; grid-template-rows: 30px minmax(0, 1fr); padding: 0 28px; }
+
+          /* лента этапов: четыре точки на волосяной нити, пройденное — краской */
+          .rail { position: relative; width: 190px; justify-self: center; display: grid; grid-template-columns: repeat(4, 1fr); align-items: start; padding-top: 5px; }
+          .rail::before {
+            content: ""; position: absolute; left: 12.5%; right: 12.5%; top: 9px; height: 1px;
+            background: linear-gradient(90deg, var(--accent) var(--rail-fill, 0%), var(--line-strong) var(--rail-fill, 0%));
+            transition: background .45s cubic-bezier(.2,.8,.2,1);
+          }
+          .rail-step {
+            z-index: 1; min-width: 0; display: grid; justify-items: center;
+            padding: 0; border: 0; background: none; color: var(--ink-faint); cursor: default;
+          }
+          .rail-dot {
+            width: 11px; height: 11px; display: grid; place-items: center;
+            border: 1.5px solid var(--line-strong); border-radius: 50%;
+            background: var(--paper); color: transparent; font-size: 0; transition: .22s ease;
+          }
+          .rail-copy { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+          .rail-step[data-state="active"] { color: var(--accent-text); }
+          .rail-step[data-state="active"] .rail-dot { border-color: var(--accent); background: var(--accent); }
+          .rail-step[data-state="done"] { color: var(--ink-mute); }
+          .rail-step[data-state="done"] .rail-dot { border-color: var(--accent); background: var(--accent-soft); }
+
+          .content {
+            min-width: 0; min-height: 0; overflow: auto; padding: 18px 24px 30px;
+            scrollbar-width: none;
+          }
+          .content::-webkit-scrollbar { width: 0; }
+          .content[data-screen="welcome"], .content[data-screen="checking"], .content[data-screen="ready"],
+          .content[data-screen="config-repaired"] {
+            display: flex; flex-direction: column; align-items: center; text-align: center; padding-top: 34px;
+          }
+          .content[data-screen="welcome"] .lead, .content[data-screen="checking"] .lead, .content[data-screen="ready"] .lead { max-width: 340px; }
+          .content.enter { animation: enter .3s cubic-bezier(.2,.75,.2,1) both; }
+          .eyebrow {
+            display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
+            color: var(--accent-text); font: 500 12.5px/1.2 var(--font); letter-spacing: 0; text-transform: none;
+          }
+          .pulse { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+          h1 { margin: 0; max-width: 360px; font: 600 22px/1.25 var(--font); letter-spacing: -.025em; text-wrap: pretty; }
+          .lead { margin: 10px 0 0; max-width: 360px; color: var(--ink-mute); font-size: 13.5px; line-height: 1.6; text-wrap: pretty; }
+
+          /* герой — тональный круг, без орбит и свечения */
+          .hero-mark, .ready-orbit {
+            position: relative; width: 64px; height: 64px; margin: 6px 0 20px; display: grid; place-items: center;
+            border: 0; border-radius: 50%;
+            background: var(--accent-soft);
+            color: var(--accent-text); font: 600 22px/1 var(--font);
+          }
+          .hero-mark::before, .ready-orbit::before, .hero-mark::after, .ready-orbit::after { content: none; }
+          .ready-orbit { color: var(--on-accent); background: var(--accent); }
+
+          .facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; width: 100%; margin-top: 24px; }
+          .fact { min-width: 0; padding: 0; }
+          .fact + .fact { border-left: 0; }
+          .fact b { display: block; color: var(--ink); font: 600 13px/1.3 var(--font); letter-spacing: -.01em; }
+          .fact span { display: block; margin-top: 4px; color: var(--ink-mute); font-size: 12px; line-height: 1.45; }
+          .system-note { margin-top: 24px; color: var(--ink-faint); font: 400 12px/1.5 var(--font); letter-spacing: 0; text-transform: none; }
+          .shortcut { margin-top: 26px; display: flex; align-items: center; gap: 10px; color: var(--ink-mute); font-size: 12.5px; }
+          .shortcut kbd {
+            min-width: 38px; padding: 5px 9px; border: 0; border-radius: var(--r-key);
+            color: var(--ink-mute); background: var(--surface); font: 500 12px/1 var(--font);
+          }
+
+          .section-title { margin: 20px 0 2px; color: var(--ink-mute); font: 500 12.5px/1.3 var(--font); letter-spacing: 0; text-transform: none; }
+          .list { display: grid; }
+          /* строка модуля — как строка настроек: 52px и волосяной стык */
+          .item {
+            display: grid; grid-template-columns: 26px minmax(0,1fr) auto; gap: 12px; align-items: center;
+            min-height: var(--h-srow); padding: 8px 2px; border-bottom: 1px solid var(--line); background: transparent;
+          }
+          .status-icon, .cap-check {
+            width: 22px; height: 22px; display: grid; place-items: center;
+            border: 0; border-radius: 50%;
+            color: var(--warn); background: var(--warn-soft); font: 600 11px/1 var(--font);
+          }
+          .item[data-ready="true"] .status-icon { color: var(--accent-text); background: var(--accent-soft); }
+          .item-title { font-size: 14px; font-weight: 500; }
+          .item-detail { margin-top: 2px; color: var(--ink-mute); font-size: 12.5px; line-height: 1.45; }
+          .badge { display: none; }
+          .item[data-ready="true"] .badge { color: var(--accent-text); }
+
+          .capability { position: relative; display: block; cursor: default; }
+          .capability input { position: absolute; opacity: 0; pointer-events: none; }
+          .capability .item { transition: padding .18s, background .18s; }
+          .capability input:focus-visible + .item { outline: 1px solid var(--accent); outline-offset: 2px; }
+          .capability input:checked + .item { padding-left: 10px; padding-right: 8px; background: var(--accent-soft); }
+          .capability input:disabled + .item { cursor: default; opacity: .7; }
+          .cap-check { background: var(--surface); color: transparent; border-radius: 7px; }
+          .capability input:checked + .item .cap-check { color: var(--on-accent); background: var(--accent); }
+          .capability input:disabled + .item .cap-check { color: var(--on-accent); background: var(--accent); }
+          .cap-side { text-align: right; }
+          .cap-side b { display: block; color: var(--ink-mute); font: 500 12px/1.3 var(--font); }
+          .qwen-size { display: inline-block; margin-top: 4px; padding: 3px 8px; border: 0; border-radius: 6px; background: var(--surface); color: var(--ink-mute); font-size: 11.5px; }
+
+          .notice { position: relative; margin-top: 14px; padding: 2px 0 2px 16px; border: 0; background: none; color: var(--ink-mute); font-size: 12.5px; line-height: 1.55; }
+          .notice::before { content: "·"; position: absolute; left: 2px; top: -1px; color: var(--warn); font: 600 14px/1 var(--font); }
+          .warnings { margin: 12px 0 0; padding: 6px 0 6px 16px; border: 0; border-left: 2px solid var(--danger); background: none; color: var(--danger); font-size: 12.5px; line-height: 1.55; }
+
+          .progress-card { position: relative; margin-top: 22px; padding: 16px 0 14px; border-top: 1px solid var(--line); border-bottom: 0; overflow: hidden; }
+          .content[data-screen="checking"] .progress-card { width: 100%; max-width: 340px; text-align: left; }
+          .progress-card::after { content: none; }
+          .progress-head { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 500; }
+          .spinner { width: 14px; height: 14px; border: 1.5px solid var(--surface-2); border-top-color: var(--accent); border-radius: 50%; animation: orbit .75s linear infinite; }
+          .progress-line { margin-top: 8px; color: var(--ink-mute); font-size: 12.5px; line-height: 1.5; }
+          .progress-track { height: 4px; margin-top: 12px; border-radius: 2px; overflow: hidden; background: var(--surface-2); }
+          .progress-fill { height: 100%; width: var(--pct, 12%); border-radius: 2px; background: var(--accent); transition: width .28s ease; }
+
+          .proxy-toggle { margin-top: 14px; padding: 0; border: 0; background: none; color: var(--accent-text); font-size: 12.5px; cursor: default; text-decoration: underline; text-underline-offset: 2px; }
+          .proxy-field {
+            width: 100%; height: 40px; margin-top: 10px; padding: 0 14px; border: 0;
+            border-radius: var(--r-chip); outline: none;
+            box-shadow: inset 0 0 0 1.5px var(--line-strong);
+            background: var(--paper); color: var(--ink); font-size: 13.5px; user-select: text;
+          }
+          .proxy-field:focus { box-shadow: inset 0 0 0 1.5px var(--accent); }
+
+          .footer {
+            z-index: 3; display: flex; align-items: center; padding: 0 28px;
+            border-top: 1px solid var(--line); background: var(--paper);
+          }
+          .footer-actions { width: 100%; display: flex; gap: 8px; }
+          .btn {
+            min-height: 44px; padding: 0 20px; border: 0; border-radius: var(--r-card);
+            background: var(--accent-soft); color: var(--ink); cursor: default;
+            font: 500 14.5px/1 var(--font); letter-spacing: 0;
+            transition: filter .16s, background .16s;
+          }
+          .btn:hover:not(:disabled) { filter: brightness(.97); }
+          .btn.primary { flex: 1; background: var(--accent); color: var(--on-accent); font-weight: 600; }
+          .btn.primary:hover:not(:disabled) { filter: brightness(1.06); }
+          .btn:disabled { opacity: 1; cursor: default; background: var(--surface); color: var(--ink-faint); }
+          .btn.primary:disabled { background: var(--surface); color: var(--ink-faint); }
+          .btn:focus-visible, .close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+          .compact-status {
+            width: 38px; height: 38px; margin: 2px 0 15px; display: grid; place-items: center;
+            border: 1px solid rgba(255,127,139,.34); border-radius: 50%;
+            background: rgba(255,127,139,.06); color: var(--danger);
+            font: 650 16px/1 "SF Mono", ui-monospace, monospace;
+          }
+          .compact-status.ok { border-color: rgba(101,233,182,.34); background: rgba(101,233,182,.06); color: var(--ready); }
+          .config-path { margin-top: 13px; color: var(--dim); font: 9.5px/1.4 "SF Mono", ui-monospace, monospace; word-break: break-all; }
+          .config-issues { display: grid; margin-top: 9px; }
+          .config-issue { display: grid; grid-template-columns: 25px minmax(0,1fr); gap: 10px; align-items: center; min-height: 50px; padding: 7px 2px; border-bottom: 1px solid rgba(201,225,241,.065); }
+          .inline-error { margin-top: 12px; padding-left: 14px; border-left: 1px solid rgba(255,127,139,.35); color: #e4a8ae; font-size: 10.5px; line-height: 1.48; }
+          .backup-card { width: 100%; max-width: 355px; margin-top: 18px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--soft); text-align: left; }
+          .backup-card span { display: block; color: var(--dim); font-size: 9px; text-transform: uppercase; letter-spacing: .1em; }
+          .backup-card code { display: block; margin-top: 5px; color: var(--muted); font: 10px/1.4 "SF Mono", ui-monospace, monospace; word-break: break-all; user-select: text; }
+
+          @keyframes orbit { to { transform: rotate(360deg); } }
+          @keyframes enter { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+          @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+          }
+    </style>
+  </head>
+  <body>
+  <!-- внешность до первой отрисовки: theme.js синхронно читает кэш
+       и ставит data-* на <html>. Прямой ребёнок body — требование ACL. -->
   <script src="./theme.js"></script>
-  <style>
-    /* Онбординг · дизайн «Клевер». Тот же язык, что панель: бумажная карточка,
-       одна краска, строки 52px, никаких свечений и сканлайнов. */
-
-    * { box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; margin: 0; background: transparent; }
-    body {
-      overflow: hidden;
-      color: var(--ink);
-      font-family: var(--font);
-      font-size: 13.5px;
-      -webkit-font-smoothing: antialiased;
-      user-select: none;
-    }
-    button, input, select { font: inherit; }
-    button { color: inherit; }
-    [hidden] { display: none !important; }
-    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-
-    .shell {
-      position: relative;
-      isolation: isolate;
-      height: 100vh;
-      display: grid;
-      grid-template-rows: 44px minmax(0, 1fr) 76px;
-      overflow: hidden;
-      border: 0;
-      border-radius: var(--r-panel);
-      background: var(--paper);
-      box-shadow: var(--shadow-panel);
-    }
-    .shell::before, .shell::after { content: none; }
-
-    .titlebar { position: relative; display: flex; align-items: center; padding: 0 20px; }
-    .brand {
-      display: flex; align-items: center; gap: 9px;
-      color: var(--ink-mute); font: 500 12.5px/1 var(--font); letter-spacing: 0;
-    }
-    .brand-signal { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
-    .brand span:last-child { display: none; }
-    .close {
-      position: absolute; top: 15px; right: 16px; width: 14px; height: 14px; padding: 0;
-      border: 0; border-radius: 50%; background: var(--surface-2); cursor: default;
-      transition: background .16s;
-    }
-    .close:hover { background: var(--danger); }
-
-    .workspace { min-height: 0; display: grid; grid-template-rows: 30px minmax(0, 1fr); padding: 0 28px; }
-
-    /* лента этапов: четыре точки на волосяной нити, пройденное — краской */
-    .rail { position: relative; width: 190px; justify-self: center; display: grid; grid-template-columns: repeat(4, 1fr); align-items: start; padding-top: 5px; }
-    .rail::before {
-      content: ""; position: absolute; left: 12.5%; right: 12.5%; top: 9px; height: 1px;
-      background: linear-gradient(90deg, var(--accent) var(--rail-fill, 0%), var(--line-strong) var(--rail-fill, 0%));
-      transition: background .45s cubic-bezier(.2,.8,.2,1);
-    }
-    .rail-step {
-      z-index: 1; min-width: 0; display: grid; justify-items: center;
-      padding: 0; border: 0; background: none; color: var(--ink-faint); cursor: default;
-    }
-    .rail-dot {
-      width: 11px; height: 11px; display: grid; place-items: center;
-      border: 1.5px solid var(--line-strong); border-radius: 50%;
-      background: var(--paper); color: transparent; font-size: 0; transition: .22s ease;
-    }
-    .rail-copy { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
-    .rail-step[data-state="active"] { color: var(--accent-text); }
-    .rail-step[data-state="active"] .rail-dot { border-color: var(--accent); background: var(--accent); }
-    .rail-step[data-state="done"] { color: var(--ink-mute); }
-    .rail-step[data-state="done"] .rail-dot { border-color: var(--accent); background: var(--accent-soft); }
-
-    .content {
-      min-width: 0; min-height: 0; overflow: auto; padding: 18px 24px 30px;
-      scrollbar-width: none;
-    }
-    .content::-webkit-scrollbar { width: 0; }
-    .content[data-screen="welcome"], .content[data-screen="checking"], .content[data-screen="ready"] {
-      display: flex; flex-direction: column; align-items: center; text-align: center; padding-top: 34px;
-    }
-    .content[data-screen="welcome"] .lead, .content[data-screen="checking"] .lead, .content[data-screen="ready"] .lead { max-width: 340px; }
-    .content.enter { animation: enter .3s cubic-bezier(.2,.75,.2,1) both; }
-    .eyebrow {
-      display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
-      color: var(--accent-text); font: 500 12.5px/1.2 var(--font); letter-spacing: 0; text-transform: none;
-    }
-    .pulse { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-    h1 { margin: 0; max-width: 360px; font: 600 22px/1.25 var(--font); letter-spacing: -.025em; text-wrap: pretty; }
-    .lead { margin: 10px 0 0; max-width: 360px; color: var(--ink-mute); font-size: 13.5px; line-height: 1.6; text-wrap: pretty; }
-
-    /* герой — тональный круг, без орбит и свечения */
-    .hero-mark, .ready-orbit {
-      position: relative; width: 64px; height: 64px; margin: 6px 0 20px; display: grid; place-items: center;
-      border: 0; border-radius: 50%;
-      background: var(--accent-soft);
-      color: var(--accent-text); font: 600 22px/1 var(--font);
-    }
-    .hero-mark::before, .ready-orbit::before, .hero-mark::after, .ready-orbit::after { content: none; }
-    .ready-orbit { color: var(--on-accent); background: var(--accent); }
-
-    .facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; width: 100%; margin-top: 24px; }
-    .fact { min-width: 0; padding: 0; }
-    .fact + .fact { border-left: 0; }
-    .fact b { display: block; color: var(--ink); font: 600 13px/1.3 var(--font); letter-spacing: -.01em; }
-    .fact span { display: block; margin-top: 4px; color: var(--ink-mute); font-size: 12px; line-height: 1.45; }
-    .system-note { margin-top: 24px; color: var(--ink-faint); font: 400 12px/1.5 var(--font); letter-spacing: 0; text-transform: none; }
-    .shortcut { margin-top: 26px; display: flex; align-items: center; gap: 10px; color: var(--ink-mute); font-size: 12.5px; }
-    .shortcut kbd {
-      min-width: 38px; padding: 5px 9px; border: 0; border-radius: var(--r-key);
-      color: var(--ink-mute); background: var(--surface); font: 500 12px/1 var(--font);
-    }
-
-    .section-title { margin: 20px 0 2px; color: var(--ink-mute); font: 500 12.5px/1.3 var(--font); letter-spacing: 0; text-transform: none; }
-    .list { display: grid; }
-    /* строка модуля — как строка настроек: 52px и волосяной стык */
-    .item {
-      display: grid; grid-template-columns: 26px minmax(0,1fr) auto; gap: 12px; align-items: center;
-      min-height: var(--h-srow); padding: 8px 2px; border-bottom: 1px solid var(--line); background: transparent;
-    }
-    .status-icon, .cap-check {
-      width: 22px; height: 22px; display: grid; place-items: center;
-      border: 0; border-radius: 50%;
-      color: var(--warn); background: var(--warn-soft); font: 600 11px/1 var(--font);
-    }
-    .item[data-ready="true"] .status-icon { color: var(--accent-text); background: var(--accent-soft); }
-    .item-title { font-size: 14px; font-weight: 500; }
-    .item-detail { margin-top: 2px; color: var(--ink-mute); font-size: 12.5px; line-height: 1.45; }
-    .badge { display: none; }
-    .item[data-ready="true"] .badge { color: var(--accent-text); }
-
-    .capability { position: relative; display: block; cursor: default; }
-    .capability input { position: absolute; opacity: 0; pointer-events: none; }
-    .capability .item { transition: padding .18s, background .18s; }
-    .capability input:focus-visible + .item { outline: 1px solid var(--accent); outline-offset: 2px; }
-    .capability input:checked + .item { padding-left: 10px; padding-right: 8px; background: var(--accent-soft); }
-    .capability input:disabled + .item { cursor: default; opacity: .7; }
-    .cap-check { background: var(--surface); color: transparent; border-radius: 7px; }
-    .capability input:checked + .item .cap-check { color: var(--on-accent); background: var(--accent); }
-    .capability input:disabled + .item .cap-check { color: var(--on-accent); background: var(--accent); }
-    .cap-side { text-align: right; }
-    .cap-side b { display: block; color: var(--ink-mute); font: 500 12px/1.3 var(--font); }
-    .qwen-size { display: inline-block; margin-top: 4px; padding: 3px 8px; border: 0; border-radius: 6px; background: var(--surface); color: var(--ink-mute); font-size: 11.5px; }
-
-    .notice { position: relative; margin-top: 14px; padding: 2px 0 2px 16px; border: 0; background: none; color: var(--ink-mute); font-size: 12.5px; line-height: 1.55; }
-    .notice::before { content: "·"; position: absolute; left: 2px; top: -1px; color: var(--warn); font: 600 14px/1 var(--font); }
-    .warnings { margin: 12px 0 0; padding: 6px 0 6px 16px; border: 0; border-left: 2px solid var(--danger); background: none; color: var(--danger); font-size: 12.5px; line-height: 1.55; }
-
-    .progress-card { position: relative; margin-top: 22px; padding: 16px 0 14px; border-top: 1px solid var(--line); border-bottom: 0; overflow: hidden; }
-    .content[data-screen="checking"] .progress-card { width: 100%; max-width: 340px; text-align: left; }
-    .progress-card::after { content: none; }
-    .progress-head { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 500; }
-    .spinner { width: 14px; height: 14px; border: 1.5px solid var(--surface-2); border-top-color: var(--accent); border-radius: 50%; animation: orbit .75s linear infinite; }
-    .progress-line { margin-top: 8px; color: var(--ink-mute); font-size: 12.5px; line-height: 1.5; }
-    .progress-track { height: 4px; margin-top: 12px; border-radius: 2px; overflow: hidden; background: var(--surface-2); }
-    .progress-fill { height: 100%; width: var(--pct, 12%); border-radius: 2px; background: var(--accent); transition: width .28s ease; }
-
-    .proxy-toggle { margin-top: 14px; padding: 0; border: 0; background: none; color: var(--accent-text); font-size: 12.5px; cursor: default; text-decoration: underline; text-underline-offset: 2px; }
-    .proxy-field {
-      width: 100%; height: 40px; margin-top: 10px; padding: 0 14px; border: 0;
-      border-radius: var(--r-chip); outline: none;
-      box-shadow: inset 0 0 0 1.5px var(--line-strong);
-      background: var(--paper); color: var(--ink); font-size: 13.5px; user-select: text;
-    }
-    .proxy-field:focus { box-shadow: inset 0 0 0 1.5px var(--accent); }
-
-    .footer {
-      z-index: 3; display: flex; align-items: center; padding: 0 28px;
-      border-top: 1px solid var(--line); background: var(--paper);
-    }
-    .footer-actions { width: 100%; display: flex; gap: 8px; }
-    .btn {
-      min-height: 44px; padding: 0 20px; border: 0; border-radius: var(--r-card);
-      background: var(--accent-soft); color: var(--ink); cursor: default;
-      font: 500 14.5px/1 var(--font); letter-spacing: 0;
-      transition: filter .16s, background .16s;
-    }
-    .btn:hover:not(:disabled) { filter: brightness(.97); }
-    .btn.primary { flex: 1; background: var(--accent); color: var(--on-accent); font-weight: 600; }
-    .btn.primary:hover:not(:disabled) { filter: brightness(1.06); }
-    .btn:disabled { opacity: .45; cursor: default; }
-    .btn:focus-visible, .close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-    @keyframes orbit { to { transform: rotate(360deg); } }
-    @keyframes enter { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
-    }
-  </style>
-</head>
-<body>
-  <main class="shell" aria-labelledby="screen-title">
-    <div class="titlebar" data-tauri-drag-region>
-      <div class="brand" aria-hidden="true"><i class="brand-signal"></i>JARVIS <span>/ SYSTEM INIT</span></div>
-      <button class="close" id="close" type="button" aria-label="Закрыть онбординг"></button>
-    </div>
-
-    <div class="workspace">
-      <nav class="rail" id="rail" aria-label="Этапы настройки">
-        <button class="rail-step" type="button" data-screen="welcome" aria-label="Старт"><span class="rail-dot">✓</span><span class="rail-copy"><strong>Старт</strong><span>контекст</span></span></button>
-        <button class="rail-step" type="button" data-screen="agents" aria-label="Связь с агентами"><span class="rail-dot">✓</span><span class="rail-copy"><strong>Связь</strong><span>hooks</span></span></button>
-        <button class="rail-step" type="button" data-screen="capabilities" aria-label="Локальные модули"><span class="rail-dot">✓</span><span class="rail-copy"><strong>Модули</strong><span>локально</span></span></button>
-        <button class="rail-step" type="button" data-screen="ready" aria-label="Система online"><span class="rail-dot">✓</span><span class="rail-copy"><strong>Online</strong><span>запуск</span></span></button>
-      </nav>
-      <section class="content" id="content" tabindex="-1"></section>
-    </div>
-
-    <footer class="footer">
-      <div class="footer-actions">
-        <button class="btn" id="secondary" type="button" hidden>Назад</button>
-        <button class="btn primary" id="primary" type="button">Продолжить</button>
+    <main class="shell" aria-labelledby="screen-title">
+      <div class="titlebar" data-tauri-drag-region>
+        <div class="brand" aria-hidden="true">
+          <i class="brand-signal"></i>JARVIS <span>/ SYSTEM INIT</span>
+        </div>
+        <button
+          class="close"
+          id="close"
+          type="button"
+          aria-label="Закрыть онбординг"
+        ></button>
       </div>
-    </footer>
-    <div id="announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
-  </main>
-  <script src="onboarding-state.js"></script>
-  <script src="onboarding.js"></script>
-</body>
+
+      <div class="workspace">
+        <nav class="rail" id="rail" aria-label="Этапы настройки">
+          <button
+            class="rail-step"
+            type="button"
+            data-screen="welcome"
+            aria-label="Старт"
+          >
+            <span class="rail-dot">✓</span
+            ><span class="rail-copy"
+              ><strong>Старт</strong><span>контекст</span></span
+            >
+          </button>
+          <button
+            class="rail-step"
+            type="button"
+            data-screen="agents"
+            aria-label="Связь с агентами"
+          >
+            <span class="rail-dot">✓</span
+            ><span class="rail-copy"
+              ><strong>Связь</strong><span>hooks</span></span
+            >
+          </button>
+          <button
+            class="rail-step"
+            type="button"
+            data-screen="capabilities"
+            aria-label="Локальные модули"
+          >
+            <span class="rail-dot">✓</span
+            ><span class="rail-copy"
+              ><strong>Модули</strong><span>локально</span></span
+            >
+          </button>
+          <button
+            class="rail-step"
+            type="button"
+            data-screen="ready"
+            aria-label="Система online"
+          >
+            <span class="rail-dot">✓</span
+            ><span class="rail-copy"
+              ><strong>Online</strong><span>запуск</span></span
+            >
+          </button>
+        </nav>
+        <section class="content" id="content" tabindex="-1"></section>
+      </div>
+
+      <footer class="footer">
+        <div class="footer-actions">
+          <button class="btn" id="secondary" type="button" hidden>Назад</button>
+          <button class="btn primary" id="primary" type="button">
+            Продолжить
+          </button>
+        </div>
+      </footer>
+      <div
+        id="announcer"
+        class="sr-only"
+        aria-live="polite"
+        aria-atomic="true"
+      ></div>
+    </main>
+    <script src="onboarding-state.js"></script>
+    <script src="./generated/tauri-transport.js"></script>
+    <script src="onboarding.js"></script>
+  </body>
 </html>

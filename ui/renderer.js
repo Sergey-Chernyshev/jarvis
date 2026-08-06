@@ -36,6 +36,17 @@ const tabSessionsEl = document.getElementById('tabSessions');
 const tabSettingsEl = document.getElementById('tabSettings');
 const voicehistEl = document.getElementById('voicehist');
 const tabVoiceEl = document.getElementById('tabVoice');
+const activeEnvironmentsEl = document.getElementById('activeEnvironments');
+const activeEnvironmentRowsEl = document.getElementById('activeEnvironmentRows');
+const activeEnvironmentCountEl = document.getElementById('activeEnvironmentCount');
+const agentVmWorkspaceEl = document.getElementById('agentVmWorkspace');
+const agentVmFeedEl = document.getElementById('agentVmFeed');
+const agentVmPromptEl = document.getElementById('agentVmPrompt');
+const agentVmSendEl = document.getElementById('agentVmSend');
+const agentVmCommandPaletteEl = document.getElementById('agentVmCommandPalette');
+const agentVmAttachmentsEl = document.getElementById('agentVmAttachments');
+const agentVmAttachEl = document.getElementById('agentVmAttach');
+const agentVmImagePickerEl = document.getElementById('agentVmImagePicker');
 
 const STATUS_LABEL = {
   working: 'работает',
@@ -47,7 +58,7 @@ const STATUS_LABEL = {
 
 let state = [];
 let sel = 0;
-let view = 'list'; // list | chat | settings
+let view = 'list'; // list | chat | question | history | stats | voicehist | agentvm | settings
 let chatSessionId = null;
 
 /* ---------- helpers ---------- */
@@ -124,21 +135,30 @@ const detailEmptyEl = document.getElementById('detailEmpty');
 const windowMode = () => document.documentElement.dataset.mode === 'window';
 
 function setView(next) {
+  const previousView = view;
   if (view === 'chat' && next !== 'chat') {
     window.jarvis.closeChat();
     chatSessionId = null;
   }
+  if (view === 'agentvm' && next !== 'agentvm') syncAgentVmFocus(null, null);
   if (view === 'question' && next !== 'question') qSessionId = null;
   if (next === 'history' && view !== 'history') histProject = null; // вкладка всегда открывается со списка проектов
+  if (next !== previousView && (next === 'history' || previousView === 'history')) {
+    queryEl.value = '';
+  }
   view = next;
+  queryEl.placeholder = next === 'history' ? 'Найти проект или папку…' : 'Найти чат…';
   closeActions();
   // Оконный режим (14h): список слева живёт всегда, поиск и вкладки — тоже.
-  // В накладке остаётся прежний фокус-режим: чат и вопрос занимают панель целиком.
+  // В накладке остаётся прежний фокус-режим: чат, вопрос и рабочее место
+  // проекта занимают панель целиком.
   const win = windowMode();
-  const minimal = !win && (next === 'chat' || next === 'question');
+  const minimal =
+    !win && (next === 'chat' || next === 'question' || next === 'agentvm');
   document.querySelector('.cmdrow').hidden = minimal;
   document.querySelector('.tabs').hidden = minimal;
   listEl.hidden = win ? false : next !== 'list';
+  if (next !== 'list') activeEnvironmentsEl.hidden = true;
   // правая колонка окна пустует, пока сессия не выбрана
   contentEl.hidden = win && next === 'list';
   detailEmptyEl.hidden = !(win && next === 'list');
@@ -148,16 +168,19 @@ function setView(next) {
   statsEl.hidden = next !== 'stats';
   voicehistEl.hidden = next !== 'voicehist';
   historyEl.hidden = next !== 'history';
-  // чат и вопрос несут собственные нижние бары — парящий футер только тут.
-  // В окне полоска не парит, а стоит в сетке под обеими колонками — она нужна всегда.
-  footerEl.hidden = !win && (next === 'chat' || next === 'question');
+  agentVmWorkspaceEl.hidden = next !== 'agentvm';
+  // чат, вопрос и рабочее место проекта несут собственные нижние бары —
+  // парящий футер только вне них. В окне полоска не парит, а стоит в сетке
+  // под обеими колонками — там она нужна всегда.
+  footerEl.hidden =
+    !win && (next === 'chat' || next === 'question' || next === 'agentvm');
   if (next === 'list') { primaryLabelEl.textContent = 'Открыть чат'; primaryKeyEl.textContent = '↵'; }
   else if (next === 'history') { primaryLabelEl.textContent = 'Открыть проект'; primaryKeyEl.textContent = '↵'; }
   else { primaryLabelEl.textContent = 'Назад'; primaryKeyEl.textContent = 'esc'; }
   tabSettingsEl.classList.toggle('active', next === 'settings');
   document.getElementById('tlSettings').classList.toggle('active', next === 'settings');
   tabStatsEl.classList.toggle('active', next === 'stats');
-  tabHistoryEl.classList.toggle('active', next === 'history');
+  tabHistoryEl.classList.toggle('active', next === 'history' || next === 'agentvm');
   tabVoiceEl.classList.toggle('active', next === 'voicehist');
   tabSessionsEl.classList.toggle('active', next === 'list' || next === 'chat');
   if (next === 'settings') loadSettings();
@@ -167,8 +190,12 @@ function setView(next) {
     try { window.initVoiceHistory(voicehistEl); } catch (e) { console.error('[voicehist] init:', e); }
   }
   if (next === 'history') renderHistory();
+  if (next === 'agentvm') renderAgentVmWorkspace();
   else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
-  if (next === 'list') queryEl.focus();
+  if (next === 'list') {
+    renderActiveEnvironments();
+    queryEl.focus();
+  }
 }
 
 // Клик/Enter по сессии: всегда открываем чат; если у сессии есть вопрос —
@@ -233,6 +260,7 @@ function filtered() {
 
 function render() {
   if (view !== 'list') return;
+  renderActiveEnvironments();
   // hover-выбор разоружаем на каждую перерисовку: дальше его снова взведёт только
   // реальное mousemove (см. listEl.mousemove). Иначе фон-обновления (data push)
   // пересоздают строки под неподвижным курсором → mouseenter таскает выделение.
@@ -563,13 +591,61 @@ function bumpCount(chip) {
   c.textContent = `×${n}`;
 }
 
+// Сколько инструментов показать, не сворачивая: один-два вызова читаются как
+// часть разговора, длинная лента — уже шум, из-за которого не видно реплик.
+const TOOLS_VISIBLE = 2;
+
+/** Строка-переключатель «ещё N действий» под группой чипов. */
+function toolsToggle(group) {
+  let bar = group.querySelector(':scope > .tools-more');
+  if (!bar) {
+    bar = document.createElement('button');
+    bar.type = 'button';
+    bar.className = 'tools-more';
+    bar.addEventListener('click', () => {
+      const open = group.classList.toggle('open');
+      bar.setAttribute('aria-expanded', open ? 'true' : 'false');
+      paintToolsToggle(group);
+    });
+    group.appendChild(bar);
+  } else {
+    group.appendChild(bar); // держим строку последней
+  }
+  return bar;
+}
+
+/** Прячет лишние чипы и подписывает переключатель. */
+function paintToolsToggle(group) {
+  const chips = [...group.querySelectorAll(':scope > .chip')];
+  const hidden = Math.max(0, chips.length - TOOLS_VISIBLE);
+  const open = group.classList.contains('open');
+  chips.forEach((chip, i) => {
+    chip.hidden = !open && i >= TOOLS_VISIBLE;
+  });
+  const bar = group.querySelector(':scope > .tools-more');
+  if (!bar) return;
+  if (!hidden) { bar.remove(); return; }
+  bar.textContent = open ? 'свернуть действия' : `ещё ${hidden} ${plural(hidden, 'действие', 'действия', 'действий')}`;
+}
+
+/** Русское склонение после числа: 1 действие, 2 действия, 5 действий. */
+function plural(n, one, few, many) {
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 14) return many;
+  const mod10 = n % 10;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
+}
+
 function addToolChip(label) {
   if (!toolsGroup) {
     toolsGroup = document.createElement('div');
     toolsGroup.className = 'msg tools';
     turnTarget().appendChild(toolsGroup);
   }
-  const last = toolsGroup.lastElementChild;
+  const chips = toolsGroup.querySelectorAll(':scope > .chip');
+  const last = chips[chips.length - 1];
   if (last && last.dataset.label === label) { bumpCount(last); return; }
 
   const { tool, arg } = toolParts(label);
@@ -591,6 +667,8 @@ function addToolChip(label) {
     chip.appendChild(a);
   }
   toolsGroup.appendChild(chip);
+  toolsToggle(toolsGroup);
+  paintToolsToggle(toolsGroup);
 }
 
 // epoch-мс → HH:MM локального времени (для метки времени над репликой)
@@ -732,22 +810,19 @@ function buildCard(key, card) {
     }
     box.appendChild(fl);
   }
-  if (card && card.docs_digest) {
+  // финальный ответ агента — под сворачиваемым блоком (фокус на разборе,
+  // дословный ответ в один клик). Только у LLM-карточки с непустым reply.
+  if (card && card.reply) {
     const det = document.createElement('details');
+    det.className = 'tsum-reply';
     const sm = document.createElement('summary');
-    sm.textContent = 'Дока';
+    sm.textContent = '💬 Ответ агента';
     det.appendChild(sm);
     const body = document.createElement('div');
-    renderMarkdown(body, card.docs_digest);
+    body.className = 'tsum-reply-body';
+    renderMarkdown(body, card.reply);
     det.appendChild(body);
     box.appendChild(det);
-  }
-  const cmds = card ? card.commands : facts.commands.slice(0, 3).join(' · ');
-  if (cmds) {
-    const c = document.createElement('div');
-    c.className = 'tsum-cmds';
-    c.textContent = cmds;
-    box.appendChild(c);
   }
 
   const foot = document.createElement('div');
@@ -1938,16 +2013,28 @@ async function focusTerminal(sessionId, project) {
 
 /* ---------- состояние от демона ---------- */
 
-window.jarvis.onState((list) => {
-  state = list;
+function applySessionState(list) {
+  const normalized = window.JarvisStateSync.normalizeSessions(list);
+  if (normalized === null) {
+    console.error('[state-sync] invalid session state payload');
+    return;
+  }
+  state = normalized;
   render();
   if (view === 'chat') updateChatChannelMark();
   if (view === 'question') {
     const s = state.find((x) => x.id === qSessionId);
     if (!s || !s.question) { setView('list'); render(); } // ответили в терминале — выходим
   }
+}
+
+const sync = window.JarvisStateSync.create({
+  subscribe: (apply) => window.jarvis.onState(apply),
+  read: () => window.jarvis.getState(),
+  apply: applySessionState,
+  onError: (error) => console.error('[state-sync]', error),
 });
-window.jarvis.getState().then((list) => { state = list; rebuildOrder(); render(); });
+void sync.start();
 
 /* ---------- лимит-баннер ---------- */
 
@@ -1966,6 +2053,77 @@ function paintLimitBanner() {
 window.jarvis.onLimitState((l) => { limitInfo = l; paintLimitBanner(); });
 window.jarvis.getLimit().then((l) => { limitInfo = l; paintLimitBanner(); }).catch(() => {});
 setInterval(paintLimitBanner, 30000); // тикаем обратный отсчёт
+
+/* ---------- постоянная проверка settings.json ---------- */
+
+const configBannerEl = document.getElementById('configBanner');
+const configBannerTextEl = document.getElementById('configBannerText');
+const configDetailsEl = document.getElementById('configDetails');
+const configRepairEl = document.getElementById('configRepair');
+let configHealthInfo = null;
+let configRestartRequired = false;
+let configRepairBusy = false;
+let configRepairError = '';
+
+function paintConfigBanner() {
+  const issues = configHealthInfo && Array.isArray(configHealthInfo.issues)
+    ? configHealthInfo.issues : [];
+  const broken = configHealthInfo && configHealthInfo.status === 'error';
+  if (!broken && !configRestartRequired && !configRepairError) {
+    configBannerEl.hidden = true;
+    return;
+  }
+  configBannerEl.hidden = false;
+  if (configRepairError) {
+    configBannerTextEl.textContent = configRepairError;
+  } else if (configRestartRequired) {
+    configBannerTextEl.textContent = 'Конфигурация исправлена · нужен перезапуск Jarvis';
+  } else {
+    configBannerTextEl.textContent =
+      `Конфигурация Jarvis требует внимания · ${issues.length} ${plural(issues.length, 'проблема', 'проблемы', 'проблем')}`;
+  }
+  configDetailsEl.hidden = configRestartRequired;
+  configRepairEl.disabled = configRepairBusy || (!configRestartRequired && !configHealthInfo?.repairable);
+  configRepairEl.textContent = configRepairBusy
+    ? 'Исправляю…'
+    : (configRestartRequired ? 'Перезапустить' : 'Исправить');
+}
+
+async function refreshConfigHealth() {
+  try {
+    configHealthInfo = await window.jarvis.settingsHealth();
+    if (configHealthInfo && configHealthInfo.status === 'healthy' && !configRestartRequired) {
+      configRepairError = '';
+    }
+  } catch {
+    // Ошибка IPC не означает, что файл битый: не показываем ложную тревогу.
+  }
+  paintConfigBanner();
+}
+
+configDetailsEl.addEventListener('click', () => window.jarvis.onboardingOpen());
+configRepairEl.addEventListener('click', async () => {
+  if (configRestartRequired) {
+    window.jarvis.relaunch();
+    return;
+  }
+  configRepairBusy = true;
+  configRepairError = '';
+  paintConfigBanner();
+  try {
+    const outcome = await window.jarvis.settingsRepair();
+    configHealthInfo = outcome.health;
+    configRestartRequired = true;
+  } catch (error) {
+    configRepairError = String(error || 'Не удалось исправить конфиг');
+    await refreshConfigHealth();
+  } finally {
+    configRepairBusy = false;
+    paintConfigBanner();
+  }
+});
+
+refreshConfigHealth();
 
 /* ---------- плагины: Не спать (☕) и Крышка (⌒) ---------- */
 
@@ -1987,7 +2145,8 @@ function powerSuffix() {
   const ka = pluginById('keep-awake');
   if (ka?.enabled) parts.push(ka.status?.active ? `☕ ${ka.status.line || 'вкл'}` : '☕ выкл');
   const cs = pluginById('clamshell');
-  if (cs?.enabled) parts.push(cs.status?.armed ? '⌒ не уснёт закрытым' : '⌒ выкл');
+  if (cs?.status?.pendingCleanup) parts.push('⌒ helper cleanup не завершён');
+  else if (cs?.enabled) parts.push(cs.status?.armed ? '⌒ не уснёт закрытым' : '⌒ выкл');
   return parts.length ? ' · ' + parts.join(' · ') : '';
 }
 
@@ -2268,6 +2427,19 @@ async function pluginCmd(id, cmd, args) {
   plugins = await window.jarvis.getPlugins();
   renderPluginRows();
   footerLeftEl.textContent = footerText();
+  if (view === 'history' && histProject == null) renderAgentVmRuntimeStatus();
+  return res;
+}
+
+function clamshellResultMessage(result, mode) {
+  if (!result) return 'Крышка: helper не вернул результат';
+  if (result.pendingCleanup) {
+    return result.error || 'Крышка: точное освобождение helper lease ещё не подтверждено';
+  }
+  if (result.ok === false) return result.error || 'Крышка: команда не выполнена';
+  return mode === 'keep'
+    ? 'Крышка: helper lease активна — закрытый мак не уснёт'
+    : 'Крышка: helper lease освобождена';
 }
 
 // маленькие глифы для карточки бодрости (через DOM — без innerHTML)
@@ -2370,7 +2542,8 @@ function renderPluginRows() {
 
   // крышка (clamshell) — сегмент Спать / Не спать
   const cs = pluginById('clamshell');
-  const armed = !!(cs && cs.status && cs.status.armed);
+  const csStatus = (cs && cs.status) || {};
+  const armed = !!csStatus.armed;
   const lid = document.createElement('div');
   lid.className = 'arow lid hairtop';
   lid.appendChild(awakeGlyph('lid'));
@@ -2387,16 +2560,49 @@ function renderPluginRows() {
     b.textContent = label;
     b.addEventListener('click', async () => {
       if (val === 'keep') {
-        if (cs && !cs.enabled) await window.jarvis.pluginCmd('clamshell', '_enable', { on: true });
-        pluginCmd('clamshell', 'arm');
+        if (cs && !cs.enabled) {
+          const enabled = await pluginCmd('clamshell', '_enable', { on: true });
+          if (!enabled || enabled.ok === false) return;
+        }
+        const result = await pluginCmd('clamshell', 'arm');
+        showToast(clamshellResultMessage(result, 'keep'));
       } else {
-        pluginCmd('clamshell', 'disarm');
+        const result = await pluginCmd('clamshell', 'disarm');
+        showToast(clamshellResultMessage(result, 'sleep'));
       }
     });
     lidSeg.appendChild(b);
   }
   lid.appendChild(lidSeg);
   box.appendChild(lid);
+
+  if (csStatus.pendingCleanup || csStatus.renewalError) {
+    const helperState = csStatus.helperLease
+      ? 'helper lease требует точного release'
+      : csStatus.helperLeaseUnknown
+        ? 'результат acquire неизвестен'
+        : 'helper lease не удерживается';
+    const retryCleanup = csStatus.pendingCleanup
+      ? async () => {
+        const result = await pluginCmd('clamshell', 'retry-cleanup');
+        showToast(clamshellResultMessage(result, 'sleep'));
+      }
+      : () => {};
+    box.appendChild(actionRow(
+      csStatus.renewalError ? `${helperState}: ${csStatus.renewalError}` : helperState,
+      false,
+      csStatus.pendingCleanup ? 'Повторить cleanup' : 'Понятно',
+      retryCleanup,
+    ));
+  }
+  if (cs && cs.health && cs.health.state === 'blocked' && cs.health.repairAction) {
+    box.appendChild(actionRow(
+      cs.health.message || 'Power recovery заблокирован',
+      false,
+      'Как починить',
+      () => showToast(cs.health.repairAction),
+    ));
+  }
 
   // подсказка
   const hint = document.createElement('div');
@@ -2425,16 +2631,20 @@ window.jarvis.onPlugins((list) => {
   plugins = list;
   footerLeftEl.textContent = footerText();
   renderPluginRows();
+  if (view === 'history') renderHistory();
+  if (view === 'agentvm') renderAgentVmWorkspace();
 });
 window.jarvis.getPlugins().then((list) => {
   plugins = list;
   footerLeftEl.textContent = footerText();
+  if (view === 'history') renderHistory();
+  if (view === 'agentvm') renderAgentVmWorkspace();
 }).catch(() => {});
 
 // клик по уведомлению: панель уже показана демоном — открываем чат сессии
 window.jarvis.onOpenSession(async (id) => {
   if (!state.length) {
-    try { state = await window.jarvis.getState(); rebuildOrder(); } catch {}
+    await sync.refresh();
   }
   const s = state.find((x) => x.id === id);
   if (s) openSession(s);
@@ -2442,13 +2652,16 @@ window.jarvis.onOpenSession(async (id) => {
 
 // Анимация появления в стиле Raycast: scale(.98)→1 + fade, 120ms.
 // Порядок строк пересобираем ТОЛЬКО здесь — при открытии панели, не во время просмотра.
-window.jarvis.onShown(() => {
+window.jarvis.onShown(async () => {
   // перезапуск входной анимации на каждый показ: снять класс → форс-рефлоу → вернуть.
   // keyframe стартует с opacity:0 (fill both держит 0 до показа окна), поэтому
   // реверс-fade и «моргание» исключены, даже если панель уже была видима.
   panelEl.classList.remove('entering');
   void panelEl.offsetWidth;
   panelEl.classList.add('entering');
+  refreshConfigHealth();
+  const refreshed = await sync.refresh();
+  if (!refreshed) return;
   // Окно при скрытии не уничтожается — view и открытый чат живы. Возвращаем
   // на то же место (клик мимо / Cmd+J прячут панель как есть). Чат или вопрос
   // уже закрытой сессии (могла завершиться, пока панель была спрятана) —
@@ -2464,6 +2677,8 @@ window.jarvis.onShown(() => {
     rebuildOrder();
     setView('list');
     render();
+  } else if (view === 'agentvm') {
+    syncAgentVmFocus();
   }
 });
 
@@ -2542,9 +2757,12 @@ function applyAmf(mode) {
 }
 async function applyLid(m) {
   const cs = pluginById('clamshell');
-  if (m === 'keep' && cs && !cs.enabled) await window.jarvis.pluginCmd('clamshell', '_enable', { on: true });
-  pluginCmd('clamshell', m === 'keep' ? 'arm' : 'disarm');
-  showToast(m === 'keep' ? 'Крышка закрыта — не уснёт' : 'Крышка закрыта — обычный сон');
+  if (m === 'keep' && cs && !cs.enabled) {
+    const enabled = await pluginCmd('clamshell', '_enable', { on: true });
+    if (!enabled || enabled.ok === false) return;
+  }
+  const result = await pluginCmd('clamshell', m === 'keep' ? 'arm' : 'disarm');
+  showToast(clamshellResultMessage(result, m));
 }
 async function applyPos(p) {
   await window.jarvis.setSettings({ position: p });
@@ -2848,7 +3066,7 @@ function actionItems() {
     if (s.tmuxPane) items.push({ label: 'Где этот терминал?', key: '⌘G', run: () => window.jarvis.pingTerminal(s.id) });
   }
   if (view !== 'chat') items.push({ label: 'Очистить завершённые', key: '⌘⌫', run: () => window.jarvis.clearFinished() });
-  items.push({ label: 'Проекты и история', key: '⌘2', run: () => setView('history') });
+  items.push({ label: 'Проекты и Agent VM', key: '⌘2', run: () => setView('history') });
   items.push({ label: 'Статистика usage', key: '⌘3', run: () => setView('stats') });
   items.push({ label: 'История голоса', key: '⌘4', run: () => setView('voicehist') });
   items.push({ label: 'Настройки', key: '⌘,', run: () => setView('settings') });
@@ -2891,14 +3109,1387 @@ function toggleActions() {
 document.getElementById('actionsBtn').addEventListener('click', toggleActions);
 document.getElementById('primaryHint').addEventListener('click', () => {
   if (view === 'list') { const s = filtered()[sel]; if (s) openSession(s); }
+  else if (view === 'history' && histRows[histSel]) {
+    const row = histRows[histSel];
+    if (row.type === 'project') openProjectPrimary(row.project);
+    else openHistChat(row);
+  }
   else if (view === 'settings') { setView('list'); render(); }
 });
 
 tabSessionsEl.addEventListener('click', () => { setView('list'); render(); });
 
+/* ---------- Agent VM: entity feed, active environments, project workspace ---------- */
+
+const AgentVmModel = window.JarvisAgentVm;
+const agentVmBackEl = document.getElementById('agentVmBack');
+const agentVmProjectTitleEl = document.getElementById('agentVmProjectTitle');
+const agentVmProjectPathEl = document.getElementById('agentVmProjectPath');
+const agentVmEnvironmentButtonEl = document.getElementById('agentVmEnvironmentButton');
+const agentVmEnvironmentLabelEl = document.getElementById('agentVmEnvironmentLabel');
+const agentVmEnvironmentEl = document.getElementById('agentVmEnvironment');
+const agentVmEnvironmentDotEl = document.getElementById('agentVmEnvironmentDot');
+const agentVmEnvironmentTitleEl = document.getElementById('agentVmEnvironmentTitle');
+const agentVmDiskEl = document.getElementById('agentVmDisk');
+const agentVmNameEl = document.getElementById('agentVmName');
+const agentVmStateValueEl = document.getElementById('agentVmStateValue');
+const agentVmResourcesEl = document.getElementById('agentVmResources');
+const agentVmModulesEl = document.getElementById('agentVmModules');
+const agentVmAutostartEl = document.getElementById('agentVmAutostart');
+const agentVmEnsureEl = document.getElementById('agentVmEnsure');
+const agentVmConnectEl = document.getElementById('agentVmConnect');
+const agentVmReleaseCacheEl = document.getElementById('agentVmReleaseCache');
+const agentVmRestartEl = document.getElementById('agentVmRestart');
+const agentVmStopAgentEl = document.getElementById('agentVmStopAgent');
+const agentVmStopEl = document.getElementById('agentVmStop');
+const agentVmCopyShellEl = document.getElementById('agentVmCopyShell');
+const agentVmCopyResumeEl = document.getElementById('agentVmCopyResume');
+const agentVmCancelEl = document.getElementById('agentVmCancel');
+const agentVmStageEl = document.getElementById('agentVmStage');
+const agentVmStageTitleEl = document.getElementById('agentVmStageTitle');
+const agentVmStageDetailEl = document.getElementById('agentVmStageDetail');
+const agentVmStageTimeEl = document.getElementById('agentVmStageTime');
+const agentVmQueueHintEl = document.getElementById('agentVmQueueHint');
+const agentVmTerminalScreenEl = document.getElementById('agentVmTerminalScreen');
+const agentVmTerminalEmptyEl = document.getElementById('agentVmTerminalEmpty');
+const agentVmTerminalEmptyDetailEl = document.getElementById('agentVmTerminalEmptyDetail');
+const agentVmTerminalLightEl = document.getElementById('agentVmTerminalLight');
+const agentVmTerminalTitleEl = document.getElementById('agentVmTerminalTitle');
+const agentVmTerminalStateEl = document.getElementById('agentVmTerminalState');
+const agentVmFileDrawerEl = document.getElementById('agentVmFileDrawer');
+const agentVmFileTitleEl = document.getElementById('agentVmFileTitle');
+const agentVmFileDiffEl = document.getElementById('agentVmFileDiff');
+const agentVmFileBodyEl = document.getElementById('agentVmFileBody');
+const agentVmFileDiffTabEl = document.getElementById('agentVmFileDiffTab');
+const agentVmFileContentTabEl = document.getElementById('agentVmFileContentTab');
+
+let agentVmEntities = [];
+let agentVmProfiles = [];
+let projectManagerState = { folders: [], favoriteProjectIds: [], view: 'list' };
+let projectManagerSaving = false;
+let agentVmCurrent = null;
+let agentVmRunId = null;
+let agentVmBackend = 'claude';
+let agentVmStage = null;
+let agentVmStageStartedAt = 0;
+let agentVmFile = null;
+let agentVmFileMode = 'diff';
+let agentVmProfileSaving = false;
+let agentVmRuntimeStatusEl = null;
+let agentVmTerminalPollInFlight = false;
+let agentVmTerminalInputInFlight = false;
+let agentVmTerminalLastScreenKey = '';
+let agentVmTerminalResizeTimer = null;
+let agentVmCommandItems = [];
+let agentVmCommandSelected = 0;
+let agentVmPendingImages = [];
+let agentVmAttachmentSequence = 0;
+const agentVmTerminals = new Map();
+const agentVmTerminalSizes = new Map();
+const agentVmTerminalEnsurePromises = new Map();
+const agentVmEnvironmentEnsurePromises = new Map();
+const agentVmSyncedProjects = new Set();
+const agentVmCommandCatalogs = new Map();
+const agentVmOperationWaiters = new Map();
+
+function agentVmPluginReady() {
+  const plugin = pluginById('agent-vm');
+  return !!plugin?.enabled && plugin?.status?.state === 'running';
+}
+
+function renderAgentVmRuntimeStatus(root = agentVmRuntimeStatusEl) {
+  const runtime = AgentVmModel.pluginRuntimeStatus(pluginById('agent-vm'));
+  if (!root) return runtime;
+
+  root.className = `pm-runtime ${runtime.tone}`;
+  root.setAttribute('role', 'status');
+  root.setAttribute('aria-live', 'polite');
+  root.textContent = '';
+  root.appendChild(Object.assign(document.createElement('span'), {
+    className: 'pm-runtime-signal',
+  }));
+
+  const copy = document.createElement('span');
+  copy.className = 'pm-runtime-copy';
+  copy.appendChild(Object.assign(document.createElement('strong'), {
+    textContent: runtime.label,
+  }));
+  copy.appendChild(Object.assign(document.createElement('small'), {
+    textContent: runtime.detail,
+  }));
+  root.appendChild(copy);
+
+  const steps = document.createElement('span');
+  steps.className = 'pm-runtime-steps';
+  for (const [index, label] of ['Sidecar', 'Handshake', 'Готово'].entries()) {
+    const step = document.createElement('span');
+    const done = runtime.state === 'running' ? index <= runtime.step : index < runtime.step;
+    step.className = `pm-runtime-step${done ? ' done' : index === runtime.step ? ' active' : ''}`;
+    step.textContent = label;
+    steps.appendChild(step);
+  }
+  root.appendChild(steps);
+
+  if (runtime.retryable) {
+    const retry = Object.assign(document.createElement('button'), {
+      className: 'vm-button',
+      textContent: 'Повторить сейчас',
+    });
+    retry.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      retry.disabled = true;
+      await pluginCmd('agent-vm', '_restart');
+    });
+    root.appendChild(retry);
+  }
+  return runtime;
+}
+
+function agentVmProjects() {
+  const projects = AgentVmModel.deriveProjects(historyData, agentVmEntities);
+  for (const profile of agentVmProfiles) {
+    let project = projects.find((item) =>
+      (item.projectId && item.projectId === profile.projectId) || item.cwd === profile.cwd);
+    if (project) {
+      project.projectId ||= profile.projectId;
+      project.agentVmProfile = profile;
+      continue;
+    }
+    project = {
+      key: profile.cwd,
+      cwd: profile.cwd,
+      name: profile.project,
+      projectId: profile.projectId,
+      history: null,
+      vm: null,
+      run: null,
+      summary: 'Agent VM запускается вместе с Jarvis',
+      updatedAt: 0,
+      agentVmProfile: profile,
+    };
+    projects.push(project);
+  }
+  return AgentVmModel.mergeProjectCatalog(projects, projectManagerState);
+}
+
+function agentVmProjectByCwd(cwd) {
+  return agentVmProjects().find((project) => project.cwd === cwd) || null;
+}
+
+function agentVmProfileFor(project) {
+  if (!project) return null;
+  return agentVmProfiles.find((profile) =>
+    (project.projectId && profile.projectId === project.projectId) || profile.cwd === project.cwd) || null;
+}
+
+function syncAgentVmFocus(project = agentVmCurrent, runId = null) {
+  const projectId = project?.projectId || null;
+  return window.jarvis.setAgentVmFocus(projectId, projectId ? runId : null).catch(() => {});
+}
+
+function agentVmElapsed(ts) {
+  const seconds = Math.max(0, Math.floor((Date.now() - (Number(ts) || Date.now())) / 1000));
+  if (seconds < 60) return `${seconds}с`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}м`;
+  return `${Math.floor(minutes / 60)}ч ${minutes % 60}м`;
+}
+
+function settleAgentVmOperations() {
+  for (const [requestId, waiter] of agentVmOperationWaiters) {
+    const result = AgentVmModel.operationResult(agentVmEntities, requestId);
+    if (!result) continue;
+    clearTimeout(waiter.timer);
+    agentVmOperationWaiters.delete(requestId);
+    if (result.ok) waiter.resolve(result.attrs);
+    else waiter.reject(new Error(result.error));
+  }
+}
+
+function waitAgentVmOperation(requestId, timeoutMs = 10 * 60 * 1000) {
+  const current = AgentVmModel.operationResult(agentVmEntities, requestId);
+  if (current) {
+    return current.ok ? Promise.resolve(current.attrs) : Promise.reject(new Error(current.error));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      agentVmOperationWaiters.delete(requestId);
+      reject(new Error('Agent VM не ответила вовремя'));
+    }, timeoutMs);
+    agentVmOperationWaiters.set(requestId, { resolve, reject, timer });
+  });
+}
+
+async function agentVmCommand(command, args, timeoutMs) {
+  const accepted = await window.jarvis.pluginCmd('agent-vm', command, args);
+  if (!accepted?.ok || !accepted?.requestId) {
+    throw new Error(accepted?.error || 'Agent VM plugin недоступен');
+  }
+  try {
+    return await waitAgentVmOperation(accepted.requestId, timeoutMs);
+  } finally {
+    window.jarvis.agentVmOperationAck(accepted.requestId).catch(() => {});
+  }
+}
+
+function ingestAgentVmEntities(list) {
+  agentVmEntities = Array.isArray(list) ? list : [];
+  settleAgentVmOperations();
+  renderActiveEnvironments();
+
+  if (agentVmCurrent) {
+    const refreshed = agentVmProjectByCwd(agentVmCurrent.cwd);
+    if (refreshed) agentVmCurrent = refreshed;
+    const runId = agentVmCurrent.run?.attrs?.runId || null;
+    if (!agentVmRunId && runId) agentVmRunId = runId;
+    if (view === 'agentvm') syncAgentVmFocus(agentVmCurrent, agentVmRunId);
+  }
+
+  if (view === 'history') renderHistLevel();
+  if (view === 'agentvm') renderAgentVmWorkspace();
+}
+
+function renderActiveEnvironments() {
+  if (!AgentVmModel || view !== 'list') {
+    activeEnvironmentsEl.hidden = true;
+    return;
+  }
+  const environments = AgentVmModel.activeEnvironments(agentVmEntities);
+  activeEnvironmentRowsEl.textContent = '';
+  activeEnvironmentCountEl.textContent = environments.length ? String(environments.length) : '';
+  activeEnvironmentsEl.hidden = environments.length === 0;
+  for (const environment of environments) {
+    const terminalProjectKey = environment.projectId || environment.cwd;
+    const liveBackend = ['claude', 'codex'].find((backend) =>
+      AgentVmModel.terminalSnapshotLive(
+        agentVmTerminals.get(`${terminalProjectKey}:${backend}`)));
+    const uiState = liveBackend ? 'working' : environment.uiState;
+    const row = document.createElement('div');
+    row.className = `vm-active-row ${uiState}`;
+    row.title = environment.cwd;
+    row.appendChild(Object.assign(document.createElement('span'), { className: 'vm-active-signal' }));
+    row.appendChild(Object.assign(document.createElement('span'), {
+      className: 'vm-active-name',
+      textContent: environment.project,
+    }));
+    row.appendChild(Object.assign(document.createElement('span'), {
+      className: 'vm-active-agent',
+      textContent: liveBackend === 'codex'
+        ? 'Codex'
+        : liveBackend === 'claude'
+          ? 'Claude'
+          : environment.run?.attrs?.backend === 'codex'
+            ? 'Codex'
+            : environment.run?.attrs?.backend === 'claude' ? 'Claude' : 'VM',
+    }));
+    row.appendChild(Object.assign(document.createElement('span'), {
+      className: 'vm-active-state',
+      textContent: AgentVmModel.stateLabel(uiState),
+    }));
+    row.appendChild(Object.assign(document.createElement('span'), {
+      className: 'vm-active-time',
+      textContent: agentVmElapsed(environment.updatedAt),
+    }));
+    row.appendChild(Object.assign(document.createElement('span'), {
+      className: 'vm-active-chevron',
+      textContent: '›',
+    }));
+    row.addEventListener('click', () => {
+      const project = agentVmProjectByCwd(environment.cwd) || {
+        key: environment.cwd,
+        cwd: environment.cwd,
+        name: environment.project,
+        projectId: environment.projectId,
+        vm: environment.vm,
+        run: environment.run,
+        history: null,
+      };
+      openAgentVmProject(project);
+    });
+    activeEnvironmentRowsEl.appendChild(row);
+  }
+}
+
+function setAgentVmStage(title, detail = '') {
+  agentVmStage = { title, detail };
+  agentVmStageStartedAt = Date.now();
+  renderAgentVmWorkspace();
+}
+
+function clearAgentVmStage() {
+  agentVmStage = null;
+  agentVmStageStartedAt = 0;
+  renderAgentVmWorkspace();
+}
+
+function agentVmArgs() {
+  const args = { cwd: agentVmCurrent.cwd };
+  if (agentVmCurrent.projectId) args.projectId = agentVmCurrent.projectId;
+  return args;
+}
+
+function agentVmTerminalKey(project = agentVmCurrent, backend = agentVmBackend) {
+  if (!project) return '';
+  return `${project.projectId || project.cwd}:${backend}`;
+}
+
+function currentAgentVmTerminal(project = agentVmCurrent, backend = agentVmBackend) {
+  return agentVmTerminals.get(agentVmTerminalKey(project, backend)) || {
+    state: 'absent',
+    screen: '',
+    backend,
+  };
+}
+
+function agentVmTerminalAlive(terminal = currentAgentVmTerminal()) {
+  return ['ready', 'working'].includes(terminal?.state);
+}
+
+function agentVmTerminalSize() {
+  const width = Math.max(320, agentVmTerminalScreenEl.clientWidth || agentVmFeedEl.clientWidth);
+  const height = Math.max(180, agentVmTerminalScreenEl.clientHeight || agentVmFeedEl.clientHeight);
+  return {
+    cols: Math.max(40, Math.min(240, Math.floor((width - 30) / 6.7))),
+    rows: Math.max(12, Math.min(100, Math.floor((height - 36) / 15.6))),
+  };
+}
+
+async function resizeAgentVmTerminal() {
+  if (view !== 'agentvm' || !agentVmCurrent?.projectId || !agentVmTerminalAlive()) return;
+  const projectId = agentVmCurrent.projectId;
+  const backend = agentVmBackend;
+  const key = agentVmTerminalKey();
+  const size = agentVmTerminalSize();
+  const signature = `${size.cols}x${size.rows}`;
+  if (agentVmTerminalSizes.get(key) === signature) return;
+  agentVmTerminalSizes.set(key, signature);
+  try {
+    const result = await window.jarvis.agentVmTerminalResize(
+      projectId,
+      backend,
+      size.cols,
+      size.rows,
+    );
+    if (!result?.ok) agentVmTerminalSizes.delete(key);
+  } catch {
+    agentVmTerminalSizes.delete(key);
+  }
+}
+
+function scheduleAgentVmTerminalResize() {
+  clearTimeout(agentVmTerminalResizeTimer);
+  agentVmTerminalResizeTimer = setTimeout(resizeAgentVmTerminal, 90);
+}
+
+function rememberAgentVmTerminal(terminal, key = agentVmTerminalKey()) {
+  if (!key || !terminal) return false;
+  const current = agentVmTerminals.get(key);
+  // seenAt обновляем всегда, даже когда снимок не изменился: это отметка
+  // «сейчас проверено», по ней экраны вне проекта отличают живую сессию от
+  // протухшего снимка (см. AgentVmModel.terminalSnapshotLive).
+  const seen = { ...terminal, seenAt: Date.now() };
+  if (current?.state === terminal.state
+    && current?.screen === terminal.screen
+    && current?.terminalId === terminal.terminalId) {
+    agentVmTerminals.set(key, seen);
+    return false;
+  }
+  agentVmTerminals.set(key, seen);
+  return true;
+}
+
+async function refreshAgentVmTerminal() {
+  if (view !== 'agentvm' || !agentVmCurrent?.projectId || agentVmTerminalPollInFlight) return;
+  const vmReady = ['running', 'ready', 'working'].includes(agentVmCurrent.vm?.state);
+  if (!vmReady) {
+    rememberAgentVmTerminal({
+      state: 'absent',
+      screen: '',
+      backend: agentVmBackend,
+    });
+    renderAgentVmWorkspace();
+    return;
+  }
+  const key = agentVmTerminalKey();
+  const projectId = agentVmCurrent.projectId;
+  const backend = agentVmBackend;
+  agentVmTerminalPollInFlight = true;
+  try {
+    const response = await window.jarvis.agentVmTerminalSnapshot(projectId, backend);
+    if (key !== agentVmTerminalKey()) return;
+    if (response?.ok && response.terminal) {
+      if (rememberAgentVmTerminal(response.terminal, key)) renderAgentVmWorkspace();
+    }
+  } finally {
+    agentVmTerminalPollInFlight = false;
+  }
+}
+
+async function ensureAgentVmTerminalOnce(project, backend) {
+  const key = agentVmTerminalKey(project, backend);
+  await ensureAgentVmEnvironment(project, backend);
+  const existing = currentAgentVmTerminal(project, backend);
+  if (agentVmTerminalAlive(existing)) return existing;
+
+  if (project.projectId && ['running', 'ready', 'working'].includes(project.vm?.state)) {
+    const snapshot = await window.jarvis.agentVmTerminalSnapshot(
+      project.projectId,
+      backend,
+    );
+    if (snapshot?.ok && agentVmTerminalAlive(snapshot.terminal)) {
+      rememberAgentVmTerminal(snapshot.terminal, key);
+      return snapshot.terminal;
+    }
+  }
+
+  const projectId = project.projectId;
+  if (!projectId) throw new Error('Agent VM не вернула projectId');
+  const size = agentVmTerminalSize();
+  const started = await window.jarvis.agentVmTerminalEnsure(
+    projectId,
+    backend,
+    size.cols,
+    size.rows,
+  );
+  if (!started?.ok || !started.terminal) {
+    throw new Error(started?.error || 'Не удалось запустить terminal session');
+  }
+  const resolvedKey = agentVmTerminalKey(project, backend);
+  rememberAgentVmTerminal(started.terminal, resolvedKey);
+  agentVmTerminalSizes.set(resolvedKey, `${size.cols}x${size.rows}`);
+  return started.terminal;
+}
+
+function agentVmEnvironmentKey(project, backend) {
+  return `${project.cwd}:${backend}`;
+}
+
+function ensureAgentVmEnvironment(project, backend) {
+  const key = agentVmEnvironmentKey(project, backend);
+  if (agentVmSyncedProjects.has(key)) {
+    return Promise.resolve({ projectId: project.projectId });
+  }
+  const existing = agentVmEnvironmentEnsurePromises.get(key);
+  if (existing) return existing;
+  const promise = agentVmCommand('runtime.ensure', {
+    cwd: project.cwd,
+    ...(project.projectId ? { projectId: project.projectId } : {}),
+    agent: backend,
+  }).then((environment) => {
+    const projectId = environment.projectId || project.projectId;
+    if (!projectId) throw new Error('Agent VM не вернула projectId');
+    project.projectId = projectId;
+    // занятое место приходит ответом команды: в сущности его держать нельзя —
+    // размер меняется постоянно и ломает дедупликацию публикаций
+    if (environment.disk) project.disk = environment.disk;
+    if (agentVmCurrent?.cwd === project.cwd) {
+      agentVmCurrent.projectId = projectId;
+      if (environment.disk) agentVmCurrent.disk = environment.disk;
+    }
+    agentVmSyncedProjects.add(key);
+    return environment;
+  }).finally(() => {
+    agentVmEnvironmentEnsurePromises.delete(key);
+  });
+  agentVmEnvironmentEnsurePromises.set(key, promise);
+  return promise;
+}
+
+function ensureAgentVmTerminal(
+  project = agentVmCurrent,
+  backend = agentVmBackend,
+) {
+  if (!project) return Promise.reject(new Error('Проект не выбран'));
+  const promiseKey = `${project.cwd}:${backend}`;
+  const existing = agentVmTerminalEnsurePromises.get(promiseKey);
+  if (existing) return existing;
+  const promise = ensureAgentVmTerminalOnce(project, backend)
+    .finally(() => agentVmTerminalEnsurePromises.delete(promiseKey));
+  agentVmTerminalEnsurePromises.set(promiseKey, promise);
+  return promise;
+}
+
+async function warmAgentVmTerminal() {
+  const project = agentVmCurrent;
+  if (!project || !agentVmPluginReady()
+    || !['running', 'ready', 'working'].includes(project.vm?.state)) return;
+  const backend = AgentVmModel.selectBackend(project.vm, agentVmBackend);
+  const terminalAlive = agentVmTerminalAlive(currentAgentVmTerminal(project, backend));
+  setAgentVmStage(
+    terminalAlive ? 'Синхронизирую настройки и memory' : 'Подключаю живой терминал',
+    terminalAlive
+      ? 'VM и агент остаются запущены'
+      : 'VM готова → persistent tmux → агент',
+  );
+  try {
+    await ensureAgentVmTerminal(project, backend);
+    if (agentVmCurrent?.cwd === project.cwd) await refreshAgentVmTerminal();
+  } catch (error) {
+    if (agentVmCurrent?.cwd === project.cwd) {
+      showToast(error.message || 'Не удалось подключить терминал');
+    }
+  } finally {
+    if (agentVmCurrent?.cwd === project.cwd && !agentVmTerminalInputInFlight) {
+      clearAgentVmStage();
+    }
+  }
+}
+
+// Освобождение кэша образов. Операция не привязана к проекту — кэш общий, — но
+// вызывается из popover проекта, потому что там показан его размер.
+async function releaseAgentVmCache() {
+  if (!agentVmPluginReady()) return;
+  setAgentVmStage('Освобождаю кэш образов', 'Существующие VM не пострадают');
+  try {
+    const result = await agentVmCommand('runtime.releaseCache', {}, 60_000);
+    if (result.disk && agentVmCurrent) agentVmCurrent.disk = result.disk;
+    showToast(result.freedBytes
+      ? `Освобождено ${formatGb(result.freedBytes)}`
+      : 'Кэш уже пуст');
+    renderAgentVmWorkspace();
+  } catch (error) {
+    showToast(error.message || 'Не удалось освободить кэш');
+  } finally {
+    clearAgentVmStage();
+  }
+}
+
+async function refreshAgentVmStatus() {
+  if (!agentVmCurrent || !agentVmPluginReady()) return;
+  try {
+    await agentVmCommand('runtime.status', agentVmArgs(), 30_000);
+  } catch {
+    // Inline plugin/VM state is more useful than a transient status toast.
+  }
+}
+
+async function runAgentVmLifecycle(command, title) {
+  if (!agentVmCurrent) return;
+  setAgentVmStage(title, 'Project config → VM → настройки');
+  try {
+    const result = await agentVmCommand(command, agentVmArgs());
+    if (result.projectId) agentVmCurrent.projectId = result.projectId;
+    if (command === 'runtime.stop' || command === 'runtime.restart') {
+      for (const backend of ['claude', 'codex']) {
+        agentVmSyncedProjects.delete(agentVmEnvironmentKey(agentVmCurrent, backend));
+        rememberAgentVmTerminal(
+          { state: 'absent', screen: '', backend },
+          agentVmTerminalKey(agentVmCurrent, backend),
+        );
+      }
+    }
+    showToast(command === 'runtime.stop' ? 'VM остановлена' : 'Среда готова');
+  } catch (error) {
+    showToast(error.message || 'Agent VM operation failed');
+  } finally {
+    clearAgentVmStage();
+  }
+}
+
+async function sendAgentVmMessage() {
+  if (!agentVmCurrent) return;
+  const project = agentVmCurrent;
+  const backend = agentVmBackend;
+  const prompt = agentVmPromptEl.value.trim();
+  const images = agentVmPendingImages.slice();
+  if ((!prompt && !images.length) || agentVmTerminalInputInFlight) return;
+  if (!agentVmPluginReady()) {
+    showToast('Agent VM plugin ещё запускается');
+    return;
+  }
+  if (!AgentVmModel.backendAvailable(agentVmCurrent.vm, agentVmBackend)) {
+    const name = agentVmBackend === 'codex' ? 'Codex' : 'Claude';
+    showToast(`${name} не установлен в этой VM`);
+    return;
+  }
+  agentVmTerminalInputInFlight = true;
+  hideAgentVmCommandPalette();
+  renderAgentVmAttachments();
+  agentVmQueueHintEl.hidden = false;
+  const active = project.run && ['starting', 'working', 'waiting'].includes(project.run.state);
+  setAgentVmStage(
+    active ? 'Ставлю сообщение следом' : 'Запускаю управляемую задачу',
+    active
+      ? 'В очереди может быть одно следующее сообщение'
+      : 'Project config → VM → настройки → агент',
+  );
+  try {
+    const environment = await ensureAgentVmEnvironment(project, backend);
+    const projectId = environment.projectId || project.projectId;
+    if (!projectId) throw new Error('Agent VM не вернула projectId');
+    const uploaded = await Promise.all(images.map(async (image) => {
+      if (image.guestPath && image.projectId === projectId) return image.guestPath;
+      const comma = image.dataUrl.indexOf(',');
+      if (comma < 0) throw new Error('Некорректное изображение');
+      const result = await window.jarvis.agentVmTerminalUpload(
+        projectId,
+        backend,
+        image.dataUrl.slice(comma + 1),
+        image.ext,
+      );
+      if (!result?.ok || !result.path) {
+        throw new Error(result?.error || 'Не удалось загрузить изображение');
+      }
+      image.guestPath = result.path;
+      image.projectId = projectId;
+      return result.path;
+    }));
+    const message = AgentVmModel.composePrompt(prompt, uploaded);
+    const continuation = AgentVmModel.continuationRunId(
+      project.run,
+      backend,
+      agentVmRunId,
+    );
+    const result = await agentVmCommand('runtime.send', {
+      cwd: project.cwd,
+      projectId,
+      agent: backend,
+      message,
+      ...(continuation ? { runId: continuation } : {}),
+    }, 60_000);
+    agentVmRunId = result.runId || agentVmRunId;
+    agentVmQueueHintEl.hidden = !result.queued;
+    await syncAgentVmFocus(project, agentVmRunId);
+    agentVmPromptEl.value = '';
+    agentVmPromptEl.style.height = '';
+    agentVmPendingImages = [];
+    renderAgentVmAttachments();
+  } catch (error) {
+    agentVmQueueHintEl.hidden = true;
+    refreshAgentVmCommandPalette();
+    showToast(error.message || 'Не удалось отправить задачу');
+  } finally {
+    agentVmTerminalInputInFlight = false;
+    renderAgentVmAttachments();
+    clearAgentVmStage();
+    agentVmPromptEl.focus();
+  }
+}
+
+async function cancelAgentVmRun() {
+  if (!agentVmRunId) return;
+  setAgentVmStage('Останавливаю агента', 'VM останется запущенной');
+  try {
+    await agentVmCommand('runtime.cancel', { runId: agentVmRunId }, 30_000);
+  } catch (error) {
+    showToast(error.message || 'Не удалось остановить агента');
+  } finally {
+    clearAgentVmStage();
+  }
+}
+
+async function stopAgentVmTerminal() {
+  if (!agentVmCurrent?.projectId || !agentVmTerminalAlive()) return;
+  const key = agentVmTerminalKey();
+  setAgentVmStage('Завершаю агента', 'VM и файлы проекта останутся на месте');
+  try {
+    const result = await window.jarvis.agentVmTerminalStop(
+      agentVmCurrent.projectId,
+      agentVmBackend,
+    );
+    if (!result?.ok) throw new Error(result?.error || 'Terminal session не остановлена');
+    rememberAgentVmTerminal({ state: 'absent', screen: '', backend: agentVmBackend }, key);
+  } catch (error) {
+    showToast(error.message || 'Не удалось остановить агента');
+  } finally {
+    clearAgentVmStage();
+  }
+}
+
+function openAgentVmProject(project, backend = null, requestedRunId = null) {
+  if (!project?.cwd) return;
+  if (agentVmCurrent?.cwd && agentVmCurrent.cwd !== project.cwd) {
+    agentVmPendingImages = [];
+  }
+  agentVmCurrent = project;
+  agentVmBackend = backend || project.run?.attrs?.backend || 'claude';
+  agentVmRunId = requestedRunId || project.run?.attrs?.runId || null;
+  agentVmQueueHintEl.hidden = true;
+  agentVmEnvironmentEl.hidden = true;
+  renderAgentVmAttachments();
+  closeAgentVmFile();
+  setView('agentvm');
+  syncAgentVmFocus(project, agentVmRunId);
+  renderAgentVmWorkspace();
+  loadAgentVmCommands(project, agentVmBackend);
+  refreshAgentVmTerminal();
+  refreshAgentVmStatus();
+  setTimeout(() => agentVmPromptEl.focus(), 30);
+}
+
+function closeAgentVmProject() {
+  clearTimeout(agentVmTerminalResizeTimer);
+  hideAgentVmCommandPalette();
+  agentVmEnvironmentEl.hidden = true;
+  closeAgentVmFile();
+  setView('history');
+}
+
+function agentVmTerminalUiState(vm, terminal, run) {
+  const vmState = AgentVmModel.environmentState(vm, run);
+  if (!['ready', 'working'].includes(vmState)) return vmState;
+  if (vmState === 'working') return vmState;
+  if (agentVmTerminalAlive(terminal)) return 'working';
+  if (terminal?.state === 'disconnected' || terminal?.state === 'error') return 'error';
+  if (terminal?.state === 'starting') return 'starting';
+  return 'ready';
+}
+
+/** Байты → «10,5 ГБ» (без ложной точности на мелких значениях). */
+function formatGb(bytes) {
+  const gb = bytes / 1024 ** 3;
+  if (gb >= 10) return `${Math.round(gb)} ГБ`;
+  if (gb >= 1) return `${gb.toFixed(1).replace('.', ',')} ГБ`;
+  const mb = bytes / 1024 ** 2;
+  return `${Math.max(1, Math.round(mb))} МБ`;
+}
+
+/** Строка «образы 10 ГБ · кэш 841 МБ» для строки «На диске». */
+function formatDiskUsage(disk) {
+  if (!disk || (!disk.imagesBytes && !disk.cacheBytes)) return '—';
+  const parts = [];
+  if (disk.imagesBytes) parts.push(`образы ${formatGb(disk.imagesBytes)}`);
+  if (disk.cacheBytes) parts.push(`кэш ${formatGb(disk.cacheBytes)}`);
+  return parts.join(' · ');
+}
+
+function renderAgentVmEnvironment(project, vm, terminal, run, uiState) {
+  const attrs = vm?.attrs || {};
+  const runAttrs = run?.attrs || {};
+  const terminalAlive = agentVmTerminalAlive(terminal);
+  const backend = runAttrs.backend || (terminalAlive ? agentVmBackend : '');
+  const backendName = backend === 'codex' ? 'Codex' : backend === 'claude' ? 'Claude' : '';
+  const stateText = AgentVmModel.stateLabel(uiState);
+  agentVmEnvironmentButtonEl.className = `vmws-env ${uiState}`;
+  agentVmEnvironmentDotEl.className = `vmws-env-dot ${uiState}`;
+  agentVmEnvironmentButtonEl.classList.toggle('open', !agentVmEnvironmentEl.hidden);
+  agentVmEnvironmentLabelEl.textContent = `${stateText}${backendName ? ` · ${backendName}` : ''}`;
+  agentVmEnvironmentTitleEl.textContent = stateText;
+  agentVmNameEl.textContent = vm?.id?.replace(/^vm\./, '')
+    || 'VM ещё не создана';
+  agentVmStateValueEl.textContent = stateText;
+  const resources = attrs.resources || {};
+  agentVmResourcesEl.textContent = [
+    resources.cpus ? `${resources.cpus} CPU` : '',
+    resources.memory || '',
+    resources.disk || '',
+  ].filter(Boolean).join(' · ') || 'по умолчанию';
+  // Занятое место: образы VM и общий кэш загрузок. Кэш показываем отдельно —
+  // он один на все VM, и его удаление стоит повторной загрузки образа.
+  agentVmDiskEl.textContent = formatDiskUsage(project?.disk);
+  // Кэш общий на все VM и хранит единственную копию образа: чистим только по
+  // явной просьбе, поэтому кнопка появляется, лишь когда есть что освобождать.
+  agentVmReleaseCacheEl.hidden = !(project?.disk?.cacheBytes > 0);
+  agentVmReleaseCacheEl.disabled = !!agentVmStage;
+  agentVmReleaseCacheEl.title = project?.disk?.cacheBytes
+    ? `Освободить ${formatGb(project.disk.cacheBytes)}. Существующие VM не пострадают, следующая скачает образ заново.`
+    : '';
+  const configuredBackends = AgentVmModel.configuredBackends(vm);
+  agentVmModulesEl.textContent = configuredBackends.length
+    ? configuredBackends.map((backend) => (backend === 'codex' ? 'Codex' : 'Claude')).join(' · ')
+    : 'Не установлены';
+  agentVmAutostartEl.checked = !!agentVmProfileFor(project)?.startWithJarvis;
+  agentVmAutostartEl.disabled = agentVmProfileSaving;
+  const running = ['running', 'ready', 'working'].includes(vm?.state);
+  agentVmEnsureEl.hidden = running;
+  agentVmEnsureEl.disabled = !!agentVmStage;
+  agentVmEnsureEl.textContent = vm?.state === 'stopped' ? 'Запустить VM' : 'Создать VM';
+  agentVmRestartEl.hidden = !running;
+  // Живой tmux-терминал: подключаем, пока агент не запущен, и даём завершить
+  // его, не трогая VM. До этого обе операции были написаны, но недостижимы.
+  agentVmConnectEl.hidden = !running || terminalAlive;
+  agentVmConnectEl.disabled = !!agentVmStage;
+  agentVmStopAgentEl.hidden = !terminalAlive;
+  agentVmStopAgentEl.disabled = !!agentVmStage;
+  agentVmStopEl.hidden = !running;
+  const shell = running ? attrs.shellCommand || runAttrs.shellCommand || '' : '';
+  agentVmCopyShellEl.disabled = !shell;
+  agentVmCopyShellEl.dataset.command = shell;
+  const resume = runAttrs.resumeCommand || '';
+  agentVmCopyResumeEl.hidden = !resume;
+  agentVmCopyResumeEl.dataset.command = resume;
+}
+
+function renderAgentVmWorkspace() {
+  if (view !== 'agentvm' || !agentVmCurrent) return;
+  const refreshed = agentVmProjectByCwd(agentVmCurrent.cwd);
+  if (refreshed) agentVmCurrent = refreshed;
+  const project = agentVmCurrent;
+  const vm = project.vm;
+  agentVmBackend = AgentVmModel.selectBackend(vm, agentVmBackend);
+  const configuredBackends = AgentVmModel.configuredBackends(vm);
+  const terminal = currentAgentVmTerminal();
+  const terminalAlive = agentVmTerminalAlive(terminal);
+  const run = project.run?.attrs?.runId === agentVmRunId ? project.run : null;
+  const runBusy = ['starting', 'working'].includes(run?.state);
+  const uiState = agentVmTerminalUiState(vm, terminal, run);
+  const pluginRuntime = AgentVmModel.pluginRuntimeStatus(pluginById('agent-vm'));
+  const pluginPending = pluginRuntime.state !== 'running';
+  const vmReady = ['running', 'ready', 'working'].includes(vm?.state);
+  const selectedBackendAvailable = configuredBackends.includes(agentVmBackend);
+
+  agentVmProjectTitleEl.textContent = project.name;
+  agentVmProjectPathEl.textContent = project.cwd;
+  renderAgentVmEnvironment(project, vm, terminal, run, uiState);
+  agentVmCancelEl.hidden = !runBusy || !agentVmRunId;
+  agentVmCancelEl.textContent = 'Остановить задачу';
+  agentVmSendEl.disabled = !agentVmPluginReady()
+    || !selectedBackendAvailable
+    || agentVmTerminalInputInFlight;
+  agentVmAttachEl.disabled = !agentVmPluginReady()
+    || !selectedBackendAvailable
+    || agentVmTerminalInputInFlight;
+  agentVmPromptEl.disabled = agentVmTerminalInputInFlight;
+  renderAgentVmAttachments();
+
+  for (const button of document.querySelectorAll('[data-agent-vm-backend]')) {
+    const backend = button.dataset.agentVmBackend;
+    const active = backend === agentVmBackend;
+    const available = configuredBackends.includes(backend);
+    button.classList.toggle('active', active);
+    button.disabled = !available;
+    button.title = available
+      ? ''
+      : `Добавьте ${backend} в .agent-vm.yaml и пересоздайте VM`;
+  }
+
+  const implicitStage = pluginPending
+    || ['starting', 'provisioning', 'creating'].includes(vm?.state)
+    || terminal?.state === 'starting';
+  agentVmStageEl.hidden = !agentVmStage && !implicitStage;
+  if (!agentVmStageEl.hidden) {
+    agentVmStageTitleEl.textContent = agentVmStage?.title
+      || (pluginPending
+        ? pluginRuntime.label
+        : terminal?.state === 'starting'
+          ? vmReady ? 'Подключаю terminal session' : 'Создаю и запускаю VM'
+          : 'Подготавливаю среду');
+    agentVmStageDetailEl.textContent = agentVmStage?.detail
+      || (pluginPending
+        ? pluginRuntime.detail
+        : vmReady
+          ? 'VM готова → persistent tmux → агент'
+          : 'Образ → запуск VM → настройки → агент');
+    const started = agentVmStageStartedAt
+      || (pluginPending ? pluginById('agent-vm')?.status?.startedAt : 0)
+      || vm?.updatedAt
+      || Date.now();
+    agentVmStageTimeEl.textContent = pluginPending && pluginRuntime.state !== 'starting'
+      ? ''
+      : agentVmElapsed(started);
+  }
+
+  const screen = typeof terminal?.screen === 'string' ? terminal.screen : '';
+  const screenKey = agentVmTerminalKey();
+  const showScreen = terminalAlive && !!screen;
+  agentVmTerminalScreenEl.hidden = !showScreen;
+  agentVmTerminalEmptyEl.hidden = showScreen;
+  agentVmTerminalLightEl.classList.toggle('live', terminalAlive);
+  agentVmTerminalTitleEl.textContent = run
+    ? `${run.attrs?.backend || agentVmBackend} · managed run`
+    : `${agentVmBackend}@${terminal?.vmName || project.name}`;
+  agentVmTerminalStateEl.textContent = run
+    ? AgentVmModel.stateLabel(uiState).toLocaleLowerCase()
+    : terminalAlive
+      ? 'подключён'
+      : terminal?.state === 'disconnected' ? 'нет связи' : 'не запущен';
+  if (showScreen && (agentVmTerminalLastScreenKey !== screenKey
+    || agentVmTerminalScreenEl.textContent !== screen)) {
+    const following = agentVmTerminalLastScreenKey !== screenKey
+      || agentVmTerminalScreenEl.scrollHeight
+        - agentVmTerminalScreenEl.scrollTop
+        - agentVmTerminalScreenEl.clientHeight < 48;
+    agentVmTerminalScreenEl.textContent = screen;
+    agentVmTerminalLastScreenKey = screenKey;
+    if (following) agentVmTerminalScreenEl.scrollTop = agentVmTerminalScreenEl.scrollHeight;
+  }
+  if (terminalAlive) scheduleAgentVmTerminalResize();
+  if (!selectedBackendAvailable && vm) {
+    agentVmTerminalEmptyDetailEl.textContent =
+      `Добавь ${agentVmBackend} в .agent-vm.yaml и пересоздай VM.`;
+  } else if (run) {
+    const summary = AgentVmModel.runSummary(run);
+    agentVmTerminalEmptyDetailEl.textContent =
+      `${AgentVmModel.stateLabel(uiState)}${summary ? ` · ${summary}` : ''}`;
+  } else if (terminalAlive) {
+    agentVmTerminalEmptyDetailEl.textContent = 'Подключаю экран живой tmux pane…';
+  } else {
+    agentVmTerminalEmptyDetailEl.textContent =
+      'Первый ввод подготовит VM и запустит управляемую задачу с отслеживанием состояния и результата.';
+  }
+  for (const button of document.querySelectorAll('[data-agent-vm-key]')) {
+    button.disabled = !terminalAlive;
+  }
+}
+
+async function openAgentVmFile(file) {
+  if (!agentVmRunId || !file?.path) return;
+  agentVmFile = { ...file, content: null, diff: null };
+  agentVmFileTitleEl.textContent = file.relativePath || file.path;
+  agentVmFileDrawerEl.hidden = false;
+  agentVmFileMode = 'diff';
+  renderAgentVmFile();
+  try {
+    const [content, diff] = await Promise.all([
+      window.jarvis.agentVmFileRead(agentVmRunId, file.path),
+      window.jarvis.agentVmFileDiff(agentVmRunId, file.path),
+    ]);
+    if (!agentVmFile || agentVmFile.path !== file.path) return;
+    agentVmFile.content = content;
+    agentVmFile.diff = diff;
+    if (!diff?.ok || diff.mode === 'none') agentVmFileMode = 'content';
+    renderAgentVmFile();
+  } catch {
+    showToast('Не удалось открыть файл');
+  }
+}
+
+function renderAgentVmFile() {
+  if (!agentVmFile) return;
+  const showDiff = agentVmFileMode === 'diff' && agentVmFile.diff?.ok
+    && agentVmFile.diff.mode !== 'none';
+  agentVmFileDiffTabEl.hidden = !agentVmFile.diff?.ok || agentVmFile.diff.mode === 'none';
+  agentVmFileDiffTabEl.classList.toggle('active', showDiff);
+  agentVmFileContentTabEl.classList.toggle('active', !showDiff);
+  agentVmFileDiffEl.hidden = !showDiff;
+  agentVmFileBodyEl.hidden = showDiff;
+  if (showDiff) {
+    JarvisDiffView.renderTo(agentVmFileDiffEl, agentVmFile.diff.hunks);
+  } else {
+    agentVmFileBodyEl.textContent = '';
+    if (!agentVmFile.content) {
+      agentVmFileBodyEl.textContent = 'Загружаю файл…';
+    } else if (!agentVmFile.content.ok) {
+      agentVmFileBodyEl.textContent = agentVmFile.content.error || 'Файл недоступен';
+    } else if (JarvisMarkdown.isMarkdownPath(agentVmFile.path)) {
+      agentVmFileBodyEl.innerHTML = JarvisMarkdown.render(agentVmFile.content.content);
+    } else {
+      const pre = document.createElement('pre');
+      pre.textContent = agentVmFile.content.content;
+      agentVmFileBodyEl.appendChild(pre);
+    }
+  }
+}
+
+function closeAgentVmFile() {
+  agentVmFile = null;
+  agentVmFileDrawerEl.hidden = true;
+  agentVmFileBodyEl.textContent = '';
+  agentVmFileDiffEl.textContent = '';
+}
+
+function agentVmCommandCatalogKey(project = agentVmCurrent, backend = agentVmBackend) {
+  return project ? `${project.cwd}:${backend}` : '';
+}
+
+function hideAgentVmCommandPalette() {
+  agentVmCommandItems = [];
+  agentVmCommandSelected = 0;
+  agentVmCommandPaletteEl.hidden = true;
+  agentVmCommandPaletteEl.textContent = '';
+}
+
+function agentVmCommandSourceLabel(source) {
+  return {
+    builtin: 'встроенная',
+    project: 'проект',
+    user: 'моя',
+    plugin: 'плагин',
+    codex: 'codex',
+  }[source] || '';
+}
+
+function completeAgentVmCommand(command) {
+  if (!command?.name) return;
+  agentVmPromptEl.value = `/${command.name}${command.hint ? ' ' : ''}`;
+  agentVmPromptEl.style.height = 'auto';
+  agentVmPromptEl.style.height = `${Math.min(agentVmPromptEl.scrollHeight, 104)}px`;
+  agentVmPromptEl.setSelectionRange(
+    agentVmPromptEl.value.length,
+    agentVmPromptEl.value.length,
+  );
+  refreshAgentVmCommandPalette();
+  agentVmPromptEl.focus();
+}
+
+function selectAgentVmCommand(index) {
+  agentVmCommandSelected = Math.max(
+    0,
+    Math.min(index, agentVmCommandItems.length - 1),
+  );
+  for (const [optionIndex, option] of [...agentVmCommandPaletteEl.children].entries()) {
+    const selected = optionIndex === agentVmCommandSelected;
+    option.classList.toggle('selected', selected);
+    option.setAttribute('aria-selected', String(selected));
+  }
+}
+
+function renderAgentVmCommandPalette() {
+  if (!agentVmCommandItems.length) {
+    hideAgentVmCommandPalette();
+    return;
+  }
+  agentVmCommandSelected = Math.max(
+    0,
+    Math.min(agentVmCommandSelected, agentVmCommandItems.length - 1),
+  );
+  agentVmCommandPaletteEl.hidden = false;
+  agentVmCommandPaletteEl.textContent = '';
+  for (const [index, command] of agentVmCommandItems.entries()) {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = `vm-command-option${index === agentVmCommandSelected ? ' selected' : ''}`;
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', String(index === agentVmCommandSelected));
+    option.appendChild(Object.assign(document.createElement('span'), {
+      className: 'vm-command-name',
+      textContent: `/${command.name}`,
+    }));
+    option.appendChild(Object.assign(document.createElement('span'), {
+      className: 'vm-command-description',
+      textContent: command.description || command.hint || 'Команда агента',
+    }));
+    option.appendChild(Object.assign(document.createElement('span'), {
+      className: command.hint ? 'vm-command-hint' : 'vm-command-source',
+      textContent: command.hint || agentVmCommandSourceLabel(command.source),
+    }));
+    option.addEventListener('mouseenter', () => {
+      selectAgentVmCommand(index);
+    });
+    option.addEventListener('mousedown', (event) => event.preventDefault());
+    option.addEventListener('click', () => completeAgentVmCommand(command));
+    agentVmCommandPaletteEl.appendChild(option);
+  }
+}
+
+function refreshAgentVmCommandPalette() {
+  const key = agentVmCommandCatalogKey();
+  const commands = key ? agentVmCommandCatalogs.get(key) || [] : [];
+  agentVmCommandItems = AgentVmModel.filterCommands(commands, agentVmPromptEl.value);
+  agentVmCommandSelected = 0;
+  renderAgentVmCommandPalette();
+}
+
+async function loadAgentVmCommands(project = agentVmCurrent, backend = agentVmBackend) {
+  if (!project?.cwd) return;
+  const key = agentVmCommandCatalogKey(project, backend);
+  if (agentVmCommandCatalogs.has(key)) {
+    if (key === agentVmCommandCatalogKey()) refreshAgentVmCommandPalette();
+    return;
+  }
+  agentVmCommandCatalogs.set(key, []);
+  try {
+    const result = await window.jarvis.getAgentVmCommands(
+      project.projectId || '',
+      project.cwd,
+      backend,
+    );
+    if (!result?.ok) throw new Error(result?.error || 'Каталог команд недоступен');
+    if (!project.projectId && result.projectId) project.projectId = result.projectId;
+    agentVmCommandCatalogs.set(key, Array.isArray(result.commands) ? result.commands : []);
+  } catch {
+    agentVmCommandCatalogs.delete(key);
+  }
+  if (key === agentVmCommandCatalogKey()) refreshAgentVmCommandPalette();
+}
+
+function agentVmImageExtension(file) {
+  const byType = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+  };
+  if (byType[file?.type]) return byType[file.type];
+  const extension = String(file?.name || '').split('.').at(-1)?.toLocaleLowerCase();
+  return ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension)
+    ? extension === 'jpeg' ? 'jpg' : extension
+    : '';
+}
+
+function renderAgentVmAttachments() {
+  agentVmAttachmentsEl.textContent = '';
+  agentVmAttachmentsEl.hidden = agentVmPendingImages.length === 0;
+  for (const image of agentVmPendingImages) {
+    const item = document.createElement('div');
+    item.className = `vmws-attachment${agentVmTerminalInputInFlight ? ' uploading' : ''}`;
+    const preview = document.createElement('img');
+    preview.src = image.dataUrl;
+    preview.alt = image.name || 'Прикреплённое изображение';
+    item.appendChild(preview);
+    const remove = Object.assign(document.createElement('button'), {
+      type: 'button',
+      className: 'vmws-attachment-remove',
+      textContent: '×',
+      title: 'Убрать изображение',
+      disabled: agentVmTerminalInputInFlight,
+    });
+    remove.setAttribute('aria-label', remove.title);
+    remove.addEventListener('click', () => {
+      agentVmPendingImages = agentVmPendingImages.filter(
+        (candidate) => candidate.id !== image.id,
+      );
+      renderAgentVmAttachments();
+      agentVmPromptEl.focus();
+    });
+    item.appendChild(remove);
+    agentVmAttachmentsEl.appendChild(item);
+  }
+}
+
+function addAgentVmImage(file) {
+  if (!file) return;
+  if (agentVmPendingImages.length >= MAX_IMAGES) {
+    showToast(`Не больше ${MAX_IMAGES} картинок`);
+    return;
+  }
+  if (file.size > 25 * 1024 * 1024) {
+    showToast('Картинка больше 25 МБ');
+    return;
+  }
+  const ext = agentVmImageExtension(file);
+  if (!ext) {
+    showToast('Поддерживаются PNG, JPEG, GIF и WebP');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    if (agentVmPendingImages.length >= MAX_IMAGES) {
+      showToast(`Не больше ${MAX_IMAGES} картинок`);
+      return;
+    }
+    const dataUrl = String(reader.result || '');
+    if (!dataUrl.includes(',')) return;
+    agentVmPendingImages.push({
+      id: `agent-vm-image-${agentVmAttachmentSequence++}`,
+      name: file.name || `image.${ext}`,
+      ext,
+      dataUrl,
+      guestPath: '',
+      projectId: '',
+    });
+    renderAgentVmAttachments();
+  };
+  reader.readAsDataURL(file);
+}
+
+agentVmBackEl.addEventListener('click', closeAgentVmProject);
+agentVmEnvironmentButtonEl.addEventListener('click', (event) => {
+  event.stopPropagation();
+  agentVmEnvironmentEl.hidden = !agentVmEnvironmentEl.hidden;
+  agentVmEnvironmentButtonEl.setAttribute('aria-expanded', String(!agentVmEnvironmentEl.hidden));
+  renderAgentVmWorkspace();
+});
+agentVmEnvironmentEl.addEventListener('click', (event) => event.stopPropagation());
+document.addEventListener('click', () => {
+  if (!agentVmEnvironmentEl.hidden) {
+    agentVmEnvironmentEl.hidden = true;
+    agentVmEnvironmentButtonEl.setAttribute('aria-expanded', 'false');
+    if (view === 'agentvm') renderAgentVmWorkspace();
+  }
+});
+for (const button of document.querySelectorAll('[data-agent-vm-backend]')) {
+  button.addEventListener('click', () => {
+    agentVmBackend = button.dataset.agentVmBackend;
+    renderAgentVmWorkspace();
+    loadAgentVmCommands(agentVmCurrent, agentVmBackend);
+    refreshAgentVmTerminal();
+    agentVmPromptEl.focus();
+  });
+}
+for (const button of document.querySelectorAll('[data-agent-vm-key]')) {
+  button.addEventListener('click', async () => {
+    if (!agentVmCurrent?.projectId || !agentVmTerminalAlive()) return;
+    button.disabled = true;
+    try {
+      const result = await window.jarvis.agentVmTerminalKey(
+        agentVmCurrent.projectId,
+        agentVmBackend,
+        button.dataset.agentVmKey,
+      );
+      if (!result?.ok) throw new Error(result?.error || 'Клавиша не принята');
+      await refreshAgentVmTerminal();
+    } catch (error) {
+      showToast(error.message || 'Не удалось отправить клавишу');
+    } finally {
+      renderAgentVmWorkspace();
+    }
+  });
+}
+agentVmPromptEl.addEventListener('input', () => {
+  agentVmPromptEl.style.height = 'auto';
+  agentVmPromptEl.style.height = `${Math.min(agentVmPromptEl.scrollHeight, 104)}px`;
+  refreshAgentVmCommandPalette();
+});
+agentVmPromptEl.addEventListener('paste', (event) => {
+  const items = event.clipboardData?.items;
+  if (!items) return;
+  const images = [...items].filter(
+    (item) => item.kind === 'file' && item.type.startsWith('image/'),
+  );
+  if (!images.length) return;
+  event.preventDefault();
+  for (const item of images) addAgentVmImage(item.getAsFile());
+});
+agentVmPromptEl.addEventListener('keydown', (event) => {
+  if (!agentVmCommandPaletteEl.hidden) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      event.stopPropagation();
+      selectAgentVmCommand(agentVmCommandSelected + 1);
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      event.stopPropagation();
+      selectAgentVmCommand(agentVmCommandSelected - 1);
+      return;
+    }
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      event.stopPropagation();
+      completeAgentVmCommand(agentVmCommandItems[agentVmCommandSelected]);
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      hideAgentVmCommandPalette();
+      return;
+    }
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      const selected = agentVmCommandItems[agentVmCommandSelected];
+      if (selected && agentVmPromptEl.value.toLocaleLowerCase()
+        !== `/${selected.name}`.toLocaleLowerCase()) {
+        event.preventDefault();
+        event.stopPropagation();
+        completeAgentVmCommand(selected);
+        return;
+      }
+    }
+  }
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    event.stopPropagation();
+    sendAgentVmMessage();
+  }
+});
+agentVmAttachEl.addEventListener('click', () => agentVmImagePickerEl.click());
+agentVmImagePickerEl.addEventListener('change', () => {
+  for (const file of agentVmImagePickerEl.files || []) addAgentVmImage(file);
+  agentVmImagePickerEl.value = '';
+});
+agentVmSendEl.addEventListener('click', sendAgentVmMessage);
+agentVmCancelEl.addEventListener('click', cancelAgentVmRun);
+agentVmEnsureEl.addEventListener('click', () => runAgentVmLifecycle('runtime.ensure', 'Подготавливаю среду'));
+agentVmConnectEl.addEventListener('click', () => warmAgentVmTerminal());
+agentVmReleaseCacheEl.addEventListener('click', releaseAgentVmCache);
+agentVmRestartEl.addEventListener('click', () => runAgentVmLifecycle('runtime.restart', 'Перезапускаю VM'));
+agentVmStopAgentEl.addEventListener('click', () => stopAgentVmTerminal());
+agentVmStopEl.addEventListener('click', () => runAgentVmLifecycle('runtime.stop', 'Останавливаю VM'));
+agentVmAutostartEl.addEventListener('change', async () => {
+  if (!agentVmCurrent || agentVmProfileSaving) return;
+  const desired = agentVmAutostartEl.checked;
+  agentVmProfileSaving = true;
+  renderAgentVmWorkspace();
+  try {
+    const result = await window.jarvis.setAgentVmProfile(agentVmCurrent.cwd, desired);
+    if (!result?.ok) throw new Error(result?.error || 'Не удалось сохранить профиль');
+    agentVmProfiles = Array.isArray(result.profiles) ? result.profiles : [];
+    if (result.profile?.projectId) agentVmCurrent.projectId = result.profile.projectId;
+    showToast(desired ? 'VM будет запускаться вместе с Jarvis' : 'Автозапуск VM выключен');
+    if (view === 'history') renderHistLevel();
+  } catch (error) {
+    agentVmAutostartEl.checked = !desired;
+    showToast(error.message || 'Не удалось сохранить автозапуск');
+  } finally {
+    agentVmProfileSaving = false;
+    renderAgentVmWorkspace();
+  }
+});
+agentVmCopyShellEl.addEventListener('click', async () => {
+  const command = agentVmCopyShellEl.dataset.command;
+  if (!command) return;
+  await navigator.clipboard.writeText(command);
+  showToast('Команда входа скопирована');
+});
+agentVmCopyResumeEl.addEventListener('click', async () => {
+  const command = agentVmCopyResumeEl.dataset.command;
+  if (!command) return;
+  await navigator.clipboard.writeText(command);
+  showToast('Команда resume скопирована');
+});
+document.getElementById('agentVmFileClose').addEventListener('click', closeAgentVmFile);
+document.getElementById('agentVmFileFinder').addEventListener('click', () => {
+  if (agentVmFile && agentVmRunId) {
+    window.jarvis.agentVmFileOpen(agentVmRunId, agentVmFile.path, true);
+  }
+});
+agentVmFileDiffTabEl.addEventListener('click', () => {
+  agentVmFileMode = 'diff';
+  renderAgentVmFile();
+});
+agentVmFileContentTabEl.addEventListener('click', () => {
+  agentVmFileMode = 'content';
+  renderAgentVmFile();
+});
+
+window.jarvis.onEntities(ingestAgentVmEntities);
+window.jarvis.getEntities().then(ingestAgentVmEntities).catch(() => {});
+window.jarvis.getAgentVmProfiles().then((profiles) => {
+  agentVmProfiles = Array.isArray(profiles) ? profiles : [];
+  if (view === 'history') renderHistLevel();
+  if (view === 'agentvm') renderAgentVmWorkspace();
+}).catch(() => {});
+window.jarvis.getProjectManagerState().then((state) => {
+  projectManagerState = state || projectManagerState;
+  if (view === 'history') renderHistLevel();
+}).catch(() => {});
+window.jarvis.onOpenAgentVm(async (target) => {
+  if (!target?.cwd || !target?.projectId) return;
+  if (!historyData.length) {
+    try { historyData = await window.jarvis.getHistory(); } catch {}
+  }
+  if (!agentVmEntities.length) {
+    try { ingestAgentVmEntities(await window.jarvis.getEntities()); } catch {}
+  }
+  const project = agentVmProjects().find((item) =>
+    item.projectId === target.projectId || item.cwd === target.cwd) || {
+    key: target.cwd,
+    cwd: target.cwd,
+    name: target.project || target.cwd.split('/').filter(Boolean).at(-1) || 'Project',
+    projectId: target.projectId,
+    history: null,
+    vm: null,
+    run: null,
+    summary: '',
+    updatedAt: 0,
+  };
+  project.projectId ||= target.projectId;
+  openAgentVmProject(project, null, target.runId || null);
+});
+if (typeof ResizeObserver === 'function') {
+  const agentVmTerminalResizeObserver = new ResizeObserver(scheduleAgentVmTerminalResize);
+  agentVmTerminalResizeObserver.observe(agentVmFeedEl);
+}
+setInterval(() => {
+  if (view === 'agentvm') refreshAgentVmTerminal();
+}, 350);
+setInterval(() => {
+  if (view === 'list') renderActiveEnvironments();
+  if (view === 'agentvm' && !agentVmStageEl.hidden) renderAgentVmWorkspace();
+  if (view === 'history' && histProject == null) renderAgentVmRuntimeStatus();
+}, 1000);
+
 /* ---------- вкладка «Проекты» (история чатов по проектам) ---------- */
 
 const historyEl = document.getElementById('history');
+const projectManagerToolbarEl = document.getElementById('projectManagerToolbar');
+const projectManagerContentEl = document.getElementById('projectManagerContent');
+const projectManagerSubtitleEl = document.getElementById('projectManagerSubtitle');
+const projectManagerAddEl = document.getElementById('projectManagerAdd');
+const projectManagerListViewEl = document.getElementById('projectManagerListView');
+const projectManagerCardsViewEl = document.getElementById('projectManagerCardsView');
 const tabHistoryEl = document.getElementById('tabHistory');
 tabHistoryEl.addEventListener('click', () => setView('history'));
 
@@ -2906,6 +4497,50 @@ let historyData = [];
 let histRows = []; // плоский список выбираемых строк: проекты или чаты (для ↑↓/Enter)
 let histSel = 0;
 let histProject = null; // ключ открытого проекта (cwd) — null = список проектов
+const histRuns = new Map(); // cwd → прогоны Agent VM для списка чатов проекта
+let histRunsInFlight = null;
+
+// Прогоны проекта живут в журналах на хосте и приходят ответом команды, а не
+// сущностью: список нужен только на этом экране, держать его в EntityStore
+// незачем. Ответ асинхронный, поэтому список чатов рисуется сразу, а VM-строки
+// добавляются, когда команда ответит.
+async function loadHistRuns(cwd) {
+  if (!cwd || histRuns.has(cwd) || histRunsInFlight === cwd) return;
+  // Плагин не поднят — прогонов нет, и это законный ответ, а не «ещё грузим».
+  // Без этой записи список у пользователя без Agent VM вечно висел бы
+  // в «Загружаю чаты…». Когда плагин поднимется, вход в проект перезапросит.
+  if (!agentVmPluginReady()) {
+    histRuns.set(cwd, []);
+    return;
+  }
+  histRunsInFlight = cwd;
+  try {
+    const project = agentVmProjectByCwd(cwd);
+    const result = await agentVmCommand('runtime.runs', {
+      cwd,
+      ...(project?.projectId ? { projectId: project.projectId } : {}),
+    }, 15_000);
+    histRuns.set(cwd, Array.isArray(result?.runs) ? result.runs : []);
+    if (view === 'history' && histProject === cwd) renderHistory();
+  } catch {
+    histRuns.set(cwd, []); // без прогонов список чатов всё равно осмыслен
+  } finally {
+    histRunsInFlight = null;
+  }
+}
+
+// Перерисовать текущий уровень вкладки «Проекты», не роняя пользователя из
+// открытого проекта. Раньше обновления сущностей звали renderHistProjects
+// напрямую и выкидывали из списка чатов обратно к проектам.
+function renderHistLevel() {
+  if (view !== 'history') return;
+  if (histProject == null) {
+    renderHistProjects(queryEl.value.trim().toLowerCase());
+    paintHistSel();
+    return;
+  }
+  renderHistory();
+}
 
 function histTime(ts) {
   const d = new Date(ts);
@@ -2933,14 +4568,27 @@ async function launchSession(agent, sessionId, cwd) {
 
 function openHistProject(key) {
   histProject = key;
+  // Прогоны кэшируются на время просмотра одного проекта, но при каждом входе
+  // список запрашивается заново: иначе завершившийся с прошлого раза прогон
+  // остался бы «работает», а новый вовсе не появился бы.
+  histRuns.delete(key);
   queryEl.value = ''; // фильтр списка проектов внутри проекта не нужен
+  queryEl.placeholder = 'Найти чат…';
   renderHistory();
+}
+
+// Проект открывается своими чатами, а не пультом VM: пульт живёт в
+// environment popover внутри рабочего места, куда ведёт конкретный VM-чат.
+function openProjectPrimary(project) {
+  if (!project?.cwd) return;
+  openHistProject(project.cwd);
 }
 
 async function renderHistory() {
   try { historyData = await window.jarvis.getHistory(); } catch { historyData = []; }
   if (view !== 'history') return;
-  historyEl.textContent = '';
+  projectManagerContentEl.textContent = '';
+  agentVmRuntimeStatusEl = null;
   histRows = [];
   histSel = 0;
 
@@ -2949,9 +4597,21 @@ async function renderHistory() {
   let g = null;
   if (histProject != null) {
     g = historyData.find((x) => (x.cwd || x.project) === histProject);
-    if (!g) histProject = null; // проект исчез с диска — назад к списку
+    // У проекта может не быть истории на хосте — например, он работал только
+    // в VM (транскрипты гостя наружу не выходят). Экран чатов всё равно нужен:
+    // его наполнят прогоны из runtime.runs.
+    if (!g) {
+      const known = agentVmProjectByCwd(histProject);
+      if (known) {
+        g = { project: known.name, cwd: known.cwd, count: 0, lastAt: 0, sessions: [] };
+      } else {
+        histProject = null; // проект исчез с диска — назад к списку
+      }
+    }
   }
 
+  projectManagerToolbarEl.hidden = !!g;
+  queryEl.placeholder = g ? 'Найти чат…' : 'Найти проект или папку…';
   if (!g) renderHistProjects(q);
   else renderHistChats(g, q);
   paintHistSel();
@@ -2960,47 +4620,288 @@ async function renderHistory() {
 /* уровень 1: проекты */
 function renderHistProjects(q) {
   primaryLabelEl.textContent = 'Открыть проект';
-  const groups = q
-    ? historyData.filter((x) => x.project.toLowerCase().includes(q) || x.sessions.some((s) => s.title.toLowerCase().includes(q)))
-    : historyData;
+  const previousCwd = histRows[histSel]?.project?.cwd;
+  projectManagerToolbarEl.hidden = false;
+  projectManagerContentEl.textContent = '';
+  histRows = [];
+  const allProjects = agentVmProjects();
+  const groups = AgentVmModel.filterProjects(allProjects, q);
+
+  const runtime = AgentVmModel.pluginRuntimeStatus(pluginById('agent-vm'));
+  projectManagerSubtitleEl.textContent =
+    `${groups.length} ${plural(groups.length, 'проект', 'проекта', 'проектов')}`;
+  const cards = projectManagerState.view === 'cards';
+  projectManagerListViewEl.classList.toggle('active', !cards);
+  projectManagerListViewEl.setAttribute('aria-pressed', String(!cards));
+  projectManagerCardsViewEl.classList.toggle('active', cards);
+  projectManagerCardsViewEl.setAttribute('aria-pressed', String(cards));
+  projectManagerAddEl.disabled = projectManagerSaving;
+
+  if (runtime.state === 'running') {
+    agentVmRuntimeStatusEl = null;
+  } else {
+    agentVmRuntimeStatusEl = document.createElement('div');
+    renderAgentVmRuntimeStatus(agentVmRuntimeStatusEl);
+    projectManagerContentEl.appendChild(agentVmRuntimeStatusEl);
+  }
 
   if (!groups.length) {
-    historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'empty', textContent: q ? 'Ничего не найдено' : 'История пуста' }));
+    projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), {
+      className: 'empty',
+      textContent: q
+        ? 'Ничего не найдено'
+        : 'Добавь папку или запусти Claude/Codex — проект появится здесь.',
+    }));
     return;
   }
 
-  for (const x of groups) {
-    const key = x.cwd || x.project;
+  const favoriteProjects = groups.filter((project) => project.favoriteIndex >= 0);
+  const regularProjects = groups.filter((project) => project.favoriteIndex < 0);
+  const sections = favoriteProjects.length
+    ? [['Избранное', favoriteProjects], ['Все проекты', regularProjects]]
+    : [['', regularProjects]];
+  for (const [label, projects] of sections) {
+    if (!projects.length) continue;
+    const section = document.createElement('section');
+    section.className = 'pm-section';
+    if (label) {
+      section.appendChild(Object.assign(document.createElement('div'), {
+        className: 'pm-section-title',
+        textContent: label,
+      }));
+    }
+    const grid = document.createElement('div');
+    grid.className = `pm-card-grid ${cards ? 'cards' : 'list'}`;
+    for (const project of projects) {
+      grid.appendChild(renderProjectCard(project));
+    }
+    section.appendChild(grid);
+    projectManagerContentEl.appendChild(section);
+  }
+  const restored = groups.findIndex((project) => project.cwd === previousCwd);
+  histSel = restored >= 0 ? restored : Math.min(histSel, groups.length - 1);
+  paintHistSel();
+}
+
+function renderProjectCard(project) {
     const idx = histRows.length;
-    histRows.push({ type: 'project', key });
+    histRows.push({ type: 'project', key: project.cwd, project });
+    const terminalProjectKey = project.projectId || project.cwd;
+    const terminalBackend = ['claude', 'codex'].find((backend) =>
+      AgentVmModel.terminalSnapshotLive(
+        agentVmTerminals.get(`${terminalProjectKey}:${backend}`)));
+    const uiState = terminalBackend
+      ? 'working'
+      : AgentVmModel.environmentState(project.vm, project.run);
     const row = document.createElement('div');
-    row.className = 'hrow';
+    row.className = `pm-card ${uiState}`;
     row.dataset.idx = idx;
-    row.title = x.cwd || x.project;
+    row.title = project.cwd;
 
-    row.appendChild(Object.assign(document.createElement('span'), { className: 'htitle', textContent: x.project }));
-    row.appendChild(Object.assign(document.createElement('span'), {
-      className: 'hmeta',
-      textContent: `${x.count} ${plural(x.count, 'чат', 'чата', 'чатов')} · ${histTime(x.lastAt)}`,
+    const copy = document.createElement('div');
+    copy.className = 'pm-card-copy';
+    copy.appendChild(Object.assign(document.createElement('span'), {
+      className: 'pm-card-title',
+      textContent: project.name,
     }));
-    row.appendChild(Object.assign(document.createElement('span'), { className: 'hchev', textContent: '›' }));
+    copy.appendChild(Object.assign(document.createElement('span'), {
+      className: 'pm-card-path',
+      textContent: AgentVmModel.displayProjectPath(project.cwd),
+    }));
+    row.appendChild(copy);
 
+    const controls = document.createElement('div');
+    controls.className = 'pm-card-controls';
+    const openVm = Object.assign(document.createElement('button'), {
+      type: 'button',
+      className: 'pm-icon-button agent-vm',
+      textContent: 'VM',
+      title: 'Открыть Agent VM',
+    });
+    openVm.setAttribute('aria-label', openVm.title);
+    openVm.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openAgentVmProject(project);
+    });
+    controls.appendChild(openVm);
+    const favorite = project.favoriteIndex >= 0;
+    const star = Object.assign(document.createElement('button'), {
+      className: `pm-icon-button star${favorite ? ' active' : ''}`,
+      textContent: favorite ? '★' : '☆',
+      title: favorite ? 'Убрать из избранного' : 'Добавить в избранное',
+      disabled: projectManagerSaving,
+    });
+    star.setAttribute('aria-label', star.title);
+    star.addEventListener('click', (event) => {
+      event.stopPropagation();
+      setProjectManagerFavorite(project, !favorite);
+    });
+    controls.appendChild(star);
+    if (favorite) {
+      const favoriteCount = Array.isArray(projectManagerState.favoriteProjectIds)
+        ? projectManagerState.favoriteProjectIds.length
+        : 0;
+      for (const [direction, glyph, disabled] of [
+        ['up', '↑', project.favoriteIndex === 0],
+        ['down', '↓', project.favoriteIndex === favoriteCount - 1],
+      ]) {
+        const move = Object.assign(document.createElement('button'), {
+          className: 'pm-icon-button move',
+          textContent: glyph,
+          title: direction === 'up' ? 'Выше в избранном' : 'Ниже в избранном',
+          disabled: projectManagerSaving || disabled,
+        });
+        move.setAttribute('aria-label', move.title);
+        move.addEventListener('click', (event) => {
+          event.stopPropagation();
+          moveProjectManagerFavorite(project, direction);
+        });
+        controls.appendChild(move);
+      }
+    }
+    row.appendChild(controls);
+
+    const vmState = project.vm?.state;
+    const showVmStatus = terminalBackend
+      || ['provisioning', 'creating', 'starting', 'running', 'ready', 'working', 'error']
+        .includes(vmState);
+    if (showVmStatus) {
+      const status = document.createElement('div');
+      status.className = `pm-card-status ${uiState}`;
+      status.appendChild(Object.assign(document.createElement('span'), {
+        className: 'pm-card-status-dot',
+      }));
+      status.appendChild(Object.assign(document.createElement('span'), {
+        textContent: terminalBackend
+          ? `${terminalBackend === 'codex' ? 'Codex' : 'Claude'} работает`
+          : ['running', 'ready', 'working'].includes(vmState)
+            ? 'VM готова'
+            : AgentVmModel.stateLabel(uiState),
+      }));
+      row.appendChild(status);
+    }
     row.addEventListener('mouseenter', () => { histSel = idx; paintHistSel(); });
-    row.addEventListener('click', () => openHistProject(key));
-    historyEl.appendChild(row);
+    row.addEventListener('click', () => openProjectPrimary(project));
+    return row;
+}
+
+// Ошибка записи не значит, что запись не применилась: ответ мог потеряться уже
+// после сохранения. Гадать нельзя — спрашиваем актуальное состояние у бэкенда,
+// иначе каталог проектов навсегда расходится с диском.
+async function resyncProjectManagerState() {
+  try {
+    const state = await window.jarvis.getProjectManagerState();
+    if (state) projectManagerState = state;
+  } catch {
+    // Бэкенд недоступен — оставляем прежнее состояние до следующей попытки.
   }
 }
 
+async function pickProjectManagerFolder() {
+  if (projectManagerSaving) return;
+  projectManagerSaving = true;
+  renderHistProjects(queryEl.value.trim());
+  try {
+    const result = await window.jarvis.pickProjectManagerFolder();
+    if (!result?.ok) throw new Error(result?.error || 'Не удалось добавить папку');
+    if (result.cancelled) return;
+    projectManagerState = result.state || projectManagerState;
+    queryEl.value = '';
+    showToast(`${result.project?.project || 'Папка'} добавлена в проекты`);
+  } catch (error) {
+    showToast(error.message || 'Не удалось добавить папку');
+    await resyncProjectManagerState();
+  } finally {
+    projectManagerSaving = false;
+    if (view === 'history' && histProject == null) renderHistProjects(queryEl.value.trim());
+  }
+}
+
+async function setProjectManagerFavorite(project, favorite) {
+  if (projectManagerSaving || !project?.cwd) return;
+  projectManagerSaving = true;
+  renderHistProjects(queryEl.value.trim());
+  try {
+    const result = await window.jarvis.setProjectManagerFavorite(project.cwd, favorite);
+    if (!result?.ok) throw new Error(result?.error || 'Не удалось изменить избранное');
+    projectManagerState = result.state || projectManagerState;
+  } catch (error) {
+    showToast(error.message || 'Не удалось изменить избранное');
+    await resyncProjectManagerState();
+  } finally {
+    projectManagerSaving = false;
+    if (view === 'history' && histProject == null) renderHistProjects(queryEl.value.trim());
+  }
+}
+
+async function moveProjectManagerFavorite(project, direction) {
+  if (projectManagerSaving || !project?.projectId) return;
+  projectManagerSaving = true;
+  renderHistProjects(queryEl.value.trim());
+  try {
+    const result = await window.jarvis.moveProjectManagerFavorite(project.projectId, direction);
+    if (!result?.ok) throw new Error(result?.error || 'Не удалось переместить проект');
+    projectManagerState = result.state || projectManagerState;
+  } catch (error) {
+    showToast(error.message || 'Не удалось переместить проект');
+    await resyncProjectManagerState();
+  } finally {
+    projectManagerSaving = false;
+    if (view === 'history' && histProject == null) renderHistProjects(queryEl.value.trim());
+  }
+}
+
+async function setProjectManagerView(nextView) {
+  if (projectManagerSaving || !['list', 'cards'].includes(nextView)
+    || projectManagerState.view === nextView) return;
+  const previousView = projectManagerState.view;
+  projectManagerState = { ...projectManagerState, view: nextView };
+  projectManagerSaving = true;
+  renderHistProjects(queryEl.value.trim());
+  try {
+    const result = await window.jarvis.setProjectManagerView(nextView);
+    if (!result?.ok) throw new Error(result?.error || 'Не удалось сохранить вид');
+    projectManagerState = result.state || projectManagerState;
+  } catch (error) {
+    projectManagerState = { ...projectManagerState, view: previousView };
+    showToast(error.message || 'Не удалось сохранить вид');
+    await resyncProjectManagerState();
+  } finally {
+    projectManagerSaving = false;
+    if (view === 'history' && histProject == null) renderHistProjects(queryEl.value.trim());
+  }
+}
+
+projectManagerAddEl.addEventListener('click', pickProjectManagerFolder);
+projectManagerListViewEl.addEventListener('click', () => setProjectManagerView('list'));
+projectManagerCardsViewEl.addEventListener('click', () => setProjectManagerView('cards'));
+
 /* уровень 2: чаты проекта */
+
+// Открыть выбранный чат: обычный — продолжением в терминале, VM-чат — рабочим
+// местом проекта на этом прогоне. Единая точка, чтобы клик, ↵ и подсказка внизу
+// не разошлись между собой.
+function openHistChat(row) {
+  if (!row) return;
+  if (row.chat?.kind === 'vm') {
+    const project = agentVmProjectByCwd(row.cwd);
+    if (!project) { showToast('Проект недоступен'); return; }
+    openAgentVmProject(project, row.chat.agent, row.chat.runId);
+    return;
+  }
+  launchSession(row.s.agent, row.s.id, row.cwd);
+}
+
 function renderHistChats(g, q) {
-  primaryLabelEl.textContent = 'Запустить в терминале';
+  primaryLabelEl.textContent = 'Открыть чат';
+  projectManagerToolbarEl.hidden = true;
+  loadHistRuns(g.cwd);
   const head = document.createElement('div');
   head.className = 'hgroup';
   const back = Object.assign(document.createElement('span'), { className: 'hback', textContent: '‹ Проекты' });
   back.addEventListener('click', () => { histProject = null; renderHistory(); });
   head.appendChild(back);
   head.appendChild(Object.assign(document.createElement('span'), { textContent: g.project }));
-  head.appendChild(Object.assign(document.createElement('span'), { className: 'hcount', textContent: `${g.count} ${plural(g.count, 'чат', 'чата', 'чатов')}` }));
   // новые сессии в директории проекта — отдельно для Claude и Codex; для групп
   // без известной директории («другое», g.cwd == null) новая сессия бессмысленна
   if (g.cwd) {
@@ -3012,52 +4913,98 @@ function renderHistChats(g, q) {
     newCodex.addEventListener('click', (e) => { e.stopPropagation(); launchSession('codex', null, g.cwd); });
     head.appendChild(newClaude);
     head.appendChild(newCodex);
+    // Вход в Agent VM: раньше он был только на карточке проекта — то есть
+    // на уровне выше, откуда пользователь уже ушёл. Пока VM нет, отсюда её и
+    // создают; когда есть — сюда же возвращаются к её рабочему месту.
+    const project = agentVmProjectByCwd(g.cwd);
+    const vmReady = ['running', 'ready', 'working'].includes(project?.vm?.state);
+    const openVm = Object.assign(document.createElement('button'), {
+      className: 'abtn small',
+      textContent: vmReady ? 'Agent VM' : '+ Agent VM',
+    });
+    openVm.title = vmReady
+      ? 'Открыть рабочее место Agent VM этого проекта'
+      : 'Создать среду Agent VM для этого проекта';
+    openVm.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (project) openAgentVmProject(project);
+      else showToast('Проект недоступен');
+    });
+    head.appendChild(openVm);
   }
-  historyEl.appendChild(head);
+  projectManagerContentEl.appendChild(head);
 
-  historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — запустить продолжение в терминале · + Claude / + Codex — новая сессия · esc — к проектам' }));
+  projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — открыть чат · VM-чат откроется рабочим местом проекта · + Claude / + Codex — новая сессия · Agent VM — среда проекта · esc — к проектам' }));
 
-  const sessions = q ? g.sessions.filter((s) => s.title.toLowerCase().includes(q)) : g.sessions;
-  if (!sessions.length) {
-    historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'empty', textContent: 'Ничего не найдено' }));
+  const all = AgentVmModel.mergeProjectChats(g.sessions, histRuns.get(g.cwd) || []);
+  const chats = q ? all.filter((chat) => chat.title.toLowerCase().includes(q)) : all;
+  if (!chats.length) {
+    projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), {
+      className: 'empty',
+      textContent: q
+        ? 'Ничего не найдено'
+        : histRuns.has(g.cwd)
+          ? 'Чатов пока нет — запусти Claude или Codex в этой папке.'
+          : 'Загружаю чаты…',
+    }));
     return;
   }
 
-  for (const s of sessions) {
+  for (const chat of chats) {
     const idx = histRows.length;
-    histRows.push({ type: 'chat', s, cwd: g.cwd });
+    // s остаётся ради существующих обработчиков (resume в терминале)
+    const s = { id: chat.id, title: chat.title, agent: chat.agent };
+    histRows.push({ type: 'chat', s, chat, cwd: g.cwd });
     const row = document.createElement('div');
-    row.className = 'hrow';
+    row.className = `hrow${chat.kind === 'vm' ? ' vm' : ''}`;
     row.dataset.idx = idx;
-    row.title = `${s.title}\n${resumeCommand(s, g.cwd)}`;
+    row.title = chat.kind === 'vm'
+      ? `${chat.title}\nAgent VM · ${chat.vm || 'VM'}${chat.changedFiles ? ` · изменено файлов: ${chat.changedFiles}` : ''}`
+      : `${chat.title}\n${resumeCommand(s, g.cwd)}`;
 
     const title = document.createElement('span');
     title.className = 'htitle';
-    title.textContent = s.title || s.id.slice(0, 8);
+    title.textContent = chat.title;
     row.appendChild(title);
+
+    // Бейдж отличает чат в VM от обычного: у них разное поведение по ↵.
+    if (chat.kind === 'vm') {
+      row.appendChild(Object.assign(document.createElement('span'), {
+        className: 'hbadge vm',
+        textContent: 'VM',
+      }));
+    }
 
     const meta = document.createElement('span');
     meta.className = 'hmeta';
     const parts = [];
-    if (s.model) parts.push(s.model);
-    if (s.tokens) parts.push(fmtTok(s.tokens));
-    parts.push(histTime(s.lastAt));
+    if (chat.kind === 'vm') {
+      if (chat.state) parts.push(AgentVmModel.stateLabel(chat.state));
+      if (chat.changedFiles) parts.push(`${chat.changedFiles} ${plural(chat.changedFiles, 'файл', 'файла', 'файлов')}`);
+    } else {
+      if (chat.model) parts.push(chat.model);
+      if (chat.tokens) parts.push(fmtTok(chat.tokens));
+    }
+    parts.push(histTime(chat.lastAt));
     meta.textContent = parts.join(' · ');
     row.appendChild(meta);
 
-    row.appendChild(Object.assign(document.createElement('span'), { className: 'hcopy', textContent: 'запустить ↵' }));
+    row.appendChild(Object.assign(document.createElement('span'), {
+      className: 'hcopy',
+      textContent: chat.kind === 'vm' ? 'открыть ↵' : 'запустить ↵',
+    }));
 
     row.addEventListener('mouseenter', () => { histSel = idx; paintHistSel(); });
-    row.addEventListener('click', () => launchSession(s.agent, s.id, g.cwd));
-    historyEl.appendChild(row);
+    row.addEventListener('click', () => openHistChat(histRows[idx]));
+    projectManagerContentEl.appendChild(row);
   }
 }
 
 function paintHistSel() {
-  for (const row of historyEl.querySelectorAll('.hrow')) {
+  for (const row of projectManagerContentEl.querySelectorAll('.hrow, .pm-card')) {
     row.classList.toggle('selected', Number(row.dataset.idx) === histSel);
   }
-  historyEl.querySelector('.hrow.selected')?.scrollIntoView({ block: 'nearest' });
+  projectManagerContentEl.querySelector('.hrow.selected, .pm-card.selected')?.scrollIntoView({ block: 'nearest' });
 }
 
 /* ---------- вкладка «Статистика» ---------- */
@@ -4184,7 +6131,7 @@ window.addEventListener('keydown', async (e) => {
     render();
     return;
   }
-  if (e.metaKey && e.key === '2') { // ⌘2 — История
+  if (e.metaKey && e.key === '2') { // ⌘2 — Project Manager
     e.preventDefault();
     setView('history');
     return;
@@ -4224,8 +6171,8 @@ window.addEventListener('keydown', async (e) => {
     if (e.key === 'Enter' && histRows[histSel]) {
       e.preventDefault();
       const r = histRows[histSel];
-      if (r.type === 'project') openHistProject(r.key);
-      else launchSession(r.s.agent, r.s.id, r.cwd);
+      if (r.type === 'project') openProjectPrimary(r.project);
+      else openHistChat(r);
       return;
     }
     if (e.key === 'Escape') {
@@ -4235,6 +6182,17 @@ window.addEventListener('keydown', async (e) => {
       return;
     }
     return; // прочее (печать в поиск) — пусть идёт в инпут
+  }
+
+  if (view === 'agentvm' && e.key === 'Escape') {
+    e.preventDefault();
+    if (!agentVmFileDrawerEl.hidden) closeAgentVmFile();
+    else if (!agentVmEnvironmentEl.hidden) {
+      agentVmEnvironmentEl.hidden = true;
+      agentVmEnvironmentButtonEl.setAttribute('aria-expanded', 'false');
+      renderAgentVmWorkspace();
+    } else closeAgentVmProject();
+    return;
   }
 
   if (e.key === 'Escape') { // raycast: Esc — назад / закрыть

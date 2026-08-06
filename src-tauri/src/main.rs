@@ -7,12 +7,17 @@
 
 #[allow(dead_code)] // UI-потребитель подключается в фазе 7 (chat UI)
 mod agent;
+mod agent_vm;
+mod agent_vm_cli;
+mod agent_vm_terminal;
+mod app_command_inventory;
 #[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
 mod backend;
 #[allow(dead_code)] // проекции/фасады подключаются по фазам (инкр. 8)
 mod capability;
 mod claude_bin;
 mod commands_catalog;
+mod config_health;
 mod convo; // голосовой разговор: снапшот → Haiku-план → скилы → голосовой ответ (п/п-2)
 mod coord; // координация голоса: пока юзер диктует/говорит — уведомления ждут, wake подавлен
 mod daemon;
@@ -29,11 +34,19 @@ mod macos;
 mod metrics;
 mod model;
 mod onboarding;
+mod plugin_cli;
+#[cfg(test)]
+mod plugin_cli_tests;
+mod plugin_manager_api;
+mod plugin_platform;
+mod plugins;
 mod power;
+mod project_folder_picker;
 mod route; // голосовая маршрутизация: скоринг → tie-break → пикер → stage-then-send
 mod ru;
 mod screen_prompt;
 mod server;
+mod service_text; // вырезание служебных секций агентов из текста
 mod settings;
 mod shutdown;
 #[allow(dead_code)] // STT-потребители подключаются в фазах 4-6 (инкр. 9)
@@ -58,12 +71,35 @@ use tauri::Manager;
 
 use daemon::Daemon;
 
+macro_rules! build_app_invoke_handler {
+    ($(($name:literal, $handler:path, $webviews:expr)),* $(,)?) => {
+        tauri::generate_handler![$($handler),*]
+    };
+}
+
+fn headless_from(value: Option<&std::ffi::OsStr>) -> bool {
+    value
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn is_headless() -> bool {
+    headless_from(std::env::var_os("JARVIS_HEADLESS").as_deref())
+}
+
 fn main() {
+    if let Some(exit_code) = plugin_cli::maybe_run() {
+        std::process::exit(exit_code);
+    }
+    if let Some(exit_code) = agent_vm_cli::maybe_run() {
+        std::process::exit(exit_code);
+    }
+
     let mut builder = tauri::Builder::default();
 
     // single-instance — только в проде; в dev-сборке (JARVIS_DEV=1) НЕ ставим,
     // чтобы dev и установленный прод крутились рядом, не гася друг друга.
-    if std::env::var("JARVIS_DEV").is_err() {
+    if std::env::var("JARVIS_DEV").is_err() && !is_headless() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             windows::show_panel(&Daemon::get(app));
         }));
@@ -118,110 +154,9 @@ fn main() {
         ))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![
-            ipc::state_get,
-            ipc::state_clear,
-            ipc::panel_hide,
-            ipc::settings_get,
-            ipc::settings_set,
-            ipc::chat_open,
-            ipc::chat_summarize,
-            ipc::file_open,
-            ipc::file_read,
-            ipc::file_diff,
-            ipc::url_open,
-            ipc::chat_close,
-            ipc::commands_get,
-            ipc::app_meta,
-            ipc::update_check_install,
-            ipc::app_relaunch,
-            ipc::plugins_status,
-            ipc::plugins_cmd,
-            ipc::usage_summary,
-            ipc::limit_get,
-            ipc::history_get,
-            ipc::usage_session,
-            ipc::session_set_pin,
-            ipc::session_set_model,
-            ipc::session_set_effort,
-            ipc::terminal_ping,
-            ipc::question_answer,
-            ipc::task_action,
-            ipc::voice_get,
-            ipc::voice_set_speaker,
-            ipc::voice_set_rate,
-            ipc::voice_test,
-            ipc::voice_set_mute,
-            ipc::voice_set_duck,
-            ipc::voice_set_bluetooth_only,
-            ipc::session_reply,
-            ipc::session_save_image,
-            ipc::session_continue,
-            ipc::agent_confirm,
-            ipc::voice_pick_resolve,
-            ipc::voice_stage_cancel,
-            ipc::voice_audio_state,
-            ipc::voice_confirm_resolve,
-            ipc::voice_abort,
-            ipc::agent_chat_open,
-            ipc::terminal_focus,
-            ipc::session_launch,
-            ipc::toast_resize,
-            ipc::toast_ready,
-            ipc::toast_click,
-            onboarding::onboarding_status,
-            onboarding::onboarding_get,
-            onboarding::onboarding_run,
-            onboarding::onboarding_open,
-            onboarding::onboarding_close,
-            onboarding::onboarding_open_panel,
-            onboarding::onboarding_open_settings,
-            onboarding::integration_get,
-            onboarding::integration_remove,
-            onboarding::model_delete,
-            onboarding::quiet_set,
-            ipc::agent_send,
-            ipc::stt_get,
-            ipc::models_get,
-            ipc::transcripts_get,
-            ipc::transcripts_clear,
-            ipc::transcript_delete,
-            ipc::transcript_retranscribe,
-            ipc::transcript_enhance,
-            ipc::prompts_get_settings,
-            ipc::prompts_set_smart,
-            ipc::prompts_get,
-            ipc::stt_set_engine,
-            ipc::stt_set_hotkey,
-            ipc::hotkey_bindings,
-            ipc::hotkey_assign,
-            ipc::hotkeys_suspend,
-            ipc::stt_set_noise_gate,
-            ipc::stt_test,
-            ipc::voice_history_open,
-            ipc::stt_input_devices,
-            ipc::stt_set_input_device,
-            ipc::service_get,
-            ipc::service_set_backend,
-            ipc::service_set_model,
-            ipc::service_set_effort,
-            ipc::service_set_proxy,
-            ipc::service_test,
-            ipc::claude_auth_get,
-            ipc::claude_auth_connect,
-            ipc::claude_auth_disconnect,
-            onboarding::codex_install_sidecar,
-            onboarding::stt_install_whisper,
-            onboarding::stt_install_sidecar,
-            onboarding::stt_install_qwen,
-            ipc::wake_get,
-            ipc::wake_set_enabled,
-            ipc::wake_set_threshold,
-            ipc::audio_set_mute,
-            onboarding::wake_install_models,
-            onboarding::voice_install_silero,
-            onboarding::models_install,
-        ])
+        .invoke_handler(crate::app_command_inventory::with_app_commands!(
+            build_app_invoke_handler
+        ))
         .setup(|app| {
             // Профильный lock ДО Daemon::new: второй процесс того же JARVIS_DIR
             // не стартует, но prod/dev и чужие listeners больше не убиваются.
@@ -229,17 +164,45 @@ fn main() {
                 io::Error::new(io::ErrorKind::AlreadyExists, format!("Jarvis profile already running: {err}"))
             })?;
 
+            // One-way v1 ownership migration is reconciled before any
+            // headless/UI branch or subsystem construction. After startup,
+            // persistent power mutations belong only to the attested helper.
+            // Failure is fail-closed for later arm, but never blocks startup.
+            let power_recovery = power::recover_on_startup();
+            crate::log::line(&format!(
+                "[power] startup recovery {}",
+                power_recovery.summary()
+            ));
+
             // миграция схемы settings.json ДО первого чтения настроек (Daemon::new
             // их читает). Сейчас no-op v0→v1; задел под ломающие изменения формата.
             settings::Store::new().migrate_on_startup();
+            match jarvis_secret_store::migrate_legacy_claude_secret(
+                &crate::util::jarvis_dir().join("settings.json"),
+                &jarvis_secret_store::MacKeychainStore,
+            ) {
+                Ok(report) if report.migrated => {
+                    crate::log::line("[security] Claude credential migrated to Keychain");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    crate::log::line(&format!(
+                        "[security] Claude credential migration deferred: {error}"
+                    ));
+                }
+            }
+
+            if let Err(err) = plugins::install::install_bundled() {
+                crate::log::line(&format!("[plugins] Agent VM install skipped: {err}"));
+            }
 
             let d = Arc::new(Daemon::new(app.handle().clone()));
             app.manage(d.clone());
 
             // Накладка ⌘J — чистое меню-бар приложение без иконки в доке.
             // Оконный режим (макет 14h) — обычное приложение: док, ⌘Tab, меню.
-            // Политика ставится один раз на старте; смена режима на лету
-            // перестраивает окно сразу, а иконку в доке — со следующего запуска.
+            // Здесь — стартовое значение; смену режима на лету доводит
+            // windows::apply_mode (там же переключается и политика).
             app.set_activation_policy(if d.settings.string("mode") == "window" {
                 tauri::ActivationPolicy::Regular
             } else {
@@ -254,13 +217,23 @@ fn main() {
             );
 
             d.restore_state(); // реестр переживает перезапуск
+
+            // Smoke/plugin-host процессы могут использовать daemon/socket, но не
+            // имеют права открывать пользовательские окна или регистрировать
+            // глобальные интерактивные ресурсы.
+            if is_headless() {
+                tauri::async_runtime::spawn(server::serve(d.clone()));
+                crate::log::line("[startup] JARVIS_HEADLESS=1 — UI и tray отключены");
+                return Ok(());
+            }
+
             windows::create_panel(app.handle())?;
             windows::create_toast(app.handle())?;
             tray::init(&d)?;
 
             // первый запуск без интеграции — онбординг; иначе показываем панель,
             // чтобы запуск приложения был видимым (а не «ничего не открылось»).
-            if !install::integration_health().ok() {
+            if d.settings.health().has_errors() || !install::integration_health().ok() {
                 let _ = windows::create_onboarding(app.handle());
             } else {
                 windows::show_panel(&d);
@@ -268,6 +241,7 @@ fn main() {
 
             // unix-сокет — канал событий от хуков
             tauri::async_runtime::spawn(server::serve(d.clone()));
+            d.plugins.init(&d);
 
             // плагины питания (Не спать, Крышка) — после трея:
             // их changed() обновляет title
@@ -342,23 +316,41 @@ fn main() {
                 // ⌘W и крестик — просто прячем, демон живёт
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
-                    let _ = window.hide();
+                    windows::hide_panel(&Daemon::get(window.app_handle()));
                 }
                 // клик вне панели — спрятать. Но с задержкой и перепроверкой:
                 // навигация стрелками перерисовывает DOM (render() пересоздаёт и
                 // рефокусит queryEl), отчего WKWebView даёт ложный blur→focus за
                 // один кадр. Гасим только если фокус реально ушёл из приложения и
                 // не вернулся за 120 мс — иначе панель моргала бы на каждой стрелке.
+                // окно стало активным — пользователь снова смотрит на проект
+                tauri::WindowEvent::Focused(true) => {
+                    Daemon::get(window.app_handle())
+                        .agent_vm
+                        .set_window_active(true);
+                }
                 tauri::WindowEvent::Focused(false) => {
-                    // обычное окно не исчезает от клика мимо — это поведение накладки
-                    if windows::is_window_mode(window.app_handle()) {
+                    // проект остаётся открытым, но уведомления о завершении
+                    // задач больше не подавляем: человек ушёл в другое окно
+                    Daemon::get(window.app_handle())
+                        .agent_vm
+                        .set_window_active(false);
+                    // обычное окно не исчезает от клика мимо — это поведение накладки;
+                    // системный folder picker тоже забирает фокус, но панель нужна дальше
+                    if windows::is_window_mode(window.app_handle())
+                        || project_folder_picker::is_active()
+                    {
                         return;
                     }
                     let w = window.clone();
+                    let app = window.app_handle().clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(120));
-                        if !w.is_focused().unwrap_or(false) && w.is_visible().unwrap_or(false) {
-                            let _ = w.hide();
+                        if !project_folder_picker::is_active()
+                            && !w.is_focused().unwrap_or(false)
+                            && w.is_visible().unwrap_or(false)
+                        {
+                            windows::hide_panel(&Daemon::get(&app));
                         }
                     });
                 }
@@ -370,20 +362,22 @@ fn main() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 let d = Daemon::get(app);
-                d.write_state_now(); // реестр переживает перезапуск
-                // размер окна тоже: снимаем один раз здесь, а не на каждом кадре ресайза
+                // размер окна снимаем до cleanup: внутри него write_state_now уже
+                // сбрасывает реестр на диск, после него правка настроек потерялась бы
                 if let Some(w) = app.get_webview_window("main") {
                     if let (Ok(sz), Ok(sf)) = (w.inner_size(), w.scale_factor()) {
                         let l = sz.to_logical::<f64>(sf);
                         windows::remember_window_size(&d, l.width, l.height);
                     }
                 }
-                power::Power::dispose(&d); // снять assertion, вернуть disablesleep
-                d.voice.dispose(); // погасить Silero-сайдкар, если был поднят
-                d.stt.dispose(); // погасить Qwen3-MLX-сайдкар, если был поднят
-                d.wake.dispose(); // остановить wake-word consumer-поток
-                d.audio.dispose(); // остановить общий аудио-захват (drop cpal Stream)
-                let _ = std::fs::remove_file(util::sock_path());
+                // дальше порядком владеет cleanup: power освобождается до
+                // потенциально блокирующих disposals сайдкаров
+                let report = shutdown::cleanup(&d);
+                if !report.complete() {
+                    crate::log::line(&format!(
+                        "[shutdown] Exit fallback remains incomplete: {report:?}"
+                    ));
+                }
             }
         });
 }
@@ -420,13 +414,31 @@ fn spawn_timers(d: &Arc<Daemon>) {
         }
     });
 
-    // секундный пульс плагинов питания (таймеры, сторожа, детект сна)
+    // Секундный пульс UI-сторожей питания. Helper lease renewal lives in its
+    // own cancellable worker so shutdown can stop and join it before release.
     let dd = d.clone();
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             power::Power::tick(&dd).await;
         }
+    });
+
+    // секундный supervisor внешних плагинов; первый tick после bind UDS.
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            dd.plugins.tick(&dd);
+        }
+    });
+
+    // Закреплённые project VM стартуют после PluginHost строго по одной.
+    // Новые agent turns без пользовательского prompt здесь не создаются.
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        crate::agent_vm::autostart_profiles(dd).await;
     });
 
     // супервизор Silero-сайдкара: раз в 5с перезапускаем, если упал
@@ -546,4 +558,18 @@ fn spawn_timers(d: &Arc<Daemon>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn headless_flag_accepts_only_explicit_truthy_values() {
+        assert!(headless_from(Some(OsStr::new("1"))));
+        assert!(headless_from(Some(OsStr::new("true"))));
+        assert!(!headless_from(Some(OsStr::new("0"))));
+        assert!(!headless_from(None));
+    }
 }

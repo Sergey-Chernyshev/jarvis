@@ -61,7 +61,9 @@ fn window_theme(app: &AppHandle) -> Option<Theme> {
         .map(|d| d.settings.string("theme"))
         .unwrap_or_else(|| "light".into());
     match theme.as_str() {
-        "dark" => Some(Theme::Dark),
+        // «Полночь» — тоже тёмная: нативный материал окна должен быть тёмным,
+        // иначе за webview просвечивает светлый фон в момент показа
+        "dark" | "midnight" => Some(Theme::Dark),
         "auto" => None,
         _ => Some(Theme::Light),
     }
@@ -110,8 +112,12 @@ pub fn create_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 }
 
 /// Переключение режима на лету: окно уже создано, поэтому меняем его свойства,
-/// а не пересоздаём (иначе улетели бы открытый чат и позиция). Иконка в доке
-/// (ActivationPolicy) ставится на старте — она подхватится со следующего запуска.
+/// а не пересоздаём (иначе улетели бы открытый чат и позиция).
+///
+/// ActivationPolicy переключается здесь же: Regular-приложение управляется
+/// Mission Control и остаётся на своём Space, поэтому без этого накладка после
+/// оконного режима всплывала только на исходном рабочем столе и не вставала
+/// над чужим окном.
 pub fn apply_mode(d: &Arc<Daemon>) {
     let Some(win) = d.app.get_webview_window("main") else {
         return;
@@ -122,6 +128,7 @@ pub fn apply_mode(d: &Arc<Daemon>) {
     let _ = win.set_minimizable(window_mode);
     let _ = win.set_skip_taskbar(!window_mode);
     if window_mode {
+        let _ = d.app.set_activation_policy(tauri::ActivationPolicy::Regular);
         macos::float_normal(&win);
         let (w, h) = window_size(&d.app);
         let _ = win.set_size(tauri::LogicalSize::new(w, h));
@@ -131,6 +138,9 @@ pub fn apply_mode(d: &Arc<Daemon>) {
     } else {
         // из фуллскрина накладку не построишь — выходим до смены геометрии
         let _ = win.set_fullscreen(false);
+        // Accessory до float_above_everything: пока приложение Regular, AppKit
+        // держит окно управляемым и игнорирует CanJoinAllSpaces
+        let _ = d.app.set_activation_policy(tauri::ActivationPolicy::Accessory);
         macos::float_above_everything(&win);
         let _ = win.set_size(tauri::LogicalSize::new(PANEL_W, PANEL_H));
         position_panel(d);
@@ -152,6 +162,9 @@ pub fn remember_window_size(d: &Arc<Daemon>, w: f64, h: f64) {
 /// меню — показать и сфокусировать существующее, а не плодить копии.
 pub fn create_onboarding(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     if let Some(win) = app.get_webview_window("onboarding") {
+        // окно живёт на своём Space — без этого set_focus утащил бы туда
+        // пользователя вместо того, чтобы показать окно здесь
+        macos::move_to_active_space(&win);
         let _ = win.show();
         let _ = win.set_focus();
         return Ok(win);
@@ -166,7 +179,7 @@ pub fn create_onboarding(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             .effects(WindowEffectsConfig {
                 effects: vec![Effect::UnderWindowBackground],
                 state: Some(EffectState::Active),
-                radius: Some(16.0),
+                radius: Some(18.0),
                 color: None,
             })
             .resizable(false)
@@ -178,6 +191,7 @@ pub fn create_onboarding(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             .theme(window_theme(app))
             .accept_first_mouse(true)
             .build()?;
+    macos::move_to_active_space(&win);
     let _ = win.set_focus();
     Ok(win)
 }
@@ -186,6 +200,9 @@ pub fn create_onboarding(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 /// вызов — показать существующее, а не плодить копии.
 pub fn create_agent_chat(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     if let Some(win) = app.get_webview_window("agent-chat") {
+        // окно живёт на своём Space — без этого set_focus утащил бы туда
+        // пользователя вместо того, чтобы показать окно здесь
+        macos::move_to_active_space(&win);
         let _ = win.show();
         let _ = win.set_focus();
         return Ok(win);
@@ -213,6 +230,7 @@ pub fn create_agent_chat(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             .theme(window_theme(app))
             .accept_first_mouse(true)
             .build()?;
+    macos::move_to_active_space(&win);
     let _ = win.set_focus();
     Ok(win)
 }
@@ -322,6 +340,23 @@ pub fn toast_add(
     question: Option<&serde_json::Value>,
     meta: &serde_json::Value,
 ) {
+    toast_add_target(
+        d, id, title, body, session_id, kind, question, meta, None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn toast_add_target(
+    d: &Daemon,
+    id: &str,
+    title: &str,
+    body: &str,
+    session_id: Option<&str>,
+    kind: &str,
+    question: Option<&serde_json::Value>,
+    meta: &serde_json::Value,
+    target: Option<&serde_json::Value>,
+) {
     let payload = toast_payload(
         &d.settings.load(),
         id,
@@ -331,6 +366,7 @@ pub fn toast_add(
         kind,
         question,
         meta,
+        target,
     );
     toast_emit(d, "toast-add", payload);
 }
@@ -345,6 +381,7 @@ fn toast_payload(
     kind: &str,
     question: Option<&serde_json::Value>,
     meta: &serde_json::Value,
+    target: Option<&serde_json::Value>,
 ) -> serde_json::Value {
     let ttl_ms = settings
         .pointer("/notify/ttlSec")
@@ -355,7 +392,7 @@ fn toast_payload(
     json!({
         "id": id, "title": title, "body": body,
         "sessionId": session_id, "kind": kind, "question": question,
-        "meta": meta, "ttlMs": ttl_ms,
+        "meta": meta, "ttlMs": ttl_ms, "target": target,
     })
 }
 
@@ -423,6 +460,7 @@ pub fn panel_visible(d: &Arc<Daemon>) -> bool {
 pub fn hide_panel(d: &Arc<Daemon>) {
     // запись сочетания не должна пережить панель — вернуть хоткеи
     crate::ipc::hotkeys_set_suspended(d, false);
+    d.agent_vm.clear_focus();
     if let Some(panel) = d.app.get_webview_window("main") {
         let _ = panel.hide();
     }
@@ -492,6 +530,7 @@ mod tests {
                 "done",
                 None,
                 &json!([]),
+                None,
             );
 
             assert_eq!(payload["ttlMs"], milliseconds);
@@ -514,6 +553,7 @@ mod tests {
                 "done",
                 None,
                 &json!([]),
+                None,
             );
 
             assert_eq!(payload["ttlMs"], 8_000);

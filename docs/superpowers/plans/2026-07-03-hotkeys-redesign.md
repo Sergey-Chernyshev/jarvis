@@ -11,6 +11,7 @@
 **Ветка:** `feat/hotkeys-redesign` (уже создана, спека закоммичена).
 
 **Сборка/тесты:**
+
 - тесты: `cargo test --manifest-path src-tauri/Cargo.toml` (быстрее: `-- ipc::tests`)
 - дев-сборка вживую: `npm start` (собирает с нужными features + codesign — только так, не голый cargo run)
 
@@ -18,20 +19,21 @@
 
 ## Карта файлов
 
-| Файл | Что происходит |
-|---|---|
-| `src-tauri/src/ipc.rs` | + `HkAction`, `accel_from_raw`, `action_accel`, `action_shortcuts`, `find_conflict`, `hotkey_bindings`, `hotkey_assign`, `hotkeys_suspend`, suspend-логика; правка `register_*` (пропуск пустых); тесты |
-| `src-tauri/src/daemon.rs` | + поля `hk_suspend_gen: AtomicU64`, `hk_select_was_on: AtomicBool` |
-| `src-tauri/src/main.rs` | + 3 команды в `generate_handler` |
-| `src-tauri/src/windows.rs` | `hide_panel` → ресюм хоткеев |
-| `ui/bridge.js` | + `hotkeyBindings`, `hotkeyAssign`, `hotkeysSuspend` |
-| `ui/settings2.js` | + `hotkeyRow` (рекордер) и CSS; переписать `renderKeys`; правки `renderGeneral`, `renderStt`; − `hotkeyField`, `hotkeyEditorField`, `dictationHotkeyField`, `HK_DEFAULTS`, CSS чипов/пресетов |
+| Файл                       | Что происходит                                                                                                                                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src-tauri/src/ipc.rs`     | + `HkAction`, `accel_from_raw`, `action_accel`, `action_shortcuts`, `find_conflict`, `hotkey_bindings`, `hotkey_assign`, `hotkeys_suspend`, suspend-логика; правка `register_*` (пропуск пустых); тесты |
+| `src-tauri/src/daemon.rs`  | + поля `hk_suspend_gen: AtomicU64`, `hk_select_was_on: AtomicBool`                                                                                                                                      |
+| `src-tauri/src/main.rs`    | + 3 команды в `generate_handler`                                                                                                                                                                        |
+| `src-tauri/src/windows.rs` | `hide_panel` → ресюм хоткеев                                                                                                                                                                            |
+| `ui/bridge.js`             | + `hotkeyBindings`, `hotkeyAssign`, `hotkeysSuspend`                                                                                                                                                    |
+| `ui/settings2.js`          | + `hotkeyRow` (рекордер) и CSS; переписать `renderKeys`; правки `renderGeneral`, `renderStt`; − `hotkeyField`, `hotkeyEditorField`, `dictationHotkeyField`, `HK_DEFAULTS`, CSS чипов/пресетов           |
 
 ---
 
 ### Task 1: Реестр действий `HkAction` + «не назначен»
 
 **Files:**
+
 - Modify: `src-tauri/src/ipc.rs` (после `register_hotkey`, ~строка 88; тесты в `mod tests`, ~строка 1736)
 
 - [ ] **Step 1: Написать падающие тесты**
@@ -202,6 +204,7 @@ pub fn action_accel(d: &Arc<Daemon>, a: HkAction) -> Option<String> {
 Там же в `ipc.rs` заменить ТЕЛА функций (сигнатуры не трогаем — их зовёт main.rs):
 
 `quiet_accelerator` (строки ~91-98) →
+
 ```rust
 /// Аккселератор тумблера тихого режима ("" = не назначен).
 pub fn quiet_accelerator(d: &Arc<Daemon>) -> String {
@@ -212,12 +215,14 @@ pub fn quiet_accelerator(d: &Arc<Daemon>) -> String {
 Аналогично `continue_accelerator` → `HkAction::Continue`, `repeat_accelerator` → `HkAction::Repeat`, `mute_accelerator` → `HkAction::Mute`, `dictation_accelerator` → `HkAction::Dictation` (докстроки сохранить, добавив «"" = не назначен»).
 
 `select_template` (строки ~243-245) →
+
 ```rust
 /// Шаблон хоткеев выбора варианта (всегда валидный: normalize внутри).
 pub fn select_template(d: &Arc<Daemon>) -> String {
     action_accel(d, HkAction::Select).unwrap_or_else(|| SELECT_TEMPLATE_DEFAULT.to_string())
 }
 ```
+
 (select с HK_NONE → «не назначен»: но `set_select_hotkeys` зовётся с этим шаблоном — поэтому None даёт дефолт ТОЛЬКО тут нельзя; см. Step 5: правильное поведение — при HK_NONE набор 1..9 просто не регистрируется. Меняем `set_select_hotkeys`:)
 
 ```rust
@@ -227,12 +232,15 @@ pub fn set_select_hotkeys(d: &Arc<Daemon>, on: bool) {
     set_select_hotkeys_tpl(d, on, &tpl);
 }
 ```
+
 и `is_select_hotkey`:
+
 ```rust
 pub fn is_select_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> Option<u32> {
     match_select_template(&action_accel(d, HkAction::Select)?, shortcut)
 }
 ```
+
 а `select_template` тогда УДАЛИТЬ и починить её call-sites: в `settings_set` (строка ~382 `let old = select_template(&d);`) заменить на `let old = action_accel(&d, HkAction::Select).unwrap_or_else(|| SELECT_TEMPLATE_DEFAULT.to_string());`. Другие call-sites найти `grep -n "select_template(" src-tauri/src/ -r` и поправить так же (кроме `normalize_select_template` / `set_select_hotkeys_tpl`).
 
 - [ ] **Step 5: Пропуск пустых акселераторов в register_***
@@ -246,6 +254,7 @@ pub fn is_select_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> Option<u32> {
 ```
 
 В `register_hotkey` (panel, с откатом) после `let current = ...`:
+
 ```rust
     if accelerator.is_empty() {
         // «не назначен»: снять текущий, ничего не регистрировать
@@ -255,13 +264,16 @@ pub fn is_select_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> Option<u32> {
         return Ok(());
     }
 ```
+
 и обёртку от паники на пустом current: строку `let _ = gs.unregister(current.as_str());` внутри `if accelerator != current` дополнить гардом `if !current.is_empty()`.
 
 В `main.rs:274` вызов `ipc::register_hotkey(&d, &d.settings.string("hotkey"))` заменить на
+
 ```rust
             let hk0 = ipc::action_accel(&d, ipc::HkAction::Panel).unwrap_or_default();
             if let Err(e) = ipc::register_hotkey(&d, &hk0) {
 ```
+
 (иначе сырое `"none"` уйдёт в регистрацию как акселератор).
 
 - [ ] **Step 6: Тесты зелёные**
@@ -281,6 +293,7 @@ git commit -m "feat(hotkeys): реестр действий HkAction + сост�
 ### Task 2: Детект конфликтов (чистые функции)
 
 **Files:**
+
 - Modify: `src-tauri/src/ipc.rs`
 
 - [ ] **Step 1: Падающие тесты**
@@ -397,6 +410,7 @@ git commit -m "feat(hotkeys): детект конфликтов между св�
 ### Task 3: Команды `hotkey_bindings` + `hotkey_assign`
 
 **Files:**
+
 - Modify: `src-tauri/src/ipc.rs`, `src-tauri/src/main.rs` (~строка 178), `ui/bridge.js` (~строка 75)
 
 - [ ] **Step 1: Вспомогательные функции регистрации**
@@ -598,6 +612,7 @@ git commit -m "feat(hotkeys): hotkey_bindings + hotkey_assign (конфликт/
 ### Task 4: Приостановка хоткеев на время записи
 
 **Files:**
+
 - Modify: `src-tauri/src/daemon.rs` (~строки 95-100 и конструктор ~224-232), `src-tauri/src/ipc.rs`, `src-tauri/src/windows.rs:259`, `src-tauri/src/main.rs`, `ui/bridge.js`
 
 - [ ] **Step 1: Поля в Daemon**
@@ -703,11 +718,13 @@ pub fn hide_panel(d: &Arc<Daemon>) {
 - [ ] **Step 4: Команда в main.rs + мост**
 
 `main.rs` в `generate_handler!` после `ipc::hotkey_assign,`:
+
 ```rust
             ipc::hotkeys_suspend,
 ```
 
 `ui/bridge.js` после `hotkeyAssign`:
+
 ```js
     hotkeysSuspend: (on) => invoke('hotkeys_suspend', { on }),
 ```
@@ -757,6 +774,7 @@ Run (фоном): `npm start`
 ### Task 5b (УСЛОВНЫЙ — только если спайк провалился): NSEvent-монитор записи
 
 **Files:**
+
 - Modify: `src-tauri/src/macos.rs`, `src-tauri/src/ipc.rs`
 
 - [ ] **Step 1: Локальный монитор клавиатуры**
@@ -790,6 +808,7 @@ git commit -m "feat(hotkeys): NSEvent-монитор записи сочетан
 ### Task 6: UI — компонент `hotkeyRow` и перестройка панелей
 
 **Files:**
+
 - Modify: `ui/settings2.js`:
   - удалить: `HK_DEFAULTS` (~31-39), `hotkeyField` (~353-366), `hotkeyEditorField` (~368-482), `dictationHotkeyField` (~514-586)
   - добавить: `hotkeyRow` (на место `hotkeyField`)
@@ -801,122 +820,185 @@ git commit -m "feat(hotkeys): NSEvent-монитор записи сочетан
 Вместо удалённого `hotkeyField` (само место в файле — после `segmented`):
 
 ```js
-  /* ── Строка хоткея с инлайн-рекордером (Raycast-style) ────────────────────
-   * b: { action, label, accel, default } из hotkeyBindings() (accel: null =
-   * «не назначен»). Клик по капсуле → запись: бэкенд снимает ВСЕ глобальные
-   * хоткеи (hotkeysSuspend — команды не срабатывают, и наши шорткаты не
-   * съедают keydown), жмёшь комбо целиком → hotkeyAssign. Esc / клик мимо /
-   * 12 с тишины — отмена (бэкенд сам вернёт хоткеи через 15 с, если UI умер).
-   * Конфликт со своим хоткеем → красная строка + «Всё равно назначить»
-   * (steal: у конфликтующего действия сочетание снимается в «не назначен»).
-   * action='select': основная клавиша фиксирована «1…9» — в записи нужна
-   * любая цифра, в акселератор идёт {n}. opts.after() — после успешного
-   * применения (перерисовать пары-дубли в других вкладках). */
-  function hotkeyRow(b, desc, opts) {
-    const isSel = b.action === 'select';
-    let acc = b.accel; // string | null
-    const row = el('div.drow');
-    const left = el('div.grow');
-    left.appendChild(el('div.dt', { text: b.label }));
-    if (desc) left.appendChild(el('div.dd', { text: desc }));
-    const errBox = el('div.hkerr');
-    errBox.style.display = 'none';
-    left.appendChild(errBox);
-    const cap = el('div.hkey.rec', { title: 'Кликни и нажми сочетание' });
-    const rb = el('button.hkreset', { title: 'Сбросить' }, icon('rotate-ccw'));
-    const ctl = el('div.dctl.hk', null, [cap, rb]);
-    row.appendChild(left);
-    row.appendChild(ctl);
+/* ── Строка хоткея с инлайн-рекордером (Raycast-style) ────────────────────
+ * b: { action, label, accel, default } из hotkeyBindings() (accel: null =
+ * «не назначен»). Клик по капсуле → запись: бэкенд снимает ВСЕ глобальные
+ * хоткеи (hotkeysSuspend — команды не срабатывают, и наши шорткаты не
+ * съедают keydown), жмёшь комбо целиком → hotkeyAssign. Esc / клик мимо /
+ * 12 с тишины — отмена (бэкенд сам вернёт хоткеи через 15 с, если UI умер).
+ * Конфликт со своим хоткеем → красная строка + «Всё равно назначить»
+ * (steal: у конфликтующего действия сочетание снимается в «не назначен»).
+ * action='select': основная клавиша фиксирована «1…9» — в записи нужна
+ * любая цифра, в акселератор идёт {n}. opts.after() — после успешного
+ * применения (перерисовать пары-дубли в других вкладках). */
+function hotkeyRow(b, desc, opts) {
+  const isSel = b.action === "select";
+  let acc = b.accel; // string | null
+  const row = el("div.drow");
+  const left = el("div.grow");
+  left.appendChild(el("div.dt", { text: b.label }));
+  if (desc) left.appendChild(el("div.dd", { text: desc }));
+  const errBox = el("div.hkerr");
+  errBox.style.display = "none";
+  left.appendChild(errBox);
+  const cap = el("div.hkey.rec", { title: "Кликни и нажми сочетание" });
+  const rb = el("button.hkreset", { title: "Сбросить" }, icon("rotate-ccw"));
+  const ctl = el("div.dctl.hk", null, [cap, rb]);
+  row.appendChild(left);
+  row.appendChild(ctl);
 
-    const clearErr = () => { row.classList.remove('conflict'); errBox.style.display = 'none'; errBox.replaceChildren(); };
-    const paint = () => {
-      clearErr();
-      cap.classList.remove('recording');
-      cap.classList.toggle('none', !acc);
-      cap.replaceChildren();
-      if (!acc) { cap.appendChild(el('span.hknone', { text: 'не назначен' })); return; }
-      if (isSel) {
-        for (const k of hotkeyKeys(acc.replace('+{n}', ''))) cap.appendChild(el('kbd', { text: k }));
-        cap.appendChild(el('kbd.fix', { text: '1…9' }));
+  const clearErr = () => {
+    row.classList.remove("conflict");
+    errBox.style.display = "none";
+    errBox.replaceChildren();
+  };
+  const paint = () => {
+    clearErr();
+    cap.classList.remove("recording");
+    cap.classList.toggle("none", !acc);
+    cap.replaceChildren();
+    if (!acc) {
+      cap.appendChild(el("span.hknone", { text: "не назначен" }));
+      return;
+    }
+    if (isSel) {
+      for (const k of hotkeyKeys(acc.replace("+{n}", "")))
+        cap.appendChild(el("kbd", { text: k }));
+      cap.appendChild(el("kbd.fix", { text: "1…9" }));
+    } else {
+      for (const k of hotkeyKeys(acc)) cap.appendChild(el("kbd", { text: k }));
+    }
+  };
+  const note = (txt) => {
+    cap.replaceChildren(el("span.ph", { text: txt }));
+  };
+  const done = () => {
+    paint();
+    if (opts && opts.after) opts.after();
+  };
+
+  const showConflict = (conf, next) => {
+    paint();
+    row.classList.add("conflict");
+    const shown = isSel
+      ? displayHotkey(next.replace("{n}", "1…9"))
+      : displayHotkey(next);
+    errBox.appendChild(
+      el("span", { text: "⚠ " + shown + " занято «" + conf.label + "» · " }),
+    );
+    const steal = el("button.hksteal", { text: "Всё равно назначить" });
+    steal.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const res = await safe(
+        () => window.jarvis.hotkeyAssign(b.action, next, true),
+        null,
+      );
+      if (res && res.ok) {
+        acc = res.accel;
+        done();
       } else {
-        for (const k of hotkeyKeys(acc)) cap.appendChild(el('kbd', { text: k }));
+        note((res && res.error) || "не удалось");
+        setTimeout(paint, 1600);
       }
-    };
-    const note = (txt) => { cap.replaceChildren(el('span.ph', { text: txt })); };
-    const done = () => { paint(); if (opts && opts.after) opts.after(); };
+    });
+    errBox.appendChild(steal);
+    errBox.style.display = "";
+  };
 
-    const showConflict = (conf, next) => {
-      paint();
-      row.classList.add('conflict');
-      const shown = isSel ? displayHotkey(next.replace('{n}', '1…9')) : displayHotkey(next);
-      errBox.appendChild(el('span', { text: '⚠ ' + shown + ' занято «' + conf.label + '» · ' }));
-      const steal = el('button.hksteal', { text: 'Всё равно назначить' });
-      steal.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const res = await safe(() => window.jarvis.hotkeyAssign(b.action, next, true), null);
-        if (res && res.ok) { acc = res.accel; done(); }
-        else { note((res && res.error) || 'не удалось'); setTimeout(paint, 1600); }
-      });
-      errBox.appendChild(steal);
-      errBox.style.display = '';
-    };
+  const applyAccel = async (next) => {
+    const res = await safe(
+      () => window.jarvis.hotkeyAssign(b.action, next, false),
+      null,
+    );
+    if (res && res.ok) {
+      acc = res.accel;
+      done();
+      return;
+    }
+    if (res && res.conflict) {
+      showConflict(res.conflict, next);
+      return;
+    }
+    note((res && res.error) || "не удалось");
+    setTimeout(paint, 1600);
+  };
 
-    const applyAccel = async (next) => {
-      const res = await safe(() => window.jarvis.hotkeyAssign(b.action, next, false), null);
-      if (res && res.ok) { acc = res.accel; done(); return; }
-      if (res && res.conflict) { showConflict(res.conflict, next); return; }
-      note((res && res.error) || 'не удалось');
-      setTimeout(paint, 1600);
-    };
-
-    let recording = false, onKey = null, recTimer = 0;
-    function stopRec() {
-      if (!recording) return;
+  let recording = false,
+    onKey = null,
+    recTimer = 0;
+  function stopRec() {
+    if (!recording) return;
+    recording = false;
+    clearTimeout(recTimer);
+    if (onKey) {
+      document.removeEventListener("keydown", onKey, true);
+      onKey = null;
+    }
+    document.removeEventListener("click", onAway, true);
+    fire(() => window.jarvis.hotkeysSuspend(false));
+    paint();
+  }
+  function onAway(e) {
+    if (!cap.contains(e.target)) stopRec();
+  }
+  function startRec() {
+    if (recording) return;
+    recording = true;
+    clearErr();
+    fire(() => window.jarvis.hotkeysSuspend(true));
+    cap.classList.add("recording");
+    cap.classList.remove("none");
+    note(isSel ? "Нажмите сочетание с цифрой…" : "Нажмите сочетание…");
+    recTimer = setTimeout(stopRec, 12000); // раньше авто-ресюма бэкенда (15 с)
+    onKey = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        stopRec();
+        return;
+      }
+      if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return; // ждём основную
+      const { mods, key, isFn } = eventToAccel(e);
+      if (!key) {
+        note("Эта клавиша не поддерживается");
+        return;
+      }
+      if (isSel) {
+        if (!/^\d$/.test(key)) {
+          note("Нужна цифра 1–9");
+          return;
+        }
+        if (!mods.length) {
+          note("Нужен модификатор (⌘/⌥/⌃)");
+          return;
+        }
+      } else if (!isFn && mods.length === 0) {
+        note("Нужен модификатор (⌘/⌥/⌃) или F-клавиша");
+        return;
+      }
+      const next = mods.concat(isSel ? "{n}" : key).join("+");
       recording = false;
       clearTimeout(recTimer);
-      if (onKey) { document.removeEventListener('keydown', onKey, true); onKey = null; }
-      document.removeEventListener('click', onAway, true);
+      document.removeEventListener("keydown", onKey, true);
+      onKey = null;
+      document.removeEventListener("click", onAway, true);
       fire(() => window.jarvis.hotkeysSuspend(false));
-      paint();
-    }
-    function onAway(e) { if (!cap.contains(e.target)) stopRec(); }
-    function startRec() {
-      if (recording) return;
-      recording = true;
-      clearErr();
-      fire(() => window.jarvis.hotkeysSuspend(true));
-      cap.classList.add('recording');
-      cap.classList.remove('none');
-      note(isSel ? 'Нажмите сочетание с цифрой…' : 'Нажмите сочетание…');
-      recTimer = setTimeout(stopRec, 12000); // раньше авто-ресюма бэкенда (15 с)
-      onKey = (e) => {
-        e.preventDefault(); e.stopPropagation();
-        if (e.key === 'Escape') { stopRec(); return; }
-        if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return; // ждём основную
-        const { mods, key, isFn } = eventToAccel(e);
-        if (!key) { note('Эта клавиша не поддерживается'); return; }
-        if (isSel) {
-          if (!/^\d$/.test(key)) { note('Нужна цифра 1–9'); return; }
-          if (!mods.length) { note('Нужен модификатор (⌘/⌥/⌃)'); return; }
-        } else if (!isFn && mods.length === 0) {
-          note('Нужен модификатор (⌘/⌥/⌃) или F-клавиша'); return;
-        }
-        const next = mods.concat(isSel ? '{n}' : key).join('+');
-        recording = false;
-        clearTimeout(recTimer);
-        document.removeEventListener('keydown', onKey, true); onKey = null;
-        document.removeEventListener('click', onAway, true);
-        fire(() => window.jarvis.hotkeysSuspend(false));
-        applyAccel(next);
-      };
-      document.addEventListener('keydown', onKey, true);
-      document.addEventListener('click', onAway, true);
-    }
-    cap.addEventListener('click', (e) => { e.stopPropagation(); startRec(); });
-    rb.addEventListener('click', (e) => { e.stopPropagation(); applyAccel(b.default); });
-    paint();
-    return row;
+      applyAccel(next);
+    };
+    document.addEventListener("keydown", onKey, true);
+    document.addEventListener("click", onAway, true);
   }
+  cap.addEventListener("click", (e) => {
+    e.stopPropagation();
+    startRec();
+  });
+  rb.addEventListener("click", (e) => {
+    e.stopPropagation();
+    applyAccel(b.default);
+  });
+  paint();
+  return row;
+}
 ```
 
 Примечание: `el('div.dctl.hk', null, [cap, rb])` — проверить сигнатуру `el` в файле (используется как `el('div.drow', null, [...])` в других местах — форма та же).
@@ -927,26 +1009,116 @@ git commit -m "feat(hotkeys): NSEvent-монитор записи сочетан
 
 ```css
 /* ── Хоткей-поле (Raycast-style, инлайн-рекордер) ─────────────────────── */
-#settings2 .dctl.hk { gap:6px; }
-#settings2 .hkey { display:inline-flex; align-items:center; gap:8px; padding:8px 13px; border-radius:8px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.08); transition:background .15s ease, box-shadow .15s ease; }
-#settings2 .hkey kbd { font:500 13px/1 var(--s2-font); color:var(--text,#e7e7ea); background:transparent; border:0; padding:0; }
-#settings2 .hkey kbd.fix { color:var(--working,#6ca0ff); }
-#settings2 .hkey.rec { background:rgba(108,160,255,0.1); border-color:rgba(108,160,255,0.25); cursor:pointer; }
-#settings2 .hkey.rec:hover { border-color:rgba(108,160,255,0.45); }
-#settings2 .hkey.rec kbd { color:var(--working,#6ca0ff); }
-#settings2 .hkey .ph { font:500 12px/1 var(--s2-font); color:var(--working,#6ca0ff); }
-#settings2 .hkey.recording { background:rgba(108,160,255,0.18); border-color:var(--working,#6ca0ff); animation:s2hkpulse 1.2s ease-in-out infinite; }
-@keyframes s2hkpulse { 0%,100% { box-shadow:0 0 0 3px rgba(108,160,255,.10); } 50% { box-shadow:0 0 0 6px rgba(108,160,255,.22); } }
-#settings2 .hkey.none { border-style:dashed; }
-#settings2 .hknone { font:400 12px/1 var(--s2-font); color:var(--faint,#55555c); font-style:italic; }
-#settings2 .hkreset { width:32px; height:32px; border-radius:8px; display:grid; place-items:center; background:transparent; border:0; color:var(--faint,#55555c); cursor:default; visibility:hidden; }
-#settings2 .drow:hover .hkreset { visibility:visible; }
-#settings2 .hkreset:hover { color:var(--text-body,#d6d6db); background:rgba(255,255,255,0.06); }
-#settings2 .hkreset svg.lucide { width:15px; height:15px; }
-#settings2 .drow.conflict { background:rgba(242,97,92,.05); }
-#settings2 .drow.conflict .hkey { border-color:rgba(242,97,92,.55); }
-#settings2 .hkerr { display:flex; align-items:center; gap:6px; margin-top:7px; font-size:11.5px; color:var(--danger,#f2615c); flex-wrap:wrap; }
-#settings2 .hksteal { appearance:none; border:0; background:transparent; padding:0; font:500 11.5px/1 var(--s2-font); color:var(--waiting,#f2a33c); text-decoration:underline; cursor:pointer; }
+#settings2 .dctl.hk {
+  gap: 6px;
+}
+#settings2 .hkey {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 13px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition:
+    background 0.15s ease,
+    box-shadow 0.15s ease;
+}
+#settings2 .hkey kbd {
+  font: 500 13px/1 var(--s2-font);
+  color: var(--text, #e7e7ea);
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+#settings2 .hkey kbd.fix {
+  color: var(--working, #6ca0ff);
+}
+#settings2 .hkey.rec {
+  background: rgba(108, 160, 255, 0.1);
+  border-color: rgba(108, 160, 255, 0.25);
+  cursor: pointer;
+}
+#settings2 .hkey.rec:hover {
+  border-color: rgba(108, 160, 255, 0.45);
+}
+#settings2 .hkey.rec kbd {
+  color: var(--working, #6ca0ff);
+}
+#settings2 .hkey .ph {
+  font: 500 12px/1 var(--s2-font);
+  color: var(--working, #6ca0ff);
+}
+#settings2 .hkey.recording {
+  background: rgba(108, 160, 255, 0.18);
+  border-color: var(--working, #6ca0ff);
+  animation: s2hkpulse 1.2s ease-in-out infinite;
+}
+@keyframes s2hkpulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px rgba(108, 160, 255, 0.1);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(108, 160, 255, 0.22);
+  }
+}
+#settings2 .hkey.none {
+  border-style: dashed;
+}
+#settings2 .hknone {
+  font: 400 12px/1 var(--s2-font);
+  color: var(--faint, #55555c);
+  font-style: italic;
+}
+#settings2 .hkreset {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--faint, #55555c);
+  cursor: default;
+  visibility: hidden;
+}
+#settings2 .drow:hover .hkreset {
+  visibility: visible;
+}
+#settings2 .hkreset:hover {
+  color: var(--text-body, #d6d6db);
+  background: rgba(255, 255, 255, 0.06);
+}
+#settings2 .hkreset svg.lucide {
+  width: 15px;
+  height: 15px;
+}
+#settings2 .drow.conflict {
+  background: rgba(242, 97, 92, 0.05);
+}
+#settings2 .drow.conflict .hkey {
+  border-color: rgba(242, 97, 92, 0.55);
+}
+#settings2 .hkerr {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  font-size: 11.5px;
+  color: var(--danger, #f2615c);
+  flex-wrap: wrap;
+}
+#settings2 .hksteal {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: 500 11.5px/1 var(--s2-font);
+  color: var(--waiting, #f2a33c);
+  text-decoration: underline;
+  cursor: pointer;
+}
 ```
 
 (`.hkpresets`, `.hkchip`, `.hkmods` — удалены.)
@@ -956,41 +1128,48 @@ git commit -m "feat(hotkeys): NSEvent-монитор записи сочетан
 Заменить целиком (строки ~1331-1363):
 
 ```js
-  // 7. Горячие клавиши (keys) — hotkey_bindings (единый реестр действий)
-  async function renderKeys(pane) {
-    pane.appendChild(el('div.dtitle', { text: 'Горячие клавиши' }));
-    const _sk = skelGroup(4); pane.appendChild(_sk);
-    const r = await safe(() => window.jarvis.hotkeyBindings(), null);
-    _sk.remove();
-    if (!r || !r.ok) {
-      pane.appendChild(el('div.dgroup', null, [drow('Недоступно', 'Не удалось получить привязки хоткеев.', [])]));
-      return;
-    }
-    const by = {};
-    for (const x of r.bindings || []) by[x.action] = x;
-    const DESC = {
-      panel: 'Показать или скрыть Jarvis.',
-      continue: 'Возобновить последнюю сессию.',
-      repeat: 'Повторить последнее уведомление.',
-      select: 'Выбрать вариант активного вопроса — сочетание + цифра.',
-      mute: 'Заглушить уведомления и голос.',
-      quiet: 'Копить статистику без тостов.',
-      dictation: 'Зажми и говори (push-to-talk). Дублируется в «Голосовом вводе».',
-    };
-    const GROUPS = [
-      ['Панель и сессии', ['panel', 'continue', 'repeat', 'select']],
-      ['Звук и уведомления', ['mute', 'quiet']],
-      ['Голос', ['dictation']],
-    ];
-    // перехват меняет ЧУЖУЮ строку («не назначен») — перерисовать вкладку
-    const after = () => reRenderPane('keys');
-    for (const [title, actions] of GROUPS) {
-      pane.appendChild(el('div.dsection', { text: title }));
-      const g = el('div.dgroup');
-      for (const id of actions) if (by[id]) g.appendChild(hotkeyRow(by[id], DESC[id], { after }));
-      pane.appendChild(g);
-    }
+// 7. Горячие клавиши (keys) — hotkey_bindings (единый реестр действий)
+async function renderKeys(pane) {
+  pane.appendChild(el("div.dtitle", { text: "Горячие клавиши" }));
+  const _sk = skelGroup(4);
+  pane.appendChild(_sk);
+  const r = await safe(() => window.jarvis.hotkeyBindings(), null);
+  _sk.remove();
+  if (!r || !r.ok) {
+    pane.appendChild(
+      el("div.dgroup", null, [
+        drow("Недоступно", "Не удалось получить привязки хоткеев.", []),
+      ]),
+    );
+    return;
   }
+  const by = {};
+  for (const x of r.bindings || []) by[x.action] = x;
+  const DESC = {
+    panel: "Показать или скрыть Jarvis.",
+    continue: "Возобновить последнюю сессию.",
+    repeat: "Повторить последнее уведомление.",
+    select: "Выбрать вариант активного вопроса — сочетание + цифра.",
+    mute: "Заглушить уведомления и голос.",
+    quiet: "Копить статистику без тостов.",
+    dictation:
+      "Зажми и говори (push-to-talk). Дублируется в «Голосовом вводе».",
+  };
+  const GROUPS = [
+    ["Панель и сессии", ["panel", "continue", "repeat", "select"]],
+    ["Звук и уведомления", ["mute", "quiet"]],
+    ["Голос", ["dictation"]],
+  ];
+  // перехват меняет ЧУЖУЮ строку («не назначен») — перерисовать вкладку
+  const after = () => reRenderPane("keys");
+  for (const [title, actions] of GROUPS) {
+    pane.appendChild(el("div.dsection", { text: title }));
+    const g = el("div.dgroup");
+    for (const id of actions)
+      if (by[id]) g.appendChild(hotkeyRow(by[id], DESC[id], { after }));
+    pane.appendChild(g);
+  }
+}
 ```
 
 - [ ] **Step 4: renderGeneral — редактируемый глобальный хоткей**
@@ -998,10 +1177,14 @@ git commit -m "feat(hotkeys): NSEvent-монитор записи сочетан
 Заменить блок «глобальный хоткей (read-only капсы) + сброс» (строки ~842-846):
 
 ```js
-    // глобальный хоткей — тот же рекордер, что во вкладке «Горячие клавиши»
-    const hkr = await safe(() => window.jarvis.hotkeyBindings(), null);
-    const pb = hkr && hkr.ok && (hkr.bindings || []).find((x) => x.action === 'panel');
-    if (pb) group.appendChild(hotkeyRow(pb, 'Открыть панель Jarvis из любого места.', {}));
+// глобальный хоткей — тот же рекордер, что во вкладке «Горячие клавиши»
+const hkr = await safe(() => window.jarvis.hotkeyBindings(), null);
+const pb =
+  hkr && hkr.ok && (hkr.bindings || []).find((x) => x.action === "panel");
+if (pb)
+  group.appendChild(
+    hotkeyRow(pb, "Открыть панель Jarvis из любого места.", {}),
+  );
 ```
 
 - [ ] **Step 5: renderStt — диктовка на общем рекордере**
@@ -1009,10 +1192,18 @@ git commit -m "feat(hotkeys): NSEvent-монитор записи сочетан
 Заменить строку с `dictationHotkeyField` (строки ~925-927):
 
 ```js
-    // клавиша диктовки — общий рекордер (пресеты убраны: запись работает)
-    const hkr = await safe(() => window.jarvis.hotkeyBindings(), null);
-    const db = hkr && hkr.ok && (hkr.bindings || []).find((x) => x.action === 'dictation');
-    if (db) group.appendChild(hotkeyRow(db, 'Зажми и говори (push-to-talk). Кликни и нажми новое сочетание.', {}));
+// клавиша диктовки — общий рекордер (пресеты убраны: запись работает)
+const hkr = await safe(() => window.jarvis.hotkeyBindings(), null);
+const db =
+  hkr && hkr.ok && (hkr.bindings || []).find((x) => x.action === "dictation");
+if (db)
+  group.appendChild(
+    hotkeyRow(
+      db,
+      "Зажми и говори (push-to-talk). Кликни и нажми новое сочетание.",
+      {},
+    ),
+  );
 ```
 
 - [ ] **Step 6: Удалить мёртвый код**
@@ -1064,6 +1255,7 @@ git add -A && git commit -m "docs(plan): чек-лист живой провер
 git push -u origin feat/hotkeys-redesign
 gh pr create --title "feat(hotkeys): инлайн-рекордер, конфликты с перехватом, приостановка команд при записи" --body "..."
 ```
+
 ---
 
 ## Самопроверка плана

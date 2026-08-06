@@ -5,17 +5,37 @@
   "description": "macOS menu-bar mission control for Claude Code and Codex sessions: status panel, notifications, voice (Rust + Tauri)",
   "license": "MIT",
   "scripts": {
-    "start": "JARVIS_DEV_SIGN=1 cargo build --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort,whisper-native,stt-vad --bin jarvis && codesign --force --sign - --entitlements src-tauri/entitlements.plist src-tauri/target/release/jarvis && JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 src-tauri/target/release/jarvis",
-    "start:prod": "JARVIS_DEV_SIGN=1 cargo build --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort,whisper-native,stt-vad --bin jarvis && codesign --force --sign - --entitlements src-tauri/entitlements.plist src-tauri/target/release/jarvis && src-tauri/target/release/jarvis",
-    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "build:core-transport": "node scripts/build-core-transport.mjs",
+    "build:power-helper-dev": "cargo build --release --locked --manifest-path crates/jarvis-power-helper/Cargo.toml --features dev-uds --bin jarvis-power-helper-dev",
+    "start:power-helper-dev": "JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 cargo run --locked --manifest-path crates/jarvis-power-helper/Cargo.toml --features dev-uds --bin jarvis-power-helper-dev",
+    "build:agent-vm-plugin": "cargo build --release --manifest-path plugins/agent-vm/Cargo.toml --target-dir src-tauri/target",
+    "prepare:agent-vm-sidecar": "bash scripts/prepare-agent-vm-sidecar.sh",
+    "start": "npm run build:core-transport && npm run build:agent-vm-plugin && JARVIS_DEV_SIGN=1 cargo build --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort,whisper-native,stt-vad,power-helper-dev --bin jarvis && codesign --force --sign - --entitlements src-tauri/entitlements.plist src-tauri/target/release/jarvis && JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 JARVIS_PLUGIN_DEV_DIR=\"$PWD/plugins\" src-tauri/target/release/jarvis",
+    "start:prod": "npm run build:core-transport && npm run build:agent-vm-plugin && JARVIS_DEV_SIGN=1 cargo build --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort,whisper-native,stt-vad --bin jarvis && codesign --force --sign - --entitlements src-tauri/entitlements.plist src-tauri/target/release/jarvis && src-tauri/target/release/jarvis",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml && cargo test --manifest-path plugins/agent-vm/Cargo.toml",
     "test:ui": "node --test ui/*.test.mjs",
+    "generate:plugin-contracts": "cargo run --quiet --manifest-path crates/jarvis-plugin-protocol/Cargo.toml --bin export_ui_contracts && node scripts/generate-plugin-ui-contracts.mjs",
+    "check:plugin-contracts": "bash scripts/check-plugin-contract-generation.sh",
+    "test:plugin-ui-sdk": "node --test packages/jarvis-plugin-ui/test/*.test.mjs",
+    "test:plugin-schema-parity": "cargo test --locked --manifest-path tools/plugin-schema-parity/Cargo.toml",
+    "check:public": "bash scripts/check-public-repo-secrets.sh",
+    "test:plugin-boundaries": "bash scripts/check-plugin-boundaries.test.sh",
+    "check:plugin-boundaries": "bash scripts/check-plugin-boundaries.sh",
+    "generate:package-lock": "bash scripts/generate-jarvis-package-lock.sh",
+    "test:package-lock": "bash scripts/check-package-lock-contract.test.sh",
+    "check:package-lock": "bash scripts/check-package-lock-contract.sh",
     "setup": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- install",
     "teardown": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- uninstall",
     "status": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- status",
     "tauri": "tauri",
-    "bundle": "tauri build --features wakeword-ort,whisper-native,stt-vad"
+    "bundle": "npm run build:core-transport && tauri build --features wakeword-ort,whisper-native,stt-vad"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.2"
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/cli": "^2.11.2",
+    "esbuild": "0.25.12",
+    "json-schema-to-typescript": "15.0.4",
+    "parse5": "8.0.0",
+    "typescript": "5.9.3"
   }
 }

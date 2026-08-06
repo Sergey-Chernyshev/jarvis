@@ -8,21 +8,34 @@ rust-version = "1.77.2"
 default-run = "jarvis"
 
 [build-dependencies]
+cc = "1"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+getrandom = "0.2"
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["fast", "std", "zeroize"] }
+jarvis-package = { path = "../crates/jarvis-package" }
+jarvis-power-core = { path = "../crates/jarvis-power-core" }
+jarvis-plugin-protocol = { path = "../crates/jarvis-plugin-protocol" }
+jarvis-secret-store = { path = "../crates/jarvis-secret-store" }
+jsonschema = { version = "=0.18.3", default-features = false, features = ["draft202012"] }
+semver = "1"
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
+url = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 # preserve_order: не пересортировывать ключи чужих JSON (~/.claude/settings.json)
 serde_json = { version = "1", features = ["preserve_order"] }
+serde_json_canonicalizer = "=0.3.2"
+sha2 = { version = "=0.10.9", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 regex = "1"
+rusqlite = "=0.31.0"
 chrono = "0.4"
 libc = "0.2"
 # голос (инкремент 7): проигрывание WAV на системный output
@@ -34,7 +47,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 core-foundation = "0.10"
 core-graphics = "0.24"
 objc2 = "0.6"
-# блоки Objective-C для AVCaptureDevice.requestAccessForMediaType:completionHandler:
+# блоки Objective-C для системных async completion-handler'ов
 block2 = "0.6"
 # base64 для stt.transcribe capability (кодирование PCM в аргументах MCP)
 base64 = "0.22"
@@ -43,6 +56,7 @@ cpal = "0.17.1"
 rubato = "0.16.2"
 # вставка текста (инкр. 9, фаза 5): clipboard snapshot/restore для ⌘V-вставки
 arboard = "3"
+zeroize = "1"
 
 [[bin]]
 name = "jarvis"
@@ -66,6 +80,7 @@ path = "src/bin/jarvis-mcp.rs"
 # ad-hoc сборках. cmake требуется всегда (есть локально + шаг в release.yml).
 # Отключить можно явно: `cargo build --no-default-features`.
 default = ["whisper-native"]
+power-helper-dev = []
 whisper-native = ["dep:whisper-rs"]
 # wake-word через openWakeWord/ort (инкр. 10). ВЫКЛ по умолчанию: дефолтная сборка
 # НЕ тянет onnxruntime и компилируется офлайн. Для работы нужны 3 ONNX-модели

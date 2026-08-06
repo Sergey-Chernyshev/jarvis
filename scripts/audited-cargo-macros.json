@@ -1,0 +1,121 @@
+{
+  "registrySource": "registry+https://github.com/rust-lang/crates.io-index",
+  "packages": {
+    "objc2": {
+      "attributes": {},
+      "derives": {},
+      "macros": {
+        "class": null,
+        "msg_send": null
+      },
+      "versions": {
+        "0.6.4": "3a12a8ed07aefc768292f076dc3ac8c48f3781c8f2d5851dd3d98950e8c5a89f"
+      }
+    },
+    "ort": {
+      "attributes": {},
+      "derives": {},
+      "macros": {
+        "inputs": null
+      },
+      "versions": {
+        "2.0.0-rc.10": "1fa7e49bd669d32d7bc2a15ec540a527e7764aec722a45467814005725bcd721"
+      }
+    },
+    "rusqlite": {
+      "attributes": {},
+      "derives": {},
+      "macros": {
+        "params": null
+      },
+      "versions": {
+        "0.31.0": "b838eba278d213a8beaf485bd313fd580ca4505a00d5871caeb1457c55322cae"
+      }
+    },
+    "schemars": {
+      "attributes": {},
+      "derives": {
+        "JsonSchema": "schemars_derive"
+      },
+      "macros": {
+        "schema_for": null
+      },
+      "versions": {
+        "0.8.22": "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
+      }
+    },
+    "serde_json": {
+      "attributes": {},
+      "derives": {},
+      "macros": {
+        "json": null
+      },
+      "versions": {
+        "1.0.150": "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9",
+        "1.0.151": "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+      }
+    },
+    "tauri": {
+      "attributes": {
+        "command": "tauri-macros"
+      },
+      "derives": {},
+      "macros": {
+        "generate_context": "tauri-macros",
+        "generate_handler": "tauri-macros"
+      },
+      "versions": {
+        "2.11.2": "437404997acf375d85f1177afa7e11bb971f274ed6a7b83a2a3e339015f4cc28"
+      }
+    },
+    "tokio": {
+      "attributes": {
+        "test": "tokio-macros"
+      },
+      "derives": {},
+      "macros": {
+        "join": null,
+        "pin": null,
+        "select": null
+      },
+      "versions": {
+        "1.52.3": "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
+      }
+    },
+    "serde": {
+      "attributes": {},
+      "derives": {
+        "Deserialize": "serde_derive",
+        "Serialize": "serde_derive"
+      },
+      "macros": {},
+      "versions": {
+        "1.0.228": "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e",
+        "1.0.229": "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+      }
+    }
+  },
+  "providers": {
+    "schemars_derive": {
+      "versions": {
+        "0.8.22": "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d"
+      }
+    },
+    "serde_derive": {
+      "versions": {
+        "1.0.228": "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79",
+        "1.0.229": "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+      }
+    },
+    "tauri-macros": {
+      "versions": {
+        "2.6.2": "ae6cb4e3896c21d2f6da5b31251d2faea0153bba56ed0e970f918115dbee4924"
+      }
+    },
+    "tokio-macros": {
+      "versions": {
+        "2.7.0": "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496"
+      }
+    }
+  }
+}

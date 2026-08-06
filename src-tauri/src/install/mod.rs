@@ -237,14 +237,33 @@ pub fn plan_install(ids: &[String], inst: &Installed) -> Vec<InstallTask> {
 
 /* ================= пути ================= */
 
+fn home_from_env(raw: Option<String>) -> PathBuf {
+    match raw {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => PathBuf::from("/"),
+    }
+}
+
+fn home_is_available(raw: Option<&str>) -> bool {
+    raw.is_some_and(|path| !path.is_empty())
+}
+
+fn home_opt() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").expect("нет $HOME"))
+    home_from_env(std::env::var("HOME").ok())
 }
 /// $JARVIS_DIR или ~/.jarvis (изоляция dev-сборки — как и в util::jarvis_dir).
 fn jarvis_dir() -> PathBuf {
     match std::env::var("JARVIS_DIR") {
         Ok(d) if !d.is_empty() => PathBuf::from(d),
-        _ => home().join(".jarvis"),
+        _ => home_opt()
+            .map(|home| home.join(".jarvis"))
+            .unwrap_or_else(|| std::env::temp_dir().join("jarvis-home-unavailable")),
     }
 }
 
@@ -296,15 +315,87 @@ fn augmented_path() -> String {
         "/opt/homebrew/bin".to_string(),
         "/usr/local/bin".to_string(),
     ];
-    if let Ok(rd) = fs::read_dir(home().join(".nvm/versions/node")) {
-        for e in rd.flatten() {
-            let bin = e.path().join("bin");
-            if bin.is_dir() {
-                extra.push(bin.display().to_string());
+    if let Some(home) = home_opt() {
+        extra.push(home.join(".local/bin").display().to_string());
+        if let Ok(rd) = fs::read_dir(home.join(".nvm/versions/node")) {
+            for e in rd.flatten() {
+                let bin = e.path().join("bin");
+                if bin.is_dir() {
+                    extra.push(bin.display().to_string());
+                }
             }
         }
     }
     format!("{}:{base}", extra.join(":"))
+}
+
+fn resolve_agent_bin_in(
+    name: &str,
+    path: &str,
+    home: Option<&Path>,
+    shims: &Path,
+) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = path
+        .split(':')
+        .filter(|segment| !segment.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    for dir in [
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ] {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    if let Some(home) = home {
+        let local = home.join(".local/bin");
+        if !dirs.contains(&local) {
+            dirs.push(local);
+        }
+        if let Ok(entries) = fs::read_dir(home.join(".nvm/versions/node")) {
+            let mut nvm_bins: Vec<_> = entries
+                .flatten()
+                .map(|entry| entry.path().join("bin"))
+                .filter(|path| path.is_dir())
+                .collect();
+            nvm_bins.sort();
+            nvm_bins.reverse();
+            for dir in nvm_bins {
+                if !dirs.contains(&dir) {
+                    dirs.push(dir);
+                }
+            }
+        }
+    }
+
+    dirs.into_iter()
+        .filter(|dir| dir != shims)
+        .map(|dir| dir.join(name))
+        .find(|candidate| {
+            fs::metadata(candidate)
+                .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
+}
+
+/// Единственный resolver Claude/Codex для readiness и runtime-бэкендов.
+/// Ищет в GUI-safe PATH и известных каталогах, но исключает наши shims.
+pub fn resolve_agent_bin(name: &str) -> Option<PathBuf> {
+    if !matches!(name, "claude" | "codex") {
+        return None;
+    }
+    let profile = std::env::var_os("JARVIS_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home_opt().map(|home| home.join(".jarvis")))
+        .unwrap_or_else(|| std::env::temp_dir().join("jarvis-home-unavailable"));
+    resolve_agent_bin_in(
+        name,
+        &std::env::var("PATH").unwrap_or_default(),
+        home_opt().as_deref(),
+        &profile.join("shims"),
+    )
 }
 
 /// Версия интерпретатора (major, minor) из `<py> --version`. None — не запустился.
@@ -511,14 +602,22 @@ fn codex_shim_dst() -> PathBuf {
 fn tmux_conf_dst() -> PathBuf {
     jarvis_dir().join("tmux.conf")
 }
+
+fn jarvis_cli_dst() -> PathBuf {
+    shims_dir().join("jarvis")
+}
 fn settings_path() -> PathBuf {
-    home().join(".claude/settings.json")
+    home_opt()
+        .map(|home| home.join(".claude/settings.json"))
+        .unwrap_or_else(|| jarvis_dir().join(".home-unavailable/claude/settings.json"))
 }
 /// Codex: $CODEX_HOME или ~/.codex; файл регистрации хуков.
 fn codex_home() -> PathBuf {
     match std::env::var("CODEX_HOME") {
         Ok(d) if !d.is_empty() => PathBuf::from(d),
-        _ => home().join(".codex"),
+        _ => home_opt()
+            .map(|home| home.join(".codex"))
+            .unwrap_or_else(|| jarvis_dir().join(".home-unavailable/codex")),
     }
 }
 fn codex_hooks_path() -> PathBuf {
@@ -530,13 +629,7 @@ fn jarvis_settings_path() -> PathBuf {
 
 /// Установлен ли `codex` в PATH (минуя наш шим).
 fn codex_found() -> bool {
-    Command::new("/bin/sh")
-        .args(["-c", "command -v codex"])
-        .env("PATH", augmented_path())
-        .stdout(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    resolve_agent_bin("codex").is_some()
 }
 
 /* ================= STT: Whisper + Qwen3-MLX (инкр. 9, Phase 8) ================= */
@@ -1724,6 +1817,14 @@ pub fn integration_health() -> IntegrationHealth {
 /// верно, файлы не переписываются. Лечит главный баг: stale prod-путь/метка после
 /// смены dev↔prod профиля, из-за которого codex дёргал несуществующий бинарь.
 pub fn reconcile_hooks(progress: &Progress) {
+    let home_env = std::env::var("HOME").ok();
+    if !home_is_available(home_env.as_deref()) {
+        progress(Step::warn(
+            "Интеграция",
+            "HOME недоступен; самовосстановление хуков пропущено",
+        ));
+        return;
+    }
     install_hooks_into(&settings_path(), "claude", &EVENTS, progress);
     if codex_found() {
         install_hooks_into(&codex_hooks_path(), "codex", &CODEX_EVENTS, progress);
@@ -1736,7 +1837,13 @@ pub fn reconcile_hooks(progress: &Progress) {
 /// codex появился после первичной установки, и лечит дрейф путей/меток в хуках.
 /// Для `jarvis-setup repair` и кнопки «Починить интеграцию» в настройках.
 pub fn repair(progress: &Progress) {
-    let h = install_core(progress);
+    let h = match install_core(progress) {
+        Ok(health) => health,
+        Err(error) => {
+            progress(Step::warn("Интеграция", error));
+            return;
+        }
+    };
     progress(Step::info(
         "Интеграция",
         format!(
@@ -1759,13 +1866,7 @@ fn event_installed(json: &Value, event: &str) -> bool {
 }
 
 fn claude_found() -> bool {
-    Command::new("/bin/sh")
-        .args(["-c", "command -v claude"])
-        .env("PATH", augmented_path())
-        .stdout(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    resolve_agent_bin("claude").is_some()
 }
 
 fn tmux_found() -> bool {
@@ -1998,8 +2099,13 @@ pub fn status_report() -> String {
 /// сюда принципиально не входят: onboarding не должен начинать многогигабайтные
 /// загрузки без явного выбора пользователя. Возвращает фактический health после
 /// установки, а не «успех потока».
-pub fn install_core(progress: &Progress) -> IntegrationHealth {
+pub fn install_core(progress: &Progress) -> Result<IntegrationHealth, String> {
     debug_assert_eq!(core_install_phases(), &["Хуки", "Транспорт"]);
+    if home_opt().is_none() {
+        return Err(
+            "HOME недоступен: Jarvis не может безопасно изменить конфиги Claude/Codex".into(),
+        );
+    }
     progress(Step::start("Хуки"));
     write_executable(&hook_dst(), HOOK_SRC);
 
@@ -2048,7 +2154,7 @@ pub fn install_core(progress: &Progress) -> IntegrationHealth {
     // медиа-адаптер для паузы чужого звука (мгновенно, тихо)
     install_mediaremote();
 
-    integration_health()
+    Ok(integration_health())
 }
 
 /// Legacy full install для CLI: core плюс optional voice/STT setup. Новый
@@ -2119,6 +2225,18 @@ fn install_tmux_transport(progress: &Progress) {
         // тот же скрипт под именем codex — поведение выбирается по basename "$0".
         write_executable(&codex_shim_dst(), &shim);
     }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            let jarvis = directory.join("jarvis");
+            if jarvis.is_file() {
+                let command = format!(
+                    "#!/bin/sh\nexec {} \"$@\"\n",
+                    shell_quote(&jarvis.to_string_lossy())
+                );
+                write_executable(&jarvis_cli_dst(), &command);
+            }
+        }
+    }
     fs::write(tmux_conf_dst(), TMUX_CONF_SRC).expect("запись tmux.conf");
 
     let shims = shims_dir().display().to_string();
@@ -2160,6 +2278,7 @@ pub fn uninstall(progress: &Progress) {
         jarvis_dir().join("run.sock"),
         shim_dst(),
         codex_shim_dst(),
+        jarvis_cli_dst(),
         tmux_conf_dst(),
     ] {
         let _ = fs::remove_file(&f);
@@ -2550,6 +2669,14 @@ mod tests {
     const DIR: &str = "/Users/test/.jarvis/shims";
 
     #[test]
+    fn missing_home_falls_back_to_root() {
+        assert_eq!(home_from_env(None), PathBuf::from("/"));
+        assert!(!home_is_available(None));
+        assert!(!home_is_available(Some("")));
+        assert!(home_is_available(Some("/Users/test")));
+    }
+
+    #[test]
     fn core_install_plan_contains_no_optional_downloads() {
         assert_eq!(core_install_phases(), &["Хуки", "Транспорт"]);
         assert!(!core_install_phases()
@@ -2578,6 +2705,28 @@ mod tests {
         );
         health.claude_hooks_ok = false;
         assert!(!health.ok(), "hooks доступного агента обязательны");
+    }
+
+    #[test]
+    fn canonical_agent_resolver_skips_jarvis_shim_and_finds_real_binary() {
+        let root =
+            std::env::temp_dir().join(format!("jarvis-agent-resolver-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let shims = root.join("profile/shims");
+        let real = root.join("nvm/v22/bin");
+        fs::create_dir_all(&shims).unwrap();
+        fs::create_dir_all(&real).unwrap();
+        for path in [shims.join("codex"), real.join("codex")] {
+            fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let path = format!("{}:{}", shims.display(), real.display());
+        assert_eq!(
+            resolve_agent_bin_in("codex", &path, None, &shims),
+            Some(real.join("codex"))
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2719,6 +2868,21 @@ mod tests {
             SHIM_SRC.contains("command -v \"$BIN_NAME\""),
             "резолвит реальный бинарь по имени"
         );
+        assert!(
+            SHIM_SRC.contains("JARVIS_SOCK=\"${JARVIS_SOCK:-$JARVIS_DIR/run.sock}\""),
+            "каждая agent-сессия привязана к сокету своего Jarvis profile"
+        );
+        assert!(
+            SHIM_SRC.contains("export JARVIS_DIR JARVIS_SOCK"),
+            "profile binding наследуется настоящим agent-процессом"
+        );
+        assert!(
+            TMUX_CONF_SRC
+                .lines()
+                .find(|line| line.contains("update-environment"))
+                .is_some_and(|line| line.contains("JARVIS_SOCK")),
+            "tmux переносит profile socket из запускающего терминала"
+        );
     }
 
     #[test]
@@ -2748,8 +2912,12 @@ mod tests {
     #[test]
     fn claude_events_cover_subagent_lifecycle() {
         assert_eq!(EVENTS.len(), 10);
-        assert!(EVENTS.iter().any(|(event, arg)| *event == "SubagentStart" && *arg == "subagent-start"));
-        assert!(EVENTS.iter().any(|(event, arg)| *event == "SubagentStop" && *arg == "subagent-stop"));
+        assert!(EVENTS
+            .iter()
+            .any(|(event, arg)| *event == "SubagentStart" && *arg == "subagent-start"));
+        assert!(EVENTS
+            .iter()
+            .any(|(event, arg)| *event == "SubagentStop" && *arg == "subagent-stop"));
         assert!(EVENTS.iter().any(|(event, _)| *event == "Notification"));
     }
 

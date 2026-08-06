@@ -135,6 +135,51 @@ pub async fn play_keys(pane: &str, keys: &[Key]) -> Result<(), String> {
     Ok(())
 }
 
+/// Поднять сессию агента в отдельной сессии `tmux -L jarvis`.
+///
+/// `-d` обязателен: клиента здесь нет и быть не может — за этой машиной никто
+/// не сидит, а хуки агента доедут до ноута и без подключённого терминала.
+/// Команда уходит через `bash -lc`: неинтерактивная оболочка не читает профиль,
+/// и `claude`, поставленный через nvm или в `~/.local/bin`, оказался бы «не
+/// найден» ровно там, где он есть.
+pub async fn launch(cwd: &str, cmd: &str, name: Option<&str>) -> Result<(), String> {
+    // std, а не tokio::fs: фича "fs" узлу больше нигде не нужна, а тянуть её
+    // ради одного mkdir — лишний вес там, где вес и есть смысл крейта.
+    std::fs::create_dir_all(cwd).map_err(|e| format!("не создал {cwd}: {e}"))?;
+    let session = session_name(cwd, name);
+    tmux_j(&[
+        "new-session", "-d", "-s", &session, "-c", cwd, "bash", "-lc", cmd,
+    ])
+    .await
+    .map(|_| ())
+}
+
+/// Имя tmux-сессии: человекочитаемое и уникальное. Совпадение имён tmux не
+/// прощает — вторая сессия того же проекта просто не создалась бы.
+fn session_name(cwd: &str, name: Option<&str>) -> String {
+    let base = name
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            cwd.trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("project")
+                .to_string()
+        });
+    let safe: String = base
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let safe = safe.trim_matches('-');
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{}-{stamp}", if safe.is_empty() { "project" } else { safe })
+}
+
 /// Пульт: слэш-команда с аргументом (`/model sonnet`, `/effort high`).
 /// На длинной сессии `/model` показывает «Switch model?» — подтверждаем
 /// выделенный по умолчанию вариант ещё одним Enter, если он есть.
@@ -274,5 +319,15 @@ mod tests {
         // значит оставить пикер в произвольном состоянии
         assert!(parse_keys(&json!([{ "key": "Down" }, { "wat": 1 }])).is_none());
         assert!(parse_keys(&json!("Down")).is_none());
+    }
+
+    #[test]
+    fn session_name_is_readable_and_unique() {
+        let a = session_name("/home/bob/my proj/", None);
+        assert!(a.starts_with("my-proj-"), "{a}");
+        // tmux не прощает совпадения имён: у второй сессии проекта должно
+        // получиться другое имя, иначе она просто не создастся
+        assert!(session_name("/srv/x", Some("явное имя")).starts_with("явное-имя-"));
+        assert!(session_name("/", None).starts_with("project-"));
     }
 }

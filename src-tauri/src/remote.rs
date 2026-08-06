@@ -684,6 +684,24 @@ impl NodeClient {
             .await
     }
 
+    /// Оглавление проектов машины: где там работали. Узел отдаёт только
+    /// найденное на диске — что из этого показать, решает панель.
+    pub async fn projects(&self) -> Result<Value, String> {
+        self.get_json::<Value>(&self.http, "/projects", &[])
+            .await
+            .map(|v| v.get("projects").cloned().unwrap_or(Value::Array(Vec::new())))
+    }
+
+    /// Поднять сессию агента на той машине: каталог создаётся рекурсивно,
+    /// команду собирает ноут (агент и флаги — его настройки).
+    pub async fn launch(&self, cwd: &str, cmd: &str, name: &str) -> Result<(), String> {
+        self.post(
+            "/launch",
+            &serde_json::json!({ "cwd": cwd, "cmd": cmd, "name": name }),
+        )
+        .await
+    }
+
     /// Живые паны узла — по ним видно, что удалённая сессия ещё жива.
     pub async fn panes(&self) -> Result<PanesReply, String> {
         self.get_json(&self.http, "/panes", &[]).await

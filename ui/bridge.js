@@ -62,7 +62,11 @@
     onChatAppend: (cb) => on('chat:append', cb),
     onChatSummary: (cb) => on('chat:summary', cb),
     focusTerminal: (sessionId) => invoke('terminal_focus', { sessionId }),
-    launchSession: (cwd, agent, sessionId) => invoke('session_launch', { cwd: cwd ?? null, agent, sessionId: sessionId ?? null }),
+    // machine: 'local' | имя узла — где запускать (вкладка «Проекты», шаг 1)
+    launchSession: (cwd, agent, sessionId, machine) => invoke('session_launch', {
+      cwd: cwd ?? null, agent, sessionId: sessionId ?? null, machine: machine ?? null,
+    }),
+    machinesList: () => invoke('machines_list'),
     sendReply: (sessionId, text) => invoke('session_reply', { sessionId, text }),
     // вставленная картинка → временный файл; путь уйдёт агенту в промпте
     saveImage: (dataBase64, ext) => invoke('session_save_image', { dataBase64, ext }),
@@ -92,7 +96,7 @@
     getLimit: () => invoke('limit_get'),
     onLimitState: (cb) => on('limit-state', cb),
     getSessionUsage: (id) => invoke('usage_session', { id }),
-    getHistory: () => invoke('history_get'),
+    getHistory: (machine) => invoke('history_get', { machine: machine ?? null }),
     // интеграция и модели (настройки)
     integrationGet: () => invoke('integration_get'),
     integrationRemove: () => invoke('integration_remove'),

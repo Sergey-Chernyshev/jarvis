@@ -21,6 +21,7 @@
 
 pub mod files;
 pub mod http;
+pub mod projects;
 pub mod ring;
 pub mod tmux;
 

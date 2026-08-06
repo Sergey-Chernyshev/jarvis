@@ -1217,10 +1217,97 @@ pub fn limit_get(app: AppHandle) -> Value {
     serde_json::to_value(Daemon::get(&app).limits.state()).unwrap_or(Value::Null)
 }
 
+/// Машины, на которых можно работать: эта плюс настроенные узлы.
+///
+/// Список нужен вкладке «Проекты» первым шагом — до выбора проекта. Локальная
+/// всегда первая и всегда «на связи»: она никуда не денется, и отсутствие
+/// узлов не должно выглядеть как «работать негде».
 #[tauri::command]
-pub fn history_get(app: AppHandle) -> Value {
+pub fn machines_list(app: AppHandle) -> Value {
     let d = Daemon::get(&app);
-    d.history.projects(&d.usage)
+    let mut out = vec![json!({
+        "id": "local", "name": "Эта машина", "kind": "local", "online": true,
+    })];
+    for st in d.remotes.list() {
+        out.push(json!({
+            "id": st.name,
+            "name": st.name,
+            "kind": "remote",
+            "sshHost": st.ssh_host,
+            "online": st.connected,
+            "error": st.error,
+        }));
+    }
+    Value::Array(out)
+}
+
+/// История проектов выбранной машины. `machine` = `None`/`"local"` — эта.
+///
+/// У локальной история богатая (заголовки, модели, расход) — её собирает
+/// сканер транскриптов. У удалённой берём оглавление с узла: каталоги, время
+/// и идентификаторы сессий. Заголовков там нет и взяться им неоткуда без
+/// вычитывания каждого транскрипта по ssh — а это уже не «показать список».
+#[tauri::command]
+pub async fn history_get(app: AppHandle, machine: Option<String>) -> Value {
+    let d = Daemon::get(&app);
+    let machine = machine.unwrap_or_default();
+    if machine.is_empty() || machine == "local" {
+        return d.history.projects(&d.usage);
+    }
+    let Some(node) = d.remotes.node(&machine) else {
+        return json!([]);
+    };
+    let client = match node.client() {
+        Ok(c) => c,
+        Err(e) => return json!({ "error": format!("{e}: {}", node.why()) }),
+    };
+    match client.projects().await {
+        Ok(list) => remote_projects_to_history(&machine, list),
+        Err(e) => json!({ "error": ellipsize(&one_line(&e), 160) }),
+    }
+}
+
+/// Оглавление узла → та же форма, что отдаёт локальная история, чтобы панель
+/// рисовала оба списка одним кодом. Чего нет — того нет: заголовок сессии
+/// заменяем её временем, а не выдумываем.
+fn remote_projects_to_history(machine: &str, list: Value) -> Value {
+    let Some(arr) = list.as_array() else { return json!([]) };
+    let out: Vec<Value> = arr
+        .iter()
+        .map(|p| {
+            let cwd = p.get("cwd").and_then(Value::as_str).unwrap_or_default();
+            let project = cwd.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("другое");
+            let sessions: Vec<Value> = p
+                .get("sessions")
+                .and_then(Value::as_array)
+                .map(|s| {
+                    s.iter()
+                        .map(|x| {
+                            let id = x.get("id").and_then(Value::as_str).unwrap_or_default();
+                            json!({
+                                // ключ реестра — с префиксом узла, как у событий:
+                                // по нему панель узнает уже известную ей сессию
+                                "id": format!("{machine}:{id}"),
+                                "agentId": id,
+                                "at": x.get("at").cloned().unwrap_or(Value::Null),
+                                "title": "",
+                                "remote": machine,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            json!({
+                "project": project,
+                "cwd": cwd,
+                "count": p.get("count").cloned().unwrap_or(json!(sessions.len())),
+                "lastAt": p.get("lastAt").cloned().unwrap_or(Value::Null),
+                "remote": machine,
+                "sessions": sessions,
+            })
+        })
+        .collect();
+    Value::Array(out)
 }
 
 #[tauri::command]
@@ -1835,6 +1922,7 @@ pub async fn session_launch(
     cwd: Option<String>,
     agent: String,
     session_id: Option<String>,
+    machine: Option<String>,
 ) -> Value {
     let d = Daemon::get(&app);
     // cwd бывает null: история группирует сессии без директории в «другое».
@@ -1843,6 +1931,17 @@ pub async fn session_launch(
     let cwd = cwd.unwrap_or_default();
     if cwd.trim().is_empty() && session_id.is_none() {
         return err("Не указана директория проекта");
+    }
+    let machine = machine.unwrap_or_default();
+    if !machine.is_empty() && machine != "local" {
+        return launch_on_node(&d, &machine, &cwd, &agent, session_id.as_deref()).await;
+    }
+    // Новый проект на этой машине: каталога может ещё не быть, и требовать
+    // сходить создать его руками — значит не сделать работу.
+    if !cwd.trim().is_empty() {
+        if let Err(e) = std::fs::create_dir_all(cwd.trim()) {
+            return err(format!("не создал {}: {e}", cwd.trim()));
+        }
     }
     let terminal = d.settings.string("launchTerminal");
     let custom = d.settings.string("launchCustomCmd");
@@ -1854,6 +1953,39 @@ pub async fn session_launch(
     match crate::launch::spawn(&terminal, &custom, &inner).await {
         Ok(()) => ok(),
         Err(e) => err(e),
+    }
+}
+
+/// Запуск на удалённой машине. Терминала там нет и открывать нечего: сессия
+/// поднимается в `tmux -L jarvis` отсоединённой, и дальше живёт как любая
+/// другая удалённая — статусы и чат приезжают хуками через узел.
+///
+/// Идентификатор сессии для `--resume` отдаём БЕЗ префикса узла: префикс —
+/// ключ нашего реестра, агент на той машине про него не знает.
+async fn launch_on_node(
+    d: &Arc<Daemon>,
+    machine: &str,
+    cwd: &str,
+    agent: &str,
+    session_id: Option<&str>,
+) -> Value {
+    let Some(node) = d.remotes.node(machine) else {
+        return err(format!("Узел «{machine}» не подключён"));
+    };
+    let client = match node.client() {
+        Ok(c) => c,
+        Err(e) => return err(format!("{e}: {}", node.why())),
+    };
+    let bare = session_id.map(|s| s.strip_prefix(&format!("{machine}:")).unwrap_or(s));
+    let dangerous = d.settings.bool("launchDangerous");
+    let cmd = crate::launch::agent_command(agent, bare, dangerous);
+    let name = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("project");
+    match client.launch(cwd, &cmd, name).await {
+        Ok(()) => json!({ "ok": true, "channel": "node", "machine": machine }),
+        Err(e) => err(format!(
+            "{}\nЕсли не хватает tmux или агента — поставь их на той машине.",
+            ellipsize(&one_line(&e), 200)
+        )),
     }
 }
 
@@ -3210,6 +3342,36 @@ mod turn_ipc_tests {
         assert!(resolve_user_file(Some(&cwd), "нет/такого.rs").is_err());
         assert!(resolve_user_file(None, "relative/without/cwd.rs").is_err());
         assert!(resolve_user_file(Some(&cwd), "sub").is_err(), "каталог — не файл");
+    }
+
+    #[test]
+    fn remote_projects_keep_both_ids() {
+        // Панели нужен ключ реестра (по нему она узнаёт уже известную сессию),
+        // а агенту на той машине — его собственный id. Путать их нельзя:
+        // `--resume vps:abc` там не найдёт ничего.
+        let listing = json!([{
+            "cwd": "/home/bob/my-proj",
+            "count": 2,
+            "lastAt": 1700,
+            "sessions": [{ "id": "abc", "at": 1700 }, { "id": "def", "at": 1600 }],
+        }]);
+        let got = remote_projects_to_history("vps", listing);
+        let g = &got[0];
+        assert_eq!(g["project"], "my-proj", "имя проекта — из cwd, а не из имени каталога");
+        assert_eq!(g["remote"], "vps");
+        assert_eq!(g["sessions"][0]["id"], "vps:abc");
+        assert_eq!(g["sessions"][0]["agentId"], "abc");
+        assert_eq!(g["sessions"][0]["title"], "", "заголовков с узла нет — не выдумываем");
+    }
+
+    #[test]
+    fn remote_projects_survive_a_listing_without_cwd() {
+        // узел не смог достать cwd (пустой транскрипт, чужой формат) — список
+        // всё равно должен нарисоваться, а не исчезнуть целиком
+        let got = remote_projects_to_history("vps", json!([{ "sessions": [] }]));
+        assert_eq!(got[0]["project"], "другое");
+        assert_eq!(got[0]["cwd"], "");
+        assert!(remote_projects_to_history("vps", json!("не массив")).as_array().unwrap().is_empty());
     }
 
     #[test]

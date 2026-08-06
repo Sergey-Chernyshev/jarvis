@@ -9,6 +9,8 @@
 //! | `POST /reply` | `{pane, text}` → вставка в tmux |
 //! | `POST /control` | `{pane, cmd}` → слэш-команда в пану |
 //! | `POST /keys` | `{pane, keys}` → план клавиш в пикер вопроса |
+//! | `GET /projects` | оглавление проектов машины (каталоги, сессии, время) |
+//! | `POST /launch` | `{cwd, cmd}` → создать каталог и поднять сессию в tmux |
 //! | `GET /panes` | живые паны `tmux -L jarvis` |
 //! | `POST <прочее>` | конверт от jarvis-hook |
 //!
@@ -27,7 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::ring::{Recorded, Slice};
-use super::{files, tmux, Node};
+use super::{files, projects, tmux, Node};
 
 /// Потолок long-poll. 25с, а не «до последнего»: SSH-туннель и NAT рвут
 /// молчащее соединение без предупреждения, и лучше отдать пустой ответ, чем
@@ -46,6 +48,8 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/reply", post(reply))
         .route("/control", post(control))
         .route("/keys", post(keys))
+        .route("/projects", get(projects))
+        .route("/launch", post(launch))
         // POST на любой прочий путь — конверт от хука. jarvis-hook бьёт в
         // /event, но привязываться к одному пути не за что: у демона ровно так же.
         .fallback(fallback)
@@ -169,6 +173,31 @@ async fn keys(body: Bytes) -> Response {
         return json_err(StatusCode::BAD_REQUEST, "пустая пана или пустой план");
     }
     tmux_result(tmux::play_keys(pane, &plan).await)
+}
+
+/// GET /projects — где на этой машине работали. Только оглавление: ноут сам
+/// решит, что показать и что из этого прочитать через `/file`.
+async fn projects() -> Response {
+    let home = super::home_dir();
+    json_ok(&json!({ "projects": projects::list(&home) }))
+}
+
+/// POST /launch — {cwd, cmd}: поднять сессию агента в `tmux -L jarvis`.
+///
+/// Каталог создаётся рекурсивно: человек заводит проект там, где его ещё нет,
+/// и требовать от него сначала сходить туда по ssh — значит не сделать работу.
+/// Команду собирает ноут (агент, флаги, прокси — его настройки), узел только
+/// исполняет: та же граница, что у `/keys`.
+async fn launch(body: Bytes) -> Response {
+    let Ok(v) = serde_json::from_slice::<Value>(&body) else {
+        return json_err(StatusCode::BAD_REQUEST, "ожидаю {cwd, cmd}");
+    };
+    let cwd = v.get("cwd").and_then(Value::as_str).unwrap_or_default().trim();
+    let cmd = v.get("cmd").and_then(Value::as_str).unwrap_or_default().trim();
+    if !cwd.starts_with('/') || cmd.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "нужен абсолютный cwd и непустая команда");
+    }
+    tmux_result(tmux::launch(cwd, cmd, v.get("name").and_then(Value::as_str)).await)
 }
 
 /// POST <прочее> — конверт от jarvis-hook; GET <прочее> — признак жизни.

@@ -176,6 +176,7 @@ fn main() {
             ipc::remotes_install,
             ipc::remotes_ssh_key,
             ipc::remotes_ssh_authorize,
+            ipc::machines_list,
             ipc::toast_resize,
             ipc::toast_ready,
             ipc::toast_click,

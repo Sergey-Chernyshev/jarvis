@@ -10,6 +10,7 @@
 //! доверие, а надежда.
 
 pub mod engine;
+pub mod ipc;
 pub mod model;
 pub mod runner;
 pub mod schedule;

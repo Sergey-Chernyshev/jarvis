@@ -498,6 +498,48 @@ mod tests {
         assert_eq!(run.pending_review(), 1);
     }
 
+    /// Панель разбирает расписание руками, поэтому его вид на проводе —
+    /// договор, а не деталь. Он уже разъезжался: JS ждал `Daily`, serde слал
+    /// `daily`, и конструктор молча терял расписание при сохранении.
+    #[test]
+    fn wake_shape_on_the_wire_is_fixed() {
+        let j = |w: Wake| serde_json::to_string(&w).unwrap();
+        assert_eq!(j(Wake::Manual), "\"manual\"");
+        assert_eq!(j(Wake::Daily { at: "02:00".into() }), r#"{"daily":{"at":"02:00"}}"#);
+        assert_eq!(j(Wake::Every { minutes: 60 }), r#"{"every":{"minutes":60}}"#);
+    }
+
+    /// Панель шлёт форму обратно целиком — вместе с полями снимка, которых в
+    /// конфигурации нет. Лишнее обязано игнорироваться, иначе сохранение
+    /// падает на ровном месте.
+    #[test]
+    fn saving_ignores_the_snapshot_only_fields() {
+        let from_panel = serde_json::json!({
+            "id": "loop-1", "name": "ночной test-fix",
+            "run": { "n": 3 }, "wakeLabel": "каждый день в 02:00",
+            "nextWake": 123, "pendingReview": 2, "problems": ["…"],
+        });
+        let parsed: Loop = serde_json::from_value(from_panel).expect("лишние поля не должны мешать");
+        assert_eq!(parsed.name, "ночной test-fix");
+        // Пропущенные поля берут умолчания, а не обнуляются.
+        assert_eq!(parsed.limits.tokens, Limits::default().tokens);
+        assert_eq!(parsed.sampling.every, 3);
+    }
+
+    /// Вердикты и причины остановки панель разбирает по строкам — их вид тоже
+    /// договор.
+    #[test]
+    fn verdicts_and_stops_keep_their_names() {
+        let v = |x: Verdict| serde_json::to_string(&x).unwrap();
+        assert_eq!(v(Verdict::GateFailed), "\"gateFailed\"");
+        assert_eq!(v(Verdict::Returned), "\"returned\"");
+        let s = |x: StopReason| serde_json::to_string(&x).unwrap();
+        assert_eq!(s(StopReason::Tokens), "\"tokens\"");
+        assert_eq!(s(StopReason::Exit), "\"exit\"");
+        let r = |x: RunState| serde_json::to_string(&x).unwrap();
+        assert_eq!(r(RunState::Asking), "\"asking\"");
+    }
+
     #[test]
     fn limit_stop_is_not_a_failure() {
         assert!(StopReason::Tokens.is_limit());

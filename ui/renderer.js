@@ -36,6 +36,8 @@ const footerLeftEl = document.getElementById('footerLeft');
 const tabSessionsEl = document.getElementById('tabSessions');
 const tabSettingsEl = document.getElementById('tabSettings');
 const voicehistEl = document.getElementById('voicehist');
+const loopsEl = document.getElementById('loops');
+const tabLoopsEl = document.getElementById('tabLoops');
 const tabVoiceEl = document.getElementById('tabVoice');
 
 const STATUS_LABEL = {
@@ -150,6 +152,7 @@ function setView(next) {
   settingsEl.hidden = next !== 'settings';
   statsEl.hidden = next !== 'stats';
   voicehistEl.hidden = next !== 'voicehist';
+  loopsEl.hidden = next !== 'loops';
   historyEl.hidden = next !== 'history';
   // чат и вопрос несут собственные нижние бары — парящий футер только тут.
   // В окне полоска не парит, а стоит в сетке под обеими колонками — она нужна всегда.
@@ -162,12 +165,17 @@ function setView(next) {
   tabStatsEl.classList.toggle('active', next === 'stats');
   tabHistoryEl.classList.toggle('active', next === 'history');
   tabVoiceEl.classList.toggle('active', next === 'voicehist');
+  tabLoopsEl.classList.toggle('active', next === 'loops');
   tabSessionsEl.classList.toggle('active', next === 'list' || next === 'chat');
   if (next === 'settings') loadSettings();
   if (next === 'stats') renderStats();
   if (next === 'voicehist') {
     voicehistEl.style.cssText = 'padding:0;height:100%;overflow:hidden';
     try { window.initVoiceHistory(voicehistEl); } catch (e) { console.error('[voicehist] init:', e); }
+  }
+  if (next === 'loops') {
+    // Режим живёт своим модулем: панель только даёт ему место и уходит.
+    try { window.initLoops(loopsEl); } catch (e) { console.error('[loops] init:', e); }
   }
   if (next === 'history') renderHistory();
   else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
@@ -3296,6 +3304,7 @@ const statsEl = document.getElementById('stats');
 const tabStatsEl = document.getElementById('tabStats');
 tabStatsEl.addEventListener('click', () => setView('stats'));
 tabVoiceEl.addEventListener('click', () => setView('voicehist'));
+tabLoopsEl.addEventListener('click', () => setView('loops'));
 
 const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(n || 0));
 
@@ -4427,6 +4436,11 @@ window.addEventListener('keydown', async (e) => {
   if (e.metaKey && e.key === '4') { // ⌘4 — История голоса
     e.preventDefault();
     setView('voicehist');
+    return;
+  }
+  if (e.metaKey && e.key === '5') { // ⌘5 — Циклы
+    e.preventDefault();
+    setView('loops');
     return;
   }
 

@@ -2501,6 +2501,13 @@
   .vmws-back:hover,
   .vmws-iconbtn:hover { color: var(--text); background: rgba(255, 255, 255, .06); }
   .vmws-identity { min-width: 0; flex: 1; }
+  .vmws-kind {
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+  }
   .vmws-title {
     overflow: hidden;
     color: var(--text);
@@ -3655,9 +3662,12 @@
           <button class="vmws-back" id="agentVmBack" title="К проектам · Esc" aria-label="К проектам">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>
           </button>
+          <!-- «РАБОЧЕЕ МЕСТО» вместо полного пути: путь занимал всю строку
+               мелким шрифтом и ничего не сообщал — он и так виден в пульте. -->
           <div class="vmws-identity">
+            <div class="vmws-kind">рабочее место</div>
             <div class="vmws-title" id="agentVmProjectTitle">Project</div>
-            <div class="vmws-path" id="agentVmProjectPath"></div>
+            <div class="vmws-path" id="agentVmProjectPath" hidden></div>
           </div>
           <button class="vm-button danger" id="agentVmCancel" hidden>Стоп</button>
           <button class="vmws-env" id="agentVmEnvironmentButton" aria-expanded="false">

@@ -4229,7 +4229,15 @@ function renderAgentVmEnvironment(project, vm, terminal, run, uiState) {
   agentVmEnvironmentButtonEl.className = `vmws-env ${uiState}`;
   agentVmEnvironmentDotEl.className = `vmws-env-dot ${uiState}`;
   agentVmEnvironmentButtonEl.classList.toggle('open', !agentVmEnvironmentEl.hidden);
-  agentVmEnvironmentLabelEl.textContent = `${stateText}${backendName ? ` · ${backendName}` : ''}`;
+  // «Готова · Claude» описывало прогон, а кнопка — про среду. Говорим о ней:
+  // работает / спит / поднимается. Агент виден в шапке терминала рядом.
+  const vmLabel = ['running', 'ready', 'working'].includes(vm?.state)
+    ? 'VM работает'
+    : vm?.state === 'stopped' ? 'VM спит · запустить'
+      : ['provisioning', 'creating', 'starting'].includes(vm?.state) ? 'VM поднимается'
+        : vm?.state === 'error' ? 'VM не поднялась'
+          : vm ? stateText : 'Без VM';
+  agentVmEnvironmentLabelEl.textContent = vmLabel;
   agentVmEnvironmentTitleEl.textContent = stateText;
   agentVmNameEl.textContent = vm?.id?.replace(/^vm\./, '')
     || 'VM ещё не создана';
@@ -4322,7 +4330,10 @@ function renderAgentVmWorkspace() {
   const implicitStage = pluginPending
     || ['starting', 'provisioning', 'creating'].includes(vm?.state)
     || terminal?.state === 'starting';
-  agentVmStageEl.hidden = !agentVmStage && !implicitStage;
+  // Полоска-стадия и полноэкранное состояние сообщают одно и то же. Когда
+  // экран занят состоянием, полоска — третий индикатор того же события.
+  const fullState = Boolean(agentVmBoot) && !agentVmTerminalAlive(currentAgentVmTerminal());
+  agentVmStageEl.hidden = fullState || (!agentVmStage && !implicitStage);
   if (!agentVmStageEl.hidden) {
     agentVmStageTitleEl.textContent = agentVmStage?.title
       || (pluginPending
@@ -4354,9 +4365,17 @@ function renderAgentVmWorkspace() {
   const vmAsleep = !agentVmBoot
     && !terminalAlive
     && ['stopped', 'off'].includes(vm?.state);
-  agentVmFeedEl.hidden = vmAsleep;
-  if (vmAsleep) showAgentVmIdle();
-  else if (!agentVmBoot && agentVmBootEl) agentVmBootEl.hidden = true;
+  /* Экран состояния и терминал взаимоисключающи: раньше «Готовлю среду»,
+     полоска-стадия и рамка терминала с заглушкой висели одновременно —
+     три индикатора одного события.
+
+     Живой терминал сильнее экрана загрузки: если агент уже отвечает, ждать
+     нечего, даже когда таймер подъёма ещё не остановлен. */
+  const showState = !terminalAlive && (vmAsleep || Boolean(agentVmBoot));
+  agentVmFeedEl.hidden = showState;
+  if (showState && vmAsleep) showAgentVmIdle();
+  else if (showState) renderAgentVmBoot();
+  else if (agentVmBootEl) agentVmBootEl.hidden = true;
   agentVmTerminalScreenEl.hidden = !showScreen;
   agentVmTerminalEmptyEl.hidden = showScreen;
   agentVmTerminalLightEl.classList.toggle('live', terminalAlive);

@@ -37,7 +37,7 @@
     onRemoteInstallDone: (cb) => on('remote_install_done', cb),
     // режим «Циклы»: рутина, которую агент крутит сам
     loopsGet: () => invoke('loops_get'),
-    loopsCreate: (template, repo) => invoke('loops_create', { template, repo }),
+    loopsDraft: (template) => invoke('loops_draft', { template }),
     loopsSave: (item) => invoke('loops_save', { item }),
     loopsRemove: (id) => invoke('loops_remove', { id }),
     loopsStart: (id) => invoke('loops_start', { id }),

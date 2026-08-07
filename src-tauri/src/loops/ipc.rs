@@ -39,29 +39,25 @@ pub fn loops_get(app: AppHandle) -> Value {
     snapshot(&Daemon::get(&app))
 }
 
-/// Создать цикл: из шаблона или с нуля.
+/// Заготовка нового цикла: из шаблона или с нуля.
+///
+/// Ничего не сохраняет. Раньше создание сразу писало пустой цикл на диск, и
+/// человек, передумавший на первом же поле, оставлял в списке «без имени»
+/// навсегда. Заготовка живёт в панели, пока её не сохранят.
 #[tauri::command]
-pub fn loops_create(app: AppHandle, template: Option<String>, repo: Option<String>) -> Value {
-    let d = Daemon::get(&app);
-    let mut item = match template.as_deref().filter(|t| !t.is_empty()) {
+pub fn loops_draft(template: Option<String>) -> Value {
+    let item = match template.as_deref().filter(|t| !t.is_empty()) {
         Some(id) => match super::templates::build(id) {
             Some(l) => l,
             None => return json!({ "ok": false, "error": format!("нет шаблона «{id}»") }),
         },
         None => Loop {
-            name: String::new(),
             agent: "claude".into(),
             created_at: crate::util::now_ms(),
             ..Default::default()
         },
     };
-    item.id = format!("loop-{}", crate::util::now_ms());
-    if let Some(r) = repo {
-        item.sandbox.repo = r;
-    }
-    d.loops.store.save(item.clone());
-    push(&d);
-    json!({ "ok": true, "id": item.id })
+    json!({ "ok": true, "item": item })
 }
 
 /// Сохранить конфигурацию целиком — конструктор шлёт форму как есть.

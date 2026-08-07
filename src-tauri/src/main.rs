@@ -123,7 +123,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             loops::ipc::loops_get,
-            loops::ipc::loops_create,
+            loops::ipc::loops_draft,
             loops::ipc::loops_save,
             loops::ipc::loops_remove,
             loops::ipc::loops_start,

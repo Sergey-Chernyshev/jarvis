@@ -25,6 +25,7 @@ mod ipc;
 mod launch; // запуск новой/возобновляемой сессии в терминале из вкладки «Проекты»
 mod limits;
 mod log;
+mod loops; // режим «Циклы»: рутина, которую агент крутит сам — с концом и стенами
 mod macos;
 mod metrics;
 mod model;
@@ -121,6 +122,17 @@ fn main() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
+            loops::ipc::loops_get,
+            loops::ipc::loops_create,
+            loops::ipc::loops_save,
+            loops::ipc::loops_remove,
+            loops::ipc::loops_start,
+            loops::ipc::loops_stop,
+            loops::ipc::loops_intervene,
+            loops::ipc::loops_answer,
+            loops::ipc::loops_review,
+            loops::ipc::loops_resume,
+            loops::ipc::loops_diff,
             ipc::state_get,
             ipc::state_clear,
             ipc::panel_hide,
@@ -441,6 +453,16 @@ fn spawn_timers(d: &Arc<Daemon>) {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             power::Power::tick(&dd).await;
+        }
+    });
+
+    // расписание циклов: раз в 30с смотрим, чьё время пришло. Чаще незачем —
+    // самое частое расписание меряется минутами, а запуск всё равно один за раз.
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            loops::ipc::tick(&dd);
         }
     });
 

@@ -203,6 +203,8 @@ pub struct Daemon {
     /// Удалённые узлы (VPS): ssh-туннели и поллеры их событий. События оттуда
     /// приходят в тот же `reduce`, что и локальные, — реестр сессий один.
     pub remotes: std::sync::Arc<crate::remote::Remotes>,
+    /// Режим «Циклы»: конфигурации, журналы запусков и признак занятости.
+    pub loops: std::sync::Arc<crate::loops::Loops>,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -352,6 +354,7 @@ impl Daemon {
             interaction,
             media_ducked: AtomicBool::new(false),
             remotes: std::sync::Arc::new(crate::remote::Remotes::new()),
+            loops: std::sync::Arc::new(crate::loops::Loops::new()),
         }
     }
 

@@ -35,6 +35,20 @@
     remotesSshAuthorize: (sshHost, password) => invoke('remotes_ssh_authorize', { sshHost, password }),
     onRemoteInstallStep: (cb) => on('remote_install_progress', cb),
     onRemoteInstallDone: (cb) => on('remote_install_done', cb),
+    // режим «Циклы»: рутина, которую агент крутит сам
+    loopsGet: () => invoke('loops_get'),
+    loopsCreate: (template, repo) => invoke('loops_create', { template, repo }),
+    loopsSave: (item) => invoke('loops_save', { item }),
+    loopsRemove: (id) => invoke('loops_remove', { id }),
+    loopsStart: (id) => invoke('loops_start', { id }),
+    loopsStop: (id) => invoke('loops_stop', { id }),
+    loopsIntervene: (id, text) => invoke('loops_intervene', { id, text }),
+    loopsAnswer: (id, answer) => invoke('loops_answer', { id, answer }),
+    loopsReview: (id, n, accept, comment) => invoke('loops_review', { id, n, accept, comment }),
+    loopsResume: (id, extraTokens) => invoke('loops_resume', { id, extraTokens }),
+    loopsDiff: (id) => invoke('loops_diff', { id }),
+    onLoopsState: (cb) => on('loops-state', cb),
+
     // тема/краска сменились в другом окне (демон рассылает всем)
     onAppearance: (cb) => on('appearance', cb),
     winMinimize: () => self().minimize(),

@@ -3166,6 +3166,7 @@ const agentVmStateGoEl = document.getElementById('agentVmStateGo');
 const agentVmStateAltEl = document.getElementById('agentVmStateAlt');
 const agentVmMoreEl = document.getElementById('agentVmMore');
 const agentVmRareEl = document.getElementById('agentVmRare');
+const agentVmComposeHintEl = document.getElementById('agentVmComposeHint');
 const agentVmQueueHintEl = document.getElementById('agentVmQueueHint');
 const agentVmTerminalScreenEl = document.getElementById('agentVmTerminalScreen');
 const agentVmTerminalEmptyEl = document.getElementById('agentVmTerminalEmpty');
@@ -4226,8 +4227,15 @@ function renderAgentVmEnvironment(project, vm, terminal, run, uiState) {
   const backend = runAttrs.backend || (terminalAlive ? agentVmBackend : '');
   const backendName = backend === 'codex' ? 'Codex' : backend === 'claude' ? 'Claude' : '';
   const stateText = AgentVmModel.stateLabel(uiState);
-  agentVmEnvironmentButtonEl.className = `vmws-env ${uiState}`;
-  agentVmEnvironmentDotEl.className = `vmws-env-dot ${uiState}`;
+  /* Цвет и текст должны говорить об одном. Раньше точка красилась по uiState
+     (он учитывает и упавший прогон), а надпись — по состоянию машины: выходило
+     «VM работает» с красной точкой. Кнопка про среду, значит и цвет про неё. */
+  const vmVisual = ['running', 'ready', 'working'].includes(vm?.state) ? 'ready'
+    : ['provisioning', 'creating', 'starting'].includes(vm?.state) ? 'starting'
+      : vm?.state === 'error' ? 'error'
+        : vm?.state === 'stopped' ? 'off' : 'absent';
+  agentVmEnvironmentButtonEl.className = `vmws-env ${vmVisual}`;
+  agentVmEnvironmentDotEl.className = `vmws-env-dot ${vmVisual}`;
   agentVmEnvironmentButtonEl.classList.toggle('open', !agentVmEnvironmentEl.hidden);
   // «Готова · Claude» описывало прогон, а кнопка — про среду. Говорим о ней:
   // работает / спит / поднимается. Агент виден в шапке терминала рядом.
@@ -4356,6 +4364,14 @@ function renderAgentVmWorkspace() {
       : agentVmElapsed(started);
   }
 
+  if (agentVmComposeHintEl) {
+    agentVmComposeHintEl.textContent = terminalAlive
+      ? '↵ — отправить · среда уже работает'
+      : ['running', 'ready', 'working'].includes(vm?.state)
+        ? '↵ — отправить · агент запустится сам'
+        : '↵ — отправить · среда поднимется сама';
+  }
+
   const screen = typeof terminal?.screen === 'string' ? terminal.screen : '';
   const screenKey = agentVmTerminalKey();
   const showScreen = terminalAlive && !!screen;
@@ -4379,9 +4395,11 @@ function renderAgentVmWorkspace() {
   agentVmTerminalScreenEl.hidden = !showScreen;
   agentVmTerminalEmptyEl.hidden = showScreen;
   agentVmTerminalLightEl.classList.toggle('live', terminalAlive);
-  agentVmTerminalTitleEl.textContent = run
-    ? `${run.attrs?.backend || agentVmBackend} · managed run`
-    : `${agentVmBackend}@${terminal?.vmName || project.name}`;
+  // «claude · managed run» — внутренний термин. Человеку важно, на какой
+  // машине и каким агентом он работает: «jarvis-vm · Claude».
+  const vmName = vm?.id?.replace(/^vm\./, '') || terminal?.vmName || project.name;
+  const agentName = (run?.attrs?.backend || agentVmBackend) === 'codex' ? 'Codex' : 'Claude';
+  agentVmTerminalTitleEl.textContent = `${vmName} · ${agentName}`;
   agentVmTerminalStateEl.textContent = run
     ? AgentVmModel.stateLabel(uiState).toLocaleLowerCase()
     : terminalAlive
@@ -4402,10 +4420,17 @@ function renderAgentVmWorkspace() {
     agentVmTerminalEmptyDetailEl.textContent =
       `Добавь ${agentVmBackend} в .agent-vm.yaml и пересоздай VM.`;
   } else if (run) {
+    // Голое слово «Ошибка» ничего не объясняет и не подсказывает, что делать.
+    // Причина падения лежит в attrs.error — она и нужна на экране.
     const summary = AgentVmModel.runSummary(run);
-    agentVmTerminalEmptyDetailEl.textContent =
-      `${AgentVmModel.stateLabel(uiState)}${summary ? ` · ${summary}` : ''}`;
+    const failed = ['failed', 'error'].includes(run.state);
+    const reason = String(run.attrs?.error || '').trim();
+    agentVmTerminalEmptyDetailEl.textContent = failed
+      ? (reason || 'Прогон не удался. Попробуй отправить задачу заново.')
+      : `${AgentVmModel.stateLabel(uiState)}${summary ? ` · ${summary}` : ''}`;
+    agentVmTerminalEmptyEl.classList.toggle('failed', failed);
   } else if (terminalAlive) {
+    agentVmTerminalEmptyEl.classList.remove('failed');
     agentVmTerminalEmptyDetailEl.textContent = 'Подключаю экран живой tmux pane…';
   } else {
     agentVmTerminalEmptyDetailEl.textContent =

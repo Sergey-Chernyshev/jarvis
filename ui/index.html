@@ -2898,6 +2898,10 @@
     border-radius: 8px;
     background: rgba(255, 255, 255, .12);
   }
+  /* Упавший прогон: заголовок краснеет, причина читается как текст, а не
+     как одно слово «Ошибка» без объяснения. */
+  .vm-terminal-empty.failed .vm-terminal-empty-title { color: var(--danger); }
+  .vm-terminal-empty.failed .vm-terminal-empty-detail { color: var(--text-body); }
   .vm-terminal-empty {
     min-height: 0;
     flex: 1;
@@ -3275,6 +3279,20 @@
   }
   .vm-send:hover { background: color-mix(in srgb, var(--accent) 24%, transparent); }
   .vm-send:disabled { opacity: .35; }
+  /* Композер по эталону прототипа: колонка 760px по центру, скруглённое поле,
+     скрепка и отправка одного размера по краям строки. Раньше поле тянулось
+     во всю ширину окна — текст начинался у левого края, кнопка улетала к
+     правому, между ними метр пустоты. */
+  .vmws-composebox {
+    width: min(100%, 760px);
+    margin: 0 auto;
+    border-radius: 12px;
+  }
+  .vmws-composehint { width: min(100%, 760px); margin-left: auto; margin-right: auto; }
+  .vm-attach { width: 30px; height: 30px; border-radius: 9px; }
+  .vm-send { width: 30px; height: 30px; border-radius: 9px; }
+  /* Стрелка вверх вместо бумажного самолётика: отправка в поле ввода — это
+     «отправить наверх», а самолётик читается как «поделиться». */
   .vmws-composehint {
     display: flex;
     align-items: center;
@@ -3718,11 +3736,11 @@
                 <span class="vm-terminal-light" id="agentVmTerminalLight"></span>
               </span>
               <span class="vm-terminal-title" id="agentVmTerminalTitle">Agent VM terminal</span>
+              <span class="vm-terminal-spacer"></span>
               <div class="vm-agent-switch" aria-label="Агент">
                 <button class="vm-agent-option active" data-agent-vm-backend="claude">Claude</button>
                 <button class="vm-agent-option" data-agent-vm-backend="codex">Codex</button>
               </div>
-              <span class="vm-terminal-spacer"></span>
               <span class="vm-terminal-state" id="agentVmTerminalState">не запущен</span>
             </header>
             <pre class="vm-terminal-screen" id="agentVmTerminalScreen" hidden></pre>
@@ -3753,13 +3771,13 @@
                 accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
               <span class="vmws-prompt-mark">›</span>
               <textarea class="vmws-prompt" id="agentVmPrompt" rows="1" spellcheck="false"
-                placeholder="Задача для агента…  / — команды"></textarea>
+                placeholder="Напиши задачу агенту…"></textarea>
             <button class="vm-send" id="agentVmSend" title="Отправить · Enter" aria-label="Отправить">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
             </button>
           </div>
               <div class="vmws-composehint">
-                <span>↵ отправить</span><span>⇧↵ новая строка</span><span>⌘V картинка</span>
+                <span id="agentVmComposeHint">↵ — отправить</span>
             <span class="spacer"></span>
             <span class="vmws-queue" id="agentVmQueueHint" hidden>Ввод отправляется…</span>
             <details class="vm-key-menu">

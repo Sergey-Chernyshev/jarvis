@@ -60,3 +60,11 @@ jobs:
         run: >
           cargo test --manifest-path src-tauri/Cargo.toml
           --features wakeword-ort,whisper-native,stt-vad
+
+      # Узел удалённых агентов — отдельный крейт воркспейса, и фичи приложения к
+      # нему неприменимы, поэтому своим шагом. Он же проверяет главное свойство
+      # узла: что он собирается БЕЗ tauri и прочих macOS-зависимостей.
+      - name: Clippy · tests (узел)
+        run: >
+          cargo clippy --manifest-path src-tauri/node/Cargo.toml --all-targets &&
+          cargo test --manifest-path src-tauri/node/Cargo.toml

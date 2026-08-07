@@ -2,7 +2,6 @@
 //! Reads → данные; route/control → consent. Чистая часть (меню, валидация)
 //! юнит-тестируема; `dispatch` (исполнение) добавляется в оркестраторе.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -100,27 +99,26 @@ fn search_items(items: &[crate::transcript::ChatItem], query: &str, limit: usize
     hits
 }
 
-/// Прочитать элементы чата сессии из её транскрипта (хвост 512K).
-fn session_chat_items(transcript: &str) -> Vec<crate::transcript::ChatItem> {
-    crate::transcript::chain_from_entries(crate::transcript::read_recent_entries(
-        Path::new(transcript),
-        512 * 1024,
-    ))
-    .iter()
-    .flat_map(crate::transcript::to_chat_items)
-    .collect()
+/// Элементы чата из уже прочитанного транскрипта. Текст даёт демон — он же
+/// знает, лежит транскрипт тут или на удалённом узле.
+fn chat_items_from_text(text: &str) -> Vec<crate::transcript::ChatItem> {
+    crate::transcript::chain_from_entries(crate::transcript::entries_from_text(text))
+        .iter()
+        .flat_map(crate::transcript::to_chat_items)
+        .collect()
 }
 
 /// Поиск по чатам ВСЕХ живых сессий → агрегированные совпадения (Data).
-fn search_chats(d: &Arc<Daemon>, query: &str) -> SkillOutcome {
+async fn search_chats(d: &Arc<Daemon>, query: &str) -> SkillOutcome {
     let q = query.trim();
     if q.is_empty() {
         return SkillOutcome::Rejected("пустой запрос".into());
     }
     let mut results = Vec::new();
     for s in d.snapshot().into_iter().filter(|s| s.renamed_to.is_none()) {
-        let Some(tr) = s.transcript.as_deref() else { continue };
-        let hits = search_items(&session_chat_items(tr), q, 3);
+        // транскрипт берём с машины сессии: у удалённой он на её узле
+        let Some(text) = d.transcript_text(&s, 512 * 1024).await else { continue };
+        let hits = search_items(&chat_items_from_text(&text), q, 3);
         if !hits.is_empty() {
             results.push(json!({
                 "session_id": s.id.chars().take(8).collect::<String>(),
@@ -189,19 +187,14 @@ fn match_prefix(ids: &[String], hint: &str) -> Result<String, String> {
 }
 
 /// Прочитать хвост транскрипта сессии (как `chats.read`, in-process). `id` — полный.
-fn read_chat(d: &Arc<Daemon>, id: &str) -> SkillOutcome {
+async fn read_chat(d: &Arc<Daemon>, id: &str) -> SkillOutcome {
     let Some(s) = d.session(id) else {
         return SkillOutcome::Rejected("сессия не найдена".into());
     };
-    let Some(tr) = s.transcript else {
+    let Some(text) = d.transcript_text(&s, 512 * 1024).await else {
         return SkillOutcome::Rejected("нет транскрипта сессии".into());
     };
-    let items: Vec<crate::transcript::ChatItem> = crate::transcript::chain_from_entries(
-        crate::transcript::read_recent_entries(Path::new(&tr), 512 * 1024),
-    )
-    .iter()
-    .flat_map(crate::transcript::to_chat_items)
-    .collect();
+    let items = chat_items_from_text(&text);
     let start = items.len().saturating_sub(40);
     SkillOutcome::Data(json!({ "session_id": id, "project": s.project, "items": &items[start..] }))
 }
@@ -226,7 +219,7 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
         "time" => SkillOutcome::Data(json!({ "now": crate::convo::now_string() })),
         "session_chat" => match action.args.get("id").and_then(Value::as_str) {
             Some(id) => match resolve_sid(d, id) {
-                Ok(full) => read_chat(d, &full),
+                Ok(full) => read_chat(d, &full).await,
                 Err(e) => SkillOutcome::Rejected(e),
             },
             None => SkillOutcome::Rejected("нет id".into()),
@@ -241,7 +234,7 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
             None => SkillOutcome::Rejected("нет id".into()),
         },
         "search_chats" => match action.args.get("query").and_then(Value::as_str) {
-            Some(q) => search_chats(d, q),
+            Some(q) => search_chats(d, q).await,
             None => SkillOutcome::Rejected("нет query".into()),
         },
         "metrics" => SkillOutcome::Data(d.usage.stats("today")),

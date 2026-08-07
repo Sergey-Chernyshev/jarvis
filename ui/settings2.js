@@ -63,6 +63,16 @@
   function hotkeyKeys(acc) {
     return displayHotkey(acc).split(' ').filter(Boolean);
   }
+  /* Имя одиночной клавиши для подписи. Единственный источник правды —
+   * window.jarvisKeys (ui/keys.js): он знает про ОС и рисует ⌘ только там,
+   * где такая клавиша есть. Модуль могут ещё не подключить — тогда отдаём
+   * нейтральное слово, но маковских символов руками не пишем никогда. */
+  const KEY_FALLBACK = { enter: 'Enter', esc: 'Esc', del: 'Backspace', tab: 'Tab' };
+  function keyName(n) {
+    const K = window.jarvisKeys;
+    if (K && K.NAMES && K.NAMES[n]) return K.NAMES[n];
+    return KEY_FALLBACK[n] || n;
+  }
 
   /* ========================================================================
    * Инлайновые lucide-style иконки (24×24, stroke=currentColor). Данные —
@@ -129,6 +139,13 @@
       ['path', { d: 'M3 5h4V3' }],
       ['path', { d: 'M7 5a1 1 0 0 1 1 1v1a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a1 1 0 0 1 1-1V3' }],
     ],
+    // lucide: server — раздел «Удалённые» (узлы на других машинах)
+    'server': [
+      ['rect', { width: 20, height: 8, x: 2, y: 2, rx: 2, ry: 2 }],
+      ['rect', { width: 20, height: 8, x: 2, y: 14, rx: 2, ry: 2 }],
+      ['line', { x1: 6, x2: 6.01, y1: 6, y2: 6 }],
+      ['line', { x1: 6, x2: 6.01, y1: 18, y2: 18 }],
+    ],
     'info': [
       ['circle', { cx: 12, cy: 12, r: 10 }],
       ['path', { d: 'M12 16v-4' }],
@@ -168,6 +185,18 @@
       ['path', { d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4' }],
       ['polyline', { points: '7 10 12 15 17 10' }],
       ['line', { x1: 12, x2: 12, y1: 15, y2: 3 }],
+    ],
+    // lucide: triangle-alert — предупреждения (чего не хватает на машине, ошибки)
+    'alert-triangle': [
+      ['path', { d: 'm21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3' }],
+      ['path', { d: 'M12 9v4' }],
+      ['path', { d: 'M12 17h.01' }],
+    ],
+    // lucide: key — публичный ssh-ключ этой машины (мастер удалённых узлов)
+    'key': [
+      ['path', { d: 'm15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4' }],
+      ['path', { d: 'm21 2-9.6 9.6' }],
+      ['circle', { cx: 7.5, cy: 15.5, r: 5.5 }],
     ],
     'trash-2': [
       ['path', { d: 'M3 6h18' }],
@@ -741,6 +770,73 @@
 #settings2 .npvmeta .ef { font:600 10px/1 var(--s2-font); color:var(--ink-mute); background:var(--surface); border:0; border-radius:5px; padding:3px 6px; }
 #settings2 .npvmeta .sp { color:var(--ink-faint); }
 #settings2 .npvbody { font-size:13px; line-height:1.55; color:var(--ink-mute); margin:7px 16px 0 20px; }
+
+/* ── Пояснительная плашка (пустое состояние вкладки) ─────────────────────
+   Тональная подложка + одна плитка краской — как .ic в сайдбаре. */
+#settings2 .s2note { display:flex; align-items:flex-start; gap:14px; padding:16px 18px;
+  border-radius:var(--r-card); background:var(--surface); margin:0 0 22px; }
+#settings2 .s2note-ic { width:30px; height:30px; border-radius:9px; flex:none; display:grid; place-items:center;
+  background:var(--accent-soft); color:var(--accent-text); }
+#settings2 .s2note-ic svg.lucide { width:16px; height:16px; }
+#settings2 .s2note-t { font-size:13.5px; font-weight:500; color:var(--ink); margin-bottom:6px; }
+#settings2 .s2note-p { font-size:12.5px; line-height:1.55; color:var(--ink-mute); max-width:520px; }
+#settings2 .s2note-p + .s2note-p { margin-top:7px; }
+#settings2 .s2note code { font:12px/1.4 var(--s2-mono); background:var(--paper); border-radius:5px; padding:1px 6px; color:var(--ink-2); }
+
+/* ── Строка узла: на узкой панели не ломается — хост режется многоточием,
+   статус не переносится, ошибка занимает всю ширину строки ─────────────── */
+#settings2 .s2rmeta { max-width:none; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#settings2 .s2rstat { white-space:nowrap; }
+#settings2 .s2rerr { max-width:none; }
+#settings2 .s2rctl { flex-wrap:wrap; justify-content:flex-end; row-gap:6px; }
+/* вторая дорога на машину (пароль) — равноправная с ключом, поэтому отделена
+   линией, а не спрятана мелким шрифтом под ней */
+#settings2 .s2rold { color:var(--warn); }
+#settings2 .s2rpass { margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }
+#settings2 .s2rpass .s2rbtns { align-items:center; }
+#settings2 .s2rpass input.s2-secret { flex:1 1 220px; min-width:0; }
+
+/* ── Форма в строке настройки: поля в ряд, на узкой панели переносятся ─── */
+#settings2 .s2form { display:flex; flex-wrap:wrap; gap:8px; margin-top:11px; }
+#settings2 .s2form input.s2-secret { flex:1 1 150px; width:auto; max-width:none; min-width:118px; }
+#settings2 .s2hint { display:flex; align-items:center; gap:7px; margin-top:9px; font-size:12px; color:var(--ink-faint); }
+#settings2 .s2hint kbd { font:500 11px/1.4 var(--s2-font); color:var(--ink-mute); background:var(--surface);
+  border-radius:var(--r-key); padding:2px 6px; }
+
+/* ── Мастер подключения машины: разведка, лог установки, ssh-ключ ─────────
+   Вывод ssh (отказ разведки, ошибка установки) — это пошаговая инструкция с
+   путями и командами: моноширинно, с переносами и БЕЗ обрезки, иначе совет
+   теряет смысл. Прокрутка только у самого блока, страница не разъезжается. */
+#settings2 .s2rpre { margin-top:9px; padding:10px 12px; border-radius:9px; background:var(--surface);
+  font:12px/1.55 var(--s2-mono); color:var(--ink-2); white-space:pre-wrap; overflow-wrap:anywhere;
+  max-height:230px; overflow-y:auto; }
+#settings2 .s2rpre.bad { background:var(--danger-soft); color:var(--danger); }
+/* галочки разведки: две колонки на широкой панели, один столбец на узкой */
+#settings2 .s2rchecks { display:flex; flex-wrap:wrap; gap:7px 22px; margin-top:12px; }
+#settings2 .s2rchk { display:flex; align-items:center; gap:8px; flex:1 1 160px; font-size:12.5px; color:var(--ink-2); }
+#settings2 .s2rchk .nm { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#settings2 .s2rchk .vl { flex:none; color:var(--ink-faint); }
+#settings2 .s2rchk.on .vl { color:var(--accent-text); }
+/* строка-пояснение с иконкой (откуда возьмётся узел, чего не хватает) */
+#settings2 .s2rnode { display:flex; align-items:flex-start; gap:9px; margin-top:12px; padding-top:11px;
+  border-top:1px solid var(--line); font-size:12.5px; line-height:1.5; color:var(--ink-mute); }
+#settings2 .s2rnode + .s2rnode { border-top:0; padding-top:0; margin-top:7px; }
+#settings2 .s2rnode svg.lucide { margin-top:2px; color:var(--ink-faint); }
+#settings2 .s2rnode.warn svg.lucide { color:var(--warn); }
+/* живой лог установки: фаза + сообщение, состояние — формой точки и цветом */
+#settings2 .s2rlog { margin-top:11px; max-height:200px; overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
+#settings2 .s2rln { display:flex; align-items:flex-start; gap:9px; font-size:12.5px; line-height:1.45; color:var(--ink-mute); }
+#settings2 .s2rln .dot { margin-top:5px; }
+#settings2 .s2rln .ph { flex:none; width:82px; color:var(--ink-2); font-weight:500; }
+#settings2 .s2rln .msg { flex:1; min-width:0; overflow-wrap:anywhere; }
+#settings2 .s2rln.done .msg { color:var(--ink-2); }
+#settings2 .s2rln.warn .dot { background:var(--warn); }
+#settings2 .s2rln.warn .msg { color:var(--warn); }
+#settings2 .s2rbtns { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:11px; }
+/* «узел уже стоит — добавить вручную»: тихая ссылка, а не вторая кнопка */
+#settings2 .s2rmore { padding:12px 0 2px; }
+#settings2 .s2rlink { appearance:none; border:0; background:transparent; padding:0; cursor:default;
+  font:500 12.5px/1 var(--s2-font); color:var(--accent-text); text-decoration:underline; text-underline-offset:2px; }
 `;
     const style = document.createElement('style');
     style.id = 'settings2-style';
@@ -754,6 +850,7 @@
   const NAV = [
     { pane: 'general', label: 'Основное', icon: 'settings', ic: 'gray' },
     { pane: 'look', label: 'Вид', icon: 'palette', ic: 'green' },
+    { pane: 'remotes', label: 'Удалённые', icon: 'server', ic: 'teal' },
     { pane: 'stt', label: 'Голосовой ввод', icon: 'mic', ic: 'blue' },
     { pane: 'voice', label: 'Голос', icon: 'volume-2', ic: 'green' },
     { pane: 'wake', label: 'Пробуждение', icon: 'mic', ic: 'blue' },
@@ -1841,9 +1938,562 @@
     pane.appendChild(tune);
   }
 
+  /* 1c. Удалённые (remotes) — узлы на других машинах.
+   * Узел = тонкий транспорт на VPS: принимает хуки, копит события и умеет
+   * tmux send-keys; ходим к нему по SSH. Здесь — только список, проверка
+   * связи и добавление; всё остальное делает ноут своим обычным кодом.
+   *
+   * Контракт IPC: remotesList / remotesAdd / remotesRemove / remotesTest —
+   * список и ручное добавление; remotesPreflight / remotesInstall /
+   * remotesSshKey + события onRemoteInstallStep/Done — мастер «настроить VPS
+   * с нуля». Старая сборка без этих методов не должна ронять панель — отсюда
+   * safe() и явная проверка наличия метода перед показом каждой части. */
+  function remotesApiReady() {
+    try { return !!(window.jarvis && typeof window.jarvis.remotesList === 'function'); } catch (e) { return false; }
+  }
+  // мастер требует и разведку, и установку: без любой из них дороги «с нуля» нет
+  function remotesWizardReady() {
+    try {
+      return !!(window.jarvis && typeof window.jarvis.remotesPreflight === 'function'
+        && typeof window.jarvis.remotesInstall === 'function');
+    } catch (e) { return false; }
+  }
+
+  // строка одного узла: точка + имя, ssh-хост и каталог, «Проверить» / «Удалить»
+  function remoteRow(r) {
+    const dot = el('span.dot', { style: 'margin-top:5px' });
+    const grow = el('div.grow');
+    grow.appendChild(el('div.dt', { text: r.name || 'без имени' }));
+    const meta = (r.sshHost || 'ssh-хост не задан') + ' · ' + (r.jarvisDir || '~/.jarvis');
+    grow.appendChild(el('div.dd.mono.s2rmeta', { text: meta, title: meta }));
+    const errLine = el('div.s2err.s2rerr', { style: 'display:none' });
+    grow.appendChild(errLine);
+
+    // Версия узла и отставание: узел ставится приложением и живёт на чужой
+    // машине месяцами. Без явной отметки человек не узнает, что половина
+    // починенного до него просто не доехала.
+    if (r.version) {
+      grow.appendChild(el('div.dd' + (r.outdated ? '.s2rold' : ''), {
+        text: r.outdated
+          ? 'узел v' + r.version + ' — старее приложения, переустанови его'
+          : 'узел v' + r.version,
+      }));
+    }
+
+    const stat = el('span.sval.s2rstat');
+    // одно место, где статус превращается в точку и текст (точка — формой, не цветом)
+    const paint = (on, text, error) => {
+      dot.className = 'dot' + (on ? ' done' : '');
+      stat.className = 'sval s2rstat' + (on ? ' on' : '');
+      stat.textContent = text;
+      errLine.textContent = error || '';
+      errLine.style.display = error ? '' : 'none';
+    };
+    paint(!!r.connected,
+      r.connected ? 'на связи' : (r.error ? 'не отвечает' : 'не проверен'),
+      r.connected ? null : (r.error || null));
+
+    const test = button('Проверить', async (b) => {
+      b.disabled = true; b.textContent = 'Проверяю…';
+      const res = await safe(() => window.jarvis.remotesTest(r.name), null);
+      b.disabled = false; b.textContent = 'Проверить';
+      if (res && res.ok) {
+        const parts = [];
+        if (res.host) parts.push(res.host);
+        if (res.version) parts.push('v' + res.version);
+        paint(true, parts.length ? 'на связи · ' + parts.join(' · ') : 'на связи', null);
+      } else {
+        paint(false, 'не отвечает', (res && res.error) || 'узел не ответил — проверь ssh и что там запущен jarvis-node');
+      }
+    }, 'sm');
+
+    // Переустановка — тот же установщик, что и при добавлении: он идемпотентен
+    // и перезальёт бинарь с хуками. Это единственный способ довезти до чужой
+    // машины то, что починили здесь.
+    const again = button('Переустановить', (b) => {
+      if (!remotesWizardReady()) { paint(false, 'нужна свежая сборка', null); return; }
+      b.disabled = true; b.textContent = 'Ставлю…';
+      remoteWizReset();
+      remoteWiz.host = r.sshHost || ''; remoteWiz.name = r.name; remoteWiz.dir = r.jarvisDir || '~/.jarvis';
+      startRemoteInstall();
+      reRenderPane('remotes');
+    }, 'sm');
+
+    // удаление с подтверждением в самой кнопке (как у моделей) — без диалогов
+    const del = el('button.btn.sm.danger', { text: 'Удалить' });
+    let armed = false;
+    del.addEventListener('click', async () => {
+      if (!armed) {
+        armed = true; del.textContent = 'Точно?';
+        setTimeout(() => { armed = false; del.textContent = 'Удалить'; }, 3000);
+        return;
+      }
+      del.disabled = true; del.textContent = 'Удаляю…';
+      await safe(() => window.jarvis.remotesRemove(r.name), null);
+      reRenderPane('remotes');
+    });
+
+    return el('div.drow', null, [dot, grow, el('div.dctl.s2rctl', null, [stat, test, again, del])]);
+  }
+
+  // пустое состояние: что это вообще и что нужно на той стороне
+  // wizard=false — старая сборка без мастера: обещать установку «отсюда» нельзя
+  function remotesEmptyNote(wizard) {
+    const body = el('div.grow', null, [
+      el('div.s2note-t', { text: 'Узлов пока нет' }),
+      el('div.s2note-p', { text: 'Узел — это Jarvis на чужой машине: Claude или Codex работают на VPS, '
+        + 'а видно и слышно их здесь — в общем списке, с уведомлениями и ответом прямо из панели. '
+        + 'Пока ноут спит, узел копит события и отдаёт их, когда ты вернёшься.' }),
+      el('div.s2note-p', { text: 'На той стороне нужны две вещи: SSH-доступ (ходим твоими ключами и ~/.ssh/config — '
+        + 'своих паролей Jarvis не заводит) и tmux — без него ответ в сессию не вставить, ровно как локально.' }),
+    ]);
+    const p3 = el('div.s2note-p');
+    if (wizard) {
+      p3.appendChild(document.createTextNode('Всё это ставится прямо отсюда: дай ssh-хост, нажми «Проверить машину» — '
+        + 'Jarvis сходит туда, покажет, чего не хватает, и поставит узел сам. Если узел уже ставили через '));
+      p3.appendChild(el('code', { text: 'jarvis-setup remote add' }));
+      p3.appendChild(document.createTextNode(' — его можно просто прописать вручную.'));
+    } else {
+      p3.appendChild(document.createTextNode('Сам узел ставится командой '));
+      p3.appendChild(el('code', { text: 'jarvis-setup remote add <имя> <ssh-хост>' }));
+      p3.appendChild(document.createTextNode(' — здесь остаётся только прописать его.'));
+    }
+    body.appendChild(p3);
+    return el('div.s2note', null, [el('div.s2note-ic', null, icon('server')), body]);
+  }
+
+  /* ── Мастер «подключить машину с нуля» ───────────────────────────────────
+   * Состояние живёт в модуле, а не в DOM: установка идёт минутами и приезжает
+   * событиями, панель за это время перерисовывается — введённые поля, отчёт
+   * разведки и лог обязаны это пережить. */
+  const remoteWiz = {
+    host: '', name: '', dir: '',
+    probe: null,      // успешный ответ remotesPreflight
+    probeErr: null,   // текст отказа ssh (многострочный — показываем как есть)
+    busy: false,      // идёт разведка
+    key: null,        // {publicKey, path} — ssh-ключ ЭТОЙ машины, ленивая загрузка
+    keyBusy: false,
+    manual: false,    // раскрыта прежняя форма «узел уже стоит»
+    formErr: null,
+    install: null,    // {name, steps:[…], pct, running, error}
+    flash: null,      // «узел X установлен» — одна строка после успеха
+    authErr: null,    // отказ входа по паролю; сам пароль тут НЕ живёт
+  };
+  function remoteWizReset() {
+    remoteWiz.host = ''; remoteWiz.name = ''; remoteWiz.dir = '';
+    remoteWiz.probe = null; remoteWiz.probeErr = null; remoteWiz.busy = false;
+    remoteWiz.formErr = null; remoteWiz.install = null; remoteWiz.manual = false;
+    remoteWiz.authErr = null;
+  }
+  // имя по умолчанию из ssh-хоста: dev@vps.example:22 → vps
+  function remoteGuessName(host) {
+    const h = String(host || '').trim().split('@').pop().split(':')[0];
+    const first = (h.split('.')[0] || h).replace(/[^A-Za-z0-9_.-]+/g, '-');
+    return first.slice(0, 24) || 'узел';
+  }
+  // перерисовать ТОЛЬКО мастер (список узлов и запросы к бэкенду не трогаем)
+  function repaintRemoteWiz() {
+    const box = currentRoot && currentRoot.querySelector('#s2-rwiz');
+    if (!box) return;
+    box.textContent = '';
+    paintRemoteWiz(box);
+  }
+
+  // строка проверки: точка формой (кольцо — нашлось, залитая — нет) + «есть/нет»
+  function remoteCheck(ok, label) {
+    return el('div.s2rchk' + (ok ? '.on' : ''), null, [
+      el('span.dot' + (ok ? '.done' : '')),
+      el('span.nm', { text: label, title: label }),
+      el('span.vl', { text: ok ? 'есть' : 'нет' }),
+    ]);
+  }
+  // строка-пояснение с иконкой (nodeNote и предупреждения разведки)
+  function remoteHintLine(ic, text, warn) {
+    return el('div.s2rnode' + (warn ? '.warn' : ''), null, [icon(ic), el('span', { text })]);
+  }
+
+  // карточка разведки: ОС, куда встанет узел, что нашлось и откуда возьмётся бинарь
+  const NODE_SRC_ICON = { local: 'server', download: 'download', build: 'cpu', none: 'alert-triangle' };
+  function remoteProbeCard() {
+    const p = remoteWiz.probe || {};
+    const inst = remoteWiz.install;
+    const grow = el('div.grow');
+    grow.appendChild(el('div.dt', { text: 'Машина проверена' }));
+    grow.appendChild(el('div.dd', { text: [p.os, p.arch].filter(Boolean).join(' · ') || 'система не определилась' }));
+    const dir = p.dir || (remoteWiz.dir.trim() || '~/.jarvis');
+    grow.appendChild(el('div.dd.mono.s2rmeta', { text: 'узел встанет в ' + dir, title: dir }));
+    grow.appendChild(el('div.s2rchecks', null, [
+      remoteCheck(p.tmux, 'tmux'),
+      remoteCheck(p.curl, 'curl'),
+      remoteCheck(p.claude, 'Claude Code'),
+      remoteCheck(p.codex, 'Codex'),
+      remoteCheck(p.systemd, 'systemd — автозапуск'),
+      remoteCheck(p.cargo, 'cargo — сборка на месте'),
+    ]));
+    // строку про происхождение бинаря отдаёт бэкенд — показываем как есть
+    if (p.nodeNote) grow.appendChild(remoteHintLine(NODE_SRC_ICON[p.nodeSource] || 'info', p.nodeNote, p.nodeSource === 'none'));
+    if (!p.tmux) {
+      grow.appendChild(remoteHintLine('alert-triangle',
+        'tmux на машине нет — узел встанет, но вставить ответ в сессию с него не выйдет, ровно как локально.', true));
+    }
+    if (!p.claude && !p.codex) {
+      grow.appendChild(remoteHintLine('alert-triangle',
+        'Ни Claude Code, ни Codex там не нашлось — вести сессии на этой машине пока некому.', true));
+    }
+
+    // пока идёт (или упала) установка, единственная точка действия — карточка
+    // установки ниже: две одинаковые кнопки на экране только путают
+    const blocked = p.nodeSource === 'none';
+    const run = button('Установить', () => startRemoteInstall(), 'sm primary');
+    run.disabled = blocked;
+    if (blocked) run.title = 'Взять бинарь узла неоткуда — смотри пояснение слева';
+    return el('div.drow', null, [grow, el('div.dctl', { style: 'align-self:flex-start;margin-top:2px' }, inst ? [] : [run])]);
+  }
+
+  /* Помощь по ssh: разведка не прошла — чаще всего на свежий VPS просто не
+   * пустили по ключу. Показываем публичный ключ этой машины, чтобы его было
+   * куда скопировать, и заводим ключ, если его вообще нет. */
+  function remoteSshKeyApi() {
+    try { return !!(window.jarvis && typeof window.jarvis.remotesSshKey === 'function'); } catch (e) { return false; }
+  }
+  function loadRemoteSshKey(create) {
+    const w = remoteWiz;
+    if (w.keyBusy || !remoteSshKeyApi()) return;
+    w.keyBusy = true;
+    safe(() => window.jarvis.remotesSshKey(!!create), null).then((res) => {
+      w.keyBusy = false;
+      w.key = (res && res.ok)
+        ? { publicKey: res.publicKey || '', path: res.path || '', created: !!res.created }
+        : { publicKey: '', error: (res && res.error) || 'не удалось прочитать ssh-ключ' };
+      repaintRemoteWiz();
+    });
+  }
+  // Разведка отдельной функцией: её дёргает и кнопка, и удачный вход по паролю
+  // (после него человек не должен жать «Проверить машину» ещё раз).
+  function runRemoteProbe() {
+    const w = remoteWiz;
+    const host = (w.host || '').trim();
+    if (!host) { w.formErr = 'Нужен ssh-хост — алиас из ~/.ssh/config или user@адрес.'; repaintRemoteWiz(); return; }
+    if (w.busy) return;
+    w.formErr = null; w.busy = true; w.probe = null; w.probeErr = null; w.flash = null;
+    repaintRemoteWiz();
+    safe(() => window.jarvis.remotesPreflight(host, (w.dir || '').trim() || '~/.jarvis'), null).then((res) => {
+      w.busy = false;
+      if (res && res.ok) {
+        w.probe = res;
+        if (!(w.name || '').trim()) w.name = remoteGuessName(host);
+      } else {
+        w.probeErr = (res && res.error) || 'Не удалось сходить на машину: ssh не ответил.';
+      }
+      repaintRemoteWiz();
+    });
+  }
+
+  function remoteAuthorizeApi() {
+    try { return !!(window.jarvis && typeof window.jarvis.remotesSshAuthorize === 'function'); } catch (e) { return false; }
+  }
+
+  /* Вторая дорога на машину, куда ключ ещё не положен: войти по паролю и
+   * положить его самим. Пароль живёт только в этом поле — ни в состоянии
+   * мастера, ни в логах его нет, и на сервер он уходит один раз. Иначе и
+   * нельзя: туннель к узлу переподнимается сам после сна и смены сети, и
+   * спросить пароль в этот момент не у кого. */
+  function remotePasswordBlock() {
+    const w = remoteWiz;
+    const box = el('div.s2rpass');
+    box.appendChild(el('div.dt', { text: 'Или войти по паролю' }));
+    box.appendChild(el('div.dd', { text: 'Пароль пользователя на той машине. Нужен один раз: Jarvis положит '
+      + 'туда свой ключ и дальше будет ходить без пароля — пароль никуда не сохраняется.' }));
+    const pass = el('input.s2-secret', {
+      type: 'password', placeholder: 'пароль на сервере', autocomplete: 'off', spellcheck: 'false',
+    });
+    const note = el('div.dd');
+    const go = button('Войти по паролю', (b) => {
+      const value = pass.value;
+      if (!value) { note.textContent = 'Пустой пароль'; return; }
+      b.disabled = true; pass.disabled = true; b.textContent = 'Захожу…';
+      note.textContent = ''; w.authErr = null;
+      safe(() => window.jarvis.remotesSshAuthorize((w.host || '').trim(), value), null).then((res) => {
+        b.disabled = false; pass.disabled = false; b.textContent = 'Войти по паролю';
+        if (res && res.ok) {
+          pass.value = ''; // дальше он не нужен — не держим его в DOM
+          w.probeErr = null;
+          w.flash = res.createdKey
+            ? 'Ключ создан и добавлен на машину — дальше без пароля.'
+            : 'Ключ добавлен на машину — дальше без пароля.';
+          runRemoteProbe(); // сразу показываем разведку, второй клик не нужен
+          return;
+        }
+        // пароль оставляем: чаще всего это опечатка, а не отказ сервера
+        w.authErr = (res && res.error) || 'Не вышло войти по паролю.';
+        repaintRemoteWiz();
+      });
+    }, 'sm primary');
+    pass.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !go.disabled) go.click(); });
+    box.appendChild(el('div.s2rbtns', null, [pass, go]));
+    if (w.authErr) box.appendChild(el('div.s2rpre.bad', { text: w.authErr }));
+    box.appendChild(note);
+    return box;
+  }
+
+  function remoteSshHelpCard() {
+    const w = remoteWiz;
+    const grow = el('div.grow');
+    grow.appendChild(el('div.dt', { text: 'Машина не пустила по SSH' }));
+    grow.appendChild(el('div.s2rpre.bad', { text: w.probeErr }));
+
+    if (remoteSshKeyApi()) {
+      if (w.key === null) {
+        loadRemoteSshKey(false);
+        grow.appendChild(el('div.dd', { text: 'Смотрю, есть ли ssh-ключ на этой машине…' }));
+      } else if (w.key.publicKey) {
+        grow.appendChild(el('div.dd', { text: 'Публичный ключ этой машины. Добавь его строкой в ~/.ssh/authorized_keys '
+          + 'на VPS — или вставь в поле «SSH-ключ» в панели хостера, когда создаёшь сервер, и проверь ещё раз.' }));
+        grow.appendChild(el('div.s2rpre', { text: w.key.publicKey }));
+        if (w.key.path) grow.appendChild(el('div.dd.mono.s2rmeta', { text: w.key.path, title: w.key.path }));
+        const copy = button('Скопировать', (b) => {
+          try { navigator.clipboard.writeText(w.key.publicKey); } catch (e) {}
+          b.textContent = 'Скопировано';
+          setTimeout(() => { b.textContent = 'Скопировать'; }, 1600);
+        }, 'sm');
+        grow.appendChild(el('div.s2rbtns', null, [copy, el('span.dd', { text: w.key.created ? 'ключ только что создан' : '' })]));
+      } else {
+        grow.appendChild(el('div.dd', { text: w.key.error
+          || 'Ssh-ключа на этой машине ещё нет. Заведём ed25519 и покажем публичную часть — её и надо отдать серверу.' }));
+        const mkkey = button(w.keyBusy ? 'Создаю…' : 'Создать ключ', (b) => {
+          b.disabled = true; b.textContent = 'Создаю…';
+          loadRemoteSshKey(true);
+        }, 'sm');
+        mkkey.disabled = w.keyBusy;
+        grow.appendChild(el('div.s2rbtns', null, [mkkey]));
+      }
+    }
+    if (remoteAuthorizeApi()) grow.appendChild(remotePasswordBlock());
+    return el('div.drow', null, [
+      el('div.s2note-ic', { style: 'align-self:flex-start;margin-top:2px' }, icon('key')), grow,
+    ]);
+  }
+
+  // ── Установка: запуск, живой лог, финал ────────────────────────────────
+  function startRemoteInstall() {
+    const w = remoteWiz;
+    const name = (w.name || '').trim() || remoteGuessName(w.host);
+    w.name = name; w.flash = null;
+    w.install = { name, steps: [], pct: null, running: true, error: null };
+    repaintRemoteWiz();
+    safe(() => window.jarvis.remotesInstall({
+      name, sshHost: (w.host || '').trim(), jarvisDir: (w.dir || '').trim() || '~/.jarvis',
+    }), null).then((res) => {
+      // отказ на входе (кривой ввод / установка уже идёт) — событий не будет
+      if (res && res.ok) return;
+      if (!w.install) return;
+      w.install.running = false;
+      w.install.error = (res && res.error) || 'не удалось запустить установку';
+      repaintRemoteWiz();
+    });
+  }
+  // лог рисуем отдельно от мастера: шаги сыплются часто, а перерисовка всей
+  // карточки сбрасывала бы прокрутку лога и мигала кнопками
+  function fillRemoteLog(node) {
+    const st = remoteWiz.install;
+    node.textContent = '';
+    if (!st) return;
+    st.steps.forEach((s, i) => {
+      const last = i === st.steps.length - 1;
+      const kind = s.state === 'warn' ? '.warn' : (s.state === 'done' ? '.done' : '');
+      // точка формой: кольцо — шаг закрыт, пульс — текущий шаг, серая — прочее
+      const dot = s.state === 'done' ? '.done' : (last && st.running && s.state === 'start' ? '.working' : '');
+      node.appendChild(el('div.s2rln' + kind, null, [
+        el('span.dot' + dot),
+        el('span.ph', { text: s.phase || '' }),
+        el('span.msg', { text: s.msg || '' }),
+      ]));
+    });
+    node.scrollTop = node.scrollHeight;
+  }
+  function repaintRemoteInstall() {
+    const log = currentRoot && currentRoot.querySelector('#s2-rlog');
+    if (!log) { repaintRemoteWiz(); return; }
+    fillRemoteLog(log);
+    const st = remoteWiz.install;
+    const prog = currentRoot.querySelector('#s2-rprog');
+    if (prog) {
+      prog.textContent = '';
+      // pct приходит не всегда — без него полосу не рисуем вовсе
+      if (st && st.running && st.pct != null) prog.appendChild(progressBar(st.pct));
+    }
+  }
+  function remoteInstallCard() {
+    const st = remoteWiz.install;
+    const grow = el('div.grow');
+    grow.appendChild(el('div.dt', { text: st.running ? 'Ставлю узел «' + st.name + '»' : 'Установка не удалась' }));
+    if (st.running) {
+      grow.appendChild(el('div.dd', { text: 'Занимает от десятков секунд до пары минут — узел может собираться прямо '
+        + 'на той машине. Панель можно не закрывать, шаги идут ниже.' }));
+    }
+    grow.appendChild(el('div#s2-rprog'));
+    const log = el('div.s2rlog#s2-rlog');
+    grow.appendChild(log);
+    // ошибка установки — та же пошаговая инструкция: пусть занимает всю ширину
+    // строки, поэтому кнопки уходят под неё, а не в узкий .dctl справа
+    if (st.error) grow.appendChild(el('div.s2rpre.bad', { text: st.error }));
+    if (!st.running) {
+      grow.appendChild(el('div.s2rbtns', null, [
+        button('Повторить', () => startRemoteInstall(), 'sm primary'),
+        button('Закрыть', () => { remoteWiz.install = null; repaintRemoteWiz(); }, 'sm'),
+      ]));
+    }
+    const row = el('div.drow', null, [grow]);
+    // лог и полосу наполняем после вставки в DOM — scrollTop до этого не работает
+    setTimeout(repaintRemoteInstall, 0);
+    return row;
+  }
+
+  // сам мастер: поля → разведка → отчёт → установка (+ ручная дорога внизу)
+  function paintRemoteWiz(box) {
+    const w = remoteWiz;
+    const running = !!(w.install && w.install.running);
+
+    if (w.flash) {
+      box.appendChild(el('div.drow', null, [
+        el('span.dot.done', { style: 'margin-top:5px' }),
+        el('div.grow', null, [el('div.dt', { text: w.flash })]),
+      ]));
+    }
+
+    if (remotesWizardReady()) {
+      const mk = (ph, key) => {
+        const i = el('input.s2-secret', {
+          type: 'text', placeholder: ph, autocomplete: 'off', spellcheck: 'false', value: w[key] || '',
+        });
+        i.disabled = running || w.busy;
+        i.addEventListener('input', () => { w[key] = i.value; });
+        return i;
+      };
+      const hostIn = mk('ssh-хост · user@адрес', 'host');
+      const nameIn = mk('имя · vps', 'name');
+      const dirIn = mk('~/.jarvis', 'dir');
+
+      const probe = button(w.busy ? 'Проверяю…' : 'Проверить машину', () => {
+        runRemoteProbe();
+      }, 'sm' + (w.probe ? '' : ' primary'));
+      probe.disabled = w.busy || running;
+      for (const i of [hostIn, nameIn, dirIn]) {
+        i.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !probe.disabled) probe.click(); });
+      }
+
+      const grow = el('div.grow', null, [
+        el('div.dt', { text: 'Подключить машину' }),
+        el('div.dd', { text: 'Хост — то же, что пишешь в ssh: алиас из ~/.ssh/config или user@адрес. Имя — как будешь '
+          + 'звать узел в списке сессий. Каталог — куда на той машине встанет jarvis-node.' }),
+        el('div.s2form', null, [hostIn, nameIn, dirIn]),
+      ]);
+      if (w.formErr) grow.appendChild(el('div.s2err', null, [el('span.s2err-ic', null, icon('alert-triangle')), el('span.s2err-txt', { text: w.formErr })]));
+      grow.appendChild(el('div.s2hint', null, [
+        el('kbd', { text: keyName('enter') }),
+        el('span', { text: 'проверить · сначала разведка, установка — потом' }),
+      ]));
+      box.appendChild(el('div.drow', null, [grow, el('div.dctl', { style: 'align-self:flex-start;margin-top:2px' }, [probe])]));
+
+      if (w.probeErr) box.appendChild(remoteSshHelpCard());
+      if (w.probe) box.appendChild(remoteProbeCard());
+      if (w.install) box.appendChild(remoteInstallCard());
+    }
+
+    // ручная дорога: узел ставили через CLI — его надо просто прописать
+    if (w.manual || !remotesWizardReady()) box.appendChild(remotesAddRow());
+    if (remotesWizardReady()) {
+      const link = el('button.s2rlink', { text: w.manual ? 'свернуть ручное добавление' : 'узел уже стоит — добавить вручную' });
+      link.addEventListener('click', () => { w.manual = !w.manual; repaintRemoteWiz(); });
+      link.disabled = running;
+      box.appendChild(el('div.s2rmore', null, [link]));
+    }
+  }
+
+  // форма добавления: имя, ssh-хост, каталог jarvis (по умолчанию ~/.jarvis)
+  function remotesAddRow() {
+    const mk = (ph, val) => el('input.s2-secret', {
+      type: 'text', placeholder: ph, autocomplete: 'off', spellcheck: 'false', value: val || '',
+    });
+    const nameIn = mk('имя · vps');
+    const hostIn = mk('ssh-хост · user@адрес');
+    const dirIn = mk('~/.jarvis');
+    const err = el('div.s2err', { style: 'display:none' });
+    const showErr = (t) => { err.textContent = t || ''; err.style.display = t ? '' : 'none'; };
+
+    const add = button('Добавить', async (b) => {
+      const name = (nameIn.value || '').trim();
+      const sshHost = (hostIn.value || '').trim();
+      const jarvisDir = (dirIn.value || '').trim() || '~/.jarvis';
+      if (!name || !sshHost) { showErr('Нужны имя и ssh-хост — остальное можно оставить как есть.'); return; }
+      showErr(null);
+      b.disabled = true; b.textContent = 'Добавляю…';
+      const res = await safe(() => window.jarvis.remotesAdd({ name, sshHost, jarvisDir }), null);
+      b.disabled = false; b.textContent = 'Добавить';
+      if (res && res.ok) { nameIn.value = ''; hostIn.value = ''; dirIn.value = ''; remoteWizReset(); reRenderPane('remotes'); return; }
+      showErr((res && res.error) || 'не удалось добавить узел');
+    }, 'sm primary');
+
+    for (const i of [nameIn, hostIn, dirIn]) {
+      i.addEventListener('keydown', (e) => { if (e.key === 'Enter') add.click(); });
+    }
+
+    const hint = el('div.s2hint', null, [
+      el('kbd', { text: keyName('enter') }),
+      el('span', { text: 'добавить · каталог по умолчанию ~/.jarvis' }),
+    ]);
+
+    return el('div.drow', null, [
+      el('div.grow', null, [
+        el('div.dt', { text: 'Узел уже стоит' }),
+        el('div.dd', { text: 'Ставили через jarvis-setup remote add — тогда установка не нужна, узел надо просто '
+          + 'прописать. Имя — как звать его в списке сессий, хост — то же, что пишешь в ssh, каталог — где живёт jarvis-node.' }),
+        el('div.s2form', null, [nameIn, hostIn, dirIn]),
+        err,
+        hint,
+      ]),
+      el('div.dctl', null, [add]),
+    ]);
+  }
+
+  async function renderRemotes(pane) {
+    pane.appendChild(el('div.dtitle', { text: 'Удалённые' }));
+    const ready = remotesApiReady();
+    const _sk = skelGroup(2); pane.appendChild(_sk);
+    // контракт — массив; принимаем и {remotes:[…]}, чтобы форма ответа не роняла вкладку
+    const raw = ready ? await safe(() => window.jarvis.remotesList(), []) : [];
+    _sk.remove();
+    const nodes = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.remotes) ? raw.remotes : []);
+
+    if (nodes.length) {
+      pane.appendChild(el('div.dsection', { text: 'узлы' }));
+      const group = el('div.dgroup');
+      for (const r of nodes) group.appendChild(remoteRow(r || {}));
+      pane.appendChild(group);
+    } else {
+      pane.appendChild(remotesEmptyNote(remotesWizardReady()));
+    }
+
+    if (!ready) {
+      // старый бэкенд: методов нет — честно говорим об этом вместо мёртвой формы
+      pane.appendChild(el('div.dgroup', null, [
+        drow('Узлы недоступны', 'Эта сборка Jarvis ещё не умеет удалённые узлы — обнови приложение во вкладке «О программе».', []),
+      ]));
+      return;
+    }
+
+    pane.appendChild(el('div.dsection', { text: 'новый узел' }));
+    // мастер целиком живёт в одном контейнере: перерисовываем его сам по себе,
+    // не дёргая список узлов и remotesList() на каждый шаг установки
+    const box = el('div#s2-rwiz');
+    pane.appendChild(el('div.dgroup', null, [box]));
+    paintRemoteWiz(box);
+  }
+
   const RENDERERS = {
     general: renderGeneral,
     look: renderLook,
+    remotes: renderRemotes,
     stt: renderStt,
     voice: renderVoice,
     wake: renderWake,
@@ -1956,6 +2606,38 @@
     try {
       window.jarvis.onModelsInstallAllDone(() => {
         reRenderPane('stt'); reRenderPane('wake'); reRenderPane('voice');
+      });
+    } catch (e) {}
+
+    /* ── Установка удалённого узла: шаги копим в состоянии мастера, а в DOM
+     * трогаем только лог с полосой — иначе перерисовка мигала бы кнопками и
+     * сбрасывала прокрутку лога на каждом шаге. ─────────────────────────── */
+    try {
+      window.jarvis.onRemoteInstallStep((s) => {
+        const st = remoteWiz.install;
+        if (!st || !s) return;
+        st.steps.push({ phase: s.phase || '', state: s.state || 'info', msg: s.msg || '' });
+        // лог длинной установки не должен расти без границ
+        if (st.steps.length > 200) st.steps.splice(0, st.steps.length - 200);
+        if (typeof s.pct === 'number') st.pct = s.pct;
+        repaintRemoteInstall();
+      });
+    } catch (e) {}
+    try {
+      window.jarvis.onRemoteInstallDone((r) => {
+        const st = remoteWiz.install;
+        if (!st) return;
+        st.running = false;
+        if (r && r.ok) {
+          // успех: мастер сворачиваем, список перечитываем — узел уже там
+          const name = (r && r.name) || st.name;
+          remoteWizReset();
+          remoteWiz.flash = 'Узел «' + name + '» установлен и добавлен в список.';
+          reRenderPane('remotes');
+          return;
+        }
+        st.error = (r && r.error) || 'установка не удалась — подробности в ~/.jarvis/jarvis.log';
+        repaintRemoteWiz();
       });
     } catch (e) {}
   }

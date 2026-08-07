@@ -133,6 +133,12 @@ fn build_snapshot_inner(
             roots.codex.join("memories/memory_summary.md"),
             ".codex/memories/memory_summary.md",
         ),
+        // Сырой накопитель опыта: без него агент в VM забывает всё, что не
+        // попало в выжимку. Вся память Codex ~768 КБ при лимите зеркала 64 МБ.
+        (
+            roots.codex.join("memories/raw_memories.md"),
+            ".codex/memories/raw_memories.md",
+        ),
         // Декларации плагинов Claude, а не их тела: cache/ — сотни мегабайт с
         // host-абсолютными installPath, гость всё равно ставит плагины сам.
         (
@@ -154,6 +160,18 @@ fn build_snapshot_inner(
         (
             roots.codex.join("memories/skills"),
             ".codex/memories/skills",
+        ),
+        // Выжимки прошлых сессий и ad-hoc расширения памяти. Это накопленный
+        // опыт, а не история: сами транскрипты остаются на хосте (sessions/
+        // в deny-list). Внутри встречаются host-пути, но это текст памяти,
+        // а не исполняемый конфиг — переписывать пути не нужно.
+        (
+            roots.codex.join("memories/rollout_summaries"),
+            ".codex/memories/rollout_summaries",
+        ),
+        (
+            roots.codex.join("memories/extensions"),
+            ".codex/memories/extensions",
         ),
     ] {
         collect_tree(
@@ -1249,6 +1267,25 @@ url = "http://127.0.0.1:8080/mcp"
             "synthetic memory skill",
         )
         .unwrap();
+        // Накопленный опыт Codex: сырые записи, выжимки прошлых сессий и
+        // ad-hoc расширения. Без них агент в VM теряет память.
+        fs::write(
+            roots.codex.join("memories/raw_memories.md"),
+            "synthetic raw memories",
+        )
+        .unwrap();
+        fs::create_dir_all(roots.codex.join("memories/rollout_summaries")).unwrap();
+        fs::write(
+            roots.codex.join("memories/rollout_summaries/2026-06-15-run.md"),
+            "synthetic rollout summary",
+        )
+        .unwrap();
+        fs::create_dir_all(roots.codex.join("memories/extensions/ad_hoc")).unwrap();
+        fs::write(
+            roots.codex.join("memories/extensions/ad_hoc/instructions.md"),
+            "synthetic extension",
+        )
+        .unwrap();
         fs::create_dir_all(roots.codex.join("memories/sessions")).unwrap();
         fs::write(
             roots.codex.join("memories/sessions/transcript.jsonl"),
@@ -1272,7 +1309,10 @@ url = "http://127.0.0.1:8080/mcp"
                 Path::new(".codex/AGENTS.md"),
                 Path::new(".codex/config.toml"),
                 Path::new(".codex/memories/MEMORY.md"),
+                Path::new(".codex/memories/extensions/ad_hoc/instructions.md"),
                 Path::new(".codex/memories/memory_summary.md"),
+                Path::new(".codex/memories/raw_memories.md"),
+                Path::new(".codex/memories/rollout_summaries/2026-06-15-run.md"),
                 Path::new(".codex/memories/skills/reviewer/SKILL.md"),
                 Path::new(".codex/skills/planner/SKILL.md"),
             ]

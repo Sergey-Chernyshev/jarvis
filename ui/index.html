@@ -2590,6 +2590,108 @@
      негде, и проценты при затыке на «avm create» всё равно доехали бы до
      конца. Фаза текста настоящая (границы команд), внутри фазы строки идут по
      кругу; время рядом — по нему виден затык. */
+  /* ── Состояния среды во весь экран ────────────────────────────────────
+     Спит, поднимается, не поднялась. Раньше это была узкая полоска со
+     спиннером и пустой экран с плюсиком: они сообщали «что-то происходит»,
+     но не что именно, надолго ли и что делать. */
+  .vm-state {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    place-content: center;
+    justify-items: center;
+    gap: 18px;
+    padding: 24px;
+    text-align: center;
+  }
+  .vm-state-art { width: 232px; height: 160px; animation: vmFloat 5.2s ease-in-out infinite; }
+  @keyframes vmFloat { 0%, 100% { transform: translateY(0) } 50% { transform: translateY(-5px) } }
+  .vm-state-art svg { display: block; overflow: visible; }
+  .vm-art-ring {
+    stroke: color-mix(in srgb, var(--vm) 34%, transparent);
+    stroke-dasharray: 3 7;
+    stroke-linecap: round;
+    transform-origin: 54px 37px;
+    animation: vmOrbit 14s linear infinite;
+  }
+  @keyframes vmOrbit { to { transform: rotate(360deg) } }
+  .vm-art-body {
+    stroke: color-mix(in srgb, var(--vm) 42%, var(--faint));
+    fill: color-mix(in srgb, var(--vm) 6%, transparent);
+  }
+  .vm-art-line {
+    stroke: color-mix(in srgb, var(--vm) 55%, transparent);
+    stroke-linecap: round;
+    animation: vmBreathe 3.4s ease-in-out infinite;
+  }
+  .vm-art-line:nth-of-type(2) { animation-delay: .35s; }
+  .vm-art-line:nth-of-type(3) { animation-delay: .7s; }
+  @keyframes vmBreathe { 0%, 100% { opacity: .2 } 50% { opacity: .75 } }
+  .vm-art-lamp { fill: color-mix(in srgb, var(--vm) 70%, transparent); }
+  /* Луч сканера и трещина показываются только в своём состоянии */
+  .vm-art-scan { fill: color-mix(in srgb, var(--vm) 22%, transparent); opacity: 0; }
+  .vm-art-crack { stroke: color-mix(in srgb, var(--danger) 72%, transparent); stroke-linecap: round; opacity: 0; }
+  /* Поднимается: кольцо крутится быстрее, по экрану идёт луч */
+  .vm-state.booting .vm-art-ring { animation-duration: 5s; }
+  .vm-state.booting .vm-art-scan { opacity: 1; animation: vmScan 2.4s ease-in-out infinite; }
+  @keyframes vmScan { 0%, 100% { transform: translateY(0) } 50% { transform: translateY(25px) } }
+  .vm-state.booting .vm-art-line { animation-duration: 1.8s; }
+  /* Не поднялась: сцена гаснет, кольцо замирает, по экрану трещина */
+  .vm-state.failed .vm-state-art { animation: none; }
+  .vm-state.failed .vm-art-ring { stroke: color-mix(in srgb, var(--danger) 26%, transparent); animation: none; }
+  .vm-state.failed .vm-art-body {
+    stroke: color-mix(in srgb, var(--danger) 46%, var(--faint));
+    fill: color-mix(in srgb, var(--danger) 6%, transparent);
+  }
+  .vm-state.failed .vm-art-line { display: none; }
+  .vm-state.failed .vm-art-crack { opacity: 1; }
+  .vm-state.failed .vm-art-lamp { fill: var(--danger); }
+  .vm-state-title { margin-top: -6px; color: var(--text); font-size: 19px; font-weight: 700; letter-spacing: -.02em; }
+  .vm-state-copy {
+    margin: -10px 0 0;
+    max-width: 46ch;
+    color: var(--muted);
+    font-size: 13.5px;
+    line-height: 1.6;
+  }
+  .vm-state-actions { display: flex; align-items: center; gap: 10px; }
+  .vm-state-go {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 36px;
+    padding: 0 18px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--accent);
+    color: var(--on-accent);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .vm-state-go:hover { filter: brightness(1.08); }
+  .vm-state-ghost {
+    min-height: 36px;
+    padding: 0 14px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .vm-state-ghost:hover { background: var(--row-hover); color: var(--text); }
+  .vm-state-hint { color: var(--faint); font-family: var(--mono); font-size: 10.5px; }
+  /* Редкие действия пульта прячутся под «Ещё»: восемь кнопок в ряд читались
+     как свалка, а нужны из них обычно три. */
+  .vm-env-rare { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .vm-env-more { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; }
+  @media (prefers-reduced-motion: reduce) {
+    .vm-state-art, .vm-art-ring, .vm-art-line, .vm-art-scan { animation: none; }
+  }
+
   .vm-boot {
     flex: none;
     display: grid;
@@ -3564,16 +3666,30 @@
             <span>⌄</span>
           </button>
         </header>
-        <div class="vm-boot" id="agentVmBoot" hidden>
-          <span class="vm-boot-machine" aria-hidden="true">
-            <span class="vm-boot-scan"></span>
-            <span class="vm-boot-lamp"></span>
-          </span>
-          <div class="vm-boot-copy">
-            <div class="vm-boot-title" id="agentVmBootTitle">Готовлю среду проекта</div>
-            <div class="vm-boot-line" id="agentVmBootLine" aria-live="polite"></div>
+        <!-- Состояние среды во весь экран: спит, поднимается, не поднялась.
+             Раньше это была узкая полоска со спиннером — она сообщала «что-то
+             происходит», но не что именно и надолго ли. -->
+        <div class="vm-state" id="agentVmBoot" hidden>
+          <div class="vm-state-art" id="agentVmStateArt" aria-hidden="true">
+            <svg viewBox="0 0 108 74" width="232" height="160" fill="none">
+              <circle class="vm-art-ring" cx="54" cy="37" r="31" stroke-width="1.6"/>
+              <rect class="vm-art-body" x="32" y="20" width="44" height="32" rx="5" stroke-width="1.8"/>
+              <path class="vm-art-body" d="M48 57h12M54 52v5" stroke-width="1.8"/>
+              <path class="vm-art-line" d="M39 29H62" stroke-width="2"/>
+              <path class="vm-art-line" d="M39 35H68" stroke-width="2"/>
+              <path class="vm-art-line" d="M39 41H56" stroke-width="2"/>
+              <rect class="vm-art-scan" x="33" y="21" width="42" height="6" rx="3"/>
+              <path class="vm-art-crack" d="M45 26l6 7-4 4 7 8" stroke-width="2"/>
+              <circle class="vm-art-lamp" cx="70" cy="47" r="1.8"/>
+            </svg>
           </div>
-          <span class="vm-boot-elapsed" id="agentVmBootElapsed"></span>
+          <div class="vm-state-title" id="agentVmBootTitle">Готовлю среду проекта</div>
+          <p class="vm-state-copy" id="agentVmBootLine" aria-live="polite"></p>
+          <div class="vm-state-actions" id="agentVmStateActions" hidden>
+            <button class="vm-state-go" id="agentVmStateGo">Поднять среду</button>
+            <button class="vm-state-ghost" id="agentVmStateAlt" hidden>Показать среды</button>
+          </div>
+          <div class="vm-state-hint" id="agentVmBootElapsed"></div>
         </div>
         <div class="vmws-stage" id="agentVmStage" hidden>
           <span class="vmws-stage-spinner"></span>
@@ -3658,7 +3774,7 @@
           <div class="vm-env-name" id="agentVmName">VM ещё не создана</div>
           <div class="vm-env-grid">
             <span class="vm-env-key">Состояние</span><span class="vm-env-value" id="agentVmStateValue">Нет VM</span>
-            <span class="vm-env-key">Workspace</span><span class="vm-env-value">Read &amp; write</span>
+            <span class="vm-env-key">Файлы проекта</span><span class="vm-env-value">Чтение и запись</span>
             <span class="vm-env-key">Ресурсы</span><span class="vm-env-value" id="agentVmResources">по умолчанию</span>
             <span class="vm-env-key">Агенты</span><span class="vm-env-value" id="agentVmModules">Claude · Codex</span>
             <span class="vm-env-key">На диске</span><span class="vm-env-value" id="agentVmDisk">—</span>
@@ -3672,15 +3788,20 @@
           </label>
           <div class="vm-env-actions">
             <button class="vm-button primary" id="agentVmEnsure">Запустить VM</button>
+            <button class="vm-button" id="agentVmRestart" hidden>Перезапустить</button>
+            <button class="vm-button danger" id="agentVmStop" hidden>Выключить</button>
+            <button class="vm-button vm-env-more" id="agentVmMore" aria-expanded="false">Ещё
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+          </div>
+          <div class="vm-env-rare" id="agentVmRare" hidden>
             <button class="vm-button" id="agentVmConnect" hidden>Подключить терминал</button>
             <button class="vm-button" id="agentVmCopyShell" disabled>Копировать вход</button>
             <button class="vm-button" id="agentVmCopyResume" hidden>Копировать resume</button>
             <button class="vm-button" id="agentVmReleaseCache" hidden>Освободить кэш</button>
-            <button class="vm-button" id="agentVmRestart" hidden>Перезапустить</button>
             <button class="vm-button danger" id="agentVmStopAgent" hidden>Завершить агента</button>
-            <button class="vm-button danger" id="agentVmStop" hidden>Остановить</button>
           </div>
-          <div class="vm-env-note">Agent VM получает весь каталог проекта. Изменения сразу видны на Mac. Секреты доставляются отдельно и не лежат в project mount.</div>
+          <div class="vm-env-note">VM поднимается сама, когда отправляешь сообщение. Файлы проекта общие с Mac.</div>
         </aside>
         <aside class="vm-file-drawer" id="agentVmFileDrawer" hidden>
           <div class="vm-file-head">

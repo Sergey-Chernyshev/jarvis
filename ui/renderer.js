@@ -3160,6 +3160,12 @@ const agentVmBootEl = document.getElementById('agentVmBoot');
 const agentVmBootTitleEl = document.getElementById('agentVmBootTitle');
 const agentVmBootElapsedEl = document.getElementById('agentVmBootElapsed');
 const agentVmBootLineEl = document.getElementById('agentVmBootLine');
+const agentVmStateArtEl = document.getElementById('agentVmStateArt');
+const agentVmStateActionsEl = document.getElementById('agentVmStateActions');
+const agentVmStateGoEl = document.getElementById('agentVmStateGo');
+const agentVmStateAltEl = document.getElementById('agentVmStateAlt');
+const agentVmMoreEl = document.getElementById('agentVmMore');
+const agentVmRareEl = document.getElementById('agentVmRare');
 const agentVmQueueHintEl = document.getElementById('agentVmQueueHint');
 const agentVmTerminalScreenEl = document.getElementById('agentVmTerminalScreen');
 const agentVmTerminalEmptyEl = document.getElementById('agentVmTerminalEmpty');
@@ -3711,11 +3717,36 @@ function paintAgentVmBootElapsed() {
     : `${Math.floor(seconds / 60)} мин ${seconds % 60} с`;
 }
 
+/* Состояние покоя: VM есть, но спит. Раньше здесь был пустой экран с
+   маленьким плюсиком — он не объяснял ни что происходит, ни сколько ждать. */
+function showAgentVmIdle() {
+  if (!agentVmBootEl) return;
+  agentVmBoot = null;
+  clearAgentVmBootTimers();
+  agentVmBootEl.hidden = false;
+  agentVmBootEl.className = 'vm-state idle';
+  agentVmBootTitleEl.textContent = 'Среда спит';
+  agentVmBootLineEl.textContent = 'Она поднимется сама, когда отправишь первое '
+    + 'сообщение. Или подними сейчас — это займёт пару минут один раз.';
+  agentVmStateActionsEl.hidden = false;
+  agentVmStateGoEl.hidden = false;
+  agentVmStateGoEl.textContent = 'Поднять среду';
+  agentVmStateAltEl.hidden = true;
+  agentVmBootElapsedEl.textContent = 'то же самое делает статус VM в шапке';
+}
+
 function renderAgentVmBoot() {
   if (!agentVmBootEl) return;
   if (!agentVmBoot) { agentVmBootEl.hidden = true; return; }
   agentVmBootEl.hidden = false;
-  agentVmBootEl.classList.toggle('failed', agentVmBoot.failed);
+  agentVmBootEl.className = `vm-state ${agentVmBoot.failed ? 'failed' : 'booting'}`;
+  // У падения — свои действия: повторить или уйти к списку сред
+  agentVmStateActionsEl.hidden = !agentVmBoot.failed;
+  if (agentVmBoot.failed) {
+    agentVmStateGoEl.hidden = false;
+    agentVmStateGoEl.textContent = 'Попробовать снова';
+    agentVmStateAltEl.hidden = false;
+  }
   agentVmBootTitleEl.textContent = agentVmBoot.failed
     ? 'Не получилось подготовить среду'
     : agentVmBoot.title;
@@ -4317,6 +4348,15 @@ function renderAgentVmWorkspace() {
   const screen = typeof terminal?.screen === 'string' ? terminal.screen : '';
   const screenKey = agentVmTerminalKey();
   const showScreen = terminalAlive && !!screen;
+  // Спящая VM — это не «пустой терминал», а понятное состояние с действием.
+  // Раньше здесь показывалась заглушка «Управляемая задача Agent VM», из
+  // которой не следовало ни что среда стоит, ни как её поднять.
+  const vmAsleep = !agentVmBoot
+    && !terminalAlive
+    && ['stopped', 'off'].includes(vm?.state);
+  agentVmFeedEl.hidden = vmAsleep;
+  if (vmAsleep) showAgentVmIdle();
+  else if (!agentVmBoot && agentVmBootEl) agentVmBootEl.hidden = true;
   agentVmTerminalScreenEl.hidden = !showScreen;
   agentVmTerminalEmptyEl.hidden = showScreen;
   agentVmTerminalLightEl.classList.toggle('live', terminalAlive);
@@ -4718,6 +4758,27 @@ agentVmImagePickerEl.addEventListener('change', () => {
 });
 agentVmSendEl.addEventListener('click', sendAgentVmMessage);
 agentVmCancelEl.addEventListener('click', cancelAgentVmRun);
+// «Ещё» в пульте: копирование команд, кэш и остановка агента нужны редко,
+// но раньше стояли в одном ряду с обычными действиями — восемь кнопок подряд
+// читались как свалка.
+if (agentVmMoreEl && agentVmRareEl) {
+  agentVmMoreEl.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const open = agentVmRareEl.hidden;
+    agentVmRareEl.hidden = !open;
+    agentVmMoreEl.setAttribute('aria-expanded', String(open));
+  });
+}
+
+// Кнопки полноэкранных состояний: у «спит» — поднять, у падения — повторить.
+if (agentVmStateGoEl) {
+  agentVmStateGoEl.addEventListener('click', () => {
+    runAgentVmLifecycle('runtime.ensure', 'Подготавливаю среду');
+  });
+}
+if (agentVmStateAltEl) {
+  agentVmStateAltEl.addEventListener('click', () => { setView('envs'); });
+}
 agentVmEnsureEl.addEventListener('click', () => runAgentVmLifecycle('runtime.ensure', 'Подготавливаю среду'));
 agentVmConnectEl.addEventListener('click', () => warmAgentVmTerminal());
 agentVmReleaseCacheEl.addEventListener('click', releaseAgentVmCache);

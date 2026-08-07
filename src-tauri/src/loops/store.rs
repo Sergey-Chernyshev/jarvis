@@ -20,12 +20,12 @@ fn atomic_write(path: &Path, text: &str) -> io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-pub fn loops_path() -> PathBuf {
-    jarvis_dir().join("loops.json")
+fn loops_path(root: &Path) -> PathBuf {
+    root.join("loops.json")
 }
 
-pub fn run_path(loop_id: &str) -> PathBuf {
-    jarvis_dir().join("loops").join(format!("{loop_id}.json"))
+fn run_path(root: &Path, loop_id: &str) -> PathBuf {
+    root.join("loops").join(format!("{loop_id}.json"))
 }
 
 /// Реестр циклов в памяти с записью на диск.
@@ -34,6 +34,10 @@ pub fn run_path(loop_id: &str) -> PathBuf {
 /// правки избавляет от целого класса вопросов «а что если запись частичная».
 #[derive(Default)]
 pub struct Store {
+    /// Каталог данных. Хранится полем, а не берётся из окружения на каждый
+    /// вызов: `JARVIS_DIR` — процессно-глобальная переменная, и подмена её в
+    /// тестах ломает соседние тесты, которые в этот момент читают диск.
+    root: PathBuf,
     items: Mutex<Vec<Loop>>,
     runs: Mutex<Vec<Run>>,
 }
@@ -42,12 +46,16 @@ impl Store {
     /// Поднять с диска. Битый файл — не повод падать: циклы важны, но не
     /// настолько, чтобы из-за них не запускалось приложение.
     pub fn load() -> Self {
-        let items: Vec<Loop> = std::fs::read_to_string(loops_path())
+        Self::load_at(jarvis_dir())
+    }
+
+    pub fn load_at(root: PathBuf) -> Self {
+        let items: Vec<Loop> = std::fs::read_to_string(loops_path(&root))
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
-        let runs = items.iter().filter_map(|l| load_run(&l.id)).collect();
-        Self { items: Mutex::new(items), runs: Mutex::new(runs) }
+        let runs = items.iter().filter_map(|l| load_run(&root, &l.id)).collect();
+        Self { root, items: Mutex::new(items), runs: Mutex::new(runs) }
     }
 
     pub fn all(&self) -> Vec<Loop> {
@@ -73,7 +81,7 @@ impl Store {
     pub fn remove(&self, id: &str) {
         self.items.lock().unwrap().retain(|l| l.id != id);
         self.runs.lock().unwrap().retain(|r| r.loop_id != id);
-        let _ = std::fs::remove_file(run_path(id));
+        let _ = std::fs::remove_file(run_path(&self.root, id));
         self.flush();
     }
 
@@ -95,7 +103,7 @@ impl Store {
             }
         }
         if let Ok(text) = serde_json::to_string_pretty(&run) {
-            let _ = atomic_write(&run_path(&run.loop_id), &text);
+            let _ = atomic_write(&run_path(&self.root, &run.loop_id), &text);
         }
     }
 
@@ -110,13 +118,13 @@ impl Store {
     fn flush(&self) {
         let items = self.items.lock().unwrap().clone();
         if let Ok(text) = serde_json::to_string_pretty(&items) {
-            let _ = atomic_write(&loops_path(), &text);
+            let _ = atomic_write(&loops_path(&self.root), &text);
         }
     }
 }
 
-fn load_run(loop_id: &str) -> Option<Run> {
-    let text = std::fs::read_to_string(run_path(loop_id)).ok()?;
+fn load_run(root: &Path, loop_id: &str) -> Option<Run> {
+    let text = std::fs::read_to_string(run_path(root, loop_id)).ok()?;
     serde_json::from_str(&text).ok()
 }
 
@@ -125,20 +133,19 @@ mod tests {
     use super::super::model::{Iteration, Loop, Run, RunState};
     use super::*;
 
-    /// Каждому тесту — свой JARVIS_DIR: они бегут в одном процессе и в общий
-    /// каталог писали бы друг поверх друга.
+    /// Каталог на тест. Никакого `JARVIS_DIR`: он процессно-глобальный, и
+    /// подмена его здесь роняла бы соседние тесты, читающие диск в тот же миг.
     fn scoped(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("jarvis-loops-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("JARVIS_DIR", &dir);
         dir
     }
 
     #[test]
     fn saved_loops_survive_a_restart() {
         let dir = scoped("save");
-        let store = Store::load();
+        let store = Store::load_at(dir.clone());
         assert!(store.all().is_empty());
 
         store.save(Loop { id: "a".into(), name: "ночной test-fix".into(), ..Default::default() });
@@ -146,7 +153,7 @@ mod tests {
         // Правка не плодит дубликат.
         store.save(Loop { id: "a".into(), name: "test-fix v2".into(), ..Default::default() });
 
-        let again = Store::load();
+        let again = Store::load_at(dir.clone());
         assert_eq!(again.all().len(), 2);
         assert_eq!(again.get("a").unwrap().name, "test-fix v2");
 
@@ -156,7 +163,7 @@ mod tests {
     #[test]
     fn run_journal_is_kept_per_loop() {
         let dir = scoped("run");
-        let store = Store::load();
+        let store = Store::load_at(dir.clone());
         store.save(Loop { id: "a".into(), name: "a".into(), ..Default::default() });
         store.put_run(Run {
             loop_id: "a".into(),
@@ -166,22 +173,22 @@ mod tests {
             ..Default::default()
         });
 
-        let again = Store::load();
+        let again = Store::load_at(dir.clone());
         let run = again.run("a").expect("журнал поднимается вместе с циклом");
         assert_eq!(run.iterations.len(), 1);
 
         // Удаление цикла уносит и журнал: иначе он всплывёт у следующего цикла
         // с тем же id.
         again.remove("a");
-        assert!(!run_path("a").exists());
+        assert!(!run_path(&dir, "a").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn broken_file_does_not_break_startup() {
         let dir = scoped("broken");
-        std::fs::write(loops_path(), "{ это не json").unwrap();
-        assert!(Store::load().all().is_empty(), "битый файл не должен ронять приложение");
+        std::fs::write(loops_path(&dir), "{ это не json").unwrap();
+        assert!(Store::load_at(dir.clone()).all().is_empty(), "битый файл не должен ронять приложение");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

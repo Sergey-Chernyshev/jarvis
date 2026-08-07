@@ -68,15 +68,27 @@ for (const relativePath of FILES) {
 // Строка чата — грид, и это не косметика: заголовку отдана вся ширина, а
 // колонок ровно столько, сколько видимых элементов. Если правило снова
 // потеряется (как от сломанного комментария), список сложится в столбик.
-test("строка чата остаётся гридом с тремя колонками", async () => {
+//
+// Состав менялся: к иконке окружения и подписи о работе в VM добавились свои
+// колонки. Число проверяем по факту — лишняя колонка съедает ширину
+// заголовка, недостающая выталкивает время на второй ряд.
+test("строка чата остаётся гридом, колонок ровно по числу элементов", async () => {
   const [sheet] = await styleSheets("./index.html");
   const css = stripComments(sheet, "index.html");
   const rule = css.slice(css.indexOf(".hrow.chat {"));
   const body = rule.slice(0, rule.indexOf("}"));
   assert.match(body, /display:\s*grid/, "строка чата должна быть гридом");
-  assert.match(
-    body,
-    /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto\s+auto\s*;/,
-    "колонки: заголовок + агент + время. Лишняя колонка = невидимая подпись, съедающая ширину заголовка",
+  const columns = body.match(/grid-template-columns:\s*([^;]+);/);
+  assert.ok(columns, "у строки чата должны быть заданы колонки");
+  // иконка + заголовок + подпись + агент + время
+  const tracks = columns[1].trim().replace(/minmax\([^)]*\)/g, "minmax").split(/\s+/);
+  assert.equal(
+    tracks.length,
+    5,
+    `колонки: иконка + заголовок + подпись + агент + время, а не ${tracks.join(" ")}`,
+  );
+  assert.ok(
+    columns[1].includes("minmax(0, 1fr)"),
+    "заголовку отдана вся свободная ширина",
   );
 });

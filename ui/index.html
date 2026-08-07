@@ -350,14 +350,20 @@
      колонку грида, поэтому невидимая на 12 строках из 13 подпись постоянно
      отъедала ~110px у заголовка. Что делает ↵ — сказано один раз в подсказке
      над списком. */
+  /* Колонок ровно столько, сколько элементов в строке: иконка окружения,
+     заголовок, подпись о работе в VM, агент, время. Раньше их было три, и
+     добавленная иконка выталкивала время на второй ряд — заголовки при этом
+     прижимались вправо. */
   .hrow.chat {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: 16px minmax(0, 1fr) auto auto auto;
     align-items: center;
     gap: 0 10px;
     height: auto; padding: 10px 16px;
   }
   .hrow.chat .htitle { flex: none; }
+  /* Подписи может не быть — тогда её колонка схлопывается сама */
+  .hrow.chat .hsub { justify-self: start; }
   .hrow.chat .hagent {
     font-family: var(--mono); font-size: 10px; letter-spacing: .04em;
     color: var(--ink-faint); text-transform: uppercase;

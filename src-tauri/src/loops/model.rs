@@ -437,9 +437,14 @@ mod tests {
     #[test]
     fn loop_without_exit_or_limits_is_rejected() {
         let bare = Loop::default();
-        let problems = bare.problems();
-        assert!(problems.iter().any(|p| p.contains("условия выхода")));
-        assert!(problems.iter().any(|p| p.contains("имени")));
+        assert!(bare.problems().iter().any(|p| p.contains("имени")));
+
+        // Критик включён по умолчанию, и один он — уже условие выхода: так
+        // живут шаблоны, у которых нет команды, способной сказать «сделано».
+        // Дыра появляется, только когда снято и то и другое.
+        let mut blind = Loop::default();
+        blind.exit.critic.enabled = false;
+        assert!(blind.problems().iter().any(|p| p.contains("условия выхода")));
 
         let mut ok = Loop {
             name: "test-fix".into(),

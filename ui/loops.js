@@ -129,23 +129,28 @@
   function library() {
     return el('div.lp-lib',
       el('div.lp-h1', { text: 'Библиотека шаблонов' }),
-      el('div.lp-h2', { text: 'рутина, которую агент будет крутить сам — ночью или по расписанию' }),
+      el('div.lp-h2', { text: 'рутина, которую агент будет крутить сам — ночью или по расписанию. Возьми шаблон или собери с нуля: откроется конструктор, ничего не сохранится, пока не нажмёшь «Создать цикл»' }),
       el('div.lp-cards', state.templates.map((t) =>
         el('div.lp-card', { onclick: () => createFrom(t.id) },
           el('div.lp-card-name', { text: t.name }),
           el('div.lp-card-hint', { text: t.hint }),
         ))),
       el('div.lp-scratch',
-        el('button.j-btn', { text: 'Собрать с нуля', onclick: () => createFrom(null) }),
+        el('button.j-btn.is-primary', { text: 'Собрать с нуля', onclick: () => createFrom(null) }),
         el('span.lp-hint', { text: 'шаблон — это заготовка: шаги и ограничители всё равно твои' }),
       ),
     );
   }
 
+  /* Заготовка живёт в панели, пока её не сохранят. Раньше создание сразу
+   * писало пустой цикл на диск, и передумавший на первом же поле человек
+   * оставлял в списке «без имени» навсегда. */
   async function createFrom(template) {
-    const res = await window.jarvis.loopsCreate(template || null, null);
-    if (res && res.ok) { await pull(); open = { id: res.id, screen: 'builder' }; draft = null; render(); }
-    else note((res && res.error) || 'не удалось создать цикл', true);
+    const res = await window.jarvis.loopsDraft(template || null);
+    if (!res || !res.ok) { note((res && res.error) || 'не удалось собрать заготовку', true); return; }
+    draft = res.item;
+    open = { id: null, screen: 'new' };
+    render();
   }
 
   /* ---------- конструктор: пять шагов и ограничители ---------- */
@@ -163,7 +168,7 @@
     return el('label.lp-check', box, el('span', { text: label }), hint ? el('span.lp-hint', { text: hint }) : null);
   };
 
-  function builder(l) {
+  function builder(l, isNew) {
     const d = draft || (draft = JSON.parse(JSON.stringify(l)));
     const step = (n, title, sub, ...body) =>
       el('section.lp-step',
@@ -224,8 +229,8 @@
     paintProblems(l.problems);
 
     return el('div.lp-builder',
-      el('div.lp-h1', { text: 'Конструктор — все пять шагов и ограничители' }),
-      el('div.lp-h2', { text: 'полная конфигурация перед запуском' }),
+      el('div.lp-h1', { text: isNew ? 'Новый цикл' : `Настройка · ${l.name || 'без имени'}` }),
+      el('div.lp-h2', { text: 'пять шагов и ограничители — полная конфигурация перед запуском' }),
       field('имя цикла', d.name, (v) => { d.name = v; }),
       step(1, 'откуда берутся задачи', 'источник',
         field('цель цикла', d.source.goal, (v) => { d.source.goal = v; }, 'своими словами — она уйдёт в промт каждой итерации'),
@@ -270,37 +275,50 @@
       problems,
       el('div.lp-actions',
         el('button.j-btn.is-primary', {
-          text: 'Сохранить',
+          text: isNew ? 'Создать цикл' : 'Сохранить',
           onclick: async () => {
             const res = await window.jarvis.loopsSave(d);
-            if (res && res.ok) {
-              paintProblems(res.problems);
-              note(res.problems && res.problems.length ? 'сохранено, но запустить пока нельзя' : 'сохранено', false);
-              draft = null;
-              await pull();
-            } else note((res && res.error) || 'не сохранилось', true);
+            if (!res || !res.ok) { note((res && res.error) || 'не сохранилось', true); return; }
+            paintProblems(res.problems);
+            const left = res.problems && res.problems.length;
+            note(left ? 'сохранено, но запустить пока нельзя: ' + res.problems.join('; ') : 'сохранено', !!left);
+            draft = null;
+            await pull();
+            open = { id: res.id, screen: left ? 'builder' : 'console' };
+            render();
           },
         }),
         el('button.j-btn', {
-          text: 'Запустить цикл',
+          text: 'Сохранить и запустить',
           onclick: async () => {
             const saved = await window.jarvis.loopsSave(d);
-            if (saved && saved.ok && saved.problems && saved.problems.length) {
+            if (!saved || !saved.ok) { note((saved && saved.error) || 'не сохранилось', true); return; }
+            if (saved.problems && saved.problems.length) {
               paintProblems(saved.problems);
               note('цикл не заполнен: ' + saved.problems.join('; '), true);
+              draft = null;
+              await pull();
+              open = { id: saved.id, screen: 'builder' };
+              render();
               return;
             }
             draft = null;
-            if (await call(() => window.jarvis.loopsStart(l.id), 'цикл пошёл')) {
-              open = { id: l.id, screen: 'console' };
+            await pull();
+            if (await call(() => window.jarvis.loopsStart(saved.id), 'цикл пошёл')) {
+              open = { id: saved.id, screen: 'console' };
               render();
             }
           },
         }),
-        el('button.j-btn.lp-ghost', {
-          text: 'Удалить цикл',
-          onclick: async () => { draft = null; await call(() => window.jarvis.loopsRemove(l.id)); open = null; render(); },
-        }),
+        isNew
+          ? el('button.j-btn.lp-ghost', {
+              text: 'Отменить',
+              onclick: () => { draft = null; open = null; render(); },
+            })
+          : el('button.j-btn.lp-ghost', {
+              text: 'Удалить цикл',
+              onclick: async () => { draft = null; await call(() => window.jarvis.loopsRemove(l.id)); open = null; render(); },
+            }),
       ),
     );
   }
@@ -510,17 +528,29 @@
     root.textContent = '';
     const note_ = el('div.lp-note', { hidden: true });
 
-    const list = el('div.lp-list');
-    state.loops.forEach((l) => list.appendChild(loopRow(l)));
-    list.appendChild(el('button.j-btn.lp-ghost.lp-new', { text: '+ цикл', onclick: () => createFrom(null) }));
+    /* Колонка слева есть ВСЕГДА, и вход в конструктор — её первая строка.
+     * Раньше он прятался: библиотека исчезала, стоило открыть любой цикл, а
+     * «+ цикл» был прижат к низу колонки — то есть новый цикл было негде
+     * начать, если один уже есть. */
+    const side = el('aside.lp-side',
+      el('button.j-btn.is-primary.lp-new', { text: '+ Новый цикл', onclick: () => createFrom(null) }),
+      el('div.lp-side-h', { text: 'мои циклы' }),
+    );
+    if (state.loops.length) state.loops.forEach((l) => side.appendChild(loopRow(l)));
+    else side.appendChild(el('div.lp-empty', { text: 'пока ни одного' }));
+    side.appendChild(el('div.lp-side-h', { text: 'из шаблона' }));
+    state.templates.forEach((t) =>
+      side.appendChild(el('div.lp-row.tmpl', { onclick: () => createFrom(t.id) },
+        el('div.lp-row-name', { text: t.name }),
+        el('div.lp-row-sub', { text: t.hint }))));
 
     let body;
-    if (!state.loops.length) body = library();
+    if (open && open.screen === 'new') body = builder(draft, true);
     else if (!open) body = library();
     else {
       const l = byId(open.id);
       if (!l) { open = null; body = library(); }
-      else if (open.screen === 'builder') body = builder(l);
+      else if (open.screen === 'builder') body = builder(l, false);
       else if (open.screen === 'iteration') body = iteration(l, open.n);
       else if (open.screen === 'ask') body = ask(l);
       else if (l.run && l.run.state === 'asking') body = ask(l);
@@ -528,9 +558,7 @@
       else body = console_(l);
     }
 
-    root.appendChild(el('div.lp-wrap',
-      state.loops.length ? el('aside.lp-side', list) : null,
-      el('main.lp-main', note_, body)));
+    root.appendChild(el('div.lp-wrap', side, el('main.lp-main', note_, body)));
   }
 
   /* ---------- вход ---------- */

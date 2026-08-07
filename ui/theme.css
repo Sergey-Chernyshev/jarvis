@@ -713,3 +713,13 @@ textarea.lp-input { height: auto; padding: 9px 11px; line-height: 1.45; resize: 
   background: var(--surface-2); font: 400 11.5px/1.55 var(--mono, monospace);
   color: var(--ink-dim); max-height: 340px; overflow: auto; white-space: pre;
 }
+
+/* Вход в конструктор — первая строка колонки, а не кнопка, прижатая к низу:
+ * новый цикл начинают чаще, чем удаляют старый. */
+.lp-new { width: 100%; height: 34px; justify-content: center; font-size: 13px; margin-bottom: 4px; }
+.lp-side-h {
+  font: 500 11px/1.4 var(--font); color: var(--ink-faint);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  margin: 10px 4px 2px;
+}
+.lp-row.tmpl .lp-row-name { color: var(--ink-dim); font-weight: 400; }

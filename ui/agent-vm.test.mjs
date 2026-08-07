@@ -1034,3 +1034,47 @@ test("all environments include stopped machines, active ones first", () => {
   assert.ok(at("sup") < at("ticksly"), "работающая машина выше остановленной");
   assert.ok(at("api") < at("ticksly"), "сломанная машина выше остановленной");
 });
+
+test("environments tab is wired end to end", () => {
+  // Вкладка живёт в четырёх местах сразу: разметка, показ/скрытие, подсветка
+  // и ленивый рендер. Забыть одно из них легко, а симптом — молчаливый:
+  // вкладка кликается и ничего не делает.
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const renderer = readFileSync(new URL("./renderer.js", import.meta.url), "utf8");
+
+  assert.match(html, /id="tabEnvs"/, "вкладка есть в разметке");
+  assert.match(html, /id="envs"/, "контейнер вьюхи есть");
+  // Пятая вкладка в оконном режиме иначе повисает одна в третьем ряду
+  assert.match(html, /#tabEnvs \{ grid-column: 1 \/ -1; \}/);
+
+  assert.match(renderer, /envsEl\.hidden = next !== 'envs';/);
+  assert.match(renderer, /tabEnvsEl\.classList\.toggle\('active', next === 'envs'\)/);
+  assert.match(renderer, /if \(next === 'envs'\) renderEnvs\(\);/);
+  assert.match(renderer, /tabEnvsEl\.addEventListener\('click', \(\) => setView\('envs'\)\)/);
+  assert.match(renderer, /e\.key === '5'/, "⌘5 открывает вкладку");
+  // Список обновляется, когда приходят новые сущности VM
+  assert.match(renderer, /if \(view === 'envs'\) renderEnvs\(\);/);
+});
+
+test("environments tab shows only facts the backend actually has", () => {
+  // Метрик CPU-загрузки, RAM и uptime в бэкенде нет. Заглушка вроде «0%»
+  // выглядит как факт и врёт — таких строк на вкладке быть не должно.
+  const renderer = readFileSync(new URL("./renderer.js", import.meta.url), "utf8");
+  const tab = renderer.slice(
+    renderer.indexOf("function envRowNode(environment)"),
+    renderer.indexOf("function setAgentVmStage("),
+  );
+
+  assert.ok(tab.length > 0, "код вкладки найден");
+  // Комментарии вырезаем: они как раз объясняют, почему этих полей нет.
+  // Иначе тест ловит собственное объяснение и падает на ровном месте.
+  const code = tab
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  assert.doesNotMatch(code, /uptime/i, "uptime не показываем — его нет");
+  assert.doesNotMatch(code, /cpuLoad|cpuUsage/i, "загрузки CPU нет");
+  assert.doesNotMatch(code, /ramUsed|memoryUsage/i, "фактической RAM нет");
+  // Выключение спрашивает подтверждение: процессы внутри погибнут
+  assert.match(tab, /envConfirmStop/);
+  assert.match(tab, /Машина, диск и файлы сохранятся/);
+});

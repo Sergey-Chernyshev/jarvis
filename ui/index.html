@@ -1365,6 +1365,9 @@
   [data-mode='window'] .tabkey,
   [data-mode='window'] .tabs .spacer,
   [data-mode='window'] .tab.icon { display: none; }
+  /* пятая вкладка осталась бы одна в третьем ряду и читалась как обрубок —
+     растягиваем её на обе колонки, ряд становится целым */
+  [data-mode='window'] #tabEnvs { grid-column: 1 / -1; }
 
   /* кнопка в титульной полосе (шестерёнка) */
   .tl-btn {
@@ -1705,6 +1708,74 @@
     color: color-mix(in srgb, var(--accent) 72%, transparent);
     font-variant-numeric: tabular-nums;
   }
+  /* ── Вкладка «Среды» ──────────────────────────────────────────────────
+     Парк машин целиком. Язык строки тот же, что у полосы активных сред над
+     списком чатов: точка состояния, имя, факты, действия справа. Действия
+     проявляются на наведении — в покое список молчит. */
+  .envs { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .envs-head { flex: none; display: flex; align-items: center; gap: 12px; padding: 16px 20px 12px; }
+  .envs-title { font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--text); }
+  .envs-sub { margin-top: 3px; font-size: 11.5px; color: var(--faint); }
+  .envs-body { flex: 1; min-height: 0; overflow-y: auto; padding: 0 20px 28px; }
+  .envs-body::-webkit-scrollbar { width: 0; }
+  .env-row {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 12px 4px;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .env-dot {
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--idle);
+  }
+  .env-row.running .env-dot,
+  .env-row.ready .env-dot { background: var(--done); box-shadow: 0 0 7px color-mix(in srgb, var(--done) 50%, transparent); }
+  .env-row.working .env-dot { background: var(--working); animation: vmPulse 1.8s ease-in-out infinite; }
+  .env-row.waiting .env-dot { background: var(--waiting); }
+  .env-row.error .env-dot { background: var(--danger); }
+  .env-name { font-size: 13px; font-weight: 500; color: var(--text); }
+  .env-stats { display: flex; align-items: baseline; gap: 13px; margin-top: 3px; }
+  .env-stat { display: inline-flex; align-items: baseline; gap: 3px; font-variant-numeric: tabular-nums; }
+  .env-stat b { font-family: var(--mono); font-size: 11px; font-weight: 500; color: var(--text-body); }
+  .env-stat i { font-family: var(--mono); font-size: 9.5px; font-style: normal; color: var(--faint); }
+  .env-stat.muted { font-size: 10.5px; color: var(--faint); }
+  .env-spacer { flex: 1; }
+  .env-acts { display: flex; gap: 2px; opacity: 0; transition: opacity .13s ease; }
+  .env-row:hover .env-acts,
+  .env-row:focus-within .env-acts { opacity: 1; }
+  .env-btn {
+    height: 26px;
+    padding: 0 9px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 11.5px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .env-btn:hover { background: var(--row-hover); color: var(--text); }
+  .env-btn.danger { color: var(--danger); }
+  .env-btn:disabled { opacity: .5; cursor: default; }
+  .env-empty { padding: 40px 20px; text-align: center; color: var(--faint); font-size: 12.5px; }
+  .env-empty-d { margin-top: 5px; font-size: 11.5px; color: var(--faint); }
+  .env-confirm {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 12px 10px;
+    border-bottom: 1px solid var(--hairline);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--waiting) 12%, transparent);
+  }
+  .env-confirm-t { font-size: 13px; font-weight: 500; color: var(--text); }
+  .env-confirm-d { margin-top: 2px; font-size: 11px; color: var(--waiting); }
+
   .vm-active-row {
     position: relative;
     display: grid;
@@ -3080,6 +3151,7 @@
       <div class="tab" id="tabHistory">Проекты <span class="tabkey">⌘2</span></div>
       <div class="tab" id="tabStats">Статистика <span class="tabkey">⌘3</span></div>
       <div class="tab" id="tabVoice">Голос <span class="tabkey">⌘4</span></div>
+      <div class="tab" id="tabEnvs">Среды <span class="tabkey">⌘5</span></div>
       <span class="spacer"></span>
       <div class="tab icon" id="tabSettings" title="Настройки · ⌘,">
         <!-- lucide: sliders-horizontal -->
@@ -3233,6 +3305,7 @@
         <div class="qvfoot" id="qFoot"></div>
       </div>
       <div class="stats" id="stats" hidden></div>
+      <div class="envs" id="envs" hidden></div>
       <div class="history" id="history" hidden>
         <header class="pm-toolbar" id="projectManagerToolbar">
           <div class="pm-toolbar-copy">

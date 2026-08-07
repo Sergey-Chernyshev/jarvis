@@ -36,6 +36,8 @@ const tabSessionsEl = document.getElementById('tabSessions');
 const tabSettingsEl = document.getElementById('tabSettings');
 const voicehistEl = document.getElementById('voicehist');
 const tabVoiceEl = document.getElementById('tabVoice');
+const tabEnvsEl = document.getElementById('tabEnvs');
+const envsEl = document.getElementById('envs');
 const activeEnvironmentsEl = document.getElementById('activeEnvironments');
 const activeEnvironmentRowsEl = document.getElementById('activeEnvironmentRows');
 const activeEnvironmentCountEl = document.getElementById('activeEnvironmentCount');
@@ -58,7 +60,7 @@ const STATUS_LABEL = {
 
 let state = [];
 let sel = 0;
-let view = 'list'; // list | chat | question | history | stats | voicehist | agentvm | settings
+let view = 'list'; // list | chat | question | history | stats | voicehist | envs | agentvm | settings
 let chatSessionId = null;
 
 /* ---------- helpers ---------- */
@@ -166,6 +168,7 @@ function setView(next) {
   qviewEl.hidden = next !== 'question';
   settingsEl.hidden = next !== 'settings';
   statsEl.hidden = next !== 'stats';
+  envsEl.hidden = next !== 'envs';
   voicehistEl.hidden = next !== 'voicehist';
   historyEl.hidden = next !== 'history';
   agentVmWorkspaceEl.hidden = next !== 'agentvm';
@@ -176,15 +179,18 @@ function setView(next) {
     !win && (next === 'chat' || next === 'question' || next === 'agentvm');
   if (next === 'list') { primaryLabelEl.textContent = 'Открыть чат'; primaryKeyEl.textContent = '↵'; }
   else if (next === 'history') { primaryLabelEl.textContent = 'Открыть проект'; primaryKeyEl.textContent = '↵'; }
+  else if (next === 'envs') { primaryLabelEl.textContent = 'Открыть среду'; primaryKeyEl.textContent = '↵'; }
   else { primaryLabelEl.textContent = 'Назад'; primaryKeyEl.textContent = 'esc'; }
   tabSettingsEl.classList.toggle('active', next === 'settings');
   document.getElementById('tlSettings').classList.toggle('active', next === 'settings');
   tabStatsEl.classList.toggle('active', next === 'stats');
   tabHistoryEl.classList.toggle('active', next === 'history' || next === 'agentvm');
   tabVoiceEl.classList.toggle('active', next === 'voicehist');
+  tabEnvsEl.classList.toggle('active', next === 'envs');
   tabSessionsEl.classList.toggle('active', next === 'list' || next === 'chat');
   if (next === 'settings') loadSettings();
   if (next === 'stats') renderStats();
+  if (next === 'envs') renderEnvs();
   if (next === 'voicehist') {
     voicehistEl.style.cssText = 'padding:0;height:100%;overflow:hidden';
     try { window.initVoiceHistory(voicehistEl); } catch (e) { console.error('[voicehist] init:', e); }
@@ -3069,6 +3075,7 @@ function actionItems() {
   items.push({ label: 'Проекты и Agent VM', key: '⌘2', run: () => setView('history') });
   items.push({ label: 'Статистика usage', key: '⌘3', run: () => setView('stats') });
   items.push({ label: 'История голоса', key: '⌘4', run: () => setView('voicehist') });
+  items.push({ label: 'Изолированные среды', key: '⌘5', run: () => setView('envs') });
   items.push({ label: 'Настройки', key: '⌘,', run: () => setView('settings') });
   return items;
 }
@@ -3350,6 +3357,7 @@ function ingestAgentVmEntities(list) {
   }
 
   if (view === 'history') renderHistLevel();
+  if (view === 'envs') renderEnvs();
   if (view === 'agentvm') renderAgentVmWorkspace();
 }
 
@@ -3412,6 +3420,204 @@ function renderActiveEnvironments() {
     });
     activeEnvironmentRowsEl.appendChild(row);
   }
+}
+
+/* ================= вкладка «Среды» ================= */
+
+// Какую машину пользователь просит выключить. Выключение не пауза: гостевая
+// ОС завершается, процессы внутри гибнут — спрашиваем перед этим.
+let envConfirmStop = null;
+let envBusy = new Set();
+
+function envStat(value, unit) {
+  const wrap = document.createElement('span');
+  wrap.className = 'env-stat';
+  const b = document.createElement('b');
+  b.textContent = value;
+  wrap.appendChild(b);
+  if (unit) {
+    const i = document.createElement('i');
+    i.textContent = unit;
+    wrap.appendChild(i);
+  }
+  return wrap;
+}
+
+function envButton(label, onClick, cls = '') {
+  const b = document.createElement('button');
+  b.className = 'env-btn' + (cls ? ' ' + cls : '');
+  b.textContent = label;
+  b.addEventListener('click', (e) => { e.stopPropagation(); onClick(b); });
+  return b;
+}
+
+/** Выполнить действие над средой, пока оно идёт — блокируем кнопки строки. */
+async function envRun(environment, command, label) {
+  const key = environment.cwd;
+  if (envBusy.has(key)) return;
+  envBusy.add(key);
+  renderEnvs();
+  try {
+    await agentVmCommand(command, { cwd: environment.cwd });
+  } catch (error) {
+    showToast(`${label}: ${error.message || 'не удалось'}`);
+  } finally {
+    envBusy.delete(key);
+    renderEnvs();
+  }
+}
+
+function envRowNode(environment) {
+  const state = environment.uiState;
+  const busy = envBusy.has(environment.cwd);
+
+  if (envConfirmStop === environment.cwd) {
+    const box = document.createElement('div');
+    box.className = 'env-confirm';
+    const mid = document.createElement('div');
+    const t = document.createElement('div');
+    t.className = 'env-confirm-t';
+    t.textContent = `Выключить ${environment.project}?`;
+    const d = document.createElement('div');
+    d.className = 'env-confirm-d';
+    // Файлы проекта живут на хосте в общей папке, их выключение не трогает.
+    d.textContent = state === 'working'
+      ? 'Агент сейчас работает — прогон прервётся. Машина и файлы сохранятся.'
+      : 'Процессы внутри погибнут. Машина, диск и файлы сохранятся.';
+    mid.appendChild(t);
+    mid.appendChild(d);
+    box.appendChild(mid);
+    const sp = document.createElement('div');
+    sp.className = 'env-spacer';
+    box.appendChild(sp);
+    const acts = document.createElement('div');
+    acts.className = 'env-acts';
+    acts.style.opacity = '1';
+    acts.appendChild(envButton('Отмена', () => { envConfirmStop = null; renderEnvs(); }));
+    acts.appendChild(envButton('Выключить', () => {
+      envConfirmStop = null;
+      envRun(environment, 'runtime.stop', 'Выключение');
+    }, 'danger'));
+    box.appendChild(acts);
+    return box;
+  }
+
+  const row = document.createElement('div');
+  row.className = `env-row ${state}`;
+  row.title = environment.cwd;
+
+  const dot = document.createElement('span');
+  dot.className = 'env-dot';
+  row.appendChild(dot);
+
+  const mid = document.createElement('div');
+  const name = document.createElement('div');
+  name.className = 'env-name';
+  name.textContent = environment.project;
+  mid.appendChild(name);
+
+  const stats = document.createElement('div');
+  stats.className = 'env-stats';
+  const attrs = environment.vm?.attrs || {};
+  const resources = attrs.resources || {};
+  // Показываем только то, что бэкенд реально знает. CPU-загрузки, RAM и
+  // uptime сегодня нет — заглушки врали бы.
+  if (Number(resources.cpus) > 0) stats.appendChild(envStat(String(resources.cpus), 'cpu'));
+  if (resources.memory) stats.appendChild(envStat(String(resources.memory).replace('GiB', ''), 'ГиБ'));
+  const label = document.createElement('span');
+  label.className = 'env-stat muted';
+  label.textContent = AgentVmModel.stateLabel(state);
+  stats.appendChild(label);
+  mid.appendChild(stats);
+  row.appendChild(mid);
+
+  const spacer = document.createElement('div');
+  spacer.className = 'env-spacer';
+  row.appendChild(spacer);
+
+  const acts = document.createElement('div');
+  acts.className = 'env-acts';
+  const live = state !== 'off' && state !== 'absent';
+  if (live) {
+    const restart = envButton('Перезапустить', () => envRun(environment, 'runtime.restart', 'Перезапуск'));
+    restart.title = 'Выключить и поднять заново, обновив снимок конфигов с хоста';
+    restart.disabled = busy;
+    acts.appendChild(restart);
+    const stop = envButton('Выключить', () => { envConfirmStop = environment.cwd; renderEnvs(); });
+    stop.title = 'Полностью выключить машину. Диск и файлы сохранятся, процессы внутри погибнут';
+    stop.disabled = busy;
+    acts.appendChild(stop);
+  } else {
+    const start = envButton('Запустить', () => envRun(environment, 'runtime.ensure', 'Запуск'));
+    start.disabled = busy;
+    acts.appendChild(start);
+  }
+  const open = envButton('Открыть', () => {
+    const project = agentVmProjectByCwd(environment.cwd);
+    if (project) openAgentVmProject(project);
+  });
+  acts.appendChild(open);
+  row.appendChild(acts);
+  return row;
+}
+
+function renderEnvs() {
+  if (!envsEl || view !== 'envs') return;
+  envsEl.textContent = '';
+
+  const environments = AgentVmModel ? AgentVmModel.allEnvironments(agentVmEntities) : [];
+  const running = environments.filter((e) => e.uiState !== 'off' && e.uiState !== 'absent').length;
+
+  const head = document.createElement('div');
+  head.className = 'envs-head';
+  const box = document.createElement('div');
+  const title = document.createElement('div');
+  title.className = 'envs-title';
+  title.textContent = 'Изолированные среды';
+  box.appendChild(title);
+  const sub = document.createElement('div');
+  sub.className = 'envs-sub';
+  sub.textContent = environments.length
+    ? `${running} из 8 работает · ${environments.length} ${plural(environments.length, 'машина', 'машины', 'машин')}`
+    : '';
+  box.appendChild(sub);
+  head.appendChild(box);
+  const sp = document.createElement('div');
+  sp.className = 'env-spacer';
+  head.appendChild(sp);
+  const cache = envButton('Очистить кэш', async (b) => {
+    b.disabled = true;
+    b.textContent = 'Очищаю…';
+    try {
+      const result = await agentVmCommand('runtime.releaseCache', {});
+      const freed = Number(result?.freedBytes) || 0;
+      showToast(freed ? `Освобождено ${fmtBytes(freed)}` : 'Кэш уже пуст');
+    } catch (error) {
+      showToast(`Очистка кэша: ${error.message || 'не удалось'}`);
+    } finally {
+      b.disabled = false;
+      b.textContent = 'Очистить кэш';
+    }
+  });
+  cache.title = 'Удалить скачанные образы Ubuntu. Существующие машины не тронутся, '
+    + 'но следующая новая скачает образ заново';
+  head.appendChild(cache);
+  envsEl.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'envs-body';
+  if (!environments.length) {
+    const empty = document.createElement('div');
+    empty.className = 'env-empty';
+    empty.textContent = 'Пока нет ни одной среды';
+    const d = document.createElement('div');
+    d.className = 'env-empty-d';
+    d.textContent = 'Среда создаётся сама, когда открываешь проект и пишешь задачу агенту.';
+    empty.appendChild(d);
+    body.appendChild(empty);
+  }
+  for (const environment of environments) body.appendChild(envRowNode(environment));
+  envsEl.appendChild(body);
 }
 
 function setAgentVmStage(title, detail = '') {
@@ -5205,6 +5411,7 @@ const statsEl = document.getElementById('stats');
 const tabStatsEl = document.getElementById('tabStats');
 tabStatsEl.addEventListener('click', () => setView('stats'));
 tabVoiceEl.addEventListener('click', () => setView('voicehist'));
+tabEnvsEl.addEventListener('click', () => setView('envs'));
 
 const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(n || 0));
 
@@ -6336,6 +6543,11 @@ window.addEventListener('keydown', async (e) => {
   if (e.metaKey && e.key === '4') { // ⌘4 — История голоса
     e.preventDefault();
     setView('voicehist');
+    return;
+  }
+  if (e.metaKey && e.key === '5') { // ⌘5 — Среды
+    e.preventDefault();
+    setView('envs');
     return;
   }
 

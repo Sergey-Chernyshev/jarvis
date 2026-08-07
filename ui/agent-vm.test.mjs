@@ -1012,3 +1012,25 @@ test("фаза агента не показывает строки про соз
   assert.match(agent, /агента/);
   assert.doesNotMatch(agent, /виртуальную машину/);
 });
+
+test("all environments include stopped machines, active ones first", () => {
+  // Вкладка «Среды» показывает парк целиком: остановленная машина — не мусор,
+  // её надо видеть, чтобы запустить. activeEnvironments для этого не годится:
+  // она сознательно отбрасывает всё, что не работает прямо сейчас.
+  const entities = [
+    vm("sleepy", "stopped", { projectId: "p1", cwd: "/Users/dev/ticksly", project: "ticksly" }, 10),
+    vm("busy", "running", { projectId: "p2", cwd: "/Users/dev/sup", project: "sup" }, 20),
+    vm("broken", "error", { projectId: "p3", cwd: "/Users/dev/api", project: "api" }, 30),
+  ];
+
+  const all = AgentVm.allEnvironments(entities);
+  assert.equal(all.length, 3, "видны все машины, включая остановленную");
+
+  const stopped = all.find((e) => e.project === "ticksly");
+  assert.ok(stopped, "остановленная машина не пропала");
+  assert.equal(stopped.uiState, "off");
+
+  const at = (name) => all.findIndex((e) => e.project === name);
+  assert.ok(at("sup") < at("ticksly"), "работающая машина выше остановленной");
+  assert.ok(at("api") < at("ticksly"), "сломанная машина выше остановленной");
+});

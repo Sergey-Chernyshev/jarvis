@@ -604,6 +604,38 @@
       );
   }
 
+  /* Парк целиком — для вкладки «Среды». activeEnvironments отбрасывает всё,
+     что не работает прямо сейчас: для полосы над списком чатов это верно, но
+     на вкладке остановленная машина нужна — её оттуда запускают. */
+  function allEnvironments(entities) {
+    const runs = newestByProject(entities, "agent_run");
+    return owned(entities, "vm")
+      .map((entity) => {
+        const attrs = asObject(entity.attrs);
+        const run = runs.get(projectKey(entity)) || null;
+        return {
+          id: entity.id,
+          projectId: asString(attrs.projectId) || asString(attrs.cwd),
+          cwd: asString(attrs.cwd),
+          project:
+            asString(attrs.project) ||
+            asString(attrs.cwd).split("/").filter(Boolean).at(-1) ||
+            "Project",
+          vm: entity,
+          run,
+          uiState: environmentState(entity, run),
+          updatedAt: Math.max(entityTime(entity), entityTime(run)),
+        };
+      })
+      // Сначала то, с чем надо что-то делать, потом спящие. Внутри группы —
+      // по свежести: недавняя машина вероятнее нужна снова.
+      .sort(
+        (a, b) =>
+          (ACTIVE_RANK[a.uiState] ?? 99) - (ACTIVE_RANK[b.uiState] ?? 99) ||
+          b.updatedAt - a.updatedAt,
+      );
+  }
+
   function mergeEvents(current, incoming) {
     const bySeq = new Map();
     for (const event of [...(current || []), ...(incoming || [])]) {
@@ -859,6 +891,7 @@
   return {
     OWNER,
     activeEnvironments,
+    allEnvironments,
     backendAvailable,
     composePrompt,
     configuredBackends,

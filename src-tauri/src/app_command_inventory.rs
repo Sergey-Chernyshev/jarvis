@@ -35,6 +35,8 @@ macro_rules! with_app_commands {
             ("entities_get", crate::ipc::entities_get, ["main"]),
             ("agent_vm_profiles_get", crate::ipc::agent_vm_profiles_get, ["main"]),
             ("agent_vm_profile_set", crate::ipc::agent_vm_profile_set, ["main"]),
+            ("agent_vm_settings_get", crate::ipc::agent_vm_settings_get, ["main"]),
+            ("agent_vm_settings_set", crate::ipc::agent_vm_settings_set, ["main"]),
             ("project_manager_state_get", crate::ipc::project_manager_state_get, ["main"]),
             ("project_manager_folder_pick", crate::ipc::project_manager_folder_pick, ["main"]),
             ("project_manager_favorite_set", crate::ipc::project_manager_favorite_set, ["main"]),

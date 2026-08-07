@@ -81,6 +81,33 @@ pub fn settings_repair(app: AppHandle) -> Result<crate::settings::RepairOutcome,
     Daemon::get(&app).settings.repair()
 }
 
+/// Настройки Agent VM, общие для всех сред. Живут в `plugins.agent-vm`,
+/// как настройки power-плагинов: отдельного файла им заводить незачем.
+///
+/// Дефолты повторяют то, что сегодня зашито в код: 4 CPU и 4 ГиБ из
+/// PROJECT_SPEC, память только своего проекта, автоостановки нет.
+#[tauri::command]
+pub fn agent_vm_settings_get(app: AppHandle) -> Value {
+    Daemon::get(&app).settings.plugin(
+        "agent-vm",
+        json!({
+            "memoryScope": "project",
+            "cpus": 4,
+            "memory": "4GiB",
+            "idleStopMinutes": 0
+        }),
+    )
+}
+
+#[tauri::command]
+pub fn agent_vm_settings_set(app: AppHandle, patch: Value) -> Value {
+    let d = Daemon::get(&app);
+    if let Some(map) = patch.as_object() {
+        d.settings.set_plugin("agent-vm", map.clone());
+    }
+    agent_vm_settings_get(app)
+}
+
 #[tauri::command]
 pub fn plugin_manager_request(
     app: AppHandle,

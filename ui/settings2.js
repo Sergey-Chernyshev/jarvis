@@ -974,6 +974,7 @@
     { pane: "launch", label: "Запуск", icon: "terminal", ic: "green" },
     { sep: true },
     { pane: "service", label: "Под капотом", icon: "cpu", ic: "purple" },
+    { pane: "envs", label: "Среды", icon: "cpu", ic: "teal" },
     { pane: "integration", label: "Интеграция", icon: "cable", ic: "teal" },
     { pane: "about", label: "О программе", icon: "info", ic: "gray" },
   ];
@@ -2361,6 +2362,125 @@
     );
   }
 
+  // 9б. Среды (Agent VM) — глобальные значения для всех VM.
+  //
+  // Отдельного «технического мира» у Agent VM нет (спека runtime, §11):
+  // состояние машин живёт своей вкладкой, а настройки — здесь, теми же
+  // строками, что и всё остальное.
+  async function renderEnvs(pane) {
+    pane.appendChild(el("div.dtitle", { text: "Среды" }));
+    const _sk = skelGroup(3);
+    pane.appendChild(_sk);
+    const v = await safe(() => window.jarvis.agentVmSettingsGet(), null);
+    _sk.remove();
+
+    if (!v) {
+      const group = el("div.dgroup");
+      group.appendChild(
+        drow(
+          "Недоступно",
+          "Не удалось получить настройки сред.",
+          el("span.sval", { text: "нет данных" }),
+        ),
+      );
+      pane.appendChild(group);
+      return;
+    }
+
+    const save = (patch) =>
+      fire(() => window.jarvis.agentVmSettingsSet(patch));
+
+    pane.appendChild(el("div.dsection", { text: "Память" }));
+    const mem = el("div.dgroup");
+    mem.appendChild(
+      drow(
+        "Память проектов Claude",
+        v.memoryScope === "all"
+          ? "В каждую VM едет память всех проектов. Чужие ключи каталогов Claude не подхватит автоматически."
+          : "Каждая VM видит память только своего проекта.",
+        segmented(
+          [
+            { value: "project", label: "Только свой" },
+            { value: "all", label: "Все" },
+          ],
+          v.memoryScope || "project",
+          (value) => {
+            save({ memoryScope: value });
+            reRenderPane("envs");
+          },
+        ),
+      ),
+    );
+    mem.appendChild(
+      drow(
+        "Память Codex",
+        "MEMORY.md, сырые записи, выжимки сессий и расширения — переносятся целиком.",
+        el("span.sval.on", { text: "целиком" }),
+      ),
+    );
+    pane.appendChild(mem);
+
+    pane.appendChild(el("div.dsection", { text: "Новые машины" }));
+    const res = el("div.dgroup");
+    res.appendChild(
+      drow(
+        "Процессоры",
+        "Применяется при создании VM. Существующие машины не трогает.",
+        segmented(
+          [
+            { value: 2, label: "2" },
+            { value: 4, label: "4" },
+            { value: 8, label: "8" },
+          ],
+          Number(v.cpus) || 4,
+          (value) => save({ cpus: value }),
+        ),
+      ),
+    );
+    res.appendChild(
+      drow(
+        "Память",
+        "Оперативная память гостя.",
+        segmented(
+          [
+            { value: "4GiB", label: "4 ГиБ" },
+            { value: "8GiB", label: "8 ГиБ" },
+            { value: "16GiB", label: "16 ГиБ" },
+          ],
+          v.memory || "4GiB",
+          (value) => save({ memory: value }),
+        ),
+      ),
+    );
+    pane.appendChild(res);
+
+    pane.appendChild(el("div.dsection", { text: "Поведение" }));
+    const beh = el("div.dgroup");
+    beh.appendChild(
+      drow(
+        "Выключать простаивающие",
+        // Это выключение, а не пауза: процессы внутри гибнут. Поэтому по
+        // умолчанию никогда — таймер однажды убьёт живой dev-сервер.
+        Number(v.idleStopMinutes) > 0
+          ? "VM выключится после простоя. Процессы внутри погибнут."
+          : "Выключено: неожиданное выключение убивает dev-серверы в VM.",
+        segmented(
+          [
+            { value: 0, label: "Никогда" },
+            { value: 30, label: "30 мин" },
+            { value: 120, label: "2 ч" },
+          ],
+          Number(v.idleStopMinutes) || 0,
+          (value) => {
+            save({ idleStopMinutes: value });
+            reRenderPane("envs");
+          },
+        ),
+      ),
+    );
+    pane.appendChild(beh);
+  }
+
   async function renderService(pane) {
     pane.appendChild(el("div.dtitle", { text: "Под капотом" }));
     const _sk = skelGroup(3);
@@ -2945,6 +3065,7 @@
     keys: renderKeys,
     launch: renderLaunch,
     service: renderService,
+    envs: renderEnvs,
     integration: renderIntegration,
     about: renderAbout,
   };

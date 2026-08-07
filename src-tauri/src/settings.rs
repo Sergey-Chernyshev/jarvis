@@ -808,4 +808,40 @@ mod persistence_tests {
         assert!(!outcome.health.has_errors());
         let _ = fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn plugin_settings_keep_defaults_for_untouched_keys() {
+        // Настройки Agent VM сохраняются по одной: пользователь трогает CPU,
+        // остальные ключи остаются дефолтными. Если бы set_plugin заменял блок
+        // целиком, каждая правка молча обнуляла бы соседние поля.
+        let dir = temp_dir("plugin-merge");
+        let store = store_at(&dir);
+        let defaults = json!({
+            "memoryScope": "project",
+            "cpus": 4,
+            "memory": "4GiB",
+            "idleStopMinutes": 0
+        });
+
+        let fresh = store.plugin("agent-vm", defaults.clone());
+        assert_eq!(fresh["cpus"], 4, "без записи отдаются дефолты");
+
+        let mut patch = Map::new();
+        patch.insert("cpus".into(), json!(8));
+        store.set_plugin("agent-vm", patch);
+
+        let after = store.plugin("agent-vm", defaults.clone());
+        assert_eq!(after["cpus"], 8, "сохранённое значение победило дефолт");
+        assert_eq!(after["memory"], "4GiB", "соседний ключ не потерялся");
+        assert_eq!(after["memoryScope"], "project");
+
+        // Новый ключ в дефолтах доезжает до старого сохранённого блока
+        let extended = store.plugin(
+            "agent-vm",
+            json!({ "cpus": 4, "memory": "4GiB", "newKnob": true }),
+        );
+        assert_eq!(extended["newKnob"], true);
+        assert_eq!(extended["cpus"], 8, "сохранённое всё ещё сильнее дефолта");
+        let _ = fs::remove_dir_all(dir);
+    }
 }

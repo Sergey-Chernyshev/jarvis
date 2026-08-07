@@ -94,6 +94,8 @@
     setAgentVmFocus: (projectId, runId) =>
       invoke('agent_vm_focus', { projectId: projectId || null, runId: runId || null }),
     agentVmOperationAck: (requestId) => invoke('agent_vm_operation_ack', { requestId }),
+    agentVmSettingsGet: () => invoke('agent_vm_settings_get'),
+    agentVmSettingsSet: (patch) => invoke('agent_vm_settings_set', { patch }),
     getAgentVmCommands: (projectId, cwd, backend) =>
       invoke('agent_vm_commands_get', { projectId, cwd, backend }),
     agentVmTerminalEnsure: (projectId, backend, cols, rows) =>

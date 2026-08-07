@@ -1078,3 +1078,21 @@ test("environments tab shows only facts the backend actually has", () => {
   assert.match(tab, /envConfirmStop/);
   assert.match(tab, /Машина, диск и файлы сохранятся/);
 });
+
+test("VM settings live in the settings window, not a separate world", () => {
+  // Спека runtime (§11) прямо запрещает Agent VM отдельный «технический мир».
+  // Настройки должны стоять в общем окне настроек теми же строками, что и всё
+  // остальное, а храниться — в plugins.agent-vm, как у power-плагинов.
+  const settings = readFileSync(new URL("./settings2.js", import.meta.url), "utf8");
+  const bridge = readFileSync(new URL("./bridge.js", import.meta.url), "utf8");
+
+  assert.match(settings, /pane: "envs", label: "Среды"/);
+  assert.match(settings, /envs: renderEnvs/);
+  assert.match(settings, /agentVmSettingsGet/);
+  assert.match(bridge, /agent_vm_settings_get/);
+  assert.match(bridge, /agent_vm_settings_set/);
+
+  // Автоостановка по умолчанию выключена: это выключение, а не пауза
+  assert.match(settings, /Выключать простаивающие/);
+  assert.match(settings, /убивает dev-серверы/);
+});

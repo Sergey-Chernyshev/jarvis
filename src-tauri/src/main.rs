@@ -25,6 +25,7 @@ mod ipc;
 mod launch; // запуск новой/возобновляемой сессии в терминале из вкладки «Проекты»
 mod limits;
 mod log;
+mod loops; // режим «Циклы»: рутина, которую агент крутит сам — с концом и стенами
 mod macos;
 mod metrics;
 mod model;

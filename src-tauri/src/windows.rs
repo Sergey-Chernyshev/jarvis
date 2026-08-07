@@ -117,6 +117,18 @@ pub fn apply_mode(d: &Arc<Daemon>) {
         return;
     };
     let window_mode = d.settings.string("mode") == "window";
+    // Место в доке — часть режима, а не косметика: без иконки окно нельзя
+    // вернуть ни ⌘Tab, ни кликом, и оно выглядит «пропавшим». Раньше политика
+    // ставилась только на старте, поэтому переключение режима на лету
+    // оставляло окно без дока до перезапуска.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = d.app.set_activation_policy(if window_mode {
+            tauri::ActivationPolicy::Regular
+        } else {
+            tauri::ActivationPolicy::Accessory
+        });
+    }
     let _ = win.set_resizable(window_mode);
     let _ = win.set_maximizable(window_mode);
     let _ = win.set_minimizable(window_mode);
@@ -430,23 +442,37 @@ pub fn hide_panel(d: &Arc<Daemon>) {
 
 pub fn toggle_panel(d: &Arc<Daemon>) {
     if panel_visible(d) {
+        // Та же логика, что у хоткея: окно обычно стоит под чужими окнами,
+        // и клик по трею по нему — это «покажи», а не «спрячь». Прячем лишь
+        // когда оно уже в фокусе, то есть человек видит его прямо сейчас.
+        if window_mode(d) && !panel_focused(d) {
+            show_panel_focused(d);
+            return;
+        }
         hide_panel(d);
     } else {
         show_panel(d);
     }
 }
 
+/// Оконный режим по настройкам.
+fn window_mode(d: &Arc<Daemon>) -> bool {
+    d.settings.string("mode") == "window"
+}
+
+/// Окно сейчас в фокусе?
+fn panel_focused(d: &Arc<Daemon>) -> bool {
+    d.app
+        .get_webview_window("main")
+        .and_then(|w| w.is_focused().ok())
+        .unwrap_or(false)
+}
+
 pub fn toggle_hotkey_panel(d: &Arc<Daemon>) {
     if panel_visible(d) {
         // Окно живёт под другими окнами: ⌘J по нему должен поднимать, а не прятать.
         // Прячем только когда оно уже в фокусе — тогда хоткей читается как «убрать».
-        if d.settings.string("mode") == "window"
-            && !d
-                .app
-                .get_webview_window("main")
-                .and_then(|w| w.is_focused().ok())
-                .unwrap_or(false)
-        {
+        if window_mode(d) && !panel_focused(d) {
             show_panel_focused(d);
             return;
         }

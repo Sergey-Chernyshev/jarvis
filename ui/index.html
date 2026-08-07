@@ -223,6 +223,13 @@
   .badge.host { color: var(--ink-faint); }
   /* бейдж агента (codex и т.п.) — тональная краска, чтобы отличать бэкенды */
   .badge.agent { color: var(--accent-ink); background: var(--accent-soft); }
+  /* бейдж удалённого узла: сессия идёт не на этой машине. Контур вместо
+     заливки — как точка «закончила»: отличаем формой, а не новым цветом */
+  .badge.remote {
+    color: var(--ink-mute);
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--line-strong);
+  }
 
   .gitbranch {
     font-size: 12px;
@@ -303,9 +310,38 @@
   .hrow.selected .hcopy, .hrow:hover .hcopy { visibility: visible; }
   .hhint { font-size: 12px; color: var(--ink-faint); padding: 4px 8px 8px; }
   .hrow .hchev { font-size: 15px; color: var(--ink-faint); flex: none; }
-  /* хлебная крошка «‹ Проекты» внутри проекта */
+  /* хлебная крошка «‹ Проекты» / «‹ Машины» — шаг на уровень вверх */
   .hgroup .hback { font-weight: 500; color: var(--ink-mute); cursor: default; }
   .hgroup .hback:hover { color: var(--ink); }
+
+  /* уровень машин: точка «на связи» и приглушённая строка узла, до которого
+     не достучались. Отличаем формой и тоном, а не отдельным цветом */
+  .hrow .hdot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--ink-faint); flex: none;
+  }
+  .hrow.off .hdot { background: transparent; box-shadow: inset 0 0 0 1px var(--ink-faint); }
+  .hrow.off .htitle { color: var(--ink-mute); }
+  /* причина отказа узла бывает длинной — метке нужно право сжиматься */
+  .hrow .hmeta-wide {
+    flex: 0 1 auto; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* у чата с узла заголовка нет — вместо него время и id, тоном потише */
+  .hrow .htitle.dim { color: var(--ink-mute); font-variant-numeric: tabular-nums; }
+
+  /* «Новый проект»: строка-переключатель и форма пути под ней */
+  .hrow.hnew .htitle { color: var(--ink-mute); }
+  .hrow.hnew.open .htitle { color: var(--ink); }
+  .hnewform { display: flex; align-items: center; gap: 8px; padding: 0 16px 8px; }
+  .hnewform input {
+    flex: 1; min-width: 0; height: 32px; padding: 0 10px;
+    background: var(--fill-1); border: 1px solid var(--line);
+    border-radius: var(--r-row); outline: none;
+    font-family: inherit; font-size: 13px; color: var(--ink);
+  }
+  .hnewform input:focus { border-color: var(--line-strong); background: transparent; }
+  .hnewform input::placeholder { color: var(--ink-faint); }
 
   /* ---------- статистика usage ---------- */
   .stats { padding: 20px 24px 64px; overflow-y: auto; }
@@ -1607,6 +1643,7 @@
       <div class="tab" id="tabHistory">Проекты <span class="tabkey">⌘2</span></div>
       <div class="tab" id="tabStats">Статистика <span class="tabkey">⌘3</span></div>
       <div class="tab" id="tabVoice">Голос <span class="tabkey">⌘4</span></div>
+      <div class="tab" id="tabLoops">Циклы <span class="tabkey">⌘5</span></div>
       <span class="spacer"></span>
       <div class="tab icon" id="tabSettings" title="Настройки · ⌘,">
         <!-- lucide: sliders-horizontal -->
@@ -1626,6 +1663,8 @@
           </button>
           <span class="chattitle" id="chatTitle"></span>
           <span class="badge" id="chatModel" hidden></span>
+          <!-- имя удалённого узла: агент работает не на этой машине -->
+          <span class="badge remote" id="chatRemote" hidden></span>
           <button id="sumToggle" class="sumtoggle" title="Сводка ходов / полная лента">Сводка</button>
           <span class="badge host" id="chatChannel" hidden>вне терминала</span>
           <span class="spacer"></span>
@@ -1746,6 +1785,7 @@
         <div class="qvfoot" id="qFoot"></div>
       </div>
       <div class="stats" id="stats" hidden></div>
+      <div class="loops" id="loops" hidden></div>
       <div class="history" id="history" hidden></div>
       <div class="settings" id="settings" hidden>
         <div class="stitle">Основное</div>
@@ -1864,6 +1904,7 @@
   <script src="./question-answer.js"></script>
   <script src="./settings2.js"></script>
   <script src="./voice-history.js"></script>
+  <script src="./loops.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

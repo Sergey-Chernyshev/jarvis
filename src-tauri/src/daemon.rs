@@ -55,11 +55,19 @@ fn stop_hook_reply(
         .map(String::from)
 }
 
-fn prefer_final_reply(
-    hook_reply: Option<String>,
-    transcript_fallback: impl FnOnce() -> Option<String>,
-) -> Option<String> {
-    hook_reply.or_else(transcript_fallback)
+/// Асинхронна из-за удалённых сессий: их транскрипт лежит на другой машине.
+/// Ленивость тут не украшение, а суть: если Stop уже принёс финал, читать
+/// транскрипт нельзя — у Codex rollout в этот момент ещё не дописан, а у
+/// удалённой сессии это лишний круг по ssh.
+async fn prefer_final_reply<F, Fut>(hook_reply: Option<String>, transcript_fallback: F) -> Option<String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    match hook_reply {
+        Some(r) => Some(r),
+        None => transcript_fallback().await,
+    }
 }
 
 /// Строит массив мета-сегментов карточки тоста на основе настроек `notify.content`
@@ -192,6 +200,11 @@ pub struct Daemon {
     /// Мы поставили чужое медиа на паузу на время диктовки (как при озвучке). Чтобы
     /// возобновить ТОЛЬКО то, что паузили сами, и не трогать ручную паузу юзера.
     media_ducked: AtomicBool,
+    /// Удалённые узлы (VPS): ssh-туннели и поллеры их событий. События оттуда
+    /// приходят в тот же `reduce`, что и локальные, — реестр сессий один.
+    pub remotes: std::sync::Arc<crate::remote::Remotes>,
+    /// Режим «Циклы»: конфигурации, журналы запусков и признак занятости.
+    pub loops: std::sync::Arc<crate::loops::Loops>,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -340,6 +353,8 @@ impl Daemon {
             convo_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             interaction,
             media_ducked: AtomicBool::new(false),
+            remotes: std::sync::Arc::new(crate::remote::Remotes::new()),
+            loops: std::sync::Arc::new(crate::loops::Loops::new()),
         }
     }
 
@@ -852,6 +867,87 @@ impl Daemon {
         self.sessions.lock().unwrap().get(sid).cloned()
     }
 
+    /* ================= удалённые узлы ================= */
+
+    /// Поднять узлы из настроек. Повторный вызов (список поменяли) гасит
+    /// прежние и поднимает заново — см. `Remotes::start`.
+    ///
+    /// Приёмник событий держит слабую ссылку: сильная замкнула бы цикл
+    /// `Daemon → Remotes → задача → Daemon`, и демон не разрушился бы никогда.
+    pub fn start_remotes(self: &std::sync::Arc<Self>) {
+        let cfgs = crate::remote::load_remotes(&self.settings);
+        let weak = std::sync::Arc::downgrade(self);
+        let sink: crate::remote::Sink = std::sync::Arc::new(move |batch| {
+            if let Some(d) = weak.upgrade() {
+                d.apply_remote_batch(batch);
+            }
+        });
+        self.remotes.start(cfgs, sink);
+    }
+
+    /// Партия событий с узла. Конверты уже помечены (`stamp`) — редьюсер ест их
+    /// как локальные, вся интерпретация общая.
+    fn apply_remote_batch(self: &std::sync::Arc<Self>, batch: crate::remote::Batch) {
+        for evt in &batch.events {
+            self.reduce(evt);
+        }
+        if batch.gap {
+            self.after_remote_gap(&batch.remote);
+        }
+    }
+
+    /// Кольцевой буфер узла переполнился — часть событий потеряна навсегда.
+    /// Состояние сессий этого узла восстанавливаем из единственного уцелевшего
+    /// источника правды: транскриптов. Делать вид, что ничего не потерялось,
+    /// нельзя — статусы застряли бы в том, что было до дырки.
+    fn after_remote_gap(self: &std::sync::Arc<Self>, remote: &str) {
+        let sids: Vec<String> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|s| s.remote.as_deref() == Some(remote))
+            .map(|s| s.id.clone())
+            .collect();
+        crate::log::line(&format!(
+            "[remote] {remote}: перечитываю мету {} сессий после потери событий",
+            sids.len()
+        ));
+        for sid in sids {
+            self.refresh_meta(sid);
+        }
+    }
+
+    /// Забыть сессии узла — его убрали из настроек. Иначе в списке остались бы
+    /// строки машины, за которой уже никто не следит: событий с неё не придёт,
+    /// а сверка живости их не тронет (узла нет в ответе — судить не по чему).
+    pub fn forget_remote_sessions(self: &std::sync::Arc<Self>, remote: &str) {
+        let changed = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let before = sessions.len();
+            sessions.retain(|_, s| s.remote.as_deref() != Some(remote));
+            sessions.len() != before
+        };
+        if changed {
+            self.push();
+        }
+    }
+
+    /// Куда слать вставки этой сессии. Узел, которого нет в реестре (его убрали
+    /// из настроек, а сессия осталась в списке), — это ошибка, а не «сделаем
+    /// локально»: локальная пана с тем же именем принадлежит другому агенту,
+    /// и промпт уехал бы не туда.
+    pub fn pane_target(&self, s: &Session) -> Result<crate::tmux::Target, String> {
+        match &s.remote {
+            None => Ok(crate::tmux::Target::Local),
+            Some(name) => self
+                .remotes
+                .node(name)
+                .map(crate::tmux::Target::Remote)
+                .ok_or_else(|| format!("Узел «{name}» не подключён")),
+        }
+    }
+
     /// Человекочитаемая метка сессии для карточек подтверждения (проект + кратко).
     /// Использует поле `Session::project` (уже basename cwd, выставляется редьюсером).
     /// Нет сессии → короткая форма id.
@@ -930,7 +1026,11 @@ impl Daemon {
                 .and_then(Value::as_str)
                 .filter(|p| !p.is_empty())
             {
-                for g in evict_pane(&mut sessions, &sid, pane) {
+                let from = evt_obj
+                    .get("remote")
+                    .and_then(Value::as_str)
+                    .filter(|r| !r.is_empty());
+                for g in evict_pane(&mut sessions, &sid, pane, from) {
                     crate::log::line(&format!(
                         "[evict] пана {pane} → sid={}, снят призрак sid={}",
                         ellipsize(&sid, 8),
@@ -954,6 +1054,17 @@ impl Daemon {
             if let Some(agent) = evt_obj.get("agent").and_then(Value::as_str) {
                 s.agent = Some(agent.to_string());
             }
+            // Событие с удалённого узла помечаем именем узла: по нему потом
+            // маршрутизируются ответ, пульт и чтение транскрипта. Сам id пришёл
+            // уже с префиксом «<узел>:», поэтому сессии с разных машин не
+            // сталкиваются, а редьюсер остаётся один на всех.
+            if let Some(remote) = evt_obj
+                .get("remote")
+                .and_then(Value::as_str)
+                .filter(|r| !r.is_empty())
+            {
+                s.remote = Some(remote.to_string());
+            }
             // Codex кладёт модель в КАЖДЫЙ хук-payload — ставим напрямую (у Claude
             // модель майнится из транскрипта в refresh_meta). Не перетираем свежий
             // ручной выбор: тот же 30с-guard по model_at, что и в refresh_meta.
@@ -972,10 +1083,15 @@ impl Daemon {
             if let Some(pane) = evt_obj.get("tmux_pane").and_then(Value::as_str) {
                 if !pane.is_empty() && s.tmux_pane.as_deref() != Some(pane) {
                     s.tmux_pane = Some(pane.to_string());
-                    effects.push(Effect::ResolveTmuxName {
-                        sid: sid.clone(),
-                        pane: pane.to_string(),
-                    });
+                    // Имя tmux-сессии спрашиваем у ЛОКАЛЬНОГО сервера — для паны
+                    // с узла он ответит про свою пану с тем же номером, то есть
+                    // соврёт. Бейдж узла в строке и так говорит, где это идёт.
+                    if s.remote.is_none() {
+                        effects.push(Effect::ResolveTmuxName {
+                            sid: sid.clone(),
+                            pane: pane.to_string(),
+                        });
+                    }
                 }
             }
             if let Some(host) = evt_obj.get("host").and_then(Value::as_str) {
@@ -997,7 +1113,10 @@ impl Daemon {
             if let Some(pid) = evt_obj.get("pid").and_then(Value::as_i64) {
                 if pid > 0 && s.pid != Some(pid) {
                     s.pid = Some(pid);
-                    if s.app.is_none() {
+                    // Родителя ищем в ЭТОЙ таблице процессов: для pid с узла это
+                    // в лучшем случае пусто, в худшем — чужое приложение с
+                    // совпавшим номером. У удалённой сессии GUI-владельца нет.
+                    if s.app.is_none() && s.remote.is_none() {
                         effects.push(Effect::ResolveGuiApp {
                             sid: sid.clone(),
                             pid,
@@ -1286,7 +1405,7 @@ impl Daemon {
             if d.tail.active_session().as_deref() != Some(sid.as_str()) {
                 return;
             }
-            let Some((be, entries)) = d.turn_entries(&sid) else { return };
+            let Some((be, entries)) = d.turn_entries(&sid).await else { return };
             let (_items, turns) = crate::turns::segment(be, &entries);
             let Some(t) = turns.iter().rev().find(|t| t.span.complete) else { return };
             if crate::turnsum::load_cards(&sid).contains_key(&t.span.key) {
@@ -1296,15 +1415,39 @@ impl Daemon {
         });
     }
 
+    /// Хвост транскрипта сессии — с той машины, где она живёт.
+    ///
+    /// У удалённой сессии путь принадлежит чужой файловой системе: прочитать
+    /// его локально в лучшем случае не выйдет, в худшем — откроется
+    /// одноимённый файл этой машины. Поэтому ВСЁ, что разбирает транскрипт
+    /// (мета, сводки, финальный ответ, карточки ходов), ходит сюда.
+    pub(crate) async fn transcript_text(&self, s: &Session, max_bytes: u64) -> Option<String> {
+        let tr = s.transcript.as_deref()?;
+        match &s.remote {
+            None => crate::transcript::read_recent_text(std::path::Path::new(tr), max_bytes),
+            Some(name) => {
+                let node = self.remotes.node(name)?;
+                let client = node.client().ok()?;
+                match client.tail_text(tr, max_bytes).await {
+                    Ok(chunk) => chunk.map(|(text, _)| text),
+                    Err(e) => {
+                        crate::log::line(&format!("[remote] {name}: транскрипт не прочитан — {e}"));
+                        None
+                    }
+                }
+            }
+        }
+    }
+
     /// Транскрипт сессии → (бэкенд, записи). None — сессии/файла нет.
-    pub(crate) fn turn_entries(
+    pub(crate) async fn turn_entries(
         &self,
         sid: &str,
     ) -> Option<(&'static dyn crate::backend::Backend, Vec<Value>)> {
         let s = self.session(sid)?;
-        let tr = s.transcript?;
         let be = crate::backend::backend(crate::backend::Agent::from_opt(s.agent.as_deref()));
-        Some((be, be.read_entries(std::path::Path::new(&tr), 512 * 1024)))
+        let text = self.transcript_text(&s, 512 * 1024).await?;
+        Some((be, be.entries_from_text(&text)))
     }
 
     /// Один LLM-вызов сводки хода: промпт → парс/валидация → кириллица-гейт с
@@ -1363,7 +1506,7 @@ impl Daemon {
     pub(crate) fn turn_backfill(self: &std::sync::Arc<Self>, sid: String, max: usize) {
         let d = self.clone();
         tauri::async_runtime::spawn(async move {
-            let Some((be, entries)) = d.turn_entries(&sid) else { return };
+            let Some((be, entries)) = d.turn_entries(&sid).await else { return };
             let (_items, turns) = crate::turns::segment(be, &entries);
             let cards = crate::turnsum::load_cards(&sid);
             let todo: Vec<crate::turns::Turn> = turns
@@ -1460,17 +1603,23 @@ impl Daemon {
             let s = self.session(sid)?;
             // финальный ответ — по бэкенду: Claude из JSONL-цепочки, Codex из rollout
             let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
-            let reply = prefer_final_reply(hook_reply, || {
-                let tr = s.transcript.as_deref()?;
-                match agent {
-                    crate::backend::Agent::Claude => transcript::full_final_reply(tr),
-                    crate::backend::Agent::Codex => {
-                        let entries = crate::backend::backend(agent)
-                            .read_entries(std::path::Path::new(tr), 512 * 1024);
-                        crate::backend::codex_transcript::full_final_reply(&entries)
-                    }
+            // Хук финал не принёс — достаём из транскрипта ТОЙ машины, где
+            // живёт сессия (для удалённой это круг по ssh к её узлу).
+            let reply = prefer_final_reply(hook_reply, || async {
+                let is_claude = agent == crate::backend::Agent::Claude;
+                let max = if is_claude { 256 * 1024 } else { 512 * 1024 };
+                let text = self.transcript_text(&s, max).await?;
+                if is_claude {
+                    transcript::final_reply_from(transcript::chain_from_entries(
+                        transcript::entries_from_text(&text),
+                    ))
+                } else {
+                    crate::backend::codex_transcript::full_final_reply(
+                        &crate::backend::backend(agent).entries_from_text(&text),
+                    )
                 }
-            })?;
+            })
+            .await?;
             // длинный ответ режем — haiku отвечает быстрее, а сути хватает
             let reply = ellipsize(&reply, 3000);
             let prompt = format!(
@@ -1529,24 +1678,33 @@ impl Daemon {
             // с невыданным hook-trust мог пропустить SessionStart → payload без пути.
             // Safety-net: находим rollout по session_id и персистим, чтобы
             // chat_open и мета (заголовок/модель) всё равно работали.
-            let tr = match snap.transcript.clone() {
-                Some(tr) => tr,
-                None if is_codex => {
+            // Поиск rollout по sid шарит по ЭТОЙ файловой системе — для сессии
+            // с узла он в лучшем случае ничего не найдёт, в худшем подсунет
+            // чужой одноимённый лог. Удалённой сессии путь приносит её хук.
+            match snap.transcript.as_ref() {
+                Some(_) => {}
+                None if is_codex && snap.remote.is_none() => {
                     let Some(path) = crate::backend::codex::find_rollout_by_sid(&sid) else {
                         return;
                     };
                     let p = path.to_string_lossy().into_owned();
                     d.with_session(&sid, |s| {
                         if s.transcript.is_none() {
-                            s.transcript = Some(p.clone());
+                            s.transcript = Some(p);
                         }
                     });
-                    p
                 }
                 None => return,
-            };
+            }
 
-            let entries = transcript::read_recent_entries(std::path::Path::new(&tr), 64 * 1024);
+            // читаем с машины сессии: у удалённой путь чужой файловой системы
+            let entries = match d.session(&sid) {
+                Some(s) => match d.transcript_text(&s, 64 * 1024).await {
+                    Some(text) => transcript::entries_from_text(&text),
+                    None => return,
+                },
+                None => return,
+            };
 
             // ветка: Claude — gitBranch в каждой записи; в rollout Codex её нет —
             // фоллбэк для обоих: .git/HEAD по cwd сессии (#24).
@@ -1561,8 +1719,12 @@ impl Daemon {
                 })
             }
             .or_else(|| {
+                // .git читаем на ЭТОЙ машине: у сессии с узла тот же путь может
+                // случайно существовать и здесь — и тогда мы показали бы ветку
+                // чужого рабочего дерева. Лучше без ветки, чем неправильная.
                 snap.cwd
                     .as_deref()
+                    .filter(|_| snap.remote.is_none())
                     .and_then(|cwd| crate::git::branch_of(std::path::Path::new(cwd)))
             });
             // заголовок: Claude — type:ai-title/summary; Codex — первая user-реплика.
@@ -1605,8 +1767,12 @@ impl Daemon {
                             .map(friendly_model)
                     })
                     .or_else(|| {
+                        // Фолбэк роется в ~/.claude/projects ЭТОЙ машины: для
+                        // сессии с узла это в лучшем случае мимо, в худшем —
+                        // модель чужого проекта с тем же путём.
                         snap.cwd
                             .as_deref()
+                            .filter(|_| snap.remote.is_none())
                             .and_then(transcript::read_model_from_project)
                     })
             };
@@ -1753,8 +1919,7 @@ impl Daemon {
             // пересчёт после каждого промта и каждого ответа: кулдауна нет,
             // только пауза, чтобы транскрипт успел дописаться на диск
             tokio::time::sleep(Duration::from_millis(1200)).await;
-            let Some(s) = d.session(&sid) else { return };
-            let Some(tr) = s.transcript.clone() else {
+            let Some(s) = d.session(&sid).filter(|s| s.transcript.is_some()) else {
                 return;
             };
             if !claude_bin::any_service_bin() || !d.busy_take("summary", &sid) {
@@ -1764,8 +1929,11 @@ impl Daemon {
             // лента диалога — по бэкенду сессии (Claude цепочка vs Codex rollout)
             let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
             let be = crate::backend::backend(agent);
+            let Some(text) = d.transcript_text(&s, 512 * 1024).await else {
+                return;
+            };
             let turns: Vec<transcript::ChatItem> = be
-                .read_entries(std::path::Path::new(&tr), 512 * 1024)
+                .entries_from_text(&text)
                 .iter()
                 .flat_map(|e| be.to_chat_items(e))
                 .filter(|i| i.kind == "text")
@@ -1872,21 +2040,32 @@ impl Daemon {
             Ok(None) => None, // tmux не установлен — реестр не трогаем
             Err(()) => Some(std::collections::HashSet::new()), // ошибка = сервер пуст
         };
+        let remote_alive = self.remote_panes().await;
 
         let mut changed = false;
         {
             let mut sessions = self.sessions.lock().unwrap();
             let now = now_ms();
             sessions.retain(|_, s| {
-                // Жив ли claude? Главный критерий — его процесс (pid = $PPID хука).
-                // Ловит и не-tmux сессии (IDE-терминал, pane=None), и фантомы из
-                // state.json после рестарта демона — чего проверка по tmux-пане не
-                // умеет. Нет pid (старые записи) → судим по пане, как раньше.
-                let dead = match s.pid {
-                    Some(pid) if pid > 0 => !pid_alive(pid),
-                    _ => (s.tmux_pane.as_ref())
-                        .zip(alive.as_ref())
-                        .is_some_and(|(pane, set)| !set.contains(pane)),
+                let dead = match &s.remote {
+                    // Сессия с узла: её pid — из таблицы процессов ТОЙ машины.
+                    // Локально он не значит ничего (а совпасть с чужим живым
+                    // процессом — вполне может), поэтому судим только по панам
+                    // узла. Узла нет в ответе — связи нет, судить не по чему.
+                    Some(name) => match remote_alive.get(name) {
+                        Some(set) => (s.tmux_pane.as_ref())
+                            .is_some_and(|pane| !set.contains(pane)),
+                        None => false,
+                    },
+                    // Жив ли claude? Главный критерий — его процесс (pid = $PPID
+                    // хука): ловит и не-tmux сессии (IDE-терминал, pane=None), и
+                    // фантомы из state.json после рестарта демона.
+                    None => match s.pid {
+                        Some(pid) if pid > 0 => !pid_alive(pid),
+                        _ => (s.tmux_pane.as_ref())
+                            .zip(alive.as_ref())
+                            .is_some_and(|(pane, set)| !set.contains(pane)),
+                    },
                 };
                 if dead {
                     changed = true;
@@ -1915,6 +2094,41 @@ impl Daemon {
         if changed {
             self.push();
         }
+    }
+
+    /// Живые паны на каждом узле. Узлы, до которых нет связи, в карту НЕ
+    /// попадают: «не смог спросить» и «пан нет» — разные вещи, и путать их
+    /// значит выселять живые сессии на каждом моргании сети.
+    ///
+    /// Узлы опрашиваем параллельно: один зависший VPS не должен задерживать
+    /// сверку остальных дольше её же периода.
+    async fn remote_panes(&self) -> HashMap<String, HashSet<String>> {
+        let nodes = self.remotes.all();
+        if nodes.is_empty() {
+            return HashMap::new();
+        }
+        let mut tasks = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            tasks.push(tokio::spawn(async move {
+                let panes = node.client()?.panes().await?;
+                if !panes.error.is_empty() {
+                    // tmux на той машине не установлен или сервер не поднят —
+                    // это не пустой список пан, а отсутствие ответа
+                    return Err(panes.error);
+                }
+                Ok::<_, String>((
+                    node.cfg.name.clone(),
+                    panes.panes.into_iter().map(|p| p.pane).collect::<HashSet<_>>(),
+                ))
+            }));
+        }
+        let mut out = HashMap::new();
+        for t in tasks {
+            if let Ok(Ok((name, panes))) = t.await {
+                out.insert(name, panes);
+            }
+        }
+        out
     }
 
     /* ================= диагностика / метрики ================= */
@@ -2397,11 +2611,22 @@ fn pid_alive(pid: i64) -> bool {
 /// `session-end` и был заменён новым в той же пане. Снимаем призраков, иначе
 /// ответ, адресованный призраку, уйдёт в живую сессию той же паны (мисроутинг).
 /// Возвращает id выселенных сессий — для лога и обновления UI.
-fn evict_pane(sessions: &mut HashMap<String, Session>, keep_sid: &str, pane: &str) -> Vec<String> {
+fn evict_pane(
+    sessions: &mut HashMap<String, Session>,
+    keep_sid: &str,
+    pane: &str,
+    remote: Option<&str>,
+) -> Vec<String> {
     let ghosts: Vec<String> = sessions
         .iter()
         .filter_map(|(id, s)| {
-            (id.as_str() != keep_sid && s.tmux_pane.as_deref() == Some(pane)).then(|| id.clone())
+            // Пана уникальна В ПРЕДЕЛАХ МАШИНЫ: `%3` на ноуте и `%3` на VPS —
+            // разные паны. Без сверки машины событие с узла выселяло бы живую
+            // локальную сессию с тем же номером, и наоборот.
+            (id.as_str() != keep_sid
+                && s.tmux_pane.as_deref() == Some(pane)
+                && s.remote.as_deref() == remote)
+                .then(|| id.clone())
         })
         .collect();
     for g in &ghosts {
@@ -2420,6 +2645,12 @@ mod tests {
         s
     }
 
+    fn remote_sess(id: &str, pane: &str, node: &str) -> Session {
+        let mut s = sess(id, Some(pane));
+        s.remote = Some(node.to_string());
+        s
+    }
+
     #[test]
     fn evict_pane_drops_ghost_sharing_pane() {
         let mut m = HashMap::new();
@@ -2427,7 +2658,7 @@ mod tests {
         m.insert("live".into(), sess("live", Some("%1"))); // новый claude в той же %1
         m.insert("other".into(), sess("other", Some("%2"))); // другая пана — не трогать
 
-        let evicted = evict_pane(&mut m, "live", "%1");
+        let evicted = evict_pane(&mut m, "live", "%1", None);
 
         assert_eq!(evicted, vec!["ghost".to_string()]);
         assert!(!m.contains_key("ghost"), "призрак должен быть снят");
@@ -2442,13 +2673,33 @@ mod tests {
         m.insert("b".into(), sess("b", Some("%1")));
 
         // событие для b из её собственной паны — никого не выселяем
-        let evicted = evict_pane(&mut m, "b", "%1");
+        let evicted = evict_pane(&mut m, "b", "%1", None);
 
         assert!(evicted.is_empty());
         assert_eq!(
             m.len(),
             2,
             "две параллельные сессии в разных панах живут обе"
+        );
+    }
+
+    #[test]
+    fn evict_pane_does_not_cross_machines() {
+        let mut m = HashMap::new();
+        m.insert("local".into(), sess("local", Some("%1")));
+        m.insert("vps:x".into(), remote_sess("vps:x", "%1", "vps"));
+
+        // номера пан на разных машинах совпадают сплошь и рядом — событие с
+        // узла не должно выселять локальную сессию, и наоборот
+        assert!(evict_pane(&mut m, "vps:x", "%1", Some("vps")).is_empty());
+        assert!(evict_pane(&mut m, "local", "%1", None).is_empty());
+        assert_eq!(m.len(), 2, "обе сессии на месте");
+
+        // а вот призрак на ТОЙ ЖЕ машине выселяется как обычно
+        m.insert("vps:ghost".into(), remote_sess("vps:ghost", "%1", "vps"));
+        assert_eq!(
+            evict_pane(&mut m, "vps:x", "%1", Some("vps")),
+            vec!["vps:ghost".to_string()]
         );
     }
 
@@ -2528,14 +2779,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hook_reply_wins_without_reading_unflushed_rollout() {
-        let reply = prefer_final_reply(Some("свежий ответ".into()), || {
-            panic!("rollout нельзя читать, когда Stop уже принёс финал")
-        });
+    #[tokio::test]
+    async fn hook_reply_wins_without_reading_unflushed_rollout() {
+        let reply = prefer_final_reply(Some("свежий ответ".into()), || async {
+            panic!("транскрипт нельзя читать, когда Stop уже принёс финал")
+        })
+        .await;
         assert_eq!(reply.as_deref(), Some("свежий ответ"));
 
-        let fallback = prefer_final_reply(None, || Some("ответ из rollout".into()));
+        let fallback = prefer_final_reply(None, || async { Some("ответ из rollout".into()) }).await;
         assert_eq!(fallback.as_deref(), Some("ответ из rollout"));
     }
 

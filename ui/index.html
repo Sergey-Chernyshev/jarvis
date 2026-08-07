@@ -2040,6 +2040,218 @@
     gap: 9px;
     padding: 0 6px;
   }
+  /* ── Строка проекта ───────────────────────────────────────────────────
+     Была карточка в две строки с четырьмя иконками-кнопками справа: они
+     соревновались с именем, а низ половины карточек пустовал. Строка отвечает
+     сразу на три вопроса — что за проект, есть ли среда, сколько чатов. */
+  /* ── Шапка проекта ────────────────────────────────────────────────────
+     Слева «кто я» (назад + имя), справа «что делать» (новый чат + среда).
+     Раньше здесь стояли три равнозначные кнопки — они заставляли выбирать
+     там, где выбор почти всегда один и тот же. */
+  .phead {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 2px 12px;
+    border-bottom: 1px solid var(--hairline);
+    margin-bottom: 6px;
+  }
+  .phead-back {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 26px;
+    height: 26px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .phead-back:hover { background: var(--row-hover); color: var(--text); }
+  .phead-kind {
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+  }
+  .phead-name { margin-top: 1px; color: var(--text); font-size: 15px; font-weight: 700; }
+  .phead-gap { flex: 1; }
+  /* Кнопка «Новый чат» — нейтральная подложка, акцент только на плюсе:
+     сплошная заливка спорила бы со статусом среды рядом. */
+  .nc-slot { position: relative; display: inline-flex; }
+  .nc { display: inline-flex; border-radius: 9px; overflow: hidden; }
+  .nc button {
+    border: 0;
+    background: color-mix(in srgb, var(--text) 8%, transparent);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .nc button:hover { background: color-mix(in srgb, var(--text) 14%, transparent); }
+  .nc-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 10px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .nc-main svg { color: var(--accent-text); }
+  .nc-caret { display: grid; place-items: center; width: 24px; height: 26px; }
+  .nc-caret svg { color: var(--muted); }
+  /* Меню прижато к правому краю кнопки: она сама у края окна, и меню с
+     left уехало бы за пределы панели. */
+  .nc-menu {
+    position: absolute;
+    z-index: 40;
+    top: calc(100% + 6px);
+    right: 0;
+    width: 268px;
+    padding: 5px;
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    background: var(--card);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, .5);
+  }
+  .nc-menu-label {
+    padding: 7px 9px 4px;
+    color: var(--faint);
+    font-size: 9.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+  }
+  .nc-menu-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 9px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .nc-menu-row:hover { background: var(--row-hover); color: var(--text); }
+  .nc-menu-row[aria-checked="true"] { background: var(--accent-soft); color: var(--text); }
+  .nc-menu-name { flex: 1; }
+  .nc-menu-note { color: var(--faint); font-size: 10px; }
+  .nc-menu-row svg { color: var(--accent-text); }
+  .nc-menu-sep { height: 1px; margin: 5px 4px; background: var(--hairline); }
+  .nc-menu-foot { margin: 5px 6px 2px; color: var(--faint); font-size: 10.5px; line-height: 1.5; }
+  .phead-vm {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    flex: none;
+    height: 26px;
+    padding: 0 11px;
+    border: 0;
+    border-radius: 9px;
+    background: var(--soft);
+    color: var(--muted);
+    font: inherit;
+    font-size: 11.5px;
+    cursor: pointer;
+  }
+  .phead-vm:hover { background: var(--row-hover); color: var(--text); }
+  .phead-vm.live { background: var(--accent-soft); color: var(--accent-text); }
+  .phead-lamp {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--idle);
+  }
+  .phead-vm.live .phead-lamp { background: var(--done); }
+  /* Иконка окружения у строки чата */
+  .henv { display: grid; place-items: center; flex: none; color: var(--faint); opacity: .75; }
+  .henv.vm { color: var(--vm); opacity: 1; }
+  .henv.working { color: var(--working); }
+  .hsub { flex: none; color: var(--faint); font-size: 10.5px; }
+
+  .pm-row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 52px;
+    padding: 9px 11px;
+    border-radius: 10px;
+    cursor: default;
+  }
+  .pm-row:hover,
+  .pm-row.selected { background: var(--row-hover); }
+  .pm-row.selected::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 2px;
+    height: 22px;
+    margin-top: -11px;
+    border-radius: 0 2px 2px 0;
+    background: var(--accent-text);
+  }
+  .pm-row-copy { min-width: 0; }
+  .pm-row-name { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  .pm-row-title {
+    overflow: hidden;
+    color: var(--text);
+    font-size: 13.5px;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pm-row-path {
+    display: block;
+    margin-top: 2px;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 10px;
+  }
+  .pm-row-gap { flex: 1; }
+  .pm-row-count {
+    flex: none;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Метка среды: куб и слово вместо отдельной строки статуса снизу */
+  .pm-vmmark {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex: none;
+    padding: 2px 6px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--faint);
+    font: inherit;
+    font-size: 10.5px;
+    cursor: pointer;
+  }
+  .pm-vmmark:hover { background: var(--row-hover); color: var(--text); }
+  .pm-vmmark.live { color: var(--vm); }
+  .pm-vmmark svg { opacity: .85; }
+  .pm-row-actions {
+    display: flex;
+    gap: 2px;
+    flex: none;
+    opacity: 0;
+    transition: opacity .13s ease;
+  }
+  .pm-row:hover .pm-row-actions,
+  .pm-row:focus-within .pm-row-actions,
+  .pm-row.selected .pm-row-actions { opacity: 1; }
+
   .pm-card {
     position: relative;
     display: grid;

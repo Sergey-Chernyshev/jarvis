@@ -847,13 +847,19 @@ test("main panel exposes Agent VM workspace, bridge and keyboard contract", () =
   assert.match(primaryUi, /openHistProject\(project\.cwd\)/);
   assert.doesNotMatch(primaryUi, /openAgentVmProject/);
   // Список чатов проекта объединяет обычные сессии с прогонами Agent VM,
-  // помечает VM-строку бейджем и ведёт в рабочее место на нужном прогоне.
+  // помечает VM-строку иконкой и ведёт в рабочее место на нужном прогоне.
   const chatsUi = renderer.slice(
     renderer.indexOf("function renderHistChats(g, q)"),
     renderer.indexOf("function paintHistSel()"),
   );
   assert.match(chatsUi, /AgentVmModel\.mergeProjectChats\(g\.sessions/);
-  assert.match(chatsUi, /className: 'hbadge vm'/);
+  // VM-чат отличим от обычного: бейдж «VM» заменён иконкой окружения —
+  // куб у прошедшего в VM, волна у идущего сейчас, реплика у обычного.
+  // Смысл проверки прежний: у ↵ разное поведение, и это должно быть видно.
+  assert.match(chatsUi, /henv/, "у строки есть иконка окружения");
+  assert.match(chatsUi, /PULSE_PATHS/, "идущий сейчас чат помечен волной");
+  assert.match(chatsUi, /CUBE_PATHS/, "прошедший в VM помечен кубом");
+  assert.match(chatsUi, /BUBBLE_PATHS/, "обычный чат помечен репликой");
   assert.match(chatsUi, /loadHistRuns\(g\.cwd\)/);
   assert.match(renderer, /agentVmCommand\('runtime\.runs'/);
   assert.match(

@@ -4617,6 +4617,8 @@ agentVmEnvironmentButtonEl.addEventListener('click', (event) => {
 });
 agentVmEnvironmentEl.addEventListener('click', (event) => event.stopPropagation());
 document.addEventListener('click', () => {
+  // Клик мимо закрывает меню «Нового чата»: внутри меню всплытие погашено
+  closeNewChatMenu();
   if (!agentVmEnvironmentEl.hidden) {
     agentVmEnvironmentEl.hidden = true;
     agentVmEnvironmentButtonEl.setAttribute('aria-expanded', 'false');
@@ -5063,6 +5065,12 @@ function renderHistProjects(q) {
   paintHistSel();
 }
 
+/* Строка проекта. Карточка с четырьмя иконками-кнопками требовала
+   прицеливания и шумела: звёздочка, стрелки и «VM» соревновались с именем.
+   Теперь строка отвечает на три вопроса сразу — что за проект, есть ли у него
+   среда, сколько внутри чатов, — а действия живут на строке при наведении. */
+const CUBE_PATHS = ['M12 2 3 7v10l9 5 9-5V7z', 'M3 7l9 5 9-5', 'M12 12v10'];
+
 function renderProjectCard(project) {
     const idx = histRows.length;
     histRows.push({ type: 'project', key: project.cwd, project });
@@ -5074,36 +5082,59 @@ function renderProjectCard(project) {
       ? 'working'
       : AgentVmModel.environmentState(project.vm, project.run);
     const row = document.createElement('div');
-    row.className = `pm-card ${uiState}`;
+    row.className = `pm-row ${uiState}`;
     row.dataset.idx = idx;
     row.title = project.cwd;
 
     const copy = document.createElement('div');
-    copy.className = 'pm-card-copy';
-    copy.appendChild(Object.assign(document.createElement('span'), {
-      className: 'pm-card-title',
+    copy.className = 'pm-row-copy';
+    const nameLine = document.createElement('div');
+    nameLine.className = 'pm-row-name';
+    nameLine.appendChild(Object.assign(document.createElement('span'), {
+      className: 'pm-row-title',
       textContent: project.name,
     }));
+
+    // Метка среды — куб и слово. Раньше состояние жило отдельной строкой
+    // снизу, из-за чего у половины карточек низ пустовал.
+    const vmState = project.vm?.state;
+    const vmLive = terminalBackend || ['running', 'ready', 'working'].includes(vmState);
+    const vmKnown = vmLive || ['stopped', 'provisioning', 'creating', 'starting', 'error']
+      .includes(vmState);
+    if (vmKnown) {
+      // Метка среды — она же вход в рабочее место VM. Отдельная кнопка «VM»
+      // рядом с именем спорила с ним за внимание; клик по самой метке
+      // очевиднее и не добавляет в строку ещё один элемент.
+      const mark = document.createElement('button');
+      mark.type = 'button';
+      mark.className = `pm-vmmark${vmLive ? ' live' : ''}`;
+      mark.title = 'Открыть рабочее место Agent VM';
+      mark.addEventListener('click', (event) => {
+        event.stopPropagation();
+        openAgentVmProject(project);
+      });
+      mark.appendChild(svgIcon(CUBE_PATHS, 12));
+      mark.appendChild(Object.assign(document.createElement('span'), {
+        textContent: terminalBackend
+          ? `${terminalBackend === 'codex' ? 'Codex' : 'Claude'} работает`
+          : vmLive ? 'VM работает'
+            : vmState === 'stopped' ? 'VM спит'
+              : AgentVmModel.stateLabel(uiState),
+      }));
+      nameLine.appendChild(mark);
+    }
+    copy.appendChild(nameLine);
     copy.appendChild(Object.assign(document.createElement('span'), {
-      className: 'pm-card-path',
+      className: 'pm-row-path',
       textContent: AgentVmModel.displayProjectPath(project.cwd),
     }));
     row.appendChild(copy);
 
+    row.appendChild(Object.assign(document.createElement('div'), { className: 'pm-row-gap' }));
+
+    // Действия проявляются на наведении: в покое строка остаётся тихой
     const controls = document.createElement('div');
-    controls.className = 'pm-card-controls';
-    const openVm = Object.assign(document.createElement('button'), {
-      type: 'button',
-      className: 'pm-icon-button agent-vm',
-      textContent: 'VM',
-      title: 'Открыть Agent VM',
-    });
-    openVm.setAttribute('aria-label', openVm.title);
-    openVm.addEventListener('click', (event) => {
-      event.stopPropagation();
-      openAgentVmProject(project);
-    });
-    controls.appendChild(openVm);
+    controls.className = 'pm-row-actions';
     const favorite = project.favoriteIndex >= 0;
     const star = Object.assign(document.createElement('button'), {
       className: `pm-icon-button star${favorite ? ' active' : ''}`,
@@ -5141,25 +5172,16 @@ function renderProjectCard(project) {
     }
     row.appendChild(controls);
 
-    const vmState = project.vm?.state;
-    const showVmStatus = terminalBackend
-      || ['provisioning', 'creating', 'starting', 'running', 'ready', 'working', 'error']
-        .includes(vmState);
-    if (showVmStatus) {
-      const status = document.createElement('div');
-      status.className = `pm-card-status ${uiState}`;
-      status.appendChild(Object.assign(document.createElement('span'), {
-        className: 'pm-card-status-dot',
-      }));
-      status.appendChild(Object.assign(document.createElement('span'), {
-        textContent: terminalBackend
-          ? `${terminalBackend === 'codex' ? 'Codex' : 'Claude'} работает`
-          : ['running', 'ready', 'working'].includes(vmState)
-            ? 'VM готова'
-            : AgentVmModel.stateLabel(uiState),
-      }));
-      row.appendChild(status);
-    }
+    // Счётчик чатов — то, ради чего в проект и заходят
+    // Счётчик живёт в истории проекта; у VM-only проекта её нет вовсе.
+    const count = Number(project.history?.count ?? project.count) || 0;
+    row.appendChild(Object.assign(document.createElement('span'), {
+      className: 'pm-row-count',
+      textContent: count
+        ? `${count} ${plural(count, 'чат', 'чата', 'чатов')}`
+        : 'нет чатов',
+    }));
+
     row.addEventListener('mouseenter', () => { histSel = idx; paintHistSel(); });
     row.addEventListener('click', () => openProjectPrimary(project));
     return row;
@@ -5272,57 +5294,174 @@ function openHistChat(row) {
   launchSession(row.s.agent, row.s.id, row.cwd);
 }
 
+// Иконки строк: у обычного чата — реплика, у прошедшего в VM — куб,
+// у идущего сейчас — волна. Пустое место слева читалось как «забыли».
+const BUBBLE_PATHS = ['M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'];
+const PULSE_PATHS = ['M2 12h4l3-8 4 16 3-8h6'];
+const PLUS_PATHS = ['M12 5v14', 'M5 12h14'];
+const CHEVRON_PATHS = ['m6 9 6 6 6-6'];
+const BACK_PATHS = ['M19 12H5', 'm12 19-7-7 7-7'];
+
+// Меню сплит-кнопки: какой агент и где выполнять. Выбор запоминается, поэтому
+// в обычном случае достаточно нажать саму кнопку.
+// Выбор запоминается между заходами: в 9 случаях из 10 он тот же самый.
+let newChatAgent = 'claude';
+let newChatWhere = 'mac';
+let newChatMenuOpen = false;
+
+function closeNewChatMenu() {
+  if (!newChatMenuOpen) return;
+  newChatMenuOpen = false;
+  document.querySelector('.nc-menu')?.remove();
+  document.querySelector('.nc-caret')?.setAttribute('aria-expanded', 'false');
+}
+
+function buildNewChatMenu(cwd, project) {
+  const menu = document.createElement('div');
+  menu.className = 'nc-menu';
+  menu.addEventListener('click', (e) => e.stopPropagation());
+
+  const section = (label) => menu.appendChild(Object.assign(
+    document.createElement('div'), { className: 'nc-menu-label', textContent: label }));
+  const option = (name, note, checked, onPick) => {
+    const row = document.createElement('button');
+    row.className = 'nc-menu-row';
+    row.setAttribute('aria-checked', String(checked));
+    row.appendChild(Object.assign(document.createElement('span'), {
+      className: 'nc-menu-name', textContent: name }));
+    if (note) row.appendChild(Object.assign(document.createElement('span'), {
+      className: 'nc-menu-note', textContent: note }));
+    if (checked) row.appendChild(svgIcon(['M20 6 9 17l-5-5'], 13));
+    row.addEventListener('click', () => { closeNewChatMenu(); onPick(); });
+    return menu.appendChild(row);
+  };
+
+  section('Агент');
+  option('Claude', newChatAgent === 'claude' ? 'в прошлый раз' : '',
+    newChatAgent === 'claude', () => { newChatAgent = 'claude'; renderHistory(); });
+  option('Codex', newChatAgent === 'codex' ? 'в прошлый раз' : '',
+    newChatAgent === 'codex', () => { newChatAgent = 'codex'; renderHistory(); });
+
+  section('Где выполнять');
+  option('На этом Mac', 'видит твои файлы', newChatWhere === 'mac',
+    () => { newChatWhere = 'mac'; renderHistory(); });
+  const vmReady = ['running', 'ready', 'working'].includes(project?.vm?.state);
+  option('В Agent VM', vmReady ? 'VM уже работает' : 'среда поднимется сама',
+    newChatWhere === 'vm', () => { newChatWhere = 'vm'; renderHistory(); });
+
+  menu.appendChild(Object.assign(document.createElement('div'), { className: 'nc-menu-sep' }));
+  const open = document.createElement('button');
+  open.className = 'nc-menu-row';
+  open.appendChild(Object.assign(document.createElement('span'), {
+    className: 'nc-menu-name', textContent: 'Открыть рабочее место VM' }));
+  open.appendChild(Object.assign(document.createElement('span'), {
+    className: 'nc-menu-note', textContent: 'терминал' }));
+  open.addEventListener('click', () => {
+    closeNewChatMenu();
+    if (project) openAgentVmProject(project);
+    else showToast('Проект недоступен');
+  });
+  menu.appendChild(open);
+  menu.appendChild(Object.assign(document.createElement('div'), {
+    className: 'nc-menu-foot',
+    textContent: 'Выбор запоминается — в следующий раз достаточно нажать кнопку.',
+  }));
+  return menu;
+}
+
+function startNewChat(cwd, project) {
+  if (newChatWhere === 'vm') {
+    if (!project) { showToast('Проект недоступен'); return; }
+    openAgentVmProject(project, newChatAgent);
+    return;
+  }
+  launchSession(newChatAgent, null, cwd);
+}
+
 function renderHistChats(g, q) {
   primaryLabelEl.textContent = 'Открыть чат';
   projectManagerToolbarEl.hidden = true;
   loadHistRuns(g.cwd);
+  const project = g.cwd ? agentVmProjectByCwd(g.cwd) : null;
+
+  /* Шапка проекта. Раньше здесь стояли «‹ Проекты», имя и три равнозначные
+     кнопки (+ Claude, + Codex, Agent VM) — они заставляли выбирать там, где
+     выбор почти всегда один и тот же. Слева теперь «кто я», справа «что
+     делать»: одна кнопка с памятью выбора и статус среды. */
   const head = document.createElement('div');
-  head.className = 'hgroup';
-  const back = Object.assign(document.createElement('span'), { className: 'hback', textContent: '‹ Проекты' });
+  head.className = 'phead';
+
+  const back = document.createElement('button');
+  back.className = 'phead-back';
+  back.title = 'К проектам · Esc';
+  back.setAttribute('aria-label', 'К проектам');
+  back.appendChild(svgIcon(BACK_PATHS, 16));
   back.addEventListener('click', () => { histProject = null; renderHistory(); });
   head.appendChild(back);
-  head.appendChild(Object.assign(document.createElement('span'), { textContent: g.project }));
-  // новые сессии в директории проекта — отдельно для Claude и Codex; для групп
-  // без известной директории («другое», g.cwd == null) новая сессия бессмысленна
+
+  const idBox = document.createElement('div');
+  idBox.className = 'phead-id';
+  idBox.appendChild(Object.assign(document.createElement('div'), {
+    className: 'phead-kind', textContent: 'проект' }));
+  idBox.appendChild(Object.assign(document.createElement('div'), {
+    className: 'phead-name', textContent: g.project }));
+  head.appendChild(idBox);
+  head.appendChild(Object.assign(document.createElement('div'), { className: 'phead-gap' }));
+
   if (g.cwd) {
-    // Три равнозначные кнопки заставляли выбирать там, где выбор почти всегда
-    // один. Новый чат Claude — главное действие, остальные тише.
-    const newClaude = Object.assign(document.createElement('button'), { className: 'abtn small primary', textContent: '+ Claude' });
-    newClaude.title = 'Новая сессия Claude в этой директории';
-    newClaude.addEventListener('click', (e) => { e.stopPropagation(); launchSession('claude', null, g.cwd); });
-    const newCodex = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Codex' });
-    newCodex.title = 'Новая сессия Codex в этой директории';
-    newCodex.addEventListener('click', (e) => { e.stopPropagation(); launchSession('codex', null, g.cwd); });
-    head.appendChild(newClaude);
-    head.appendChild(newCodex);
-    // Вход в Agent VM: раньше он был только на карточке проекта — то есть
-    // на уровне выше, откуда пользователь уже ушёл. Пока VM нет, отсюда её и
-    // создают; когда есть — сюда же возвращаются к её рабочему месту.
-    const project = agentVmProjectByCwd(g.cwd);
-    const vmReady = ['running', 'ready', 'working'].includes(project?.vm?.state);
-    const openVm = Object.assign(document.createElement('button'), {
-      className: 'abtn small',
-      textContent: vmReady ? 'Agent VM' : '+ Agent VM',
+    // Сплит-кнопка живёт в обёртке: у .nc есть overflow, он обрезал бы меню
+    const slot = document.createElement('div');
+    slot.className = 'nc-slot';
+    const nc = document.createElement('div');
+    nc.className = 'nc';
+    const main = document.createElement('button');
+    main.className = 'nc-main';
+    main.appendChild(svgIcon(PLUS_PATHS, 13));
+    main.appendChild(Object.assign(document.createElement('span'), { textContent: 'Новый чат' }));
+    main.title = newChatWhere === 'vm'
+      ? `Новый чат · ${newChatAgent === 'codex' ? 'Codex' : 'Claude'} в Agent VM`
+      : `Новый чат · ${newChatAgent === 'codex' ? 'Codex' : 'Claude'} на этом Mac`;
+    main.addEventListener('click', (e) => { e.stopPropagation(); startNewChat(g.cwd, project); });
+    const caret = document.createElement('button');
+    caret.className = 'nc-caret';
+    caret.setAttribute('aria-label', 'Выбрать агента и место');
+    caret.setAttribute('aria-expanded', String(newChatMenuOpen));
+    caret.appendChild(svgIcon(CHEVRON_PATHS, 14));
+    caret.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = !newChatMenuOpen;
+      closeNewChatMenu();
+      if (!open) return;
+      newChatMenuOpen = true;
+      caret.setAttribute('aria-expanded', 'true');
+      slot.appendChild(buildNewChatMenu(g.cwd, project));
     });
-    openVm.title = vmReady
-      ? 'Открыть рабочее место Agent VM этого проекта'
-      : 'Создать среду Agent VM для этого проекта';
-    openVm.addEventListener('click', (e) => {
+    nc.appendChild(main);
+    nc.appendChild(caret);
+    slot.appendChild(nc);
+    head.appendChild(slot);
+
+    // Статус среды: клик уводит на рабочее место, а не прячет информацию
+    const vmState = project?.vm?.state;
+    const vmLive = ['running', 'ready', 'working'].includes(vmState);
+    const st = document.createElement('button');
+    st.className = `phead-vm${vmLive ? ' live' : ''}`;
+    st.appendChild(Object.assign(document.createElement('span'), { className: 'phead-lamp' }));
+    st.appendChild(Object.assign(document.createElement('span'), {
+      textContent: vmLive ? 'VM работает'
+        : vmState === 'stopped' ? 'VM спит · запустить'
+          : vmState ? AgentVmModel.stateLabel(AgentVmModel.environmentState(project.vm, project.run))
+            : 'Без VM',
+    }));
+    st.title = 'Открыть рабочее место Agent VM';
+    st.addEventListener('click', (e) => {
       e.stopPropagation();
       if (project) openAgentVmProject(project);
       else showToast('Проект недоступен');
     });
-    head.appendChild(openVm);
+    head.appendChild(st);
   }
   projectManagerContentEl.appendChild(head);
-
-  // Подсказка в шесть пунктов через точки соревновалась за внимание с самими
-  // чатами и объясняла кнопки, которые подписаны. Оставляем две клавиши;
-  // назначение кнопок живёт в их title.
-  projectManagerContentEl.appendChild(Object.assign(document.createElement('div'), {
-    className: 'hhint',
-    textContent: '↵ — открыть · esc — к проектам',
-  }));
 
   const all = AgentVmModel.mergeProjectChats(g.sessions, histRuns.get(g.cwd) || []);
   const chats = q ? all.filter((chat) => chat.title.toLowerCase().includes(q)) : all;
@@ -5363,16 +5502,28 @@ function renderHistChats(g, q) {
       ? `${chat.title}\nAgent VM · ${chat.vm || 'VM'}${chat.changedFiles ? ` · изменено файлов: ${chat.changedFiles}` : ''}`
       : `${chat.title}\n${resumeCommand(s, g.cwd)}`;
 
+    // Иконка есть у каждой строки: пустое место слева читалось как «забыли».
+    // Обычный чат — реплика, прошедший в VM — куб, идущий сейчас — волна.
+    const working = chat.kind === 'vm'
+      && ['working', 'starting', 'waiting'].includes(chat.state);
+    const env = document.createElement('span');
+    env.className = `henv${chat.kind === 'vm' ? ' vm' : ''}${working ? ' working' : ''}`;
+    env.appendChild(svgIcon(
+      working ? PULSE_PATHS : chat.kind === 'vm' ? CUBE_PATHS : BUBBLE_PATHS, 13));
+    env.title = working ? 'Идёт в Agent VM'
+      : chat.kind === 'vm' ? 'Прошёл в Agent VM' : 'Чат в терминале';
+    row.appendChild(env);
+
     const title = document.createElement('span');
     title.className = 'htitle';
     title.textContent = chat.title;
     row.appendChild(title);
 
-    // Бейдж отличает чат в VM от обычного: у них разное поведение по ↵.
-    if (chat.kind === 'vm') {
+    // Подпись о работе в VM: сколько файлов задето — это и есть результат хода
+    if (chat.kind === 'vm' && chat.changedFiles) {
       row.appendChild(Object.assign(document.createElement('span'), {
-        className: 'hbadge vm',
-        textContent: 'VM',
+        className: 'hsub',
+        textContent: `изменено ${chat.changedFiles} ${plural(chat.changedFiles, 'файл', 'файла', 'файлов')}`,
       }));
     }
 
@@ -6601,7 +6752,8 @@ window.addEventListener('keydown', async (e) => {
 
   if (e.key === 'Escape') { // raycast: Esc — назад / закрыть
     if (view === 'chat' && paletteOpen()) return; // палитру закроет обработчик поля
-    if (view !== 'list') { setView('list'); render(); }
+    if (newChatMenuOpen) { closeNewChatMenu(); return; }
+  if (view !== 'list') { setView('list'); render(); }
     // в накладке Esc из списка прячет её; окно так не закрывают — для этого ⌘W
     else if (!windowMode()) window.jarvis.hidePanel();
     return;

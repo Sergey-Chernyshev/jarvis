@@ -850,6 +850,26 @@ function appendPendingReply(text, queued) {
   pendingReplies.push({ text: text.trim(), el: msg });
 }
 
+/* Сколько верхних блоков держим в ленте чата.
+ *
+ * Лента росла всю сессию: у агента, работающего часами, в ней накапливались
+ * десятки тысяч узлов, и каждое следующее добавление пересчитывало вёрстку по
+ * всей этой куче. Отсюда и «чат подтормаживает, а потом встаёт»: чем дольше
+ * смотришь, тем медленнее. Хвоста хватает с запасом — выше него всё равно
+ * листают до начала не глазами, а поиском. */
+const CHATLOG_MAX_BLOCKS = 400;
+
+function trimChatlog() {
+  let extra = chatlogEl.childElementCount - CHATLOG_MAX_BLOCKS;
+  while (extra-- > 0) {
+    const first = chatlogEl.firstElementChild;
+    // Текущий ход не трогаем ни при каких условиях: в него ещё пишет стрим, и
+    // унесённый из документа узел проглотил бы все следующие реплики молча.
+    if (!first || (curTurn && first === curTurn.wrap)) break;
+    first.remove();
+  }
+}
+
 function appendChatItems(items) {
   const nearBottom =
     chatlogEl.scrollHeight - chatlogEl.scrollTop - chatlogEl.clientHeight < 60;
@@ -873,6 +893,7 @@ function appendChatItems(items) {
       turnTarget().appendChild(assistantMsg(it));
     }
   }
+  if (items.length) trimChatlog();
   if (items.length && nearBottom) chatlogEl.scrollTop = chatlogEl.scrollHeight;
 }
 

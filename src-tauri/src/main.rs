@@ -25,11 +25,14 @@ mod ipc;
 mod launch; // запуск новой/возобновляемой сессии в терминале из вкладки «Проекты»
 mod limits;
 mod log;
+mod loops; // режим «Циклы»: рутина, которую агент крутит сам — с концом и стенами
 mod macos;
 mod metrics;
 mod model;
 mod onboarding;
 mod power;
+#[allow(dead_code)] // потребитель — daemon (маршрутизация удалённых сессий), следующий шаг инкремента
+mod remote; // удалённые узлы: ssh-туннель, HTTP-клиент узла, поллер событий
 mod route; // голосовая маршрутизация: скоринг → tie-break → пикер → stage-then-send
 mod ru;
 mod screen_prompt;
@@ -119,6 +122,17 @@ fn main() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
+            loops::ipc::loops_get,
+            loops::ipc::loops_draft,
+            loops::ipc::loops_save,
+            loops::ipc::loops_remove,
+            loops::ipc::loops_start,
+            loops::ipc::loops_stop,
+            loops::ipc::loops_intervene,
+            loops::ipc::loops_answer,
+            loops::ipc::loops_review,
+            loops::ipc::loops_resume,
+            loops::ipc::loops_diff,
             ipc::state_get,
             ipc::state_clear,
             ipc::panel_hide,
@@ -166,6 +180,15 @@ fn main() {
             ipc::agent_chat_open,
             ipc::terminal_focus,
             ipc::session_launch,
+            ipc::remotes_list,
+            ipc::remotes_add,
+            ipc::remotes_remove,
+            ipc::remotes_test,
+            ipc::remotes_preflight,
+            ipc::remotes_install,
+            ipc::remotes_ssh_key,
+            ipc::remotes_ssh_authorize,
+            ipc::machines_list,
             ipc::toast_resize,
             ipc::toast_ready,
             ipc::toast_click,
@@ -254,6 +277,7 @@ fn main() {
             );
 
             d.restore_state(); // реестр переживает перезапуск
+            d.start_remotes(); // ssh-туннели к удалённым узлам, если они настроены
             windows::create_panel(app.handle())?;
             windows::create_toast(app.handle())?;
             tray::init(&d)?;
@@ -378,6 +402,9 @@ fn main() {
                         windows::remember_window_size(&d, l.width, l.height);
                     }
                 }
+                // ssh-дети не должны пережить приложение: без этого туннели
+                // висят до конца сессии терминала и держат порты
+                d.remotes.stop_all();
                 power::Power::dispose(&d); // снять assertion, вернуть disablesleep
                 d.voice.dispose(); // погасить Silero-сайдкар, если был поднят
                 d.stt.dispose(); // погасить Qwen3-MLX-сайдкар, если был поднят
@@ -426,6 +453,16 @@ fn spawn_timers(d: &Arc<Daemon>) {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             power::Power::tick(&dd).await;
+        }
+    });
+
+    // расписание циклов: раз в 30с смотрим, чьё время пришло. Чаще незачем —
+    // самое частое расписание меряется минутами, а запуск всё равно один за раз.
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            loops::ipc::tick(&dd);
         }
     });
 

@@ -21,6 +21,34 @@
     clearFinished: () => invoke('state_clear'),
     hidePanel: () => invoke('panel_hide'),
     getSettings: () => invoke('settings_get'),
+    // удалённые узлы (спека 2026-08-05): список, добавление, удаление, проверка связи
+    remotesList: () => invoke('remotes_list'),
+    remotesAdd: (cfg) => invoke('remotes_add', { cfg }),
+    remotesRemove: (name) => invoke('remotes_remove', { name }),
+    remotesTest: (name) => invoke('remotes_test', { name }),
+    // установка узла с нуля: разведка машины, сама установка (ход едет
+    // событиями) и публичный ssh-ключ для машин, куда доступа ещё нет
+    remotesPreflight: (sshHost, jarvisDir) => invoke('remotes_preflight', { sshHost, jarvisDir }),
+    remotesInstall: (cfg) => invoke('remotes_install', { cfg }),
+    remotesSshKey: (create) => invoke('remotes_ssh_key', { create }),
+    // разовый вход по паролю: кладём наш ключ в authorized_keys той машины
+    remotesSshAuthorize: (sshHost, password) => invoke('remotes_ssh_authorize', { sshHost, password }),
+    onRemoteInstallStep: (cb) => on('remote_install_progress', cb),
+    onRemoteInstallDone: (cb) => on('remote_install_done', cb),
+    // режим «Циклы»: рутина, которую агент крутит сам
+    loopsGet: () => invoke('loops_get'),
+    loopsDraft: (template) => invoke('loops_draft', { template }),
+    loopsSave: (item) => invoke('loops_save', { item }),
+    loopsRemove: (id) => invoke('loops_remove', { id }),
+    loopsStart: (id) => invoke('loops_start', { id }),
+    loopsStop: (id) => invoke('loops_stop', { id }),
+    loopsIntervene: (id, text) => invoke('loops_intervene', { id, text }),
+    loopsAnswer: (id, answer) => invoke('loops_answer', { id, answer }),
+    loopsReview: (id, n, accept, comment) => invoke('loops_review', { id, n, accept, comment }),
+    loopsResume: (id, extraTokens) => invoke('loops_resume', { id, extraTokens }),
+    loopsDiff: (id) => invoke('loops_diff', { id }),
+    onLoopsState: (cb) => on('loops-state', cb),
+
     // тема/краска сменились в другом окне (демон рассылает всем)
     onAppearance: (cb) => on('appearance', cb),
     winMinimize: () => self().minimize(),
@@ -48,7 +76,11 @@
     onChatAppend: (cb) => on('chat:append', cb),
     onChatSummary: (cb) => on('chat:summary', cb),
     focusTerminal: (sessionId) => invoke('terminal_focus', { sessionId }),
-    launchSession: (cwd, agent, sessionId) => invoke('session_launch', { cwd: cwd ?? null, agent, sessionId: sessionId ?? null }),
+    // machine: 'local' | имя узла — где запускать (вкладка «Проекты», шаг 1)
+    launchSession: (cwd, agent, sessionId, machine) => invoke('session_launch', {
+      cwd: cwd ?? null, agent, sessionId: sessionId ?? null, machine: machine ?? null,
+    }),
+    machinesList: () => invoke('machines_list'),
     sendReply: (sessionId, text) => invoke('session_reply', { sessionId, text }),
     // вставленная картинка → временный файл; путь уйдёт агенту в промпте
     saveImage: (dataBase64, ext) => invoke('session_save_image', { dataBase64, ext }),
@@ -78,7 +110,7 @@
     getLimit: () => invoke('limit_get'),
     onLimitState: (cb) => on('limit-state', cb),
     getSessionUsage: (id) => invoke('usage_session', { id }),
-    getHistory: () => invoke('history_get'),
+    getHistory: (machine) => invoke('history_get', { machine: machine ?? null }),
     // интеграция и модели (настройки)
     integrationGet: () => invoke('integration_get'),
     integrationRemove: () => invoke('integration_remove'),

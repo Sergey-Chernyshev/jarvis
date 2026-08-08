@@ -5,6 +5,7 @@
 //! { ok:false, error } / { ok:false, needsTmux, resumeCmd }.
 
 use serde_json::{json, Value};
+use std::process::Stdio;
 use std::sync::Arc;
 use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt;
@@ -26,9 +27,21 @@ fn err(msg: impl Into<String>) -> Value {
 /// Вне tmux мы не вставляем текст — сессией нельзя управлять, пока она не в
 /// tmux. Подсказываем команду resume по агенту: shim завернёт её в наш сервер
 /// (`claude --resume …` либо `codex resume …`).
-fn tmux_needed(agent: crate::backend::Agent, session_id: &str) -> Value {
-    let cmd = crate::backend::backend(agent).resume_cmd(session_id);
-    json!({ "ok": false, "needsTmux": true, "resumeCmd": cmd })
+/// «Сессия вне tmux» + команда, которой её можно поднять заново уже в tmux.
+///
+/// Команда собирается по `agent_id`, а не по ключу реестра: у сессии с узла
+/// ключ выглядит как `<узел>:<id>`, и `claude --resume` с ним на той машине не
+/// найдёт ничего. Для удалённой сессии добавляем, ГДЕ её выполнять — иначе
+/// человек честно выполнит её у себя и не поймёт, почему не помогло.
+fn tmux_needed(s: &crate::model::Session) -> Value {
+    let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
+    let cmd = crate::backend::backend(agent).resume_cmd(s.agent_id());
+    match &s.remote {
+        Some(node) => json!({
+            "ok": false, "needsTmux": true, "resumeCmd": cmd, "onNode": node,
+        }),
+        None => json!({ "ok": false, "needsTmux": true, "resumeCmd": cmd }),
+    }
 }
 
 /* ================= состояние и панель ================= */
@@ -753,6 +766,7 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
         ["theme", "paint", "mode", "accent", "density", "radius", "scale"];
     let appearance_changed = APPEARANCE_KEYS.iter().any(|k| rest.contains_key(*k));
     let mode_changed = rest.contains_key("mode");
+    let remotes_changed = rest.contains_key("remotes");
     if !rest.is_empty() {
         let _ = via_gate_panel(&d, "settings.set", json!({ "patch": Value::Object(rest) })).await;
     }
@@ -763,6 +777,11 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
     // накладка ⇄ окно: свойства самого окна меняем здесь, раскладку — CSS по data-mode
     if mode_changed {
         windows::apply_mode(&d);
+    }
+    // список узлов правят не только вкладкой «Удалённые» (ещё settings.json и
+    // `jarvis-setup remote add`) — применяем сразу, как и всё в этом обработчике
+    if remotes_changed {
+        d.start_remotes();
     }
     // тумблер «Режим логов» применяем сразу (без перезапуска)
     crate::metrics::set_enabled(d.settings.bool("diagnostics"));
@@ -775,8 +794,31 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
 
 /* ================= чат сессии ================= */
 
+/// Узел + хвост его транскрипта + смещение, с которого продолжать. Узел
+/// возвращаем сюда же: живой хвост пойдёт в ТОТ ЖЕ узел, а не в найденный
+/// заново — между двумя поисками список мог смениться.
+/// Ошибки — человеческим текстом: это то, что увидит юзер вместо чата.
+async fn remote_transcript(
+    d: &std::sync::Arc<Daemon>,
+    name: &str,
+    path: &str,
+) -> Result<(std::sync::Arc<crate::remote::Node>, String, u64), String> {
+    let node = d
+        .remotes
+        .node(name)
+        .ok_or_else(|| format!("Узел «{name}» не подключён"))?;
+    let client = node.client().map_err(|e| format!("Узел «{name}»: {e}"))?;
+    match client.tail_text(path, 512 * 1024).await {
+        Ok(Some((text, next))) => Ok((node, text, next)),
+        Ok(None) => Err("Транскрипта ещё нет на узле — сессия не слала событий".into()),
+        Err(e) => Err(format!("Узел «{name}»: {e}")),
+    }
+}
+
+/// Асинхронна из-за удалённых сессий: их транскрипт приезжает по HTTP с узла.
+/// Локальная ветка осталась прежним синхронным чтением файла.
 #[tauri::command]
-pub fn chat_open(app: AppHandle, session_id: String) -> Value {
+pub async fn chat_open(app: AppHandle, session_id: String) -> Value {
     let d = Daemon::get(&app);
     let Some(s) = d.session(&session_id) else {
         return err("Сессия не найдена");
@@ -787,7 +829,23 @@ pub fn chat_open(app: AppHandle, session_id: String) -> Value {
     // Парсер транскрипта — по бэкенду сессии (Claude JSONL vs Codex rollout).
     let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
     let be = crate::backend::backend(agent);
-    let entries = be.read_entries(std::path::Path::new(&tr), 512 * 1024);
+    // Байты берём с той машины, где живёт сессия, и там же заводим живой хвост.
+    // Ниже по коду уже всё равно, откуда они приехали.
+    let entries = match &s.remote {
+        None => {
+            let e = be.read_entries(std::path::Path::new(&tr), 512 * 1024);
+            d.tail.start(app.clone(), agent, session_id.clone(), tr.clone());
+            e
+        }
+        Some(name) => match remote_transcript(&d, name, &tr).await {
+            Ok((node, text, next)) => {
+                d.tail
+                    .start_remote(app.clone(), agent, session_id.clone(), node, tr.clone(), next);
+                be.entries_from_text(&text)
+            }
+            Err(e) => return err(e),
+        },
+    };
     let (all_items, turns) = crate::turns::segment(be, &entries);
     let tail_start = all_items.len().saturating_sub(80);
     let items = &all_items[tail_start..];
@@ -808,8 +866,6 @@ pub fn chat_open(app: AppHandle, session_id: String) -> Value {
         })
         .collect();
     let cards = crate::turnsum::load_cards(&session_id);
-    d.tail
-        .start(app.clone(), agent, session_id.clone(), tr.clone());
     let llm = claude_bin::any_service_bin();
     if llm {
         d.turn_backfill(session_id.clone(), 5);
@@ -839,7 +895,7 @@ pub fn chat_summarize(app: AppHandle, session_id: String, turn_key: String) -> V
         return err("Сессия не найдена");
     }
     tauri::async_runtime::spawn(async move {
-        let Some((be, entries)) = d.turn_entries(&session_id) else { return };
+        let Some((be, entries)) = d.turn_entries(&session_id).await else { return };
         let (_items, turns) = crate::turns::segment(be, &entries);
         if let Some(t) = turns.iter().find(|t| t.span.key == turn_key) {
             d.turn_generate(&session_id, t).await;
@@ -906,10 +962,19 @@ fn resolve_user_file(cwd: Option<&str>, path: &str) -> Result<std::path::PathBuf
 /// входить в множество файлов из фактов ходов сессии — сверка по
 /// канонизированным путям, см. file_read_impl.
 #[tauri::command]
-pub fn file_read(app: AppHandle, session_id: String, path: String) -> Value {
+pub async fn file_read(app: AppHandle, session_id: String, path: String) -> Value {
     let d = Daemon::get(&app);
-    let cwd = d.session(&session_id).and_then(|s| s.cwd);
-    file_read_dispatch(d.turn_entries(&session_id).map(|(be, e)| (cwd, be, e)), &path)
+    let Some(s) = d.session(&session_id) else {
+        return file_read_dispatch(None, &path);
+    };
+    // Файлы удалённой сессии лежат на её машине. Открыть путь здесь — значит
+    // показать одноимённый файл ЭТОГО компьютера под видом того: узел отдаёт
+    // только транскрипты, и это сознательная граница (см. docs/remote.md).
+    if let Some(name) = &s.remote {
+        return err(format!("Файлы сессии — на узле «{name}», отсюда их не открыть"));
+    }
+    let entries = d.turn_entries(&session_id).await;
+    file_read_dispatch(entries.map(|(be, e)| (s.cwd, be, e)), &path)
 }
 
 /// Диспетчер file_read, отделён от команды ради тестов: None — сессии нет
@@ -994,10 +1059,18 @@ fn read_head_tail(p: &std::path::Path) -> std::io::Result<(String, bool)> {
 /// гейт по фактам, что file_read; сам дифф считает git (gitdiff.rs) от cwd
 /// сессии. Не в git / бинарь / нет cwd → mode "none" (таб просто не покажется).
 #[tauri::command]
-pub fn file_diff(app: AppHandle, session_id: String, path: String) -> Value {
+pub async fn file_diff(app: AppHandle, session_id: String, path: String) -> Value {
     let d = Daemon::get(&app);
-    let cwd = d.session(&session_id).and_then(|s| s.cwd);
-    file_diff_dispatch(d.turn_entries(&session_id).map(|(be, e)| (cwd, be, e)), &path)
+    let Some(s) = d.session(&session_id) else {
+        return file_diff_dispatch(None, &path);
+    };
+    // git-дифф считается от cwd сессии — у удалённой он на её машине (как и в
+    // file_read: чужой одноимённый репозиторий показал бы неправду)
+    if s.remote.is_some() {
+        return json!({ "ok": true, "mode": "none", "label": "", "hunks": [] });
+    }
+    let entries = d.turn_entries(&session_id).await;
+    file_diff_dispatch(entries.map(|(be, e)| (s.cwd, be, e)), &path)
 }
 
 /// Диспетчер file_diff, отделён от команды ради тестов (как file_read_dispatch).
@@ -1070,7 +1143,11 @@ pub fn commands_get(app: AppHandle, session_id: String) -> Value {
         return serde_json::to_value(crate::commands_catalog::codex_commands())
             .unwrap_or_else(|_| json!([]));
     }
-    serde_json::to_value(d.commands.get_for_cwd(s.cwd.as_deref())).unwrap_or_else(|_| json!([]))
+    // Проектные команды каталог собирает из .claude/commands по cwd — на ЭТОЙ
+    // машине. У сессии с узла её проект на той стороне, поэтому отдаём только
+    // встроенные: чужой список команд хуже пустого.
+    let cwd = s.cwd.as_deref().filter(|_| s.remote.is_none());
+    serde_json::to_value(d.commands.get_for_cwd(cwd)).unwrap_or_else(|_| json!([]))
 }
 
 #[tauri::command]
@@ -1141,10 +1218,97 @@ pub fn limit_get(app: AppHandle) -> Value {
     serde_json::to_value(Daemon::get(&app).limits.state()).unwrap_or(Value::Null)
 }
 
+/// Машины, на которых можно работать: эта плюс настроенные узлы.
+///
+/// Список нужен вкладке «Проекты» первым шагом — до выбора проекта. Локальная
+/// всегда первая и всегда «на связи»: она никуда не денется, и отсутствие
+/// узлов не должно выглядеть как «работать негде».
 #[tauri::command]
-pub fn history_get(app: AppHandle) -> Value {
+pub fn machines_list(app: AppHandle) -> Value {
     let d = Daemon::get(&app);
-    d.history.projects(&d.usage)
+    let mut out = vec![json!({
+        "id": "local", "name": "Эта машина", "kind": "local", "online": true,
+    })];
+    for st in d.remotes.list() {
+        out.push(json!({
+            "id": st.name,
+            "name": st.name,
+            "kind": "remote",
+            "sshHost": st.ssh_host,
+            "online": st.connected,
+            "error": st.error,
+        }));
+    }
+    Value::Array(out)
+}
+
+/// История проектов выбранной машины. `machine` = `None`/`"local"` — эта.
+///
+/// У локальной история богатая (заголовки, модели, расход) — её собирает
+/// сканер транскриптов. У удалённой берём оглавление с узла: каталоги, время
+/// и идентификаторы сессий. Заголовков там нет и взяться им неоткуда без
+/// вычитывания каждого транскрипта по ssh — а это уже не «показать список».
+#[tauri::command]
+pub async fn history_get(app: AppHandle, machine: Option<String>) -> Value {
+    let d = Daemon::get(&app);
+    let machine = machine.unwrap_or_default();
+    if machine.is_empty() || machine == "local" {
+        return d.history.projects(&d.usage);
+    }
+    let Some(node) = d.remotes.node(&machine) else {
+        return json!([]);
+    };
+    let client = match node.client() {
+        Ok(c) => c,
+        Err(e) => return json!({ "error": format!("{e}: {}", node.why()) }),
+    };
+    match client.projects().await {
+        Ok(list) => remote_projects_to_history(&machine, list),
+        Err(e) => json!({ "error": ellipsize(&one_line(&e), 160) }),
+    }
+}
+
+/// Оглавление узла → та же форма, что отдаёт локальная история, чтобы панель
+/// рисовала оба списка одним кодом. Чего нет — того нет: заголовок сессии
+/// заменяем её временем, а не выдумываем.
+fn remote_projects_to_history(machine: &str, list: Value) -> Value {
+    let Some(arr) = list.as_array() else { return json!([]) };
+    let out: Vec<Value> = arr
+        .iter()
+        .map(|p| {
+            let cwd = p.get("cwd").and_then(Value::as_str).unwrap_or_default();
+            let project = cwd.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("другое");
+            let sessions: Vec<Value> = p
+                .get("sessions")
+                .and_then(Value::as_array)
+                .map(|s| {
+                    s.iter()
+                        .map(|x| {
+                            let id = x.get("id").and_then(Value::as_str).unwrap_or_default();
+                            json!({
+                                // ключ реестра — с префиксом узла, как у событий:
+                                // по нему панель узнает уже известную ей сессию
+                                "id": format!("{machine}:{id}"),
+                                "agentId": id,
+                                "at": x.get("at").cloned().unwrap_or(Value::Null),
+                                "title": "",
+                                "remote": machine,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            json!({
+                "project": project,
+                "cwd": cwd,
+                "count": p.get("count").cloned().unwrap_or(json!(sessions.len())),
+                "lastAt": p.get("lastAt").cloned().unwrap_or(Value::Null),
+                "remote": machine,
+                "sessions": sessions,
+            })
+        })
+        .collect();
+    Value::Array(out)
 }
 
 #[tauri::command]
@@ -1177,14 +1341,17 @@ pub(crate) async fn set_via_slash(
     let Some(s) = d.session(session_id) else {
         return err("Сессия не найдена");
     };
-    let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
-    let Some(pane) = s.tmux_pane else {
-        return tmux_needed(agent, session_id);
+    let target = match d.pane_target(&s) {
+        Ok(t) => t,
+        Err(e) => return err(e),
     };
-    if !tmux::pane_alive(&pane).await {
-        return tmux_needed(agent, session_id);
+    let Some(pane) = s.tmux_pane.clone() else {
+        return tmux_needed(&s);
+    };
+    if !target.pane_alive(&pane).await {
+        return tmux_needed(&s);
     }
-    match tmux::paste_slash(&pane, &slash).await {
+    match target.paste_slash(&pane, &slash).await {
         Ok(()) => {
             d.with_session(session_id, apply);
             d.push();
@@ -1269,6 +1436,11 @@ pub async fn terminal_ping(app: AppHandle, session_id: String) -> Value {
     let Some(s) = d.session(&session_id) else {
         return err("Сессия не найдена");
     };
+    // popup рисуется в подключённом клиенте tmux — у удалённой сессии он на
+    // той машине, и увидит его тот, кто сидит за ней, а не мы
+    if let Some(name) = &s.remote {
+        return err(format!("Сессия идёт на узле «{name}» — показывать оверлей некому"));
+    }
     let Some(pane) = s.tmux_pane else {
         return err("Сессия не в tmux — пингануть нечем");
     };
@@ -1337,10 +1509,14 @@ pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) 
     let Some(q) = s.question.clone() else {
         return err("Вопрос уже неактуален");
     };
-    let Some(pane) = s.tmux_pane else {
+    let Some(pane) = s.tmux_pane.clone() else {
         return err("Сессия вне tmux — ответь в терминале");
     };
-    if !tmux::pane_alive(&pane).await {
+    let target = match d.pane_target(&s) {
+        Ok(t) => t,
+        Err(e) => return err(e),
+    };
+    if !target.pane_alive(&pane).await {
         return err("Пана сессии не отвечает");
     }
 
@@ -1366,7 +1542,7 @@ pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) 
     if agent == crate::backend::Agent::Codex && texts.iter().any(Option::is_some) {
         return err("Свой ответ недоступен в codex-сессии — выбери вариант");
     }
-    match tmux::answer_question(&pane, agent, &q, &answers, &texts).await {
+    match target.answer_question(&pane, agent, &q, &answers, &texts).await {
         Ok(()) => {
             // у хук-вопроса карточку закроет post-tool; у экранного — событий
             // нет, снимаем сами (детектор подтвердит по idle-экрану)
@@ -1596,9 +1772,15 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
     if prompt.is_empty() {
         return err("Пустой текст");
     }
+    // Сессия с узла — вставка уезжает туда же по ssh; дальше логика доставки
+    // (ack, очередь, ретрай) одна и та же.
+    let target = match d.pane_target(&s) {
+        Ok(t) => t,
+        Err(e) => return err(e),
+    };
 
     if let Some(pane) = s.tmux_pane {
-        if tmux::pane_alive(&pane).await {
+        if target.pane_alive(&pane).await {
             // Занята ли сессия в момент отправки. Если да — Claude Code положит
             // наш ввод в СВОЮ очередь, а prompt-хук придёт лишь когда он до него
             // дойдёт (после текущего ответа). Быстрый ack тогда невозможен — это
@@ -1608,7 +1790,7 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
             // Первая вставка.
             let t0 = now_ms();
             let t_reply = crate::metrics::now();
-            if let Err(e) = tmux::reply(&pane, &prompt).await {
+            if let Err(e) = target.reply(&pane, &prompt).await {
                 eprintln!("[jarvis] reply tmux fail: {e}");
                 return err(format!("tmux: {}", ellipsize(&one_line(&e), 120)));
             }
@@ -1663,7 +1845,7 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
             // зарегистрироваться. Один ретрай (C-u в reply() чистит строку,
             // повтор не задваивает текст).
             let t1 = now_ms();
-            if let Err(e) = tmux::reply(&pane, &prompt).await {
+            if let Err(e) = target.reply(&pane, &prompt).await {
                 return err(format!("tmux: {}", ellipsize(&one_line(&e), 120)));
             }
             if d.await_prompt_ack(&session_id, t1, std::time::Duration::from_millis(2500))
@@ -1681,11 +1863,10 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
         d.with_session(&session_id, |s| s.tmux_pane = None); // пана умерла
         d.push();
     }
-    let agent = d
-        .session(&session_id)
-        .map(|s| crate::backend::Agent::from_opt(s.agent.as_deref()))
-        .unwrap_or_default();
-    tmux_needed(agent, &session_id)
+    match d.session(&session_id) {
+        Some(s) => tmux_needed(&s),
+        None => err("Сессия не найдена"),
+    }
 }
 
 /// Лесенка «показать терминал»: tmux → вкладка по tty (Terminal/iTerm2) →
@@ -1697,6 +1878,12 @@ pub async fn terminal_focus(app: AppHandle, session_id: String) -> Value {
     let Some(s) = d.session(&session_id) else {
         return err("Сессия не найдена");
     };
+    // Терминал удалённой сессии — на другой машине. Вся лесенка ниже (tmux,
+    // tty, GUI-владелец) искала бы его здесь и в лучшем случае не нашла бы
+    // ничего, а в худшем подняла бы чужое окно с совпавшим id паны.
+    if let Some(name) = &s.remote {
+        return err(format!("Сессия идёт на узле «{name}» — её терминал не на этой машине"));
+    }
 
     // 1) tmux — точнее некуда
     if let Some(pane) = &s.tmux_pane {
@@ -1736,6 +1923,7 @@ pub async fn session_launch(
     cwd: Option<String>,
     agent: String,
     session_id: Option<String>,
+    machine: Option<String>,
 ) -> Value {
     let d = Daemon::get(&app);
     // cwd бывает null: история группирует сессии без директории в «другое».
@@ -1745,16 +1933,63 @@ pub async fn session_launch(
     if cwd.trim().is_empty() && session_id.is_none() {
         return err("Не указана директория проекта");
     }
+    let machine = machine.unwrap_or_default();
+    if !machine.is_empty() && machine != "local" {
+        return launch_on_node(&d, &machine, &cwd, &agent, session_id.as_deref()).await;
+    }
+    // Новый проект на этой машине: каталога может ещё не быть, и требовать
+    // сходить создать его руками — значит не сделать работу.
+    if !cwd.trim().is_empty() {
+        if let Err(e) = std::fs::create_dir_all(cwd.trim()) {
+            return err(format!("не создал {}: {e}", cwd.trim()));
+        }
+    }
     let terminal = d.settings.string("launchTerminal");
     let custom = d.settings.string("launchCustomCmd");
     let proxy = d.settings.string("launchProxyCmd");
     let dangerous = d.settings.bool("launchDangerous");
 
     let agent_cmd = crate::launch::agent_command(&agent, session_id.as_deref(), dangerous);
-    let inner = crate::launch::inner_command(&cwd, &proxy, &agent_cmd);
+    // PATH запускаемой команды достраиваем сами: терминал выполняет её в
+    // неинтерактивном шелле, где PATH-блока Jarvis (и шима) ещё нет.
+    let path_dirs = crate::launch::launch_path_dirs();
+    let inner = crate::launch::inner_command(&cwd, &proxy, &agent_cmd, &path_dirs);
     match crate::launch::spawn(&terminal, &custom, &inner).await {
         Ok(()) => ok(),
         Err(e) => err(e),
+    }
+}
+
+/// Запуск на удалённой машине. Терминала там нет и открывать нечего: сессия
+/// поднимается в `tmux -L jarvis` отсоединённой, и дальше живёт как любая
+/// другая удалённая — статусы и чат приезжают хуками через узел.
+///
+/// Идентификатор сессии для `--resume` отдаём БЕЗ префикса узла: префикс —
+/// ключ нашего реестра, агент на той машине про него не знает.
+async fn launch_on_node(
+    d: &Arc<Daemon>,
+    machine: &str,
+    cwd: &str,
+    agent: &str,
+    session_id: Option<&str>,
+) -> Value {
+    let Some(node) = d.remotes.node(machine) else {
+        return err(format!("Узел «{machine}» не подключён"));
+    };
+    let client = match node.client() {
+        Ok(c) => c,
+        Err(e) => return err(format!("{e}: {}", node.why())),
+    };
+    let bare = session_id.map(|s| s.strip_prefix(&format!("{machine}:")).unwrap_or(s));
+    let dangerous = d.settings.bool("launchDangerous");
+    let cmd = crate::launch::agent_command(agent, bare, dangerous);
+    let name = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("project");
+    match client.launch(cwd, &cmd, name).await {
+        Ok(()) => json!({ "ok": true, "channel": "node", "machine": machine }),
+        Err(e) => err(format!(
+            "{}\nЕсли не хватает tmux или агента — поставь их на той машине.",
+            ellipsize(&one_line(&e), 200)
+        )),
     }
 }
 
@@ -2779,6 +3014,360 @@ mod tests {
     }
 }
 
+/* ================= удалённые узлы ================= */
+
+/// Список узлов с их живостью — вкладка «Удалённые».
+#[tauri::command]
+pub fn remotes_list(app: AppHandle) -> Value {
+    json!(Daemon::get(&app).remotes.list())
+}
+
+/// Добавить узел в настройки и поднять его. Список описывается целиком, поэтому
+/// после записи перезапускаем весь слой — точечный старт оставил бы прежние
+/// туннели жить от старого конфига.
+#[tauri::command]
+pub fn remotes_add(app: AppHandle, cfg: Value) -> Value {
+    let d = Daemon::get(&app);
+    let name = cfg.get("name").and_then(Value::as_str).unwrap_or("").trim();
+    let host = cfg.get("sshHost").and_then(Value::as_str).unwrap_or("").trim();
+    let dir = cfg.get("jarvisDir").and_then(Value::as_str).unwrap_or("").trim();
+    if name.is_empty() {
+        return err("Нужно имя узла");
+    }
+    if host.is_empty() {
+        return err("Нужен ssh-хост");
+    }
+    // Имя ходит и в ключ реестра, и в имя файла курсора — двоеточия, слэши и
+    // пробелы там либо ломают разбор, либо схлопывают два разных узла в один
+    // файл. Проще запретить на входе, чем чинить последствия.
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return err("В имени узла — только латиница, цифры, дефис и подчёркивание");
+    }
+    // Имя — ключ реестра (`<узел>:<id>`): два узла под одним именем смешали бы
+    // сессии разных машин.
+    let mut list = remotes_array(&d);
+    if list.iter().any(|v| {
+        v.get("name").and_then(Value::as_str).map(str::trim) == Some(name)
+    }) {
+        return err(format!("Узел «{name}» уже есть"));
+    }
+    let mut entry = json!({ "name": name, "sshHost": host });
+    if !dir.is_empty() {
+        entry["jarvisDir"] = json!(dir);
+    }
+    list.push(entry);
+    d.settings.set_top("remotes", Value::Array(list));
+    d.start_remotes();
+    ok()
+}
+
+/// Убрать узел: гасим туннель и забываем его сессии — иначе в списке остались
+/// бы строки машины, за которой уже никто не следит.
+#[tauri::command]
+pub fn remotes_remove(app: AppHandle, name: String) -> Value {
+    let d = Daemon::get(&app);
+    let name = name.trim();
+    let list: Vec<Value> = remotes_array(&d)
+        .into_iter()
+        .filter(|v| v.get("name").and_then(Value::as_str).map(str::trim) != Some(name))
+        .collect();
+    d.settings.set_top("remotes", Value::Array(list));
+    d.start_remotes();
+    d.forget_remote_sessions(name);
+    ok()
+}
+
+/// Проверка связи: поднят ли туннель и отвечает ли узел.
+#[tauri::command]
+pub async fn remotes_test(app: AppHandle, name: String) -> Value {
+    let d = Daemon::get(&app);
+    let Some(node) = d.remotes.node(name.trim()) else {
+        return err("Узел не найден — сохрани его и попробуй снова");
+    };
+    // Туннеля нет — поднимаем сами, а не отсылаем человека ждать поллер.
+    // «Проверить» должно ОТВЕЧАТЬ, почему не работает, иначе кнопка бесполезна
+    // ровно тогда, когда нужна.
+    // Поднимаем и когда порта нет, и когда ssh умер, а порт от него остался:
+    // во втором случае в туннель просто некому отвечать, и «проверить» без
+    // переподъёма честно врало бы «узел недоступен».
+    if node.client().is_err() || !node.tunnel.is_up() {
+        let n = node.clone();
+        let state = tokio::task::spawn_blocking(move || n.tunnel.ensure_started())
+            .await
+            .unwrap_or(crate::remote::TunnelState::Failed);
+        if state == crate::remote::TunnelState::Failed {
+            let why = node.why();
+            let host = &node.cfg.ssh_host;
+            // Ровно та команда, которой это проверяется за пять секунд: без неё
+            // человек остаётся один на один с «не работает».
+            return err(if why.is_empty() {
+                format!("ssh не поднял туннель. Проверь руками: ssh {host} true")
+            } else {
+                format!("туннель не поднялся: {why}\nПроверь руками: ssh {host} true")
+            });
+        }
+        // ждём, пока форвард начнёт принимать, а не гадаем о таймингах
+        let n = node.clone();
+        let ready = tokio::task::spawn_blocking(move || {
+            n.tunnel.wait_ready(std::time::Duration::from_secs(15))
+        })
+        .await
+        .unwrap_or(false);
+        if !ready {
+            let why = node.why();
+            let host = &node.cfg.ssh_host;
+            return err(format!(
+                "ssh не открыл туннель за 15 секунд{}\nПроверь руками: ssh {host} true",
+                if why.is_empty() { String::new() } else { format!(": {why}") }
+            ));
+        }
+    }
+    let client = match node.client() {
+        Ok(c) => c,
+        Err(e) => return err(format!("{e}: {}", node.why())),
+    };
+    match client.hello().await {
+        Ok(h) => {
+            // «Проверить» — тоже рукопожатие: пусть строка узла сразу узнает
+            // его версию, не дожидаясь круга поллера.
+            node.saw_version(&h.version);
+            json!({
+                "ok": true, "host": h.host, "version": h.version,
+                "buffered": h.buffered, "outdated": node.outdated(),
+            })
+        }
+        // Узел не ответил при живом ssh — почти всегда это «сокета нет»:
+        // узел не запущен на той стороне. Подсказываем, чем это проверить.
+        Err(e) => err(format!(
+            "{}\nУзел не ответил. На той машине: systemctl --user status jarvis-node",
+            ellipsize(&one_line(&e), 160)
+        )),
+    }
+}
+
+/// Идёт ли установка узла прямо сейчас. Две параллельные писали бы в один и тот
+/// же каталог на той машине и мешали бы друг другу заливать бинарь.
+static REMOTE_INSTALL_BUSY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Разведка машины до установки: ОС, что там есть и как туда попадёт узел.
+/// Долгая (ssh), поэтому в блокирующем потоке — иначе подвисает вся панель.
+#[tauri::command]
+pub async fn remotes_preflight(ssh_host: String, jarvis_dir: Option<String>) -> Value {
+    let out = tokio::task::spawn_blocking(move || {
+        crate::install::remote::preflight(&ssh_host, jarvis_dir.as_deref())
+    })
+    .await;
+    match out {
+        Ok(Ok(p)) => match serde_json::to_value(p) {
+            Ok(Value::Object(mut m)) => {
+                m.insert("ok".into(), Value::Bool(true));
+                Value::Object(m)
+            }
+            _ => err("не смог разобрать ответ разведки"),
+        },
+        Ok(Err(e)) => err(e),
+        Err(_) => err("разведка прервалась"),
+    }
+}
+
+/// Поставить узел на машину с нуля: бинарь, шим, хуки, автозапуск, запись в
+/// настройки. Возвращается сразу — ход установки едет событиями
+/// `remote_install_progress`, конец — `remote_install_done`.
+///
+/// Не блокирующая команда, потому что это минуты: ssh-заходы, а иногда и сборка
+/// на той стороне. Панель всё это время должна оставаться живой.
+#[tauri::command]
+pub fn remotes_install(app: AppHandle, cfg: Value) -> Value {
+    use std::sync::atomic::Ordering;
+    let d = Daemon::get(&app);
+    let name = cfg.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let host = cfg.get("sshHost").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let dir = cfg
+        .get("jarvisDir")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if name.is_empty() {
+        return err("Нужно имя узла");
+    }
+    if host.is_empty() {
+        return err("Нужен ssh-хост");
+    }
+    if REMOTE_INSTALL_BUSY.swap(true, Ordering::SeqCst) {
+        return err("Уже ставлю другой узел — дождись конца");
+    }
+
+    std::thread::spawn(move || {
+        // Паника внутри установки не должна оставить панель с вечным «ставлю»:
+        // ловим её и отдаём как обычный отказ.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::install::remote::add(
+                &|step| windows::emit_to_panel(&app, "remote_install_progress", &step),
+                &name,
+                &host,
+                dir.as_deref(),
+                // Порт для телефона поднимаем сразу: узнать, что его не хватает,
+                // человек может только на чужом устройстве и уже без панели.
+                // Кому не нужен — `jarvis-setup remote add --no-tcp`.
+                Some(crate::install::remote::DEFAULT_TCP_PORT),
+            )
+        }));
+        let res = match outcome {
+            Ok(r) => r,
+            Err(_) => Err("установщик аварийно остановился — повтори, это безопасно".into()),
+        };
+        // Замок снимаем сразу, как только установщик отработал: всё, что ниже,
+        // к чужой машине уже не ходит, и падать там нечему — но если бы упало,
+        // вечное «уже ставлю другой узел» пережило бы саму ошибку.
+        REMOTE_INSTALL_BUSY.store(false, Ordering::SeqCst);
+        if res.is_ok() {
+            // Узел уже в settings.json (его записал установщик) — поднимаем
+            // туннель и поллер, чтобы сессии поехали без перезапуска панели.
+            d.start_remotes();
+            d.push();
+        }
+        windows::emit_to_panel(
+            &app,
+            "remote_install_done",
+            &match &res {
+                Ok(()) => json!({ "ok": true, "name": name }),
+                Err(e) => json!({ "ok": false, "name": name, "error": e }),
+            },
+        );
+    });
+    ok()
+}
+
+/// Публичный ssh-ключ этой машины — его человек вставляет в панель VPS, когда
+/// доступа ещё нет. `create: true` — завести ed25519, если ключей нет вовсе.
+///
+/// Своего ключа Jarvis не заводит без спроса и чужие не трогает: доступ к чужим
+/// машинам остаётся решением человека.
+#[tauri::command]
+pub async fn remotes_ssh_key(create: bool) -> Value {
+    // Синхронная команда Tauri выполняется в ГЛАВНОМ потоке, а внутри —
+    // порождение процесса. Один ssh-keygen, задумавшийся у промпта, вешал всё
+    // окно намертво; в blocking-пуле он не мешает никому.
+    let res = tauri::async_runtime::spawn_blocking(move || public_ssh_key(create)).await;
+    match res {
+        Ok(Ok((key, path, created))) => json!({
+            "ok": true, "created": created, "path": path, "publicKey": key,
+        }),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("не удалось прочитать ssh-ключ"),
+    }
+}
+
+/// Публичный ключ этой машины: `(ключ, путь, только что создан)`. Пустой ключ —
+/// ключей нет, а заводить не просили.
+fn public_ssh_key(create: bool) -> Result<(String, String, bool), String> {
+    let dir = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => std::path::PathBuf::from(h).join(".ssh"),
+        _ => return Err("не знаю домашний каталог".into()),
+    };
+    // Порядок — по предпочтительности: ed25519 короче и современнее, rsa
+    // остаётся ради машин со старым sshd.
+    for name in ["id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"] {
+        let path = dir.join(name);
+        if let Ok(key) = std::fs::read_to_string(&path) {
+            let key = key.trim().to_string();
+            if !key.is_empty() {
+                return Ok((key, path.display().to_string(), false));
+            }
+        }
+    }
+    if !create {
+        return Ok((String::new(), String::new(), false));
+    }
+    let key = dir.join("id_ed25519");
+    // Приватный ключ на месте, а .pub нет — публичную часть ВЫВОДИМ из него.
+    // Прежний код шёл сразу генерировать поверх, а ssh-keygen на это
+    // спрашивает «Overwrite (y/n)?» — и, не дождавшись ответа, висел вечно.
+    // Перезаписать чужой ключ он при этом мог бы и вовсе не спрашивая.
+    if key.exists() {
+        let out = std::process::Command::new("ssh-keygen")
+            .args(["-y", "-f"])
+            .arg(&key)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("не запустился ssh-keygen: {e}"))?;
+        if !out.status.success() {
+            return Err(
+                "у ключа ~/.ssh/id_ed25519 нет публичной половины, а достать её не вышло —                  похоже, он под пассфразой. Добавь ключ в ssh-agent или укажи другой"
+                    .into(),
+            );
+        }
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let pub_path = key.with_extension("pub");
+        let _ = std::fs::write(&pub_path, format!("{text}\n"));
+        return Ok((text, pub_path.display().to_string(), false));
+    }
+    let out = std::process::Command::new("ssh-keygen")
+        .args(["-t", "ed25519", "-N", "", "-C", "jarvis", "-f"])
+        .arg(&key)
+        // Ни один вопрос ssh-keygen не должен уметь остановить приложение:
+        // без stdin он упирается в конец ввода и честно завершается ошибкой.
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("не запустился ssh-keygen: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "ssh-keygen: {}",
+            ellipsize(&one_line(&String::from_utf8_lossy(&out.stderr)), 160)
+        ));
+    }
+    let pub_path = key.with_extension("pub");
+    let text = std::fs::read_to_string(&pub_path)
+        .map_err(|e| format!("ключ создан, но не прочитался: {e}"))?;
+    Ok((text.trim().to_string(), pub_path.display().to_string(), true))
+}
+
+/// Разовый вход по паролю: положить туда наш публичный ключ, чтобы дальше
+/// ходить без пароля. Ключа нет — заводим (человек уже согласился, нажав
+/// «войти по паролю»).
+///
+/// Пароль нужен ровно один раз и никуда не сохраняется. Иначе и нельзя:
+/// туннель к узлу переподнимается сам после сна и смены сети, спросить пароль
+/// в этот момент не у кого — транспорт обязан работать по ключу.
+#[tauri::command]
+pub async fn remotes_ssh_authorize(app: AppHandle, ssh_host: String, password: String) -> Value {
+    let out = tokio::task::spawn_blocking(move || {
+        let (key, _, created) = public_ssh_key(true)?;
+        if key.is_empty() {
+            return Err("не нашёл и не смог создать ssh-ключ".to_string());
+        }
+        crate::install::remote::authorize_key(
+            &|step| windows::emit_to_panel(&app, "remote_install_progress", &step),
+            &ssh_host,
+            &password,
+            &key,
+        )?;
+        Ok::<bool, String>(created)
+    })
+    .await;
+    match out {
+        Ok(Ok(created)) => json!({ "ok": true, "createdKey": created }),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("вход по паролю прервался"),
+    }
+}
+
+/// Ключ `remotes` настроек как массив (что угодно другое считаем пустым: список
+/// правится и руками, и битое значение не повод терять команду).
+fn remotes_array(d: &Arc<Daemon>) -> Vec<Value> {
+    d.settings
+        .load()
+        .get("remotes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+
 #[cfg(test)]
 mod turn_ipc_tests {
     use super::*;
@@ -2799,6 +3388,36 @@ mod turn_ipc_tests {
         assert!(resolve_user_file(Some(&cwd), "нет/такого.rs").is_err());
         assert!(resolve_user_file(None, "relative/without/cwd.rs").is_err());
         assert!(resolve_user_file(Some(&cwd), "sub").is_err(), "каталог — не файл");
+    }
+
+    #[test]
+    fn remote_projects_keep_both_ids() {
+        // Панели нужен ключ реестра (по нему она узнаёт уже известную сессию),
+        // а агенту на той машине — его собственный id. Путать их нельзя:
+        // `--resume vps:abc` там не найдёт ничего.
+        let listing = json!([{
+            "cwd": "/home/bob/my-proj",
+            "count": 2,
+            "lastAt": 1700,
+            "sessions": [{ "id": "abc", "at": 1700 }, { "id": "def", "at": 1600 }],
+        }]);
+        let got = remote_projects_to_history("vps", listing);
+        let g = &got[0];
+        assert_eq!(g["project"], "my-proj", "имя проекта — из cwd, а не из имени каталога");
+        assert_eq!(g["remote"], "vps");
+        assert_eq!(g["sessions"][0]["id"], "vps:abc");
+        assert_eq!(g["sessions"][0]["agentId"], "abc");
+        assert_eq!(g["sessions"][0]["title"], "", "заголовков с узла нет — не выдумываем");
+    }
+
+    #[test]
+    fn remote_projects_survive_a_listing_without_cwd() {
+        // узел не смог достать cwd (пустой транскрипт, чужой формат) — список
+        // всё равно должен нарисоваться, а не исчезнуть целиком
+        let got = remote_projects_to_history("vps", json!([{ "sessions": [] }]));
+        assert_eq!(got[0]["project"], "другое");
+        assert_eq!(got[0]["cwd"], "");
+        assert!(remote_projects_to_history("vps", json!("не массив")).as_array().unwrap().is_empty());
     }
 
     #[test]

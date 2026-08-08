@@ -7,6 +7,7 @@ const chatlogEl = document.getElementById('chatlog');
 const chatTitleEl = document.getElementById('chatTitle');
 const chatChannelEl = document.getElementById('chatChannel');
 const chatModelEl = document.getElementById('chatModel');
+const chatRemoteEl = document.getElementById('chatRemote');
 const chatDotEl = document.getElementById('chatDot');
 const settingsEl = document.getElementById('settings');
 const queryEl = document.getElementById('query');
@@ -35,6 +36,8 @@ const footerLeftEl = document.getElementById('footerLeft');
 const tabSessionsEl = document.getElementById('tabSessions');
 const tabSettingsEl = document.getElementById('tabSettings');
 const voicehistEl = document.getElementById('voicehist');
+const loopsEl = document.getElementById('loops');
+const tabLoopsEl = document.getElementById('tabLoops');
 const tabVoiceEl = document.getElementById('tabVoice');
 
 const STATUS_LABEL = {
@@ -129,7 +132,9 @@ function setView(next) {
     chatSessionId = null;
   }
   if (view === 'question' && next !== 'question') qSessionId = null;
-  if (next === 'history' && view !== 'history') histProject = null; // вкладка всегда открывается со списка проектов
+  // вкладка всегда открывается с верхнего уровня: выбор машины (или сразу
+  // проекты локальной, если узлов не настроено)
+  if (next === 'history' && view !== 'history') { histProject = null; histMachine = null; histNewOpen = false; }
   view = next;
   closeActions();
   // Оконный режим (14h): список слева живёт всегда, поиск и вкладки — тоже.
@@ -147,6 +152,7 @@ function setView(next) {
   settingsEl.hidden = next !== 'settings';
   statsEl.hidden = next !== 'stats';
   voicehistEl.hidden = next !== 'voicehist';
+  loopsEl.hidden = next !== 'loops';
   historyEl.hidden = next !== 'history';
   // чат и вопрос несут собственные нижние бары — парящий футер только тут.
   // В окне полоска не парит, а стоит в сетке под обеими колонками — она нужна всегда.
@@ -159,12 +165,17 @@ function setView(next) {
   tabStatsEl.classList.toggle('active', next === 'stats');
   tabHistoryEl.classList.toggle('active', next === 'history');
   tabVoiceEl.classList.toggle('active', next === 'voicehist');
+  tabLoopsEl.classList.toggle('active', next === 'loops');
   tabSessionsEl.classList.toggle('active', next === 'list' || next === 'chat');
   if (next === 'settings') loadSettings();
   if (next === 'stats') renderStats();
   if (next === 'voicehist') {
     voicehistEl.style.cssText = 'padding:0;height:100%;overflow:hidden';
     try { window.initVoiceHistory(voicehistEl); } catch (e) { console.error('[voicehist] init:', e); }
+  }
+  if (next === 'loops') {
+    // Режим живёт своим модулем: панель только даёт ему место и уходит.
+    try { window.initLoops(loopsEl); } catch (e) { console.error('[loops] init:', e); }
   }
   if (next === 'history') renderHistory();
   else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
@@ -228,7 +239,7 @@ function filtered() {
   const q = queryEl.value.trim().toLowerCase();
   if (!q) return ordered;
   return ordered.filter((s) =>
-    `${s.project || ''} ${s.detail || ''} ${s.agent || ''}`.toLowerCase().includes(q));
+    `${s.project || ''} ${s.detail || ''} ${s.agent || ''} ${s.remote || ''}`.toLowerCase().includes(q));
 }
 
 function render() {
@@ -260,7 +271,8 @@ function render() {
   list.forEach((s, i) => {
     const row = document.createElement('div');
     row.className = `row ${s.status}${i === sel ? ' selected' : ''}`;
-    row.title = [s.cwd, s.title, ...(s.todoList || [])].filter(Boolean).join('\n');
+    row.title = [s.remote ? `узел ${s.remote}` : null, s.cwd, s.title, ...(s.todoList || [])]
+      .filter(Boolean).join('\n');
 
     const dot = document.createElement('span');
     dot.className = 'dot';
@@ -283,6 +295,16 @@ function render() {
       agentBadge = document.createElement('span');
       agentBadge.className = 'badge agent';
       agentBadge.textContent = s.agent;
+    }
+
+    // сессия живёт не на этой машине: бейдж с именем узла рядом с бейджем агента.
+    // Контурный, а не залитый — как точка «закончила»: другая машина, не другой цвет.
+    let remoteBadge = null;
+    if (s.remote) {
+      remoteBadge = document.createElement('span');
+      remoteBadge.className = 'badge remote';
+      remoteBadge.textContent = s.remote;
+      remoteBadge.title = `Агент работает на узле «${s.remote}»`;
     }
 
     const badge = document.createElement('span');
@@ -320,6 +342,7 @@ function render() {
     row.append(dot, name);
     if (branch) row.appendChild(branch);
     if (agentBadge) row.appendChild(agentBadge);
+    if (remoteBadge) row.appendChild(remoteBadge);
     row.appendChild(badge);
     if (hostBadge) row.appendChild(hostBadge);
     row.append(summary);
@@ -827,6 +850,26 @@ function appendPendingReply(text, queued) {
   pendingReplies.push({ text: text.trim(), el: msg });
 }
 
+/* Сколько верхних блоков держим в ленте чата.
+ *
+ * Лента росла всю сессию: у агента, работающего часами, в ней накапливались
+ * десятки тысяч узлов, и каждое следующее добавление пересчитывало вёрстку по
+ * всей этой куче. Отсюда и «чат подтормаживает, а потом встаёт»: чем дольше
+ * смотришь, тем медленнее. Хвоста хватает с запасом — выше него всё равно
+ * листают до начала не глазами, а поиском. */
+const CHATLOG_MAX_BLOCKS = 400;
+
+function trimChatlog() {
+  let extra = chatlogEl.childElementCount - CHATLOG_MAX_BLOCKS;
+  while (extra-- > 0) {
+    const first = chatlogEl.firstElementChild;
+    // Текущий ход не трогаем ни при каких условиях: в него ещё пишет стрим, и
+    // унесённый из документа узел проглотил бы все следующие реплики молча.
+    if (!first || (curTurn && first === curTurn.wrap)) break;
+    first.remove();
+  }
+}
+
 function appendChatItems(items) {
   const nearBottom =
     chatlogEl.scrollHeight - chatlogEl.scrollTop - chatlogEl.clientHeight < 60;
@@ -850,6 +893,7 @@ function appendChatItems(items) {
       turnTarget().appendChild(assistantMsg(it));
     }
   }
+  if (items.length) trimChatlog();
   if (items.length && nearBottom) chatlogEl.scrollTop = chatlogEl.scrollHeight;
 }
 
@@ -859,6 +903,14 @@ function updateChatChannelMark() {
   const model = s && (s.model || s.agent);
   chatModelEl.textContent = model || '';
   chatModelEl.hidden = !model;
+  // сессия с удалённого узла — имя узла в шапке, чтобы не спутать с локальной:
+  // ответы и пульт уходят туда по SSH, а не в терминал на этой машине
+  if (chatRemoteEl) {
+    const rem = s && s.remote ? String(s.remote) : '';
+    chatRemoteEl.textContent = rem;
+    chatRemoteEl.hidden = !rem;
+    chatRemoteEl.title = rem ? `Агент работает на узле «${rem}» — ответы уходят туда по SSH` : '';
+  }
   // tmux-сессии — без пометки; вне tmux помечаем
   chatChannelEl.hidden = !s || !!s.tmuxPane;
   // статус-точка справа — цвет по состоянию, пульс если работает
@@ -916,12 +968,17 @@ function gateReply(s) {
   replyEl.placeholder = isTmux ? 'Ответить агенту…  ( / — команды )' : 'Сессия вне tmux';
   if (!s || isTmux) return;
   tmuxHintEl.textContent = '';
-  tmuxHintEl.appendChild(document.createTextNode('Сессия не в tmux — управлять из Jarvis нельзя. Запусти в терминале: '));
+  const where = s.remote ? `Сессия на узле «${s.remote}» не в tmux — управлять из Jarvis нельзя. Запусти ТАМ: `
+    : 'Сессия не в tmux — управлять из Jarvis нельзя. Запусти в терминале: ';
+  tmuxHintEl.appendChild(document.createTextNode(where));
   const code = document.createElement('code');
   code.className = 'tmuxcmd';
+  // id, под которым сессию знает САМ агент: у сессии с узла ключ реестра
+  // выглядит как «<узел>:<id>», и `--resume` с ним не найдёт ничего
+  const sid = s.remote && s.id.startsWith(s.remote + ':') ? s.id.slice(s.remote.length + 1) : s.id;
   // команда возобновления зависит от агента: codex resume <id> vs claude --resume <id>.
   // Раньше было захардкожено «claude --resume» — для codex-сессий это вело не туда.
-  const resumeCmd = s.agent === 'codex' ? `codex resume ${s.id}` : `claude --resume ${s.id}`;
+  const resumeCmd = s.agent === 'codex' ? `codex resume ${sid}` : `claude --resume ${sid}`;
   code.textContent = resumeCmd;
   code.title = 'Скопировать';
   code.addEventListener('click', () => {
@@ -929,7 +986,9 @@ function gateReply(s) {
     showToast('Скопировано');
   });
   tmuxHintEl.appendChild(code);
-  tmuxHintEl.appendChild(document.createTextNode(' — shim подхватит её в tmux.'));
+  tmuxHintEl.appendChild(document.createTextNode(s.remote
+    ? ' — под tmux -L jarvis, иначе Jarvis до неё не дотянется.'
+    : ' — shim подхватит её в tmux.'));
 }
 
 // индикатор: думает / выполняет тул / генерирует / ждёт
@@ -1930,7 +1989,9 @@ replyEl.addEventListener('keydown', (e) => {
 
 async function focusTerminal(sessionId, project) {
   const res = await window.jarvis.focusTerminal(sessionId);
-  if (res.ok) { window.jarvis.hidePanel(); return; }
+  // Накладка своё дело сделала — уходит с глаз. Окно так себя не ведёт:
+  // из него ушли в терминал, а не закрыли его.
+  if (res.ok) { if (!windowMode()) window.jarvis.hidePanel(); return; }
   // нижняя ступень лесенки — не ошибка, а чат сессии прямо в панели
   if (res.fallbackChat && view !== 'chat') openChat(sessionId, project);
   else showToast(res.error || 'Не нашёл терминал');
@@ -2903,9 +2964,24 @@ const tabHistoryEl = document.getElementById('tabHistory');
 tabHistoryEl.addEventListener('click', () => setView('history'));
 
 let historyData = [];
-let histRows = []; // плоский список выбираемых строк: проекты или чаты (для ↑↓/Enter)
+let histRows = []; // плоский список выбираемых строк: машины, проекты или чаты (для ↑↓/Enter)
 let histSel = 0;
 let histProject = null; // ключ открытого проекта (cwd) — null = список проектов
+// Уровень 0: где работать. Проекты и чаты живут ВНУТРИ выбранной машины —
+// история локальной машины и история узла это разные списки.
+let histMachines = [];
+let histMachine = null; // id машины ('local' | имя узла); null = список машин
+let histError = ''; // отказ getHistory (узел не ответил) — показываем текстом
+let histNewOpen = false; // раскрыта форма «Новый проект»
+let histNewPath = ''; // введённый путь переживает перерисовку списка
+let histNewFocus = false; // форму только что раскрыли — увести в неё курсор ровно один раз
+
+// Одна машина (узлов не настроено) — уровень выбора бессмысленен: это был бы
+// экран из одной строки на каждом заходе. Сразу показываем её проекты.
+const histMultiMachine = () => histMachines.length > 1;
+const histMachineOf = (id) => histMachines.find((m) => m.id === id) || null;
+const histMachineName = (id) => (histMachineOf(id)?.name) || id || 'Эта машина';
+const histIsRemote = (id) => !!histMachineOf(id) && histMachineOf(id).kind === 'remote';
 
 function histTime(ts) {
   const d = new Date(ts);
@@ -2917,18 +2993,33 @@ function histTime(ts) {
 function resumeCommand(s, cwd) {
   // Подсказка для tooltip. Реальная команда собирается на бэкенде из настроек
   // «Запуска» — честно предупреждаем, что она может отличаться (прокси, dangerous-флаги).
-  const base = s.agent === 'codex' ? `codex resume ${s.id}` : `claude --resume ${s.id}`;
+  // У сессии с узла id несёт префикс узла — resume ждёт «голый» agentId.
+  const id = s.agentId || s.id;
+  const base = s.agent === 'codex' ? `codex resume ${id}` : `claude --resume ${id}`;
   return (cwd ? `cd "${cwd}" && ${base}` : base) + '\n(+ параметры из настроек «Запуск»)';
 }
 
-// Запуск сессии в терминале из настроек: agent='claude'|'codex'; sessionId=null —
-// новая сессия, иначе продолжение; cwd — директория проекта. Реальную команду
-// (терминал, прокси, флаги «опасного режима») собирает бэкенд session_launch.
-async function launchSession(agent, sessionId, cwd) {
+// Запуск сессии из настроек: agent='claude'|'codex'; sessionId=null — новая
+// сессия, иначе продолжение; cwd — директория проекта; machine — где запускать
+// ('local' | имя узла). Реальную команду (терминал, прокси, флаги «опасного
+// режима») собирает бэкенд session_launch, он же создаёт каталог.
+async function launchSession(agent, sessionId, cwd, machine) {
   try {
-    const r = await window.jarvis.launchSession(cwd, agent, sessionId);
-    showToast(r && r.ok ? 'Запускаю в терминале…' : ((r && r.error) || 'Не удалось запустить'));
+    const r = await window.jarvis.launchSession(cwd, agent, sessionId, machine || 'local');
+    if (!r || !r.ok) { showToast((r && r.error) || 'Не удалось запустить'); return; }
+    // На узле терминала нет и быть не может: сессия поднимается отсоединённой в
+    // tmux на той стороне и приезжает к нам в список сама — так и говорим.
+    if (r.channel === 'node') showToast(`Поднял на узле «${r.machine || machine}» — сессия появится в списке`);
+    else showToast('Запускаю в терминале…');
   } catch { showToast('Не удалось запустить'); }
+}
+
+function openHistMachine(id) {
+  histMachine = id;
+  histProject = null;
+  histNewOpen = false;
+  queryEl.value = ''; // фильтр машин к проектам не относится
+  renderHistory();
 }
 
 function openHistProject(key) {
@@ -2937,14 +3028,45 @@ function openHistProject(key) {
   renderHistory();
 }
 
+// Шаг назад: чаты → проекты → машины. Ниже машин (или когда их нет) — вкладка «Чаты».
+function histBack() {
+  if (histProject != null) { histProject = null; renderHistory(); return true; }
+  if (histMachine != null && histMultiMachine()) { histMachine = null; histNewOpen = false; renderHistory(); return true; }
+  return false;
+}
+
+async function loadHistMachines() {
+  const local = [{ id: 'local', name: 'Эта машина', kind: 'local', online: true }];
+  try {
+    const r = typeof window.jarvis.machinesList === 'function' ? await window.jarvis.machinesList() : null;
+    histMachines = Array.isArray(r) && r.length ? r : local;
+  } catch { histMachines = local; }
+}
+
 async function renderHistory() {
-  try { historyData = await window.jarvis.getHistory(); } catch { historyData = []; }
+  await loadHistMachines();
   if (view !== 'history') return;
+  if (!histMultiMachine()) histMachine = histMachines[0].id;
+  // узел убрали из настроек, пока вкладка была открыта — возвращаемся к выбору
+  if (histMachine != null && !histMachineOf(histMachine)) { histMachine = null; histProject = null; }
+
+  histError = '';
+  if (histMachine != null) {
+    let data;
+    try { data = await window.jarvis.getHistory(histMachine); } catch { data = { error: 'Не удалось получить историю' }; }
+    if (view !== 'history') return;
+    // узел мог не ответить: бэкенд отдаёт {error} вместо массива
+    if (Array.isArray(data)) historyData = data;
+    else { historyData = []; histError = (data && data.error) ? String(data.error) : 'История недоступна'; }
+  } else historyData = [];
+
   historyEl.textContent = '';
   histRows = [];
   histSel = 0;
 
   const q = queryEl.value.trim().toLowerCase();
+
+  if (histMachine == null) { renderHistMachines(q); paintHistSel(); return; }
 
   let g = null;
   if (histProject != null) {
@@ -2957,11 +3079,69 @@ async function renderHistory() {
   paintHistSel();
 }
 
-/* уровень 1: проекты */
+/* уровень 0: где работать — эта машина или один из узлов */
+function renderHistMachines(q) {
+  primaryLabelEl.textContent = 'Выбрать машину';
+  historyEl.appendChild(Object.assign(document.createElement('div'), {
+    className: 'hhint', textContent: 'Проекты и чаты хранятся на той машине, где работает агент — выбери, где смотреть.',
+  }));
+
+  const list = q ? histMachines.filter((m) => `${m.name} ${m.sshHost || ''}`.toLowerCase().includes(q)) : histMachines;
+  if (!list.length) {
+    historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'empty', textContent: 'Ничего не найдено' }));
+    return;
+  }
+
+  for (const m of list) {
+    const idx = histRows.length;
+    histRows.push({ type: 'machine', key: m.id });
+    const row = document.createElement('div');
+    row.className = 'hrow' + (m.online ? '' : ' off');
+    row.dataset.idx = idx;
+    // не на связи — всё равно выбираем: причину назовёт сама попытка запуска
+    row.title = [m.sshHost || null, m.online ? null : 'не на связи', m.error || null].filter(Boolean).join('\n') || m.name;
+
+    row.appendChild(Object.assign(document.createElement('span'), { className: 'hdot' }));
+    row.appendChild(Object.assign(document.createElement('span'), { className: 'htitle', textContent: m.name }));
+
+    const meta = [];
+    if (m.kind === 'remote' && m.sshHost) meta.push(m.sshHost);
+    if (!m.online) meta.push(m.error ? `не на связи · ${m.error}` : 'не на связи');
+    row.appendChild(Object.assign(document.createElement('span'), { className: 'hmeta hmeta-wide', textContent: meta.join(' · ') }));
+    row.appendChild(Object.assign(document.createElement('span'), { className: 'hchev', textContent: '›' }));
+
+    row.addEventListener('mouseenter', () => { histSel = idx; paintHistSel(); });
+    row.addEventListener('click', () => openHistMachine(m.id));
+    historyEl.appendChild(row);
+  }
+}
+
+/* уровень 1: проекты выбранной машины */
 function renderHistProjects(q) {
   primaryLabelEl.textContent = 'Открыть проект';
+  const remote = histIsRemote(histMachine);
+
+  // крошка есть только когда есть куда возвращаться (узлы настроены)
+  if (histMultiMachine()) {
+    const head = document.createElement('div');
+    head.className = 'hgroup';
+    const back = Object.assign(document.createElement('span'), { className: 'hback', textContent: '‹ Машины' });
+    back.addEventListener('click', () => { histMachine = null; histNewOpen = false; renderHistory(); });
+    head.appendChild(back);
+    head.appendChild(Object.assign(document.createElement('span'), { textContent: histMachineName(histMachine) }));
+    if (remote) head.appendChild(Object.assign(document.createElement('span'), { className: 'hcount', textContent: 'узел' }));
+    historyEl.appendChild(head);
+  }
+
+  renderHistNew(remote);
+
+  if (histError) {
+    historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'empty', textContent: histError }));
+    return;
+  }
+
   const groups = q
-    ? historyData.filter((x) => x.project.toLowerCase().includes(q) || x.sessions.some((s) => s.title.toLowerCase().includes(q)))
+    ? historyData.filter((x) => (x.project || '').toLowerCase().includes(q) || x.sessions.some((s) => (s.title || '').toLowerCase().includes(q)))
     : historyData;
 
   if (!groups.length) {
@@ -2989,11 +3169,81 @@ function renderHistProjects(q) {
     row.addEventListener('click', () => openHistProject(key));
     historyEl.appendChild(row);
   }
+
+  // по умолчанию под курсором первый ПРОЕКТ, а не строка создания: Enter сразу
+  // после открытия вкладки должен работать как раньше
+  const first = histRows.findIndex((r) => r.type === 'project');
+  if (first > 0) histSel = first;
+}
+
+/* строка «Новый проект» и её форма: путь на выбранной машине + выбор агента.
+   Каталог создаст бэкенд (рекурсивно, на нужной машине) — от UI нужен только путь. */
+function renderHistNew(remote) {
+  const idx = histRows.length;
+  histRows.push({ type: 'new' });
+  const row = document.createElement('div');
+  row.className = 'hrow hnew' + (histNewOpen ? ' open' : '');
+  row.dataset.idx = idx;
+  row.title = 'Запустить агента в новой директории';
+  row.appendChild(Object.assign(document.createElement('span'), { className: 'htitle', textContent: 'Новый проект' }));
+  row.appendChild(Object.assign(document.createElement('span'), {
+    className: 'hmeta',
+    textContent: remote ? `путь на узле «${histMachineName(histMachine)}»` : 'путь на этой машине',
+  }));
+  row.appendChild(Object.assign(document.createElement('span'), { className: 'hchev', textContent: histNewOpen ? '−' : '+' }));
+  row.addEventListener('mouseenter', () => { histSel = idx; paintHistSel(); });
+  row.addEventListener('click', () => { histNewOpen = !histNewOpen; histNewFocus = histNewOpen; renderHistory(); });
+  historyEl.appendChild(row);
+  if (!histNewOpen) return;
+
+  const form = document.createElement('div');
+  form.className = 'hnewform';
+  const input = Object.assign(document.createElement('input'), {
+    type: 'text', placeholder: '~/projects/my-app', value: histNewPath, spellcheck: false,
+  });
+  input.addEventListener('input', () => { histNewPath = input.value; });
+  // поле живёт внутри вкладки с ↑↓/↵/esc на window — гасим всплытие, иначе
+  // стрелки будут двигать выбор строки вместо каретки
+  input.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey) return;
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); start('claude'); }
+    else if (e.key === 'Escape') { e.preventDefault(); histNewOpen = false; renderHistory(); }
+  });
+
+  function start(agent) {
+    const path = input.value.trim();
+    if (!path) { input.focus(); showToast('Укажи путь к проекту'); return; }
+    histNewOpen = false;
+    histNewPath = '';
+    launchSession(agent, null, path, histMachine);
+    renderHistory();
+  }
+
+  const btn = (agent, label) => {
+    const b = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: label });
+    b.title = `Новая сессия ${label} по этому пути`;
+    b.addEventListener('click', (e) => { e.stopPropagation(); start(agent); });
+    return b;
+  };
+  form.append(input, btn('claude', 'Claude'), btn('codex', 'Codex'));
+  historyEl.appendChild(form);
+  historyEl.appendChild(Object.assign(document.createElement('div'), {
+    className: 'hhint',
+    textContent: remote
+      ? 'Каталог создастся сам. На узле сессия поднимется в tmux — терминал не откроется, чат появится в списке.'
+      : 'Каталог создастся сам, если его ещё нет. ↵ — Claude, кнопка — выбрать агента.',
+  }));
+  // курсор уводим только при раскрытии: список перерисовывается и на каждую
+  // букву в поиске — иначе фокус улетал бы из строки поиска в путь
+  if (histNewFocus) { histNewFocus = false; setTimeout(() => input.focus(), 0); }
 }
 
 /* уровень 2: чаты проекта */
 function renderHistChats(g, q) {
-  primaryLabelEl.textContent = 'Запустить в терминале';
+  // на узле терминала нет: сессия уходит в tmux на той стороне
+  const remote = histIsRemote(histMachine);
+  primaryLabelEl.textContent = remote ? 'Поднять на узле' : 'Запустить в терминале';
   const head = document.createElement('div');
   head.className = 'hgroup';
   const back = Object.assign(document.createElement('span'), { className: 'hback', textContent: '‹ Проекты' });
@@ -3006,18 +3256,23 @@ function renderHistChats(g, q) {
   if (g.cwd) {
     const newClaude = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Claude' });
     newClaude.title = 'Новая сессия Claude в этой директории';
-    newClaude.addEventListener('click', (e) => { e.stopPropagation(); launchSession('claude', null, g.cwd); });
+    newClaude.addEventListener('click', (e) => { e.stopPropagation(); launchSession('claude', null, g.cwd, histMachine); });
     const newCodex = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Codex' });
     newCodex.title = 'Новая сессия Codex в этой директории';
-    newCodex.addEventListener('click', (e) => { e.stopPropagation(); launchSession('codex', null, g.cwd); });
+    newCodex.addEventListener('click', (e) => { e.stopPropagation(); launchSession('codex', null, g.cwd, histMachine); });
     head.appendChild(newClaude);
     head.appendChild(newCodex);
   }
   historyEl.appendChild(head);
 
-  historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — запустить продолжение в терминале · + Claude / + Codex — новая сессия · esc — к проектам' }));
+  historyEl.appendChild(Object.assign(document.createElement('div'), {
+    className: 'hhint',
+    textContent: remote
+      ? `↵ — поднять продолжение на узле «${histMachineName(histMachine)}» (терминал не откроется) · + Claude / + Codex — новая сессия · esc — к проектам`
+      : '↵ — запустить продолжение в терминале · + Claude / + Codex — новая сессия · esc — к проектам',
+  }));
 
-  const sessions = q ? g.sessions.filter((s) => s.title.toLowerCase().includes(q)) : g.sessions;
+  const sessions = q ? g.sessions.filter((s) => (s.title || '').toLowerCase().includes(q)) : g.sessions;
   if (!sessions.length) {
     historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'empty', textContent: 'Ничего не найдено' }));
     return;
@@ -3029,11 +3284,15 @@ function renderHistChats(g, q) {
     const row = document.createElement('div');
     row.className = 'hrow';
     row.dataset.idx = idx;
-    row.title = `${s.title}\n${resumeCommand(s, g.cwd)}`;
+    // id сессии с узла несёт префикс «узел:» — человеку показываем «голый» agentId
+    const sid = String(s.agentId || s.id || '');
+    row.title = [s.title || `сессия ${sid}`, resumeCommand(s, g.cwd)].join('\n');
 
     const title = document.createElement('span');
-    title.className = 'htitle';
-    title.textContent = s.title || s.id.slice(0, 8);
+    title.className = 'htitle' + (s.title ? '' : ' dim');
+    // заголовков с узла нет и взяться им неоткуда: показываем id (время уже
+    // справа, в метаданных — дублировать его в заголовке незачем)
+    title.textContent = s.title || `сессия ${sid.slice(0, 8)}`;
     row.appendChild(title);
 
     const meta = document.createElement('span');
@@ -3045,10 +3304,10 @@ function renderHistChats(g, q) {
     meta.textContent = parts.join(' · ');
     row.appendChild(meta);
 
-    row.appendChild(Object.assign(document.createElement('span'), { className: 'hcopy', textContent: 'запустить ↵' }));
+    row.appendChild(Object.assign(document.createElement('span'), { className: 'hcopy', textContent: remote ? 'поднять ↵' : 'запустить ↵' }));
 
     row.addEventListener('mouseenter', () => { histSel = idx; paintHistSel(); });
-    row.addEventListener('click', () => launchSession(s.agent, s.id, g.cwd));
+    row.addEventListener('click', () => launchSession(s.agent, s.id, g.cwd, histMachine));
     historyEl.appendChild(row);
   }
 }
@@ -3066,6 +3325,7 @@ const statsEl = document.getElementById('stats');
 const tabStatsEl = document.getElementById('tabStats');
 tabStatsEl.addEventListener('click', () => setView('stats'));
 tabVoiceEl.addEventListener('click', () => setView('voicehist'));
+tabLoopsEl.addEventListener('click', () => setView('loops'));
 
 const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(n || 0));
 
@@ -4199,6 +4459,11 @@ window.addEventListener('keydown', async (e) => {
     setView('voicehist');
     return;
   }
+  if (e.metaKey && e.key === '5') { // ⌘5 — Циклы
+    e.preventDefault();
+    setView('loops');
+    return;
+  }
 
   // палитра быстрых команд: «/» в главном поиске (Часть 2). Раньше generic-Esc.
   if (view === 'list' && (argMode || queryEl.value.trim().startsWith('/'))) {
@@ -4218,20 +4483,22 @@ window.addEventListener('keydown', async (e) => {
     return; // прочее (печать) идёт в #query
   }
 
-  if (view === 'history') { // ↑↓ выбор · ↵ открыть проект / запустить в терминале · esc — на уровень вверх
+  if (view === 'history') { // ↑↓ выбор · ↵ выбрать машину / открыть проект / запустить · esc — на уровень вверх
     if (e.key === 'ArrowDown') { e.preventDefault(); histSel = Math.min(histRows.length - 1, histSel + 1); paintHistSel(); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); histSel = Math.max(0, histSel - 1); paintHistSel(); return; }
     if (e.key === 'Enter' && histRows[histSel]) {
       e.preventDefault();
       const r = histRows[histSel];
-      if (r.type === 'project') openHistProject(r.key);
-      else launchSession(r.s.agent, r.s.id, r.cwd);
+      if (r.type === 'machine') openHistMachine(r.key);
+      else if (r.type === 'project') openHistProject(r.key);
+      else if (r.type === 'new') { histNewOpen = true; histNewFocus = true; renderHistory(); }
+      else launchSession(r.s.agent, r.s.id, r.cwd, r.s.remote || histMachine || 'local'); // машина сессии важнее текущего уровня
       return;
     }
     if (e.key === 'Escape') {
       e.preventDefault();
-      if (histProject != null) { histProject = null; renderHistory(); }
-      else { setView('list'); render(); }
+      if (histNewOpen) { histNewOpen = false; renderHistory(); }
+      else if (!histBack()) { setView('list'); render(); }
       return;
     }
     return; // прочее (печать в поиск) — пусть идёт в инпут

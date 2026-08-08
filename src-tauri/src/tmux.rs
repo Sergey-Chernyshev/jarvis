@@ -75,6 +75,71 @@ pub async fn tmux_j(args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Машина, на которой живёт пана. Последовательность вставки одна и та же
+/// (`tmux -L jarvis`, C-u → set-buffer → paste-buffer → Enter) — меняется
+/// только исполнитель: мы сами или узел на той стороне ssh.
+///
+/// Существует ровно затем, чтобы вызывающий код (ответ, пульт, лимиты) не знал
+/// про удалённость: сессия либо локальная, либо нет, а логика доставки общая.
+#[derive(Clone)]
+pub enum Target {
+    Local,
+    Remote(std::sync::Arc<crate::remote::Node>),
+}
+
+impl Target {
+    pub async fn pane_alive(&self, pane: &str) -> bool {
+        match self {
+            Target::Local => pane_alive(pane).await,
+            // Отдельного «жива ли пана» у узла нет: список пан всё равно нужен
+            // поллеру живости, а лишний эндпоинт — лишний контракт.
+            Target::Remote(n) => match n.client() {
+                Ok(c) => c
+                    .panes()
+                    .await
+                    .map(|r| r.panes.iter().any(|p| p.pane == pane))
+                    .unwrap_or(false),
+                Err(_) => false,
+            },
+        }
+    }
+
+    pub async fn reply(&self, pane: &str, prompt: &str) -> Result<(), String> {
+        match self {
+            Target::Local => reply(pane, prompt).await,
+            Target::Remote(n) => n.client()?.reply(pane, prompt).await,
+        }
+    }
+
+    pub async fn paste_slash(&self, pane: &str, text: &str) -> Result<(), String> {
+        match self {
+            Target::Local => paste_slash(pane, text).await,
+            Target::Remote(n) => n.client()?.control(pane, text).await,
+        }
+    }
+
+    /// Ответ на вопрос агента. План клавиш считается здесь в обоих случаях —
+    /// раскладка пикеров привязана к версии агента, и узел про неё не знает.
+    pub async fn answer_question(
+        &self,
+        pane: &str,
+        agent: crate::backend::Agent,
+        q: &crate::model::Question,
+        answers: &[Vec<u32>],
+        texts: &[Option<String>],
+    ) -> Result<(), String> {
+        let keys = answer_keys(agent, q, answers, texts);
+        match self {
+            Target::Local => play_keys(pane, &keys).await,
+            Target::Remote(n) => {
+                n.client()?
+                    .keys(pane, keys.iter().map(Key::to_json).collect())
+                    .await
+            }
+        }
+    }
+}
+
 pub async fn pane_alive(pane: &str) -> bool {
     tmux_j(&["display-message", "-p", "-t", pane, "ok"])
         .await
@@ -197,19 +262,12 @@ pub async fn rename_window(pane: &str, name: &str) -> Result<(), String> {
         .map(|_| ())
 }
 
-/// Ответ на вопрос(ы) клавишами в пану. Раскладку строит `answer_keys`
-/// (чистая, протестирована); здесь — только проигрывание с задержками.
-/// Именованные клавиши — send-keys; свой текст — через буфер, как `reply()`
-/// (bracketed paste надёжен для юникода/пробелов, settle — чтобы следующий
-/// Enter не обогнал вставку).
-pub async fn answer_question(
-    pane: &str,
-    agent: crate::backend::Agent,
-    q: &crate::model::Question,
-    answers: &[Vec<u32>],
-    texts: &[Option<String>],
-) -> Result<(), String> {
-    let keys = answer_keys(agent, q, answers, texts);
+/// Проиграть план клавиш в пану — так отвечают на вопросы агента. Раскладку
+/// строит `answer_keys` (чистая, протестирована); здесь — только проигрывание
+/// с задержками. Именованные клавиши — send-keys; свой текст — через буфер,
+/// как `reply()` (bracketed paste надёжен для юникода/пробелов, settle — чтобы
+/// следующий Enter не обогнал вставку).
+pub async fn play_keys(pane: &str, keys: &[Key]) -> Result<(), String> {
     for (i, k) in keys.iter().enumerate() {
         if i > 0 {
             sleep(Duration::from_millis(140)).await; // дать пикеру перерисоваться
@@ -278,6 +336,14 @@ pub enum Key {
 impl Key {
     fn named(s: &str) -> Key {
         Key::Named(s.to_string())
+    }
+
+    /// Шаг плана для узла: `{"key":"Down"}` / `{"text":"…"}` (см. `/keys`).
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            Key::Named(k) => serde_json::json!({ "key": k }),
+            Key::Text(t) => serde_json::json!({ "text": t }),
+        }
     }
 }
 

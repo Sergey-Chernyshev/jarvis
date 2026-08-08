@@ -562,3 +562,164 @@ body {
   .j-wave.is-live i { animation: none; }
   * { transition-duration: 1ms !important; }
 }
+
+/* ================= режим «Циклы» =================
+ *
+ * Одна краска, как и везде: состояния различаются формой и весом. Цветной
+ * светофор на журнале из двадцати итераций превращается в шум, и человек
+ * перестаёт замечать ровно ту строку, ради которой открыл экран. */
+
+.loops { height: 100%; overflow: hidden; }
+.lp-wrap { display: flex; height: 100%; min-height: 0; }
+.lp-side {
+  width: 232px; flex: 0 0 232px; padding: 10px;
+  overflow-y: auto; border-right: 1px solid var(--hair);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.lp-main { flex: 1; min-width: 0; overflow-y: auto; padding: 18px 22px 28px; }
+
+.lp-row { padding: 9px 11px; border-radius: var(--r-chip); cursor: default; position: relative; }
+.lp-row:hover { background: var(--surface-2); }
+.lp-row.active { background: var(--accent-soft); }
+.lp-row-name { font: 500 13.5px/1.3 var(--font); color: var(--ink); }
+.lp-row-sub { font: 400 11.5px/1.4 var(--font); color: var(--ink-dim); margin-top: 2px; }
+/* Идущий цикл — пульсирующая точка: он единственный, что меняется сам собой. */
+.lp-row.running .lp-row-name::before {
+  content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 6px;
+  border-radius: 50%; background: var(--accent); animation: lpPulse 1.6s ease-in-out infinite;
+}
+@keyframes lpPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.lp-row.needs-you .lp-row-name { font-weight: 600; }
+.lp-dot {
+  position: absolute; top: 12px; right: 10px;
+  width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+}
+.lp-new { margin-top: auto; height: 34px; font-size: 13px; }
+
+.lp-h1 { font: 600 19px/1.25 var(--font); color: var(--ink); }
+.lp-h2 { font: 400 13px/1.5 var(--font); color: var(--ink-dim); margin: 3px 0 16px; }
+.lp-sub { font: 500 12px/1.4 var(--font); color: var(--ink-dim); margin: 14px 0 6px; }
+.lp-hint { font: 400 11.5px/1.45 var(--font); color: var(--ink-faint); }
+.lp-empty { font: 400 13px/1.5 var(--font); color: var(--ink-faint); padding: 10px 0; }
+
+.lp-note {
+  margin-bottom: 12px; padding: 9px 12px; border-radius: var(--r-chip);
+  font: 400 12.5px/1.45 var(--font); background: var(--surface-2); color: var(--ink);
+}
+.lp-note.bad { background: var(--danger-soft, var(--surface-2)); color: var(--danger, var(--ink)); }
+
+/* --- библиотека шаблонов --- */
+.lp-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); gap: 10px; }
+.lp-card {
+  padding: 13px 14px; border-radius: var(--r-card);
+  background: var(--surface-2); cursor: default;
+  transition: background var(--dur) ease;
+}
+.lp-card:hover { background: var(--accent-soft); }
+.lp-card-name { font: 500 14px/1.3 var(--font); color: var(--ink); }
+.lp-card-hint { font: 400 11.5px/1.45 var(--font); color: var(--ink-dim); margin-top: 4px; }
+.lp-scratch { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+
+/* --- конструктор --- */
+.lp-step { margin: 16px 0; padding: 14px 16px; border-radius: var(--r-card); background: var(--surface-2); }
+.lp-step-h { display: flex; align-items: baseline; gap: 9px; margin-bottom: 10px; }
+.lp-step-n {
+  width: 20px; height: 20px; flex: 0 0 20px; border-radius: 50%;
+  background: var(--accent); color: var(--on-accent);
+  font: 600 11.5px/20px var(--font); text-align: center;
+}
+.lp-step-t { font: 600 14px/1.3 var(--font); color: var(--ink); }
+.lp-step-s { font: 400 12px/1.4 var(--font); color: var(--ink-dim); }
+.lp-step-b { display: flex; flex-direction: column; gap: 10px; }
+
+.lp-field { display: flex; flex-direction: column; gap: 4px; }
+.lp-field-label { font: 500 12px/1.3 var(--font); color: var(--ink-dim); }
+.lp-input {
+  height: 34px; padding: 0 11px; width: 100%;
+  border: 1px solid var(--hair); border-radius: var(--r-chip);
+  font: 400 13px/1 var(--font); color: var(--ink); background: var(--surface);
+  appearance: none; outline: none;
+}
+.lp-input:focus { border-color: var(--accent); }
+.lp-input.narrow { width: 130px; flex: 0 0 130px; }
+textarea.lp-input { height: auto; padding: 9px 11px; line-height: 1.45; resize: vertical; }
+.lp-check { display: flex; align-items: center; gap: 8px; font: 400 13px/1.4 var(--font); color: var(--ink); }
+.lp-check .lp-hint { margin-left: 4px; }
+.lp-gates { display: flex; flex-direction: column; gap: 8px; }
+.lp-gate { display: flex; gap: 8px; align-items: center; }
+.j-btn.lp-ghost { height: 32px; padding: 0 13px; font-size: 13px; background: transparent; box-shadow: inset 0 0 0 1px var(--hair); }
+.lp-wake { display: flex; gap: 8px; align-items: center; }
+.lp-actions { display: flex; gap: 9px; margin-top: 16px; flex-wrap: wrap; }
+
+.lp-problems { margin-top: 14px; display: flex; flex-direction: column; gap: 5px; }
+.lp-problem {
+  font: 400 12.5px/1.45 var(--font); color: var(--ink-dim);
+  padding-left: 14px; position: relative;
+}
+.lp-problem::before { content: '·'; position: absolute; left: 4px; color: var(--ink-faint); }
+
+/* --- пульт --- */
+.lp-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; margin: 6px 0 8px; }
+.lp-metric { padding: 11px 13px; border-radius: var(--r-card); background: var(--surface-2); }
+.lp-metric-v { font: 600 19px/1.15 var(--font); color: var(--ink); font-variant-numeric: tabular-nums; }
+.lp-metric-l { font: 400 11.5px/1.4 var(--font); color: var(--ink-dim); margin-top: 3px; }
+.lp-metric-s { font: 400 11px/1.4 var(--font); color: var(--ink-faint); margin-top: 1px; }
+
+.lp-journal { margin-top: 6px; }
+.lp-it {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 8px 10px; border-radius: var(--r-chip); cursor: default;
+}
+.lp-it:hover { background: var(--surface-2); }
+.lp-it-n { font: 500 12px/1 var(--font); color: var(--ink-faint); width: 22px; flex: 0 0 22px; font-variant-numeric: tabular-nums; }
+.lp-it-sum { flex: 1; min-width: 0; font: 400 13px/1.4 var(--font); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-it-v { font: 400 11.5px/1 var(--font); color: var(--ink-dim); }
+/* Красное — только настоящая поломка. Возврат критика это нормальный ход
+ * работы, а не авария, и красить его в тревогу значит обесценить тревогу. */
+.lp-it-v[data-kind='bad'] { color: var(--danger, var(--ink)); }
+.lp-it-v[data-kind='ok'] { color: var(--accent-ink, var(--ink-dim)); }
+.lp-it-t { font: 400 11.5px/1 var(--font); color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+.lp-it-eye { font: 500 11px/1 var(--font); color: var(--accent-ink, var(--ink)); }
+
+.lp-intervene { margin-top: 14px; }
+.lp-intervene .lp-input { height: 38px; }
+
+.lp-stopped { margin: 12px 0; padding: 13px 15px; border-radius: var(--r-card); background: var(--surface-2); }
+.lp-stopped-h { font: 600 14px/1.3 var(--font); color: var(--ink); }
+.lp-stopped-b { font: 400 12.5px/1.5 var(--font); color: var(--ink-dim); margin-top: 5px; }
+
+.lp-ask {
+  margin: 10px 0; padding: 14px 16px; border-radius: var(--r-card);
+  background: var(--accent-soft); font: 400 14px/1.5 var(--font); color: var(--ink);
+}
+.lp-answer { margin-top: 10px; }
+
+/* --- экран итерации --- */
+.lp-summary { font: 400 14.5px/1.5 var(--font); color: var(--ink); margin: 4px 0 10px; }
+.lp-files { display: flex; flex-direction: column; gap: 2px; }
+.lp-file { font: 400 12px/1.5 var(--mono, var(--font)); color: var(--ink-dim); }
+.lp-gate-run { padding: 8px 10px; border-radius: var(--r-chip); background: var(--surface-2); margin-bottom: 6px; }
+.lp-gate-n { font: 500 12.5px/1.4 var(--font); color: var(--ink); }
+.lp-gate-v { float: right; font: 500 12.5px/1.4 var(--font); color: var(--ink-dim); }
+.lp-gate-run[data-ok='нет'] .lp-gate-v { color: var(--danger, var(--ink)); }
+.lp-gate-o {
+  margin: 6px 0 0; padding: 8px; border-radius: var(--r-chip);
+  background: var(--surface); font: 400 11.5px/1.5 var(--mono, monospace);
+  color: var(--ink-dim); max-height: 180px; overflow: auto; white-space: pre-wrap;
+}
+.lp-critic { margin: 12px 0; font: 400 13px/1.5 var(--font); color: var(--ink); }
+.lp-diff {
+  margin: 0; padding: 11px; border-radius: var(--r-card);
+  background: var(--surface-2); font: 400 11.5px/1.55 var(--mono, monospace);
+  color: var(--ink-dim); max-height: 340px; overflow: auto; white-space: pre;
+}
+
+/* Вход в конструктор — первая строка колонки, а не кнопка, прижатая к низу:
+ * новый цикл начинают чаще, чем удаляют старый. */
+.lp-new { width: 100%; height: 34px; justify-content: center; font-size: 13px; margin-bottom: 4px; }
+.lp-side-h {
+  font: 500 11px/1.4 var(--font); color: var(--ink-faint);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  margin: 10px 4px 2px;
+}
+.lp-row.tmpl .lp-row-name { color: var(--ink-dim); font-weight: 400; }

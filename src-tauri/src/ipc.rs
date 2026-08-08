@@ -5,6 +5,7 @@
 //! { ok:false, error } / { ok:false, needsTmux, resumeCmd }.
 
 use serde_json::{json, Value};
+use std::process::Stdio;
 use std::sync::Arc;
 use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt;
@@ -3247,12 +3248,17 @@ pub fn remotes_install(app: AppHandle, cfg: Value) -> Value {
 /// Своего ключа Jarvis не заводит без спроса и чужие не трогает: доступ к чужим
 /// машинам остаётся решением человека.
 #[tauri::command]
-pub fn remotes_ssh_key(create: bool) -> Value {
-    match public_ssh_key(create) {
-        Ok((key, path, created)) => json!({
+pub async fn remotes_ssh_key(create: bool) -> Value {
+    // Синхронная команда Tauri выполняется в ГЛАВНОМ потоке, а внутри —
+    // порождение процесса. Один ssh-keygen, задумавшийся у промпта, вешал всё
+    // окно намертво; в blocking-пуле он не мешает никому.
+    let res = tauri::async_runtime::spawn_blocking(move || public_ssh_key(create)).await;
+    match res {
+        Ok(Ok((key, path, created))) => json!({
             "ok": true, "created": created, "path": path, "publicKey": key,
         }),
-        Err(e) => err(e),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("не удалось прочитать ssh-ключ"),
     }
 }
 
@@ -3278,9 +3284,34 @@ fn public_ssh_key(create: bool) -> Result<(String, String, bool), String> {
         return Ok((String::new(), String::new(), false));
     }
     let key = dir.join("id_ed25519");
+    // Приватный ключ на месте, а .pub нет — публичную часть ВЫВОДИМ из него.
+    // Прежний код шёл сразу генерировать поверх, а ssh-keygen на это
+    // спрашивает «Overwrite (y/n)?» — и, не дождавшись ответа, висел вечно.
+    // Перезаписать чужой ключ он при этом мог бы и вовсе не спрашивая.
+    if key.exists() {
+        let out = std::process::Command::new("ssh-keygen")
+            .args(["-y", "-f"])
+            .arg(&key)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("не запустился ssh-keygen: {e}"))?;
+        if !out.status.success() {
+            return Err(
+                "у ключа ~/.ssh/id_ed25519 нет публичной половины, а достать её не вышло —                  похоже, он под пассфразой. Добавь ключ в ssh-agent или укажи другой"
+                    .into(),
+            );
+        }
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let pub_path = key.with_extension("pub");
+        let _ = std::fs::write(&pub_path, format!("{text}\n"));
+        return Ok((text, pub_path.display().to_string(), false));
+    }
     let out = std::process::Command::new("ssh-keygen")
         .args(["-t", "ed25519", "-N", "", "-C", "jarvis", "-f"])
         .arg(&key)
+        // Ни один вопрос ssh-keygen не должен уметь остановить приложение:
+        // без stdin он упирается в конец ввода и честно завершается ошибкой.
+        .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("не запустился ssh-keygen: {e}"))?;
     if !out.status.success() {

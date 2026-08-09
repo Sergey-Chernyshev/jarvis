@@ -384,7 +384,8 @@ impl History {
         // дорогу, а внутри цикла бралcя ещё и замок расхода: на большой истории
         // это ставило в очередь и сканер, и запись кэша. Копия дороже на одну
         // аллокацию и дешевле на всё остальное.
-        let snapshot: Vec<Meta> = self.cache.lock().unwrap().values().cloned().collect();
+        let snapshot: Vec<Meta> =
+            self.cache.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
         for meta in &snapshot {
             if meta.service || meta.title.is_empty() {
                 continue;

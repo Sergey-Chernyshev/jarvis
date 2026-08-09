@@ -1242,10 +1242,18 @@ pub fn limit_get(app: AppHandle) -> Value {
 #[tauri::command]
 pub async fn machines_list(app: AppHandle) -> Value {
     let _t = crate::log::Step::new("machines_list");
-    // Асинхронная команда Tauri уходит с главного потока. Синхронная — нет, и
-    // любой замок, за которым она встанет, останавливает всё окно. Здесь это
-    // особенно дорого: с этой команды начинается вкладка «Проекты».
-    let d = Daemon::get(&app);
+    // Паника внутри асинхронной команды убивает задачу, и вызов из панели не
+    // завершается НИКОГДА — ни успехом, ни отказом. Раздел висит белым, и
+    // отличить это от «пусто» нечем. Отказ честнее вечного ожидания.
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| machines(&app)));
+    match caught {
+        Ok(v) => v,
+        Err(_) => json!([{ "id": "local", "name": "Эта машина", "kind": "local", "online": true }]),
+    }
+}
+
+fn machines(app: &AppHandle) -> Value {
+    let d = Daemon::get(app);
     let mut out = vec![json!({
         "id": "local", "name": "Эта машина", "kind": "local", "online": true,
     })];
@@ -1274,7 +1282,13 @@ pub async fn history_get(app: AppHandle, machine: Option<String>) -> Value {
     let d = Daemon::get(&app);
     let machine = machine.unwrap_or_default();
     if machine.is_empty() || machine == "local" {
-        return d.history.projects(&d.usage);
+        // См. `machines_list`: паника здесь оставила бы вкладку «Проекты»
+        // белой навсегда, потому что обещание в панели не завершится.
+        let d2 = d.clone();
+        return std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            d2.history.projects(&d2.usage)
+        }))
+        .unwrap_or_else(|_| json!({ "error": "история не собралась — подробности в логе" }));
     }
     let Some(node) = d.remotes.node(&machine) else {
         return json!([]);

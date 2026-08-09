@@ -939,6 +939,17 @@ impl Node {
     }
 
     pub fn status(&self) -> RemoteStatus {
+        // Версию берём ОДИН раз в переменную — и только потом собираем ответ.
+        //
+        // Раньше она читалась прямо в поле структуры, а соседнее поле звало
+        // `outdated()`, который лезет за тем же замком. Временный страж живёт
+        // до конца всего выражения, то есть до конца литерала структуры, —
+        // значит второй захват происходил при живом первом. Обычный мьютекс не
+        // реентерабелен: поток вставал навсегда, и вместе с ним весь список
+        // машин. Отсюда и белый экран «Проектов», и вечные скелетоны в
+        // настройках удалённых.
+        let version = self.version.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let outdated = !version.is_empty() && version != env!("CARGO_PKG_VERSION");
         RemoteStatus {
             name: self.cfg.name.clone(),
             ssh_host: self.cfg.ssh_host.clone(),
@@ -946,8 +957,8 @@ impl Node {
             connected: self.online.load(Ordering::SeqCst),
             port: self.tunnel.port(),
             cursor: self.cursor(),
-            version: self.version.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-            outdated: self.outdated(),
+            version,
+            outdated,
             error: self.why(),
         }
     }
@@ -961,7 +972,7 @@ impl Node {
     /// любого разбора на компоненты — расхождение в любую сторону означает,
     /// что узел ставился другой сборкой.
     pub fn outdated(&self) -> bool {
-        let v = self.version.lock().unwrap();
+        let v = self.version.lock().unwrap_or_else(|e| e.into_inner());
         !v.is_empty() && *v != env!("CARGO_PKG_VERSION")
     }
 
@@ -1206,20 +1217,10 @@ impl Remotes {
 
     /// Состояние всех узлов — для панели и диагностики.
     pub fn list(&self) -> Vec<RemoteStatus> {
-        crate::log::line("[trace] remotes.list: жду замок");
         // Отравленный замок — это чужая паника в прошлом, а не повод уронить
         // ещё и эту команду: данные под ним целы, читаем их как есть.
         let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
-        crate::log::line(&format!("[trace] remotes.list: замок взят, узлов {}", nodes.len()));
-        let out: Vec<RemoteStatus> = nodes
-            .iter()
-            .map(|n| {
-                crate::log::line(&format!("[trace] remotes.list: статус {}", n.cfg.name));
-                n.status()
-            })
-            .collect();
-        crate::log::line("[trace] remotes.list: готово");
-        out
+        nodes.iter().map(|n| n.status()).collect()
     }
 }
 
@@ -1245,6 +1246,35 @@ mod lock_tests {
         });
         reader.join().unwrap();
         assert!(done.load(Ordering::SeqCst), "чтение списка не должно упираться в гашение");
+    }
+
+    /// Снятие статуса не должно вставать на собственном замке.
+    ///
+    /// Так уже было: версия читалась прямо в поле структуры, а соседнее поле
+    /// звало `outdated()` за тем же замком. Временный страж живёт до конца
+    /// всего выражения, поэтому второй захват приходился на живой первый —
+    /// и поток вставал навсегда вместе со всем списком машин.
+    ///
+    /// Проверяем в отдельном потоке с ожиданием: тест обязан ПАДАТЬ, а не
+    /// висеть, иначе он утащит за собой весь прогон.
+    #[test]
+    fn status_does_not_deadlock_on_its_own_lock() {
+        let node = std::sync::Arc::new(Node::new(RemoteCfg {
+            name: "t".into(),
+            ssh_host: "nowhere.invalid".into(),
+            jarvis_dir: "/tmp".into(),
+        }));
+        node.saw_version("0.0.1"); // непустая версия — путь, на котором и вставало
+        let (tx, rx) = std::sync::mpsc::channel();
+        let n = node.clone();
+        std::thread::spawn(move || {
+            let st = n.status();
+            let _ = tx.send(st.version);
+        });
+        let got = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("status() встал на собственном замке");
+        assert_eq!(got, "0.0.1");
     }
 
     /// Мёртвый туннель хоронится, но не на плечах вызывающего.

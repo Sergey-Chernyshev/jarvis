@@ -1224,7 +1224,10 @@ pub fn limit_get(app: AppHandle) -> Value {
 /// всегда первая и всегда «на связи»: она никуда не денется, и отсутствие
 /// узлов не должно выглядеть как «работать негде».
 #[tauri::command]
-pub fn machines_list(app: AppHandle) -> Value {
+pub async fn machines_list(app: AppHandle) -> Value {
+    // Асинхронная команда Tauri уходит с главного потока. Синхронная — нет, и
+    // любой замок, за которым она встанет, останавливает всё окно. Здесь это
+    // особенно дорого: с этой команды начинается вкладка «Проекты».
     let d = Daemon::get(&app);
     let mut out = vec![json!({
         "id": "local", "name": "Эта машина", "kind": "local", "online": true,
@@ -3018,7 +3021,7 @@ mod tests {
 
 /// Список узлов с их живостью — вкладка «Удалённые».
 #[tauri::command]
-pub fn remotes_list(app: AppHandle) -> Value {
+pub async fn remotes_list(app: AppHandle) -> Value {
     json!(Daemon::get(&app).remotes.list())
 }
 
@@ -3026,7 +3029,7 @@ pub fn remotes_list(app: AppHandle) -> Value {
 /// после записи перезапускаем весь слой — точечный старт оставил бы прежние
 /// туннели жить от старого конфига.
 #[tauri::command]
-pub fn remotes_add(app: AppHandle, cfg: Value) -> Value {
+pub async fn remotes_add(app: AppHandle, cfg: Value) -> Value {
     let d = Daemon::get(&app);
     let name = cfg.get("name").and_then(Value::as_str).unwrap_or("").trim();
     let host = cfg.get("sshHost").and_then(Value::as_str).unwrap_or("").trim();
@@ -3067,7 +3070,7 @@ pub fn remotes_add(app: AppHandle, cfg: Value) -> Value {
 /// Убрать узел: гасим туннель и забываем его сессии — иначе в списке остались
 /// бы строки машины, за которой уже никто не следит.
 #[tauri::command]
-pub fn remotes_remove(app: AppHandle, name: String) -> Value {
+pub async fn remotes_remove(app: AppHandle, name: String) -> Value {
     let d = Daemon::get(&app);
     let name = name.trim();
     let list: Vec<Value> = remotes_array(&d)

@@ -5,7 +5,27 @@
  * изменений. Требует withGlobalTauri (см. tauri.conf.json). */
 
 (() => {
-  const { invoke } = window.__TAURI__.core;
+  const raw = window.__TAURI__.core.invoke;
+
+  /**
+   * Вызов команды с присмотром.
+   *
+   * Обещание, которое не завершается ни успехом, ни отказом, — худший вид
+   * поломки: экран пуст, ошибок нет, ждать можно вечно. Так бывает, когда
+   * команда на той стороне паникует: задача умирает, и ответить уже некому.
+   * Сам вызов не трогаем — только замечаем вслух, что ответа нет.
+   */
+  const invoke = (cmd, args) => {
+    const p = raw(cmd, args);
+    let done = false;
+    const stop = () => { done = true; };
+    p.then(stop, stop);
+    setTimeout(() => {
+      if (done) return;
+      try { raw('ui_error', { place: 'invoke', message: `команда ${cmd} не ответила за 10 с` }); } catch (e) { /* тишина */ }
+    }, 10_000);
+    return p;
+  };
   const { listen } = window.__TAURI__.event;
 
   const on = (event, cb) => { listen(event, (e) => cb(e.payload)); };

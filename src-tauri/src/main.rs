@@ -323,7 +323,7 @@ fn main() {
             // в settings.json, пока приложение не работало.
             let cfg = d.settings.load();
             std::thread::spawn(move || {
-                crate::install::sync_custom_shims(&crate::agents::parse(&cfg));
+                crate::install::sync_custom_shims(&crate::agents::shim_specs(&crate::agents::parse(&cfg)));
                 crate::install::reconcile_hooks(&|s| {
                     if !s.msg.is_empty() {
                         crate::log::line(&format!("[integration] {}: {}", s.phase, s.msg));

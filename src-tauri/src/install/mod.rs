@@ -1859,28 +1859,32 @@ const CUSTOM_SHIM_MARK: &str = "# jarvis-custom-agent";
 
 /// Привести шимы своих агентов к настройкам: недостающие написать, изменённые
 /// перезаписать, осиротевшие убрать.
-pub fn sync_custom_shims(agents: &[crate::agents::CustomAgent]) {
+///
+/// Вход — пары (id, бинарь): ровно то, что нужно шиму. Полная модель агента
+/// живёт в приложении — install компилируется и в jarvis-setup через #[path]
+/// без остального crate, и тянуть сюда crate::agents нельзя.
+pub fn sync_custom_shims(agents: &[(String, String)]) {
     sync_custom_shims_at(&shims_dir(), agents);
 }
 
-fn sync_custom_shims_at(dir: &Path, agents: &[crate::agents::CustomAgent]) {
+fn sync_custom_shims_at(dir: &Path, agents: &[(String, String)]) {
     let _ = fs::create_dir_all(dir);
-    for a in agents {
+    for (id, bin) in agents {
         let shim = CUSTOM_SHIM_SRC
-            .replace("%AGENT%", &a.id)
-            .replace("%BIN%", a.bin.trim())
+            .replace("%AGENT%", id)
+            .replace("%BIN%", bin.trim())
             .replacen(
                 "JARVIS_DIR=\"${JARVIS_DIR:-$HOME/.jarvis}\"",
                 &format!("JARVIS_DIR=\"${{JARVIS_DIR:-{}}}\"", jarvis_dir().display()),
                 1,
             );
-        let dst = dir.join(&a.id);
+        let dst = dir.join(id);
         if fs::read_to_string(&dst).ok().as_deref() != Some(&shim) {
             write_executable(&dst, &shim);
         }
     }
     // Осиротевшие: наш маркер есть, а агента в настройках больше нет.
-    let keep: std::collections::HashSet<&str> = agents.iter().map(|a| a.id.as_str()).collect();
+    let keep: std::collections::HashSet<&str> = agents.iter().map(|(id, _)| id.as_str()).collect();
     let Ok(rd) = fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -3407,8 +3411,8 @@ mod tests {
 mod custom_shim_tests {
     use super::*;
 
-    fn agent(id: &str, bin: &str) -> crate::agents::CustomAgent {
-        crate::agents::CustomAgent { id: id.into(), bin: bin.into(), ..Default::default() }
+    fn agent(id: &str, bin: &str) -> (String, String) {
+        (id.into(), bin.into())
     }
 
     /// Свой каталог на тест; JARVIS_DIR не трогаем — он процессно-глобальный,

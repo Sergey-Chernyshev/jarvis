@@ -103,6 +103,12 @@ pub fn command(a: &CustomAgent, session_id: Option<&str>, dangerous: bool) -> St
     cmd
 }
 
+/// Пары (id, бинарь) для установщика шимов: install самодостаточен и полную
+/// модель агента не знает.
+pub fn shim_specs(agents: &[CustomAgent]) -> Vec<(String, String)> {
+    agents.iter().map(|a| (a.id.clone(), a.bin.clone())).collect()
+}
+
 /// Готовые карточки известных CLI — человек выбирает и правит путь.
 ///
 /// Только имя и бинарь: флаги возобновления у этих утилит меняются от версии

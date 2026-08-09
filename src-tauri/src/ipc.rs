@@ -1277,7 +1277,7 @@ pub async fn agents_save(app: AppHandle, agents: Value) -> Value {
     d.settings.set_top("customAgents", serde_json::to_value(&list).unwrap_or(Value::Null));
     // Шимы приводим сразу: агент должен быть запускаем в ту же секунду, а не
     // после перезапуска приложения.
-    crate::install::sync_custom_shims(&list);
+    crate::install::sync_custom_shims(&crate::agents::shim_specs(&list));
     // Бинарь проверяем ПОСЛЕ сохранения и только предупреждением: человек
     // вправе вписать агента до того, как установил его на машину.
     let missing: Vec<String> = list

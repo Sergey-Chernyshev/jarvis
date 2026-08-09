@@ -30,6 +30,7 @@ use std::sync::OnceLock;
 
 const HOOK_SRC: &str = include_str!("../../../bin/jarvis-hook");
 const SHIM_SRC: &str = include_str!("../../../bin/agent-shim");
+const CUSTOM_SHIM_SRC: &str = include_str!("../../../bin/custom-shim");
 const TMUX_CONF_SRC: &str = include_str!("../../../bin/jarvis-tmux.conf");
 const SILERO_SERVER_SRC: &str = include_str!("../../../bin/silero-server.py");
 /// STT-сайдкар (Qwen3-ASR MLX): Python-сервер для диктовки (инкр. 9, Phase 8).
@@ -1850,6 +1851,55 @@ fn write_executable(dst: &Path, content: &str) {
     fs::set_permissions(dst, fs::Permissions::from_mode(0o755)).expect("chmod");
 }
 
+/// Метка, по которой свои шимы отличаются от всех прочих файлов.
+///
+/// Чистка по метке, а не по списку: агент, удалённый из настроек, должен унести
+/// свой шим с собой, а трогать чужие файлы в этом каталоге нельзя.
+const CUSTOM_SHIM_MARK: &str = "# jarvis-custom-agent";
+
+/// Привести шимы своих агентов к настройкам: недостающие написать, изменённые
+/// перезаписать, осиротевшие убрать.
+///
+/// Вход — пары (id, бинарь): ровно то, что нужно шиму. Полная модель агента
+/// живёт в приложении — install компилируется и в jarvis-setup через #[path]
+/// без остального crate, и тянуть сюда crate::agents нельзя.
+pub fn sync_custom_shims(agents: &[(String, String)]) {
+    sync_custom_shims_at(&shims_dir(), agents);
+}
+
+fn sync_custom_shims_at(dir: &Path, agents: &[(String, String)]) {
+    let _ = fs::create_dir_all(dir);
+    for (id, bin) in agents {
+        let shim = CUSTOM_SHIM_SRC
+            .replace("%AGENT%", id)
+            .replace("%BIN%", bin.trim())
+            .replacen(
+                "JARVIS_DIR=\"${JARVIS_DIR:-$HOME/.jarvis}\"",
+                &format!("JARVIS_DIR=\"${{JARVIS_DIR:-{}}}\"", jarvis_dir().display()),
+                1,
+            );
+        let dst = dir.join(id);
+        if fs::read_to_string(&dst).ok().as_deref() != Some(&shim) {
+            write_executable(&dst, &shim);
+        }
+    }
+    // Осиротевшие: наш маркер есть, а агента в настройках больше нет.
+    let keep: std::collections::HashSet<&str> = agents.iter().map(|(id, _)| id.as_str()).collect();
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if keep.contains(name.as_str()) {
+            continue;
+        }
+        let path = e.path();
+        let ours = fs::read_to_string(&path)
+            .is_ok_and(|t| t.lines().take(3).any(|l| l.contains(CUSTOM_SHIM_MARK)));
+        if ours {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
 /* ================= публичный API: status / install / uninstall ================= */
 
 /// Текущее «что установлено» из реального статуса — вход оркестратора `models_install`.
@@ -3354,5 +3404,66 @@ mod tests {
     #[test]
     fn unknown_engine_never_ready() {
         assert!(!stt_engine_ready("banana", true, true, true, true));
+    }
+}
+
+#[cfg(test)]
+mod custom_shim_tests {
+    use super::*;
+
+    fn agent(id: &str, bin: &str) -> (String, String) {
+        (id.into(), bin.into())
+    }
+
+    /// Свой каталог на тест; JARVIS_DIR не трогаем — он процессно-глобальный,
+    /// и его подмена уже давала плавающие падения соседям.
+    fn scoped(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("jarvis-custom-shims-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn shims_are_written_updated_and_orphans_removed() {
+        let dir = scoped("sync");
+        sync_custom_shims_at(&dir, &[agent("qwen", "/opt/qwen"), agent("pi", "pi")]);
+        let qwen = fs::read_to_string(dir.join("qwen")).unwrap();
+        assert!(qwen.contains("AGENT='qwen'"), "id не запёкся");
+        assert!(qwen.contains("BIN='/opt/qwen'"), "путь бинаря не запёкся");
+        assert!(qwen.contains(CUSTOM_SHIM_MARK), "без метки шим не вычистится");
+        assert!(!qwen.contains("%AGENT%") && !qwen.contains("%BIN%"), "плейсхолдеры остались");
+        // исполняемость
+        let mode = fs::metadata(dir.join("pi")).unwrap().permissions().mode();
+        assert_ne!(mode & 0o111, 0, "шим не исполняемый");
+
+        // агент ушёл из настроек — его шим уходит следом
+        sync_custom_shims_at(&dir, &[agent("pi", "pi")]);
+        assert!(!dir.join("qwen").exists(), "осиротевший шим остался");
+        assert!(dir.join("pi").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn foreign_files_are_never_touched() {
+        let dir = scoped("foreign");
+        // Чужие файлы в каталоге шимов: настоящий claude-шим и что-то ручное.
+        fs::write(dir.join("claude"), "#!/bin/sh\n# настоящий шим\n").unwrap();
+        fs::write(dir.join("моё"), "не трогать").unwrap();
+        sync_custom_shims_at(&dir, &[]);
+        assert!(dir.join("claude").exists(), "снесли чужой шим");
+        assert!(dir.join("моё").exists(), "снесли чужой файл");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Хуки жизненного цикла — весь смысл шима: без session-start сессия не
+    /// появится в списке, без session-end не исчезнет.
+    #[test]
+    fn shim_template_emits_both_lifecycle_hooks() {
+        assert!(CUSTOM_SHIM_SRC.contains("session-start"));
+        assert!(CUSTOM_SHIM_SRC.contains("session-end"));
+        assert!(CUSTOM_SHIM_SRC.contains("--jarvis-run"), "самоперезапуск внутри tmux пропал");
+        assert!(CUSTOM_SHIM_SRC.contains("jarvis-hook"), "хуки должны идти общим транспортом");
     }
 }

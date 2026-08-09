@@ -7,6 +7,7 @@
 
 #[allow(dead_code)] // UI-потребитель подключается в фазе 7 (chat UI)
 mod agent;
+mod agents; // реестр внешних агентов: qwen/opencode/свои — шимы и жизненный цикл
 #[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
 mod backend;
 #[allow(dead_code)] // проекции/фасады подключаются по фазам (инкр. 8)
@@ -140,6 +141,8 @@ fn main() {
             loops::ipc::loops_review,
             loops::ipc::loops_resume,
             loops::ipc::loops_diff,
+            ipc::agents_list,
+            ipc::agents_save,
             ipc::state_get,
             ipc::state_clear,
             ipc::panel_hide,
@@ -316,7 +319,11 @@ fn main() {
             // prod-путь ~/.jarvis после смены на dev-профиль ~/.jarvis-dev) — и
             // пишем health-снимок в лог. Дёшево и без сети, но в отдельном потоке,
             // чтобы не тормозить создание окна.
-            std::thread::spawn(|| {
+            // Шимы своих агентов — к настройкам: их могли поправить руками
+            // в settings.json, пока приложение не работало.
+            let cfg = d.settings.load();
+            std::thread::spawn(move || {
+                crate::install::sync_custom_shims(&crate::agents::shim_specs(&crate::agents::parse(&cfg)));
                 crate::install::reconcile_hooks(&|s| {
                     if !s.msg.is_empty() {
                         crate::log::line(&format!("[integration] {}: {}", s.phase, s.msg));

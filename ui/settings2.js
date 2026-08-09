@@ -643,6 +643,8 @@
 #settings2 .skctl{width:50px;height:22px;border-radius:11px;flex:none;margin-left:auto}
 
 /* ── поле-секрет (API-ключ / токен подписки) ─────────────────────────── */
+#settings2 .s2agents-chips{display:flex;gap:6px;flex-wrap:wrap;margin:2px 0 10px}
+#settings2 .s2agents-note{margin-top:8px}
 #settings2 .s2-secret{width:100%;max-width:340px;background:var(--paper);border:0;box-shadow:inset 0 0 0 1.5px var(--line-strong);border-radius:9px;color:var(--ink);font:12.5px/1.3 var(--s2-mono,ui-monospace,monospace);padding:10px 12px;outline:none;transition:box-shadow .12s ease}
 #settings2 .s2-secret:focus{box-shadow:inset 0 0 0 1.5px var(--accent)}
 #settings2 .s2-secret::placeholder{color:var(--ink-faint)}
@@ -851,6 +853,7 @@
     { pane: 'general', label: 'Основное', icon: 'settings', ic: 'gray' },
     { pane: 'look', label: 'Вид', icon: 'palette', ic: 'green' },
     { pane: 'remotes', label: 'Удалённые', icon: 'server', ic: 'teal' },
+    { pane: 'agents', label: 'Агенты', icon: 'terminal', ic: 'violet' },
     { pane: 'stt', label: 'Голосовой ввод', icon: 'mic', ic: 'blue' },
     { pane: 'voice', label: 'Голос', icon: 'volume-2', ic: 'green' },
     { pane: 'wake', label: 'Пробуждение', icon: 'mic', ic: 'blue' },
@@ -2490,10 +2493,115 @@
     paintRemoteWiz(box);
   }
 
+  /* 1d. Агенты (agents) — свои CLI помимо claude и codex.
+   *
+   * Человек вводит путь до бинарника — остальное (tmux-шим и хуки жизненного
+   * цикла) настраивается само при сохранении. Возможности честно ограничены:
+   * сессия в списке, живой экран паны, ответ в пану. Статусов «думает /
+   * спрашивает» и транскрипта у чужого CLI нет — их не выдумываем. */
+  async function renderAgents(pane) {
+    pane.appendChild(el('div.dtitle', { text: 'Агенты' }));
+    const ready = typeof window.jarvis.agentsList === 'function';
+    const _sk = skelGroup(2); pane.appendChild(_sk);
+    const res = ready ? await safe(() => window.jarvis.agentsList(), null) : null;
+    _sk.remove();
+    if (!res || !res.ok) {
+      pane.appendChild(el('div.dgroup', null, [
+        drow('Недоступно', 'Нужна свежая сборка приложения.', []),
+      ]));
+      return;
+    }
+    let list = (res.agents || []).map((a) => ({ ...a }));
+    const presets = res.presets || [];
+
+    const note = el('div.dd.s2agents-note', { style: 'display:none' });
+    const paintNote = (text, bad) => {
+      note.textContent = text || '';
+      note.style.display = text ? '' : 'none';
+      note.style.color = bad ? 'var(--danger, inherit)' : '';
+    };
+
+    const saveAll = async () => {
+      const r = await safe(() => window.jarvis.agentsSave(list), null);
+      if (!r || !r.ok) { paintNote((r && r.error) || 'не сохранилось', true); return false; }
+      if (r.missing && r.missing.length) {
+        paintNote('сохранено; бинарь пока не найден: ' + r.missing.join(', ') + ' — путь можно поправить позже', false);
+      } else {
+        paintNote('сохранено — агент готов к запуску из «Проектов»', false);
+      }
+      return true;
+    };
+
+    const group = el('div.dgroup');
+    const paintList = () => {
+      group.textContent = '';
+      if (!list.length) {
+        group.appendChild(drow(
+          'Пока никого',
+          'Добавь свой CLI: кнопка появится в «Проектах», сессия — в списке, ответы — в пану tmux.',
+          [],
+        ));
+      }
+      for (const a of list) {
+        const meta = [a.bin, a.resume ? 'resume: ' + a.resume : 'без возобновления']
+          .filter(Boolean).join(' · ');
+        group.appendChild(drow(a.name || a.id, meta, [
+          button('Удалить', async () => {
+            list = list.filter((x) => x !== a);
+            if (await saveAll()) paintList();
+          }, 'sm'),
+        ]));
+      }
+      pane.insertBefore(group, form);
+    };
+
+    /* форма добавления: пресет заполняет поля, человек правит и сохраняет */
+    const nameIn = el('input.s2-secret', { placeholder: 'Имя (Qwen Code)' });
+    const idIn = el('input.s2-secret', { placeholder: 'id: латиница (qwen)' });
+    const binIn = el('input.s2-secret', { placeholder: 'бинарь: путь или имя в PATH' });
+    const resumeIn = el('input.s2-secret', { placeholder: 'возобновление, например: qwen --resume {sid} (не обязательно)' });
+    const addBtn = button('Добавить агента', async () => {
+      const cand = {
+        id: (idIn.value || '').trim(),
+        name: (nameIn.value || '').trim(),
+        bin: (binIn.value || '').trim(),
+        resume: (resumeIn.value || '').trim(),
+        dangerousFlag: '',
+      };
+      list = list.filter((x) => x.id !== cand.id).concat([cand]);
+      if (await saveAll()) {
+        nameIn.value = idIn.value = binIn.value = resumeIn.value = '';
+        paintList();
+      } else {
+        list = list.filter((x) => x !== cand);
+      }
+    });
+    const chips = el('div.s2agents-chips');
+    for (const pr of presets) {
+      const c = button(pr.name, () => {
+        nameIn.value = pr.name; idIn.value = pr.id; binIn.value = pr.bin; resumeIn.value = pr.resume || '';
+      }, 'sm');
+      chips.appendChild(c);
+    }
+    const form = el('div.dgroup', null, [
+      el('div.dsection', { text: 'добавить' }),
+      chips,
+      nameIn, idIn, binIn, resumeIn,
+      el('div.dd', { text: 'Хуки жизненного цикла настроятся сами: сессия появится в списке при запуске и исчезнет по завершении. Статусов «думает/спрашивает» у чужого CLI нет — Jarvis их не выдумывает.' }),
+      addBtn,
+      note,
+    ]);
+
+    pane.appendChild(form);
+    paintList();
+  }
+
   const RENDERERS = {
+
     general: renderGeneral,
     look: renderLook,
     remotes: renderRemotes,
+    agents: renderAgents,
     stt: renderStt,
     voice: renderVoice,
     wake: renderWake,

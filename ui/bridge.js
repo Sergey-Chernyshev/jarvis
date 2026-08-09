@@ -72,6 +72,7 @@
     // режим «Циклы»: рутина, которую агент крутит сам
     loopsGet: () => invoke('loops_get'),
     loopsDraft: (template) => invoke('loops_draft', { template }),
+    loopsCatalog: () => invoke('loops_catalog'),
     loopsSave: (item) => invoke('loops_save', { item }),
     loopsRemove: (id) => invoke('loops_remove', { id }),
     loopsStart: (id) => invoke('loops_start', { id }),

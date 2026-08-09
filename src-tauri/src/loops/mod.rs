@@ -12,6 +12,7 @@
 pub mod engine;
 pub mod ipc;
 pub mod model;
+pub mod presets;
 pub mod runner;
 pub mod schedule;
 pub mod store;

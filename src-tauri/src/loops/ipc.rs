@@ -39,6 +39,30 @@ pub fn loops_get(app: AppHandle) -> Value {
     snapshot(&Daemon::get(&app))
 }
 
+/// Справочник конструктора: модели агентов и каталог заготовок.
+///
+/// Статика — но за отдельной командой, а не в каждом снимке: снимок летит в
+/// панель на каждый шаг запуска, и возить с ним неизменный каталог значило бы
+/// платить за него каждые несколько секунд. Панель зовёт это один раз и кэширует.
+#[tauri::command]
+pub fn loops_catalog() -> Value {
+    let models = |a: crate::backend::Agent| -> Vec<Value> {
+        crate::backend::backend(a)
+            .models()
+            .iter()
+            .map(|(id, label)| json!({ "id": id, "label": label }))
+            .collect()
+    };
+    json!({
+        "ok": true,
+        "models": {
+            "claude": models(crate::backend::Agent::Claude),
+            "codex": models(crate::backend::Agent::Codex),
+        },
+        "presets": super::presets::all(),
+    })
+}
+
 /// Заготовка нового цикла: из шаблона или с нуля.
 ///
 /// Ничего не сохраняет. Раньше создание сразу писало пустой цикл на диск, и

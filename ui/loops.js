@@ -167,18 +167,207 @@
 
   /* ---------- конструктор: пять шагов и ограничители ---------- */
 
-  const field = (label, value, oninput, hint) =>
-    el('label.lp-field',
+  /* Справочник конструктора: модели агентов и каталог заготовок. Грузится один
+   * раз при входе в режим — это статика, дёргать её на каждый показ незачем.
+   * Старый бэкенд без команды — не повод ломаться: остаётся встроенный список
+   * моделей, а каталог честно скажет, что ему нужна свежая сборка. */
+  let catalog = null;
+  const FALLBACK_MODELS = {
+    claude: [
+      { id: 'fable', label: 'Fable' }, { id: 'opus', label: 'Opus' },
+      { id: 'sonnet', label: 'Sonnet' }, { id: 'haiku', label: 'Haiku' },
+    ],
+    codex: [
+      { id: 'gpt-5.5', label: 'GPT-5.5' }, { id: 'gpt-5-codex', label: 'Codex' },
+      { id: 'gpt-5', label: 'GPT-5' },
+    ],
+  };
+  async function loadCatalog() {
+    if (catalog) return catalog;
+    if (typeof window.jarvis.loopsCatalog !== 'function') return null;
+    try {
+      const res = await window.jarvis.loopsCatalog();
+      if (res && res.ok) catalog = res;
+    } catch (e) { /* останемся на встроенных списках */ }
+    return catalog;
+  }
+  const modelsFor = (agent) =>
+    (catalog && catalog.models && catalog.models[agent]) || FALLBACK_MODELS[agent] || FALLBACK_MODELS.claude;
+  const modelLabel = (agent, id) => {
+    const hit = modelsFor(agent).find((m) => m.id === id);
+    return hit ? hit.label : id;
+  };
+
+  const field = (label, value, oninput, hint, extra) => {
+    const input = el('input.lp-input', {
+      value: value == null ? '' : String(value),
+      oninput: (e) => oninput(e.target.value),
+    });
+    return el('label.lp-field',
       el('span.lp-field-label', { text: label }),
-      el('input.lp-input', { value: value == null ? '' : String(value), oninput: (e) => oninput(e.target.value) }),
+      extra ? el('div.lp-withrow', input, extra) : input,
       hint ? el('span.lp-hint', { text: hint }) : null,
     );
+  };
 
   const check = (label, on, onchange, hint) => {
     const box = el('input', { type: 'checkbox', onchange: (e) => onchange(e.target.checked) });
     box.checked = !!on;
     return el('label.lp-check', box, el('span', { text: label }), hint ? el('span.lp-hint', { text: hint }) : null);
   };
+
+  /* Выбор из известного — вместо ввода по памяти. Незнакомое сохранённое
+   * значение не выбрасываем, а показываем как есть: выбор человека старше
+   * нашего списка. */
+  const selectField = (label, options, value, onchange, hint) => {
+    const sel = el('select.lp-input', options.map((o) => el('option', { value: o.id, text: o.label })));
+    if (value && !options.some((o) => o.id === value)) {
+      sel.appendChild(el('option', { value, text: value }));
+    }
+    sel.value = value || (options[0] && options[0].id) || '';
+    sel.addEventListener('change', () => onchange(sel.value));
+    return el('label.lp-field',
+      el('span.lp-field-label', { text: label }),
+      sel,
+      hint ? el('span.lp-hint', { text: hint }) : null,
+    );
+  };
+
+  /* ---------- каталог заготовок: выбирать, а не вспоминать ---------- */
+
+  /**
+   * Оверлей каталога: поиск, разделы, карточки. Выбор вставляет команду в
+   * обычное поле — она остаётся редактируемой. Много кастомизации, мало
+   * запоминания: человек выбирает по названию и описанию, а синтаксис
+   * приезжает сам.
+   */
+  function openCatalog(slot, onPick) {
+    const overlay = el('div.lp-shade');
+    const close = () => {
+      overlay.remove();
+      if (document.removeEventListener) document.removeEventListener('keydown', onKey);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    if (document.addEventListener) document.addEventListener('keydown', onKey);
+
+    const grid = el('div.lp-cat-grid');
+    const chips = el('div.lp-cat-chips');
+    const search = el('input.lp-input', { placeholder: 'найти заготовку…' });
+    const box = el('div.lp-cat',
+      el('div.lp-cat-head',
+        el('span.lp-cat-title', { text: slot === 'source' ? 'Источники задач' : 'Гейты-проверки' }),
+        el('button.j-btn.lp-ghost', { text: '×', title: 'закрыть', onclick: close }),
+      ),
+      search, chips, grid,
+    );
+    overlay.appendChild(box);
+    root.appendChild(overlay);
+
+    let activeCat = null; // раздел; null — все
+    const paint = (items) => {
+      const q = (search.value || '').trim().toLowerCase();
+      const shown = items.filter((p) =>
+        (!activeCat || p.category === activeCat) &&
+        (!q || `${p.name} ${p.hint} ${p.command} ${p.category}`.toLowerCase().includes(q)));
+      grid.textContent = '';
+      if (!shown.length) {
+        grid.appendChild(el('div.lp-empty', {
+          text: 'Ничего не нашлось. Свою команду всегда можно вписать прямо в поле — каталог лишь избавляет от набора по памяти.',
+        }));
+        return;
+      }
+      shown.forEach((p) => grid.appendChild(
+        el('div.lp-cat-card', { onclick: () => { onPick(p); close(); } },
+          el('div.lp-cat-name', { text: p.name }),
+          el('div.lp-cat-hint', { text: p.hint }),
+          el('div.lp-cat-cmd', { text: p.command, title: p.command }),
+        )));
+    };
+
+    Promise.resolve(loadCatalog()).then((c) => {
+      const items = ((c && c.presets) || []).filter((p) => p.slot === slot);
+      if (!items.length) {
+        grid.appendChild(el('div.lp-empty', { text: 'Каталог недоступен — нужна свежая сборка приложения.' }));
+        return;
+      }
+      const cats = [...new Set(items.map((p) => p.category))];
+      const chip = (label, val) => {
+        const c2 = el('button.lp-chip', {
+          text: label,
+          onclick: () => {
+            activeCat = val;
+            [...chips.children].forEach((x) => x.classList && x.classList.remove && x.classList.remove('on'));
+            c2.classList.add('on');
+            paint(items);
+          },
+        });
+        return c2;
+      };
+      const first = chip('все', null);
+      first.classList.add('on');
+      chips.appendChild(first);
+      cats.forEach((cName) => chips.appendChild(chip(cName, cName)));
+      search.addEventListener('input', () => paint(items));
+      paint(items);
+      try { search.focus(); } catch (e) { /* подставному DOM тестов фокус не нужен */ }
+    });
+  }
+
+  /* ---------- «как это будет работать» ---------- */
+
+  const razWord = (n) => {
+    const d10 = n % 10, d100 = n % 100;
+    if (d10 >= 2 && d10 <= 4 && (d100 < 12 || d100 > 14)) return 'раза';
+    return 'раз';
+  };
+
+  /**
+   * Вся конфигурация — одним человеческим абзацем.
+   *
+   * Форма из пяти шагов отвечает на вопрос «что настроить», но не на вопрос
+   * «что произойдёт». Ровно из этой дыры и растёт когнитивная нагрузка:
+   * человек собирает картину в голове из десятка полей. Абзац собирает её за
+   * него и переписывается на каждое нажатие клавиши.
+   */
+  function explain(d) {
+    const wake = d.schedule.wake;
+    const when = typeof wake === 'string' || !wake ? 'По нажатию «Запустить»'
+      : wake.daily ? `Каждый день в ${wake.daily.at || '…'}`
+      : wake.every ? (Number(wake.every.minutes) >= 60 && Number(wake.every.minutes) % 60 === 0
+          ? `Каждые ${wake.every.minutes / 60} ч`
+          : `Каждые ${wake.every.minutes || '…'} мин`)
+      : 'По нажатию «Запустить»';
+    const repo = (d.sandbox.repo || '').trim();
+    const place = repo
+      ? (d.sandbox.worktree ? `в отдельном worktree репозитория ${repo}` : `прямо в ${repo}`)
+      : '…репозиторий пока не указан';
+    const cmd = (d.source.command || '').trim();
+    const goal = (d.source.goal || '').trim();
+    const src = cmd
+      ? 'возьмёт задачи у команды-источника'
+      : goal ? `пойдёт к цели «${goal.length > 70 ? goal.slice(0, 70) + '…' : goal}»` : '…источник задач пока пуст';
+    const g = (d.exit.gates || []).filter((x) => (x.command || '').trim());
+    const gates = g.length
+      ? `прогонит ${g.length === 1 ? 'гейт' : 'гейты'}: ${g.map((x) => x.name || x.command).slice(0, 4).join(', ')}`
+      : 'детерминированных гейтов нет';
+    const critic = d.exit.critic.enabled
+      ? `дифф посмотрит критик на ${modelLabel(d.agent || 'claude', d.exit.critic.model) || 'модели по умолчанию'}`
+      : 'критик выключен';
+    const streak = Math.max(1, Number(d.exit.streak) || 1);
+    const walls = [
+      d.limits.tokens ? `${fmtTokens(d.limits.tokens)} токенов` : null,
+      d.limits.iterations ? `${d.limits.iterations} итераций` : null,
+      d.limits.minutes ? `${Math.round(d.limits.minutes / 60 * 10) / 10} ч` : null,
+    ].filter(Boolean).join(' · ');
+    const sample = d.sampling.every
+      ? `Каждая ${d.sampling.every}-я итерация ждёт твоего взгляда.`
+      : 'Выборочная проверка выключена — цикл покажет только итог.';
+    const memory = d.memory.enabled ? ` Выводы каждой итерации лягут в ${d.memory.file || 'дневник'}.` : '';
+    return `${when} агент ${d.agent || 'claude'} ${src}, сделает один шаг ${place}, ${gates}; ${critic}. ` +
+      `Цикл завершится, когда всё будет зелёным ${streak} ${razWord(streak)} подряд, ` +
+      `и остановится сам, израсходовав ${walls || '…стен нет — так нельзя'}. ${sample}${memory}`;
+  }
 
   function builder(l, isNew) {
     const d = draft || (draft = JSON.parse(JSON.stringify(l)));
@@ -189,6 +378,37 @@
         el('div.lp-step-b', body),
       );
 
+    const summary = el('div.lp-explain-text', { text: explain(d) });
+    const refresh = () => { summary.textContent = explain(d); };
+
+    /* Агент — сегмент из двух, а не поле по памяти. Смена агента меняет и
+     * список моделей критика, поэтому конструктор перерисовывается целиком:
+     * черновик это переживает, он живёт отдельно от DOM. */
+    const seg = el('div.lp-seg',
+      ['claude', 'codex'].map((a) => {
+        const b = el('button', {
+          text: a,
+          onclick: () => { if (d.agent !== a) { d.agent = a; render(); } },
+        });
+        if ((d.agent || 'claude') === a) b.classList.add('on');
+        return b;
+      }));
+
+    const sourceInput = el('input.lp-input', {
+      value: d.source.command || '',
+      placeholder: 'команда, чей stdout — список задач',
+      oninput: (e) => { d.source.command = e.target.value; },
+    });
+    const sourceRow = el('div.lp-withrow', sourceInput,
+      el('button.j-btn.lp-ghost', {
+        text: 'из каталога',
+        onclick: () => openCatalog('source', (p) => {
+          d.source.command = p.command;
+          sourceInput.value = p.command;
+          refresh();
+        }),
+      }));
+
     const gates = el('div.lp-gates');
     const paintGates = () => {
       gates.textContent = '';
@@ -196,13 +416,26 @@
         gates.appendChild(el('div.lp-gate',
           el('input.lp-input.narrow', { value: g.name, placeholder: 'имя', oninput: (e) => { g.name = e.target.value; } }),
           el('input.lp-input', { value: g.command, placeholder: 'команда', oninput: (e) => { g.command = e.target.value; } }),
-          el('button.j-btn.lp-ghost', { text: '×', title: 'убрать гейт', onclick: () => { d.exit.gates.splice(i, 1); paintGates(); } }),
+          el('button.j-btn.lp-ghost', {
+            text: '×', title: 'убрать гейт',
+            onclick: () => { d.exit.gates.splice(i, 1); paintGates(); refresh(); },
+          }),
         ));
       });
-      gates.appendChild(el('button.j-btn.lp-ghost', {
-        text: '+ гейт',
-        onclick: () => { d.exit.gates.push({ name: '', command: '' }); paintGates(); },
-      }));
+      gates.appendChild(el('div.lp-gate-add',
+        el('button.j-btn.lp-ghost', {
+          text: '+ из каталога',
+          onclick: () => openCatalog('gate', (p) => {
+            d.exit.gates.push({ name: p.name, command: p.command });
+            paintGates();
+            refresh();
+          }),
+        }),
+        el('button.j-btn.lp-ghost', {
+          text: '+ свой',
+          onclick: () => { d.exit.gates.push({ name: '', command: '' }); paintGates(); },
+        }),
+      ));
     };
     paintGates();
 
@@ -240,13 +473,28 @@
     };
     paintProblems(l.problems);
 
-    return el('div.lp-builder',
+    /* У Codex модель критика задаётся его собственными настройками — рисовать
+     * селект, который ни на что не влияет, было бы нечестно. */
+    const criticModel = (d.agent || 'claude') === 'codex'
+      ? el('div.lp-hint', { text: 'модель и усилие критика задаёт сам Codex — в его настройках' })
+      : selectField('модель критика', modelsFor('claude'), d.exit.critic.model,
+          (v) => { d.exit.critic.model = v; refresh(); },
+          'на ревью обычно ставят сильнее, чем на исполнение');
+
+    const box = el('div.lp-builder',
       el('div.lp-h1', { text: isNew ? 'Новый цикл' : `Настройка · ${l.name || 'без имени'}` }),
-      el('div.lp-h2', { text: 'пять шагов и ограничители — полная конфигурация перед запуском' }),
-      field('имя цикла', d.name, (v) => { d.name = v; }),
+      el('div.lp-h2', { text: 'пять шагов и ограничители — а внизу, человеческим языком, что из этого выйдет' }),
+      el('div.lp-headrow',
+        field('имя цикла', d.name, (v) => { d.name = v; }),
+        el('label.lp-field', el('span.lp-field-label', { text: 'агент' }), seg),
+      ),
       step(1, 'откуда берутся задачи', 'источник',
         field('цель цикла', d.source.goal, (v) => { d.source.goal = v; }, 'своими словами — она уйдёт в промт каждой итерации'),
-        field('команда', d.source.command, (v) => { d.source.command = v; }, 'её stdout станет списком задач; можно оставить пустой'),
+        el('label.lp-field',
+          el('span.lp-field-label', { text: 'команда' }),
+          sourceRow,
+          el('span.lp-hint', { text: 'её stdout станет списком задач; можно оставить пустой или взять готовую' }),
+        ),
       ),
       step(2, 'песочница агента', 'радиус поражения — ветка',
         field('репозиторий', d.sandbox.repo, (v) => { d.sandbox.repo = v; }, 'путь к git-репозиторию на этой машине'),
@@ -258,7 +506,7 @@
         el('div.lp-sub', { text: 'детерминированные гейты' }), gates,
         check('субагент-критик', d.exit.critic.enabled, (v) => { d.exit.critic.enabled = v; },
           'мнение полезно, но выпускать работу в мир по одному мнению нельзя'),
-        field('модель критика', d.exit.critic.model, (v) => { d.exit.critic.model = v; }),
+        criticModel,
         field('свой промт критика', d.exit.critic.prompt, (v) => { d.exit.critic.prompt = v; }, 'пусто — возьмётся встроенный'),
         field('итераций подряд', d.exit.streak, (v) => { d.exit.streak = Number(v) || 1; },
           'одной мало: гейт мог пройти случайно — ровно тот флаки-тест, ради которого цикл и заводят'),
@@ -283,6 +531,10 @@
           field('выборочная проверка: каждая N-я', d.sampling.every, (v) => { d.sampling.every = Number(v) || 0; },
             '0 — не показывать ничего; смысл автономности в том, чтобы дверь была приоткрыта'),
         ),
+      ),
+      el('div.lp-explain',
+        el('div.lp-explain-label', { text: 'как это будет работать' }),
+        summary,
       ),
       problems,
       el('div.lp-actions',
@@ -333,6 +585,12 @@
             }),
       ),
     );
+    /* Абзац «как это будет работать» переписывается на каждое нажатие: слушаем
+     * контейнер, а не каждое поле по отдельности. change — ради чекбоксов и
+     * селектов, у которых input случается не везде. */
+    box.addEventListener('input', refresh);
+    box.addEventListener('change', refresh);
+    return box;
   }
 
   /* ---------- пульт живого цикла ---------- */
@@ -580,6 +838,7 @@
     root.classList.add('lp');
     render();
     pull();
+    loadCatalog(); // статика: греем один раз, чтобы конструктор открылся уже с ней
     if (!window.__loopsBound) {
       window.__loopsBound = true;
       window.jarvis.onLoopsState((s) => apply(s));

@@ -10,12 +10,22 @@
  * расход, вердикты критика. Ни одного придуманного числа. */
 
 (() => {
+  /**
+   * Узел из строки-селектора, необязательных атрибутов и детей.
+   *
+   * Вторым аргументом идут атрибуты — но ТОЛЬКО если это обычный объект. Узел
+   * или массив узлов там означают детей: так короче писать, и именно так этот
+   * помощник и звали в половине мест. Раньше он честно пытался разложить
+   * массив в атрибуты, получал имя «0» — недопустимое для атрибута — и падал,
+   * унося с собой весь экран режима.
+   */
   const el = (tag, attrs, ...kids) => {
     const [name, ...cls] = tag.split('.');
     const n = document.createElement(name || 'div');
     if (cls.length) n.className = cls.join(' ');
-    if (attrs && attrs.nodeType) { n.appendChild(attrs); }
-    else if (attrs) {
+    const isProps =
+      attrs != null && typeof attrs === 'object' && !Array.isArray(attrs) && !attrs.nodeType;
+    if (isProps) {
       for (const [k, v] of Object.entries(attrs)) {
         if (v == null || v === false) continue;
         if (k === 'text') n.textContent = v;
@@ -23,8 +33,10 @@
         else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
         else n.setAttribute(k, v === true ? '' : v);
       }
+    } else if (attrs != null) {
+      kids.unshift(attrs);
     }
-    for (const kid of kids.flat()) if (kid) n.appendChild(kid);
+    for (const kid of kids.flat(Infinity)) if (kid) n.appendChild(kid);
     return n;
   };
 

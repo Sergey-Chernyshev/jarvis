@@ -946,7 +946,7 @@ impl Node {
             connected: self.online.load(Ordering::SeqCst),
             port: self.tunnel.port(),
             cursor: self.cursor(),
-            version: self.version.lock().unwrap().clone(),
+            version: self.version.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             outdated: self.outdated(),
             error: self.why(),
         }
@@ -1206,7 +1206,10 @@ impl Remotes {
 
     /// Состояние всех узлов — для панели и диагностики.
     pub fn list(&self) -> Vec<RemoteStatus> {
-        self.nodes.lock().unwrap().iter().map(|n| n.status()).collect()
+        // Отравленный замок — это чужая паника в прошлом, а не повод уронить
+        // ещё и эту команду: данные под ним целы, читаем их как есть.
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        nodes.iter().map(|n| n.status()).collect()
     }
 }
 

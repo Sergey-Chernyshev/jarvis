@@ -63,6 +63,10 @@ use tauri::Manager;
 use daemon::Daemon;
 
 fn main() {
+    // До всего остального: паника, случившаяся раньше установки крючка, уйдёт
+    // только в stderr — то есть мимо лога, который и присылают при разборе.
+    log::install_panic_hook();
+
     let mut builder = tauri::Builder::default();
 
     // single-instance — только в проде; в dev-сборке (JARVIS_DEV=1) НЕ ставим,

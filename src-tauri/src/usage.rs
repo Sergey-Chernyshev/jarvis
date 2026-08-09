@@ -758,7 +758,7 @@ impl Usage {
 
     /// Расход одной сессии — для строки чата и истории.
     pub fn for_session(&self, id: &str) -> Option<Value> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let s = state.sessions.get(id)?;
         Some(serde_json::json!({
             "tok": s.tok.total(), "cost": s.cost, "billing": s.billing, "model": s.model,

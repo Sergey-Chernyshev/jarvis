@@ -167,3 +167,28 @@ mod tests {
         assert_eq!(mode, 0o600);
     }
 }
+
+/// Замер долгого шага: пишем в лог, только если он и правда долгий.
+///
+/// «Зависло» без цифр неотличимо от «медленно», а два этих случая чинятся
+/// по-разному. Порог такой, чтобы обычная работа молчала: всё, что человек
+/// успевает заметить глазом, начинается примерно отсюда.
+pub struct Step {
+    what: &'static str,
+    at: std::time::Instant,
+}
+
+impl Step {
+    pub fn new(what: &'static str) -> Self {
+        Self { what, at: std::time::Instant::now() }
+    }
+}
+
+impl Drop for Step {
+    fn drop(&mut self) {
+        let ms = self.at.elapsed().as_millis();
+        if ms >= 300 {
+            line(&format!("[slow] {} — {ms} мс", self.what));
+        }
+    }
+}

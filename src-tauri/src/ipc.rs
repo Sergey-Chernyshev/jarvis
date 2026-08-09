@@ -819,6 +819,7 @@ async fn remote_transcript(
 /// Локальная ветка осталась прежним синхронным чтением файла.
 #[tauri::command]
 pub async fn chat_open(app: AppHandle, session_id: String) -> Value {
+    let _t = crate::log::Step::new("chat_open");
     let d = Daemon::get(&app);
     let Some(s) = d.session(&session_id) else {
         return err("Сессия не найдена");
@@ -1225,6 +1226,7 @@ pub fn limit_get(app: AppHandle) -> Value {
 /// узлов не должно выглядеть как «работать негде».
 #[tauri::command]
 pub async fn machines_list(app: AppHandle) -> Value {
+    let _t = crate::log::Step::new("machines_list");
     // Асинхронная команда Tauri уходит с главного потока. Синхронная — нет, и
     // любой замок, за которым она встанет, останавливает всё окно. Здесь это
     // особенно дорого: с этой команды начинается вкладка «Проекты».
@@ -1253,6 +1255,7 @@ pub async fn machines_list(app: AppHandle) -> Value {
 /// вычитывания каждого транскрипта по ssh — а это уже не «показать список».
 #[tauri::command]
 pub async fn history_get(app: AppHandle, machine: Option<String>) -> Value {
+    let _t = crate::log::Step::new("history_get");
     let d = Daemon::get(&app);
     let machine = machine.unwrap_or_default();
     if machine.is_empty() || machine == "local" {

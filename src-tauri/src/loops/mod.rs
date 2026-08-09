@@ -9,6 +9,7 @@
 //! спорном решении, вмешательство на ходу. Автономность без двери — это не
 //! доверие, а надежда.
 
+pub mod compose;
 pub mod engine;
 pub mod ipc;
 pub mod model;

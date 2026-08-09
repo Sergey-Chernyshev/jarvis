@@ -73,6 +73,7 @@
     loopsGet: () => invoke('loops_get'),
     loopsDraft: (template) => invoke('loops_draft', { template }),
     loopsCatalog: () => invoke('loops_catalog'),
+    loopsCompose: (text, item) => invoke('loops_compose', { text, item }),
     loopsSave: (item) => invoke('loops_save', { item }),
     loopsRemove: (id) => invoke('loops_remove', { id }),
     loopsStart: (id) => invoke('loops_start', { id }),

@@ -181,12 +181,19 @@ function setView(next) {
     // человека перед экраном. Поэтому меряем и считаем нарисованное.
     const audit = () => {
       const ms = Date.now() - at;
-      const empty = host && host.childElementCount === 0;
-      if (!empty && ms < 1500) return;
+      if (!host) return;
+      const kids = host.childElementCount;
+      // Высота нужна отдельно от числа детей: «белый экран» бывает и при
+      // непустом DOM — когда раздел отрисовался, но схлопнут в нулевую высоту
+      // или спрятан. Одно число этих двух случаев не различает, а чинятся они
+      // в разных местах.
+      const h = Math.round(host.getBoundingClientRect().height);
+      const bad = kids === 0 || h === 0;
+      if (!bad && ms < 1500) return;
       try {
         window.jarvis.reportError(
           `view:${what}`,
-          `${empty ? 'раздел отрисован пустым' : 'раздел отрисован'} за ${ms} мс`,
+          `дети=${kids} высота=${h}px за ${ms} мс${host.hidden ? ' (скрыт)' : ''}`,
         );
       } catch (_) { /* лог не обязателен */ }
     };

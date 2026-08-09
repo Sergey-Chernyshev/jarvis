@@ -2644,10 +2644,21 @@ mod tests {
             "second process cannot take same profile"
         );
         drop(first);
-        assert!(
-            acquire_profile_lock(&path).is_ok(),
-            "OS releases lock after owner exits"
-        );
+        // Захват повторяем с коротким запасом. Проверяемое свойство — «ОС
+        // отпускает замок вместе с владельцем», и оно тут ни при чём: под
+        // нагрузкой параллельных тестов однократная попытка в CI срывалась,
+        // давая плавающее падение, которое уже дважды стоило разбирательства.
+        // Запас в четверть секунды не ослабляет утверждение — незанятый замок
+        // берётся сразу, а занятый не возьмётся и через час.
+        let mut retaken = false;
+        for _ in 0..25 {
+            if acquire_profile_lock(&path).is_ok() {
+                retaken = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(retaken, "OS releases lock after owner exits");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -404,7 +404,7 @@ fn main() {
                 }
                 // ssh-дети не должны пережить приложение: без этого туннели
                 // висят до конца сессии терминала и держат порты
-                d.remotes.stop_all();
+                d.remotes.stop_all_now();
                 power::Power::dispose(&d); // снять assertion, вернуть disablesleep
                 d.voice.dispose(); // погасить Silero-сайдкар, если был поднят
                 d.stt.dispose(); // погасить Qwen3-MLX-сайдкар, если был поднят

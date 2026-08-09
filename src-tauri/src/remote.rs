@@ -328,8 +328,10 @@ impl Tunnel {
         if self.is_up() {
             return TunnelState::Alive;
         }
-        // Мёртвого дожинаем, иначе останется зомби.
-        if let Some(mut c) = self.child.lock().unwrap().take() {
+        // Мёртвого дожинаем, иначе останется зомби. Забрать — под замком,
+        // дожать — без него: см. `kick`.
+        let dead = self.child.lock().unwrap().take();
+        if let Some(mut c) = dead {
             let _ = c.wait();
         }
         self.port.store(0, Ordering::SeqCst);
@@ -405,7 +407,11 @@ impl Tunnel {
     /// заново и на новом порту. Нужно, когда HTTP не отвечает при живом ssh —
     /// значит подвис узел или сам форвард, и лечится только переподъёмом.
     pub fn kick(&self) {
-        if let Some(mut c) = self.child.lock().unwrap().take() {
+        // Ребёнка забираем ПОД замком, а хороним уже без него. Ожидание смерти
+        // ssh — блокирующее и на мёртвой сети затягивается; под замком оно
+        // останавливало всех, кому этот замок нужен, включая главный поток.
+        let child = self.child.lock().unwrap().take();
+        if let Some(mut c) = child {
             let _ = c.kill();
             let _ = c.wait();
         }
@@ -413,9 +419,38 @@ impl Tunnel {
     }
 
     /// Остановить и снять намерение работать (смена настроек/выход).
+    ///
+    /// Намерение снимаем здесь и сейчас — это атомик, он мгновенный и важен:
+    /// поллер не должен поднять туннель обратно. А похороны процесса уходят в
+    /// отдельный поток: `wait` блокирующий, на мёртвой сети ssh умирает не
+    /// мгновенно, и вызывающим (в том числе главному потоку через синхронные
+    /// команды настроек) ждать этого незачем.
     pub fn stop(&self) {
+        let Some(mut c) = self.disarm() else { return };
+        std::thread::spawn(move || {
+            let _ = c.kill();
+            let _ = c.wait();
+        });
+    }
+
+    /// То же, но дождавшись смерти прямо здесь.
+    ///
+    /// Нужно ровно на выходе из приложения: там отложенные похороны не
+    /// состоятся — процесс закончится раньше, и ssh переживёт своего хозяина,
+    /// продолжая держать порт до конца сессии терминала.
+    pub fn stop_now(&self) {
+        let Some(mut c) = self.disarm() else { return };
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+
+    /// Снять намерение работать и забрать процесс. Только атомики и короткий
+    /// замок — ничего блокирующего.
+    fn disarm(&self) -> Option<Child> {
         self.active.store(false, Ordering::SeqCst);
-        self.kick();
+        let child = self.child.lock().unwrap().take();
+        self.port.store(0, Ordering::SeqCst);
+        child
     }
 }
 
@@ -423,7 +458,7 @@ impl Drop for Tunnel {
     /// Дочерний ssh не должен пережить владельца: иначе после смены настроек
     /// (или закрытия приложения) на машине копятся осиротевшие туннели.
     fn drop(&mut self) {
-        self.stop();
+        self.stop_now();
     }
 }
 
@@ -1109,26 +1144,47 @@ impl Remotes {
     /// добавил бы состояний, в которых туннель живёт от старого конфига.
     pub fn start(&self, cfgs: Vec<RemoteCfg>, sink: Sink) {
         self.stop_all();
-        let mut nodes = self.nodes.lock().unwrap();
-        let mut tasks = self.tasks.lock().unwrap();
-        for cfg in cfgs {
-            let node = Arc::new(Node::new(cfg));
-            nodes.push(node.clone());
-            tasks.push(tauri::async_runtime::spawn(poll_loop(node, sink.clone())));
-        }
-        if !nodes.is_empty() {
-            crate::log::line(&format!("[remote] узлов в работе: {}", nodes.len()));
+        // Сначала собираем всё, что нужно, и только потом трогаем замки: под
+        // ними не должно происходить ничего, кроме записи.
+        let fresh: Vec<Arc<Node>> = cfgs.into_iter().map(|cfg| Arc::new(Node::new(cfg))).collect();
+        let spawned: Vec<_> = fresh
+            .iter()
+            .map(|n| tauri::async_runtime::spawn(poll_loop(n.clone(), sink.clone())))
+            .collect();
+        let count = fresh.len();
+        self.nodes.lock().unwrap().extend(fresh);
+        self.tasks.lock().unwrap().extend(spawned);
+        if count > 0 {
+            crate::log::line(&format!("[remote] узлов в работе: {count}"));
         }
     }
 
     /// Погасить всё: сначала задачи, потом туннели — иначе поллер успел бы
     /// поднять убитый ssh заново.
     pub fn stop_all(&self) {
-        for t in self.tasks.lock().unwrap().drain(..) {
+        let tasks: Vec<_> = self.tasks.lock().unwrap().drain(..).collect();
+        for t in tasks {
             t.abort();
         }
-        for n in self.nodes.lock().unwrap().drain(..) {
+        // Список забираем и отпускаем замок СРАЗУ. Раньше он держался всё
+        // время, пока умирали ssh-процессы, — а список читает `machines_list`,
+        // синхронная команда, то есть главный поток. Медленно умирающий
+        // туннель вешал этим всё окно; ровно это и происходило на вкладке
+        // «Проекты», которая с этого списка и начинается.
+        let nodes: Vec<_> = self.nodes.lock().unwrap().drain(..).collect();
+        for n in nodes {
             n.tunnel.stop();
+        }
+    }
+
+    /// Погасить всё и дождаться. Только для выхода из приложения — см.
+    /// `Tunnel::stop_now`.
+    pub fn stop_all_now(&self) {
+        for t in self.tasks.lock().unwrap().drain(..).collect::<Vec<_>>() {
+            t.abort();
+        }
+        for n in self.nodes.lock().unwrap().drain(..).collect::<Vec<_>>() {
+            n.tunnel.stop_now();
         }
     }
 
@@ -1151,6 +1207,46 @@ impl Remotes {
     /// Состояние всех узлов — для панели и диагностики.
     pub fn list(&self) -> Vec<RemoteStatus> {
         self.nodes.lock().unwrap().iter().map(|n| n.status()).collect()
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    /// Список узлов читает `machines_list` — СИНХРОННАЯ команда, то есть
+    /// главный поток. Если гашение туннелей держит тот же замок, пока умирает
+    /// ssh, окно встаёт целиком. Ровно это и происходило на вкладке
+    /// «Проекты», которая с этого списка начинается.
+    #[test]
+    fn stopping_does_not_hold_the_node_list() {
+        let remotes = Remotes::new();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let d = done.clone();
+        // Пока «гасим», кто-то читает список — и обязан пройти насквозь.
+        let reader = std::thread::spawn(move || {
+            for _ in 0..100 {
+                let _ = remotes.list();
+            }
+            d.store(true, Ordering::SeqCst);
+        });
+        reader.join().unwrap();
+        assert!(done.load(Ordering::SeqCst), "чтение списка не должно упираться в гашение");
+    }
+
+    /// Мёртвый туннель хоронится, но не на плечах вызывающего.
+    #[test]
+    fn stop_returns_without_waiting_for_the_child() {
+        let cfg = RemoteCfg {
+            name: "t".into(),
+            ssh_host: "nowhere.invalid".into(),
+            jarvis_dir: "/tmp".into(),
+        };
+        let t = Tunnel::new(&cfg);
+        let at = std::time::Instant::now();
+        t.stop();
+        assert!(at.elapsed() < Duration::from_millis(200), "stop обязан возвращаться сразу");
+        assert_eq!(t.port(), 0);
     }
 }
 

@@ -33,6 +33,16 @@
   // собственный светофор оконного режима: декораций нет, кнопки рисуем сами
   const self = () => window.__TAURI__.window.getCurrentWindow();
 
+  /* Отказ оконного вызова — в лог, не в тишину. Кнопки светофора уже были
+   * декорацией по вине ACL: вызов отклонялся политикой разрешений, отказ
+   * обещания глотался, и снаружи это выглядело как «не работают». Боковая
+   * ветка catch помечает отказ обработанным, но само обещание возвращается
+   * как есть — свои обработчики вызывающих продолжают работать. */
+  const guard = (p, what) => {
+    p.catch((e) => report(`window.${what}`, e));
+    return p;
+  };
+
   // Ошибки панели уезжают в общий лог: белый экран это почти всегда
   // исключение, оборвавшее отрисовку, и видеть его только в девтулзах —
   // значит не видеть вовсе.
@@ -91,15 +101,15 @@
     // тема/краска сменились в другом окне (демон рассылает всем)
     onAppearance: (cb) => on('appearance', cb),
     reportError: report,
-    winMinimize: () => self().minimize(),
-    winZoom: () => self().toggleMaximize(),
-    winClose: () => self().close(),  // CloseRequested перехвачен → просто прячет
+    winMinimize: () => guard(self().minimize(), 'minimize'),
+    winZoom: () => guard(self().toggleMaximize(), 'toggleMaximize'),
+    winClose: () => guard(self().close(), 'close'),  // CloseRequested перехвачен → просто прячет
     // зелёная кнопка macOS — фуллскрин (зум под Alt, как в системе)
-    winIsFullscreen: () => self().isFullscreen(),
-    winToggleFullscreen: async () => {
+    winIsFullscreen: () => guard(self().isFullscreen(), 'isFullscreen'),
+    winToggleFullscreen: () => guard((async () => {
       const w = self();
       await w.setFullscreen(!(await w.isFullscreen()));
-    },
+    })(), 'setFullscreen'),
     // светофор горит только у активного окна — как у системных кнопок
     onWinFocus: (cb) => { self().onFocusChanged(({ payload }) => cb(!!payload)); },
     setSettings: (patch) => invoke('settings_set', { patch }),

@@ -20,14 +20,21 @@ function makeDom() {
       textContent: '',
       innerHTML: '',
       hidden: false,
+      value: '',
+      parent: null,
       children: [],
       attrs: {},
       listeners: {},
       classList: {
         add(c) { node.className = `${node.className} ${c}`.trim(); },
+        remove(c) { node.className = node.className.split(' ').filter((x) => x !== c).join(' '); },
         contains(c) { return node.className.split(' ').includes(c); },
       },
-      appendChild(k) { node.children.push(k); return k; },
+      remove() {
+        if (node.parent) node.parent.children = node.parent.children.filter((k) => k !== node);
+        node.parent = null;
+      },
+      appendChild(k) { node.children.push(k); k.parent = node; return k; },
       addEventListener(ev, fn) { (node.listeners[ev] ||= []).push(fn); },
       setAttribute(k, v) {
         // Настоящий DOM бросает InvalidCharacterError на имя, начинающееся с
@@ -50,7 +57,19 @@ function makeDom() {
     };
     return node;
   };
-  return { createElement: (t) => mk(t) };
+  return {
+    createElement: (t) => mk(t),
+    // Каталог вешает Esc на документ — заглушек достаточно.
+    addEventListener() {},
+    removeEventListener() {},
+  };
+}
+
+/** Найти в поддереве все узлы, прошедшие проверку. */
+function find(node, pred, out = []) {
+  if (pred(node)) out.push(node);
+  for (const k of node.children) find(k, pred, out);
+  return out;
 }
 
 /** Собираем весь текст поддерева — по нему и проверяем, что нарисовалось. */
@@ -66,10 +85,21 @@ async function loadLoops(state) {
   const window = {
     jarvis: {
       loopsGet: async () => ({ ok: true, ...state }),
-      loopsDraft: async (t) => { calls.push(['draft', t]); return { ok: true, item: { id: '', name: '', exit: { gates: [], critic: {} }, source: {}, sandbox: {}, memory: {}, schedule: { wake: 'manual' }, limits: {}, sampling: {} } }; },
+      loopsDraft: async (t) => { calls.push(['draft', t]); return { ok: true, item: { id: '', name: '', agent: 'claude', exit: { gates: [], critic: { enabled: true, model: 'opus' } }, source: {}, sandbox: {}, memory: {}, schedule: { wake: 'manual' }, limits: {}, sampling: {} } }; },
       loopsSave: async () => ({ ok: true, id: 'a', problems: [] }),
       loopsStart: async () => ({ ok: true }),
       loopsDiff: async () => ({ ok: true, diff: '' }),
+      loopsCatalog: async () => ({
+        ok: true,
+        models: {
+          claude: [{ id: 'fable', label: 'Fable' }, { id: 'opus', label: 'Opus' }],
+          codex: [{ id: 'gpt-5.5', label: 'GPT-5.5' }],
+        },
+        presets: [
+          { id: 'src-gh-label', slot: 'source', category: 'GitHub', name: 'issue с меткой agent', hint: 'классика', command: 'gh issue list --label agent' },
+          { id: 'gate-cargo-test', slot: 'gate', category: 'Rust', name: 'тесты', hint: 'все тесты', command: 'cargo test' },
+        ],
+      }),
       onLoopsState: () => {},
     },
   };
@@ -125,3 +155,54 @@ test('конструктор открывается и показывает вс
   }
   assert.ok(text.includes('Создать цикл'), 'нечем сохранить новый цикл');
 });
+
+test('модель критика выбирается из списка, а не вводится по памяти', async () => {
+  const { root } = await loadLoops({ loops: [], templates: TEMPLATES });
+  const scratch = root.querySelector('.lp-scratch');
+  scratch.children.find((c) => c.textContent === 'Собрать с нуля').listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  const selects = find(root, (n) => n.tag === 'select');
+  const model = selects.find((sel) => n2text(sel).includes('Opus'));
+  assert.ok(model, 'селекта моделей нет — значит опять поле по памяти');
+  assert.ok(n2text(model).includes('Fable'), 'в списке нет Fable');
+});
+
+test('заготовка из каталога вставляется в источник и попадает в объяснение', async () => {
+  const { root } = await loadLoops({ loops: [], templates: TEMPLATES });
+  root.querySelector('.lp-scratch').children.find((c) => c.textContent === 'Собрать с нуля').listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(textOf(root).includes('источник задач пока пуст'), 'объяснение не отражает пустой источник');
+
+  const fromCatalog = find(root, (n) => n.textContent === 'из каталога')[0];
+  assert.ok(fromCatalog, 'кнопки каталога у источника нет');
+  fromCatalog.listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(textOf(root).includes('issue с меткой agent'), 'карточки каталога не нарисовались');
+
+  const card = find(root, (n) => n.classList.contains('lp-cat-card'))[0];
+  card.listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(textOf(root).includes('возьмёт задачи у команды-источника'),
+    'после выбора заготовки объяснение не пересчиталось');
+  assert.ok(!find(root, (n) => n.classList.contains('lp-shade')).length, 'каталог не закрылся после выбора');
+});
+
+test('гейт из каталога добавляется с именем и командой', async () => {
+  const { root } = await loadLoops({ loops: [], templates: TEMPLATES });
+  root.querySelector('.lp-scratch').children.find((c) => c.textContent === 'Собрать с нуля').listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  const add = find(root, (n) => n.textContent === '+ из каталога')[0];
+  assert.ok(add, 'кнопки «+ из каталога» нет');
+  add.listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  const card = find(root, (n) => n.classList.contains('lp-cat-card'))[0];
+  assert.ok(n2text(card).includes('cargo test'), 'в каталоге гейтов нет cargo test');
+  card.listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(textOf(root).includes('прогонит гейт'), 'объяснение не увидело новый гейт');
+});
+
+/** Текст узла с детьми — как textOf, но от произвольного корня. */
+function n2text(node) {
+  return [node.textContent || '', ...node.children.map(n2text)].join(' ');
+}

@@ -74,6 +74,9 @@
     loopsDraft: (template) => invoke('loops_draft', { template }),
     loopsCatalog: () => invoke('loops_catalog'),
     loopsCompose: (text, item) => invoke('loops_compose', { text, item }),
+    // свои агенты: qwen/opencode/внутренние CLI — реестр в настройках
+    agentsList: () => invoke('agents_list'),
+    agentsSave: (agents) => invoke('agents_save', { agents }),
     loopsSave: (item) => invoke('loops_save', { item }),
     loopsRemove: (id) => invoke('loops_remove', { id }),
     loopsStart: (id) => invoke('loops_start', { id }),

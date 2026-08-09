@@ -1239,6 +1239,75 @@ pub fn limit_get(app: AppHandle) -> Value {
 /// Список нужен вкладке «Проекты» первым шагом — до выбора проекта. Локальная
 /// всегда первая и всегда «на связи»: она никуда не денется, и отсутствие
 /// узлов не должно выглядеть как «работать негде».
+/// Реестр своих агентов: список из настроек и готовые карточки.
+#[tauri::command]
+pub async fn agents_list(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    json!({
+        "ok": true,
+        "agents": crate::agents::parse(&d.settings.load()),
+        "presets": crate::agents::presets(),
+    })
+}
+
+/// Сохранить реестр целиком и привести шимы к нему.
+///
+/// Валидация — до записи и вся разом: человек правит форму целиком и вправе
+/// увидеть все дыры, а не по одной за подход.
+#[tauri::command]
+pub async fn agents_save(app: AppHandle, agents: Value) -> Value {
+    let d = Daemon::get(&app);
+    let list: Vec<crate::agents::CustomAgent> = match serde_json::from_value(agents) {
+        Ok(l) => l,
+        Err(e) => return err(format!("не разобрал список агентов: {e}")),
+    };
+    let mut bad = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for a in &list {
+        for p in crate::agents::problems(a) {
+            bad.push(format!("{}: {p}", if a.id.is_empty() { "агент" } else { &a.id }));
+        }
+        if !seen.insert(a.id.clone()) {
+            bad.push(format!("{}: имя повторяется", a.id));
+        }
+    }
+    if !bad.is_empty() {
+        return json!({ "ok": false, "error": bad.join("\n") });
+    }
+    d.settings.set_top("customAgents", serde_json::to_value(&list).unwrap_or(Value::Null));
+    // Шимы приводим сразу: агент должен быть запускаем в ту же секунду, а не
+    // после перезапуска приложения.
+    crate::install::sync_custom_shims(&list);
+    // Бинарь проверяем ПОСЛЕ сохранения и только предупреждением: человек
+    // вправе вписать агента до того, как установил его на машину.
+    let missing: Vec<String> = list
+        .iter()
+        .filter(|a| resolve_agent_bin(&a.bin).is_none())
+        .map(|a| a.id.clone())
+        .collect();
+    json!({ "ok": true, "missing": missing })
+}
+
+/// Найдётся ли бинарь: абсолютный путь — проверкой файла, имя — поиском в PATH.
+fn resolve_agent_bin(bin: &str) -> Option<std::path::PathBuf> {
+    let bin = bin.trim();
+    if bin.is_empty() {
+        return None;
+    }
+    if bin.contains('/') {
+        let p = std::path::PathBuf::from(bin);
+        return p.is_file().then_some(p);
+    }
+    let path = std::env::var("PATH").unwrap_or_default();
+    for dir in path.split(':').filter(|d| !d.is_empty()) {
+        let p = std::path::Path::new(dir).join(bin);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 #[tauri::command]
 pub async fn machines_list(app: AppHandle) -> Value {
     let _t = crate::log::Step::new("machines_list");
@@ -1984,7 +2053,13 @@ pub async fn session_launch(
     let proxy = d.settings.string("launchProxyCmd");
     let dangerous = d.settings.bool("launchDangerous");
 
-    let agent_cmd = crate::launch::agent_command(&agent, session_id.as_deref(), dangerous);
+    // Свой агент из реестра — раньше зашитой пары: команду для него собирает
+    // реестр (шим + шаблон возобновления человека), а не наши догадки.
+    let customs = crate::agents::parse(&d.settings.load());
+    let agent_cmd = match crate::agents::find(&customs, &agent) {
+        Some(a) => crate::agents::command(a, session_id.as_deref(), dangerous),
+        None => crate::launch::agent_command(&agent, session_id.as_deref(), dangerous),
+    };
     // PATH запускаемой команды достраиваем сами: терминал выполняет её в
     // неинтерактивном шелле, где PATH-блока Jarvis (и шима) ещё нет.
     let path_dirs = crate::launch::launch_path_dirs();
@@ -2017,6 +2092,11 @@ async fn launch_on_node(
     };
     let bare = session_id.map(|s| s.strip_prefix(&format!("{machine}:")).unwrap_or(s));
     let dangerous = d.settings.bool("launchDangerous");
+    // На узле шима своего агента нет — без него не будет ни tmux, ни хуков
+    // жизненного цикла, и сессия молча не появилась бы. Честный отказ лучше.
+    if crate::agents::find(&crate::agents::parse(&d.settings.load()), agent).is_some() {
+        return err("свои агенты пока запускаются только на этой машине — на узле нет их шима");
+    }
     let cmd = crate::launch::agent_command(agent, bare, dangerous);
     let name = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("project");
     match client.launch(cwd, &cmd, name).await {

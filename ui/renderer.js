@@ -1033,7 +1033,7 @@ function gateReply(s) {
   const sid = s.remote && s.id.startsWith(s.remote + ':') ? s.id.slice(s.remote.length + 1) : s.id;
   // команда возобновления зависит от агента: codex resume <id> vs claude --resume <id>.
   // Раньше было захардкожено «claude --resume» — для codex-сессий это вело не туда.
-  const resumeCmd = s.agent === 'codex' ? `codex resume ${sid}` : `claude --resume ${sid}`;
+  const resumeCmd = resumeBase(s.agent, sid);
   code.textContent = resumeCmd;
   code.title = 'Скопировать';
   code.addEventListener('click', () => {
@@ -2069,6 +2069,23 @@ window.jarvis.onState((list) => {
 });
 window.jarvis.getState().then((list) => { state = list; rebuildOrder(); render(); });
 
+/* Свои агенты (qwen/opencode/внутренние CLI): нужны кнопкам «Нового проекта»
+ * и командам возобновления. Старый бэкенд без реестра — просто пустой список. */
+let customAgents = [];
+if (typeof window.jarvis.agentsList === 'function') {
+  window.jarvis.agentsList().then((r) => { if (r && r.ok) customAgents = r.agents || []; }).catch(() => {});
+}
+
+/* Команда возобновления по агенту: свои агенты несут шаблон в настройках;
+ * без шаблона честно запускаем новую сессию тем же шимом, а не выдумываем флаг. */
+function resumeBase(agent, sid) {
+  if (agent === 'codex') return `codex resume ${sid}`;
+  if (!agent || agent === 'claude') return `claude --resume ${sid}`;
+  const a = customAgents.find((x) => x.id === agent);
+  if (a && a.resume) return a.resume.replaceAll('{sid}', sid);
+  return agent; // новая сессия через шим — resume у агента не описан
+}
+
 /* ---------- лимит-баннер ---------- */
 
 const limitBannerEl = document.getElementById('limitBanner');
@@ -3054,7 +3071,7 @@ function resumeCommand(s, cwd) {
   // «Запуска» — честно предупреждаем, что она может отличаться (прокси, dangerous-флаги).
   // У сессии с узла id несёт префикс узла — resume ждёт «голый» agentId.
   const id = s.agentId || s.id;
-  const base = s.agent === 'codex' ? `codex resume ${id}` : `claude --resume ${id}`;
+  const base = resumeBase(s.agent, id);
   return (cwd ? `cd "${cwd}" && ${base}` : base) + '\n(+ параметры из настроек «Запуск»)';
 }
 
@@ -3286,6 +3303,8 @@ function renderHistNew(remote) {
     return b;
   };
   form.append(input, btn('claude', 'Claude'), btn('codex', 'Codex'));
+  // Свои агенты — теми же кнопками: на узлах их шима нет, поэтому только локально.
+  if (!remote) for (const a of customAgents) form.append(btn(a.id, a.name || a.id));
   historyEl.appendChild(form);
   historyEl.appendChild(Object.assign(document.createElement('div'), {
     className: 'hhint',

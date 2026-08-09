@@ -1206,10 +1206,20 @@ impl Remotes {
 
     /// Состояние всех узлов — для панели и диагностики.
     pub fn list(&self) -> Vec<RemoteStatus> {
+        crate::log::line("[trace] remotes.list: жду замок");
         // Отравленный замок — это чужая паника в прошлом, а не повод уронить
         // ещё и эту команду: данные под ним целы, читаем их как есть.
         let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
-        nodes.iter().map(|n| n.status()).collect()
+        crate::log::line(&format!("[trace] remotes.list: замок взят, узлов {}", nodes.len()));
+        let out: Vec<RemoteStatus> = nodes
+            .iter()
+            .map(|n| {
+                crate::log::line(&format!("[trace] remotes.list: статус {}", n.cfg.name));
+                n.status()
+            })
+            .collect();
+        crate::log::line("[trace] remotes.list: готово");
+        out
     }
 }
 

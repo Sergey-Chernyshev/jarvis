@@ -130,6 +130,7 @@ fn main() {
             loops::ipc::loops_get,
             loops::ipc::loops_draft,
             loops::ipc::loops_catalog,
+            loops::ipc::loops_compose,
             loops::ipc::loops_save,
             loops::ipc::loops_remove,
             loops::ipc::loops_start,

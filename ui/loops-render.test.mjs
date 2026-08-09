@@ -28,6 +28,7 @@ function makeDom() {
       classList: {
         add(c) { node.className = `${node.className} ${c}`.trim(); },
         remove(c) { node.className = node.className.split(' ').filter((x) => x !== c).join(' '); },
+        toggle(c, on) { if (on) this.add(c); else this.remove(c); },
         contains(c) { return node.className.split(' ').includes(c); },
       },
       remove() {
@@ -86,9 +87,26 @@ async function loadLoops(state) {
     jarvis: {
       loopsGet: async () => ({ ok: true, ...state }),
       loopsDraft: async (t) => { calls.push(['draft', t]); return { ok: true, item: { id: '', name: '', agent: 'claude', exit: { gates: [], critic: { enabled: true, model: 'opus' } }, source: {}, sandbox: {}, memory: {}, schedule: { wake: 'manual' }, limits: {}, sampling: {} } }; },
-      loopsSave: async () => ({ ok: true, id: 'a', problems: [] }),
+      loopsSave: async (item) => { calls.push(['save', item]); return { ok: true, id: 'a', problems: [] }; },
       loopsStart: async () => ({ ok: true }),
       loopsDiff: async () => ({ ok: true, diff: '' }),
+      loopsCompose: async (text, item) => {
+        calls.push(['compose', text, item]);
+        return {
+          ok: true,
+          problems: [],
+          item: {
+            id: item && item.id, name: 'ночной test-fix', agent: 'claude',
+            source: { goal: 'чинить флаки', command: 'cargo test' },
+            sandbox: { repo: '/repo', branch: 'loop/{name}-{n}', worktree: true },
+            exit: { gates: [{ name: 'тесты', command: 'cargo test' }], critic: { enabled: true, model: 'opus' }, streak: 2 },
+            memory: { enabled: true, file: 'notes.md' },
+            schedule: { wake: { daily: { at: '02:00' } }, resumeAfterLimit: true, keepAwake: true },
+            limits: { tokens: 200000, iterations: 20, minutes: 480, stopOnDrift: true },
+            sampling: { every: 3 },
+          },
+        };
+      },
       loopsCatalog: async () => ({
         ok: true,
         models: {
@@ -206,3 +224,34 @@ test('гейт из каталога добавляется с именем и �
 function n2text(node) {
   return [node.textContent || '', ...node.children.map(n2text)].join(' ');
 }
+
+test('описание словами заполняет форму, но ничего не сохраняет', async () => {
+  const { root, calls } = await loadLoops({ loops: [], templates: TEMPLATES });
+  root.querySelector('.lp-scratch').children.find((c) => c.textContent === 'Собрать с нуля').listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const area = find(root, (n) => n.classList.contains('lp-ask-text'))[0];
+  assert.ok(area, 'поля описания нет');
+  const go = find(root, (n) => n.textContent === 'Заполнить за меня')[0];
+  assert.ok(go, 'кнопки сборки нет');
+
+  // Слишком короткое описание модель не тревожит.
+  area.value = 'ага';
+  go.listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(!calls.some((c) => c[0] === 'compose'), 'позвали модель на пустяке');
+
+  area.value = 'каждую ночь чинить флаки-тесты';
+  go.listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const compose = calls.find((c) => c[0] === 'compose');
+  assert.ok(compose, 'модель не позвали');
+  assert.ok(compose[2] && typeof compose[2] === 'object', 'заготовку не передали — выбор человека потеряется');
+
+  const text = textOf(root);
+  assert.ok(text.includes('ночной test-fix'), 'имя из ответа не попало в форму');
+  assert.ok(text.includes('прогонит гейт'), 'объяснение не увидело заполненные поля');
+  // Ключевое: заполнение — это черновик, а не сохранение.
+  assert.ok(!calls.some((c) => c[0] === 'save'), 'форма сохранилась сама, без подтверждения');
+});

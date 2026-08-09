@@ -148,7 +148,8 @@
           el('div.lp-card-hint', { text: t.hint }),
         ))),
       el('div.lp-scratch',
-        el('button.j-btn.is-primary', { text: 'Собрать с нуля', onclick: () => createFrom(null) }),
+        el('button.j-btn.is-primary', { text: 'Описать словами', onclick: () => createFrom(null) }),
+        el('button.j-btn', { text: 'Собрать с нуля', onclick: () => createFrom(null) }),
         el('span.lp-hint', { text: 'шаблон — это заготовка: шаги и ограничители всё равно твои' }),
       ),
     );
@@ -369,6 +370,48 @@
       `и остановится сам, израсходовав ${walls || '…стен нет — так нельзя'}. ${sample}${memory}`;
   }
 
+  /**
+   * Описать словами — и получить заполненную форму.
+   *
+   * Конструктор спрашивает «что настроить» двенадцатью полями, а человек
+   * думает задачей: «каждую ночь чини флаки и не трогай CI». Здесь описание
+   * уходит модели, та раскладывает его по полям, а человек проверяет и правит.
+   * Ничего не сохраняется и не запускается само: подтверждение остаётся за
+   * человеком — команды-то будут выполняться всю ночь без надзора.
+   */
+  function composer(d, onFilled) {
+    const area = el('textarea.lp-input.lp-ask-text', {
+      rows: 3,
+      placeholder: 'Каждую ночь чинить флаки-тесты в этом репозитории, гейты — тесты и clippy, критик Opus, не больше 20 итераций',
+    });
+    const go = el('button.j-btn.is-primary', { text: 'Заполнить за меня' });
+    const state = el('span.lp-hint');
+    go.addEventListener('click', async () => {
+      const text = (area.value || '').trim();
+      if (text.length < 8) { state.textContent = 'опиши задачу хотя бы одной фразой'; return; }
+      go.disabled = true;
+      state.textContent = 'раскладываю по полям…';
+      const res = await window.jarvis.loopsCompose(text, d);
+      go.disabled = false;
+      if (!res || !res.ok) {
+        state.textContent = (res && res.error) || 'не вышло — заполни поля руками';
+        return;
+      }
+      // Черновик заменяем целиком и перерисовываем форму: поля заполнены, но
+      // это всё ещё черновик — на диск ничего не ушло.
+      draft = res.item;
+      onFilled(res.problems || []);
+    });
+    return el('section.lp-ask',
+      el('div.lp-ask-h',
+        el('span.lp-ask-title', { text: 'Опиши словами' }),
+        el('span.lp-ask-sub', { text: 'модель разложит по полям — проверишь и поправишь' }),
+      ),
+      area,
+      el('div.lp-ask-row', go, state),
+    );
+  }
+
   function builder(l, isNew) {
     const d = draft || (draft = JSON.parse(JSON.stringify(l)));
     const step = (n, title, sub, ...body) =>
@@ -484,6 +527,12 @@
     const box = el('div.lp-builder',
       el('div.lp-h1', { text: isNew ? 'Новый цикл' : `Настройка · ${l.name || 'без имени'}` }),
       el('div.lp-h2', { text: 'пять шагов и ограничители — а внизу, человеческим языком, что из этого выйдет' }),
+      composer(d, (problems) => {
+        note(problems.length
+          ? 'заполнил — проверь поля, кое-чего ещё не хватает: ' + problems.join('; ')
+          : 'заполнил — проверь поля и запускай', !!problems.length);
+        render();
+      }),
       el('div.lp-headrow',
         field('имя цикла', d.name, (v) => { d.name = v; }),
         el('label.lp-field', el('span.lp-field-label', { text: 'агент' }), seg),

@@ -84,6 +84,44 @@ pub fn loops_draft(template: Option<String>) -> Value {
     json!({ "ok": true, "item": item })
 }
 
+/// Собрать цикл из описания словами.
+///
+/// Ничего не сохраняет и не запускает: возвращает заполненную заготовку, а
+/// решает человек. Это и есть граница ответственности — модель раскладывает
+/// описание по полям, но команды, которые всю ночь будут выполняться без
+/// надзора, подтверждает глазами человек.
+#[tauri::command]
+pub async fn loops_compose(app: AppHandle, text: String, item: Option<Value>) -> Value {
+    let text = text.trim().to_string();
+    if text.len() < 8 {
+        return json!({ "ok": false, "error": "опиши задачу хотя бы одной фразой" });
+    }
+    if !crate::claude_bin::any_service_bin() {
+        return json!({ "ok": false, "error": "не найден ни claude, ни codex — заполни поля руками" });
+    }
+    // Заготовка из панели: репозиторий и агент человек мог выбрать до описания,
+    // и его выбор сильнее того, что придумает модель.
+    let base: Loop = item.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    let _ = &app; // команда ничего не берёт у демона, но подпись держим общей
+
+    let p = super::compose::prompt(&text, &base.sandbox.repo, &base.agent);
+    let out = crate::claude_bin::run_service_llm(
+        &p,
+        std::time::Duration::from_secs(super::compose::TIMEOUT_SECS),
+    )
+    .await;
+    let Some(out) = out else {
+        return json!({ "ok": false, "error": "модель не ответила — попробуй ещё раз или заполни руками" });
+    };
+    match super::compose::parse(&out, &base) {
+        Some(item) => {
+            let problems = item.problems();
+            json!({ "ok": true, "item": item, "problems": problems })
+        }
+        None => json!({ "ok": false, "error": "не разобрал ответ модели — попробуй переформулировать" }),
+    }
+}
+
 /// Сохранить конфигурацию целиком — конструктор шлёт форму как есть.
 #[tauri::command]
 pub fn loops_save(app: AppHandle, item: Value) -> Value {

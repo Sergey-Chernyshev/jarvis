@@ -1123,6 +1123,21 @@ fn file_diff_impl(
 /// Открыть внешнюю ссылку из отрендеренного документа в браузере по клику.
 /// markdown.js уже режет не-http(s) схемы, но UI-слою не доверяем — схема
 /// валидируется и здесь; url уходит одним аргументом (без шелла).
+/// Ошибка в панели → в общий лог.
+///
+/// Белый экран — это почти всегда исключение в JS, оборвавшее отрисовку. Без
+/// этого канала оно видно только в девтулзах, то есть на практике не видно
+/// никому: человек сообщает «белый экран», и дальше начинается гадание.
+#[tauri::command]
+pub fn ui_error(place: String, message: String) -> Value {
+    crate::log::line(&format!(
+        "[ui] {} — {}",
+        one_line(&place),
+        ellipsize(&one_line(&message), 600)
+    ));
+    json!({ "ok": true })
+}
+
 #[tauri::command]
 pub fn url_open(url: String) -> Value {
     if !(url.starts_with("http://") || url.starts_with("https://")) {

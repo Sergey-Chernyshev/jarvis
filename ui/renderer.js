@@ -167,17 +167,32 @@ function setView(next) {
   tabVoiceEl.classList.toggle('active', next === 'voicehist');
   tabLoopsEl.classList.toggle('active', next === 'loops');
   tabSessionsEl.classList.toggle('active', next === 'list' || next === 'chat');
-  if (next === 'settings') loadSettings();
-  if (next === 'stats') renderStats();
+  // Каждый раздел поднимается в своей обёртке: исключение в одном не должно
+  // оставлять панель с белым экраном — раньше первая же ошибка обрывала
+  // setView, и соседние разделы переставали показываться вместе с ним.
+  const safely = (what, fn) => {
+    const blame = (e) => {
+      console.error(`[view:${what}]`, e);
+      try { window.jarvis.reportError(`view:${what}`, (e && e.stack) || e); } catch (_) { /* лог не обязателен */ }
+    };
+    try {
+      const r = fn();
+      // Разделы бывают асинхронными: у них ошибка приходит отказом обещания,
+      // и обычный catch её не увидит.
+      if (r && typeof r.catch === 'function') r.catch(blame);
+    } catch (e) { blame(e); }
+  };
+  if (next === 'settings') safely('settings', loadSettings);
+  if (next === 'stats') safely('stats', renderStats);
   if (next === 'voicehist') {
     voicehistEl.style.cssText = 'padding:0;height:100%;overflow:hidden';
-    try { window.initVoiceHistory(voicehistEl); } catch (e) { console.error('[voicehist] init:', e); }
+    safely('voicehist', () => window.initVoiceHistory(voicehistEl));
   }
   if (next === 'loops') {
     // Режим живёт своим модулем: панель только даёт ему место и уходит.
-    try { window.initLoops(loopsEl); } catch (e) { console.error('[loops] init:', e); }
+    safely('loops', () => window.initLoops(loopsEl));
   }
-  if (next === 'history') renderHistory();
+  if (next === 'history') safely('history', renderHistory);
   else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
   if (next === 'list') queryEl.focus();
 }

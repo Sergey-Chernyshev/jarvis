@@ -145,6 +145,7 @@ fn main() {
             ipc::file_read,
             ipc::file_diff,
             ipc::url_open,
+            ipc::ui_error,
             ipc::chat_close,
             ipc::commands_get,
             ipc::app_meta,

@@ -1253,17 +1253,11 @@ pub async fn machines_list(app: AppHandle) -> Value {
 }
 
 fn machines(app: &AppHandle) -> Value {
-    // Пошаговый след: команда висит, а где именно — не видно. Строк немного и
-    // зовут её редко, зато следующий же запуск покажет точку остановки.
-    crate::log::line("[trace] machines: вход");
     let d = Daemon::get(app);
-    crate::log::line("[trace] machines: демон взят");
     let mut out = vec![json!({
         "id": "local", "name": "Эта машина", "kind": "local", "online": true,
     })];
-    let list = d.remotes.list();
-    crate::log::line(&format!("[trace] machines: узлов {}", list.len()));
-    for st in list {
+    for st in d.remotes.list() {
         out.push(json!({
             "id": st.name,
             "name": st.name,

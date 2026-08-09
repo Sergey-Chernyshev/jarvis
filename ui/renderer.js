@@ -284,13 +284,19 @@ function filtered() {
 }
 
 function render() {
-  if (view !== 'list') return;
+  // Гейт — видимость списка, а не имя вида. В оконном режиме список стоит
+  // рядом с открытым чатом, и прежняя проверка «вид — не список» замораживала
+  // его на всё время чата: статусы не обновлялись, а открытый чат никак не
+  // выделялся среди строк.
+  if (listEl.hidden) return;
   // hover-выбор разоружаем на каждую перерисовку: дальше его снова взведёт только
   // реальное mousemove (см. listEl.mousemove). Иначе фон-обновления (data push)
   // пересоздают строки под неподвижным курсором → mouseenter таскает выделение.
   palHoverEnabled = false;
-  // палитра быстрых команд: «/» в главном поиске вместо списка сессий
-  if (argMode || queryEl.value.trim().startsWith('/')) { renderCmdPalette(); return; }
+  // палитра быстрых команд: «/» в главном поиске вместо списка сессий.
+  // Только в виде списка: в оконном режиме рядом с чатом список остаётся
+  // списком — палитре там рисоваться не на чем.
+  if (view === 'list' && (argMode || queryEl.value.trim().startsWith('/'))) { renderCmdPalette(); return; }
   argMode = null;
   listEl.textContent = '';
 
@@ -298,6 +304,14 @@ function render() {
 
   const list = filtered();
   sel = Math.min(sel, Math.max(0, list.length - 1));
+
+  // Открытый чат и есть выделение: курсор списка ведём за ним, а не отдельно.
+  // Заодно Esc из чата возвращает к той же строке, а не куда курсор укатился.
+  const openId = view === 'chat' ? chatSessionId : view === 'question' ? qSessionId : null;
+  if (openId) {
+    const oi = list.findIndex((x) => x.id === openId);
+    if (oi >= 0) sel = oi;
+  }
 
   if (!list.length) {
     const empty = document.createElement('div');
@@ -404,7 +418,7 @@ function render() {
       if (!palHoverEnabled || sel === i) return;
       sel = i; render();
     });
-    row.addEventListener('click', () => openSession(s));
+    row.addEventListener('click', () => { sel = i; openSession(s); });
     listEl.appendChild(row);
   });
 }
@@ -1098,6 +1112,7 @@ function openQuestion(s) {
   qTexts = qItems.map(() => null);
   loadQ();
   setView('question');
+  render(); // выделение в оконном списке — за открытым вопросом
   renderQuestion();
   qOptsEl.focus?.();
 }
@@ -1273,6 +1288,9 @@ async function openChat(sessionId, project) {
   hidePalette();
   loadCommands();
   setView('chat');
+  // В оконном режиме список стоит рядом: выделение должно переехать на
+  // открытый чат сейчас, а не со следующим пушем состояния.
+  render();
   replyEl.focus();
   if (res.items.length) {
     appendChatItems(res.items);

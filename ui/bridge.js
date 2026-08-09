@@ -13,6 +13,20 @@
   // собственный светофор оконного режима: декораций нет, кнопки рисуем сами
   const self = () => window.__TAURI__.window.getCurrentWindow();
 
+  // Ошибки панели уезжают в общий лог: белый экран это почти всегда
+  // исключение, оборвавшее отрисовку, и видеть его только в девтулзах —
+  // значит не видеть вовсе.
+  const report = (place, message) => {
+    try { invoke('ui_error', { place, message: String(message) }); } catch (e) { /* лог не должен ронять панель */ }
+  };
+  window.addEventListener('error', (e) => {
+    report(`${e.filename || '?'}:${e.lineno || 0}`, (e.error && e.error.stack) || e.message);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e.reason;
+    report('promise', (r && r.stack) || (r && r.message) || r);
+  });
+
   window.jarvis = {
     onState: (cb) => on('state', cb),
     onShown: (cb) => on('panel-shown', () => cb()),
@@ -51,6 +65,7 @@
 
     // тема/краска сменились в другом окне (демон рассылает всем)
     onAppearance: (cb) => on('appearance', cb),
+    reportError: report,
     winMinimize: () => self().minimize(),
     winZoom: () => self().toggleMaximize(),
     winClose: () => self().close(),  // CloseRequested перехвачен → просто прячет

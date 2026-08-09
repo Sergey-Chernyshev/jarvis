@@ -170,29 +170,45 @@ function setView(next) {
   // Каждый раздел поднимается в своей обёртке: исключение в одном не должно
   // оставлять панель с белым экраном — раньше первая же ошибка обрывала
   // setView, и соседние разделы переставали показываться вместе с ним.
-  const safely = (what, fn) => {
+  const safely = (what, fn, host) => {
+    const at = Date.now();
     const blame = (e) => {
       console.error(`[view:${what}]`, e);
       try { window.jarvis.reportError(`view:${what}`, (e && e.stack) || e); } catch (_) { /* лог не обязателен */ }
+    };
+    // Молчаливые беды не менее вредны, чем исключения: раздел может отрисоваться
+    // пустым или отрисовываться десять секунд, и об этом не узнает никто, кроме
+    // человека перед экраном. Поэтому меряем и считаем нарисованное.
+    const audit = () => {
+      const ms = Date.now() - at;
+      const empty = host && host.childElementCount === 0;
+      if (!empty && ms < 1500) return;
+      try {
+        window.jarvis.reportError(
+          `view:${what}`,
+          `${empty ? 'раздел отрисован пустым' : 'раздел отрисован'} за ${ms} мс`,
+        );
+      } catch (_) { /* лог не обязателен */ }
     };
     try {
       const r = fn();
       // Разделы бывают асинхронными: у них ошибка приходит отказом обещания,
       // и обычный catch её не увидит.
-      if (r && typeof r.catch === 'function') r.catch(blame);
+      if (r && typeof r.then === 'function') r.then(audit, blame);
+      else audit();
     } catch (e) { blame(e); }
   };
   if (next === 'settings') safely('settings', loadSettings);
-  if (next === 'stats') safely('stats', renderStats);
+  if (next === 'stats') safely('stats', renderStats, statsEl);
   if (next === 'voicehist') {
     voicehistEl.style.cssText = 'padding:0;height:100%;overflow:hidden';
     safely('voicehist', () => window.initVoiceHistory(voicehistEl));
   }
   if (next === 'loops') {
     // Режим живёт своим модулем: панель только даёт ему место и уходит.
-    safely('loops', () => window.initLoops(loopsEl));
+    safely('loops', () => window.initLoops(loopsEl), loopsEl);
   }
-  if (next === 'history') safely('history', renderHistory);
+  if (next === 'history') safely('history', renderHistory, historyEl);
   else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
   if (next === 'list') queryEl.focus();
 }

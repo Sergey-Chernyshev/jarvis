@@ -3040,6 +3040,7 @@ mod tests {
 /// Список узлов с их живостью — вкладка «Удалённые».
 #[tauri::command]
 pub async fn remotes_list(app: AppHandle) -> Value {
+    let _t = crate::log::Step::new("remotes_list");
     json!(Daemon::get(&app).remotes.list())
 }
 

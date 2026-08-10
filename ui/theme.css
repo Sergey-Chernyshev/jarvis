@@ -797,3 +797,67 @@ textarea.lp-input { height: auto; padding: 9px 11px; line-height: 1.45; resize: 
 .lp-ask-sub { font: 400 12px/1.4 var(--font); color: var(--ink-dim); }
 textarea.lp-ask-text { width: 100%; min-height: 66px; }
 .lp-ask-row { display: flex; align-items: center; gap: 10px; margin-top: 9px; flex-wrap: wrap; }
+
+/* ================= режим «Связка» ================= */
+.bundle { height: 100%; overflow-y: auto; }
+.bd-wrap { padding: 18px 22px 28px; }
+.bd-note {
+  margin-bottom: 12px; padding: 9px 12px; border-radius: var(--r-chip);
+  font: 400 12.5px/1.45 var(--font); background: var(--surface-2); color: var(--ink);
+}
+.bd-note.bad { background: var(--danger-soft, var(--surface-2)); color: var(--danger, var(--ink)); }
+
+/* --- старт --- */
+.bd-start-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.bd-field { display: flex; flex-direction: column; gap: 4px; }
+.bd-label { font: 500 12px/1.3 var(--font); color: var(--ink-dim); }
+.bd-hands { display: flex; flex-direction: column; gap: 10px; }
+.bd-hand-row { padding: 10px 12px; border-radius: var(--r-card); background: var(--surface-2); }
+.bd-hand-head { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; }
+.bd-hand-n {
+  width: 20px; height: 20px; flex: 0 0 20px; border-radius: 50%;
+  background: var(--accent); color: var(--on-accent);
+  font: 600 11.5px/20px var(--font); text-align: center;
+}
+.bd-task { width: 100%; }
+
+/* --- пульт --- */
+.bd-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.bd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; margin-top: 12px; }
+.bd-card {
+  padding: 12px 14px; border-radius: var(--r-card); background: var(--surface-2);
+  transition: background var(--dur) ease;
+}
+.bd-card.open { cursor: default; }
+.bd-card.open:hover { background: var(--accent-soft); }
+.bd-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.bd-card-name { font: 600 14px/1.3 var(--font); color: var(--ink); }
+.bd-card-state { font: 500 11px/1.3 var(--font); color: var(--ink-dim); }
+/* Исключения — единственное, что выделено: за ними и приходят на пульт. */
+.bd-card[data-state='conflict'] .bd-card-state { color: var(--danger, var(--ink)); }
+.bd-card[data-state='ready'] .bd-card-state { color: var(--accent-ink, var(--ink)); }
+.bd-card[data-state='merged'] { opacity: 0.62; }
+.bd-card-line { font: 400 12.5px/1.5 var(--font); color: var(--ink); margin-top: 5px; }
+.bd-card-meta { font: 400 11.5px/1.4 var(--mono, monospace); color: var(--ink-faint); margin-top: 6px; }
+
+.bd-add { display: flex; gap: 8px; align-items: flex-start; margin-top: 12px; }
+.bd-add .bd-task { flex: 1; }
+
+.bd-bottom { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 20px; margin-top: 18px; }
+@media (max-width: 760px) { .bd-bottom { grid-template-columns: 1fr; } }
+
+.bd-queue, .bd-side { min-width: 0; }
+.bd-qrow {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 11px; border-radius: var(--r-chip); background: var(--surface-2); margin-top: 6px;
+}
+.bd-qrow.out { opacity: 0.85; }
+.bd-qpos { font: 600 12px/1 var(--font); color: var(--accent-ink, var(--ink-dim)); flex: 0 0 auto; }
+.bd-qname { flex: 1; min-width: 0; font: 400 13px/1.4 var(--font); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bd-merge { height: 34px; padding: 0 14px; font-size: 13px; }
+
+.bd-hot { display: flex; align-items: baseline; gap: 8px; padding: 4px 0; }
+.bd-hot-file { font: 400 12px/1.4 var(--mono, monospace); color: var(--ink); }
+.bd-ev { display: flex; gap: 8px; padding: 3px 0; align-items: baseline; }
+.bd-ev-t { font: 400 11px/1.4 var(--font); color: var(--ink-faint); flex: 0 0 34px; font-variant-numeric: tabular-nums; }
+.bd-ev-x { font: 400 12px/1.45 var(--font); color: var(--ink-dim); }

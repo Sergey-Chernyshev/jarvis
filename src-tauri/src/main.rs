@@ -10,6 +10,7 @@ mod agent;
 mod agents; // реестр внешних агентов: qwen/opencode/свои — шимы и жизненный цикл
 #[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
 mod backend;
+mod bundle; // режим «Связка»: несколько агентов в worktree над одним проектом + очередь слияний
 #[allow(dead_code)] // проекции/фасады подключаются по фазам (инкр. 8)
 mod capability;
 mod claude_bin;
@@ -131,6 +132,14 @@ fn main() {
             loops::ipc::loops_get,
             loops::ipc::loops_draft,
             loops::ipc::loops_catalog,
+            bundle::ipc::bundle_get,
+            bundle::ipc::bundle_draft,
+            bundle::ipc::bundle_save,
+            bundle::ipc::bundle_start,
+            bundle::ipc::bundle_add_hand,
+            bundle::ipc::bundle_pause,
+            bundle::ipc::bundle_merge,
+            bundle::ipc::bundle_remove,
             loops::ipc::loops_compose,
             loops::ipc::loops_save,
             loops::ipc::loops_remove,
@@ -485,6 +494,16 @@ fn spawn_timers(d: &Arc<Daemon>) {
     // Сторож главного потока: если окно встанет, в логе останется след с
     // длительностью — иначе от «зависло» нет ни места, ни времени.
     watchdog::start(d.app.clone());
+
+    // такт связки: следит за руками, ребейзит готовых, гоняет гейты. Чаще
+    // семи секунд незачем — он ходит в git, а руки работают минутами.
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(7)).await;
+            bundle::ipc::tick(&dd).await;
+        }
+    });
 
     // расписание циклов: раз в 30с смотрим, чьё время пришло. Чаще незачем —
     // самое частое расписание меряется минутами, а запуск всё равно один за раз.

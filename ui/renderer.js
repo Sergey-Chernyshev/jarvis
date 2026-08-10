@@ -38,6 +38,8 @@ const tabSettingsEl = document.getElementById('tabSettings');
 const voicehistEl = document.getElementById('voicehist');
 const loopsEl = document.getElementById('loops');
 const tabLoopsEl = document.getElementById('tabLoops');
+const bundlePaneEl = document.getElementById('bundlePane');
+const tabBundleEl = document.getElementById('tabBundle');
 const tabVoiceEl = document.getElementById('tabVoice');
 
 const STATUS_LABEL = {
@@ -153,6 +155,7 @@ function setView(next) {
   statsEl.hidden = next !== 'stats';
   voicehistEl.hidden = next !== 'voicehist';
   loopsEl.hidden = next !== 'loops';
+  bundlePaneEl.hidden = next !== 'bundle';
   historyEl.hidden = next !== 'history';
   // чат и вопрос несут собственные нижние бары — парящий футер только тут.
   // В окне полоска не парит, а стоит в сетке под обеими колонками — она нужна всегда.
@@ -166,6 +169,7 @@ function setView(next) {
   tabHistoryEl.classList.toggle('active', next === 'history');
   tabVoiceEl.classList.toggle('active', next === 'voicehist');
   tabLoopsEl.classList.toggle('active', next === 'loops');
+  tabBundleEl.classList.toggle('active', next === 'bundle');
   tabSessionsEl.classList.toggle('active', next === 'list' || next === 'chat');
   // Каждый раздел поднимается в своей обёртке: исключение в одном не должно
   // оставлять панель с белым экраном — раньше первая же ошибка обрывала
@@ -218,6 +222,9 @@ function setView(next) {
     // Режим живёт своим модулем: панель только даёт ему место и уходит.
     safely('loops', () => window.initLoops(loopsEl), loopsEl);
   }
+  if (next === 'bundle') {
+    safely('bundle', () => window.initBundle(bundlePaneEl), bundlePaneEl);
+  }
   if (next === 'history') safely('history', renderHistory, historyEl);
   else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
   if (next === 'list') queryEl.focus();
@@ -230,6 +237,12 @@ function openSession(s) {
     if (questionOf(s)) openVarPanel();
   });
 }
+
+/* Открыть чат по id сессии — для чужих модулей (карточки связки). */
+window.openSessionById = (id) => {
+  const s = state.find((x) => x.id === id);
+  if (s) openSession(s);
+};
 
 /* ---------- список сессий ---------- */
 
@@ -958,6 +971,17 @@ function updateChatChannelMark() {
   const model = s && (s.model || s.agent);
   chatModelEl.textContent = model || '';
   chatModelEl.hidden = !model;
+  // рука связки: ветка в шапке + пометка конфликта. Человек, открывший чат из
+  // пульта, должен видеть, ГДЕ он, — обычный чат и рука выглядят одинаково.
+  const chatBundleEl = document.getElementById('chatBundle');
+  if (chatBundleEl) {
+    const hand = window.bundleHandOf ? window.bundleHandOf(chatSessionId) : null;
+    chatBundleEl.textContent = hand
+      ? `связка · ${hand.branch}${hand.state === 'conflict' ? ' · конфликт' : ''}`
+      : '';
+    chatBundleEl.hidden = !hand;
+    chatBundleEl.title = hand ? `worktree ${hand.worktree}` : '';
+  }
   // сессия с удалённого узла — имя узла в шапке, чтобы не спутать с локальной:
   // ответы и пульт уходят туда по SSH, а не в терминал на этой машине
   if (chatRemoteEl) {
@@ -3404,6 +3428,7 @@ const tabStatsEl = document.getElementById('tabStats');
 tabStatsEl.addEventListener('click', () => setView('stats'));
 tabVoiceEl.addEventListener('click', () => setView('voicehist'));
 tabLoopsEl.addEventListener('click', () => setView('loops'));
+tabBundleEl.addEventListener('click', () => setView('bundle'));
 
 const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(n || 0));
 
@@ -4540,6 +4565,11 @@ window.addEventListener('keydown', async (e) => {
   if (e.metaKey && e.key === '5') { // ⌘5 — Циклы
     e.preventDefault();
     setView('loops');
+    return;
+  }
+  if (e.metaKey && e.key === '6') { // ⌘6 — Связка
+    e.preventDefault();
+    setView('bundle');
     return;
   }
 

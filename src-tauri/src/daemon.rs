@@ -205,6 +205,8 @@ pub struct Daemon {
     pub remotes: std::sync::Arc<crate::remote::Remotes>,
     /// Режим «Циклы»: конфигурации, журналы запусков и признак занятости.
     pub loops: std::sync::Arc<crate::loops::Loops>,
+    /// Режим «Связка»: руки, очередь слияний, такт.
+    pub bundles: std::sync::Arc<crate::bundle::Bundles>,
 }
 
 /// Побочные эффекты редьюсера — исполняются после освобождения лока реестра.
@@ -355,6 +357,7 @@ impl Daemon {
             media_ducked: AtomicBool::new(false),
             remotes: std::sync::Arc::new(crate::remote::Remotes::new()),
             loops: std::sync::Arc::new(crate::loops::Loops::new()),
+            bundles: std::sync::Arc::new(crate::bundle::Bundles::new()),
         }
     }
 

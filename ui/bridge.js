@@ -83,6 +83,16 @@
     loopsGet: () => invoke('loops_get'),
     loopsDraft: (template) => invoke('loops_draft', { template }),
     loopsCatalog: () => invoke('loops_catalog'),
+    // режим «Связка»: руки над одним проектом + очередь слияний
+    bundleGet: () => invoke('bundle_get'),
+    bundleDraft: () => invoke('bundle_draft'),
+    bundleSave: (item) => invoke('bundle_save', { item }),
+    bundleStart: (id) => invoke('bundle_start', { id }),
+    bundleAddHand: (id, task, name) => invoke('bundle_add_hand', { id, task, name }),
+    bundlePause: (id, on) => invoke('bundle_pause', { id, on }),
+    bundleMerge: (id, hand) => invoke('bundle_merge', { id, hand }),
+    bundleRemove: (id) => invoke('bundle_remove', { id }),
+    onBundleState: (cb) => on('bundle-state', cb),
     loopsCompose: (text, item) => invoke('loops_compose', { text, item }),
     // свои агенты: qwen/opencode/внутренние CLI — реестр в настройках
     agentsList: () => invoke('agents_list'),

@@ -72,9 +72,24 @@ async fn local_git(dir: &str, args: &[&str]) -> (i32, String) {
 /// такт крутится без человека, и ssh, вставший с вопросом про пароль, повесил
 /// бы связку целиком. Не настроен ключ — честная ошибка в ленту.
 async fn ssh(host: &str, script: &str, timeout: Duration) -> (i32, String) {
+    let (code, out, err) = ssh_split(host, script, timeout).await;
+    (code, merge(out, err))
+}
+
+/// То же, но потоки раздельно: stdout — данные, stderr — шум и диагностика.
+async fn ssh_split(host: &str, script: &str, timeout: Duration) -> (i32, String, String) {
     let mut cmd = tokio::process::Command::new("ssh");
     cmd.arg("-o")
         .arg("BatchMode=yes")
+        // Локаль этой машины не должна ехать на узел: там её может не быть, и
+        // каждый запуск bash ругался бы в stderr «cannot change locale» —
+        // ровно этот мусор и прилипал к списку каталогов. Синтаксис с минусом
+        // понимает OpenSSH 8.7+; старому он безвреден: шаблон «-LC_*» просто
+        // ничего не матчит.
+        .arg("-o")
+        .arg("SendEnv=-LC_*")
+        .arg("-o")
+        .arg("SendEnv=-LANG")
         .arg(host)
         .arg("bash")
         .arg("-lc")
@@ -83,34 +98,82 @@ async fn ssh(host: &str, script: &str, timeout: Duration) -> (i32, String) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    collect(cmd, timeout).await
+    collect_split(cmd, timeout).await
 }
 
-async fn collect(mut cmd: tokio::process::Command, timeout: Duration) -> (i32, String) {
-    let Ok(Ok(out)) = tokio::time::timeout(timeout, cmd.output()).await else {
-        return (-1, format!("не уложилось в {} с", timeout.as_secs()));
-    };
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let err = String::from_utf8_lossy(&out.stderr);
+/// Слить потоки в один текст — для диагностики: у git и гейтов она в stderr,
+/// и терять её нельзя.
+fn merge(mut out: String, err: String) -> String {
     if !err.trim().is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
+        if !out.is_empty() {
+            out.push('\n');
         }
-        text.push_str(err.trim_end());
+        out.push_str(err.trim_end());
     }
-    (out.status.code().unwrap_or(-1), text)
+    out
+}
+
+async fn collect(cmd: tokio::process::Command, timeout: Duration) -> (i32, String) {
+    let (code, out, err) = collect_split(cmd, timeout).await;
+    (code, merge(out, err))
+}
+
+async fn collect_split(mut cmd: tokio::process::Command, timeout: Duration) -> (i32, String, String) {
+    let Ok(Ok(out)) = tokio::time::timeout(timeout, cmd.output()).await else {
+        return (-1, String::new(), format!("не уложилось в {} с", timeout.as_secs()));
+    };
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
 impl Host {
+    /// Команда, чей stdout — ДАННЫЕ, а не диагностика.
+    ///
+    /// Отдельно от [`Host::sh`] принципиально: там потоки сливаются, потому
+    /// что у git и гейтов диагностика живёт в stderr и терять её нельзя. А
+    /// здесь наоборот — stderr это шум (удалённый bash любит поворчать про
+    /// локаль на старте), и подмешивать его к данным значит показывать
+    /// «/home/desktop bash: warning: setlocale…» вместо пути.
+    pub async fn sh_data(&self, cwd: &str, cmd: &str, timeout: Duration) -> Result<String, String> {
+        let (code, out, err) = match self {
+            Host::Local => {
+                let mut c = tokio::process::Command::new("/bin/sh");
+                c.arg("-lc")
+                    .arg(cmd)
+                    .current_dir(cwd)
+                    .env("JARVIS_IGNORE", "1")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true);
+                collect_split(c, timeout).await
+            }
+            Host::Ssh { host, .. } => {
+                let full = format!("cd {} && {{ {cmd}\n}}", crate::util::shell_quote(cwd));
+                ssh_split(host, &full, timeout).await
+            }
+        };
+        if code == 0 {
+            Ok(out)
+        } else {
+            Err(crate::util::ellipsize(&crate::util::one_line(&merge(out, err)), 300))
+        }
+    }
+
     /// Домашний каталог машины — с него начинается обзор.
     pub async fn home(&self) -> Result<String, String> {
         match self {
             Host::Local => std::env::var("HOME").map_err(|_| "не знаю $HOME".into()),
-            Host::Ssh { host, .. } => {
-                let (code, out) = ssh(host, "printf %s \"$HOME\"", Duration::from_secs(15)).await;
-                let out = out.trim().to_string();
-                if code == 0 && out.starts_with('/') {
-                    Ok(out)
+            Host::Ssh { .. } => {
+                let out = self.sh_data("/", "printf %s \"$HOME\"", Duration::from_secs(15)).await?;
+                // Первая строка stdout и ничего больше: любые приветствия из
+                // rc-файлов не должны становиться частью пути.
+                let home = out.lines().next().unwrap_or("").trim().to_string();
+                if home.starts_with('/') {
+                    Ok(home)
                 } else {
                     Err(format!("не узнал $HOME узла: {}", crate::util::one_line(&out)))
                 }
@@ -139,12 +202,11 @@ impl Host {
             }
             Host::Ssh { .. } => {
                 // POSIX-набор, без GNU-расширений: узлы бывают разными.
-                let (code, out) = self
-                    .sh(path, "LC_ALL=C ls -1p | grep '/$' || true", Duration::from_secs(20))
-                    .await;
-                if code != 0 {
-                    return Err(crate::util::ellipsize(&crate::util::one_line(&out), 200));
-                }
+                // Данные — только stdout: ворчание bash в stderr иначе
+                // превращалось в псевдокаталоги списка.
+                let out = self
+                    .sh_data(path, "ls -1p | grep '/$' || true", Duration::from_secs(20))
+                    .await?;
                 let mut dirs: Vec<String> = out
                     .lines()
                     .map(|l| l.trim_end_matches('/').to_string())
@@ -209,6 +271,35 @@ mod tests {
 #[cfg(test)]
 mod browse_tests {
     use super::*;
+
+    /// Ровно та поломка из жизни: удалённый bash ворчал в stderr про локаль, и
+    /// мусор приклеивался к данным — «/home/desktop bash: warning: setlocale…»
+    /// вместо пути. Данные обязаны быть только stdout'ом.
+    #[tokio::test]
+    async fn data_channel_ignores_stderr_noise() {
+        let dir = std::env::temp_dir();
+        let out = Host::Local
+            .sh_data(
+                &dir.to_string_lossy(),
+                "echo /home/desktop; echo 'bash: warning: setlocale: LC_ALL: cannot change locale' >&2",
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.trim(), "/home/desktop", "stderr просочился в данные");
+    }
+
+    /// А при ошибке stderr, наоборот, обязан попасть в сообщение: без него
+    /// человеку нечего чинить.
+    #[tokio::test]
+    async fn data_channel_keeps_stderr_in_errors() {
+        let dir = std::env::temp_dir();
+        let err = Host::Local
+            .sh_data(&dir.to_string_lossy(), "echo причина >&2; exit 3", Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(err.contains("причина"), "{err}");
+    }
 
     #[tokio::test]
     async fn local_home_and_dirs_are_real() {

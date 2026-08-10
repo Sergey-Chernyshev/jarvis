@@ -730,11 +730,31 @@ impl NodeClient {
     /// Поднять сессию агента на той машине: каталог создаётся рекурсивно,
     /// команду собирает ноут (агент и флаги — его настройки).
     pub async fn launch(&self, cwd: &str, cmd: &str, name: &str) -> Result<(), String> {
-        self.post(
-            "/launch",
-            &serde_json::json!({ "cwd": cwd, "cmd": cmd, "name": name }),
-        )
-        .await
+        self.launch_pane(cwd, cmd, name).await.map(|_| ())
+    }
+
+    /// То же, но с паной в ответе. Связке она нужна: через пану уходят задача,
+    /// сообщение о конфликте и прерывание — без неё рука неуправляема.
+    pub async fn launch_pane(&self, cwd: &str, cmd: &str, name: &str) -> Result<(String, String), String> {
+        let resp = self
+            .http
+            .post(format!("{}/launch", self.base))
+            .json(&serde_json::json!({ "cwd": cwd, "cmd": cmd, "name": name }))
+            .send()
+            .await
+            .map_err(|e| format!("узел недоступен: {e}"))?;
+        let status = resp.status();
+        let body: serde_json::Value =
+            resp.json().await.map_err(|e| format!("узел ответил не-JSON: {e}"))?;
+        if !status.is_success() {
+            return Err(body
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("узел отказал")
+                .to_string());
+        }
+        let take = |k: &str| body.get(k).and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+        Ok((take("session"), take("pane")))
     }
 
     /// Живые паны узла — по ним видно, что удалённая сессия ещё жива.

@@ -29,6 +29,17 @@
   };
 
   let state = { bundles: [] };
+  /* Машины — эта плюс узлы из настроек. Грузятся один раз: старт-экран должен
+   * предлагать выбор, а не поле с именем узла по памяти. */
+  let machines = [{ id: 'local', name: 'Эта машина', kind: 'local' }];
+  async function loadMachines() {
+    try {
+      const r = typeof window.jarvis.machinesList === 'function' ? await window.jarvis.machinesList() : null;
+      if (Array.isArray(r) && r.length) machines = r;
+    } catch (e) { /* останется локальная */ }
+  }
+  const machineName = (id) =>
+    (machines.find((m) => m.id === id) || {}).name || (id === 'local' || !id ? 'Эта машина' : id);
   let root = null;
   /* Черновик старта: живёт в панели, на диск уезжает только по «Запустить». */
   let draft = null;
@@ -184,12 +195,28 @@
     };
     paintGates();
 
+    d.machine = d.machine || 'local';
+    // Машина — выбор, как в «Проектах»: эта или любой узел из настроек.
+    const machineSel = el('select.lp-input',
+      machines.map((m) => el('option', { value: m.id, text: m.name + (m.kind === 'remote' && m.sshHost ? ` · ${m.sshHost}` : '') })));
+    if (!machines.some((m) => m.id === d.machine)) {
+      machineSel.appendChild(el('option', { value: d.machine, text: d.machine }));
+    }
+    machineSel.value = d.machine;
+    machineSel.addEventListener('change', () => { d.machine = machineSel.value; });
+
     return el('div.bd-start',
       el('div.lp-h1', { text: 'Связка — несколько чатов разом' }),
       el('div.lp-h2', { text: 'каждая рука — обычный чат: пишешь первое сообщение, ветка и worktree создаются сами. Очередь слияний: авторебейз и гейты — сами, вливаешь ты.' }),
       el('div.bd-start-grid',
         field('имя связки', d.name, (v) => { d.name = v; }, 'например: клевер-релиз'),
-        field('репозиторий', d.repo, (v) => { d.repo = v; }, 'путь к git-репозиторию на этой машине'),
+        el('label.bd-field',
+          el('span.bd-label', { text: 'машина' }),
+          machineSel,
+          el('span.lp-hint', { text: 'эта или любой узел — как в «Проектах»' }),
+        ),
+        field('директория', d.dir, (v) => { d.dir = v; },
+          'git не обязателен: нет .git или самого каталога — создам и инициализирую сам'),
         field('бюджет на руку, токенов', d.budgetTokens, (v) => { d.budgetTokens = Number(v) || 0; }, 'ориентир на пульте, не ограничитель'),
       ),
       el('div.lp-sub', { text: 'руки' }),
@@ -322,7 +349,7 @@
         el('div',
           el('div.lp-h1', { text: `связка · ${b.name}` }),
           el('div.lp-h2', {
-            text: `${b.repo} → ${b.base || 'main'}${b.paused ? ' · на паузе' : ''}`,
+            text: `${machineName(b.machine)} · ${b.dir} → ${b.base || 'main'}${b.paused ? ' · на паузе' : ''}`,
           }),
         ),
         el('div.lp-actions',
@@ -396,6 +423,7 @@
     root = mount;
     render();
     pull();
+    loadMachines().then(render);
     if (!window.__bundleBound) {
       window.__bundleBound = true;
       if (window.jarvis.onBundleState) {

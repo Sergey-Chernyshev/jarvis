@@ -11,11 +11,11 @@ import { readFileSync } from 'node:fs';
 
 function makeDom() {
   const mk = (tag) => {
+    let text = '';
     const node = {
       tag,
       nodeType: 1,
       className: '',
-      textContent: '',
       hidden: false,
       value: '',
       disabled: false,
@@ -51,6 +51,12 @@ function makeDom() {
         return walk(node);
       },
     };
+    // Настоящий DOM на запись textContent сносит всех детей — фейк обязан
+    // делать то же, иначе перерисовки наслаиваются и тесты видят призраков.
+    Object.defineProperty(node, 'textContent', {
+      get: () => text,
+      set: (v) => { text = String(v); node.children = []; },
+    });
     return node;
   };
   return { createElement: (t) => mk(t), addEventListener() {}, removeEventListener() {} };
@@ -67,7 +73,7 @@ function find(node, pred, out = []) {
 }
 
 const DRAFT = {
-  id: '', name: '', repo: '', base: '',
+  id: '', name: '', machine: 'local', dir: '', base: '',
   gates: [{ name: 'тесты', command: 'cargo test' }],
   budgetTokens: 60000, paused: false,
   hands: [{ task: '' }, { task: '' }, { task: '' }],
@@ -89,6 +95,10 @@ async function load(state) {
       bundleMerge: async (id, hand) => { calls.push(['merge', hand]); return { ok: true }; },
       bundleRemove: async () => ({ ok: true }),
       onBundleState: () => {},
+      machinesList: async () => [
+        { id: 'local', name: 'Эта машина', kind: 'local' },
+        { id: 'terminalka', name: 'terminalka', kind: 'remote', sshHost: 'desktop@149.33.48.114' },
+      ],
     },
     openSessionById: (id) => calls.push(['open', id]),
   };
@@ -125,7 +135,7 @@ test('первый вход — старт с пачкой задач, запу�
 
 const CONSOLE = {
   bundles: [{
-    id: 'b1', name: 'клевер-релиз', repo: '/repo', base: 'main',
+    id: 'b1', name: 'клевер-релиз', machine: 'local', dir: '/repo', base: 'main',
     gates: [], budgetTokens: 60000, paused: false, active: true,
     createdAt: 1, lastMergeAt: 0, problems: [],
     events: [{ at: 1, text: 'платёжка: конфликт при ребейзе' }],
@@ -171,4 +181,16 @@ test('голова без зелёных гейтов не вливается', 
   const { root } = await load(state);
   const merge = find(root, (n) => (n.textContent || '').startsWith('Влить в'))[0];
   assert.ok(merge.attrs.disabled !== undefined || merge.disabled, 'кнопка обязана ждать зелёных гейтов');
+});
+
+test('машина выбирается из списка, директории хватает без git', async () => {
+  const { root } = await load({ bundles: [] });
+  const text = textOf(root);
+  assert.ok(text.includes('директория'), 'поля директории нет');
+  assert.ok(text.includes('создам и инициализирую сам'), 'обещание автоинициализации пропало');
+  const sel = find(root, (n) => n.tag === 'select')[0];
+  assert.ok(sel, 'выбора машины нет — снова поле по памяти');
+  const opts = textOf(sel);
+  assert.ok(opts.includes('Эта машина'), 'нет локальной машины');
+  assert.ok(opts.includes('terminalka'), 'нет узла из настроек');
 });

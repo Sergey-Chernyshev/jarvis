@@ -13,11 +13,11 @@ import { readFileSync } from 'node:fs';
 /** DOM ровно в том объёме, который нужен модулю, — включая строгость настоящего. */
 function makeDom() {
   const mk = (tag) => {
+    let text = '';
     const node = {
       tag,
       nodeType: 1,
       className: '',
-      textContent: '',
       innerHTML: '',
       hidden: false,
       value: '',
@@ -56,6 +56,12 @@ function makeDom() {
         return walk(node);
       },
     };
+    // Настоящий DOM на запись textContent сносит всех детей — фейк обязан
+    // делать то же, иначе перерисовки наслаиваются и тесты видят призраков.
+    Object.defineProperty(node, 'textContent', {
+      get: () => text,
+      set: (v) => { text = String(v); node.children = []; },
+    });
     return node;
   };
   return {

@@ -6,21 +6,52 @@
 //! `store.with`: такт работает долго, а панель в это время может добавить руку
 //! или нажать паузу, и батч-запись затёрла бы её действия.
 
+use super::host::Host;
 use super::{git, launch, Bundle, Hand, HandState};
 use crate::daemon::Daemon;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::AppHandle;
 
 /* ================= снимок для панели ================= */
 
-fn session_of(d: &Arc<Daemon>, worktree: &str) -> Option<crate::model::Session> {
+/// Где исполняется связка. Узел ищется в настройках удалённых машин — его
+/// ssh-хост и есть транспорт для git и гейтов.
+fn host_for(d: &Arc<Daemon>, b: &Bundle) -> Result<Host, String> {
+    let m = b.machine.trim();
+    if m.is_empty() || m == "local" {
+        return Ok(Host::Local);
+    }
+    match d.remotes.node(m) {
+        Some(node) => Ok(Host::Ssh { machine: m.to_string(), host: node.cfg.ssh_host.clone() }),
+        None => Err(format!("узел «{m}» не найден в настройках удалённых машин")),
+    }
+}
+
+/// Сессия руки: локальная ищется без пометки узла, удалённая — с ней.
+/// cwd — единственная ниточка между рукой и её сессией.
+fn session_of(d: &Arc<Daemon>, machine: &str, worktree: &str) -> Option<crate::model::Session> {
+    let local = machine.is_empty() || machine == "local";
     let sessions = d.sessions.lock().unwrap_or_else(|e| e.into_inner());
     sessions
         .values()
-        .find(|s| s.remote.is_none() && s.cwd.as_deref() == Some(worktree))
+        .find(|s| {
+            let same_host = if local { s.remote.is_none() } else { s.remote.as_deref() == Some(machine) };
+            same_host && s.cwd.as_deref() == Some(worktree)
+        })
         .cloned()
+}
+
+/// Сообщение в чат руки — локально через tmux, на узле через его /reply.
+async fn send_to_hand(d: &Arc<Daemon>, b: &Bundle, pane: &str, text: &str) -> Result<(), String> {
+    match host_for(d, b)? {
+        Host::Local => crate::tmux::reply(pane, text).await,
+        Host::Ssh { machine, .. } => {
+            let node = d.remotes.node(&machine).ok_or("узел пропал из настроек")?;
+            node.client()?.reply(pane, text).await
+        }
+    }
 }
 
 pub fn snapshot(d: &Arc<Daemon>) -> Value {
@@ -35,7 +66,7 @@ fn bundle_view(d: &Arc<Daemon>, b: &Bundle) -> Value {
         .hands
         .iter()
         .map(|h| {
-            let sess = session_of(d, &h.worktree);
+            let sess = session_of(d, &b.machine, &h.worktree);
             let (sid, status, detail) = match &sess {
                 Some(s) => (
                     Some(s.id.clone()),
@@ -73,7 +104,8 @@ fn bundle_view(d: &Arc<Daemon>, b: &Bundle) -> Value {
     json!({
         "id": b.id,
         "name": b.name,
-        "repo": b.repo,
+        "machine": if b.machine.trim().is_empty() { "local" } else { b.machine.trim() },
+        "dir": b.dir,
         "base": b.base,
         "gates": b.gates,
         "budgetTokens": b.budget_tokens,
@@ -154,7 +186,8 @@ pub fn bundle_draft() -> Value {
         "item": {
             "id": "",
             "name": "",
-            "repo": "",
+            "machine": "local",
+            "dir": "",
             "base": "",
             "gates": [
                 { "name": "тесты", "command": "cargo test" },
@@ -220,18 +253,26 @@ pub async fn bundle_start(app: AppHandle, id: String) -> Value {
     if !problems.is_empty() {
         return json!({ "ok": false, "error": problems.join("; ") });
     }
-    let repo = PathBuf::from(b.repo.trim());
-    if !git::is_repo(&repo).await {
-        return json!({ "ok": false, "error": format!("{} — не git-репозиторий", repo.display()) });
+    let host = match host_for(&d, &b) {
+        Ok(h) => h,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let dir = b.dir.trim().to_string();
+    if matches!(host, Host::Ssh { .. }) && !dir.starts_with('/') {
+        return json!({ "ok": false, "error": "на узле нужен абсолютный путь — ~ раскрывать некому" });
     }
-    // Базовую ветку определяем на старте и запоминаем: дальше на неё смотрит
-    // и очередь, и авторебейз.
+    // Директория — как в «Проектах»: нет каталога — создадим, нет git —
+    // инициализируем, нет коммитов — закоммитим лежащее. База определяется
+    // здесь же и запоминается: на неё смотрят очередь и авторебейз.
     let base = if b.base.trim().is_empty() {
-        match git::base_branch(&repo).await {
+        match git::ensure_repo(&host, &dir).await {
             Ok(x) => x,
             Err(e) => return json!({ "ok": false, "error": e }),
         }
     } else {
+        if let Err(e) = git::ensure_repo(&host, &dir).await {
+            return json!({ "ok": false, "error": e });
+        }
         b.base.trim().to_string()
     };
     d.bundles.store.with(&id, |b| b.base = base.clone());
@@ -254,29 +295,37 @@ pub async fn bundle_start(app: AppHandle, id: String) -> Value {
 /// Поднять одну руку: worktree → ветка → tmux → первое сообщение.
 async fn launch_hand(d: &Arc<Daemon>, bid: &str, hand: &Hand) {
     let Some(b) = d.bundles.store.get(bid) else { return };
-    let repo = PathBuf::from(b.repo.trim());
+    let host = match host_for(d, &b) {
+        Ok(h) => h,
+        Err(e) => {
+            set_hand(d, bid, &hand.id, |h| h.state = HandState::Failed);
+            add_event(d, bid, format!("{}: не поднялась — {e}", hand.name));
+            return;
+        }
+    };
+    let dir = b.dir.trim().to_string();
     let slug = unique_slug(&b, &hand.name, &hand.task);
     let branch = format!("team/{slug}");
-    // Worktree — сосед репозитория, как в дизайне: ../wt-<имя>. На виду, а не
+    // Worktree — сосед директории, как в дизайне: ../wt-<имя>. На виду, а не
     // в недрах ~/.jarvis: человек в него заглядывает.
-    let wt = repo.parent().unwrap_or(&repo).join(format!("wt-{slug}"));
+    let wt = format!("{}/wt-{slug}", super::host::parent_of(&dir));
 
     let fail = |d: &Arc<Daemon>, why: String| {
         set_hand(d, bid, &hand.id, |h| h.state = HandState::Failed);
         add_event(d, bid, format!("{}: не поднялась — {}", hand.name, why));
     };
 
-    if let Err(e) = git::add_worktree(&repo, &wt, &branch, &b.base).await {
+    if let Err(e) = git::add_worktree(&host, &dir, &wt, &branch, &b.base).await {
         return fail(d, e);
     }
-    let wt_canon = wt.canonicalize().unwrap_or(wt).to_string_lossy().into_owned();
-    let cmd = match launch::hand_command(d.settings.bool("launchDangerous")) {
-        Ok(c) => c,
-        Err(e) => return fail(d, e),
-    };
-    let pane = match launch::spawn(Path::new(&wt_canon), &slug, &cmd).await {
-        Ok(p) => p,
-        Err(e) => return fail(d, e),
+    // Канонический путь нужен для сверки с cwd из хуков; удалённый путь и так
+    // абсолютный, а Path этой машины про чужую ФС ничего не знает.
+    let wt_canon = match &host {
+        Host::Local => std::path::Path::new(&wt)
+            .canonicalize()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or(wt.clone()),
+        Host::Ssh { .. } => wt.clone(),
     };
     // Задача + правила руки. Коммиты — не пожелание: очередь слияний видит
     // только закоммиченное, рука без коммитов не станет готовой никогда.
@@ -294,7 +343,37 @@ async fn launch_hand(d: &Arc<Daemon>, bid: &str, hand: &Hand) {
             b.gates.iter().map(|g| g.command.as_str()).collect::<Vec<_>>().join("; ")
         },
     );
-    if let Err(e) = launch::first_message(&pane, &brief).await {
+    let dangerous = d.settings.bool("launchDangerous");
+    let pane = match &host {
+        Host::Local => {
+            let cmd = match launch::hand_command(dangerous) {
+                Ok(c) => c,
+                Err(e) => return fail(d, e),
+            };
+            match launch::spawn(std::path::Path::new(&wt_canon), &slug, &cmd).await {
+                Ok(p) => p,
+                Err(e) => return fail(d, e),
+            }
+        }
+        Host::Ssh { machine, .. } => {
+            // На узле бинарь агента резолвит сам узел (он добавляет PATH), а
+            // вопрос доверия к папке подтверждает его launch — как в «Проектах».
+            let cmd = crate::launch::agent_command("claude", None, dangerous);
+            let node = match d.remotes.node(machine) {
+                Some(n) => n,
+                None => return fail(d, "узел пропал из настроек".into()),
+            };
+            let client = match node.client() {
+                Ok(c) => c,
+                Err(e) => return fail(d, e),
+            };
+            match client.launch_pane(&wt_canon, &cmd, &slug).await {
+                Ok((_session, pane)) => pane,
+                Err(e) => return fail(d, e),
+            }
+        }
+    };
+    if let Err(e) = send_to_hand(d, &b, &pane, &brief).await {
         return fail(d, format!("сессия поднялась, но задача не доехала: {e}"));
     }
     set_hand(d, bid, &hand.id, |h| {
@@ -361,9 +440,19 @@ pub async fn bundle_pause(app: AppHandle, id: String, on: bool) -> Value {
     };
     if on {
         for h in b.hands.iter().filter(|h| h.state == HandState::Working && !h.pane.is_empty()) {
-            if let Some(s) = session_of(&d, &h.worktree) {
-                if s.status == crate::model::Status::Working {
-                    launch::interrupt(&h.pane).await;
+            let working = session_of(&d, &b.machine, &h.worktree)
+                .is_some_and(|s| s.status == crate::model::Status::Working);
+            if !working {
+                continue;
+            }
+            match host_for(&d, &b) {
+                Ok(Host::Local) | Err(_) => launch::interrupt(&h.pane).await,
+                Ok(Host::Ssh { machine, .. }) => {
+                    if let Some(node) = d.remotes.node(&machine) {
+                        if let Ok(c) = node.client() {
+                            let _ = c.keys(&h.pane, vec![json!({ "key": "Escape" })]).await;
+                        }
+                    }
                 }
             }
         }
@@ -390,8 +479,11 @@ pub async fn bundle_merge(app: AppHandle, id: String, hand: String) -> Value {
     if !head.gates_ok {
         return json!({ "ok": false, "error": "гейты не зелёные — вливать рано" });
     }
-    let repo = PathBuf::from(b.repo.clone());
-    if let Err(e) = git::ff_advance(&repo, &b.base, &head.branch).await {
+    let host = match host_for(&d, &b) {
+        Ok(h) => h,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    if let Err(e) = git::ff_advance(&host, &b.dir, &b.base, &head.branch).await {
         add_event(&d, &id, format!("{}: вливание не прошло — {e}", head.name));
         push(&d);
         return json!({ "ok": false, "error": e });
@@ -418,12 +510,13 @@ pub async fn bundle_remove(app: AppHandle, id: String) -> Value {
     let Some(b) = d.bundles.store.get(&id) else {
         return json!({ "ok": false, "error": "связка не найдена" });
     };
-    let repo = PathBuf::from(b.repo.clone());
-    for h in &b.hands {
-        if h.worktree.is_empty() {
-            continue;
+    if let Ok(host) = host_for(&d, &b) {
+        for h in &b.hands {
+            if h.worktree.is_empty() {
+                continue;
+            }
+            let _ = host.git(&b.dir, &["worktree", "remove", "--force", &h.worktree]).await;
         }
-        let _ = git::git(&repo, &["worktree", "remove", "--force", &h.worktree]).await;
     }
     d.bundles.store.remove(&id);
     push(&d);
@@ -445,13 +538,16 @@ pub async fn tick(d: &Arc<Daemon>) {
 }
 
 async fn tick_bundle(d: &Arc<Daemon>, b: &Bundle) {
-    let repo = PathBuf::from(b.repo.clone());
+    let host = match host_for(d, b) {
+        Ok(h) => h,
+        Err(_) => return, // узел пропал из настроек: молча ждём его возвращения
+    };
     let mut changed = false;
     for h in &b.hands {
         let moved = match h.state {
-            HandState::Working => tick_working(d, b, h, &repo).await,
-            HandState::Ready => tick_ready(d, b, h, &repo).await,
-            HandState::Conflict => tick_conflict(d, b, h, &repo).await,
+            HandState::Working => tick_working(d, b, h, &host).await,
+            HandState::Ready => tick_ready(d, b, h, &host).await,
+            HandState::Conflict => tick_conflict(d, b, h, &host).await,
             _ => false,
         };
         changed = changed || moved;
@@ -463,28 +559,37 @@ async fn tick_bundle(d: &Arc<Daemon>, b: &Bundle) {
 
 /// Агент руки сейчас занят? Занятость — по её сессии; без сессии судим по
 /// живости паны: агент мог ещё не прислать ни одного хука.
-async fn busy(d: &Arc<Daemon>, h: &Hand) -> bool {
-    match session_of(d, &h.worktree) {
+async fn busy(d: &Arc<Daemon>, b: &Bundle, h: &Hand, host: &Host) -> bool {
+    match session_of(d, &b.machine, &h.worktree) {
         Some(s) => matches!(s.status, crate::model::Status::Working | crate::model::Status::Waiting),
-        None => crate::tmux::pane_alive(&h.pane).await,
+        None => match host {
+            Host::Local => crate::tmux::pane_alive(&h.pane).await,
+            Host::Ssh { machine, .. } => match d.remotes.node(machine).and_then(|n| n.client().ok()) {
+                Some(c) => c
+                    .panes()
+                    .await
+                    .map(|r| r.panes.iter().any(|p| p.pane == h.pane))
+                    .unwrap_or(false),
+                None => false,
+            },
+        },
     }
 }
 
 /// Рабочая рука: ждём, пока агент закончит и закоммитит, — тогда ребейз,
 /// гейты и очередь.
-async fn tick_working(d: &Arc<Daemon>, b: &Bundle, h: &Hand, repo: &Path) -> bool {
-    if busy(d, h).await {
+async fn tick_working(d: &Arc<Daemon>, b: &Bundle, h: &Hand, host: &Host) -> bool {
+    if busy(d, b, h, host).await {
         return false;
     }
-    let wt = Path::new(&h.worktree);
-    if git::dirty(wt).await {
+    if git::dirty(host, &h.worktree).await {
         return false; // агент замолчал, не закоммитив, — не наша очередь решать
     }
-    if git::ahead(repo, &b.base, &h.branch).await == 0 {
+    if git::ahead(host, &b.dir, &b.base, &h.branch).await == 0 {
         return false; // коммитов нет — готовности нет
     }
-    if !git::rebased(repo, &b.base, &h.branch).await {
-        match git::try_rebase(wt, &b.base).await {
+    if !git::rebased(host, &b.dir, &b.base, &h.branch).await {
+        match git::try_rebase(host, &h.worktree, &b.base).await {
             Ok(git::Rebase::Clean) => {}
             Ok(git::Rebase::Conflict(files)) => {
                 to_conflict(d, b, h, files).await;
@@ -496,13 +601,13 @@ async fn tick_working(d: &Arc<Daemon>, b: &Bundle, h: &Hand, repo: &Path) -> boo
             }
         }
     }
-    run_gates_and_queue(d, b, h).await
+    run_gates_and_queue(d, b, h, host).await
 }
 
 /// Готовая рука: база могла уехать после чужого вливания — переребейз и гейты
 /// заново; агент мог дописать — тогда она снова рабочая.
-async fn tick_ready(d: &Arc<Daemon>, b: &Bundle, h: &Hand, repo: &Path) -> bool {
-    if busy(d, h).await {
+async fn tick_ready(d: &Arc<Daemon>, b: &Bundle, h: &Hand, host: &Host) -> bool {
+    if busy(d, b, h, host).await {
         set_hand(d, &b.id, &h.id, |h| {
             h.state = HandState::Working;
             h.gates_ok = false;
@@ -510,18 +615,18 @@ async fn tick_ready(d: &Arc<Daemon>, b: &Bundle, h: &Hand, repo: &Path) -> bool 
         add_event(d, &b.id, format!("{}: агент снова работает — вышла из очереди", h.name));
         return true;
     }
-    if git::rebased(repo, &b.base, &h.branch).await {
-        let sha = git::head_sha(Path::new(&h.worktree)).await.unwrap_or_default();
+    if git::rebased(host, &b.dir, &b.base, &h.branch).await {
+        let sha = git::head_sha(host, &h.worktree).await.unwrap_or_default();
         if sha != h.checked_sha {
             // Дописала коммит, стоя в очереди, — гейты пересдать.
-            return run_gates_and_queue(d, b, h).await;
+            return run_gates_and_queue(d, b, h, host).await;
         }
         return false;
     }
-    match git::try_rebase(Path::new(&h.worktree), &b.base).await {
+    match git::try_rebase(host, &h.worktree, &b.base).await {
         Ok(git::Rebase::Clean) => {
             add_event(d, &b.id, format!("{}: авторебейз на свежий {} — гейты заново", h.name, b.base));
-            run_gates_and_queue(d, b, h).await;
+            run_gates_and_queue(d, b, h, host).await;
             true
         }
         Ok(git::Rebase::Conflict(files)) => {
@@ -537,14 +642,13 @@ async fn tick_ready(d: &Arc<Daemon>, b: &Bundle, h: &Hand, repo: &Path) -> bool 
 
 /// Конфликтная рука: агент чинит у себя; как только ветка снова на базе и
 /// дерево чисто — обратно в строй через гейты.
-async fn tick_conflict(d: &Arc<Daemon>, b: &Bundle, h: &Hand, repo: &Path) -> bool {
-    if busy(d, h).await {
+async fn tick_conflict(d: &Arc<Daemon>, b: &Bundle, h: &Hand, host: &Host) -> bool {
+    if busy(d, b, h, host).await {
         return false;
     }
-    let wt = Path::new(&h.worktree);
-    if git::rebased(repo, &b.base, &h.branch).await && !git::dirty(wt).await {
+    if git::rebased(host, &b.dir, &b.base, &h.branch).await && !git::dirty(host, &h.worktree).await {
         add_event(d, &b.id, format!("{}: конфликт решён — гейты и обратно в очередь", h.name));
-        return run_gates_and_queue(d, b, h).await;
+        return run_gates_and_queue(d, b, h, host).await;
     }
     false
 }
@@ -571,18 +675,17 @@ async fn to_conflict(d: &Arc<Daemon>, b: &Bundle, h: &Hand, files: Vec<String>) 
         base = b.base,
         files = files.join(", "),
     );
-    if let Err(e) = crate::tmux::reply(&h.pane, &msg).await {
+    if let Err(e) = send_to_hand(d, b, &h.pane, &msg).await {
         add_event(d, &b.id, format!("{}: не смог передать конфликт агенту — {e}", h.name));
     }
 }
 
 /// Гейты на текущей голове; зелёные — в очередь (или подтверждение готовности).
-async fn run_gates_and_queue(d: &Arc<Daemon>, b: &Bundle, h: &Hand) -> bool {
-    let wt = Path::new(&h.worktree);
-    let sha = git::head_sha(wt).await.unwrap_or_default();
-    let runs = crate::loops::runner::run_gates(&b.gates, wt).await;
+async fn run_gates_and_queue(d: &Arc<Daemon>, b: &Bundle, h: &Hand, host: &Host) -> bool {
+    let sha = git::head_sha(host, &h.worktree).await.unwrap_or_default();
+    let runs = run_gates(host, &b.gates, &h.worktree).await;
     let ok = runs.iter().all(|g| g.ok);
-    let files = git::changed_files(&PathBuf::from(&b.repo), &b.base, &h.branch).await;
+    let files = git::changed_files(host, &b.dir, &b.base, &h.branch).await;
     let was = h.state;
     set_hand(d, &b.id, &h.id, |h| {
         h.checked_sha = sha.clone();
@@ -610,7 +713,26 @@ async fn run_gates_and_queue(d: &Arc<Daemon>, b: &Bundle, h: &Hand) -> bool {
             "Гейт «{name}» красный:\n{}\nПочини и закоммить — без зелёных проверок рука не встанет в очередь.",
             crate::loops::runner::tail(&red.map(|g| g.output.clone()).unwrap_or_default(), 25),
         );
-        let _ = crate::tmux::reply(&h.pane, &msg).await;
+        let _ = send_to_hand(d, b, &h.pane, &msg).await;
     }
     true
+}
+
+/// Прогнать гейты по порядку — там, где живёт связка. Первый красный
+/// останавливает: гонять остальные нечего.
+async fn run_gates(host: &Host, gates: &[crate::loops::model::Gate], cwd: &str) -> Vec<crate::loops::model::GateRun> {
+    let mut out = Vec::new();
+    for g in gates {
+        let (code, text) = host.sh(cwd, &g.command, Duration::from_secs(1800)).await;
+        let ok = code == 0;
+        out.push(crate::loops::model::GateRun {
+            name: g.name.clone(),
+            ok,
+            output: crate::loops::runner::tail(&text, 40),
+        });
+        if !ok {
+            break;
+        }
+    }
+    out
 }

@@ -11,6 +11,7 @@
 //! правок — мы нет.
 
 pub mod git;
+pub mod host;
 pub mod ipc;
 pub mod launch;
 
@@ -77,7 +78,12 @@ pub struct Event {
 pub struct Bundle {
     pub id: String,
     pub name: String,
-    pub repo: String,
+    /// Где связка живёт: `local` — эта машина, иначе имя узла из настроек.
+    pub machine: String,
+    /// Директория проекта. Как в «Проектах»: git она не обязана быть — нет
+    /// `.git` или самого каталога, связка инициализирует и создаст сама.
+    #[serde(alias = "repo")]
+    pub dir: String,
     /// Базовая ветка (main/master) — в неё едет очередь.
     pub base: String,
     pub gates: Vec<crate::loops::model::Gate>,
@@ -97,8 +103,8 @@ impl Bundle {
         if self.name.trim().is_empty() {
             out.push("у связки нет имени".into());
         }
-        if self.repo.trim().is_empty() {
-            out.push("не указан репозиторий".into());
+        if self.dir.trim().is_empty() {
+            out.push("не указана директория".into());
         }
         if self.hands.iter().all(|h| h.task.trim().is_empty()) {
             out.push("ни у одной руки нет задачи".into());
@@ -271,12 +277,12 @@ mod tests {
         let empty = Bundle::default();
         let p = empty.problems();
         assert!(p.iter().any(|x| x.contains("имени")));
-        assert!(p.iter().any(|x| x.contains("репозиторий")));
+        assert!(p.iter().any(|x| x.contains("директория")));
         assert!(p.iter().any(|x| x.contains("задачи")));
 
         let ok = Bundle {
             name: "клевер-релиз".into(),
-            repo: "/repo".into(),
+            dir: "/repo".into(),
             hands: vec![Hand { task: "экран логина".into(), ..Default::default() }],
             ..Default::default()
         };
@@ -315,5 +321,18 @@ mod tests {
         assert_eq!(b.name, "клевер-релиз");
         assert_eq!(b.events.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod compat_tests {
+    use super::*;
+
+    /// Старые bundles.json звали директорию «repo» — они обязаны читаться.
+    #[test]
+    fn old_files_with_repo_field_still_load() {
+        let b: Bundle = serde_json::from_str(r#"{ "id": "b1", "name": "x", "repo": "/старый/путь" }"#).unwrap();
+        assert_eq!(b.dir, "/старый/путь");
+        assert_eq!(b.machine, "");
     }
 }

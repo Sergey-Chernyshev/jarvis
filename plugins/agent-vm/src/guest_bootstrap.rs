@@ -316,17 +316,24 @@ pub fn build_bundle<S: SecretStore>(
         agent_env.push_str(&format!("export {variable}={}\n", shell_quote(secret)));
         "ready".into()
     } else if let Some(login) = host_claude_login {
-        let credentials = normalize_claude_login(login)?;
-        if files
-            .insert(
-                PathBuf::from(".claude/.credentials.json"),
-                (0o600, credentials),
-            )
-            .is_some()
-        {
-            return Err("Claude credential конфликтует с config snapshot".into());
+        match normalize_claude_login(login) {
+            Ok(credentials) => {
+                if files
+                    .insert(
+                        PathBuf::from(".claude/.credentials.json"),
+                        (0o600, credentials),
+                    )
+                    .is_some()
+                {
+                    return Err("Claude credential конфликтует с config snapshot".into());
+                }
+                "ready".into()
+            }
+            // A stale or incomplete Keychain login must not prevent the VM
+            // from bootstrapping other configured agents. Do not copy it;
+            // the resulting `missing` status remains visible to the caller.
+            Err(_) => "missing".into(),
         }
-        "ready".into()
     } else {
         "missing".into()
     };
@@ -951,13 +958,13 @@ mod tests {
     }
 
     #[test]
-    fn host_claude_login_rejects_incomplete_oauth_credentials() {
+    fn incomplete_host_claude_login_is_skipped_without_blocking_bootstrap() {
         let store = MemorySecretStore::default();
         let login =
             SecretValue::new(br#"{"claudeAiOauth":{"accessToken":"SYNTHETIC_ACCESS"}}"#.to_vec())
                 .unwrap();
 
-        let error = build_bundle(
+        let bundle = build_bundle(
             &snapshot(),
             &store,
             None,
@@ -965,10 +972,16 @@ mod tests {
             &LoadedCodexCredential::file(None),
             &BTreeMap::new(),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.contains("refreshToken"));
-        assert!(!error.contains("SYNTHETIC_ACCESS"));
+        assert_eq!(bundle.credential_status.claude, "missing");
+        assert!(!archive_entries(&bundle.archive)
+            .iter()
+            .any(|entry| entry.0 == ".claude/.credentials.json"));
+        assert!(!bundle
+            .archive
+            .windows(b"SYNTHETIC_ACCESS".len())
+            .any(|part| part == b"SYNTHETIC_ACCESS"));
     }
 
     #[test]

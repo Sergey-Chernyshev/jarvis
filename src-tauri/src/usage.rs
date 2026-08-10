@@ -1019,7 +1019,19 @@ fn parse_reset_date(s: &str) -> i64 {
         _ => {} // без am/pm — 24-часовой формат как есть
     }
     let min: u32 = c.get(4).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
-    let utc = s.to_ascii_uppercase().contains("UTC");
+    // Пояс — из хвоста строки. Живьём видели два: «(UTC)» у нынешнего формата
+    // и «(Europe/Moscow)» у прежнего (Claude пишет время в поясе аккаунта;
+    // Москва без переводов с 2014-го, смещение константно). Незнакомое имя —
+    // это почти наверняка пояс самой машины: разбираем как местное время, что
+    // строго честнее прежнего зашитого +3 для всех подряд.
+    let tail_up = s.to_ascii_uppercase();
+    let fixed_offset_ms: Option<i64> = if tail_up.contains("UTC") {
+        Some(0)
+    } else if tail_up.contains("EUROPE/MOSCOW") {
+        Some(3 * 3_600_000)
+    } else {
+        None
+    };
     let now = now_ms();
     let year = chrono::DateTime::from_timestamp_millis(now)
         .map(|d| chrono::Datelike::year(&d))
@@ -1030,15 +1042,16 @@ fn parse_reset_date(s: &str) -> i64 {
         else {
             return 0;
         };
-        if utc {
-            naive.and_utc().timestamp_millis()
-        } else {
-            use chrono::TimeZone;
-            chrono::Local
-                .from_local_datetime(&naive)
-                .single()
-                .map(|dt| dt.timestamp_millis())
-                .unwrap_or(0)
+        match fixed_offset_ms {
+            Some(off) => naive.and_utc().timestamp_millis() - off,
+            None => {
+                use chrono::TimeZone;
+                chrono::Local
+                    .from_local_datetime(&naive)
+                    .single()
+                    .map(|dt| dt.timestamp_millis())
+                    .unwrap_or(0)
+            }
         }
     };
     let mut ts = make(year);

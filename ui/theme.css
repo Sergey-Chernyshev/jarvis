@@ -861,3 +861,17 @@ textarea.lp-ask-text { width: 100%; min-height: 66px; }
 .bd-ev { display: flex; gap: 8px; padding: 3px 0; align-items: baseline; }
 .bd-ev-t { font: 400 11px/1.4 var(--font); color: var(--ink-faint); flex: 0 0 34px; font-variant-numeric: tabular-nums; }
 .bd-ev-x { font: 400 12px/1.45 var(--font); color: var(--ink-dim); }
+
+/* --- обзор директорий связки --- */
+.bd-dir-path { font: 400 12.5px/1.5 var(--mono, monospace); color: var(--ink); word-break: break-all; }
+.bd-dir-act { margin-top: 0; align-items: center; }
+.bd-dir-new { flex: 1; min-width: 200px; }
+.bd-dir-list { display: flex; flex-direction: column; max-height: 300px; overflow-y: auto; }
+.bd-dir-row {
+  padding: 7px 10px; border-radius: var(--r-chip); cursor: default;
+  font: 400 13px/1.4 var(--mono, monospace); color: var(--ink);
+}
+.bd-dir-row:hover { background: var(--accent-soft); }
+.bd-dir-row.up { color: var(--ink-dim); font-family: var(--font); }
+.bd-dir-known { display: flex; flex-direction: column; gap: 6px; }
+.bd-dir-known .lp-chip { align-self: flex-start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }

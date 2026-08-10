@@ -95,6 +95,16 @@ async function load(state) {
       bundleMerge: async (id, hand) => { calls.push(['merge', hand]); return { ok: true }; },
       bundleRemove: async () => ({ ok: true }),
       onBundleState: () => {},
+      bundlePlaces: async (machine) => ({
+        ok: true, home: '/home/bob',
+        known: machine === 'local' ? ['/home/bob/jarvis', '/home/bob/lct'] : ['/srv/app'],
+      }),
+      bundleBrowse: async (machine, path) => {
+        const p = path || '/home/bob';
+        return p === '/home/bob'
+          ? { ok: true, path: p, parent: '/home', dirs: ['jarvis', 'проекты'] }
+          : { ok: true, path: p, parent: '/home/bob', dirs: [] };
+      },
       machinesList: async () => [
         { id: 'local', name: 'Эта машина', kind: 'local' },
         { id: 'terminalka', name: 'terminalka', kind: 'remote', sshHost: 'desktop@149.33.48.114' },
@@ -193,4 +203,50 @@ test('машина выбирается из списка, директории 
   const opts = textOf(sel);
   assert.ok(opts.includes('Эта машина'), 'нет локальной машины');
   assert.ok(opts.includes('terminalka'), 'нет узла из настроек');
+});
+
+test('директория выбирается обзором, а не по памяти', async () => {
+  const { root } = await load({ bundles: [] });
+  const pick = find(root, (n) => n.textContent === 'выбрать…')[0];
+  assert.ok(pick, 'кнопки обзора нет — снова ввод по памяти');
+  pick.listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+
+  const text = textOf(root);
+  assert.ok(text.includes('/home/bob'), 'обзор не начался с дома машины');
+  assert.ok(text.includes('известные проекты'), 'известных проектов нет');
+  assert.ok(text.includes('jarvis'), 'известный проект не показан');
+
+  // Спуск в подкаталог — по клику, как в любом проводнике.
+  const row = find(root, (n) => n.classList.contains('bd-dir-row') && n.textContent === 'проекты')[0];
+  assert.ok(row, 'подкаталог не показан');
+  row.listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(textOf(root).includes('/home/bob/проекты'), 'спуск не сработал');
+
+  // «Выбрать эту директорию» заполняет поле.
+  const choose = find(root, (n) => n.textContent === 'Выбрать эту директорию')[0];
+  choose.listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  const dirInput = find(root, (n) => n.tag === 'input' && n.value === '/home/bob/проекты')[0];
+  assert.ok(dirInput, 'выбранный путь не попал в поле директории');
+  assert.ok(!find(root, (n) => n.classList.contains('lp-shade')).length, 'обзор не закрылся после выбора');
+});
+
+test('известный проект узла выбирается одним кликом', async () => {
+  const { root } = await load({ bundles: [] });
+  // Выбираем узел — известные проекты должны стать узловыми.
+  const sel = find(root, (n) => n.tag === 'select')[0];
+  sel.value = 'terminalka';
+  sel.listeners.change[0]();
+  const pick = find(root, (n) => n.textContent === 'выбрать…')[0];
+  pick.listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  const chip = find(root, (n) => n.classList.contains('lp-chip') && n.textContent === 'app')[0];
+  assert.ok(chip, 'известный проект узла не показан');
+  chip.listeners.click[0]();
+  const dirInput = find(root, (n) => n.tag === 'input' && n.value === '/srv/app')[0];
+  assert.ok(dirInput, 'клик по известному проекту не заполнил директорию');
 });

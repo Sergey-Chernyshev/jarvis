@@ -2181,11 +2181,34 @@ function paintFooterWave() {
   footerWaveEl.classList.toggle('is-live', !!(wakeStatus?.listening && !wakeStatus.muted));
 }
 
-/** «лимит 62% · до 14:30» — или «$14.20 за день», если выбран расход. */
+/**
+ * Полоска лимитов: «5ч 62% · нед 94% · до 21:59».
+ *
+ * Планка — по УЗКОМУ месту: сессия может быть полупустой, когда неделя уже
+ * упирается в стену, и полоска только с сессией врала бы спокойствием. Время —
+ * сброс того окна, что узкое.
+ */
+function limitStrip() {
+  const o = footerUsage?.official;
+  const sess = o?.session;
+  const week = o?.week;
+  if (!sess && !week) return null;
+  const worst = (week?.pct ?? -1) > (sess?.pct ?? -1) ? week : sess;
+  const pct = Math.max(0, Math.min(100, Math.round(worst.pct)));
+  const parts = [];
+  if (sess && typeof sess.pct === 'number') parts.push(`5ч ${Math.round(sess.pct)}%`);
+  if (week && typeof week.pct === 'number') parts.push(`нед ${Math.round(week.pct)}%`);
+  if (worst.resetAt > Date.now()) {
+    const d = new Date(worst.resetAt);
+    parts.push(`до ${pad2(d.getHours())}:${pad2(d.getMinutes())}`);
+  }
+  return { pct, text: parts.join(' · ') };
+}
+
+/** «5ч 62% · нед 94%» — или «$14.20 за день», если выбран расход. */
 function paintFooterLimit() {
   if (!footerLimitEl) return;
   const bar = footerMeterEl?.firstElementChild;
-  const sess = footerUsage?.official?.session;
 
   if (footerBottom === 'spend') {
     const t = footerUsage?.total;
@@ -2197,19 +2220,13 @@ function paintFooterLimit() {
     return;
   }
 
-  if (!sess || typeof sess.pct !== 'number') { footerLimitEl.hidden = true; return; }
+  const strip = limitStrip();
+  if (!strip) { footerLimitEl.hidden = true; return; }
   footerMeterEl.hidden = false;
-  const pct = Math.max(0, Math.min(100, Math.round(sess.pct)));
-  if (bar) bar.style.width = `${pct}%`;
-  footerMeterEl.classList.toggle('is-crit', pct > 90);
-  footerMeterEl.classList.toggle('is-warn', pct > 75 && pct <= 90);
-  // окно до сброса — часами, как в макете («до 14:30»)
-  let until = '';
-  if (sess.resetAt > Date.now()) {
-    const d = new Date(sess.resetAt);
-    until = ` · до ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  }
-  footerLimitTextEl.textContent = `лимит ${pct}%${until}`;
+  if (bar) bar.style.width = `${strip.pct}%`;
+  footerMeterEl.classList.toggle('is-crit', strip.pct > 90);
+  footerMeterEl.classList.toggle('is-warn', strip.pct > 75 && strip.pct <= 90);
+  footerLimitTextEl.textContent = strip.text;
   footerLimitEl.hidden = false;
 }
 
@@ -2292,19 +2309,13 @@ window.addEventListener('blur', () => paintWinFocus(false));
 
 /** Лимит в титульной полосе — тот же расчёт, что внизу панели. */
 function paintTitlebarLimit() {
-  const sess = footerUsage?.official?.session;
-  if (!sess || typeof sess.pct !== 'number') { tlLimitEl.hidden = true; return; }
-  const pct = Math.max(0, Math.min(100, Math.round(sess.pct)));
+  const strip = limitStrip();
+  if (!strip) { tlLimitEl.hidden = true; return; }
   const bar = tlMeterEl.firstElementChild;
-  if (bar) bar.style.width = `${pct}%`;
-  tlMeterEl.classList.toggle('is-crit', pct > 90);
-  tlMeterEl.classList.toggle('is-warn', pct > 75 && pct <= 90);
-  let until = '';
-  if (sess.resetAt > Date.now()) {
-    const d = new Date(sess.resetAt);
-    until = ` · до ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  }
-  tlLimitTextEl.textContent = `лимит ${pct}%${until}`;
+  if (bar) bar.style.width = `${strip.pct}%`;
+  tlMeterEl.classList.toggle('is-crit', strip.pct > 90);
+  tlMeterEl.classList.toggle('is-warn', strip.pct > 75 && strip.pct <= 90);
+  tlLimitTextEl.textContent = strip.text;
   tlLimitEl.hidden = false;
 }
 
@@ -3522,7 +3533,7 @@ async function renderStats() {
 
     if (o.session) limitRow('Сессия', o.session.pct, `${resetText(o.session.resetAt)}${o.windowTokens ? ` · ${fmtTok(o.windowTokens)} ткн` : ''}`);
     if (o.week) limitRow('Неделя', o.week.pct, resetText(o.week.resetAt));
-    if (o.weekSonnet) limitRow('Sonnet', o.weekSonnet.pct, '');
+    if (o.weekModel) limitRow(o.weekModel.model, o.weekModel.pct, resetText(o.weekModel.resetAt));
   } else if (u.window.resetInMs > 0) {
     // официальные данные ещё не приехали — локальная оценка
     const min = Math.round(u.window.resetInMs / 60000);

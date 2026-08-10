@@ -201,6 +201,88 @@ pub fn bundle_draft() -> Value {
     })
 }
 
+/// Точки входа обзора: дом машины и её известные проекты.
+///
+/// Известные — те же, что видит вкладка «Проекты»: локально из истории
+/// транскриптов, на узле из его оглавления. Один клик вместо набора пути по
+/// памяти — ради этого обзор и существует.
+#[tauri::command]
+pub async fn bundle_places(app: AppHandle, machine: String) -> Value {
+    let d = Daemon::get(&app);
+    let probe = Bundle { machine: machine.clone(), ..Default::default() };
+    let host = match host_for(&d, &probe) {
+        Ok(h) => h,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let home = match host.home().await {
+        Ok(h) => h,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let known = known_dirs(&d, &machine).await;
+    json!({ "ok": true, "home": home, "known": known })
+}
+
+/// Известные проекты машины — их каталоги.
+async fn known_dirs(d: &Arc<Daemon>, machine: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if machine.is_empty() || machine == "local" {
+        let projects = d.history.projects(&d.usage);
+        if let Some(arr) = projects.as_array() {
+            for g in arr {
+                if let Some(cwd) = g.get("cwd").and_then(Value::as_str) {
+                    if !cwd.is_empty() {
+                        out.push(cwd.to_string());
+                    }
+                }
+            }
+        }
+    } else if let Some(node) = d.remotes.node(machine) {
+        if let Ok(client) = node.client() {
+            if let Ok(list) = client.projects().await {
+                if let Some(arr) = list.as_array() {
+                    for p in arr {
+                        if let Some(cwd) = p.get("cwd").and_then(Value::as_str) {
+                            if !cwd.is_empty() {
+                                out.push(cwd.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.truncate(24);
+    out
+}
+
+/// Подкаталоги пути — шаг обзора.
+#[tauri::command]
+pub async fn bundle_browse(app: AppHandle, machine: String, path: String) -> Value {
+    let d = Daemon::get(&app);
+    let probe = Bundle { machine, ..Default::default() };
+    let host = match host_for(&d, &probe) {
+        Ok(h) => h,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let path = if path.trim().is_empty() {
+        match host.home().await {
+            Ok(h) => h,
+            Err(e) => return json!({ "ok": false, "error": e }),
+        }
+    } else {
+        path.trim().trim_end_matches('/').to_string()
+    };
+    match host.list_dirs(&path).await {
+        Ok(dirs) => json!({
+            "ok": true,
+            "path": path,
+            "parent": super::host::parent_of(&path),
+            "dirs": dirs,
+        }),
+        Err(e) => json!({ "ok": false, "error": e, "path": path }),
+    }
+}
+
 /// Сохранить конфигурацию. Руки нормализуются: пустые задачи выбрасываются,
 /// имена достраиваются из задач.
 #[tauri::command]

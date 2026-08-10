@@ -140,6 +140,8 @@ fn main() {
             bundle::ipc::bundle_pause,
             bundle::ipc::bundle_merge,
             bundle::ipc::bundle_remove,
+            bundle::ipc::bundle_places,
+            bundle::ipc::bundle_browse,
             loops::ipc::loops_compose,
             loops::ipc::loops_save,
             loops::ipc::loops_remove,

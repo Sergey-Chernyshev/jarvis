@@ -92,6 +92,8 @@
     bundlePause: (id, on) => invoke('bundle_pause', { id, on }),
     bundleMerge: (id, hand) => invoke('bundle_merge', { id, hand }),
     bundleRemove: (id) => invoke('bundle_remove', { id }),
+    bundlePlaces: (machine) => invoke('bundle_places', { machine }),
+    bundleBrowse: (machine, path) => invoke('bundle_browse', { machine, path }),
     onBundleState: (cb) => on('bundle-state', cb),
     loopsCompose: (text, item) => invoke('loops_compose', { text, item }),
     // свои агенты: qwen/opencode/внутренние CLI — реестр в настройках

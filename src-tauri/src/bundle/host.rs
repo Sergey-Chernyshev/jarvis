@@ -101,6 +101,62 @@ async fn collect(mut cmd: tokio::process::Command, timeout: Duration) -> (i32, S
     (out.status.code().unwrap_or(-1), text)
 }
 
+impl Host {
+    /// Домашний каталог машины — с него начинается обзор.
+    pub async fn home(&self) -> Result<String, String> {
+        match self {
+            Host::Local => std::env::var("HOME").map_err(|_| "не знаю $HOME".into()),
+            Host::Ssh { host, .. } => {
+                let (code, out) = ssh(host, "printf %s \"$HOME\"", Duration::from_secs(15)).await;
+                let out = out.trim().to_string();
+                if code == 0 && out.starts_with('/') {
+                    Ok(out)
+                } else {
+                    Err(format!("не узнал $HOME узла: {}", crate::util::one_line(&out)))
+                }
+            }
+        }
+    }
+
+    /// Подкаталоги пути — для обзора. Скрытые не показываем: их набирают
+    /// руками в поле, обзор — про обычные проекты.
+    pub async fn list_dirs(&self, path: &str) -> Result<Vec<String>, String> {
+        match self {
+            Host::Local => {
+                let mut out = Vec::new();
+                let rd = std::fs::read_dir(path).map_err(|e| format!("не прочитал каталог: {e}"))?;
+                for entry in rd.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with('.') {
+                        continue;
+                    }
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        out.push(name);
+                    }
+                }
+                out.sort();
+                Ok(out)
+            }
+            Host::Ssh { .. } => {
+                // POSIX-набор, без GNU-расширений: узлы бывают разными.
+                let (code, out) = self
+                    .sh(path, "LC_ALL=C ls -1p | grep '/$' || true", Duration::from_secs(20))
+                    .await;
+                if code != 0 {
+                    return Err(crate::util::ellipsize(&crate::util::one_line(&out), 200));
+                }
+                let mut dirs: Vec<String> = out
+                    .lines()
+                    .map(|l| l.trim_end_matches('/').to_string())
+                    .filter(|l| !l.is_empty() && !l.starts_with('.'))
+                    .collect();
+                dirs.sort();
+                Ok(dirs)
+            }
+        }
+    }
+}
+
 /// Родительский каталог удалённого пути — строками: `Path` этой машины про
 /// чужую файловую систему ничего не знает.
 pub fn parent_of(dir: &str) -> String {
@@ -147,5 +203,27 @@ mod tests {
         assert_eq!(Host::Local.machine(), "local");
         let h = Host::Ssh { machine: "vps".into(), host: "user@vps".into() };
         assert_eq!(h.machine(), "vps");
+    }
+}
+
+#[cfg(test)]
+mod browse_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn local_home_and_dirs_are_real() {
+        let home = Host::Local.home().await.unwrap();
+        assert!(home.starts_with('/'));
+
+        let base = std::env::temp_dir().join(format!("jarvis-browse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        for d in ["бета", "альфа", ".скрытая"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        std::fs::write(base.join("файл.txt"), "не каталог").unwrap();
+        let dirs = Host::Local.list_dirs(&base.to_string_lossy()).await.unwrap();
+        // Только каталоги, без скрытых, по алфавиту.
+        assert_eq!(dirs, vec!["альфа".to_string(), "бета".to_string()]);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

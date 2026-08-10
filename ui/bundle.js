@@ -112,6 +112,93 @@
     return null;
   };
 
+  /* ---------- выбор директории: обзор вместо памяти ---------- */
+
+  /**
+   * Оверлей: известные проекты машины одним кликом плюс обзор её файловой
+   * системы. Работает одинаково для этой машины и узла — разница живёт в
+   * бэкенде. Поле ввода никуда не девается: обзор — это способ не набирать
+   * путь по памяти, а не запрет его набрать.
+   */
+  function openDirPicker(machine, startPath, onPick) {
+    const overlay = el('div.lp-shade');
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+    let path = startPath || '';
+    const crumb = el('div.bd-dir-path', { text: '…' });
+    const list = el('div.bd-dir-list');
+    const newName = el('input.lp-input', { placeholder: 'новая папка — создастся при запуске' });
+    const box = el('div.lp-cat',
+      el('div.lp-cat-head',
+        el('span.lp-cat-title', { text: 'Где работать' }),
+        el('button.j-btn.lp-ghost', { text: '×', title: 'закрыть', onclick: close }),
+      ),
+      crumb,
+      el('div.lp-actions.bd-dir-act',
+        el('button.j-btn.is-primary', {
+          text: 'Выбрать эту директорию',
+          onclick: () => { onPick(path); close(); },
+        }),
+        el('div.lp-withrow.bd-dir-new',
+          newName,
+          el('button.j-btn.lp-ghost', {
+            text: '+ сюда',
+            onclick: () => {
+              const name = newName.value.trim().replace(/\/+/g, '');
+              if (!name) return;
+              onPick(`${path}/${name}`);
+              close();
+            },
+          }),
+        ),
+      ),
+      list,
+    );
+    overlay.appendChild(box);
+    root.appendChild(overlay);
+
+    const go = async (next) => {
+      crumb.textContent = 'смотрю…';
+      let res;
+      try { res = await window.jarvis.bundleBrowse(machine, next || ''); }
+      catch (e) { res = null; }
+      if (!res || !res.ok) {
+        crumb.textContent = (res && res.path) || next || '';
+        list.textContent = '';
+        list.appendChild(el('div.lp-empty', { text: (res && res.error) || 'не дотянулся до машины' }));
+        return;
+      }
+      path = res.path;
+      crumb.textContent = path;
+      list.textContent = '';
+      if (res.parent && res.parent !== path) {
+        list.appendChild(el('div.bd-dir-row.up', { text: '‹ вверх', onclick: () => go(res.parent) }));
+      }
+      if (!res.dirs.length) {
+        list.appendChild(el('div.lp-empty', { text: 'подкаталогов нет — можно выбрать эту или завести новую' }));
+      }
+      res.dirs.forEach((name) => list.appendChild(
+        el('div.bd-dir-row', { text: name, onclick: () => go(`${path}/${name}`) })));
+    };
+
+    // Известные проекты — прежде обзора: чаще всего нужный каталог уже там.
+    window.jarvis.bundlePlaces(machine).then((res) => {
+      if (!res || !res.ok || !(res.known || []).length) return;
+      const known = el('div.bd-dir-known',
+        el('div.lp-sub', { text: 'известные проекты' }),
+        res.known.map((cwd) => el('button.lp-chip', {
+          text: cwd.split('/').pop() || cwd,
+          title: cwd,
+          onclick: () => { onPick(cwd); close(); },
+        })),
+      );
+      box.appendChild(known);
+    }).catch(() => {});
+
+    go(startPath || '');
+  }
+
   /* ---------- старт: несколько чатов разом ---------- */
 
   const field = (label, value, oninput, hint) =>
@@ -215,8 +302,24 @@
           machineSel,
           el('span.lp-hint', { text: 'эта или любой узел — как в «Проектах»' }),
         ),
-        field('директория', d.dir, (v) => { d.dir = v; },
-          'git не обязателен: нет .git или самого каталога — создам и инициализирую сам'),
+        (() => {
+          const input = el('input.lp-input', {
+            value: d.dir || '',
+            oninput: (e) => { d.dir = e.target.value; },
+          });
+          return el('label.bd-field',
+            el('span.bd-label', { text: 'директория' }),
+            el('div.lp-withrow', input,
+              el('button.j-btn.lp-ghost', {
+                text: 'выбрать…',
+                onclick: () => openDirPicker(d.machine || 'local', d.dir, (picked) => {
+                  d.dir = picked;
+                  input.value = picked;
+                }),
+              })),
+            el('span.lp-hint', { text: 'git не обязателен: нет .git или самого каталога — создам и инициализирую сам' }),
+          );
+        })(),
         field('бюджет на руку, токенов', d.budgetTokens, (v) => { d.budgetTokens = Number(v) || 0; }, 'ориентир на пульте, не ограничитель'),
       ),
       el('div.lp-sub', { text: 'руки' }),

@@ -133,6 +133,9 @@ pub struct OfficialInfo {
     pub session: Option<PctReset>,
     pub week: Option<PctReset>,
     pub week_model: Option<ModelWeek>,
+    /// Чей это `/usage`: "local" или имя узла — человек должен видеть, про чью
+    /// авторизацию эти проценты.
+    pub source: String,
     pub at: i64,
     pub account: Account,
 }
@@ -198,6 +201,11 @@ pub struct Usage {
     msg_seen: Mutex<OrderedRing>,
     billing_cache: Mutex<HashMap<String, String>>,
     official: Mutex<Option<Official>>,
+    /// Откуда приехали лимиты: "local" или имя узла. Пусто — ниоткуда.
+    official_source: Mutex<String>,
+    /// Почему лимитов нет — по всем источникам разом. Молчание добытчика
+    /// неотличимо от «всё хорошо», и его пришлось запретить.
+    official_err: Mutex<Option<String>>,
     scanning: AtomicBool,
     official_busy: AtomicBool,
     persist_pending: AtomicBool,
@@ -251,6 +259,8 @@ impl Usage {
             msg_seen: Mutex::new(msg_seen),
             billing_cache: Mutex::new(HashMap::new()),
             official: Mutex::new(None),
+            official_source: Mutex::new(String::new()),
+            official_err: Mutex::new(None),
             scanning: AtomicBool::new(false),
             official_busy: AtomicBool::new(false),
             persist_pending: AtomicBool::new(false),
@@ -747,8 +757,10 @@ impl Usage {
             v
         });
 
+        let official_err = self.official_err.lock().unwrap_or_else(|e| e.into_inner()).clone();
         serde_json::json!({
             "period": if week { "week" } else { "today" },
+            "officialError": official_err,
             "total": { "tok": total_tok, "api": total_api, "plan": total_plan, "n": total_n },
             "series": series,
             "byModel": by_model,
@@ -783,6 +795,7 @@ impl Usage {
             session: o.session,
             week: o.week,
             week_model: o.week_model,
+            source: self.official_source.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             at: o.at,
             account: read_account(),
         })
@@ -797,21 +810,77 @@ impl Usage {
         });
     }
 
+    /// Достать текст `/usage`: сначала локально, затем с узлов по порядку.
+    ///
+    /// Человек, работающий на узле, может быть не авторизован локально вовсе —
+    /// тогда правда о лимитах живёт только там. Ошибки всех источников
+    /// собираются в одну строку: чинить будут по ней.
+    async fn obtain_official(self: &Arc<Self>, d: &Arc<Daemon>) -> Result<(String, String), String> {
+        let mut errs: Vec<String> = Vec::new();
+        if crate::claude_bin::resolve_claude_bin().is_none() {
+            errs.push("локально: claude не найден".into());
+        } else {
+            match crate::claude_bin::run_claude(
+                &["-p", "--no-session-persistence", "/usage"],
+                Duration::from_secs(90),
+            )
+            .await
+            {
+                Some(text) => return Ok((text, "local".into())),
+                None => errs.push("локально: /usage не ответил — не авторизован или нет сети".into()),
+            }
+        }
+        for node in d.remotes.all() {
+            let name = node.cfg.name.clone();
+            match node.client() {
+                Ok(client) => match client.usage_text(false).await {
+                    Ok(text) => return Ok((text, name)),
+                    Err(e) => errs.push(format!("{name}: {e}")),
+                },
+                Err(e) => errs.push(format!("{name}: {e}")),
+            }
+        }
+        Err(if errs.is_empty() { "источников лимитов нет".into() } else { errs.join(" · ") })
+    }
+
     pub async fn fetch_official(self: &Arc<Self>, d: &Arc<Daemon>) {
         if self.official_busy.swap(true, Ordering::SeqCst) {
             return;
         }
-        let out = crate::claude_bin::run_claude(
-            &["-p", "--no-session-persistence", "/usage"],
-            Duration::from_secs(90),
-        )
-        .await;
+        let got = self.obtain_official(d).await;
         self.official_busy.store(false, Ordering::SeqCst);
-        let Some(text) = out else { return }; // нет сети/квоты — живём на локальной оценке
-
+        let (text, source) = match got {
+            Ok(x) => x,
+            Err(why) => {
+                // Провал добытчика обязан быть виден: раньше он молчал, и
+                // человек смотрел на пустую полоску, гадая, где сломано.
+                let changed = {
+                    let mut e = self.official_err.lock().unwrap_or_else(|p| p.into_inner());
+                    let same = e.as_deref() == Some(why.as_str());
+                    *e = Some(why.clone());
+                    !same
+                };
+                if changed {
+                    crate::log::line(&format!("[usage] лимиты недоступны: {why}"));
+                }
+                return;
+            }
+        };
         let Some((session, week, week_model)) = parse_official(&text) else {
+            let head = crate::util::ellipsize(&crate::util::one_line(&text), 120);
+            *self.official_err.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some(format!("{source}: формат /usage не разобрался — {head}"));
+            crate::log::line(&format!("[usage] формат /usage ({source}) не разобрался: {head}"));
             return; // формат уехал — не перетираем
         };
+        *self.official_err.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        {
+            let mut src = self.official_source.lock().unwrap_or_else(|p| p.into_inner());
+            if *src != source {
+                crate::log::line(&format!("[usage] лимиты приехали: источник {source}"));
+                *src = source.clone();
+            }
+        }
         let prev_pct = self
             .official
             .lock()

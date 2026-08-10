@@ -757,6 +757,25 @@ impl NodeClient {
         Ok((take("session"), take("pane")))
     }
 
+    /// Лимиты аккаунта с узла: текст `claude /usage` той машины как есть.
+    ///
+    /// Нужен, когда локально авторизации нет: человек работает на узле, и
+    /// правда о лимитах живёт там же. Узел кэширует ответ на пять минут.
+    pub async fn usage_text(&self, fresh: bool) -> Result<String, String> {
+        let v: serde_json::Value = self
+            .get_json(&self.http, "/usage", &[("fresh", if fresh { "1" } else { "0" }.to_string())])
+            .await?;
+        let text = v.get("text").and_then(serde_json::Value::as_str).unwrap_or_default();
+        if text.trim().is_empty() {
+            Err(v.get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("узел вернул пустой /usage")
+                .to_string())
+        } else {
+            Ok(text.to_string())
+        }
+    }
+
     /// Живые паны узла — по ним видно, что удалённая сессия ещё жива.
     pub async fn panes(&self) -> Result<PanesReply, String> {
         self.get_json(&self.http, "/panes", &[]).await

@@ -2221,12 +2221,30 @@ function paintFooterLimit() {
   }
 
   const strip = limitStrip();
-  if (!strip) { footerLimitEl.hidden = true; return; }
+  if (!strip) {
+    // Данных нет — но пустота неотличима от «всё выключено». Если добытчик
+    // назвал причину, показываем факт и держим причину в подсказке: человек,
+    // авторизованный только на узле, увидит здесь ровно свою ситуацию.
+    const why = footerUsage?.officialError;
+    if (why) {
+      footerMeterEl.hidden = true;
+      footerLimitTextEl.textContent = 'лимиты недоступны';
+      footerLimitEl.title = why;
+      footerLimitEl.hidden = false;
+    } else {
+      footerLimitEl.hidden = true;
+    }
+    return;
+  }
   footerMeterEl.hidden = false;
   if (bar) bar.style.width = `${strip.pct}%`;
   footerMeterEl.classList.toggle('is-crit', strip.pct > 90);
   footerMeterEl.classList.toggle('is-warn', strip.pct > 75 && strip.pct <= 90);
   footerLimitTextEl.textContent = strip.text;
+  // Чьи это проценты — важно, когда авторизаций несколько: подсказка называет
+  // источник («local» или имя узла).
+  const src = footerUsage?.official?.source;
+  footerLimitEl.title = src && src !== 'local' ? `лимиты с узла «${src}»` : '';
   footerLimitEl.hidden = false;
 }
 
@@ -2310,7 +2328,19 @@ window.addEventListener('blur', () => paintWinFocus(false));
 /** Лимит в титульной полосе — тот же расчёт, что внизу панели. */
 function paintTitlebarLimit() {
   const strip = limitStrip();
-  if (!strip) { tlLimitEl.hidden = true; return; }
+  if (!strip) {
+    const why = footerUsage?.officialError;
+    if (why) {
+      tlMeterEl.hidden = true;
+      tlLimitTextEl.textContent = 'лимиты недоступны';
+      tlLimitEl.title = why;
+      tlLimitEl.hidden = false;
+    } else {
+      tlLimitEl.hidden = true;
+    }
+    return;
+  }
+  tlMeterEl.hidden = false;
   const bar = tlMeterEl.firstElementChild;
   if (bar) bar.style.width = `${strip.pct}%`;
   tlMeterEl.classList.toggle('is-crit', strip.pct > 90);
@@ -3531,6 +3561,9 @@ async function renderStats() {
       statsEl.appendChild(row);
     };
 
+    if (o.source && o.source !== 'local') {
+      statsEl.appendChild(el('div', 'uhover', `лимиты с узла «${o.source}» — локальной авторизации нет`));
+    }
     if (o.session) limitRow('Сессия', o.session.pct, `${resetText(o.session.resetAt)}${o.windowTokens ? ` · ${fmtTok(o.windowTokens)} ткн` : ''}`);
     if (o.week) limitRow('Неделя', o.week.pct, resetText(o.week.resetAt));
     if (o.weekModel) limitRow(o.weekModel.model, o.weekModel.pct, resetText(o.weekModel.resetAt));

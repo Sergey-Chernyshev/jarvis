@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- Monotonic package build. Keep equal to bundle.macOS.bundleVersion in
+         tauri.conf.json; the semantic display/updater version stays separate. -->
+    <key>CFBundleVersion</key>
+    <string>340</string>
     <!-- Микрофон (инкр. 9, §10): обязательное описание для App Store / notarization.
          macOS показывает эту строку в системном диалоге разрешения микрофона при
          первой попытке захвата аудио через диктовку Jarvis. -->

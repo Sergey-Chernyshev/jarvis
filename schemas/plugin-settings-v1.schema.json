@@ -1,0 +1,316 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "CredentialReference": {
+      "additionalProperties": false,
+      "properties": {
+        "credentialId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "credentialId"
+      ],
+      "type": "object"
+    },
+    "SettingChange": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "setting": {
+          "$ref": "#/definitions/SettingRecord"
+        }
+      },
+      "required": [
+        "cursor",
+        "setting"
+      ],
+      "type": "object"
+    },
+    "SettingRecord": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "scope": {
+              "enum": [
+                "user"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/definitions/SettingValue"
+            }
+          },
+          "required": [
+            "key",
+            "revision",
+            "scope",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
+              "type": "string"
+            },
+            "projectId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/-]+$",
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "scope": {
+              "enum": [
+                "project"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/definitions/SettingValue"
+            }
+          },
+          "required": [
+            "key",
+            "projectId",
+            "revision",
+            "scope",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SettingValue": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": [
+                "integer"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": [
+                "number"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": [
+                "boolean"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": [
+                "string"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "description": "UTF-8 byte length: 0..=65536. Validators must enforce x-maxUtf8Bytes; standard maxLength counts Unicode scalars.",
+              "maxLength": 65536,
+              "minLength": 0,
+              "type": "string",
+              "x-maxUtf8Bytes": 65536
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reference": {
+              "$ref": "#/definitions/CredentialReference"
+            },
+            "type": {
+              "enum": [
+                "credentialReference"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "reference",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SettingWrite": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expectedRevision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "key": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
+              "type": "string"
+            },
+            "scope": {
+              "enum": [
+                "user"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/definitions/SettingValue"
+            }
+          },
+          "required": [
+            "expectedRevision",
+            "key",
+            "scope",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expectedRevision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "key": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$",
+              "type": "string"
+            },
+            "projectId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^(?!/)(?!~/)(?![A-Za-z]:[/\\\\])(?![Ff][Ii][Ll][Ee]:)(?![A-Za-z][A-Za-z0-9+.-]*:/)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*\\/$)[A-Za-z0-9._/-]+$",
+              "type": "string"
+            },
+            "scope": {
+              "enum": [
+                "project"
+              ],
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/definitions/SettingValue"
+            }
+          },
+          "required": [
+            "expectedRevision",
+            "key",
+            "projectId",
+            "scope",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "change": {
+      "$ref": "#/definitions/SettingChange"
+    },
+    "record": {
+      "$ref": "#/definitions/SettingRecord"
+    },
+    "value": {
+      "$ref": "#/definitions/SettingValue"
+    },
+    "write": {
+      "$ref": "#/definitions/SettingWrite"
+    }
+  },
+  "required": [
+    "change",
+    "record",
+    "value",
+    "write"
+  ],
+  "title": "SettingsContractV1",
+  "type": "object"
+}

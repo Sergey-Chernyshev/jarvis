@@ -29,6 +29,7 @@
 ## Task 1: Чистая функция раскладки клавиш `answer_keys`
 
 **Files:**
+
 - Modify: `src-tauri/src/tmux.rs` (добавить функцию + тест-модуль; рядом с `answer_question` ~строка 151)
 
 Чистая функция строит последовательность tmux-клавиш для ответа на один или
@@ -214,6 +215,7 @@ git commit -m "feat(tmux): чистая раскладка клавиш answer_k
 ## Task 2: Рефактор `tmux::answer_question` под новую сигнатуру
 
 **Files:**
+
 - Modify: `src-tauri/src/tmux.rs:151-164`
 
 Исполнитель просто проигрывает `answer_keys` с задержкой между клавишами.
@@ -256,6 +258,7 @@ Expected: FAIL — `ipc.rs` вызывает старую сигнатуру `an
 ## Task 3: `ipc::question_answer` — новый контракт `answers`
 
 **Files:**
+
 - Modify: `src-tauri/src/ipc.rs:490-532`
 
 Принять `choice.answers: number[][]`; для совместимости — старый
@@ -361,6 +364,7 @@ git commit -m "feat(ipc): по-вопросный контракт ответа 
 ## Task 4: `daemon::answer_question_hotkey` — новый контракт
 
 **Files:**
+
 - Modify: `src-tauri/src/daemon.rs:570-601`
 
 Хоткей ⌘⌥N — быстрый ответ на одиночный вопрос. Перевести на `{answers:[[n]]}`.
@@ -422,6 +426,7 @@ git commit -m "feat(daemon): хоткей выбора варианта на н�
 ## Task 5: UI-визард в полноэкранном `qview` (renderer.js)
 
 **Files:**
+
 - Modify: `ui/renderer.js:770-886` (состояние и поток вопроса)
 - Modify: `ui/index.html` (индикатор прогресса в шапке `qview`)
 
@@ -433,7 +438,7 @@ JS-тестов в репозитории нет — верификация ру
 ~строки 1347-1352) добавить:
 
 ```html
-      <span class="qprogress" id="qProgress" hidden></span>
+<span class="qprogress" id="qProgress" hidden></span>
 ```
 
 - [ ] **Step 2: Расширить состояние и поток вопроса в renderer.js**
@@ -441,12 +446,12 @@ JS-тестов в репозитории нет — верификация ру
 Заменить блок состояния (строки 770-772):
 
 ```javascript
-let qData = null;        // текущий вопрос визарда
+let qData = null; // текущий вопрос визарда
 let qSel = 0;
 let qChosen = new Set();
-let qItems = [];         // все вопросы опроса (s.question.questions)
-let qIdx = 0;            // индекс текущего вопроса
-let qAnswers = [];       // собранные выборы по каждому вопросу: number[][]
+let qItems = []; // все вопросы опроса (s.question.questions)
+let qIdx = 0; // индекс текущего вопроса
+let qAnswers = []; // собранные выборы по каждому вопросу: number[][]
 ```
 
 Заменить `openQuestion` (строки 781-790):
@@ -458,7 +463,7 @@ function openQuestion(s) {
   qIdx = 0;
   qAnswers = qItems.map(() => []);
   loadQ();
-  setView('question');
+  setView("question");
   qOptsEl.focus?.();
 }
 
@@ -474,12 +479,14 @@ function loadQ() {
 
 ```javascript
 function renderQuestion() {
-  qHeaderEl.textContent = qData.header || '';
+  qHeaderEl.textContent = qData.header || "";
   qHeaderEl.hidden = !qData.header;
   qTitleEl.textContent = qData.question;
-  const prog = document.getElementById('qProgress');
-  if (qItems.length > 1) { prog.textContent = `${qIdx + 1}/${qItems.length}`; prog.hidden = false; }
-  else prog.hidden = true;
+  const prog = document.getElementById("qProgress");
+  if (qItems.length > 1) {
+    prog.textContent = `${qIdx + 1}/${qItems.length}`;
+    prog.hidden = false;
+  } else prog.hidden = true;
   activeQOpts = qOptsEl;
   renderQOpts(qOptsEl, qFootEl);
 }
@@ -495,7 +502,10 @@ function commitCurrentQ() {
   const sel = qData.multiSelect
     ? [...qChosen].sort((a, b) => a - b)
     : [qSel + 1];
-  if (!sel.length) { showToast('Отметь хотя бы один вариант'); return false; }
+  if (!sel.length) {
+    showToast("Отметь хотя бы один вариант");
+    return false;
+  }
   qAnswers[qIdx] = sel;
   return true;
 }
@@ -504,7 +514,8 @@ function advanceQ() {
   if (qIdx + 1 < qItems.length) {
     qIdx += 1;
     loadQ();
-    if (varOpen) renderVarPanel(curSession()); else renderQuestion();
+    if (varOpen) renderVarPanel(curSession());
+    else renderQuestion();
   } else {
     finalizeQ();
   }
@@ -515,8 +526,11 @@ async function finalizeQ() {
   const res = await window.jarvis.answerQuestion(sid, { answers: qAnswers });
   if (res.ok) {
     if (varOpen) closeVarPanel();
-    else { setView('list'); render(); }
-  } else showToast(res.error || 'Не удалось ответить');
+    else {
+      setView("list");
+      render();
+    }
+  } else showToast(res.error || "Не удалось ответить");
 }
 
 // Совместимость с существующими обработчиками (Enter / кнопка «Отправить»).
@@ -546,6 +560,7 @@ git commit -m "feat(ui): визард по вопросам на полноэк�
 ## Task 6: UI-визард в слайд-овере `varPanel` (renderer.js)
 
 **Files:**
+
 - Modify: `ui/renderer.js:1001-1045`
 
 Слайд-овер вариантов поверх чата должен использовать тот же визард.
@@ -557,7 +572,13 @@ git commit -m "feat(ui): визард по вопросам на полноэк�
 ```javascript
 function openVarPanel() {
   const s = curSession();
-  if (!s || !s.question || !s.question.questions || !s.question.questions.length) return;
+  if (
+    !s ||
+    !s.question ||
+    !s.question.questions ||
+    !s.question.questions.length
+  )
+    return;
   qSessionId = s.id;
   qItems = s.question.questions;
   qIdx = 0;
@@ -565,7 +586,7 @@ function openVarPanel() {
   loadQ();
   varOpen = true;
   qWrap.hidden = false;
-  varBtn.classList.add('open');
+  varBtn.classList.add("open");
   replyEl.blur?.(); // освобождаем поле ввода — клавиши уходят пикеру
   renderVarPanel(s);
 }
@@ -578,19 +599,23 @@ function openVarPanel() {
 ```javascript
 function renderVarPanel(s) {
   const q = qItems[qIdx];
-  if (!q) { closeVarPanel(); return; }
+  if (!q) {
+    closeVarPanel();
+    return;
+  }
   qData = q;
-  const prog = qItems.length > 1 ? ` (${qIdx + 1}/${qItems.length})` : '';
-  qpHeaderEl.textContent = (q.header || '') + prog;
+  const prog = qItems.length > 1 ? ` (${qIdx + 1}/${qItems.length})` : "";
+  qpHeaderEl.textContent = (q.header || "") + prog;
   qpHeaderEl.hidden = !q.header && !prog;
   qpTitleEl.textContent = q.question;
   activeQOpts = qpOptsEl;
   renderQOpts(qpOptsEl, qpFootEl);
-  if (q.multiSelect) { // мульти-выбор: клик-сабмит (на полноэкранном экране это Enter)
-    const send = document.createElement('button');
-    send.className = 'qp-send';
-    send.textContent = qIdx + 1 < qItems.length ? 'Далее' : 'Отправить';
-    send.addEventListener('click', submitQ);
+  if (q.multiSelect) {
+    // мульти-выбор: клик-сабмит (на полноэкранном экране это Enter)
+    const send = document.createElement("button");
+    send.className = "qp-send";
+    send.textContent = qIdx + 1 < qItems.length ? "Далее" : "Отправить";
+    send.addEventListener("click", submitQ);
     qpFootEl.appendChild(send);
   }
 }
@@ -619,6 +644,7 @@ git commit -m "feat(ui): визард по вопросам в слайд-ове
 ## Task 7: Тост — несколько вопросов и прозрачный мост
 
 **Files:**
+
 - Modify: `src-tauri/src/daemon.rs:418-430` (добавить `count` в payload тоста)
 - Modify: `ui/toast-bridge.js:29-30`
 - Modify: `ui/toast.js:158-196`
@@ -669,55 +695,56 @@ payload (`d.question.options`, `d.question.multiSelect`, `d.question.count`).
 подсказка отвечать в приложении.
 
 ```javascript
-    // варианты вопроса (AskUserQuestion). Payload плоский: первый вопрос +
-    // count. Инлайн-чипы — только для одиночного вопроса; мульти-вопрос
-    // отвечается в приложении (визард).
-    const qq = d.question || null;
-    const count = qq && typeof qq.count === 'number' ? qq.count : (qq && qq.options ? 1 : 0);
-    const opts = qq && Array.isArray(qq.options) ? qq.options : null;
-    if (count > 1) {
-      sticky = true;
-      card.classList.add('sticky');
-      const note = document.createElement('div');
-      note.className = 'body';
-      note.textContent = `Несколько вопросов (${count}) — ответь в приложении`;
-      card.appendChild(note);
-    } else if (opts && opts.length) {
-      sticky = true; // ждём выбор — карточка не тикает по TTL
-      card.classList.add('sticky');
-      const list = document.createElement('div');
-      list.className = 'opts';
-      opts.slice(0, 9).forEach((o, i) => {
-        const opt = document.createElement('div');
-        opt.className = 'opt';
-        const num = document.createElement('span');
-        num.className = 'num';
-        const key = document.createElement('span');
-        key.className = 'key';
-        key.textContent = '⌘⌥';
-        num.append(key, document.createTextNode(String(i + 1)));
-        const otext = document.createElement('div');
-        otext.className = 'otext';
-        const ol = document.createElement('div');
-        ol.className = 'olabel';
-        ol.textContent = o.label || '';
-        otext.appendChild(ol);
-        if (o.description) {
-          const od = document.createElement('div');
-          od.className = 'odesc';
-          od.textContent = o.description;
-          otext.appendChild(od);
-        }
-        opt.append(num, otext);
-        opt.addEventListener('click', (e) => {
-          e.stopPropagation();
-          window.toast.answerQuestion(d.sessionId, { answers: [[i + 1]] });
-          if (!qq.multiSelect) removeCard(d.id);
-        });
-        list.appendChild(opt);
-      });
-      card.appendChild(list);
+// варианты вопроса (AskUserQuestion). Payload плоский: первый вопрос +
+// count. Инлайн-чипы — только для одиночного вопроса; мульти-вопрос
+// отвечается в приложении (визард).
+const qq = d.question || null;
+const count =
+  qq && typeof qq.count === "number" ? qq.count : qq && qq.options ? 1 : 0;
+const opts = qq && Array.isArray(qq.options) ? qq.options : null;
+if (count > 1) {
+  sticky = true;
+  card.classList.add("sticky");
+  const note = document.createElement("div");
+  note.className = "body";
+  note.textContent = `Несколько вопросов (${count}) — ответь в приложении`;
+  card.appendChild(note);
+} else if (opts && opts.length) {
+  sticky = true; // ждём выбор — карточка не тикает по TTL
+  card.classList.add("sticky");
+  const list = document.createElement("div");
+  list.className = "opts";
+  opts.slice(0, 9).forEach((o, i) => {
+    const opt = document.createElement("div");
+    opt.className = "opt";
+    const num = document.createElement("span");
+    num.className = "num";
+    const key = document.createElement("span");
+    key.className = "key";
+    key.textContent = "⌘⌥";
+    num.append(key, document.createTextNode(String(i + 1)));
+    const otext = document.createElement("div");
+    otext.className = "otext";
+    const ol = document.createElement("div");
+    ol.className = "olabel";
+    ol.textContent = o.label || "";
+    otext.appendChild(ol);
+    if (o.description) {
+      const od = document.createElement("div");
+      od.className = "odesc";
+      od.textContent = o.description;
+      otext.appendChild(od);
     }
+    opt.append(num, otext);
+    opt.addEventListener("click", (e) => {
+      e.stopPropagation();
+      window.toast.answerQuestion(d.sessionId, { answers: [[i + 1]] });
+      if (!qq.multiSelect) removeCard(d.id);
+    });
+    list.appendChild(opt);
+  });
+  card.appendChild(list);
+}
 ```
 
 Обновить проверку «застрявшей сессии» ниже (строка 201): заменить
@@ -746,6 +773,7 @@ git commit -m "feat(toast): count в payload, одиночные чипы / по
 ## Task 8: Живая верификация раскладки клавиш (с пользователем)
 
 **Files:**
+
 - Modify (при расхождении): `src-tauri/src/tmux.rs` (константы `CLAUDE_ADVANCE`,
   `CLAUDE_SUBMIT`, `CLAUDE_SUBMIT_RIGHT`, Codex Down/Space/Enter) + соответствующие
   ожидания в `answer_keys_tests`.
@@ -755,6 +783,7 @@ git commit -m "feat(toast): count в payload, одиночные чипы / по
 - [ ] **Step 1: Подготовить сценарии**
 
 Попросить пользователя инициировать в живой сессии:
+
 1. Claude `AskUserQuestion` с ОДНИМ single-select вопросом.
 2. Claude `AskUserQuestion` с ОДНИМ multiSelect вопросом.
 3. Claude `AskUserQuestion` с НЕСКОЛЬКИМИ вопросами (single и multi вперемешку).
@@ -771,6 +800,7 @@ Expected: выбор применяется ровно как в UI, экран 
 - [ ] **Step 3: При расхождении — поправить константы и тесты вместе**
 
 Если навигация «уплывает» (особенно переход между вопросами Claude):
+
 - скорректировать `CLAUDE_ADVANCE` / `CLAUDE_SUBMIT` / Codex-клавиши в `tmux.rs`;
 - синхронно обновить ожидания в `answer_keys_tests`;
 - при стойком дрейфе перехода между вопросами — добавить точечный read-back
@@ -792,6 +822,7 @@ git commit -m "fix(tmux): выверенная вживую раскладка �
 ## Self-Review
 
 **Покрытие спека:**
+
 - Контракт `{answers}` + совместимость — Task 3. ✅
 - `answer_question` ветвление по агенту/позиции — Task 1 (логика) + Task 2 (исполнитель). ✅
 - Codex стрелки/Space/Enter вместо цифр — Task 1 (Codex-ветка). ✅

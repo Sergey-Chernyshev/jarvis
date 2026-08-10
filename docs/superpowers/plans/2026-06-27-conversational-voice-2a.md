@@ -37,7 +37,7 @@
 
 - [ ] **Step 2: падающие тесты** в `convo/plan.rs`:
 
-```rust
+````rust
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,7 +81,7 @@ mod tests {
         assert!(s.contains("JSON"));
     }
 }
-```
+````
 
 - [ ] **Step 3: FAIL.** `cargo test --manifest-path src-tauri/Cargo.toml convo::plan` → FAIL (не определены).
 
@@ -167,6 +167,7 @@ fn extract_plan(text: &str) -> Option<Plan> {
 - [ ] **Step 5: PASS.** `cargo test --manifest-path src-tauri/Cargo.toml convo::plan` → PASS (5 тестов).
 
 - [ ] **Step 6: commit.**
+
 ```bash
 git add src-tauri/src/convo/ src-tauri/src/main.rs
 git commit -m "feat(convo): план хода — Plan/Action + промпт + терпимый парс (чистый, TDD)"
@@ -270,6 +271,7 @@ pub fn build_snapshot(sessions: &[Session], now: &str, muted: bool, keep_awake: 
 ```
 
 - [ ] **Step 4: PASS + commit.**
+
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml convo::snapshot
 git add src-tauri/src/convo/ && git commit -m "feat(convo): компактный снапшот мира для промпта (чистый, TDD)"
@@ -375,6 +377,7 @@ pub fn skills_menu() -> String {
 ```
 
 - [ ] **Step 4: PASS + commit.**
+
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml convo::skills
 git add src-tauri/src/convo/ && git commit -m "feat(convo): меню скилов + fail-closed валидация аргументов (TDD)"
@@ -414,6 +417,7 @@ git add src-tauri/src/convo/ && git commit -m "feat(convo): меню скило�
 - [ ] **Step 2: сборка.** `cargo build --manifest-path src-tauri/Cargo.toml --features wakeword-ort --bin jarvis` → компилируется.
 
 - [ ] **Step 3: commit.**
+
 ```bash
 git add src-tauri/src/voice/mod.rs && git commit -m "feat(voice): Voice::say — разговорная речь без контент-дедупа"
 ```
@@ -547,11 +551,12 @@ async fn followup_phrase(d: &Arc<Daemon>, transcript: &str, data: &serde_json::V
 > Решение по HUD-фазам: либо переиспользовать существующие (`Heard`/`Sent`), либо добавить `Phase::Thinking`/`Phase::Reply` в `route::hud` (чистый payload + тест) — рекомендуется добавить, чтобы UI показывал «Думаю…»/«Ответ». Небольшая правка `hud.rs` + `ui/toast.js renderVoiceHud`.
 
 - [ ] **Step 3:** `wakeword/action.rs` — заменить вызов `route_transcript` на `converse_once`:
-В `on_wake`, в конце потока: `tauri::async_runtime::block_on(crate::convo::converse_once(d.clone(), text, guard));` (вместо `route::route_transcript`). Гард едет в convo.
+      В `on_wake`, в конце потока: `tauri::async_runtime::block_on(crate::convo::converse_once(d.clone(), text, guard));` (вместо `route::route_transcript`). Гард едет в convo.
 
 - [ ] **Step 4: сборка + смоук-тест** ветвления (чистая часть уже покрыта; оркестратор — через смоук с фейками при наличии; иначе ручная проверка). `cargo build … --bin jarvis` → компилируется.
 
 - [ ] **Step 5: commit.**
+
 ```bash
 git add src-tauri/src/convo/ src-tauri/src/wakeword/action.rs src-tauri/src/route/hud.rs ui/toast.js
 git commit -m "feat(convo): оркестратор одного хода — reads+route+time → голосовой ответ"
@@ -571,6 +576,7 @@ yes/no confirm-карточку в тосте по образцу `route::pick`.
 - [ ] **Step 3: toast confirm-карточка** — в `route::hud` добавить `Phase::Confirm{nonce, text}`; в `ui/toast.js` рендер с кнопками «Да/Отмена» → `window.toast.voiceConfirm(nonce, bool)`; bridge-метод `voiceConfirm: (nonce, approved) => invoke('voice_confirm_resolve', {nonce, approved})`.
 
 - [ ] **Step 4: control в `skills::dispatch`** — добавить ветки `set_model`/`set_effort`/`keep_awake`/`mute`:
+
 ```rust
         "set_model" => {
             let (id, model) = (str_arg(action,"id"), str_arg(action,"model"));
@@ -584,11 +590,13 @@ yes/no confirm-карточку в тосте по образцу `route::pick`.
         // set_effort (validate_effort + set_effort_core), keep_awake (validate_minutes + Power::cmd),
         // mute (on/off; mute{on} ТОЛЬКО через confirm) — аналогично, каждый с confirm()+валидацией.
 ```
+
 где `confirm(d, text).await` эмитит `Phase::Confirm`, регистрирует nonce в `d.vconfirm`, ждёт `oneshot` (таймаут ~30с → false) и при подтверждении ОЗВУЧИВАЕТ эффект (`d.voice.say`).
 
 - [ ] **Step 5: тесты** — `confirm.rs` (resolve/cancel); валидация уже в Task 3; смоук control-ветки с фейковым confirm (mock resolve=false → ядро НЕ вызвано). Инвариант безопасности: `mute{on}` без подтверждения недостижим.
 
 - [ ] **Step 6: сборка + полный прогон + commit.**
+
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml convo::
 cargo build --manifest-path src-tauri/Cargo.toml --features wakeword-ort --bin jarvis
@@ -598,10 +606,11 @@ git add -A && git commit -m "feat(convo): управление (model/effort/kee
 ---
 
 ## Верификация (ручная, после Task 5-6)
-`npm start` (dev, мик). 1) «Hey Jarvis, сколько времени?» → голосом время.
-2) «…что у frontend?» → голосом статус сессии. 3) «…скажи фронту почини билд» → staged-send в сессию. 4) «…переключи фронт на opus» → confirm-карточка → «Да» → /model в сессии, голосом «переключила». 5) «спасибо» → короткое прощание.
+
+`npm start` (dev, мик). 1) «Hey Jarvis, сколько времени?» → голосом время. 2) «…что у frontend?» → голосом статус сессии. 3) «…скажи фронту почини билд» → staged-send в сессию. 4) «…переключи фронт на opus» → confirm-карточка → «Да» → /model в сессии, голосом «переключила». 5) «спасибо» → короткое прощание.
 
 ## Соответствие спеке (self-review)
+
 §Формы данных → Task 1. §Снапшот → Task 2. §Меню+валидация → Task 3,6. §TTS say → Task 4.
 §Оркестратор/reads/route/time → Task 5. §CONTROL позитивный confirm + mute-guard → Task 6.
 §Безопасность (валидация fail-closed, consent) → Task 3,6. Многоход/VAD/барж-ин → вне 2a (вехи 2b/2c).

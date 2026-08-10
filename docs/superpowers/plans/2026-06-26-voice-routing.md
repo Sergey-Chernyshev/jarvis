@@ -32,11 +32,12 @@
 - `stt/hub.rs` — `notify_panel()` дублирует `audio_state` в окно `toast`.
 - `ipc.rs` + `main.rs` — IPC `voice_pick_resolve`, `voice_stage_cancel` (in-process, НЕ в MCP-реестре).
 - `ui/toast.js`, `ui/toast-bridge.js` — HUD-карточка (стабильный id), пикер-карточка, stage-карточка с «Отменить», armed-пилюля.
-- `agent/mod.rs` — (Stage 9) параметр системного промпта в `run` *(только если tie-break пойдёт через ClaudeCliHost; по умолчанию используем отдельный one-shot хелпер).* 
+- `agent/mod.rs` — (Stage 9) параметр системного промпта в `run` _(только если tie-break пойдёт через ClaudeCliHost; по умолчанию используем отдельный one-shot хелпер)._
 
 **Порядок сборки:** чистые ядра (Stage 1–3) → транспорт HUD (4) → IPC (5) → оркестратор (6) → UI (7) → armed-индикатор (8) → LLM tie-break (9) → грани (10). Каждый stage — рабочий коммит; до Stage 6 фичи нет в проде (оркестратор не подключён), что безопасно.
 
 **Команды проверки (общие):**
+
 - Тест одного модуля: `cargo test --manifest-path src-tauri/Cargo.toml route::score`
 - Все тесты: `cargo test --manifest-path src-tauri/Cargo.toml`
 - Сборка: `cargo build --manifest-path src-tauri/Cargo.toml --features wakeword-ort --bin jarvis`
@@ -46,6 +47,7 @@
 ## Stage 1 — Детерминированный скорер (чистый)
 
 **Files:**
+
 - Create: `src-tauri/src/route/mod.rs` (объявить `pub mod score;` + `pub mod hud; …` по мере добавления)
 - Create: `src-tauri/src/route/score.rs`
 - Modify: `src-tauri/src/main.rs` (добавить `mod route;` рядом с прочими `mod`)
@@ -184,7 +186,7 @@ pub fn rank(transcript: &str, sessions: &[Session]) -> Vec<Scored> {
 
 pub fn decide(scored: &[Scored]) -> Decision {
     let Some(first) = scored.first() else { return Decision::Unknown };
-    if first.score < MIN_LEAD { 
+    if first.score < MIN_LEAD {
         // нет уверенного сигнала — но если есть хоть какие-то кандидаты, отдаём в пикер
         let cands: Vec<String> = scored.iter().take(TOPK).map(|s| s.session_id.clone()).collect();
         return if cands.is_empty() { Decision::Unknown } else { Decision::Ambiguous(cands) };
@@ -201,6 +203,7 @@ pub fn decide(scored: &[Scored]) -> Decision {
 - [ ] **Step 5: запустить тесты — PASS.** Run: `cargo test --manifest-path src-tauri/Cargo.toml route::score` → Expected: PASS (4 теста). Если пороги не сходятся с кейсами — подогнать `MIN_LEAD/GAP_RATIO`, НЕ ослабляя «no_signal → не Route».
 
 - [ ] **Step 6: commit.**
+
 ```bash
 git add src-tauri/src/route/ src-tauri/src/main.rs
 git commit -m "feat(route): детерминированный скорер маршрутизации (чистый, TDD)"
@@ -215,6 +218,7 @@ git commit -m "feat(route): детерминированный скорер ма
 Уверенный роут НЕ зовёт `reply_core` сразу: текст «висит» с окном отмены. Отмена до таймера ⇒ отправки не было.
 
 **Files:**
+
 - Create: `src-tauri/src/route/stage.rs`
 - Modify: `src-tauri/src/route/mod.rs` (`pub mod stage;`)
 
@@ -318,6 +322,7 @@ unsafe impl Send for SharedMap {}
 - [ ] **Step 4: запустить — PASS.** Run: `cargo test --manifest-path src-tauri/Cargo.toml route::stage` → Expected: PASS (3 теста).
 
 - [ ] **Step 5: commit.**
+
 ```bash
 git add src-tauri/src/route/
 git commit -m "feat(route): StageBuffer — отложенная отправка с до-исполнительной отменой (TDD)"
@@ -330,6 +335,7 @@ git commit -m "feat(route): StageBuffer — отложенная отправк�
 Зеркало `PendingConfirms`, но несёт выбор (`session_id`), а не bool.
 
 **Files:**
+
 - Create: `src-tauri/src/route/pick.rs`
 - Modify: `src-tauri/src/route/mod.rs` (`pub mod pick;`)
 
@@ -396,6 +402,7 @@ pub use crate::capability::confirm_panel::gen_nonce; // переиспользу
 - [ ] **Step 4: PASS.** Run: `cargo test --manifest-path src-tauri/Cargo.toml route::pick` → PASS.
 
 - [ ] **Step 5: commit.**
+
 ```bash
 git add src-tauri/src/route/
 git commit -m "feat(route): PendingPicks — реестр выбора пикера (TDD)"
@@ -406,6 +413,7 @@ git commit -m "feat(route): PendingPicks — реестр выбора пике�
 ## Stage 4 — Транспорт HUD (Rust → окно `toast`)
 
 **Files:**
+
 - Create: `src-tauri/src/route/hud.rs`
 - Modify: `src-tauri/src/route/mod.rs` (`pub mod hud;`), `src-tauri/src/windows.rs` (реэкспорт при нужде)
 
@@ -493,6 +501,7 @@ pub fn emit(d: &Daemon, p: Phase) {
 ```
 
 - [ ] **Step 4: добавить `windows::hud_emit`.** В `windows.rs` (рядом с `toast_emit`):
+
 ```rust
 /// Эмит произвольного HUD-события голоса в окно `toast` (с тем же буфером, что toast-*).
 pub fn hud_emit(d: &Daemon, payload: serde_json::Value) {
@@ -504,11 +513,13 @@ pub fn hud_emit(d: &Daemon, payload: serde_json::Value) {
     }
 }
 ```
+
 > Если `pending_toasts` типизирован под `&'static str` event — `"voice-hud"` подходит. Сверься с типом поля в `daemon.rs`.
 
 - [ ] **Step 5: PASS + сборка.** Run: `cargo test --manifest-path src-tauri/Cargo.toml route::hud` → PASS. Затем `cargo build --manifest-path src-tauri/Cargo.toml --features wakeword-ort --bin jarvis` → Expected: компилируется.
 
 - [ ] **Step 6: commit.**
+
 ```bash
 git add src-tauri/src/route/ src-tauri/src/windows.rs
 git commit -m "feat(route): транспорт HUD-фаз в окно toast (чистый payload + эмиттер)"
@@ -519,20 +530,25 @@ git commit -m "feat(route): транспорт HUD-фаз в окно toast (ч�
 ## Stage 5 — Поля в Daemon + IPC резолва пикера/отмены
 
 **Files:**
+
 - Modify: `src-tauri/src/daemon.rs` (поля `picks`, `stage` + init), `src-tauri/src/ipc.rs` (две команды), `src-tauri/src/main.rs` (регистрация в `invoke_handler`)
 
 - [ ] **Step 1: поля Daemon.** В `struct Daemon` добавить:
+
 ```rust
     pub picks: std::sync::Arc<crate::route::pick::PendingPicks>,
     pub stage: std::sync::Arc<crate::route::stage::StageBuffer>,
 ```
+
 В `Daemon::new(...)` при сборке структуры добавить:
+
 ```rust
             picks: std::sync::Arc::new(crate::route::pick::PendingPicks::new()),
             stage: std::sync::Arc::new(crate::route::stage::StageBuffer::new()),
 ```
 
 - [ ] **Step 2: IPC-команды** в `ipc.rs`:
+
 ```rust
 /// Тап по варианту пикера в тосте → доставить выбор ждущему роутеру. In-process
 /// (НЕ в MCP-реестре): голосовой агент не может сам себя выбрать.
@@ -558,6 +574,7 @@ pub fn voice_stage_cancel(app: AppHandle, nonce: String) -> Value {
 - [ ] **Step 4: сборка.** Run: `cargo build --manifest-path src-tauri/Cargo.toml --features wakeword-ort --bin jarvis` → Expected: компилируется.
 
 - [ ] **Step 5: commit.**
+
 ```bash
 git add src-tauri/src/daemon.rs src-tauri/src/ipc.rs src-tauri/src/main.rs
 git commit -m "feat(route): поля Daemon (picks/stage) + in-process IPC резолва пикера и отмены"
@@ -570,6 +587,7 @@ git commit -m "feat(route): поля Daemon (picks/stage) + in-process IPC ре�
 Сердце фичи. Связывает всё. Заменяет `trigger_agent` (агент-луп) на детерминированный роутер + stage-then-send. На этом этапе LLM-tie-break ещё не подключён — ветка `Ambiguous` идёт в пикер (LLM добавим в Stage 9).
 
 **Files:**
+
 - Modify: `src-tauri/src/wakeword/action.rs` (переписать `on_wake`; single-flight `AtomicBool`)
 - Create/Modify: `src-tauri/src/route/mod.rs` (функция `pub async fn route_transcript(d, transcript)` + `run_cycle`)
 
@@ -593,6 +611,7 @@ mod sf_tests {
 - [ ] **Step 2: FAIL.** Run: `cargo test --manifest-path src-tauri/Cargo.toml single_flight` → FAIL.
 
 - [ ] **Step 3: реализовать `SingleFlight`** (в `route/mod.rs` или `action.rs`):
+
 ```rust
 #[derive(Default, Clone)]
 pub struct SingleFlight(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -605,9 +624,11 @@ impl SingleFlight {
 }
 impl Drop for SfGuard { fn drop(&mut self) { self.0.store(false, std::sync::atomic::Ordering::SeqCst); } }
 ```
+
 PASS: `cargo test … single_flight`.
 
 - [ ] **Step 4: реализовать оркестратор** `route/mod.rs`:
+
 ```rust
 pub mod score; pub mod stage; pub mod pick; pub mod hud; pub mod classify; pub mod prompt;
 
@@ -681,6 +702,7 @@ async fn stage_and_send(d: Arc<Daemon>, session_id: String, label: String, text:
 - [ ] **Step 5: переписать `on_wake`** в `wakeword/action.rs`: убрать `trigger_agent`; добавить `sf: SingleFlight` в `AgentWakeAction`; в `on_wake` — `try_enter` (иначе залогировать «уже слушаю» и выйти), эмит `Listening`, захват окна (поднять `window_ms` до 6000), STT, затем `route::route_transcript(Daemon::get(&app), text)`; гард держать живым до конца async (move в таску). Все ранние выходы (ошибка capture/empty PCM/transcribe err) эмитят `Error`/`Empty` и роняют гард (Drop). Сохранить комментарий про недоверенный ввод. Удалить старый `trigger_agent` и его импорты, если больше не нужны.
 
 > Точный шаблон `on_wake` (ориентир, подгони под реальные сигнатуры `hub.open_capture/finish`, `stt.transcribe`):
+
 ```rust
 fn on_wake(&self, preroll: Vec<f32>) {
     let Some(guard) = self.sf.try_enter() else { crate::log::line("[wake] уже слушаю — повтор проигнорирован"); return; };
@@ -702,6 +724,7 @@ fn on_wake(&self, preroll: Vec<f32>) {
     });
 }
 ```
+
 (`block_on` внутри `std::thread` допустим — это не tokio-воркер. Если в проекте есть `tauri::async_runtime::spawn`, можно вместо потока спавнить async-таску и держать guard в ней.)
 
 - [ ] **Step 6: добавить поле `sf` в `AgentWakeAction`** и в `AgentWakeAction::new` (`sf: SingleFlight::default()`), `window_ms: 6000`.
@@ -709,6 +732,7 @@ fn on_wake(&self, preroll: Vec<f32>) {
 - [ ] **Step 7: сборка + все тесты.** Run: `cargo build … --bin jarvis` и `cargo test …` → Expected: компилируется, тесты зелёные (старые тесты `action.rs::test_support` про `CountingAction` не сломаны — `WakeAction` trait не менялся).
 
 - [ ] **Step 8: commit.**
+
 ```bash
 git add src-tauri/src/route/ src-tauri/src/wakeword/action.rs
 git commit -m "feat(route): оркестратор on_wake — детерминир. роутинг + stage-then-send + single-flight"
@@ -719,16 +743,20 @@ git commit -m "feat(route): оркестратор on_wake — детермин�
 ## Stage 7 — UI: HUD-карточка, пикер, stage-отмена в окне `toast`
 
 **Files:**
+
 - Modify: `ui/toast-bridge.js` (слушать `voice-hud`; методы `voicePickResolve`, `voiceStageCancel`), `ui/toast.js` (рендер фаз/пикера/стейджа по стабильному id)
 
 - [ ] **Step 1: bridge.** В `ui/toast-bridge.js` добавить подписку и методы:
+
 ```js
-listen('voice-hud', (e) => window.__voiceHud && window.__voiceHud(e.payload));
+listen("voice-hud", (e) => window.__voiceHud && window.__voiceHud(e.payload));
 window.voiceRoute = {
-  pick: (nonce, sessionId) => invoke('voice_pick_resolve', { nonce, sessionId }),
-  cancel: (nonce) => invoke('voice_stage_cancel', { nonce }),
+  pick: (nonce, sessionId) =>
+    invoke("voice_pick_resolve", { nonce, sessionId }),
+  cancel: (nonce) => invoke("voice_stage_cancel", { nonce }),
 };
 ```
+
 (сверь, как в этом файле уже зовётся `invoke`/`listen` — повтори существующий паттерн.)
 
 - [ ] **Step 2: рендер в `ui/toast.js`.** Реализовать `window.__voiceHud(p)`: одна карточка с фиксированным id `p.id` (`voice-hud`), обновляемая на месте (используя существующий dedup-by-id из `onAdd`). По `p.phase`:
@@ -744,6 +772,7 @@ window.voiceRoute = {
 - [ ] **Step 3: ручная проверка.** Запусти dev: `npm start`. Терминально нельзя юнит-тестить webview — проверка ручная (см. Stage 6/верификацию ниже). Зафиксируй, что фаза `heard` появляется в оверлее.
 
 - [ ] **Step 4: commit.**
+
 ```bash
 git add ui/toast.js ui/toast-bridge.js
 git commit -m "feat(ui): голосовой HUD в тосте — фазы, пикер, stage-отмена"
@@ -754,9 +783,11 @@ git commit -m "feat(ui): голосовой HUD в тосте — фазы, пи
 ## Stage 8 — Always-on индикатор «слышу тебя» (фикс «ничего не вижу»)
 
 **Files:**
+
 - Modify: `src-tauri/src/stt/hub.rs` (`notify_panel` дублирует `audio_state` в окно `toast`), `ui/toast.js`/`toast-bridge.js` (пилюля армед/тихо/нет-доступа)
 
 - [ ] **Step 1: дубль `audio_state` в toast.** В `hub.rs::notify_panel`, после `emit_to_panel(app,"audio_state",…)` добавить второй эмит в окно `toast`:
+
 ```rust
             let _ = app.emit_to("toast", "audio_state", &serde_json::json!({
                 "state": self.state().as_str(), "muted": self.is_muted(), "mic_silent": self.is_mic_silent(),
@@ -768,6 +799,7 @@ git commit -m "feat(ui): голосовой HUD в тосте — фазы, пи
 - [ ] **Step 3: ручная проверка.** `npm start`, ничего не говорить → видно «слышу/тихо»; сказать «Hey Jarvis» → HUD-цикл поверх.
 
 - [ ] **Step 4: commit.**
+
 ```bash
 git add src-tauri/src/stt/hub.rs ui/toast.js ui/toast-bridge.js
 git commit -m "feat(voice): always-on индикатор «слышу/тихо» в оверлее — фикс «ничего не вижу»"
@@ -780,6 +812,7 @@ git commit -m "feat(voice): always-on индикатор «слышу/тихо»
 Ветка `Ambiguous`: до пикера — один узкий вызов Клода (без тулзов, structured output). Низкая уверенность → пикер.
 
 **Files:**
+
 - Create: `src-tauri/src/route/prompt.rs` (чистая сборка + парс), `src-tauri/src/route/classify.rs` (trait + ClaudeCli + Fake)
 - Modify: `src-tauri/src/route/mod.rs` (вставить tie-break в `Ambiguous`)
 
@@ -798,6 +831,7 @@ git commit -m "feat(voice): always-on индикатор «слышу/тихо»
 > Рекомендация: вынеси чистую функцию `decide_action(decision: Decision, tie: Option<(String,f32)>) -> Action` где `Action = Send(id) | Pick(Vec<id>) | None`, и юнит-тестируй ЕЁ (полностью детерминирована). Оркестратор лишь исполняет `Action`. Это снимает need в живом Daemon в тестах.
 
 - [ ] **Step 7: сборка + тесты + commit.**
+
 ```bash
 git add src-tauri/src/route/
 git commit -m "feat(route): узкий LLM-tie-break Клода для близких кандидатов (trait + one-shot, TDD)"
@@ -816,11 +850,14 @@ git commit -m "feat(route): узкий LLM-tie-break Клода для близ�
   - голосовой `reply_core` недостижим без истёкшего НЕотменённого stage (тест на `decide_action`/`StageBuffer.cancel` ⇒ нет вызова);
   - резолв пикера — только через `voice_pick_resolve` (НЕ в MCP-реестре): добавь тест/ассерт, что `voice_pick_resolve`/`voice_stage_cancel` не зарегистрированы как `mcp__jarvis__*` (их нет в `capability/native/`).
 - [ ] **Step 5: финальная сборка + полный прогон.**
+
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo build --manifest-path src-tauri/Cargo.toml --features wakeword-ort --bin jarvis
 ```
+
 - [ ] **Step 6: commit.**
+
 ```bash
 git add -A
 git commit -m "feat(route): грани (queued/empty/zero) + тесты инвариантов безопасности"
@@ -831,6 +868,7 @@ git commit -m "feat(route): грани (queued/empty/zero) + тесты инва
 ## Верификация (ручная, после Stage 6–8)
 
 Из спеки §Поток. Запусти `npm start` (dev-сборка с микрофоном). Проверь по шагам:
+
 1. Молчание → в оверлее видна пилюля «слышу» (или «тихо — говори громче», если мик тихий) — **фикс «ничего не вижу»**.
 2. «Hey Jarvis» при ≥1 живой сессии и явной команде («почини билд во фронтенде») → HUD: Слушаю → Услышал «…» → «Отправлю → frontend… через 5с» + Отменить → (без отмены) «Отправлено».
 3. Жми «Отменить» в окне → «Отменено», в целевую сессию НИЧЕГО не ушло (проверь терминал).

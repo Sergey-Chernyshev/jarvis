@@ -16,26 +16,28 @@
  * Скрипт синхронный и без зависимостей: подключается в <head> ПЕРЕД bridge.js. */
 
 (() => {
-  const THEMES = ['light', 'dark', 'auto'];
-  const PAINTS = ['clover', 'coal', 'raspberry', 'custom'];
-  const MODES = ['overlay', 'window'];
-  const DENSITIES = ['compact', 'normal', 'roomy'];
-  const RADII = ['sharp', 'normal', 'soft'];
+  const THEMES = ["light", "dark", "midnight", "auto"];
+  const PAINTS = ["clover", "coal", "raspberry", "custom"];
+  const MODES = ["overlay", "window"];
+  const DENSITIES = ["compact", "normal", "roomy"];
+  const RADII = ["sharp", "normal", "soft"];
   const SCALE_MIN = 0.85;
   const SCALE_MAX = 1.4;
-  const KEY = 'jarvis.appearance';
+  const KEY = "jarvis.appearance";
   const root = document.documentElement;
 
-  const media = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  const media = window.matchMedia
+    ? window.matchMedia("(prefers-color-scheme: dark)")
+    : null;
 
   const DEFAULTS = {
-    theme: 'light',
-    paint: 'clover',
-    mode: 'overlay',
-    density: 'normal',
-    radius: 'normal',
+    theme: "light",
+    paint: "clover",
+    mode: "overlay",
+    density: "normal",
+    radius: "normal",
     scale: 1,
-    accent: '#0B6B44', // своя краска: база, из которой выводится весь акцент
+    accent: "#0B6B44", // своя краска: база, из которой выводится весь акцент
   };
 
   /** Текущий выбор пользователя (не разрешённый). */
@@ -50,15 +52,23 @@
 
   /** '#0B6B44' | '0b6' → {r,g,b}; мусор → null. */
   function parseHex(v) {
-    if (typeof v !== 'string' || !HEX.test(v.trim())) return null;
-    let h = v.trim().replace('#', '');
-    if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+    if (typeof v !== "string" || !HEX.test(v.trim())) return null;
+    let h = v.trim().replace("#", "");
+    if (h.length === 3)
+      h = h
+        .split("")
+        .map((c) => c + c)
+        .join("");
     const n = parseInt(h, 16);
     return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
   }
 
   const toHex = ({ r, g, b }) =>
-    '#' + [r, g, b].map((c) => clamp(Math.round(c), 0, 255).toString(16).padStart(2, '0')).join('').toUpperCase();
+    "#" +
+    [r, g, b]
+      .map((c) => clamp(Math.round(c), 0, 255).toString(16).padStart(2, "0"))
+      .join("")
+      .toUpperCase();
 
   /** Смешать два цвета: t=0 → a, t=1 → b. */
   const mix = (a, b, t) => ({
@@ -79,6 +89,55 @@
   const rgba = ({ r, g, b }, a) =>
     `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${a})`;
 
+  /** Насыщенность HSL: 0 — чистый серый, 1 — предельно цветной. */
+  function saturation({ r, g, b }) {
+    const max = Math.max(r, g, b) / 255;
+    const min = Math.min(r, g, b) / 255;
+    if (max === min) return 0;
+    const l = (max + min) / 2;
+    return (max - min) / (l > 0.5 ? 2 - max - min : max + min);
+  }
+
+  /**
+   * Не дать акценту схлопнуться в серость. Осветление почти-серого тона даёт
+   * ровно такой же серый — интерфейс остаётся бесцветным, и различить
+   * «работает / ждёт / ошибка» нечем. Поэтому у обесцвеченного тона поднимаем
+   * насыщенность к минимально читаемой, сохраняя выбранный оттенок; у чистого
+   * серого (оттенка нет вовсе) берём оттенок краски по умолчанию.
+   */
+  const MIN_ACCENT_SATURATION = 0.28;
+
+  function ensureChromatic(color) {
+    if (saturation(color) >= MIN_ACCENT_SATURATION) return color;
+    // Оттенок берём из самого тона; если его нет вовсе (чистый серый) —
+    // из краски по умолчанию, а не выдумываем свой.
+    const source =
+      Math.max(color.r, color.g, color.b) === Math.min(color.r, color.g, color.b)
+        ? parseHex(DEFAULTS.accent)
+        : color;
+    // Раздвигаем каналы вокруг собственной светлоты: так яркость (а значит и
+    // контраст текста на заливке) сохраняется, а насыщенность становится ровно
+    // требуемой — смешивание с чужим цветом до неё не дотягивало.
+    const grey = (source.r + source.g + source.b) / 3;
+    const spread = Math.max(
+      Math.abs(source.r - grey),
+      Math.abs(source.g - grey),
+      Math.abs(source.b - grey),
+    );
+    if (spread === 0) return color;
+    // У почти белого/чёрного раздвигать каналы некуда: клампинг вывернул бы
+    // тон (белый → едко-голубой). Подтягиваем светлоту к середине, где место
+    // для цвета есть, и уже там задаём насыщенность.
+    const mid = Math.min(216, Math.max(40, (color.r + color.g + color.b) / 3));
+    const scale = (MIN_ACCENT_SATURATION * 255) / (2 * spread);
+    const clamp = (v) => Math.min(255, Math.max(0, v));
+    return {
+      r: clamp(mid + (source.r - grey) * scale),
+      g: clamp(mid + (source.g - grey) * scale),
+      b: clamp(mid + (source.b - grey) * scale),
+    };
+  }
+
   /**
    * Своя краска: из одного тона выводим всю акцентную семью так же, как она
    * устроена у готовых красок — заливка, тональная подложка, цифра на ней,
@@ -91,55 +150,82 @@
     const ink = dark ? { r: 239, g: 242, b: 239 } : { r: 23, g: 32, b: 26 };
     const paper = dark ? { r: 30, g: 33, b: 31 } : white;
 
-    // на тёмном тёмный тон не читается — подтягиваем к светлому
-    const accent = dark && luminance(base) < 0.18 ? mix(base, white, 0.38) : base;
+    // на тёмном тёмный тон не читается — подтягиваем к светлому; но одного
+    // осветления мало: серый так и останется серым, поэтому возвращаем цвет
+    const lifted = dark && luminance(base) < 0.18 ? mix(base, white, 0.38) : base;
+    const accent = ensureChromatic(lifted);
     // текст акцентом на бумаге: слишком светлый тон притемняем
-    const accentText = !dark && luminance(accent) > 0.45 ? mix(accent, ink, 0.35) : accent;
+    const accentText =
+      !dark && luminance(accent) > 0.45 ? mix(accent, ink, 0.35) : accent;
     const onAccent = luminance(accent) > 0.42 ? ink : white;
 
     const set = (k, v) => root.style.setProperty(k, v);
-    set('--accent', toHex(accent));
-    set('--accent-text', toHex(accentText));
-    set('--accent-soft', dark ? rgba(accent, 0.15) : toHex(mix(accent, paper, 0.88)));
-    set('--accent-ink', toHex(dark ? mix(accent, white, 0.45) : mix(accent, ink, 0.3)));
-    set('--accent-line', rgba(accent, dark ? 0.34 : 0.28));
-    set('--on-accent', toHex(onAccent));
-    set('--on-accent-dim', rgba(onAccent, 0.62));
+    set("--accent", toHex(accent));
+    set("--accent-text", toHex(accentText));
+    set(
+      "--accent-soft",
+      dark ? rgba(accent, 0.15) : toHex(mix(accent, paper, 0.88)),
+    );
+    set(
+      "--accent-ink",
+      toHex(dark ? mix(accent, white, 0.45) : mix(accent, ink, 0.3)),
+    );
+    set("--accent-line", rgba(accent, dark ? 0.34 : 0.28));
+    set("--on-accent", toHex(onAccent));
+    set("--on-accent-dim", rgba(onAccent, 0.62));
 
     // Нейтрали тоже тонируются выбранным тоном — иначе поверхности остаются
     // зеленоватыми от «клевера» и спорят с краской. Готовые краски устроены
     // так же: у каждой свой оттенок бумаги, подложек и волосяных линий.
-    set('--surface', toHex(mix(paper, accent, dark ? 0.10 : 0.055)));
-    set('--surface-2', toHex(mix(paper, accent, dark ? 0.17 : 0.11)));
-    set('--paper-2', toHex(mix(paper, accent, dark ? 0.05 : 0.022)));
-    set('--line', dark ? rgba(accent, 0.16) : toHex(mix(paper, accent, 0.10)));
-    set('--line-strong', dark ? rgba(accent, 0.26) : toHex(mix(paper, accent, 0.20)));
-    set('--dot-sleep', toHex(mix(paper, accent, dark ? 0.22 : 0.18)));
+    set("--surface", toHex(mix(paper, accent, dark ? 0.1 : 0.055)));
+    set("--surface-2", toHex(mix(paper, accent, dark ? 0.17 : 0.11)));
+    set("--paper-2", toHex(mix(paper, accent, dark ? 0.05 : 0.022)));
+    set("--line", dark ? rgba(accent, 0.16) : toHex(mix(paper, accent, 0.1)));
+    set(
+      "--line-strong",
+      dark ? rgba(accent, 0.26) : toHex(mix(paper, accent, 0.2)),
+    );
+    set("--dot-sleep", toHex(mix(paper, accent, dark ? 0.22 : 0.18)));
   }
 
   /** Снять инлайновые токены — вернуть управление готовой краске из theme.css. */
   function clearCustomAccent() {
-    for (const k of ['--accent', '--accent-text', '--accent-soft', '--accent-ink',
-                     '--accent-line', '--on-accent', '--on-accent-dim',
-                     '--surface', '--surface-2', '--paper-2',
-                     '--line', '--line-strong', '--dot-sleep']) {
+    for (const k of [
+      "--accent",
+      "--accent-text",
+      "--accent-soft",
+      "--accent-ink",
+      "--accent-line",
+      "--on-accent",
+      "--on-accent-dim",
+      "--surface",
+      "--surface-2",
+      "--paper-2",
+      "--line",
+      "--line-strong",
+      "--dot-sleep",
+    ]) {
       root.style.removeProperty(k);
     }
   }
 
   /** auto → в реальную тему по системной настройке. */
-  const resolve = (theme) => (theme === 'auto' ? (media && media.matches ? 'dark' : 'light') : theme);
+  const resolve = (theme) =>
+    theme === "auto" ? (media && media.matches ? "dark" : "light") : theme;
+
+  /** Тёмная по светлоте, а не по имени: «Полночь» тоже тёмная. */
+  const isDark = (theme) => theme === "dark" || theme === "midnight";
 
   function paint() {
     const theme = resolve(choice.theme);
-    root.setAttribute('data-theme', theme);
-    root.setAttribute('data-paint', choice.paint);
+    root.setAttribute("data-theme", theme);
+    root.setAttribute("data-paint", choice.paint);
     // раскладка: 'overlay' — накладка ⌘J, 'window' — обычное окно (макет 14h)
-    root.setAttribute('data-mode', choice.mode);
-    root.setAttribute('data-density', choice.density);
-    root.setAttribute('data-radius', choice.radius);
-    root.style.setProperty('--ui-scale', String(choice.scale));
-    if (choice.paint === 'custom') applyCustomAccent(theme === 'dark');
+    root.setAttribute("data-mode", choice.mode);
+    root.setAttribute("data-density", choice.density);
+    root.setAttribute("data-radius", choice.radius);
+    root.style.setProperty("--ui-scale", String(choice.scale));
+    if (choice.paint === "custom") applyCustomAccent(isDark(theme));
     else clearCustomAccent();
   }
 
@@ -153,41 +239,58 @@
       mode: clean(n.mode, MODES, prev.mode),
       density: clean(n.density, DENSITIES, prev.density),
       radius: clean(n.radius, RADII, prev.radius),
-      scale: Number.isFinite(+n.scale) && +n.scale > 0
-        ? clamp(+n.scale, SCALE_MIN, SCALE_MAX) : prev.scale,
+      scale:
+        Number.isFinite(+n.scale) && +n.scale > 0
+          ? clamp(+n.scale, SCALE_MIN, SCALE_MAX)
+          : prev.scale,
       accent: parseHex(n.accent) ? toHex(parseHex(n.accent)) : prev.accent,
     };
     paint();
     if (persist) {
-      try { localStorage.setItem(KEY, JSON.stringify(choice)); } catch { /* приватный режим */ }
+      try {
+        localStorage.setItem(KEY, JSON.stringify(choice));
+      } catch {
+        /* приватный режим */
+      }
     }
     const changed = Object.keys(choice).some((k) => choice[k] !== prev[k]);
     if (changed) {
-      window.dispatchEvent(new CustomEvent('jarvis:appearance', { detail: { ...choice } }));
+      window.dispatchEvent(
+        new CustomEvent("jarvis:appearance", { detail: { ...choice } }),
+      );
     }
   }
 
   // 1. Кэш — синхронно, до первой отрисовки: панель не моргает белым на тёмной теме.
   try {
-    const cached = JSON.parse(localStorage.getItem(KEY) || 'null');
+    const cached = JSON.parse(localStorage.getItem(KEY) || "null");
     if (cached) apply(cached, { persist: false });
     else paint();
-  } catch { paint(); }
+  } catch {
+    paint();
+  }
 
   // 2. Системная тема — только когда выбран auto.
   if (media) {
     const onSystem = () => {
-      if (choice.theme !== 'auto') return;
+      if (choice.theme !== "auto") return;
       paint();
-      window.dispatchEvent(new CustomEvent('jarvis:appearance', { detail: { ...choice } }));
+      window.dispatchEvent(
+        new CustomEvent("jarvis:appearance", { detail: { ...choice } }),
+      );
     };
-    if (media.addEventListener) media.addEventListener('change', onSystem);
+    if (media.addEventListener) media.addEventListener("change", onSystem);
     else if (media.addListener) media.addListener(onSystem);
   }
 
   window.jarvisTheme = {
-    THEMES, PAINTS, MODES, DENSITIES, RADII,
-    SCALE_MIN, SCALE_MAX,
+    THEMES,
+    PAINTS,
+    MODES,
+    DENSITIES,
+    RADII,
+    SCALE_MIN,
+    SCALE_MAX,
     DEFAULTS: { ...DEFAULTS },
     get: () => ({ ...choice }),
     /** Разрешённая тема — та, что реально на <html> (auto уже развёрнут). */
@@ -196,10 +299,22 @@
     set(next) {
       apply(next);
       const patch = {};
-      for (const k of ['theme', 'paint', 'mode', 'density', 'radius', 'scale', 'accent']) {
+      for (const k of [
+        "theme",
+        "paint",
+        "mode",
+        "density",
+        "radius",
+        "scale",
+        "accent",
+      ]) {
         if (next && next[k] !== undefined) patch[k] = choice[k];
       }
-      try { window.jarvis?.setSettings?.(patch); } catch { /* окно без моста */ }
+      try {
+        window.jarvis?.setSettings?.(patch);
+      } catch {
+        /* окно без моста */
+      }
     },
     /** Вернуть вид к заводскому (краска и режим остаются — их выбирают отдельно). */
     reset() {
@@ -214,23 +329,37 @@
   };
 
   // 3. Мост появляется позже скрипта — ждём его и подтягиваем settings.json.
-  const FIELDS = ['theme', 'paint', 'mode', 'density', 'radius', 'scale', 'accent'];
+  const FIELDS = [
+    "theme",
+    "paint",
+    "mode",
+    "density",
+    "radius",
+    "scale",
+    "accent",
+  ];
   const pull = () => {
     const j = window.jarvis;
     if (!j) return false;
     try {
-      Promise.resolve(j.getSettings?.()).then((s) => {
-        if (!s) return;
-        const next = {};
-        for (const k of FIELDS) if (s[k] !== undefined) next[k] = s[k];
-        if (Object.keys(next).length) apply(next);
-      }).catch(() => {});
+      Promise.resolve(j.getSettings?.())
+        .then((s) => {
+          if (!s) return;
+          const next = {};
+          for (const k of FIELDS) if (s[k] !== undefined) next[k] = s[k];
+          if (Object.keys(next).length) apply(next);
+        })
+        .catch(() => {});
       j.onAppearance?.((p) => apply(p));
-    } catch { /* мост есть, но команда не поддержана — остаёмся на кэше */ }
+    } catch {
+      /* мост есть, но команда не поддержана — остаёмся на кэше */
+    }
     return true;
   };
   if (!pull()) {
     let tries = 0;
-    const t = setInterval(() => { if (pull() || ++tries > 40) clearInterval(t); }, 50);
+    const t = setInterval(() => {
+      if (pull() || ++tries > 40) clearInterval(t);
+    }, 50);
   }
 })();

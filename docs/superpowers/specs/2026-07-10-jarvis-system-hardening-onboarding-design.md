@@ -112,4 +112,3 @@ any state -> degraded / failed -> retry
 - Ни proxy credentials, ни tokens не появляются в UI, logs или process argv.
 - Любой красный readiness status содержит одно конкретное следующее действие.
 - Коммерчески несовместимые модели явно помечены до загрузки.
-

@@ -96,4 +96,3 @@
 - [ ] Document architecture, commands/evidence, fixed findings, remaining risks, business gaps, and ranked roadmap.
 - [ ] Include the non-commercial default model, notarization, profile drift, resource usage, supportability, and hook-version risks.
 - [ ] Re-read the design and verify every requirement against code/tests/live evidence.
-

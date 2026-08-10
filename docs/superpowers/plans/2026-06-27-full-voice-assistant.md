@@ -25,6 +25,7 @@ OS (звук, музыка), и **сквозной контекст разгов
 ## Инкременты (TDD, рабочий коммит на этап)
 
 ### Инкремент 1 — OS-control скилы (`convo/os.rs` + `macos.rs`)
+
 - `macos.rs`: `media_next/media_prev/media_toggle` (коды MediaRemote 4/5/2 через
   существующий `mra_run`).
 - `convo/os.rs` (чистое ядро + тонкий exec):
@@ -35,6 +36,7 @@ OS (звук, музыка), и **сквозной контекст разгов
 - Тесты: коды команд, валидация имени (инъекции отклонены), кламп громкости.
 
 ### Инкремент 2 — расширенные read-скилы (`convo/skills.rs`)
+
 - `session_detail{id}` — ветка/модель/effort/last_prompt/статус из `d.session(id)`.
 - `search_chats{query}` — поиск по транскриптам живых сессий → совпадения (сниппеты).
 - `metrics` — сводка использования (`ipc::usage_summary`).
@@ -43,6 +45,7 @@ OS (звук, музыка), и **сквозной контекст разгов
   (чистый), форма Data.
 
 ### Инкремент 3 — внешний ассистент (`agent/assistant.rs` + скил `assistant`)
+
 - `build_assistant_args(query, cwd, model)` (чистая, тест): `-p`, stream-json,
   `--allowedTools WebSearch WebFetch Read Grep Glob`, `--strict-mcp-config`,
   `--setting-sources project,local`, изолированный scratch-cwd, voice-friendly
@@ -54,6 +57,7 @@ OS (звук, музыка), и **сквозной контекст разгов
 - Триаж в `plan.rs`: внешние/общие вопросы и «найди/поищи» → `assistant`.
 
 ### Инкремент 4 — сквозной контекст (`convo/memory.rs` + персист)
+
 - `Memory::persisted_path()`, `load_persisted(max)`, `save()` —
   `~/.jarvis[-dev]/convo-memory.json`. Хранит ТОЛЬКО санированные ходы (как сейчас:
   user/assistant/короткая сводка) — инвариант «нет сырого untrusted» сохранён.
@@ -62,10 +66,12 @@ OS (звук, музыка), и **сквозной контекст разгов
 - Тесты: round-trip сериализации; клампы; инвариант (нет сырого untrusted).
 
 ## Вне scope (этой итерации)
+
 - 4b: выполнение произвольных команд агентом через permission-tool (отдельный риск-слой).
 - Акустический барж-ин 2c (нативный AEC) — отдельная research-веха.
 - Полный OS-automation (клики по UI, Show Numbers) — нужен accessibility-слой.
 
 ## Тестирование
+
 Каждый инкремент — чистые юнит-тесты ядра + smoke на форму Outcome. Полный
 `cargo test` зелёный на каждом коммите. UI вживую не запускается (как и прежде).

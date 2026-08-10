@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${JARVIS_TEST_TOOL_LOG:?}"
+printf 'xcrun %s\n' "$*" >>"$JARVIS_TEST_TOOL_LOG"
+
+if [[ "${1:-}" == "vtool" ]]; then
+  cat <<'EOF'
+Load command 11
+      cmd LC_BUILD_VERSION
+ platform MACOS
+    minos 13.0
+EOF
+  exit 0
+fi
+exit 2

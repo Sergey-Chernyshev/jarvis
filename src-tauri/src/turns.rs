@@ -223,19 +223,18 @@ fn patch_files(patch: &str) -> Vec<(String, &'static str)> {
 
 /// Версия промпта/схемы — растёт при любом изменении PROMPT_HEAD/бюджетов,
 /// инвалидирует кэш сводок (turnsum.rs).
-pub const PROMPT_VERSION: u32 = 1;
+pub const PROMPT_VERSION: u32 = 2;
 
 /// Шапка: правила + схема + few-shot (по ресёрчу: пример держит язык и форму
 /// JSON лучше инструкций; префилл `{` через CLI недоступен — компенсируем).
-const PROMPT_HEAD: &str = r#"Ты суммаризируешь один ход кодинг-агента для ленты чата. Отвечай СТРОГО одним JSON-объектом, без markdown и текста вокруг.
+/// summary — развёрнутый разбор РЕЗУЛЬТАТОВ хода (не список действий).
+const PROMPT_HEAD: &str = r#"Ты пишешь разбор результатов одного хода кодинг-агента для человека, который хочет понять итог, не читая сырую ленту действий. Отвечай СТРОГО одним JSON-объектом, без текста вокруг.
 Правила:
 - Пиши по-русски. Пути файлов, команды, имена функций/тестов, флаги — оставляй как есть на английском, НЕ переводи и НЕ транслитерируй.
 - Используй ТОЛЬКО факты из блока FACTS и текста хода. Не выдумывай файлы, команды или результаты, которых там нет.
+- summary: развёрнутый разбор в 1–3 абзаца (внутри JSON-строки, переносы строк как \n). Раскрой: (а) что по сути делалось и зачем; (б) что получилось — ключевые результаты, включая исход тестов/команд словами; (в) оговорки и риски, если есть. Пиши про СУТЬ и ИТОГ, а не перечисляй действия по шагам. Можно короткий список пунктов внутри абзаца.
 - files: ровно те пути, что даны в FACTS.files (копируй посимвольно); note — одна фраза до 60 символов, что изменилось.
-- summary: 2–5 предложений, что сделано и итог.
-- docs_digest: если агент выдал доку/отчёт/длинные выводы — сжатый пересказ в 3–6 пунктов, числа/имена/пути дословно; иначе пустая строка.
-- commands: итог команд/тестов одной строкой; не было — пустая строка.
-Схема: {"summary": string, "files": [{"path": string, "note": string}], "docs_digest": string, "commands": string}
+Схема: {"summary": string, "files": [{"path": string, "note": string}]}
 
 Пример.
 FACTS:
@@ -249,7 +248,7 @@ commands:
 Агент: Исправил сериализацию биндингов в settings2.js — раньше терялся сентинел "none". Тесты зелёные: 281 passed.
 
 Ответ:
-{"summary": "Починено сохранение хоткеев: при сериализации биндингов терялось состояние «не назначен» (сентинел none). Тесты прогнаны, все зелёные.", "files": [{"path": "ui/settings2.js", "note": "исправлена сериализация биндингов"}], "docs_digest": "", "commands": "npm test — 281 passed"}
+{"summary": "Проблема была в сериализации настроек: при сохранении биндингов хоткеев терялось состояние «не назначен» (сентинел none), из-за чего после перезапуска хоткей сбрасывался. Починил сохранение сентинела и добавил тест ровно на этот случай, чтобы регрессия не вернулась.\n\nПрогон зелёный — 281 тест. Оговорка: старые сохранённые настройки подхватываются на лету, миграция не нужна.", "files": [{"path": "ui/settings2.js", "note": "исправлена сериализация биндингов"}]}
 
 Теперь реальный ход.
 "#;
@@ -317,15 +316,16 @@ pub fn build_prompt(user_prompt: &str, facts: &TurnFacts) -> String {
     p
 }
 
-/// Карточка сводки хода — то, что кэшируется и уходит в UI (поля как в схеме
-/// промпта, snake_case: JS читает card.docs_digest).
+/// Карточка хода — то, что кэшируется и уходит в UI. `summary` теперь
+/// развёрнутый ИИ-разбор результатов (markdown, 1–3 абзаца), не фактовая
+/// выжимка (спека 2026-07-18-turn-ai-analysis-redesign). `reply` — финальный
+/// ответ агента для сворачиваемого блока, заполняется из фактов (не из LLM).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TurnCard {
     pub summary: String,
     pub files: Vec<CardFile>,
-    pub docs_digest: String,
-    pub commands: String,
+    pub reply: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -385,10 +385,11 @@ pub fn parse_card(out: &str, facts: &TurnFacts) -> Option<TurnCard> {
             .map(|x| x.kind.clone())
             .unwrap_or_default();
     }
-    card.summary = ellipsize(&one_line(&card.summary), 600);
-    // docs_digest без one_line намеренно: это многострочные пункты дайджеста.
-    card.docs_digest = ellipsize(&card.docs_digest, 1200);
-    card.commands = ellipsize(&one_line(&card.commands), 200);
+    // summary — многоабзацный разбор: one_line НЕ применяем (сохраняем переносы).
+    card.summary = ellipsize(&card.summary, 2200);
+    // reply — финальный ответ агента для сворачиваемого блока; из фактов, не из
+    // LLM (в схеме его нет). Голова+хвост, чтобы длинный ответ не раздувал кэш.
+    card.reply = head_tail(&facts.final_reply, 3000, 2000, 1000);
     (!card.summary.is_empty()).then_some(card)
 }
 
@@ -605,11 +606,30 @@ mod tests {
 
     #[test]
     fn parse_card_clean_json() {
-        let out = r#"{"summary": "Сделано.", "files": [{"path": "a.rs", "note": "правка"}], "docs_digest": "", "commands": "cargo test — ok"}"#;
+        let out = r#"{"summary": "Сделано.", "files": [{"path": "a.rs", "note": "правка"}]}"#;
         let c = parse_card(out, &facts_with(&["a.rs"])).unwrap();
         assert_eq!(c.summary, "Сделано.");
         assert_eq!(c.files.len(), 1);
-        assert_eq!(c.commands, "cargo test — ok");
+    }
+
+    #[test]
+    fn parse_card_keeps_multiline_analysis_and_fills_reply() {
+        // разбор многоабзацный — переносы строк НЕ схлопываются в одну строку;
+        // reply берётся из фактов (в схеме LLM его нет)
+        let mut facts = facts_with(&["a.rs"]);
+        facts.final_reply = "Готово, тесты зелёные.".into();
+        let out = r#"{"summary": "Первый абзац разбора.\n\nВторой абзац: итог и оговорки.", "files": []}"#;
+        let c = parse_card(out, &facts).unwrap();
+        assert!(c.summary.contains('\n'), "переносы абзацев сохранены: {:?}", c.summary);
+        assert_eq!(c.reply, "Готово, тесты зелёные.", "reply из фактов, не из LLM");
+    }
+
+    #[test]
+    fn parse_card_ignores_legacy_fields() {
+        // старые поля docs_digest/commands в выдаче не ломают разбор (serde
+        // игнорит неизвестные) — важно на переходе версий кэша
+        let out = r#"{"summary": "Ок.", "files": [], "docs_digest": "x", "commands": "y"}"#;
+        assert_eq!(parse_card(out, &facts_with(&[])).unwrap().summary, "Ок.");
     }
 
     #[test]

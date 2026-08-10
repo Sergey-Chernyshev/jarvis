@@ -152,6 +152,7 @@ impl Endpointer {
 ```
 
 - [ ] **Step 4: PASS + commit.**
+
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml convo::vad
 git add src-tauri/src/convo/ && git commit -m "feat(convo): чистый VAD-эндпойнтер (RMS + автомат начала/конца) — TDD"
@@ -258,6 +259,7 @@ impl Memory {
 ```
 
 - [ ] **Step 4: PASS + commit.**
+
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml convo::memory
 git add src-tauri/src/convo/ && git commit -m "feat(convo): память разговора (кольцо ходов, без сырого untrusted) — TDD"
@@ -272,13 +274,16 @@ git add src-tauri/src/convo/ && git commit -m "feat(convo): память раз�
 **Files:** Modify `src-tauri/src/voice/composer.rs` (поле сигнала в Utterance), `voice/mod.rs` (`speak_blocking`), `voice/queue.rs` (не ломать дедуп).
 
 - [ ] **Step 1:** добавить в `Utterance` опц. канал завершения:
+
 ```rust
     /// Some → воркер сигналит сюда после play_blocking (для speak_blocking).
     pub done: Option<std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>,
 ```
+
 Обновить ВСЕ конструкторы Utterance (speak/speak_text/test_phrase/say) полем `done: None`. (`Utterance` уже не Default — заполняем явно.)
 
 - [ ] **Step 2:** в воркере (`voice/mod.rs` spawn_worker, после `play_blocking`/прерывания) — сигналить:
+
 ```rust
             // (после play_blocking и веток ошибки/мьюта — на ВСЕХ путях, где утта «отыграна»)
             if let Some(done) = &u.done {
@@ -287,9 +292,11 @@ git add src-tauri/src/convo/ && git commit -m "feat(convo): память раз�
                 cv.notify_all();
             }
 ```
+
 Важно: сигналить и при `is_muted()` (continue) — иначе вызывающий зависнет. Вынести сигнал так, чтобы он срабатывал на любом исходе утты.
 
 - [ ] **Step 3:** метод:
+
 ```rust
     /// Озвучить и ДОЖДАТЬСЯ конца (для полудуплексного цикла). Возвращает, когда
     /// речь отыграна/прервана/смьючена. Таймаут-страховка ~30с.
@@ -316,9 +323,11 @@ git add src-tauri/src/convo/ && git commit -m "feat(convo): память раз�
         }
     }
 ```
+
 (Сверь `crate::util::now_ms`/`Instant` доступность; `now_ms` есть в util.)
 
 - [ ] **Step 4: сборка + commit.**
+
 ```bash
 cargo build --manifest-path src-tauri/Cargo.toml --features wakeword-ort --bin jarvis
 git add src-tauri/src/voice/ && git commit -m "feat(voice): speak_blocking — сигнал завершения речи для полудуплексного цикла"
@@ -331,6 +340,7 @@ git add src-tauri/src/voice/ && git commit -m "feat(voice): speak_blocking — �
 **Files:** Create `src-tauri/src/convo/listen.rs`; Modify `convo/mod.rs` (`pub mod listen;`).
 
 - [ ] **Step 1: реализация** (тонкая обёртка; чистая логика уже в vad.rs):
+
 ```rust
 //! Потоковый захват реплики с VAD-эндпойнтингом поверх AudioHub::subscribe_wake.
 //! 80мс-кадры (FRAME_LEN=1280 @16к). Полудуплекс: звать, когда Джарвис молчит.
@@ -367,9 +377,11 @@ pub fn listen(hub: &Arc<AudioHub>, max_wait_frames: u32) -> ListenResult {
     }
 }
 ```
+
 > Тап дропается на выходе (Drop отписывает). Тест — ручной/смоук (поток); чистый автомат покрыт vad.rs.
 
 - [ ] **Step 2: сборка + commit.**
+
 ```bash
 cargo build --manifest-path src-tauri/Cargo.toml --features wakeword-ort --bin jarvis
 git add src-tauri/src/convo/ && git commit -m "feat(convo): потоковый VAD-захват реплики (listen.rs поверх WakeTap)"
@@ -389,6 +401,7 @@ git add src-tauri/src/convo/ && git commit -m "feat(convo): потоковый V
   - стоп-фраза: если `p.end` → вернуть true.
 
 - [ ] **Step 2: `start_conversation`** — цикл:
+
 ```rust
 pub fn start_conversation(d: Arc<Daemon>, _preroll: Vec<f32>, guard: SfGuard) {
     std::thread::spawn(move || {
@@ -416,11 +429,13 @@ fn is_stop_phrase(t: &str) -> bool {
     ["спасибо", "хватит", "всё", "отбой", "стоп"].iter().any(|s| t.contains(s))
 }
 ```
+
 (STT-вызов — как в текущем on_wake: `d.stt.transcribe(&pcm, &d.stt.options())`.)
 
 - [ ] **Step 3:** `wakeword/action.rs` on_wake → `convo::start_conversation(d, preroll, guard)` (вместо `converse_once`). Первый ход тоже идёт через `listen` (preroll можно влить как первые кадры — опц.).
 
 - [ ] **Step 4: сборка + смоук + commit.**
+
 ```bash
 cargo build … --bin jarvis ; cargo test … convo::
 git add -A && git commit -m "feat(convo): многоходовый разговор — VAD-цикл + память + полудуплекс + conversation-lock"
@@ -431,7 +446,9 @@ git add -A && git commit -m "feat(convo): многоходовый разгов�
 ---
 
 ## Верификация (ручная, мик)
+
 `npm start`. «Hey Jarvis» → «сколько времени?» (ответ голосом) → БЕЗ повторного wake: «а сколько сессий ждёт?» (помнит контекст) → «переключи фронт на opus» (Да/Отмена) → «спасибо» (прощается, разговор закрыт). Проверить: пока Джарвис говорит, мик не слушает (полудуплекс); пауза ~9с без речи закрывает разговор; повторный «Hey Jarvis» в разговоре игнорируется.
 
 ## Соответствие спеке (self-review)
+
 §2b VAD → Task 1,4. §Память (без сырого untrusted) → Task 2. §Полудуплекс/speak_blocking → Task 3,5. §Conversation-lock/подавление wake → Task 5. §Конец (тишина/стоп-фраза) → Task 5. Барж-ин/AEC → веха 2c (вне 2b).

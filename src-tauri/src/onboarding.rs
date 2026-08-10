@@ -209,6 +209,7 @@ impl ReadinessItem {
 #[serde(rename_all = "camelCase")]
 pub struct ReadinessSnapshot {
     pub core_ready: bool,
+    pub config_health: crate::config_health::ConfigHealth,
     pub agents: Vec<ReadinessItem>,
     pub transport: Vec<ReadinessItem>,
     pub capabilities: Vec<ReadinessItem>,
@@ -222,11 +223,12 @@ fn build_readiness(
     status: Status,
     job: InstallJobSnapshot,
     proxy_configured: bool,
+    config_health: crate::config_health::ConfigHealth,
 ) -> ReadinessSnapshot {
     let core_ready = health.ok();
     let mut warnings = Vec::new();
     if !health.claude_present && !health.codex_present {
-        warnings.push("Не найден ни Claude Code, ни Codex CLI.".into());
+        warnings.push("Не найден ни Claude Code, ни Codex.".into());
     }
     if !health.hook_bin {
         warnings.push("Hook binary отсутствует — запусти восстановление интеграции.".into());
@@ -252,9 +254,9 @@ fn build_readiness(
             health.claude_present,
             health.claude_present,
             if health.claude_present {
-                "События и lifecycle hooks"
+                "События и жизненный цикл"
             } else {
-                "CLI не найден в PATH"
+                "Команда не найдена"
             },
         )
         .action("Установить Claude Code или обновить PATH"),
@@ -265,9 +267,9 @@ fn build_readiness(
             health.codex_present,
             health.codex_present,
             if health.codex_present {
-                "Hooks без глобального bypass; Codex может запросить доверие"
+                "События подключены; Codex может запросить доверие"
             } else {
-                "CLI не найден в PATH"
+                "Команда не найдена"
             },
         )
         .action("Установить Codex или подтвердить доверие hooks"),
@@ -275,32 +277,32 @@ fn build_readiness(
     let transport = vec![
         ReadinessItem::new(
             "hook",
-            "Hook transport",
+            "События агентов",
             health.hook_bin,
             true,
             true,
-            "Локальный бинарь событий",
+            "Локальная доставка в Jarvis",
         )
         .action("Восстановить интеграцию"),
         ReadinessItem::new(
             "tmux",
-            "Terminal remote",
+            "Управление терминалом",
             status.tmux_conf && status.path_block,
             status.tmux_conf,
             false,
-            "Опциональные команды в живую tmux-сессию",
+            "Необязательные команды в активную сессию",
         )
         .action("Установить tmux и повторить настройку"),
         ReadinessItem::new(
             "socket",
-            "Runtime socket",
+            "Локальный канал",
             health.socket,
             true,
             false,
             if health.socket {
-                "Демон принимает события"
+                "Jarvis принимает события"
             } else {
-                "Запускается вместе с Jarvis"
+                "Поднимается вместе с приложением"
             },
         ),
     ];
@@ -342,6 +344,7 @@ fn build_readiness(
     ];
     ReadinessSnapshot {
         core_ready,
+        config_health,
         agents,
         transport,
         capabilities,
@@ -352,18 +355,35 @@ fn build_readiness(
 }
 
 fn readiness_snapshot(app: &AppHandle) -> ReadinessSnapshot {
-    let proxy_configured = crate::daemon::Daemon::get(app).settings.proxy().is_some();
+    let daemon = crate::daemon::Daemon::get(app);
+    let proxy_configured = daemon.settings.proxy().is_some();
+    let config_health = daemon.settings.health();
     build_readiness(
         install::integration_health(),
         install::status(),
         current_job(),
         proxy_configured,
+        config_health,
     )
 }
 
 fn emit_both(app: &AppHandle, event: &str, payload: Value) {
     let _ = app.emit_to("main", event, payload.clone());
     let _ = app.emit_to("onboarding", event, payload);
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    let raw = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|value| (*value).to_string())
+        })
+        .unwrap_or_else(|| "неизвестная внутренняя ошибка".into());
+    let one_line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    one_line.chars().take(320).collect()
 }
 
 #[tauri::command]
@@ -402,9 +422,13 @@ pub fn onboarding_run(app: AppHandle, proxy: Option<String>) -> InstallJobSnapsh
             })
         }));
         let failures = match outcome {
-            Ok(health) if health.ok() => Vec::new(),
-            Ok(_) => vec!["Core integration не прошла итоговую readiness-проверку".into()],
-            Err(_) => vec!["Core installer аварийно остановился; безопасно повтори установку".into()],
+            Ok(Ok(health)) if health.ok() => Vec::new(),
+            Ok(Ok(_)) => vec!["Интеграция не прошла итоговую проверку готовности.".into()],
+            Ok(Err(error)) => vec![error],
+            Err(payload) => vec![format!(
+                "Установщик остановился: {}",
+                panic_payload_message(payload.as_ref())
+            )],
         };
         finish_job(failures);
         let readiness = readiness_snapshot(&app);
@@ -715,6 +739,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn panic_payload_keeps_concrete_reason() {
+        let owned: Box<dyn std::any::Any + Send> =
+            Box::new(String::from("HOME недоступен для установки hooks"));
+        assert_eq!(
+            panic_payload_message(owned.as_ref()),
+            "HOME недоступен для установки hooks"
+        );
+        let borrowed: Box<dyn std::any::Any + Send> = Box::new("PATH недоступен");
+        assert_eq!(panic_payload_message(borrowed.as_ref()), "PATH недоступен");
+    }
+
+    #[test]
     fn job_machine_rejects_duplicate_start_and_replaces_latest_step() {
         let mut jobs = JobMachine::default();
         let first = jobs.start("core", vec![]).expect("first job starts");
@@ -764,9 +800,25 @@ mod tests {
             ..InstallJobSnapshot::default()
         };
         assert!(
-            !build_readiness(health.clone(), status.clone(), done_job.clone(), false).core_ready
+            !build_readiness(
+                health.clone(),
+                status.clone(),
+                done_job.clone(),
+                false,
+                crate::config_health::ConfigHealth::healthy("/tmp/settings.json"),
+            )
+            .core_ready
         );
         health.hook_bin = true;
-        assert!(build_readiness(health, status, done_job, true).core_ready);
+        assert!(
+            build_readiness(
+                health,
+                status,
+                done_job,
+                true,
+                crate::config_health::ConfigHealth::healthy("/tmp/settings.json"),
+            )
+            .core_ready
+        );
     }
 }

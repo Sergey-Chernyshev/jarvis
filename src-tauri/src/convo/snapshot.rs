@@ -14,7 +14,7 @@ fn ellip(s: &str, n: usize) -> String {
 
 /// Собрать снапшот: время, флаги (mute/keep-awake), список живых сессий + счётчики.
 pub fn build_snapshot(sessions: &[Session], now: &str, muted: bool, keep_awake: bool) -> String {
-    let live: Vec<&Session> = sessions.iter().filter(|s| s.renamed_to.is_none()).collect();
+    let live: Vec<&Session> = sessions.iter().collect();
     let waiting = live.iter().filter(|s| s.status == Status::Waiting).count();
     let working = live.iter().filter(|s| s.status == Status::Working).count();
 
@@ -45,9 +45,18 @@ pub fn build_snapshot(sessions: &[Session], now: &str, muted: bool, keep_awake: 
         // + ветка + краткая сводка (summary). Раньше слали только task/last_prompt,
         // которые на практике пусты → голос не знал, чем заняты проекты, и не мог
         // ни описать их, ни сопоставить названный проект (DATA-баг).
-        let branch = s.branch.as_deref().map(|b| format!(" ({b})")).unwrap_or_default();
+        let branch = s
+            .branch
+            .as_deref()
+            .map(|b| format!(" ({b})"))
+            .unwrap_or_default();
         out.push_str(&format!("- [{id}] {project}{branch} · {status}"));
-        if let Some(desc) = s.title.as_deref().or(s.task.as_deref()).filter(|x| !x.is_empty()) {
+        if let Some(desc) = s
+            .title
+            .as_deref()
+            .or(s.task.as_deref())
+            .filter(|x| !x.is_empty())
+        {
             out.push_str(&format!(" · {}", ellip(desc, 60)));
         }
         if let Some(sum) = s.summary.as_deref().filter(|x| !x.is_empty()) {
@@ -103,10 +112,11 @@ mod tests {
     }
 
     #[test]
-    fn excludes_renamed_sessions() {
+    fn includes_session_after_tmux_window_was_named() {
         let mut s = sess("aaaaaaaa1", "frontend", "fix", Status::Idle);
-        s.renamed_to = Some("new".into());
+        s.renamed_to = Some("fix-build".into());
         let snap = build_snapshot(&[s], "t", false, false);
-        assert!(snap.to_lowercase().contains("нет активных"));
+        assert!(snap.contains("frontend"));
+        assert!(!snap.to_lowercase().contains("нет активных"));
     }
 }

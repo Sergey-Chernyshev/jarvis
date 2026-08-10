@@ -37,7 +37,18 @@ pub fn register(reg: &mut DaemonRegistry) {
             }),
         },
         make_handler(|d: Arc<Daemon>, args: Value| async move {
+            let entity_id = args
+                .get("kind")
+                .and_then(Value::as_str)
+                .zip(args.get("id").and_then(Value::as_str))
+                .map(|(kind, id)| format!("{kind}.{id}"));
+            let previous = entity_id.as_deref().and_then(|id| d.entities.get(id));
             let out = crate::entities::apply_publish(&d.entities, &args)?;
+            if args.get("op").and_then(Value::as_str).unwrap_or("upsert") == "upsert" {
+                if let Some(current) = entity_id.as_deref().and_then(|id| d.entities.get(id)) {
+                    crate::agent_vm::route_transition(&d, previous.as_ref(), &current);
+                }
+            }
             crate::windows::emit_to_panel(&d.app, "entities", &d.entities.snapshot());
             Ok(out)
         }),

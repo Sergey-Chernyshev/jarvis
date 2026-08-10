@@ -34,9 +34,11 @@
 **Files:** `src-tauri/Cargo.toml`
 
 - [ ] **Step 1:** Add to `[dependencies]`:
+
 ```toml
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 ```
+
 - [ ] **Step 2:** `cargo build --manifest-path src-tauri/Cargo.toml --bin jarvis` → PASS (rustls avoids OpenSSL).
 - [ ] **Step 3:** Commit: `git add src-tauri/Cargo.toml src-tauri/Cargo.lock && git commit -m "build: add reqwest (blocking) for Silero sidecar client"`
 
@@ -49,6 +51,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 - [ ] **Step 0 (LIVE-VERIFY at implementation, but write best-known now):** Confirm the Silero `torch.hub` load + `apply_tts` signature against current `snakers4/silero-models`. Expected: `model, _ = torch.hub.load('snakers4/silero-models','silero_tts',language='ru',speaker='v4_ru')`; `audio = model.apply_tts(text=..., speaker='baya', sample_rate=24000)` → 1-D float tensor in [-1,1]; v4_ru speakers: `aidar baya kseniya xenia eugene random`. **If the real API differs (v5 naming, return shape), stop and report — do not guess.**
 
 - [ ] **Step 1:** Write `bin/silero-server.py`:
+
 ```python
 #!/usr/bin/env python3
 """Silero TTS сайдкар Jarvis. Только localhost. Текст → WAV, модель в памяти.
@@ -98,6 +101,7 @@ def tts(r: Req):
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 ```
+
 - [ ] **Step 2:** Syntax check: `python3 -m py_compile bin/silero-server.py` → PASS (does not require torch installed).
 - [ ] **Step 3:** Commit: `git add bin/silero-server.py && git commit -m "feat(voice): Silero FastAPI sidecar (text→WAV, localhost)"`
 
@@ -110,6 +114,7 @@ Replace the `SileroStub` with a real client. Tests use a closed port (unreachabl
 **Files:** Modify `src-tauri/src/voice/engine.rs`
 
 - [ ] **Step 1: Write failing tests** (add to `engine.rs` test module):
+
 ```rust
 #[test]
 fn silero_unreachable_fails_safe() {
@@ -124,8 +129,10 @@ fn build_engine_silero_is_silero() {
     assert_eq!(build_engine("silero", std::path::PathBuf::from("/x")).name(), "silero");
 }
 ```
+
 - [ ] **Step 2:** Run → FAIL (`SileroEngine` doesn't exist; `build_engine("silero")` still returns the stub).
 - [ ] **Step 3: Implement.** Remove `SileroStub`; add:
+
 ```rust
 use std::time::Duration;
 
@@ -161,7 +168,9 @@ impl TtsEngine for SileroEngine {
     fn name(&self) -> &'static str { "silero" }
 }
 ```
+
 Update `build_engine` to take the sidecar base URL for silero. Since `build_engine(engine, piper_bin)` currently only has the piper path, **change its signature** to `build_engine(engine: &str, piper_bin: PathBuf, silero_base: String) -> Box<dyn TtsEngine>`:
+
 ```rust
 pub fn build_engine(engine: &str, piper_bin: PathBuf, silero_base: String) -> Box<dyn TtsEngine> {
     match engine {
@@ -170,7 +179,9 @@ pub fn build_engine(engine: &str, piper_bin: PathBuf, silero_base: String) -> Bo
     }
 }
 ```
+
 Update the test `build_engine_selects_by_name` and the `mod.rs` caller accordingly (Task 5). The silero base is `http://127.0.0.1:<port>` (port from Task 5).
+
 - [ ] **Step 4:** Run `cargo test ... voice::engine` → PASS.
 - [ ] **Step 5:** Commit: `git add src-tauri/src/voice/engine.rs && git commit -m "feat(voice): SileroEngine HTTP client replaces stub"`
 
@@ -183,6 +194,7 @@ Owns the Python child process: spawn, health-wait, restart-on-crash, kill on dis
 **Files:** Create `src-tauri/src/voice/sidecar.rs`; modify `mod.rs` (`pub mod sidecar;`)
 
 - [ ] **Step 1:** Implement:
+
 ```rust
 //! Супервизор Silero-сайдкара: запускает venv-python с server.py, ждёт /health,
 //! перезапускает при падении, гасит на выходе. Всё fail-safe.
@@ -252,6 +264,7 @@ mod tests {
     }
 }
 ```
+
 - [ ] **Step 2:** `cargo test ... voice::sidecar` → PASS.
 - [ ] **Step 3:** Commit: `git add src-tauri/src/voice/sidecar.rs src-tauri/src/voice/mod.rs && git commit -m "feat(voice): Silero sidecar supervisor (spawn/health/restart/kill)"`
 
@@ -262,7 +275,7 @@ mod tests {
 **Files:** Modify `src-tauri/src/voice/mod.rs`, `src-tauri/src/main.rs`
 
 - [ ] **Step 1:** In `Voice`, add `sidecar: Option<Arc<sidecar::Sidecar>>`. In `Voice::new(cfg, piper_bin)`: pick a fixed port (e.g. `8731`); if `cfg.engine == "silero"`, build a `Sidecar` from `jarvis_dir/silero` + `cfg.speaker` (default "baya") + model (`"v4_ru"`), call `ensure_started()`, set `silero_base = sidecar.base()`. Pass `silero_base` into `build_engine(&cfg.engine, piper_bin, silero_base)`. Store the `Arc<Sidecar>` so the supervisor tick and `dispose` can reach it. Expose `pub fn dispose(&self)` → `sidecar.stop()` and `pub fn tick(&self)` → `sidecar.restart_if_dead()` (no-ops when `sidecar` is None).
-   - Note: `jarvis_dir()` isn't in `voice/`; pass the sidecar dir in from the daemon (the daemon already passes `piper_bin`). Change `Voice::new` to also accept `silero_dir: PathBuf`. Update the daemon caller (it has `jarvis_dir()`): `Voice::new(&vcfg, jarvis_dir().join("piper").join("piper"), jarvis_dir().join("silero"))`.
+  - Note: `jarvis_dir()` isn't in `voice/`; pass the sidecar dir in from the daemon (the daemon already passes `piper_bin`). Change `Voice::new` to also accept `silero_dir: PathBuf`. Update the daemon caller (it has `jarvis_dir()`): `Voice::new(&vcfg, jarvis_dir().join("piper").join("piper"), jarvis_dir().join("silero"))`.
 - [ ] **Step 2:** Supervisor tick: in `main.rs::spawn_timers`, add a loop (every 5s) calling `d.voice.tick()` (restart sidecar if it died). Dispose on exit: in `main.rs` `RunEvent::Exit` handler (next to `power::Power::dispose(&d)`), add `d.voice.dispose()`.
 - [ ] **Step 3:** `cargo build ... --bin jarvis` → PASS; `cargo test ... voice` → PASS.
 - [ ] **Step 4:** Commit: `git add src-tauri/src/voice/mod.rs src-tauri/src/main.rs && git commit -m "feat(voice): supervise Silero sidecar from Voice (tick + dispose)"`
@@ -277,12 +290,14 @@ mod tests {
 
 - [ ] **Step 1:** Add `fn install_silero() -> Result<(), String>`: create `~/.jarvis/silero/`; copy the shipped `silero-server.py` (via `include_str!("../../../bin/silero-server.py")`, atomic write) into it; create venv `~/.jarvis/silero/venv` (`python3 -m venv`); `pip install --upgrade pip` then `pip install torch --index-url https://download.pytorch.org/whl/cpu fastapi uvicorn numpy` (idempotent — skip if `venv/bin/python` already imports torch); **explicitly print the install weight** ("Silero: ставлю PyTorch CPU — это сотни МБ–ГБ, один раз"). Warm-download the model once: run `venv/bin/python -c "import torch; torch.hub.load('snakers4/silero-models','silero_tts',language='ru',speaker='v4_ru')"`. Return `Err` (non-fatal) on any failure.
 - [ ] **Step 2:** Hook into `install` non-fatally (after Piper):
+
 ```rust
 match install_silero() {
     Ok(()) => println!("✓ Silero установлен (~/.jarvis/silero/venv + модель)"),
     Err(e) => eprintln!("⚠ Silero не установлен ({e}); engine=\"silero\" будет молчать, демон не затронут"),
 }
 ```
+
 - [ ] **Step 3:** Extend `status`: silero line → installed = `venv/bin/python` + `silero-server.py` present; active = `voice.engine=="silero"`.
 - [ ] **Step 4:** `cargo build ... --bin jarvis-setup` → PASS; `jarvis-setup -- status` prints silero line without panic.
 - [ ] **Step 5:** Commit: `git add src-tauri/src/bin/setup.rs && git commit -m "feat(setup): install Silero sidecar (venv + torch + model)"`

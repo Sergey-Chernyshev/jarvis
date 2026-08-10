@@ -33,6 +33,7 @@
 ### Task 1: Add audio dependencies
 
 **Files:**
+
 - Modify: `src-tauri/Cargo.toml`
 
 - [ ] **Step 1: Add deps**
@@ -63,6 +64,7 @@ git commit -m "build: add rodio + hound for TTS playback"
 Pure functions, fully unit-tested. Composer depends on these.
 
 **Files:**
+
 - Create: `src-tauri/src/voice/numerals.rs`
 
 - [ ] **Step 1: Write the failing tests**
@@ -227,6 +229,7 @@ git commit -m "feat(voice): russian numeral & duration agreement"
 Pure `signals → Option<Utterance>`. The LLM seam = the `Composer` trait.
 
 **Files:**
+
 - Create: `src-tauri/src/voice/composer.rs`
 - Modify: `src-tauri/src/voice/mod.rs` (add `pub mod composer;`)
 
@@ -439,6 +442,7 @@ git commit -m "feat(voice): template phrase composer (board > diff > fact)"
 ### Task 4: Voice config (`config.rs`)
 
 **Files:**
+
 - Create: `src-tauri/src/voice/config.rs`
 - Modify: `src-tauri/src/voice/mod.rs` (add `pub mod config;`)
 
@@ -553,6 +557,7 @@ git commit -m "feat(voice): voice config block in settings.json"
 ### Task 5: Engine trait + Piper + Silero stub (`engine.rs`)
 
 **Files:**
+
 - Create: `src-tauri/src/voice/engine.rs`
 - Modify: `src-tauri/src/voice/mod.rs` (add `pub mod engine;`)
 
@@ -694,6 +699,7 @@ git commit -m "feat(voice): TtsEngine trait + Piper subprocess + Silero stub"
 Audio playback isn't unit-tested (needs a device); keep the surface tiny and mockable. The queue (Task 7) depends only on a `Play` trait so it stays testable.
 
 **Files:**
+
 - Create: `src-tauri/src/voice/player.rs`
 - Modify: `src-tauri/src/voice/mod.rs` (add `pub mod player;`)
 
@@ -778,6 +784,7 @@ git commit -m "feat(voice): rodio player behind Play trait (interruptible)"
 Serialized, priority, dedup, coalesce, interrupt — all unit-tested against a fake `Play` + fake engine.
 
 **Files:**
+
 - Create: `src-tauri/src/voice/queue.rs`
 - Modify: `src-tauri/src/voice/mod.rs` (add `pub mod queue;`)
 
@@ -920,6 +927,7 @@ git commit -m "feat(voice): serialized priority speech queue (dedup + coalesce)"
 Wires config + engine + composer + queue + player on a background thread. Public API used by the daemon/tray.
 
 **Files:**
+
 - Modify: `src-tauri/src/voice/mod.rs`
 
 - [ ] **Step 1: Implement the service**
@@ -1039,6 +1047,7 @@ git commit -m "feat(voice): Voice service — compose→queue→engine→player 
 ### Task 9: Installer — Piper binary + Russian voice (`setup.rs`)
 
 **Files:**
+
 - Modify: `src-tauri/src/bin/setup.rs`
 
 - [ ] **Step 0 (VERIFY LIVE): pick the real Piper asset URLs for this platform**
@@ -1085,6 +1094,7 @@ git commit -m "feat(setup): install Piper binary + ru voice; voice status"
 ### Task 10: Daemon wiring — build signals & speak
 
 **Files:**
+
 - Modify: `src-tauri/src/daemon.rs`
 
 - [ ] **Step 1: Add `Voice` to `Daemon` + warmup on start**
@@ -1094,9 +1104,10 @@ Add a field `pub voice: std::sync::Arc<crate::voice::Voice>` to the `Daemon` str
 - [ ] **Step 2: Build `SpeechSignals` at the event sites**
 
 In the event handler, after the `match event` mutates the session, add a helper `fn voice_signal(s: &Session, event: composer::Event, extra…)` that fills `SpeechSignals` from the session: `project` (s.project), `board_done`/`board_total`/`board_active` from `s.board`, `diff_files` from `s.touched.len()` (or diff-stat source), `notification_text` from the notification message, `limit_reset_min` from the StopFailure reset. Then, gated by config events:
-  - `stop` arm: if `cfg.ev_stop` → `self.voice.speak(stop_signal)`.
-  - `notification` arm (the `is_new && !redundant_idle` branch already dedups): if `cfg.ev_notification` → `self.voice.speak(notif_signal)`.
-  - `stop-failure` effect (`Effect::StopFailure`): if `cfg.ev_stop_failure` → `self.voice.speak(limit_signal)`.
+
+- `stop` arm: if `cfg.ev_stop` → `self.voice.speak(stop_signal)`.
+- `notification` arm (the `is_new && !redundant_idle` branch already dedups): if `cfg.ev_notification` → `self.voice.speak(notif_signal)`.
+- `stop-failure` effect (`Effect::StopFailure`): if `cfg.ev_stop_failure` → `self.voice.speak(limit_signal)`.
 
 Read `cfg` once per call from `self.settings` (or cache `VoiceConfig` on `Daemon`, refreshed on settings change). Keep it off the lock: collect the needed fields under the reducer lock, call `self.voice.speak(...)` AFTER `self.push()` (consistent with effects running after the lock is released).
 
@@ -1117,13 +1128,15 @@ git commit -m "feat(voice): speak on stop/notification/stop-failure from session
 ### Task 11: Tray — mute toggle + test voice
 
 **Files:**
+
 - Modify: `src-tauri/src/tray.rs`
 
 - [ ] **Step 1: Add menu items**
 
 In `build_menu`, after the existing items, append a `CheckMenuItem` with id `voice-mute` (checked = `d.voice.is_muted()`), label "Без звука", and a `MenuItem` id `voice-test`, label "Тест голоса". In `on_menu`, handle:
-  - `"voice-mute"` → `d.voice.set_mute(!d.voice.is_muted())`, then `refresh_menu(d)`.
-  - `"voice-test"` → `d.voice.test_phrase("Проверка голоса. Пиксела: четыре из шести задач, сейчас docker-compose.")`.
+
+- `"voice-mute"` → `d.voice.set_mute(!d.voice.is_muted())`, then `refresh_menu(d)`.
+- `"voice-test"` → `d.voice.test_phrase("Проверка голоса. Пиксела: четыре из шести задач, сейчас docker-compose.")`.
 
 Include `voice-mute` checked-state in `menu_signature` so the menu re-renders when toggled elsewhere.
 
@@ -1144,6 +1157,7 @@ git commit -m "feat(voice): tray mute toggle + test-voice item"
 ### Task 12: Full test sweep + README
 
 **Files:**
+
 - Modify: `README.md`
 
 - [ ] **Step 1: Run the whole suite**
@@ -1167,6 +1181,7 @@ git commit -m "docs: voice (TTS) section — Piper, engine switch, output-only b
 ## Self-Review
 
 **Spec coverage:**
+
 - Engine trait + Piper + Silero stub → Task 5 ✓
 - Composer (board>diff>fact, Notification, StopFailure, truncation, LLM seam=trait) → Task 3 ✓
 - Russian numerals/units → Task 2 ✓

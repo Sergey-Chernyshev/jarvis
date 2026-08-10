@@ -87,13 +87,14 @@ pub fn rank(transcript: &str, sessions: &[Session]) -> Vec<Scored> {
     let words = tokens(transcript);
     let mut out: Vec<(Scored, i64)> = sessions
         .iter()
-        // Пропускаем переименованные/вытесненные сессии (renamed_to задан) и те,
-        // что НЕ в tmux (tmux_pane = None): вставить промпт туда нельзя, роут в
-        // них — тупик (VR-LOGIC-2). Нет таких → decide вернёт Unknown → «нет сессий».
-        .filter(|s| s.renamed_to.is_none() && s.tmux_pane.is_some())
+        // `renamed_to` — это кэш заголовка tmux-окна, не признак вытеснения.
+        // Пропускаем только сессии НЕ в tmux: вставить промпт туда нельзя, роут
+        // в них — тупик (VR-LOGIC-2).
+        .filter(|s| s.tmux_pane.is_some())
         .map(|s| {
             // сильные поля (project/task) отдельно — по ним решаем «уверенность»
-            let strong_score = field_score(&words, &s.project, 1.5) + field_score(&words, &s.task, 1.2);
+            let strong_score =
+                field_score(&words, &s.project, 1.5) + field_score(&words, &s.task, 1.2);
             let mut score = strong_score;
             score += field_score(&words, &s.branch, 1.0);
             score += field_score(&words, &cwd_leaf(&s.cwd), 1.0);
@@ -120,13 +121,25 @@ pub fn rank(transcript: &str, sessions: &[Session]) -> Vec<Scored> {
 
 /// Превратить ранжированный список в решение.
 pub fn decide(scored: &[Scored]) -> Decision {
-    let Some(first) = scored.first() else { return Decision::Unknown };
-    let topk = || -> Vec<String> { scored.iter().take(TOPK).map(|s| s.session_id.clone()).collect() };
+    let Some(first) = scored.first() else {
+        return Decision::Unknown;
+    };
+    let topk = || -> Vec<String> {
+        scored
+            .iter()
+            .take(TOPK)
+            .map(|s| s.session_id.clone())
+            .collect()
+    };
 
     // Нет уверенного сигнала: есть кандидаты → пусть человек/LLM выберет.
     if first.score < MIN_LEAD {
         let cands = topk();
-        return if cands.is_empty() { Decision::Unknown } else { Decision::Ambiguous(cands) };
+        return if cands.is_empty() {
+            Decision::Unknown
+        } else {
+            Decision::Ambiguous(cands)
+        };
     }
     let second = scored.get(1).map(|s| s.score).unwrap_or(0.0);
     let decisive = second <= 0.0 || first.score >= second * GAP_RATIO;
@@ -172,20 +185,27 @@ mod tests {
             sess("b", "backend", "db migration", 100),
         ];
         let scored = rank("сделай хорошо пожалуйста", &sessions);
-        assert!(matches!(decide(&scored), Decision::Ambiguous(_) | Decision::Unknown));
+        assert!(matches!(
+            decide(&scored),
+            Decision::Ambiguous(_) | Decision::Unknown
+        ));
     }
 
     #[test]
     fn empty_sessions_is_unknown() {
-        assert!(matches!(decide(&rank("что угодно", &[])), Decision::Unknown));
+        assert!(matches!(
+            decide(&rank("что угодно", &[])),
+            Decision::Unknown
+        ));
     }
 
     #[test]
-    fn renamed_sessions_excluded() {
+    fn tmux_window_renamed_session_remains_routable() {
         let mut s = sess("a", "frontend", "fix build", 100);
-        s.renamed_to = Some("new-id".into());
+        s.renamed_to = Some("fix-build".into());
         let scored = rank("frontend build", &[s]);
-        assert!(scored.is_empty());
+        assert_eq!(scored.len(), 1);
+        assert_eq!(scored[0].session_id, "a");
     }
 
     #[test]

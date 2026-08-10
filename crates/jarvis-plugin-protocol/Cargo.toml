@@ -1,0 +1,14 @@
+[package]
+name = "jarvis-plugin-protocol"
+version = "0.1.0"
+description = "Host-independent public wire contracts for Jarvis plugins"
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.2"
+
+[dependencies]
+schemars = { version = "=0.8.22", features = ["semver"] }
+semver = { version = "1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-normalization = { version = "=0.1.24", default-features = false, features = ["std"] }

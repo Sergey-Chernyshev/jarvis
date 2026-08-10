@@ -38,12 +38,66 @@ jobs:
       - name: Install JS deps
         run: npm ci
 
+      - name: Trusted core transport and Tauri ACL
+        run: |
+          npm run build:core-transport
+          node --test ui/core-transport.test.mjs
+          node --test scripts/check-tauri-acl.test.mjs
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --test app_command_acl
+          node scripts/check-tauri-acl.mjs
+          git diff --exit-code -- ui/generated/tauri-transport.js
+
       # whisper.cpp (фича whisper-native) собирается через CMake.
       - name: Ensure cmake
         run: cmake --version || brew install cmake
 
       - name: Webview contract tests
         run: npm run test:ui
+
+      - name: Public repository boundary
+        run: npm run check:public
+
+      - name: Ensure ripgrep
+        run: rg --version || brew install ripgrep
+
+      - name: Prepare plugin boundary Cargo metadata
+        run: |
+          cargo fetch --locked --manifest-path crates/jarvis-package/Cargo.toml
+          cargo fetch --locked --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
+          cargo fetch --locked --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
+          cargo fetch --locked --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
+          cargo fetch --locked --manifest-path crates/jarvis-power-core/Cargo.toml
+          cargo fetch --locked --manifest-path crates/jarvis-power-helper/Cargo.toml
+          cargo fetch --locked --manifest-path crates/jarvis-secret-store/Cargo.toml
+          cargo fetch --locked --manifest-path plugins/agent-vm/Cargo.toml
+          cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Plugin source boundary
+        run: |
+          npm run test:plugin-boundaries
+          npm run check:plugin-boundaries
+
+      - name: Plugin public contract tests
+        run: |
+          npm run check:plugin-contracts
+          npm run test:plugin-ui-sdk
+          npm run test:plugin-schema-parity
+          cargo test --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
+          cargo test --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
+          cargo test --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
+
+      - name: Private package engine
+        run: |
+          npm run test:package-lock
+          npm run check:package-lock
+          cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml --all-targets
+          cargo clippy --locked --manifest-path crates/jarvis-package/Cargo.toml --all-targets -- -D warnings
+
+      - name: Power helper core tests
+        run: cargo test --locked --manifest-path crates/jarvis-power-core/Cargo.toml
+
+      - name: Agent VM sidecar tests
+        run: cargo test --manifest-path plugins/agent-vm/Cargo.toml
 
       # Информационно: проект использует компактный авторский стиль, не совпадающий
       # с дефолтным rustfmt. Показываем расхождения, но не блокируем мерж.
@@ -60,3 +114,24 @@ jobs:
         run: >
           cargo test --manifest-path src-tauri/Cargo.toml
           --features wakeword-ort,whisper-native,stt-vad
+
+  plugin-msrv:
+    name: plugin crates · Rust 1.77.2
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust 1.77.2
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.77.2
+          components: clippy
+
+      - name: Public and core crates on declared MSRV
+        run: |
+          cargo test --locked --manifest-path crates/jarvis-plugin-protocol/Cargo.toml
+          cargo test --locked --manifest-path crates/jarvis-plugin-sdk/Cargo.toml
+          cargo test --locked --manifest-path crates/jarvis-plugin-test-host/Cargo.toml
+          cargo test --locked --manifest-path crates/jarvis-power-core/Cargo.toml
+          cargo test --locked --manifest-path crates/jarvis-package/Cargo.toml --all-targets
+          cargo clippy --locked --manifest-path crates/jarvis-package/Cargo.toml --all-targets -- -D warnings

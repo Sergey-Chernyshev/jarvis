@@ -13,7 +13,7 @@ Jarvis — монитор сессий Claude Code (демон на Rust + Tauri
 
 ## Расхождения со спекой (зафиксированы при ресёрче на живом коде)
 
-1. **Конфиг — JSON, не TOML.** Проект хранит всё в `~/.jarvis/settings.json` (конвенция `plugins.*`). Voice-конфиг — новый блок `"voice"` в этом же файле; новый формат/парсер не вводим. *(Решение пользователя.)*
+1. **Конфиг — JSON, не TOML.** Проект хранит всё в `~/.jarvis/settings.json` (конвенция `plugins.*`). Voice-конфиг — новый блок `"voice"` в этом же файле; новый формат/парсер не вводим. _(Решение пользователя.)_
 2. **`last_assistant_message` берётся из транскрипта, не из payload `Stop`.** В Rust-порте финальный ответ уже читается через `transcript::full_final_reply` (используется в `done_summary`). Композиторский сигнал «текст ответа» = transcript-read.
 3. **Долгоживущего supervised-процесса в проекте ещё нет.** Демон спавнит только короткие команды (tmux, claude). Piper (subprocess на реплику) ложится на это сразу; Silero-сайдкар (живой процесс, health-check, restart) — новая инфраструктура, отнесена в Фазу 2.
 
@@ -24,6 +24,7 @@ Jarvis — монитор сессий Claude Code (демон на Rust + Tauri
 Общий слой не зависит от движка. Различается только реализация трейта.
 
 - **`engine.rs`** — `trait TtsEngine`:
+
   ```rust
   pub trait TtsEngine: Send + Sync {
       /// текст → WAV-байты (или PCM). Ошибка — fail-safe, демон не падает.
@@ -36,6 +37,7 @@ Jarvis — монитор сессий Claude Code (демон на Rust + Tauri
       fn name(&self) -> &'static str;
   }
   ```
+
   Реализации: **`PiperEngine`** (Фаза 1), **`SileroEngine`** (Фаза 2). Выбор — по конфигу на старте; горячую смену не делаем (смена `engine` требует перезапуска демона).
 
 - **`composer.rs`** — `trait Composer { fn compose(&self, sig: &SpeechSignals) -> Option<Utterance>; }` + **`TemplateComposer`** (чистая функция). `Utterance { text: String, priority: Priority, dedup_key: String, coalesce_group: Option<String> }`. **Шов под LLM:** альтернативная реализация трейта (читает `last_assistant_message`) подставляется без изменения вызывающего кода; здесь не пишется.
@@ -81,6 +83,7 @@ daemon хендлер события (stop / notification / stop-failure)
 ## Очередь речи
 
 Сериализованная, одна реплика за раз (никакого хора).
+
 - **Приоритет:** `Notification`/`StopFailure` (нужен человек) **выше** `Stop` (готово).
 - **Дедуп:** повторный idle-`Notification` не озвучивается дважды (по `dedup_key`).
 - **Коалесцирование:** при заторе `Stop`-реплики сливаются в одну («Пиксела и Рекрю закончили»), а не зачитываются пачкой по одной (по `coalesce_group`).
@@ -111,6 +114,7 @@ Subprocess бинаря `piper`: текст в stdin → WAV в stdout, моде
   "mute": false
 }
 ```
+
 Дефолты по событиям: `Notification`/`StopFailure`/`Stop` — вкл; `SubagentStop`/`SessionEnd` — выкл. Битый блок → дефолты, молча (как остальной settings.rs).
 
 ## Меню-бар (`tray.rs`)
@@ -149,6 +153,7 @@ Silero-шаги установщика (venv + torch + модель, явный 
 ## Приёмочные сценарии
 
 Полный список — из исходной спеки (1–10). Привязка к фазам:
+
 - **Фаза 1 (этот план):** 2 (часть — переключение конфигом, активным Piper), 3, 4, 5, 6, 9, 10, плюс fail-safe-вариант сценария 7 (`engine="silero"` без сайдкара → демон жив, причина в лог, переключение на `piper` даёт голос).
 - **Фаза 2 (Silero):** 1, 7 (полностью), 8 (честный A/B качества Silero vs Piper).
 

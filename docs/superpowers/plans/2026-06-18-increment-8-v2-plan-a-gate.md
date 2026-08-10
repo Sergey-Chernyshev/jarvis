@@ -57,11 +57,12 @@ nonce-реестром вне локов и привязкой к цели (INV-
 ## Task 1: TokenStore (R2 — ядро идентичности)
 
 **Files:**
+
 - Create: `src-tauri/src/capability/tokens.rs`
 - Modify: `src-tauri/src/capability/mod.rs` (добавить `pub mod tokens;`)
 
 - [ ] **Step 1: Объявить модуль.** В `capability/mod.rs` после `pub mod registry;`
-  добавить строку:
+      добавить строку:
 
 ```rust
 pub mod tokens;
@@ -232,9 +233,9 @@ mod tests {
 ```
 
 - [ ] **Step 3: Запустить — провалится компиляцией** (нет `Consumer::plugin`,
-  новых полей `Grant`). Это ок: Task 2 их добавляет. Чтобы изолировать Task 1,
-  временно НЕ запускаем; компиляцию закрывает Task 2. Перейти к Task 2, затем
-  вернуться и прогнать:
+      новых полей `Grant`). Это ок: Task 2 их добавляет. Чтобы изолировать Task 1,
+      временно НЕ запускаем; компиляцию закрывает Task 2. Перейти к Task 2, затем
+      вернуться и прогнать:
 
 Run: `cargo test -p jarvis --bin jarvis capability::tokens`
 Expected (после Task 2): PASS (4 теста).
@@ -246,6 +247,7 @@ Expected (после Task 2): PASS (4 теста).
 ## Task 2: Grant — плагин-потребитель, write-scope, denied_ids (R2/R7)
 
 **Files:**
+
 - Modify: `src-tauri/src/capability/grant.rs`
 
 - [ ] **Step 1: Тест на новые свойства гранта.** В конец `grant.rs` добавить:
@@ -287,8 +289,8 @@ mod tests {
 ```
 
 - [ ] **Step 2: Расширить `Grant` и конструкторы.** Заменить определение `Grant`,
-  `impl Grant`, `Consumer::agent`, `Consumer::panel` и добавить `plugin`,
-  `SettingsWrite`, `SETTINGS_ALLOWLIST`:
+      `impl Grant`, `Consumer::agent`, `Consumer::panel` и добавить `plugin`,
+      `SettingsWrite`, `SETTINGS_ALLOWLIST`:
 
 ```rust
 /// Право записи конфига: панель (пользователь) пишет всё; агент/плагин — только
@@ -412,11 +414,12 @@ git commit -m "feat(cap): R2 токены потребителя + грант п
 ## Task 3: Гейт — GateConfig и таймауты (R3)
 
 **Files:**
+
 - Modify: `src-tauri/src/capability/gate.rs`
 - Modify: `src-tauri/src/capability/mod.rs` (реэкспорт + правка call-site тестов)
 
 - [ ] **Step 1: Падающий тест на таймауты.** В `capability/mod.rs` в `mod tests`
-  добавить медленные капабилити в `test_registry()` (перед `reg` в конце функции):
+      добавить медленные капабилити в `test_registry()` (перед `reg` в конце функции):
 
 ```rust
         reg.register(
@@ -488,7 +491,7 @@ Run: `cargo test -p jarvis --bin jarvis capability::tests::handler_timeout_fails
 Expected: FAIL (компиляция: не тот арность `invoke` / нет `GateConfig`).
 
 - [ ] **Step 3: Добавить `GateConfig` и таймауты в `gate.rs`.** В начало (после
-  `use std::time::Instant;`):
+      `use std::time::Instant;`):
 
 ```rust
 use std::time::Duration;
@@ -569,24 +572,24 @@ pub async fn invoke<C>(
 ```
 
 - [ ] **Step 4: Реэкспорт.** В `capability/mod.rs` строку
-  `pub use gate::invoke;` заменить на:
+      `pub use gate::invoke;` заменить на:
 
 ```rust
 pub use gate::{invoke, GateConfig};
 ```
 
 - [ ] **Step 5: Обновить 8 существующих call-site `super::invoke(...)`** в
-  `capability/mod.rs` (`mod tests`): добавить последним аргументом
-  `GateConfig::default()`. Затронуты тесты: `read_auto_allowed_records_audit`,
-  `control_with_approval_executes`, `control_without_approval_rejected`,
-  `class_outside_grant_denied`, `settings_set_security_key_blocked`,
-  `settings_set_normal_key_ok`, `unknown_capability_not_found`,
-  `handler_failure_surfaced`. Каждый вызов вида
-  `super::invoke(&reg, (), &c, "id", json!(…), &Conf, &audit)` →
-  `super::invoke(&reg, (), &c, "id", json!(…), &Conf, &audit, GateConfig::default())`.
-  Добавить в `use super::grant::{…}` импорт не нужен — `GateConfig` тянем как
-  `super::gate::GateConfig` (в `fast_cfg`) или добавь `use super::gate::GateConfig;`
-  в `mod tests`.
+      `capability/mod.rs` (`mod tests`): добавить последним аргументом
+      `GateConfig::default()`. Затронуты тесты: `read_auto_allowed_records_audit`,
+      `control_with_approval_executes`, `control_without_approval_rejected`,
+      `class_outside_grant_denied`, `settings_set_security_key_blocked`,
+      `settings_set_normal_key_ok`, `unknown_capability_not_found`,
+      `handler_failure_surfaced`. Каждый вызов вида
+      `super::invoke(&reg, (), &c, "id", json!(…), &Conf, &audit)` →
+      `super::invoke(&reg, (), &c, "id", json!(…), &Conf, &audit, GateConfig::default())`.
+      Добавить в `use super::grant::{…}` импорт не нужен — `GateConfig` тянем как
+      `super::gate::GateConfig` (в `fast_cfg`) или добавь `use super::gate::GateConfig;`
+      в `mod tests`.
 
 - [ ] **Step 6: Прогнать ядро гейта целиком.**
 
@@ -605,11 +608,12 @@ git commit -m "feat(cap): R3 таймауты гейта (confirm 60с/handler 3
 ## Task 4: Гейт — class-based самоэскалация + allowlist (R7)
 
 **Files:**
+
 - Modify: `src-tauri/src/capability/gate.rs`
 - Modify: `src-tauri/src/capability/mod.rs` (тесты)
 
 - [ ] **Step 1: Падающие тесты.** В `test_registry()` добавить вторую
-  settings-капабилити (доказать class-based, не id-based):
+      settings-капабилити (доказать class-based, не id-based):
 
 ```rust
         reg.register(
@@ -672,7 +676,7 @@ Run: `cargo test -p jarvis --bin jarvis capability::tests::agent_settings_non_al
 Expected: FAIL (проходит как ok — allowlist не применяется).
 
 - [ ] **Step 3: Заменить блок «2. Запрет самоэскалации»** в `gate.rs`. Импорт
-  расширить:
+      расширить:
 
 ```rust
 use super::grant::{Consumer, SettingsWrite, SECURITY_KEYS, SETTINGS_ALLOWLIST};
@@ -745,6 +749,7 @@ git commit -m "feat(cap): R7 самоэскалация по классу + allo
 ## Task 5: Реестр — honor denied_ids в проекции (агент не видит audit.query)
 
 **Files:**
+
 - Modify: `src-tauri/src/capability/registry.rs`
 - Modify: `src-tauri/src/capability/mod.rs` (тест)
 
@@ -798,6 +803,7 @@ git commit -m "feat(cap): проекция tools/list уважает denied_ids 
 ## Task 6: PanelConfirmer + PendingConfirms + INV-CONFIRM-BIND (R4)
 
 **Files:**
+
 - Create: `src-tauri/src/capability/confirm_panel.rs`
 - Modify: `src-tauri/src/capability/mod.rs` (`pub mod confirm_panel;`)
 
@@ -911,7 +917,7 @@ Run: `cargo test -p jarvis --bin jarvis capability::confirm_panel`
 Expected: PASS (3).
 
 - [ ] **Step 4: Добавить `PanelConfirmer`** (реализует `Confirmer`; держит
-  `AppHandle` + `Arc<PendingConfirms>` + `Arc<Daemon>`). Дописать в `confirm_panel.rs`:
+      `AppHandle` + `Arc<PendingConfirms>` + `Arc<Daemon>`). Дописать в `confirm_panel.rs`:
 
 ```rust
 use std::future::Future;
@@ -1038,7 +1044,7 @@ pub fn target_fingerprint(d: &Arc<Daemon>, id: &str, args: &Value) -> String {
 > `PendingConfirms`/`gen_nonce` (Step 3), не требующие Daemon.
 
 - [ ] **Step 5: Commit** (PendingConfirms-часть зелёная; PanelConfirmer
-  компилируется после Task 10):
+      компилируется после Task 10):
 
 ```bash
 git add src-tauri/src/capability/confirm_panel.rs src-tauri/src/capability/mod.rs
@@ -1050,6 +1056,7 @@ git commit -m "feat(cap): R4 PendingConfirms (nonce, single-use) + каркас 
 ## Task 7: Daemon — поля tokens + pending
 
 **Files:**
+
 - Modify: `src-tauri/src/daemon.rs`
 
 - [ ] **Step 1: Добавить поля.** Найти `struct Daemon { … }` и добавить:
@@ -1060,7 +1067,7 @@ git commit -m "feat(cap): R4 PendingConfirms (nonce, single-use) + каркас 
 ```
 
 - [ ] **Step 2: Инициализировать в `Daemon::new`.** В литерале, которым
-  конструируется `Daemon`, добавить:
+      конструируется `Daemon`, добавить:
 
 ```rust
             tokens: crate::capability::tokens::TokenStore::new(),
@@ -1086,11 +1093,12 @@ git commit -m "feat(daemon): держим TokenStore и реестр pending-п�
 ## Task 8: Сокет-аутентификация по токену + INV-PANEL (R2)
 
 **Files:**
+
 - Modify: `src-tauri/src/server.rs`
 - Modify: `src-tauri/src/bin/jarvis-mcp.rs` (токен в заголовок)
 
 - [ ] **Step 1: Падающий тест на резолв идентичности** (чистая функция, без axum).
-  В `server.rs` в конце добавить `mod tests` (и саму функцию ниже):
+      В `server.rs` в конце добавить `mod tests` (и саму функцию ниже):
 
 ```rust
 #[cfg(test)]
@@ -1117,7 +1125,7 @@ Run: `cargo test -p jarvis --bin jarvis server::tests`
 Expected: FAIL (нет функции).
 
 - [ ] **Step 3: Реализовать резолв + переписать `handle_capability`.** Заменить
-  импорт и функцию:
+      импорт и функцию:
 
 ```rust
 use crate::capability::{self, grant::Consumer, tokens::TokenStore};
@@ -1186,7 +1194,7 @@ async fn handle_capability(
 > используется в windows.rs). Если поле зовётся иначе — сверить в daemon.rs.
 
 - [ ] **Step 4: jarvis-mcp — слать токен.** В `bin/jarvis-mcp.rs`, `CurlSocket::call`,
-  после `cmd.arg("-X").arg(method);` добавить заголовок из env:
+      после `cmd.arg("-X").arg(method);` добавить заголовок из env:
 
 ```rust
         if let Ok(tok) = std::env::var("JARVIS_TOKEN") {
@@ -1217,6 +1225,7 @@ git commit -m "feat(server): R2 идентичность по токену (INV-
 ## Task 9: IPC-команда agent_confirm (резолв подтверждения из панели, R4)
 
 **Files:**
+
 - Modify: `src-tauri/src/ipc.rs`
 - Modify: `src-tauri/src/main.rs` (регистрация команды)
 
@@ -1235,7 +1244,7 @@ pub fn agent_confirm(app: AppHandle, nonce: String, approved: bool) -> Value {
 ```
 
 - [ ] **Step 2: Зарегистрировать** в `main.rs` в `tauri::generate_handler![ … ]`
-  (после `ipc::session_continue,`):
+      (после `ipc::session_continue,`):
 
 ```rust
             ipc::agent_confirm,
@@ -1258,6 +1267,7 @@ git commit -m "feat(ipc): команда agent_confirm — резолв карт
 ## Task 10: R1 — панель через гейт (+ Daemon::session_label)
 
 **Files:**
+
 - Modify: `src-tauri/src/daemon.rs` (добавить `session_label`)
 - Modify: `src-tauri/src/ipc.rs` (обернуть капабилити-backed команды)
 
@@ -1295,7 +1305,7 @@ git commit -m "feat(ipc): команда agent_confirm — резолв карт
 > `util::basename(&s.cwd)`), не выдумывая новых полей.
 
 - [ ] **Step 2: Хелпер преобразования исхода гейта в панельный Value.** В `ipc.rs`
-  (рядом с `reply_core`) добавить:
+      (рядом с `reply_core`) добавить:
 
 ```rust
 /// Прогнать действие панели через гейт (Consumer::panel) и вернуть панельный
@@ -1385,15 +1395,15 @@ hotkey) на проход через гейт. Конкретно: блок `if 
 > `Value::Object(rest)` (rest — `Map<String,Value>`).
 
 - [ ] **Step 4: Собрать целиком** (теперь PanelConfirmer из Task 6 тоже
-  компилируется — `session_label` есть).
+      компилируется — `session_label` есть).
 
 Run: `cargo build -p jarvis && cargo test -p jarvis --bin jarvis capability::`
 Expected: компиляция + все тесты гейта PASS (17).
 
 - [ ] **Step 5: Дымовой ручной прогон** (dev-сборка на `~/.jarvis`): открыть панель,
-  ответить в сессию, сменить модель — убедиться, что работает как раньше, и что в
-  `~/.jarvis/audit.jsonl` появились записи `consumer:"panel"` для `sessions.reply`/
-  `sessions.control`.
+      ответить в сессию, сменить модель — убедиться, что работает как раньше, и что в
+      `~/.jarvis/audit.jsonl` появились записи `consumer:"panel"` для `sessions.reply`/
+      `sessions.control`.
 
 Run: `tail -n 5 ~/.jarvis/audit.jsonl`
 Expected: строки с `"consumer":"panel","id":"sessions.reply","outcome":"ok"`.
@@ -1410,6 +1420,7 @@ git commit -m "feat(ipc): R1 панель через гейт (reply/control/set
 ## Task 11: R6 — провенанс в MCP tool_result
 
 **Files:**
+
 - Modify: `src-tauri/src/bin/jarvis-mcp.rs`
 
 - [ ] **Step 1: Падающие тесты.** В `mod tests` (`jarvis-mcp.rs`) добавить:
@@ -1493,6 +1504,7 @@ git commit -m "feat(mcp): R6 провенанс в tool_result (structuredConten
 ## Task 12: R5 — установка jarvis-mcp + токен + MCP-конфиг
 
 **Files:**
+
 - Modify: `src-tauri/src/install/mod.rs`
 
 > **Сверить с кодом/упаковкой:** `jarvis-mcp` — компилируемый `[[bin]]`, НЕ скрипт,
@@ -1541,7 +1553,7 @@ pub fn build_mcp_config(mcp_bin: &str, token: &str) -> serde_json::Value {
 ```
 
 - [ ] **Step 4: Установка в `install(progress, proxy)`.** После
-  `write_executable(&hook_dst(), HOOK_SRC);` (строка ~514) добавить блок:
+      `write_executable(&hook_dst(), HOOK_SRC);` (строка ~514) добавить блок:
 
 ```rust
     // R5: мост агента (jarvis-mcp) + токен + MCP-конфиг. Fail-safe: сбой не валит
@@ -1575,7 +1587,7 @@ Run: `cargo test -p jarvis --bin jarvis install:: && cargo build -p jarvis`
 Expected: PASS + компиляция.
 
 - [ ] **Step 6: Дымовой прогон установки** (dev): прогнать установку из онбординга
-  (или `cargo run --bin jarvis-setup -- install`, если так зовётся CLI) и проверить:
+      (или `cargo run --bin jarvis-setup -- install`, если так зовётся CLI) и проверить:
 
 Run: `ls -l ~/.jarvis/bin/jarvis-mcp ~/.jarvis/tokens.json ~/.jarvis/jarvis-mcp.json`
 Expected: все три на месте; `tokens.json` права `-rw-------`; в `jarvis-mcp.json`
@@ -1598,7 +1610,7 @@ Run: `cargo test -p jarvis`
 Expected: всё зелёное (ядро гейта 17, мост 8, server 1, install, util, прочее).
 
 - [ ] **Завершение ветки.** Announce: "I'm using the finishing-a-development-branch
-  skill to complete this work." Затем — superpowers:finishing-a-development-branch.
+      skill to complete this work." Затем — superpowers:finishing-a-development-branch.
 
 ## Карта приёмки (спека §14 → задачи)
 

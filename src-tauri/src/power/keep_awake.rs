@@ -148,7 +148,10 @@ impl<B: Blocker> Engine<B> {
     }
 
     pub fn start_timer(&mut self, ms: i64, label: String, now: i64) -> Vec<Event> {
-        self.manual = Some(Manual::Timer { label, until: now + ms });
+        self.manual = Some(Manual::Timer {
+            label,
+            until: now + ms,
+        });
         self.evaluate();
         vec![Event::Changed]
     }
@@ -217,6 +220,14 @@ impl<B: Blocker> Engine<B> {
     }
 }
 
+impl<B: Blocker> Drop for Engine<B> {
+    fn drop(&mut self) {
+        // Releasing by the exact assertion id is safe and idempotent: `dispose`
+        // clears `held`, so an earlier normal shutdown is not repeated here.
+        self.dispose();
+    }
+}
+
 /// «ещё 47м» — остаток таймера для строки статуса.
 pub fn fmt_left(until: i64, now: i64) -> String {
     let m = (((until - now) as f64) / 60_000.0).round().max(1.0) as i64;
@@ -253,14 +264,20 @@ pub fn status_line(st: &Value, now: i64) -> Option<String> {
         if st["lingering"].as_bool().unwrap_or(false) {
             parts.push("агенты затихли — держу ещё минуту".to_string());
         } else {
-            parts.push(format!("агенты работают ({})", st["working"].as_u64().unwrap_or(0)));
+            parts.push(format!(
+                "агенты работают ({})",
+                st["working"].as_u64().unwrap_or(0)
+            ));
         }
     }
     if let Some(manual) = st["manual"].as_object() {
         match manual.get("kind").and_then(Value::as_str) {
             Some("timer") => parts.push(format!(
                 "ещё {}",
-                fmt_left(manual.get("until").and_then(Value::as_i64).unwrap_or(now), now)
+                fmt_left(
+                    manual.get("until").and_then(Value::as_i64).unwrap_or(now),
+                    now
+                )
             )),
             Some("process") => parts.push(format!(
                 "пока жив {}",
@@ -282,6 +299,7 @@ mod tests {
     struct FakeBlocker {
         starts: Arc<Mutex<Vec<bool>>>,
         stops: Arc<Mutex<u32>>,
+        stopped_ids: Arc<Mutex<Vec<u32>>>,
         next: Arc<Mutex<u32>>,
     }
 
@@ -293,8 +311,9 @@ mod tests {
             *n += 1;
             id
         }
-        fn stop(&mut self, _id: u32) {
+        fn stop(&mut self, id: u32) {
             *self.stops.lock().unwrap() += 1;
+            self.stopped_ids.lock().unwrap().push(id);
         }
     }
 
@@ -311,7 +330,11 @@ mod tests {
         assert!(e.active());
         assert_eq!(b.starts.lock().unwrap().len(), 1);
         e.set_working(3, 0); // больше working — но грант уже есть
-        assert_eq!(b.starts.lock().unwrap().len(), 1, "повторный working не плодит блокеры");
+        assert_eq!(
+            b.starts.lock().unwrap().len(),
+            1,
+            "повторный working не плодит блокеры"
+        );
     }
 
     #[test]
@@ -329,7 +352,11 @@ mod tests {
         e.set_working(1, 72_000); // вернулся в работу внутри линджера
         e.tick(72_000 + LINGER_MS + 1);
         assert!(e.active(), "working вернулся в линджер — грант жив");
-        assert_eq!(b.starts.lock().unwrap().len(), 2, "возврат в линджере не перезапускает блокер");
+        assert_eq!(
+            b.starts.lock().unwrap().len(),
+            2,
+            "возврат в линджере не перезапускает блокер"
+        );
     }
 
     #[test]
@@ -337,7 +364,10 @@ mod tests {
         let (mut e, _) = engine(true);
         e.set_working(2, 0);
         e.set_auto(false, 0);
-        assert!(!e.active(), "setAuto(false) снимает auto-грант сразу, без линджера");
+        assert!(
+            !e.active(),
+            "setAuto(false) снимает auto-грант сразу, без линджера"
+        );
         e.set_working(5, 0);
         assert!(!e.active(), "при выключенном авто working игнорируется");
         e.set_auto(true, 0);
@@ -363,9 +393,17 @@ mod tests {
         let (mut e, b) = engine(true);
         e.start_timer(5_000_000, "час".into(), 0);
         e.start_manual(None);
-        assert_eq!(e.state()["manual"]["kind"], "manual", "manual заменил timer в слоте");
+        assert_eq!(
+            e.state()["manual"]["kind"],
+            "manual",
+            "manual заменил timer в слоте"
+        );
         assert_eq!(b.starts.lock().unwrap().len(), 1);
-        assert_eq!(*b.stops.lock().unwrap(), 0, "замена слота не дёргает блокер");
+        assert_eq!(
+            *b.stops.lock().unwrap(),
+            0,
+            "замена слота не дёргает блокер"
+        );
         let events = e.tick(6_000_000); // протухший таймер после замены не стреляет
         assert!(!events.contains(&Event::TimerEnd));
         assert!(e.active());
@@ -379,7 +417,10 @@ mod tests {
         let mut e = Engine::new(b, true, false).with_pid_alive(move |_| *alive2.lock().unwrap());
         e.start_process(12345, "Safari".into());
         assert!(e.active());
-        assert!(e.tick(15_000).is_empty(), "процесс жив — assertion держится");
+        assert!(
+            e.tick(15_000).is_empty(),
+            "процесс жив — assertion держится"
+        );
         *alive.lock().unwrap() = false;
         let events = e.tick(30_000);
         assert!(matches!(&events[0], Event::ProcessDied { label } if label == "Safari"));
@@ -395,7 +436,11 @@ mod tests {
         assert!(e.active(), "stopManual не трогает auto-грант");
         e.set_auto(false, 0);
         assert!(!e.active(), "оба гранта сняты — assertion ушла");
-        assert_eq!(*b.stops.lock().unwrap(), 1, "блокер остановлен ровно один раз");
+        assert_eq!(
+            *b.stops.lock().unwrap(),
+            1,
+            "блокер остановлен ровно один раз"
+        );
     }
 
     #[test]
@@ -404,7 +449,11 @@ mod tests {
         e.start_manual(None); // FakeBlocker отдаёт id=0 первым
         assert!(e.active(), "blocker id=0 считается активным");
         e.stop_manual();
-        assert_eq!(*b.stops.lock().unwrap(), 1, "blocker id=0 корректно останавливается");
+        assert_eq!(
+            *b.stops.lock().unwrap(),
+            1,
+            "blocker id=0 корректно останавливается"
+        );
     }
 
     #[test]
@@ -414,9 +463,48 @@ mod tests {
         e.set_display_pref(true);
         let starts = b.starts.lock().unwrap();
         assert_eq!(*b.stops.lock().unwrap(), 1);
-        assert_eq!(starts.as_slice(), &[false, true], "перезапуск с новым типом");
+        assert_eq!(
+            starts.as_slice(),
+            &[false, true],
+            "перезапуск с новым типом"
+        );
         drop(starts);
         e.set_display_pref(true); // тип не менялся — ничего не происходит
         assert_eq!(*b.stops.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn explicit_dispose_is_idempotent_and_releases_only_the_owned_assertion() {
+        let b = FakeBlocker::default();
+        *b.next.lock().unwrap() = 41;
+        let mut e = Engine::new(b.clone(), true, false);
+        e.start_manual(None);
+
+        e.dispose();
+        e.dispose();
+        drop(e);
+
+        assert_eq!(
+            b.stopped_ids.lock().unwrap().as_slice(),
+            &[41],
+            "cleanup must release only the exact IOPM assertion id owned by this engine"
+        );
+    }
+
+    #[test]
+    fn dropping_an_active_engine_releases_its_exact_assertion() {
+        let b = FakeBlocker::default();
+        *b.next.lock().unwrap() = 73;
+        {
+            let mut e = Engine::new(b.clone(), true, false);
+            e.start_manual(None);
+            assert!(e.active());
+        }
+
+        assert_eq!(
+            b.stopped_ids.lock().unwrap().as_slice(),
+            &[73],
+            "an early owner drop must not leave Jarvis' IOPM assertion active"
+        );
     }
 }

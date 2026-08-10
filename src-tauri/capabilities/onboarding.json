@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "onboarding",
+  "description": "Trusted Jarvis onboarding surface with exact app-command grants",
+  "local": true,
+  "webviews": ["onboarding"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "allow-settings-repair",
+    "allow-app-relaunch",
+    "allow-onboarding-get",
+    "allow-onboarding-run",
+    "allow-onboarding-close",
+    "allow-onboarding-open-panel",
+    "allow-onboarding-open-settings",
+    "allow-models-install"
+  ]
+}

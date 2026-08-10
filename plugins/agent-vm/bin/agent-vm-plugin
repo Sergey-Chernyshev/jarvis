@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname -- "$0")" && /bin/pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/../../.." && /bin/pwd)
+
+for candidate in \
+  "$repo_root/src-tauri/target/release/jarvis-agent-vm-plugin" \
+  "$repo_root/plugins/agent-vm/target/release/jarvis-agent-vm-plugin"
+do
+  if [ -x "$candidate" ]; then
+    exec "$candidate"
+  fi
+done
+
+echo "[agent-vm] sidecar binary is not built" >&2
+exit 127

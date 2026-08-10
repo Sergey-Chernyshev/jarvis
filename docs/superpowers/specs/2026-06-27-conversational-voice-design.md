@@ -16,6 +16,7 @@
 Маршрутизация из п/п-1 становится ОДНИМ из «скилов».
 
 Согласовано на брейншторме:
+
 - **Скоуп — всё**: чтение (sessions/chats/metrics/tasks/limits/time), маршрутизация,
   управление (model/effort/keep-awake/mute/settings).
 - **Диалог — полный многоходовый** (память разговора).
@@ -42,6 +43,7 @@
 ## Что уже есть и что НЕТ (выверено по коду ветки voice-routing-rebuilt)
 
 ЕСТЬ (переиспользуем):
+
 - Haiku c проксей: `claude_bin::run_haiku(prompt, timeout) -> Option<String>` —
   хардненный single-shot. Шаблон терпимого парса JSON из ответа Haiku уже есть в
   `daemon.rs` (`ai_toast_summary` парсит `{display,speak}` с fence/prose-толерантностью).
@@ -59,6 +61,7 @@
   tmux_pane/model/effort + счётчики из `daemon.snapshot()`.
 
 НЕТ (надо строить — выявлено аудитом):
+
 - **Нет AEC** (эхо-подавления) нигде в `stt/`+`voice/`. Захват (cpal input) и
   воспроизведение (rodio output) — независимые устройства; TTS течёт в открытый мик.
   → блокер акустического барж-ина (веха 2c); до него — полудуплекс (мьют мика на TTS).
@@ -87,6 +90,7 @@
 латентность, всё юнит-тестируемо.
 
 ### Снапшот мира (ключ к «один вызов на ход»)
+
 `build_snapshot(daemon)` всегда в промпте: время/дата; живые сессии
 `{id[..8], project, task, status, branch, last_prompt(сжат), in_tmux}`; счётчики
 ждут/работают; флаг лимита; mute; keep-awake. → Haiku отвечает на большинство
@@ -113,6 +117,7 @@ enum SkillOutcome {
     Rejected(String),              // нелистовой скил / провал валидации → переспрос
 }
 ```
+
 Снапшот сериализуется компактно (строки `project · task · status`, не сырой JSON).
 Память хода: `{user: String, assistant: String, action_result: Option<String>}`,
 где `action_result` — КОРОТКАЯ структурная сводка (skill + санированные args +
@@ -121,19 +126,23 @@ enum SkillOutcome {
 ## Меню скилов и валидация аргументов
 
 Чтение (free, без consent):
+
 - `sessions_status` · `session_detail{id}` · `session_chat{id}`(chats.read) ·
   `metrics{scope}` · `tasks{id}` · `limits` · `time`(Rust, без модели).
 
 Маршрутизация (сайд-эффект → окно отмены/пикер из п/п-1):
+
 - `route{prompt}` — БЕЗ `session_hint`: `route::score` ранжирует цель из полей
   сессий (как сейчас), неоднозначно → пикер. (Сверено: `route_transcript`/`score::rank`
   берут только транскрипт; параметра hint нет — не выдумываем.)
 
 Управление (сайд-эффект → ПОЗИТИВНОЕ подтверждение, не пассивное окно):
+
 - `set_model{id, model}` · `set_effort{id, level}` · `keep_awake{minutes|off}` ·
   `mute{on|off}`.
 
 **Валидация (fail-closed, ДО исполнения)** — `convo/skills.rs`:
+
 - `model` ∈ фикс-allowlist (opus/sonnet/haiku/fable/…); `level` ∈ {low,medium,high,
   xhigh,max} (из `daemon.effort_levels`); `minutes` ∈ разумный диапазон;
   `id` обязан резолвиться через `d.session(id)`.
@@ -214,31 +223,31 @@ enum SkillOutcome {
   динамиках; интеграция VoiceProcessingIO с текущим `AudioHub`/cpal; задержка.
 
 ## Латентность (ход, Haiku)
+
 VAD/захват + STT (~0.5-2с) + Haiku-план (хардненный, ~1-3с) + TTS до первого звука
 (~0.5-1.5с) ≈ 3-7с/ход с HUD «Думаю…». Снапшот в промпте убирает лишние round-trip’ы.
 
 ## Этапы реализации (по вехам, TDD)
 
 **2a (одноходовый Q&A):**
+
 1. `snapshot.rs` + `plan.rs` (чистые) — мозг (формы данных выше).
 2. `skills.rs` — диспатч + валидация: reads → данные; route → `route::stage`; control →
    confirm; нелистовой/невалидный → `Rejected`.
 3. `reply.rs` — `Voice::say`/`speak_blocking` + HUD-фазы; одноходовый «вопрос →
    голосовой ответ» поверх текущего фикс-окна. **Поставляемо.**
 
-**2b (многоход, полудуплекс):**
-4. `listen.rs` — WakeTap-консьюмер + RMS + адаптивный порог + автомат endpointing.
-5. `convo/mod.rs` + `memory.rs` — цикл, память, условия конца, conversation-lock,
-   подавление wake-действия.
+**2b (многоход, полудуплекс):** 4. `listen.rs` — WakeTap-консьюмер + RMS + адаптивный порог + автомат endpointing. 5. `convo/mod.rs` + `memory.rs` — цикл, память, условия конца, conversation-lock,
+подавление wake-действия.
 
-**2c (акустический барж-ин):**
-6. AEC (VoiceProcessingIO/Silero-VAD) + онсет-детект поверх TTS + `Voice::stop()` →
-   full-duplex. Research-веха.
+**2c (акустический барж-ин):** 6. AEC (VoiceProcessingIO/Silero-VAD) + онсет-детект поверх TTS + `Voice::stop()` →
+full-duplex. Research-веха.
 
 Каждый этап — рабочий коммит. После 2a — голосовой Q&A; после 2b — полноценный
 полудуплексный разговор; после 2c — перебивание голосом.
 
 ## Тестирование (TDD)
+
 - `plan.rs` (чистая): промпт содержит снапшот/меню/память/untrusted-маркер; `parse_plan`
   терпим (fence/конверт/мусор → безопасный фолбэк-переспрос).
 - `snapshot.rs` (чистая): корректная компактная сводка + счётчики/лимит/mute.
@@ -254,11 +263,13 @@ VAD/захват + STT (~0.5-2с) + Haiku-план (хардненный, ~1-3с
   требует confirm.
 
 ## Вне scope
+
 Полноценный Silero-VAD как замена энергетического (если нужно сверх 2b); создание
 НОВОЙ сессии голосом (под-проект 3); проактивные голосовые диалоги-уведомления;
 не-Haiku эскалация; персистентная память между разговорами.
 
 ## Открытые вопросы (сузились после аудита)
+
 1. Точный API `Voice::speak_blocking` (oneshot vs Condvar) и взаимодействие с
    приоритетной преемпцией воркера.
 2. Дефолты адаптивного VAD: стартовый порог над шумовым полом, длина трейлинг-тишины,

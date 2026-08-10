@@ -225,7 +225,7 @@ fn on_menu(d: &Arc<Daemon>, id: &str) {
             let _ = windows::create_onboarding(&d.app);
         }
         "quit" => {
-            d.app.exit(0); // уборка — в RunEvent::Exit
+            crate::shutdown::request_exit(d, 0);
         }
         other => {
             Power::handle_menu(d, other);

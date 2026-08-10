@@ -11,6 +11,9 @@ use serde_json::{json, Value};
 
 use crate::util::now_ms;
 
+pub const MAX_ENTITIES_PER_OWNER: usize = 1_000;
+pub const MAX_ATTRS_BYTES: usize = 64 * 1024;
+
 /// Одна сущность. `id` = `<kind>.<object_id>`, владелец — только пишущий
 /// (`plugin:<id>`). `stale` = владелец остановлен, данные могли устареть.
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -56,12 +59,27 @@ impl EntityStore {
             Value::Object(_) => attrs,
             _ => return Err("attrs должен быть объектом".into()),
         };
+        let attrs_bytes = serde_json::to_vec(&attrs)
+            .map_err(|e| format!("attrs не сериализуется: {e}"))?
+            .len();
+        if attrs_bytes > MAX_ATTRS_BYTES {
+            return Err(format!(
+                "attrs сущности превышает лимит {} байт",
+                MAX_ATTRS_BYTES
+            ));
+        }
         let id = format!("{kind}.{object_id}");
         let mut items = self.items.lock().unwrap();
         if let Some(prev) = items.get(&id) {
             if prev.owner != owner {
                 return Err(format!("сущность '{id}' принадлежит {}", prev.owner));
             }
+        } else if items.values().filter(|entity| entity.owner == owner).count()
+            >= MAX_ENTITIES_PER_OWNER
+        {
+            return Err(format!(
+                "владелец {owner} превысил лимит {MAX_ENTITIES_PER_OWNER} сущностей"
+            ));
         }
         let e = Entity {
             id: id.clone(),
@@ -102,6 +120,10 @@ impl EntityStore {
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
+    }
+
+    pub fn get(&self, id: &str) -> Option<Entity> {
+        self.items.lock().unwrap().get(id).cloned()
     }
 
     /// Пометить все сущности владельца как stale (плагин остановлен).
@@ -192,6 +214,37 @@ mod tests {
     }
 
     #[test]
+    fn rejects_attrs_larger_than_quota() {
+        let s = EntityStore::new();
+        let attrs = json!({ "blob": "x".repeat(MAX_ATTRS_BYTES) });
+        let err = s
+            .upsert("plugin:avm", "vm", "too-big", "running", attrs)
+            .unwrap_err();
+        assert!(err.contains("attrs"), "понятная ошибка квоты: {err}");
+    }
+
+    #[test]
+    fn rejects_new_entity_after_owner_quota_but_allows_update() {
+        let s = EntityStore::new();
+        for n in 0..MAX_ENTITIES_PER_OWNER {
+            s.upsert(
+                "plugin:avm",
+                "vm",
+                &format!("vm-{n}"),
+                "running",
+                json!({}),
+            )
+            .unwrap();
+        }
+        let err = s
+            .upsert("plugin:avm", "vm", "overflow", "running", json!({}))
+            .unwrap_err();
+        assert!(err.contains("1000"), "ошибка называет лимит: {err}");
+        s.upsert("plugin:avm", "vm", "vm-0", "stopped", json!({}))
+            .expect("обновление существующей сущности не расходует новую квоту");
+    }
+
+    #[test]
     fn remove_own_only() {
         let s = EntityStore::new();
         s.upsert("plugin:avm", "vm", "x", "on", json!({})).unwrap();
@@ -212,6 +265,25 @@ mod tests {
         assert_eq!(s.query(Some("vm"), None).len(), 2);
         assert_eq!(s.query(None, Some("plugin:other")).len(), 1);
         assert_eq!(s.query(Some("vm"), Some("plugin:other")).len(), 0);
+    }
+
+    #[test]
+    fn get_returns_one_cloned_entity_without_exposing_the_store_lock() {
+        let s = EntityStore::new();
+        s.upsert(
+            "plugin:agent-vm",
+            "agent_run",
+            "run-1",
+            "completed",
+            json!({"cwd":"/synthetic/project"}),
+        )
+        .unwrap();
+
+        let found = s.get("agent_run.run-1").unwrap();
+
+        assert_eq!(found.owner, "plugin:agent-vm");
+        assert_eq!(found.attrs["cwd"], json!("/synthetic/project"));
+        assert!(s.get("agent_run.missing").is_none());
     }
 
     #[test]

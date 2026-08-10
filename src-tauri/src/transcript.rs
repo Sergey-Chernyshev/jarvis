@@ -141,10 +141,11 @@ pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
         .unwrap_or_else(now_ms);
 
     let push_text = |role: &'static str, text: &str, items: &mut Vec<ChatItem>| {
-        let t = text.trim();
-        // служебные вставки (<system-reminder>, <command-name>…) в чат не показываем
-        if !t.is_empty() && !t.starts_with('<') {
-            items.push(ChatItem { role, kind: "text", text: ellipsize(t, 4000), ts });
+        // служебные секции (<system-reminder>, <command-name>…) вырезаем из
+        // текста: агент дописывает их и в конец обычного сообщения
+        let t = crate::service_text::strip_service_sections(text);
+        if !t.is_empty() {
+            items.push(ChatItem { role, kind: "text", text: ellipsize(&t, 4000), ts });
         }
     };
 

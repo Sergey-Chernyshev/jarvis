@@ -11,7 +11,7 @@ per-language duplicates.
    - the panel opening on **⌘J** (centered, Raycast-style);
    - the menu-bar counters changing live (**⏸ waiting · ⚙ working**);
    - a toast notification appearing **over a fullscreen** app.
-   A static screenshot of the panel is an acceptable minimum; a GIF is better.
+     A static screenshot of the panel is an acceptable minimum; a GIF is better.
 2. `panel.png` — the panel with the session list, model badges and the reply field.
 3. `toast.png` — a toast over fullscreen.
 4. `taskboard.png` — the "Tasks" slide-over (the TodoWrite board).

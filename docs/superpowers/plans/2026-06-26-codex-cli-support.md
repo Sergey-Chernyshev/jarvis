@@ -17,6 +17,7 @@
 ## File Structure
 
 **New:**
+
 - `src-tauri/src/backend/mod.rs` — `Agent` enum, `Backend` trait, `backend()` dispatcher, `ClaudeBackend`.
 - `src-tauri/src/backend/codex.rs` — `CodexBackend` (data/format methods).
 - `src-tauri/src/backend/codex_transcript.rs` — Codex rollout JSONL → `Vec<Value>`/`ChatItem`.
@@ -36,6 +37,7 @@ Pure scaffolding; zero behavior change. Claude routed through `backend(Agent::Cl
 **Files:** Create `src-tauri/src/backend/mod.rs`; Modify `src-tauri/src/main.rs` (add `mod backend;`).
 
 - [ ] **Step 1 — test** (in `backend/mod.rs` `#[cfg(test)]`):
+
 ```rust
 #[test]
 fn agent_from_label_defaults_to_claude() {
@@ -45,7 +47,9 @@ fn agent_from_label_defaults_to_claude() {
     assert_eq!(Agent::Codex.label(), "codex");
 }
 ```
+
 - [ ] **Step 2 — impl:**
+
 ```rust
 use serde::{Deserialize, Serialize};
 
@@ -62,8 +66,9 @@ impl Agent {
     pub fn all() -> [Agent; 2] { [Agent::Claude, Agent::Codex] }
 }
 ```
+
 - [ ] **Step 3 — wire:** add `mod backend;` to `main.rs` near the other `mod` decls; add `pub use backend::Agent;` if convenient.
-- [ ] **Step 4 — verify:** `cargo test --manifest-path src-tauri/Cargo.toml backend::`  → PASS; `cargo build` → OK.
+- [ ] **Step 4 — verify:** `cargo test --manifest-path src-tauri/Cargo.toml backend::` → PASS; `cargo build` → OK.
 - [ ] **Step 5 — commit:** `git add src-tauri/src/backend/mod.rs src-tauri/src/main.rs && git commit -m "feat(codex): Agent enum + backend module skeleton"`
 
 ### Task 0.2: `Backend` trait + dispatcher + `ClaudeBackend`
@@ -71,6 +76,7 @@ impl Agent {
 **Files:** Modify `backend/mod.rs`.
 
 - [ ] **Step 1 — define the sync trait** (signatures from spec §3.2; import `crate::transcript::ChatItem`, `serde_json::Value`, `std::path::{Path,PathBuf}`):
+
 ```rust
 pub trait Backend: Send + Sync {
     fn agent(&self) -> Agent;
@@ -99,6 +105,7 @@ pub fn backend(a: Agent) -> &'static dyn Backend {
     match a { Agent::Claude => &ClaudeBackend, Agent::Codex => &codex::CODEX }
 }
 ```
+
 - [ ] **Step 2 — implement `ClaudeBackend` by delegating to existing code** (NO logic moves yet — call the current functions so behavior is identical):
   - `hook_events` → the existing `install::EVENTS` (re-export or duplicate the 8-row table; keep `install::EVENTS` as source of truth and reference it).
   - `hooks_path` → `crate::util::home_dir().join(".claude/settings.json")`.
@@ -128,6 +135,7 @@ Delivers: interactive `codex` sessions appear in the panel labelled `codex`. Fix
 
 - [ ] Read `install/mod.rs:1-60` and `:980-1010` first (exact current code).
 - [ ] Keep Claude `EVENTS` as-is. Add `pub const CODEX_EVENTS: &[(&str,&str)]` mapping Codex hook names → internal args:
+
 ```rust
 pub const CODEX_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),
@@ -140,6 +148,7 @@ pub const CODEX_EVENTS: &[(&str, &str)] = &[
     ("SubagentStop", "subagent-stop"),
 ];
 ```
+
 - [ ] Wire `ClaudeBackend::hook_events()`→`EVENTS`, `CodexBackend::hook_events()`→`CODEX_EVENTS`.
 - [ ] **Test:** `backend(Agent::Codex).hook_events().len() == 8` and contains `("Stop","stop")`. Commit.
 
@@ -172,6 +181,7 @@ pub const CODEX_EVENTS: &[(&str, &str)] = &[
 ### Task 1.4: onboarding phase + integration card (UI)
 
 **Files:** Modify `ui/onboarding.js` (`PHASES` ~`:11`), `install/mod.rs` (emit a "Codex" progress phase iff codex_found), `ui/renderer.js` (`renderIntegrationCard` ~`:2639` parameterized per backend).
+
 - [ ] Add `{ key:"Codex", name:"Codex CLI", desc:"Хуки/шим codex" }` to PHASES (only meaningful if codex installed; guard display).
 - [ ] Generalize `renderIntegrationCard(title, statusKeys)` and render one card per detected backend.
 - [ ] Manual smoke later. Build, commit.
@@ -183,13 +193,15 @@ pub const CODEX_EVENTS: &[(&str, &str)] = &[
 **Files:** Modify `daemon.rs` (common extraction ~`:601-641`, event match ~`:644-780`).
 
 ### Task 2.1: type the agent + model-from-payload guarded to Codex
+
 - [ ] Read `daemon.rs:546-660` and `:960-1010` first.
 - [ ] After `s.agent` is set (`:609-611`), compute `let agent = Agent::from_opt(s.agent.as_deref());` for use in this reduce call.
-- [ ] **Test (daemon unit):** feed a Codex `session-start` envelope `{agent:"codex", payload:{session_id, model:"gpt-5.5", cwd}}` → `s.model == Some("GPT-5")` (via `backend.friendly_model`), and a Claude envelope with a stray `payload.model` → `s.model` unchanged (still mined later). 
+- [ ] **Test (daemon unit):** feed a Codex `session-start` envelope `{agent:"codex", payload:{session_id, model:"gpt-5.5", cwd}}` → `s.model == Some("GPT-5")` (via `backend.friendly_model`), and a Claude envelope with a stray `payload.model` → `s.model` unchanged (still mined later).
 - [ ] **Impl:** in the common block, `if agent==Agent::Codex { if let Some(m)=p.get("model").and_then(Value::as_str) { if s.model_at.map_or(true, |t| now - t > 30_000) { s.model = Some(backend(agent).friendly_model(m)); } } }`.
 - [ ] Build, test, commit.
 
 ### Task 2.2: `permission` → Waiting; `subagent-start/stop`
+
 - [ ] Add match arms mirroring `notification` (→`Status::Waiting`, default text "Codex ждёт подтверждения") for `"permission"`, and mirroring the `Task` pre/post-tool subagent logic (read `payload.agent_type`/`agent_id`) for `"subagent-start"`/`"subagent-stop"`.
 - [ ] **Test:** `permission` event → `s.status == Waiting`; `subagent-start` then `subagent-stop` updates `s.subagents`.
 - [ ] Build, test, commit.
@@ -201,12 +213,14 @@ pub const CODEX_EVENTS: &[(&str, &str)] = &[
 **Files:** Create `backend/codex_transcript.rs`; Modify `backend/codex.rs`, `transcript.rs` call-sites, `tail.rs`, `daemon.rs`, `ipc.rs`, `capability/native/chats.rs`.
 
 ### Task 3.1: Codex rollout → ChatItem (TDD with real fixtures)
+
 - [ ] Capture 1 real rollout: copy ~30 lines from a file under `~/.codex/sessions/2026/06/**/rollout-*.jsonl` into a test fixture string.
 - [ ] **Test:** `codex_transcript::to_chat_items(&line)` for a `response_item` message(role=assistant, content[output_text]) → `ChatItem{role:"assistant",...}`; for `function_call` → a tool-label item; `session_meta`/`reasoning`/`token_count` → `[]` or hidden.
 - [ ] **Impl** per spec §4.3 (parse `{timestamp,type,payload}`; map `response_item.payload.type` message/function_call/custom_tool_call; reuse `transcript::short_tool_label`, `parse_ts`). Add `extract_model` (last `turn_context.model`), `extract_branch` (`session_meta.git.branch`), `extract_title` (lookup `~/.codex/session_index.jsonl`), `transcript_dir_for`, and `full_final_reply` preferring a passed-in `last_assistant_message`.
 - [ ] Wire `CodexBackend` methods to these. Build, test, commit.
 
 ### Task 3.2: dispatch every transcript call-site by `s.agent`
+
 - [ ] Thread `Agent` to: `ipc.rs:305` (chat_open), `tail.rs` (add `agent: Agent` to `TailHandle::start` + `tail_loop`; `ipc.rs:313` passes `s.agent`), `daemon.rs:910` (`ai_toast_summary` → `backend(agent).full_final_reply` / pass Stop `last_assistant_message`), `daemon.rs:963-1008` (`refresh_meta` title/branch/model via `backend(agent).extract_*`), `daemon.rs:1152-1156`, `capability/native/chats.rs:43-48`.
 - [ ] Replace direct `transcript::to_chat_items`/`chain_from_entries` calls at those sites with `backend(agent).to_chat_items` / `read_entries`.
 - [ ] **Test:** existing Claude transcript tests still green (regression); a Codex `chat_open` smoke unit returns non-empty items from the fixture.
@@ -248,8 +262,8 @@ pub const CODEX_EVENTS: &[(&str, &str)] = &[
 **Files:** `claude_bin.rs` (+ new `service.rs` or extend), `backend/codex_agent.rs`, `agent/mod.rs`, `wakeword/action.rs`, `ipc.rs`, `settings.rs`.
 
 - [ ] **7.1 resolve_codex_bin + service-LLM dispatch:** add `resolve_codex_bin()`; `run_service_llm(agent, prompt, timeout)`; setting `internalBackend: auto|claude|codex` (default auto=Claude-if-present-else-Codex). Replace `resolve_claude_bin().is_none()` gates at `daemon.rs:905/1148` with "any service backend available". Codex path: `codex exec --json -m <model> -c model_reasoning_effort=low -C <tmp> "<HAIKU_SYSTEM+prompt>"` (env proxy inherited; no `minimal`). Test parse of final `agent_message.text`. Commit.
-- [ ] **7.2 CodexCliHost + mandatory per-item kill:** `~/.jarvis/codex-agent-home/` (auth.json symlink + minimal config.toml jarvis-MCP, no skills dir); run `CODEX_HOME=… codex exec --json -s read-only -c mcp_servers.jarvis.* …`; `parse_codex_line` maps thread.started/item.*/turn.completed → `AgentEvent`; **kill on any `command_execution`/`local_shell`/non-jarvis `mcp_tool_call` item** (Codex INV-TOOLS analogue). 
-  - **Test (security):** synthetic `--json` stream with a `command_execution` item → host kills (mirror the existing INV-TOOLS test in `agent/mod.rs`). 
+- [ ] **7.2 CodexCliHost + mandatory per-item kill:** `~/.jarvis/codex-agent-home/` (auth.json symlink + minimal config.toml jarvis-MCP, no skills dir); run `CODEX_HOME=… codex exec --json -s read-only -c mcp_servers.jarvis.* …`; `parse_codex_line` maps thread.started/item.*/turn.completed → `AgentEvent`; **kill on any `command_execution`/`local_shell`/non-jarvis `mcp_tool_call` item** (Codex INV-TOOLS analogue).
+  - **Test (security):** synthetic `--json` stream with a `command_execution` item → host kills (mirror the existing INV-TOOLS test in `agent/mod.rs`).
   - Commit.
 - [ ] **7.3 host selection:** route `ipc.rs:781` (`agent_send`) and `wakeword/action.rs:99/111` through `internalBackend` host choice. Test + commit.
 

@@ -4,6 +4,9 @@
 //! ответы на вопросы клавишами. Текст всегда уходит элементом argv —
 //! никакой интерполяции в shell-строку.
 
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+use std::path::{Component, Path};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -11,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 
 const BRACKETED_PASTE_SETTLE: Duration = Duration::from_millis(90);
+const MAX_PANE_MARKER_BYTES: usize = 16 * 1024;
 static BUFFER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
@@ -136,12 +140,141 @@ pub async fn paste_slash(pane: &str, text: &str) -> Result<(), String> {
 }
 
 /// Метаданные живой паны для адопта осиротевших сессий при рестарте демона.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaneSessionMarker {
+    pub session_id: String,
+    pub agent: String,
+    pub cwd: String,
+    pub transcript: Option<String>,
+    pub pid: i64,
+}
+
+fn normalized_absolute_path(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > 4096
+        || value.chars().any(char::is_control)
+        || !Path::new(value).is_absolute()
+    {
+        return false;
+    }
+    Path::new(value)
+        .components()
+        .all(|component| !matches!(component, Component::CurDir | Component::ParentDir))
+}
+
+fn valid_pane_session_marker(marker: &PaneSessionMarker) -> bool {
+    let session_id = marker.session_id.as_bytes();
+    (8..=128).contains(&session_id.len())
+        && session_id
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_'))
+        && matches!(marker.agent.as_str(), "claude" | "codex")
+        && normalized_absolute_path(&marker.cwd)
+        && (1..=i32::MAX as i64).contains(&marker.pid)
+        && marker
+            .transcript
+            .as_deref()
+            .map_or(true, normalized_absolute_path)
+}
+
+pub fn encode_pane_session_marker(marker: &PaneSessionMarker) -> Result<String, String> {
+    if !valid_pane_session_marker(marker) {
+        return Err("tmux session marker имеет unsafe поля".into());
+    }
+    let json = serde_json::to_vec(marker).map_err(|error| format!("tmux marker JSON: {error}"))?;
+    if json.len() > MAX_PANE_MARKER_BYTES {
+        return Err("tmux session marker слишком большой".into());
+    }
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json))
+}
+
+fn decode_pane_session_marker(encoded: &str) -> Option<PaneSessionMarker> {
+    if encoded.is_empty() || encoded.len() > MAX_PANE_MARKER_BYTES * 2 {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .ok()?;
+    if bytes.len() > MAX_PANE_MARKER_BYTES {
+        return None;
+    }
+    let marker = serde_json::from_slice::<PaneSessionMarker>(&bytes).ok()?;
+    valid_pane_session_marker(&marker).then_some(marker)
+}
+
+/// Привязать к pane только безопасные identity-метаданные сессии. Значение
+/// хранится в user-option самого tmux и переживает рестарт/смену Jarvis profile.
+/// Ни содержимое экрана, ни ввод агента команда не затрагивает.
+pub async fn mark_pane_session(pane: &str, encoded: &str) -> Result<(), String> {
+    if decode_pane_session_marker(encoded).is_none() {
+        return Err("tmux session marker не прошёл валидацию".into());
+    }
+    tmux_j(&["set-option", "-p", "-t", pane, "@jarvis_session", encoded])
+        .await
+        .map(|_| ())
+}
+
+fn unmark_pane_session_args(pane: &str, expected_marker: &str) -> Result<Vec<String>, String> {
+    let pane_suffix = pane
+        .strip_prefix('%')
+        .filter(|suffix| !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()));
+    if pane_suffix.is_none() {
+        return Err("tmux pane id не прошёл валидацию".into());
+    }
+    if decode_pane_session_marker(expected_marker).is_none() {
+        return Err("tmux session marker не прошёл валидацию".into());
+    }
+    Ok(vec![
+        "if-shell".into(),
+        "-F".into(),
+        "-t".into(),
+        pane.into(),
+        format!("#{{==:#{{@jarvis_session}},{expected_marker}}}"),
+        format!("set-option -p -u -t {pane} @jarvis_session"),
+        String::new(),
+    ])
+}
+
+/// Снять Jarvis identity-marker только если pane всё ещё содержит именно
+/// ожидаемую привязку. Проверка и очистка исполняются одной командой в tmux
+/// server, поэтому запоздалый SessionEnd не сотрёт marker уже новой сессии.
+pub async fn unmark_pane_session(pane: &str, expected_marker: &str) -> Result<(), String> {
+    let args = unmark_pane_session_args(pane, expected_marker)?;
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    tmux_j(&refs).await.map(|_| ())
+}
+
 #[derive(Debug, Clone)]
 pub struct PaneInfo {
     pub pane_id: String,
     pub session_name: String,
     pub cwd: String,
     pub pid: i64,
+    pub marker: Option<PaneSessionMarker>,
+}
+
+pub(crate) fn parse_pane_info(line: &str) -> Option<PaneInfo> {
+    let mut it = line.splitn(5, '\t');
+    let pane_id = it.next()?.trim();
+    if pane_id.is_empty() {
+        return None;
+    }
+    let session_name = it.next().unwrap_or("").trim().to_string();
+    let pid = it.next().unwrap_or("").trim().parse::<i64>().unwrap_or(0);
+    let marker = it
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(decode_pane_session_marker);
+    let cwd = it.next().unwrap_or("").trim().to_string();
+    Some(PaneInfo {
+        pane_id: pane_id.to_string(),
+        session_name,
+        cwd,
+        pid,
+        marker,
+    })
 }
 
 /// Живые паны сервера jarvis с метаданными (id, имя сессии, cwd, pid процесса
@@ -157,7 +290,7 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}",
+        "#{pane_id}\t#{session_name}\t#{pane_pid}\t#{@jarvis_session}\t#{pane_current_path}",
     ])
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
@@ -167,22 +300,7 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
         Ok(Ok(out)) if out.status.success() => Ok(Some(
             String::from_utf8_lossy(&out.stdout)
                 .lines()
-                .filter_map(|line| {
-                    let mut it = line.splitn(4, '\t');
-                    let pane_id = it.next()?.trim();
-                    if pane_id.is_empty() {
-                        return None;
-                    }
-                    let session_name = it.next().unwrap_or("").trim().to_string();
-                    let pid = it.next().unwrap_or("").trim().parse::<i64>().unwrap_or(0);
-                    let cwd = it.next().unwrap_or("").trim().to_string();
-                    Some(PaneInfo {
-                        pane_id: pane_id.to_string(),
-                        session_name,
-                        cwd,
-                        pid,
-                    })
-                })
+                .filter_map(parse_pane_info)
                 .collect(),
         )),
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -519,7 +637,15 @@ mod answer_keys_tests {
         );
         assert_eq!(
             keys,
-            seq(&["Space", "Down", "Down", "Space", "Down", "~плюс вот это", "Enter"])
+            seq(&[
+                "Space",
+                "Down",
+                "Down",
+                "Space",
+                "Down",
+                "~плюс вот это",
+                "Enter"
+            ])
         );
     }
 
@@ -593,6 +719,110 @@ mod answer_keys_tests {
             &[Some("мимо".into())],
         );
         assert_eq!(keys, seq(&["Down", "Down", "Enter"]));
+    }
+}
+
+#[cfg(test)]
+mod pane_discovery_tests {
+    use super::*;
+
+    fn marker() -> PaneSessionMarker {
+        PaneSessionMarker {
+            session_id: "019fc8de-763a-7800-bfd4-f1c270a1eac6".into(),
+            agent: "codex".into(),
+            cwd: "/Users/example/work/project".into(),
+            transcript: Some(
+                "/Users/example/.codex/sessions/2026/08/03/rollout-session.jsonl".into(),
+            ),
+            pid: std::process::id() as i64,
+        }
+    }
+
+    #[test]
+    fn pane_session_marker_round_trips_without_delimiter_ambiguity() {
+        let encoded = encode_pane_session_marker(&marker()).expect("valid marker");
+        assert!(
+            !encoded.chars().any(|ch| matches!(ch, '\t' | '\n' | '\r')),
+            "tmux inventory keeps the marker in one field"
+        );
+
+        assert_eq!(decode_pane_session_marker(&encoded), Some(marker()));
+    }
+
+    #[test]
+    fn pane_session_marker_rejects_untrusted_or_ambiguous_identity() {
+        for mut invalid in [
+            PaneSessionMarker {
+                session_id: String::new(),
+                ..marker()
+            },
+            PaneSessionMarker {
+                session_id: "../../other".into(),
+                ..marker()
+            },
+            PaneSessionMarker {
+                agent: "unknown".into(),
+                ..marker()
+            },
+            PaneSessionMarker {
+                cwd: "relative/project".into(),
+                ..marker()
+            },
+            PaneSessionMarker {
+                transcript: Some("../secret".into()),
+                ..marker()
+            },
+            PaneSessionMarker { pid: 0, ..marker() },
+        ] {
+            let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&invalid).unwrap());
+            assert_eq!(decode_pane_session_marker(&encoded), None);
+            invalid.session_id.clear();
+        }
+    }
+
+    #[test]
+    fn pane_inventory_recovers_marker_and_keeps_cwd_as_final_field() {
+        let encoded = encode_pane_session_marker(&marker()).expect("valid marker");
+        let line =
+            format!("%4\tjarvis-123\t8123\t{encoded}\t/Users/example/work/project with spaces");
+
+        let pane = parse_pane_info(&line).expect("pane");
+
+        assert_eq!(pane.pane_id, "%4");
+        assert_eq!(pane.session_name, "jarvis-123");
+        assert_eq!(pane.pid, 8123);
+        assert_eq!(pane.cwd, "/Users/example/work/project with spaces");
+        assert_eq!(pane.marker, Some(marker()));
+    }
+
+    #[test]
+    fn pane_inventory_keeps_unmarked_legacy_panes_visible() {
+        let pane = parse_pane_info("%2\tjarvis-old\t42\t\t/tmp/project").expect("pane");
+
+        assert_eq!(pane.pane_id, "%2");
+        assert_eq!(pane.marker, None);
+        assert_eq!(pane.cwd, "/tmp/project");
+    }
+
+    #[test]
+    fn marker_cleanup_is_an_atomic_compare_and_clear() {
+        let encoded = encode_pane_session_marker(&marker()).expect("valid marker");
+
+        let args = unmark_pane_session_args("%7", &encoded).expect("cleanup command");
+
+        assert_eq!(
+            args,
+            vec![
+                "if-shell".to_string(),
+                "-F".to_string(),
+                "-t".to_string(),
+                "%7".to_string(),
+                format!("#{{==:#{{@jarvis_session}},{encoded}}}"),
+                "set-option -p -u -t %7 @jarvis_session".to_string(),
+                String::new(),
+            ]
+        );
     }
 }
 

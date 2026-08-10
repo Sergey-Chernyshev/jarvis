@@ -1,0 +1,13 @@
+{
+  "id": "fake-plugin",
+  "name": "Fake Plugin",
+  "version": "0.1.0",
+  "protocolVersion": 1,
+  "entry": {
+    "type": "binary",
+    "path": "fake-plugin.sh",
+    "args": []
+  },
+  "capabilities": ["read"],
+  "projectRuntimes": []
+}

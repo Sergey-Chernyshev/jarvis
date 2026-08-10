@@ -17,6 +17,7 @@
 ### Task 1: `turns.rs` — сегментация ленты на ходы (`spans`)
 
 **Files:**
+
 - Create: `src-tauri/src/turns.rs`
 - Modify: `src-tauri/src/main.rs` (объявить модуль рядом с `mod transcript;`)
 - Test: внутри `src-tauri/src/turns.rs` (`#[cfg(test)] mod tests`)
@@ -134,6 +135,7 @@ git commit -m "feat(chatsum): сегментация ленты чата на х
 ### Task 2: `turns.rs` — факты хода (`TurnFacts`, `segment`) для Claude и Codex
 
 **Files:**
+
 - Modify: `src-tauri/src/turns.rs`
 - Test: там же
 
@@ -435,6 +437,7 @@ git commit -m "feat(chatsum): TurnFacts — детерминированные �
 ### Task 3: `turns.rs` — промпт с бюджетами и few-shot
 
 **Files:**
+
 - Modify: `src-tauri/src/turns.rs`
 - Test: там же
 
@@ -589,12 +592,13 @@ git commit -m "feat(chatsum): промпт сводки хода — few-shot, �
 ### Task 4: `turns.rs` — парс/ремонт JSON и валидация карточки
 
 **Files:**
+
 - Modify: `src-tauri/src/turns.rs`
 - Test: там же
 
 - [ ] **Step 1: Падающие тесты**
 
-```rust
+````rust
     fn facts_with(paths: &[&str]) -> TurnFacts {
         let mut f = TurnFacts::default();
         for p in paths {
@@ -635,7 +639,7 @@ git commit -m "feat(chatsum): промпт сводки хода — few-shot, �
         assert!(parse_card(empty, &facts_with(&[])).is_none(), "пустое summary → None");
         assert!(parse_card("совсем не json", &facts_with(&[])).is_none());
     }
-```
+````
 
 - [ ] **Step 2: Прогнать — FAIL (нет `TurnCard`/`parse_card`)**
 
@@ -717,6 +721,7 @@ git commit -m "feat(chatsum): TurnCard — парс с ремонтом JSON и 
 ### Task 5: `turnsum.rs` — кэш сводок на диске
 
 **Files:**
+
 - Create: `src-tauri/src/turnsum.rs`
 - Modify: `src-tauri/src/main.rs` (рядом с `mod turns;` добавить `mod turnsum;`)
 - Test: внутри `src-tauri/src/turnsum.rs`
@@ -854,6 +859,7 @@ git commit -m "feat(chatsum): дисковый кэш сводок ходов с
 ### Task 6: генерация сводок + триггер на Stop (демон, tail)
 
 **Files:**
+
 - Modify: `src-tauri/src/tail.rs` (запомнить сессию активного хвоста)
 - Modify: `src-tauri/src/daemon.rs` (`busy_take`/`busy_release` → `pub(crate)`; Effect + методы генерации)
 - Test: `src-tauri/src/tail.rs` (минимальный), остальное — интеграция (чистые части уже покрыты)
@@ -1050,6 +1056,7 @@ git commit -m "feat(chatsum): генерация сводок ходов — Sto
 ### Task 7: IPC — `chat_open` с ходами, `chat_summarize`, `file_open`; мост
 
 **Files:**
+
 - Modify: `src-tauri/src/ipc.rs` (`chat_open` + 2 новые команды + чистый `resolve_user_file`)
 - Modify: `src-tauri/src/main.rs:119` (регистрация команд рядом с `ipc::chat_open`)
 - Modify: `ui/bridge.js` (3 новых метода)
@@ -1242,6 +1249,7 @@ git commit -m "feat(chatsum): IPC — chat_open с разметкой ходов
 ### Task 8: UI — карточки сводок в чате (renderer.js + index.html)
 
 **Files:**
+
 - Modify: `ui/renderer.js`
 - Modify: `ui/index.html` (кнопка-тумблер в шапке чата + CSS)
 
@@ -1252,41 +1260,102 @@ git commit -m "feat(chatsum): IPC — chat_open с разметкой ходов
 Найти в `ui/index.html` элемент `id="chatModel"` (шапка чата) и сразу после него добавить:
 
 ```html
-<button id="sumToggle" class="sumtoggle" title="Сводка ходов / полная лента">Сводка</button>
+<button id="sumToggle" class="sumtoggle" title="Сводка ходов / полная лента">
+  Сводка
+</button>
 ```
 
 В `<style>` рядом с блоком `.msg.tools .chip` (~строка 822) добавить:
 
 ```css
-  /* --- сводки ходов --- */
-  .sumtoggle {
-    margin-left: 6px; padding: 2px 8px; font-size: 11px; border-radius: 9px;
-    border: 1px solid var(--line, rgba(128,128,128,.35)); background: none;
-    color: var(--muted); cursor: pointer;
-  }
-  .sumtoggle.on { color: var(--fg, inherit); border-color: currentColor; }
-  .turnsum {
-    margin: 6px 0; padding: 8px 10px; border-radius: 10px;
-    background: rgba(127,127,127,.08); border: 1px solid rgba(127,127,127,.15);
-    font-size: 12.5px; line-height: 1.45;
-  }
-  .turnsum .tsum-files { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
-  .turnsum .fchip {
-    display: inline-flex; gap: 4px; align-items: baseline; max-width: 100%;
-    padding: 2px 8px; border-radius: 8px; font-size: 11.5px; cursor: pointer;
-    background: rgba(127,127,127,.12);
-  }
-  .turnsum .fchip:hover { background: rgba(127,127,127,.22); }
-  .turnsum .fchip .fnote { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .turnsum .tsum-cmds { margin-top: 6px; font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); }
-  .turnsum details { margin-top: 6px; }
-  .turnsum details summary { cursor: pointer; color: var(--muted); font-size: 11.5px; }
-  .turnsum .tsum-foot { margin-top: 6px; display: flex; gap: 10px; }
-  .turnsum .tsum-btn { background: none; border: none; padding: 0; font-size: 11px; color: var(--muted); cursor: pointer; text-decoration: underline; }
-  /* режим «Сводка»: сырьё завершённых ходов спрятано, пока не развернули */
-  #chatlog.sum .turn.done .turnraw { display: none; }
-  #chatlog.sum .turn.done.expanded .turnraw { display: block; }
-  #chatlog:not(.sum) .turnsum { display: none; }
+/* --- сводки ходов --- */
+.sumtoggle {
+  margin-left: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 9px;
+  border: 1px solid var(--line, rgba(128, 128, 128, 0.35));
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.sumtoggle.on {
+  color: var(--fg, inherit);
+  border-color: currentColor;
+}
+.turnsum {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(127, 127, 127, 0.08);
+  border: 1px solid rgba(127, 127, 127, 0.15);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.turnsum .tsum-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+.turnsum .fchip {
+  display: inline-flex;
+  gap: 4px;
+  align-items: baseline;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  cursor: pointer;
+  background: rgba(127, 127, 127, 0.12);
+}
+.turnsum .fchip:hover {
+  background: rgba(127, 127, 127, 0.22);
+}
+.turnsum .fchip .fnote {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.turnsum .tsum-cmds {
+  margin-top: 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+.turnsum details {
+  margin-top: 6px;
+}
+.turnsum details summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.turnsum .tsum-foot {
+  margin-top: 6px;
+  display: flex;
+  gap: 10px;
+}
+.turnsum .tsum-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  text-decoration: underline;
+}
+/* режим «Сводка»: сырьё завершённых ходов спрятано, пока не развернули */
+#chatlog.sum .turn.done .turnraw {
+  display: none;
+}
+#chatlog.sum .turn.done.expanded .turnraw {
+  display: block;
+}
+#chatlog:not(.sum) .turnsum {
+  display: none;
+}
 ```
 
 - [ ] **Step 2: renderer.js — группировка ходов**
@@ -1301,12 +1370,12 @@ let chatLlmOk = false; // есть ли служебный LLM (кнопка «�
 const turnTarget = () => (curTurn ? curTurn.raw : chatlogEl);
 
 function startTurn(key, complete) {
-  const wrap = document.createElement('div');
-  wrap.className = 'turn';
+  const wrap = document.createElement("div");
+  wrap.className = "turn";
   wrap.dataset.key = key;
-  if (complete) wrap.dataset.complete = '1';
-  const raw = document.createElement('div');
-  raw.className = 'turnraw';
+  if (complete) wrap.dataset.complete = "1";
+  const raw = document.createElement("div");
+  raw.className = "turnraw";
   wrap.appendChild(raw);
   chatlogEl.appendChild(wrap);
   curTurn = { key, wrap, raw };
@@ -1316,31 +1385,34 @@ function startTurn(key, complete) {
 В `addToolChip` заменить `chatlogEl.appendChild(toolsGroup);` на:
 
 ```js
-    turnTarget().appendChild(toolsGroup);
+turnTarget().appendChild(toolsGroup);
 ```
 
 В `appendChatItems` ветку юзера и ассистента поменять так (полный новый вид цикла):
 
 ```js
-  for (const it of items) {
-    if (it.kind === 'tool') {
-      addToolChip(it.text);
-      continue;
-    }
-    toolsGroup = null;
-    if (it.role === 'user') {
-      // реальная реплика из транскрипта пришла — снимаем оптимистичный дубль
-      const pi = pendingReplies.findIndex((p) => p.text === it.text.trim());
-      if (pi >= 0) { pendingReplies[pi].el.remove(); pendingReplies.splice(pi, 1); }
-      const msg = document.createElement('div');
-      msg.className = 'msg user';
-      msg.appendChild(userBubble(it.text));
-      chatlogEl.appendChild(msg);
-      startTurn(String(it.ts), true); // ответ агента на эту реплику — новый ход
-    } else {
-      turnTarget().appendChild(assistantMsg(it));
-    }
+for (const it of items) {
+  if (it.kind === "tool") {
+    addToolChip(it.text);
+    continue;
   }
+  toolsGroup = null;
+  if (it.role === "user") {
+    // реальная реплика из транскрипта пришла — снимаем оптимистичный дубль
+    const pi = pendingReplies.findIndex((p) => p.text === it.text.trim());
+    if (pi >= 0) {
+      pendingReplies[pi].el.remove();
+      pendingReplies.splice(pi, 1);
+    }
+    const msg = document.createElement("div");
+    msg.className = "msg user";
+    msg.appendChild(userBubble(it.text));
+    chatlogEl.appendChild(msg);
+    startTurn(String(it.ts), true); // ответ агента на эту реплику — новый ход
+  } else {
+    turnTarget().appendChild(assistantMsg(it));
+  }
+}
 ```
 
 - [ ] **Step 3: renderer.js — карточка сводки**
@@ -1351,34 +1423,40 @@ function startTurn(key, complete) {
 /* Карточка сводки хода. card=null → детерминированная (факты + сжатый ответ). */
 function buildCard(key, card) {
   const facts = turnFacts.get(key) || { files: [], commands: [] };
-  const box = document.createElement('div');
-  box.className = 'turnsum';
+  const box = document.createElement("div");
+  box.className = "turnsum";
 
-  const files = card ? card.files : facts.files.map((f) => ({ path: f.path, note: '' }));
+  const files = card
+    ? card.files
+    : facts.files.map((f) => ({ path: f.path, note: "" }));
   const sumText = card ? card.summary : detSummary(key);
   if (sumText) {
-    const s = document.createElement('div');
+    const s = document.createElement("div");
     renderMarkdown(s, sumText);
     box.appendChild(s);
   }
   if (files.length) {
-    const fl = document.createElement('div');
-    fl.className = 'tsum-files';
+    const fl = document.createElement("div");
+    fl.className = "tsum-files";
     for (const f of files) {
-      const chip = document.createElement('span');
-      chip.className = 'fchip';
+      const chip = document.createElement("span");
+      chip.className = "fchip";
       chip.title = `${f.path} — клик: открыть, ⌥клик: показать в Finder`;
-      const p = document.createElement('span');
-      p.textContent = '📄 ' + f.path.split('/').pop();
+      const p = document.createElement("span");
+      p.textContent = "📄 " + f.path.split("/").pop();
       chip.appendChild(p);
       if (f.note) {
-        const n = document.createElement('span');
-        n.className = 'fnote';
-        n.textContent = '· ' + f.note;
+        const n = document.createElement("span");
+        n.className = "fnote";
+        n.textContent = "· " + f.note;
         chip.appendChild(n);
       }
-      chip.addEventListener('click', async (ev) => {
-        const res = await window.jarvis.openFile(chatSessionId, f.path, ev.altKey);
+      chip.addEventListener("click", async (ev) => {
+        const res = await window.jarvis.openFile(
+          chatSessionId,
+          f.path,
+          ev.altKey,
+        );
         if (res && res.error) showToast(res.error);
       });
       fl.appendChild(chip);
@@ -1386,37 +1464,44 @@ function buildCard(key, card) {
     box.appendChild(fl);
   }
   if (card && card.docs_digest) {
-    const det = document.createElement('details');
-    const sm = document.createElement('summary');
-    sm.textContent = 'Дока';
+    const det = document.createElement("details");
+    const sm = document.createElement("summary");
+    sm.textContent = "Дока";
     det.appendChild(sm);
-    const body = document.createElement('div');
+    const body = document.createElement("div");
     renderMarkdown(body, card.docs_digest);
     det.appendChild(body);
     box.appendChild(det);
   }
-  const cmds = card ? card.commands : facts.commands.slice(0, 3).join(' · ');
+  const cmds = card ? card.commands : facts.commands.slice(0, 3).join(" · ");
   if (cmds) {
-    const c = document.createElement('div');
-    c.className = 'tsum-cmds';
+    const c = document.createElement("div");
+    c.className = "tsum-cmds";
     c.textContent = cmds;
     box.appendChild(c);
   }
 
-  const foot = document.createElement('div');
-  foot.className = 'tsum-foot';
-  const exp = document.createElement('button');
-  exp.className = 'tsum-btn';
-  const wrapOf = () => box.closest('.turn');
-  const relabel = () => { exp.textContent = wrapOf()?.classList.contains('expanded') ? 'свернуть' : 'развернуть'; };
-  exp.addEventListener('click', () => { wrapOf()?.classList.toggle('expanded'); relabel(); });
+  const foot = document.createElement("div");
+  foot.className = "tsum-foot";
+  const exp = document.createElement("button");
+  exp.className = "tsum-btn";
+  const wrapOf = () => box.closest(".turn");
+  const relabel = () => {
+    exp.textContent = wrapOf()?.classList.contains("expanded")
+      ? "свернуть"
+      : "развернуть";
+  };
+  exp.addEventListener("click", () => {
+    wrapOf()?.classList.toggle("expanded");
+    relabel();
+  });
   foot.appendChild(exp);
   if (!card && chatLlmOk) {
-    const gen = document.createElement('button');
-    gen.className = 'tsum-btn';
-    gen.textContent = 'Сводка';
-    gen.addEventListener('click', () => {
-      gen.textContent = 'готовлю…';
+    const gen = document.createElement("button");
+    gen.className = "tsum-btn";
+    gen.textContent = "Сводка";
+    gen.addEventListener("click", () => {
+      gen.textContent = "готовлю…";
       gen.disabled = true;
       window.jarvis.summarizeTurn(chatSessionId, key);
     });
@@ -1430,18 +1515,20 @@ function buildCard(key, card) {
 // детерминированное саммари: сжатый хвост последней реплики агента в ходе
 function detSummary(key) {
   const wrap = chatlogEl.querySelector(`.turn[data-key="${CSS.escape(key)}"]`);
-  const bubbles = wrap ? wrap.querySelectorAll('.msg.assistant .bubble') : [];
-  const last = bubbles.length ? bubbles[bubbles.length - 1].textContent.trim() : '';
-  return last.length > 220 ? last.slice(0, 220) + '…' : last;
+  const bubbles = wrap ? wrap.querySelectorAll(".msg.assistant .bubble") : [];
+  const last = bubbles.length
+    ? bubbles[bubbles.length - 1].textContent.trim()
+    : "";
+  return last.length > 220 ? last.slice(0, 220) + "…" : last;
 }
 
 /* Вставить/заменить карточку хода; card=null — детерминированная. */
 function applyCard(key, card) {
   const wrap = chatlogEl.querySelector(`.turn[data-key="${CSS.escape(key)}"]`);
   if (!wrap) return;
-  wrap.querySelector('.turnsum')?.remove();
+  wrap.querySelector(".turnsum")?.remove();
   wrap.insertBefore(buildCard(key, card), wrap.firstChild);
-  wrap.classList.add('done');
+  wrap.classList.add("done");
 }
 ```
 
@@ -1450,41 +1537,41 @@ function applyCard(key, card) {
 В `openChat` после `chatlogEl.textContent = '';` и `toolsGroup = null;` добавить:
 
 ```js
-  curTurn = null;
-  turnFacts.clear();
-  chatLlmOk = !!res.llm;
-  chatlogEl.classList.toggle('sum', summaryModeOn());
+curTurn = null;
+turnFacts.clear();
+chatLlmOk = !!res.llm;
+chatlogEl.classList.toggle("sum", summaryModeOn());
 ```
 
 Там же, внутри ветки `if (res.items.length) { … }` после `appendChatItems(res.items);` добавить:
 
 ```js
-    for (const sp of res.spans || []) {
-      if (sp.key === 'pre') continue; // частичный головной ход — только сырьё
-      turnFacts.set(sp.key, { files: sp.files || [], commands: sp.commands || [] });
-      if (!sp.complete) continue;
-      applyCard(sp.key, (res.cards || {})[sp.key] || null);
-    }
+for (const sp of res.spans || []) {
+  if (sp.key === "pre") continue; // частичный головной ход — только сырьё
+  turnFacts.set(sp.key, { files: sp.files || [], commands: sp.commands || [] });
+  if (!sp.complete) continue;
+  applyCard(sp.key, (res.cards || {})[sp.key] || null);
+}
 ```
 
 После обработчика `window.jarvis.onChatAppend(…)` добавить:
 
 ```js
 window.jarvis.onChatSummary(({ sessionId, turnKey, card }) => {
-  if (view === 'chat' && sessionId === chatSessionId) applyCard(turnKey, card);
+  if (view === "chat" && sessionId === chatSessionId) applyCard(turnKey, card);
 });
 
 /* тумблер «Сводка/Лента» — запоминается локально, по умолчанию сводка */
-const sumToggleEl = document.getElementById('sumToggle');
-const summaryModeOn = () => localStorage.getItem('chatSummary') !== '0';
+const sumToggleEl = document.getElementById("sumToggle");
+const summaryModeOn = () => localStorage.getItem("chatSummary") !== "0";
 function renderSumToggle() {
   const on = summaryModeOn();
-  sumToggleEl.classList.toggle('on', on);
-  sumToggleEl.textContent = on ? 'Сводка' : 'Лента';
-  chatlogEl.classList.toggle('sum', on);
+  sumToggleEl.classList.toggle("on", on);
+  sumToggleEl.textContent = on ? "Сводка" : "Лента";
+  chatlogEl.classList.toggle("sum", on);
 }
-sumToggleEl.addEventListener('click', () => {
-  localStorage.setItem('chatSummary', summaryModeOn() ? '0' : '1');
+sumToggleEl.addEventListener("click", () => {
+  localStorage.setItem("chatSummary", summaryModeOn() ? "0" : "1");
   renderSumToggle();
 });
 renderSumToggle();
@@ -1519,6 +1606,7 @@ Expected: PASS, ноль упавших (было 281+, стало больше)
 
 Run: `npm start` (dev-сборка с фичами и codesign — см. package.json).
 Чек-лист:
+
 1. Открыть чат сессии с историей → старые ходы схлопнуты в карточки (детерминированные сразу; LLM-проза дозаполняет последние 5 по мере готовности — событие `chat:summary`).
 2. Клик по файл-чипу → файл открылся; ⌥-клик → Finder; несуществующий путь → тост «файл не найден».
 3. Отправить сообщение агенту → живой стрим идёт как раньше; после Stop карточка появляется, сырьё уезжает под «развернуть».

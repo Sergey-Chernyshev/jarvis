@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${JARVIS_TEST_REPO_ROOT:?}"
+: "${JARVIS_TEST_TOOL_LOG:?}"
+
+printf 'cargo JARVIS_APP_BUILD=%s %s\n' "${JARVIS_APP_BUILD:-<unset>}" "$*" \
+  >>"$JARVIS_TEST_TOOL_LOG"
+binary="$JARVIS_TEST_REPO_ROOT/crates/jarvis-power-helper/target/release/jarvis-power-helper"
+mkdir -p "$(dirname "$binary")"
+printf '#!/bin/sh\nexit 78\n' >"$binary"
+chmod 0755 "$binary"

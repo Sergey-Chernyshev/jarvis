@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "sequence": 2,
+  "issuedAt": "2026-08-01T01:00:00Z",
+  "expiresAt": "2026-08-03T00:00:00Z",
+  "previousDigest": "sha256:382bdf240eb09eb2b7ba8fa8283ecb3aecb3f5a13b514abdfd36e65f1a7af472",
+  "payload": {
+    "publisherLineages": [
+      {
+        "id": "example.release",
+        "publisher": "example",
+        "pluginIds": ["dev.example.echo"],
+        "keys": [
+          {
+            "keyId": "example.release:1",
+            "algorithm": "ed25519",
+            "publicKey": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+            "validFrom": "2026-01-01T00:00:00Z",
+            "validUntil": "2027-08-01T00:00:00Z"
+          }
+        ]
+      }
+    ],
+    "releases": [
+      {
+        "pluginId": "dev.example.echo",
+        "publisher": "example",
+        "version": "1.0.0",
+        "publisherKeyId": "example.release:1",
+        "publisherLineage": "example.release",
+        "jarvisRange": ">=0.4.0, <0.5.0",
+        "pluginApi": 2,
+        "target": "darwin-arm64",
+        "minimumMacos": "14.0.0",
+        "url": "https://plugins.jarvis.example/dev.example.echo/1.0.0/darwin-arm64.jarvis-plugin",
+        "archiveDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packageSignature": {
+          "algorithm": "ed25519",
+          "keyId": "example.release:1",
+          "value": "gDDYgr16HoixPzQjmuL8+CTds3bPmnZlxOHqex3+FifEyJqpD8PHzZT5HUWX4tQrUrijxOGqKbQu/ZaPOSAjCQ=="
+        },
+        "revoked": false
+      }
+    ],
+    "rootRotation": {
+      "threshold": 1,
+      "keys": [
+        {
+          "keyId": "jarvis.root:2",
+          "algorithm": "ed25519",
+          "publicKey": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+          "validFrom": "2026-01-01T00:00:00Z",
+          "validUntil": "2027-08-01T00:00:00Z"
+        }
+      ]
+    },
+    "revokedPackageDigests": [],
+    "revokedPublisherKeys": []
+  },
+  "signatures": [
+    {
+      "algorithm": "ed25519",
+      "keyId": "jarvis.root:1",
+      "value": "GdG/zwkwY4Qrgd/ap//d18GGT4NYVhC3CAanQYfOh5R4CWmlLMjXXGlBnnDjeDg2L9m2FHgwZj6nb2nl3x7JBw=="
+    },
+    {
+      "algorithm": "ed25519",
+      "keyId": "jarvis.root:2",
+      "value": "jY9Vo8Nv9qmLNEFmKmfnAKmjJqTCU/e93qsEeY9XuMFc5pilmwPXrfsTJmDhJOTr/fCjBdq5KYSDURLlmJ4XAA=="
+    }
+  ]
+}

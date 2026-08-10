@@ -203,6 +203,10 @@ pub struct Session {
     /// Имя, которым уже подписали tmux-окно (не дёргаем rename повторно).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub renamed_to: Option<String>,
+    /// Последний marker, записанный в tmux-pane. Это runtime-дедупликация:
+    /// после рестарта поле пусто и marker безопасно восстанавливается снова.
+    #[serde(skip)]
+    pub tmux_marker: Option<String>,
 }
 
 impl Session {

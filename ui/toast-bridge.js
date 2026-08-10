@@ -1,8 +1,10 @@
 /* Мост window.toast для окна тостов — контракт Electron-preload поверх Tauri. */
 
 (() => {
-  const { invoke } = window.__TAURI__.core;
-  const { listen } = window.__TAURI__.event;
+  const transport = globalThis.__JARVIS_CORE_TRANSPORT__;
+  if (!transport) throw new Error('jarvis_core_transport_missing');
+  const { invoke, listen } = transport;
+  delete globalThis.__JARVIS_CORE_TRANSPORT__;
 
   let listeners = 0;
   const armed = () => {
@@ -11,13 +13,13 @@
   };
 
   // theme.js ждёт window.jarvis: в окне тостов даём ему только внешность
-  window.jarvis = Object.assign(window.jarvis || {}, {
+  window.jarvis = Object.freeze({
     getSettings: () => invoke('settings_get'),
     setSettings: (patch) => invoke('settings_set', { patch }),
     onAppearance: (cb) => { listen('appearance', (e) => cb(e.payload)); },
   });
 
-  window.toast = {
+  window.toast = Object.freeze({
     onAdd: (cb) => { listen('toast-add', (e) => cb(e.payload)).then(armed); },
     onUpdate: (cb) => { listen('toast-update', (e) => cb(e.payload)).then(armed); },
     // нативный hover (курсор над окном тостов): WKWebView не шлёт mouseenter,
@@ -29,7 +31,10 @@
     onExtend: (cb) => { listen('toast-extend', (e) => cb(e.payload)); },
     // снять карточку по id (вопрос ответили) — не через armed(), это не буфер
     onRemove: (cb) => { listen('toast-remove', (e) => cb(e.payload)); },
-    click: (sessionId) => invoke('toast_click', { sessionId }),
+    click: (sessionId, target) => invoke('toast_click', {
+      sessionId,
+      target: target || null,
+    }),
     resize: (h) => invoke('toast_resize', { h }),
     continueSession: (sessionId) => invoke('session_continue', { sessionId }),
     // ответ на вопрос кликом по варианту (выбор клавишами идёт мимо — глобальный хоткей)
@@ -53,5 +58,5 @@
     // копировать текст в буфер (надёжный путь через плагин Tauri — навигаторный
     // clipboard в неактивном окне тостов WKWebView капризен)
     copy: (text) => invoke('plugin:clipboard-manager|write_text', { text: String(text) }),
-  };
+  });
 })();

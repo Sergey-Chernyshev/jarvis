@@ -84,7 +84,7 @@ Stop) отображается как **одно саммари-сообщени
    отбрасываются), длины полей клампятся.
 4. **Кэш**: `~/.jarvis/turn-summaries/<session_id>.json`
    `{ v: 1, turns: { <turn_key>: { summary, files:[{path,note}], docs,
-   commands, model, at } } }`. Пересборка только отсутствующих; `v` растёт
+commands, model, at } } }`. Пересборка только отсутствующих; `v` растёт
    при смене схемы/промпта → инвалидация.
 
 ### Триггеры
@@ -100,7 +100,7 @@ Stop) отображается как **одно саммари-сообщени
 ### IPC / события
 
 - `chat_open` → `{ ok, items (хвост 80), spans: [{key, start, end, complete,
-  files, commands}] (координаты хвоста), cards: {key: card}, llm, project }` —
+files, commands}] (координаты хвоста), cards: {key: card}, llm, project }` —
   сырые items остаются (нужны для «развернуть» и режима «Лента»), поверх —
   разметка ходов; карточки — отдельной мапой, чтобы не дублировать в спанах.
 - Событие `chat:summary` `{ session_id, turn_key, card }` — рендерер

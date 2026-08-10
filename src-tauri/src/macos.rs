@@ -13,6 +13,10 @@ use tauri::{Emitter, Manager, WebviewWindow};
 const NS_SCREEN_SAVER_WINDOW_LEVEL: isize = 1000;
 /// NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary
 const COLLECTION_BEHAVIOR: usize = (1 << 0) | (1 << 8);
+/// NSWindowCollectionBehaviorMoveToActiveSpace: окно переезжает на текущий
+/// Space вместо переключения пользователя на «родной». НЕСОВМЕСТИМ с
+/// CanJoinAllSpaces — вместе валят AppKit ассертом на старте.
+const NS_COLLECTION_BEHAVIOR_MOVE_TO_ACTIVE_SPACE: usize = 1 << 1;
 /// Поведение обычного окна: Managed | ParticipatesInCycle | FullScreenPrimary.
 /// FullScreenPrimary обязателен — без него AppKit не пускает окно в фуллскрин
 /// (зелёная кнопка и ⌃⌘F молча не работают).
@@ -62,11 +66,33 @@ fn on_main(win: &WebviewWindow, f: impl FnOnce(*mut AnyObject) + Send + 'static)
 }
 
 /// Поверх всего, на всех Spaces, над фуллскрином — но без кражи фокуса при показе.
+///
+/// Симметрична `float_normal`: снимает и то, что та выставила. Resizable в
+/// стайл-маске обязателен оконному режиму, но накладке он оставляет управляемое
+/// Mission Control окно — а такое окно AppKit держит на том Space, где его
+/// активировали, и над фуллскрином оно не встаёт. Поэтому маска возвращается
+/// к накладочной, иначе после «окно → накладка» ⌘J показывал бы панель только
+/// на исходном рабочем столе.
 pub fn float_above_everything(win: &WebviewWindow) {
     on_main(win, |w| unsafe {
         let _: () = msg_send![w, setLevel: NS_SCREEN_SAVER_WINDOW_LEVEL];
         let _: () = msg_send![w, setCollectionBehavior: COLLECTION_BEHAVIOR];
         let _: () = msg_send![w, setHidesOnDeactivate: false];
+        let mask: usize = msg_send![w, styleMask];
+        let _: () = msg_send![w, setStyleMask: mask & !(1 << 3)]; // без Resizable
+    });
+}
+
+/// Показывать окно на ТЕКУЩЕМ рабочем столе, а не утаскивать пользователя на
+/// тот, где окно было создано. Для окон чата агента и онбординга: они живут на
+/// своём Space, и `set_focus` заставлял macOS переключать Space целиком.
+///
+/// Только для окон БЕЗ `CanJoinAllSpaces`: эти биты взаимоисключающие, и вместе
+/// роняют AppKit ассертом. Панели и тостам это не нужно — они и так на всех
+/// Spaces (см. `float_above_everything`).
+pub fn move_to_active_space(win: &WebviewWindow) {
+    on_main(win, |w| unsafe {
+        let _: () = msg_send![w, setCollectionBehavior: NS_COLLECTION_BEHAVIOR_MOVE_TO_ACTIVE_SPACE];
     });
 }
 
@@ -87,9 +113,18 @@ pub fn float_normal(win: &WebviewWindow) {
 
 /// Показать окно, не активируя приложение (аналог showInactive в Electron):
 /// orderFrontRegardless выводит окно на экран, не делая его key.
+///
+/// Space здесь НЕ трогаем: `MoveToActiveSpace` несовместим с
+/// `CanJoinAllSpaces` (взаимоисключающие биты NSWindowCollectionBehavior) —
+/// AppKit уходит в assert, и падение прилетает внутри did_finish_launching,
+/// где его нельзя размотать. Проверено: приложение не стартует вовсе.
 pub fn show_inactive(win: &WebviewWindow) {
     on_main(win, |w| unsafe {
         let _: () = msg_send![w, orderFrontRegardless];
+        // Прозрачное окно: форму тени AppKit кэширует по непрозрачным пикселям
+        // на момент отрисовки. Без сброса от прошлого размера остаётся контур —
+        // это и есть «артефакты теней вокруг».
+        let _: () = msg_send![w, invalidateShadow];
     });
 }
 
@@ -159,6 +194,9 @@ pub fn place_panel(win: &WebviewWindow, w: f64, h: f64, corner: bool) {
             size: CGSize { width: pw, height: ph },
         };
         let _: () = msg_send![window, setFrame: frame, display: false];
+        // Панель тоже прозрачная и меняет размер под дисплей — без сброса тени
+        // на экране остаётся контур от прежней геометрии.
+        let _: () = msg_send![window, invalidateShadow];
     });
 }
 
@@ -212,6 +250,10 @@ pub fn place_toast(win: &WebviewWindow, w: f64, h: f64) {
             size: CGSize { width: w, height: h },
         };
         let _: () = msg_send![window, setFrame: frame, display: true];
+        // Стек тостов меняет высоту на каждой карточке. У прозрачного окна тень
+        // кэшируется по прежней форме, поэтому вокруг остаются контуры старого
+        // размера — сбрасываем её после каждого изменения кадра.
+        let _: () = msg_send![window, invalidateShadow];
     });
 }
 

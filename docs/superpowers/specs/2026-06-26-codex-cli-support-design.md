@@ -8,32 +8,34 @@
 ## 1. Цели и не-цели
 
 **Цели (объём максимальный — выбор пользователя):**
+
 1. **Мониторинг** интерактивных Codex-TUI сессий: панель, тосты, голосовые саммари, просмотр чата, статус/живость.
 2. **Контроль**: вставка ответов (reply), смена модели/effort, ответ на вопрос, resume.
 3. **Usage-статистика** Codex: токены/квота из rollout `token_count`/`rate_limits` (прайсинг $ — опциональная оценка).
 4. **Внутренний Codex**: `codex exec` для собственных саммари/переводов (service-LLM) и для встроенного gated agent-chat (с усиленной изоляцией).
 
 **Не-цели:**
+
 - Мониторинг headless `codex exec` — **невозможен через хуки** (эмпирически: `exec` не дёргает `hooks.json`; хуки только в TUI). Вне scope.
 - Никаких изменений поведения Claude — байт-в-байт прежнее (инвариант на каждом инкременте).
 - Не macOS-only специфику не трогаем.
 
 ## 2. Ключевые факты-ограничения (эмпирически проверены, в т.ч. на ревью)
 
-| Факт | Следствие |
-|---|---|
-| `codex exec` НЕ шлёт хуки; интерактивный `codex` (TUI) шлёт | Мониторинг = только интерактивные сессии |
-| Хук-payload Codex **Claude-совместим**: `session_id`,`cwd`,`transcript_path`,`tool_name`,`tool_input`; `$PPID`=pid codex | Ядро ингеста daemon.rs работает почти без изменений |
-| Payload несёт `model`,`turn_id`,`permission_mode` (на ВСЕХ событиях); Stop → `last_assistant_message` (НЕТ `payload.message`); `source` только SessionStart | `s.model` из payload (только Codex, с guard); waiting — через `PermissionRequest` |
-| Codex-события (10): PreToolUse, **PermissionRequest**, PostToolUse, PreCompact, PostCompact, SessionStart, UserPromptSubmit, **SubagentStart/Stop**, Stop. НЕТ Notification/StopFailure/SessionEnd | Codex не триггерит claude-путь лимитов/Notification; live-детект иной |
-| `~/.codex/hooks.json` существует, написан вручную с меткой `claude` | Нужен **новый writer** на `~/.codex/hooks.json` с меткой `codex` (не «фикс», install/mod.rs только Claude-settings писал) |
-| Hook-trust: `config.toml [hooks.state]` sha256, прообраз не воспроизводится | Свежие машины: шим инжектит `--dangerously-bypass-hook-trust` **условно** (если наш хук ещё не доверен) + **feature-detect** флага |
-| Rollout: `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`, строки `{timestamp,type,payload}` (session_meta/turn_context/response_item/event_msg) | Отдельный парсер за общим `ChatItem` |
-| Контроль: `-m`, `-c model_reasoning_effort=<minimal\|low\|medium\|high\|xhigh>`, `codex resume <id>`; **нет отдельного `/effort`** — «Switch models or reasoning effort with /model» | UI: для Codex модель+effort одним пикером |
-| Usage: нет `/usage`; квота инлайн `event_msg.token_count.rate_limits.{primary,secondary}` (`used_percent`,`window_minutes`,`resets_at`,`plan_type`) | `official_info` per-agent (Option); Codex синтезирует при `scan` |
-| `codex exec --json`: thread.started/turn.started/item.{started,completed}/turn.completed; init **без `tools[]`**; item.type agent_message/reasoning/command_execution/mcp_tool_call | INV-TOOLS не воспроизводим на init → **per-item kill** |
-| **ПРОКСИ:** `config.toml [network] proxy` = sandbox-MITM, НЕ egress. API-egress = env `HTTP(S)_PROXY` (reqwest) — шим уже синкает | Никакого `-c network.proxy`; env-прокси наследуется |
-| `--ignore-user-config` глушит чужие **MCP**, но **НЕ skills** (FS-discovery из `$CODEX_HOME/skills/`) | Agent-host: чистый throwaway `CODEX_HOME` без skills, не `--ignore-user-config` |
+| Факт                                                                                                                                                                                               | Следствие                                                                                                                          |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `codex exec` НЕ шлёт хуки; интерактивный `codex` (TUI) шлёт                                                                                                                                        | Мониторинг = только интерактивные сессии                                                                                           |
+| Хук-payload Codex **Claude-совместим**: `session_id`,`cwd`,`transcript_path`,`tool_name`,`tool_input`; `$PPID`=pid codex                                                                           | Ядро ингеста daemon.rs работает почти без изменений                                                                                |
+| Payload несёт `model`,`turn_id`,`permission_mode` (на ВСЕХ событиях); Stop → `last_assistant_message` (НЕТ `payload.message`); `source` только SessionStart                                        | `s.model` из payload (только Codex, с guard); waiting — через `PermissionRequest`                                                  |
+| Codex-события (10): PreToolUse, **PermissionRequest**, PostToolUse, PreCompact, PostCompact, SessionStart, UserPromptSubmit, **SubagentStart/Stop**, Stop. НЕТ Notification/StopFailure/SessionEnd | Codex не триггерит claude-путь лимитов/Notification; live-детект иной                                                              |
+| `~/.codex/hooks.json` существует, написан вручную с меткой `claude`                                                                                                                                | Нужен **новый writer** на `~/.codex/hooks.json` с меткой `codex` (не «фикс», install/mod.rs только Claude-settings писал)          |
+| Hook-trust: `config.toml [hooks.state]` sha256, прообраз не воспроизводится                                                                                                                        | Свежие машины: шим инжектит `--dangerously-bypass-hook-trust` **условно** (если наш хук ещё не доверен) + **feature-detect** флага |
+| Rollout: `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`, строки `{timestamp,type,payload}` (session_meta/turn_context/response_item/event_msg)                                           | Отдельный парсер за общим `ChatItem`                                                                                               |
+| Контроль: `-m`, `-c model_reasoning_effort=<minimal\|low\|medium\|high\|xhigh>`, `codex resume <id>`; **нет отдельного `/effort`** — «Switch models or reasoning effort with /model»               | UI: для Codex модель+effort одним пикером                                                                                          |
+| Usage: нет `/usage`; квота инлайн `event_msg.token_count.rate_limits.{primary,secondary}` (`used_percent`,`window_minutes`,`resets_at`,`plan_type`)                                                | `official_info` per-agent (Option); Codex синтезирует при `scan`                                                                   |
+| `codex exec --json`: thread.started/turn.started/item.{started,completed}/turn.completed; init **без `tools[]`**; item.type agent_message/reasoning/command_execution/mcp_tool_call                | INV-TOOLS не воспроизводим на init → **per-item kill**                                                                             |
+| **ПРОКСИ:** `config.toml [network] proxy` = sandbox-MITM, НЕ egress. API-egress = env `HTTP(S)_PROXY` (reqwest) — шим уже синкает                                                                  | Никакого `-c network.proxy`; env-прокси наследуется                                                                                |
+| `--ignore-user-config` глушит чужие **MCP**, но **НЕ skills** (FS-discovery из `$CODEX_HOME/skills/`)                                                                                              | Agent-host: чистый throwaway `CODEX_HOME` без skills, не `--ignore-user-config`                                                    |
 
 ## 3. Архитектура
 
@@ -46,6 +48,7 @@
 `async fn` в `dyn`-трейте несовместимы, а этот код намеренно не тянет `#[async_trait]` (только free async fn — claude_bin.rs:48/85 — и ручной `Pin<Box<dyn Future>>` — confirm.rs:14). Поэтому шов = **две части**:
 
 **(A) sync, dyn-safe `trait Backend`** — чистые данные/форматирование, диспетчер `fn backend(a: Agent) -> &'static dyn Backend` (`ClaudeBackend`/`CodexBackend` — ZST):
+
 ```rust
 pub trait Backend: Send + Sync {
     fn agent(&self) -> Agent;
@@ -69,6 +72,7 @@ pub trait Backend: Send + Sync {
 ```
 
 **(B) free-функции, диспетчеризуемые `match agent`** — async/stateful, в своих модулях (как `claude_bin.rs`):
+
 - Provisioning: `install_hooks(agent, hook_bin)`, `uninstall_hooks(agent)`, `hooks_status(agent)` (в install/mod.rs).
 - Control: `set_model(agent,d,sid,model).await`, `set_effort(...)`, `answer_question(...)` (в ipc.rs/tmux.rs).
 - Service-LLM: `run_service_llm(agent, prompt, timeout).await` (в service.rs).
@@ -122,7 +126,7 @@ pub trait Backend: Send + Sync {
 ### 4.5 Usage / limits (usage.rs, limits.rs)
 
 - **Скан Codex:** `scan_usage(Codex,…)` тейлит `~/.codex/sessions/**/*.jsonl`, ищет `event_msg.token_count`→`info.total_token_usage`(input/cached/output/reasoning)+model+cwd(session_meta)+sid+ts. Маппинг в общий `Tok` (zero-fill). Pre-filter substring `token_count`. Агрегация/окно/`stats()` — общие; `price()` применяется **с price() правильного агента построчно**.
-- **`limits.rs:78` НЕ ТРОГАЕМ** (ревью C2/S3): это Claude-fail-safe, Codex туда не попадает (нет StopFailure). 
+- **`limits.rs:78` НЕ ТРОГАЕМ** (ревью C2/S3): это Claude-fail-safe, Codex туда не попадает (нет StopFailure).
 - **Лимиты Codex — отдельный путь, не через StopFailure** (ревью G3): при `scan` берём последний `token_count.rate_limits.primary`(used_percent,resets_at)→ синтез `official_codex`. `official_info`/`LimitState` делаем **per-provider** (`official_claude`/`official_codex`, state живёт в `Usage`, не в ZST — ревью S2). Баннер/auto-resume Codex (если делаем) — от порога used_percent при scan, не от хука. **Известное ограничение:** в инкременте лимит-баннер Codex может быть «только индикатор %», без auto-resume — допустимо (Codex auto-resume вне критичного пути).
 - **`fetch_official`** (`claude -p /usage`) — Claude-only. Прайсинг $ Codex — оценка/конфиг, помечаем (ревью O5); базово показываем counts+%.
 
@@ -131,6 +135,7 @@ pub trait Backend: Send + Sync {
 **service-LLM (саммари/переводы):** `run_service_llm(agent,prompt,timeout)`; настройка `internalBackend: "auto"|"claude"|"codex"` (default `auto`=Claude при наличии, иначе Codex). Заменяем хардкод-гейты `resolve_claude_bin().is_none()` на «доступен ли любой service-бэкенд» (daemon.rs:905/1148 — ревью S1); добавляем `resolve_codex_bin()`. Codex-путь: `codex exec --json -m <model> -c model_reasoning_effort=low -C <tmp> "<HAIKU_SYSTEM + prompt>"` (нет `--append-system-prompt`→вшиваем в промпт), env `JARVIS_IGNORE=1`. Прокси — **env наследуется** (не `-c network.proxy`). **Без `minimal`** (400 при image_gen/web_search). Парсим финальный `agent_message.text`.
 
 **agent-host (gated) — чистый throwaway CODEX_HOME + ОБЯЗАТЕЛЬНЫЙ per-item kill** (ревью C1):
+
 - Изоляция домом, а не `--ignore-user-config` (он не глушит skills): `~/.jarvis/codex-agent-home/` = `auth.json`→symlink на `~/.codex/auth.json` (живой OAuth) + минимальный `config.toml` (только `[mcp_servers.jarvis]` + model), **без `skills/`**. Запуск `CODEX_HOME=~/.jarvis/codex-agent-home codex exec --json -s read-only -c mcp_servers.jarvis.command="<bin>" -c mcp_servers.jarvis.env.JARVIS_TOKEN="<tok>" -C <tmp> "<msg>"`, env `JARVIS_SOCK`,`JARVIS_IGNORE`.
 - **Мандаторный kill в `parse_agent_line`/цикле:** любой stream-item `command_execution`/`local_shell`/`exec` ИЛИ `mcp_tool_call` с server≠jarvis → немедленный `child.kill()` (Codex-аналог INV-TOOLS, по item, т.к. init без tools[]). Не опционально.
 - `parse_agent_line(Codex)`: `thread.started→Init{session_id=thread_id}`, `item.completed{agent_message}→Delta/Done`, `item.*{mcp_tool_call(jarvis)}→ToolUse`, `turn.completed→Done`. resume: `codex exec resume <thread_id>`.

@@ -4,14 +4,16 @@
   "version": "0.3.3",
   "identifier": "app.jarvis.monitor",
   "build": {
+    "beforeBuildCommand": "npm run build:core-transport && npm run prepare:agent-vm-sidecar",
     "frontendDist": "../ui"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "macOSPrivateApi": true,
-    "windows": [],
     "security": {
-      "csp": null
+      "freezePrototype": true,
+      "capabilities": ["main", "toast", "onboarding", "agent-chat"],
+      "csp": "default-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "plugins": {
@@ -34,7 +36,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": ["resources/plugin-trust-roots.json"],
+    "externalBin": ["binaries/jarvis-agent-vm-plugin"],
     "macOS": {
+      "bundleVersion": "340",
       "minimumSystemVersion": "11.0",
       "entitlements": "entitlements.plist",
       "infoPlist": "Info.plist",

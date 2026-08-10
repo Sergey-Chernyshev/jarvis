@@ -106,11 +106,6 @@ pub struct PctReset {
     pub reset_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct PctOnly {
-    pub pct: i64,
-}
-
 /// Недельное окно конкретной модели: «Current week (Fable): 54% …».
 ///
 /// Имя — какое пришло: раньше здесь было зашито «Sonnet only», и с приходом
@@ -137,7 +132,7 @@ pub struct Account {
 pub struct OfficialInfo {
     pub session: Option<PctReset>,
     pub week: Option<PctReset>,
-    pub week_sonnet: Option<PctOnly>,
+    pub week_model: Option<ModelWeek>,
     pub at: i64,
     pub account: Account,
 }
@@ -146,7 +141,7 @@ pub struct OfficialInfo {
 struct Official {
     session: Option<PctReset>,
     week: Option<PctReset>,
-    week_sonnet: Option<PctOnly>,
+    week_model: Option<ModelWeek>,
     at: i64,
 }
 
@@ -787,7 +782,7 @@ impl Usage {
         Some(OfficialInfo {
             session: o.session,
             week: o.week,
-            week_sonnet: o.week_sonnet,
+            week_model: o.week_model,
             at: o.at,
             account: read_account(),
         })

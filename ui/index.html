@@ -811,14 +811,22 @@
     text-wrap: pretty;
   }
 
-  /* реплика юзера — та же колонка, отличается только подписью «ты» */
-  .msg.user { align-items: flex-start; gap: 6px; max-width: 560px; }
+  /* Реплика юзера — пузырь в единственной краске, у правого края.
+   * Раньше обе стороны были одинаковым текстом в одной колонке, и диалог
+   * читался как монолог: кто что сказал — только по смыслу. Форма и сторона
+   * разводят голоса без второй краски: агент — текст на бумаге слева, человек
+   * — пузырь клеверной подложки справа. Ровно так уже говорит мобильная
+   * версия — теперь языки совпадают. */
+  .msg.user { align-items: flex-end; align-self: flex-end; gap: 6px; max-width: 560px; }
   .msg.user.pending .bubble { opacity: 0.5; }
-  .msg.user .msg-status { font-size: 12px; color: var(--ink-faint); margin-top: 3px; }
+  .msg.user .msg-status { font-size: 12px; color: var(--ink-faint); margin-top: 3px; align-self: flex-end; }
   .msg.user .bubble {
-    background: transparent;
-    border-radius: 0;
-    padding: 0;
+    background: var(--accent-soft);
+    border-radius: var(--r-card);
+    /* правый нижний угол — «хвостик»: сторона говорящего видна даже у
+     * однострочной реплики, где выравнивание глазу не за что зацепить */
+    border-bottom-right-radius: 6px;
+    padding: 10px 14px;
     color: var(--ink);
     font-size: 14.5px;
     line-height: 1.6;
@@ -832,11 +840,13 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    background: var(--surface);
+    /* внутри клеверного пузыря бумага чипа должна оставаться бумагой */
+    background: var(--surface-2, var(--surface));
     border: 0;
     border-radius: var(--r-pill);
     padding: 5px 9px;
   }
+  .msg.user .attach { background: var(--surface); }
   .attach svg { flex: none; color: var(--ink-mute); }
   .attach span {
     font-family: var(--mono);

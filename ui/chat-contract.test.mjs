@@ -45,3 +45,13 @@ test('legacy summary-mode stub stays absent', () => {
   assert.doesNotMatch(renderer, /\bchatSummaryEl\b/);
   assert.doesNotMatch(renderer, /\bsetChatMode\b/);
 });
+
+// Голоса диалога разведены формой и стороной (без второй краски): человек —
+// клеверный пузырь у правого края, агент — текст на бумаге слева. Обе стороны
+// одинаковым текстом уже были — диалог читался как монолог.
+test('user and agent messages are visually distinct voices', () => {
+  assert.match(html, /\.msg\.user \.bubble \{[^}]*background: var\(--accent-soft\)/s);
+  assert.match(html, /\.msg\.user \{[^}]*align-self: flex-end/s);
+  // у агента подложки нет — его голос остаётся текстом на бумаге
+  assert.doesNotMatch(html, /\.msg\.assistant \.bubble \{[^}]*background: var\(--accent/s);
+});

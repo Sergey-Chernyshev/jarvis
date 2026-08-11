@@ -70,6 +70,16 @@ where
     }
 }
 
+/// Сводка годится в тост «закончил», только если написана ПОСЛЕ этого стопа.
+///
+/// Прошлая сводка описывает прошлую работу: голос, читающий её как свежий
+/// итог, врёт — ровно так уведомления и рассказывали про старые дела. Лучше
+/// честное общее «Ответ готов», чем уверенный рассказ о сделанном вчера.
+fn fresh_summary(summary: Option<String>, summary_at: Option<i64>, stop_at: i64) -> Option<String> {
+    let text = summary.filter(|t| !t.is_empty())?;
+    (summary_at? >= stop_at).then_some(text)
+}
+
 /// Строит массив мета-сегментов карточки тоста на основе настроек `notify.content`
 /// и полей сессии. Каждый сегмент: `{ "kind": "br"|"md"|"ef"|"plain", "text": "..." }`.
 /// Чистая функция: тестируема без демона.
@@ -1538,6 +1548,9 @@ impl Daemon {
     /// карточки читалось как второе уведомление).
     fn done_summary(self: &std::sync::Arc<Self>, sid: String, hook_reply: Option<String>) {
         let d = self.clone();
+        // Момент стопа — до всех ожиданий: по нему отличаем сводку, рождённую
+        // ЭТИМ завершением, от унаследованной с прошлого.
+        let stop_at = now_ms();
         tauri::async_runtime::spawn(async move {
             // тайминг «результат (Stop) → показано уведомление»
             let t_notify = crate::metrics::now();
@@ -1566,7 +1579,8 @@ impl Daemon {
             let Some(s) = d.session(&sid) else { return };
             let non_empty = |v: Option<String>| v.filter(|t| !t.is_empty());
             let body = non_empty(display)
-                .or_else(|| non_empty(s.summary.clone()))
+                // Старой сводке в свежем тосте не место — см. fresh_summary.
+                .or_else(|| fresh_summary(s.summary.clone(), s.summary_at, stop_at))
                 .or_else(|| non_empty(s.task.clone()))
                 .or_else(|| non_empty(s.title.clone()))
                 .unwrap_or_else(|| "Ответ готов".into());
@@ -1599,8 +1613,21 @@ impl Daemon {
         sid: &str,
         hook_reply: Option<String>,
     ) -> Option<(String, String)> {
-        if !claude_bin::any_service_bin() || !self.busy_take("aisum", sid) {
+        if !claude_bin::any_service_bin() {
             return None;
+        }
+        // Слот на сессию — с ОЖИДАНИЕМ, а не отказом. Стопы приходят пачками
+        // (ответил — и через минуту снова стоп), а генерация с кругом по ssh
+        // занимает секунды. Прежнее «занято — молчим» значило: свежая сводка
+        // не рождалась вовсе, и тост уносил старую. Дождавшись слота, читаем
+        // транскрипт уже ПОСЛЕ захвата — свежее некуда.
+        let mut waited = 0u64;
+        while !self.busy_take("aisum", sid) {
+            if waited >= 90_000 {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            waited += 300;
         }
         let result = async {
             let s = self.session(sid)?;
@@ -2640,6 +2667,26 @@ fn evict_pane(
 
 #[cfg(test)]
 mod tests {
+    use super::fresh_summary;
+
+    /// Ровно та жалоба из жизни: «в озвучке — про старые сделанные работы».
+    /// Сводка прошлого хода не имеет права попадать в тост нового стопа.
+    #[test]
+    fn stale_summary_never_reaches_a_fresh_toast() {
+        let stop_at = 1_000_000;
+        // Написана ДО стопа — унаследована с прошлого хода: отбрасываем.
+        assert_eq!(fresh_summary(Some("починил фильтр".into()), Some(999_999), stop_at), None);
+        // Написана ЭТИМ завершением — годится.
+        assert_eq!(
+            fresh_summary(Some("починил фильтр".into()), Some(1_000_001), stop_at),
+            Some("починил фильтр".to_string())
+        );
+        // Нет времени — значит нет и доверия.
+        assert_eq!(fresh_summary(Some("что-то".into()), None, stop_at), None);
+        assert_eq!(fresh_summary(None, Some(2_000_000), stop_at), None);
+        assert_eq!(fresh_summary(Some(String::new()), Some(2_000_000), stop_at), None);
+    }
+
     use super::*;
 
     fn sess(id: &str, pane: Option<&str>) -> Session {

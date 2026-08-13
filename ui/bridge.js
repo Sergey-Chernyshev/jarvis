@@ -137,6 +137,7 @@
     sessionCommit: (sessionId, message, paths) => invoke('session_commit', { sessionId, message, paths }),
     sessionRevert: (sessionId, path) => invoke('session_revert', { sessionId, path }),
     sessionReview: (sessionId) => invoke('session_review', { sessionId }),
+    sessionSearch: (sessionId, query) => invoke('session_search', { sessionId, query }),
     // дифф файла для таба «Изменения» (§3.2): git-ханки или mode:"none"
     diffFile: (sessionId, path) => invoke('file_diff', { sessionId, path }),
     // внешняя http(s)-ссылка из отрендеренного дока → системный браузер

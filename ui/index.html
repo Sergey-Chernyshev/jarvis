@@ -1691,6 +1691,10 @@
             <span class="tasksbtn-count" id="tasksBtnCount">0/0</span>
             <span class="tasksbtn-label">задач</span>
           </button>
+          <!-- поиск по проекту задачи: там же, где живёт сессия -->
+          <button class="tasksbtn" id="searchBtn" hidden title="Поиск по проекту задачи">
+            <span class="tasksbtn-label">поиск</span>
+          </button>
           <!-- свод правок агента: виден, когда у сессии есть рабочий каталог -->
           <button class="tasksbtn" id="changesBtn" hidden title="Изменения задачи · что агент наделал">
             <span class="tasksbtn-label">изменения</span>
@@ -1760,6 +1764,21 @@
           </div>
         </div>
         <!-- вьюер документов: слайд-овер поверх чата (спека 2026-07-18 §3.1) -->
+        <div class="taskpanel-wrap" id="srchWrap" hidden>
+          <div class="taskpanel-scrim" id="srchScrim"></div>
+          <div class="taskpanel" id="srchPanel">
+            <div class="tp-head">
+              <div class="tp-titlerow">
+                <span class="tp-title">Поиск по проекту</span>
+                <span class="spacer"></span>
+                <button class="tp-close" id="srchClose" title="Закрыть · Esc">
+                  <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M3 3 L11 11 M11 3 L3 11" stroke="#9A9AA2" stroke-width="1.5" stroke-linecap="round"></path></svg>
+                </button>
+              </div>
+            </div>
+            <div class="srch" id="srchBody"></div>
+          </div>
+        </div>
         <div class="taskpanel-wrap" id="chgWrap" hidden>
           <div class="taskpanel-scrim" id="chgScrim"></div>
           <div class="taskpanel" id="chgPanel">
@@ -1939,6 +1958,7 @@
   <script src="./loops.js"></script>
   <script src="./bundle.js"></script>
   <script src="./changes.js"></script>
+  <script src="./search.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

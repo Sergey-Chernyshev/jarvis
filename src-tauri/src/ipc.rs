@@ -3754,6 +3754,25 @@ pub async fn session_review(app: AppHandle, session_id: String) -> Value {
     }
 }
 
+/// Поиск по проекту задачи.
+#[tauri::command]
+pub async fn session_search(app: AppHandle, session_id: String, query: String) -> Value {
+    let (host, cwd) = match session_place(&app, &session_id) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    match crate::search::search(&host, &cwd, &query).await {
+        Ok(hits) => json!({
+            "ok": true,
+            "hits": hits,
+            // Упёрлись в потолок — говорим об этом: «двести совпадений» и
+            // «ровно двести» человек читает по-разному.
+            "capped": hits.len() >= crate::search::MAX_HITS,
+        }),
+        Err(e) => err(e),
+    }
+}
+
 /// Откатить правку файла к последнему коммиту.
 #[tauri::command]
 pub async fn session_revert(app: AppHandle, session_id: String, path: String) -> Value {

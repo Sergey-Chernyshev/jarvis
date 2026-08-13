@@ -139,6 +139,7 @@
     sessionReview: (sessionId) => invoke('session_review', { sessionId }),
     sessionSearch: (sessionId, query) => invoke('session_search', { sessionId, query }),
     previewOpen: (url) => invoke('preview_open', { url }),
+    sessionTouched: (sessionId, path) => invoke('session_touched', { sessionId, path }),
     // дифф файла для таба «Изменения» (§3.2): git-ханки или mode:"none"
     diffFile: (sessionId, path) => invoke('file_diff', { sessionId, path }),
     // внешняя http(s)-ссылка из отрендеренного дока → системный браузер

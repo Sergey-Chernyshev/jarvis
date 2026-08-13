@@ -3754,6 +3754,40 @@ pub async fn session_review(app: AppHandle, session_id: String) -> Value {
     }
 }
 
+/// Что тронула правка в файле: объявления, в которые попали изменения.
+///
+/// Ответ на «что именно он трогал» — список функций читается в сто раз
+/// быстрее, чем сорок номеров строк.
+#[tauri::command]
+pub async fn session_touched(app: AppHandle, session_id: String, path: String) -> Value {
+    let (host, cwd) = match session_place(&app, &session_id) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let listed = match crate::changes::collect(&host, &cwd).await {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let Some((_, untracked)) = listed_file(&listed, &path) else {
+        return err("файл не в списке изменений");
+    };
+    let hunks = crate::changes::file_hunks(&host, &cwd, &path, untracked).await;
+    // Содержимое читаем на той машине, где файл лежит.
+    let (code, text) = host
+        .sh(
+            &cwd,
+            &format!("cat -- {}", crate::util::shell_quote(&path)),
+            std::time::Duration::from_secs(20),
+        )
+        .await;
+    if code != 0 {
+        return err("файл не прочитался");
+    }
+    let syms = crate::symbols::symbols_of(&text);
+    let touched = crate::symbols::touched(&syms, &crate::symbols::changed_lines(&hunks));
+    json!({ "ok": true, "touched": touched })
+}
+
 /// Открыть превью: локальный адрес того, что подняла задача.
 #[tauri::command]
 pub async fn preview_open(app: AppHandle, url: String) -> Value {

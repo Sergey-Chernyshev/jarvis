@@ -146,20 +146,30 @@ pub async fn collect(host: &Host, cwd: &str) -> Result<Value, String> {
 /// `diff HEAD` про него не знает вовсе, и без этого «новый файл» открывался бы
 /// пустым — ровно там, где смотреть интереснее всего.
 pub async fn file_diff(host: &Host, cwd: &str, path: &str, untracked: bool) -> Result<Value, String> {
+    Ok(json!({
+        "ok": true,
+        "mode": "worktree",
+        "label": path,
+        "hunks": file_hunks(host, cwd, path, untracked).await,
+    }))
+}
+
+/// Ханки файла как данные — их же читает разбор «что тронуто».
+pub async fn file_hunks(
+    host: &Host,
+    cwd: &str,
+    path: &str,
+    untracked: bool,
+) -> Vec<crate::gitdiff::Hunk> {
     let args: Vec<&str> = if untracked {
         vec!["diff", "--no-index", "--", "/dev/null", path]
     } else {
         vec!["diff", "HEAD", "--", path]
     };
     let (_, out) = host.git(cwd, &args).await;
-    // Код возврата не проверяем: `git diff` отдаёт 1 просто потому, что
-    // различия есть — это не ошибка.
-    Ok(json!({
-        "ok": true,
-        "mode": "worktree",
-        "label": path,
-        "hunks": crate::gitdiff::parse_unified(&out),
-    }))
+    // Код возврата не смотрим: `git diff` отдаёт 1 просто потому, что различия
+    // есть — это не ошибка.
+    crate::gitdiff::parse_unified(&out)
 }
 
 /// Принять правки: добавить в индекс и закоммитить.

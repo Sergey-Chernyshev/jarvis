@@ -90,6 +90,7 @@ function harness(files = FILES, extra = {}) {
     sessionRevert: async (id, path) => { calls.push(['revert', path]); return { ok: true }; },
     sessionReview: async () => { calls.push(['review']); return { ok: true, verdict: 'return', text: 'тесты сняты, а не починены' }; },
     sendReply: async (id, text) => { calls.push(['reply', text]); return { ok: true }; },
+    sessionTouched: async (id, path) => { calls.push(['touched', path]); return { ok: true, touched: [{ line: 3, name: 'parse_status', kind: 'функция' }] }; },
     ...extra,
   };
   const toasts = [];
@@ -212,4 +213,13 @@ test('замечание к строке несёт адрес и саму ст�
   assert.match(t, /зачем тут единица\?/);
   // Без кода — только адрес и вопрос, без пустой цитаты.
   assert.equal(api.noteText('a.rs', 7, '   ', 'почему?'), 'a.rs:7\n\nпочему?');
+});
+
+test('открытый файл показывает, какие объявления тронуты', async () => {
+  const { api, root, calls } = harness();
+  await api.open('s1');
+  await find(root, (n) => n.className.includes('chg-path'))[0].listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(calls.some((c) => c[0] === 'touched'), 'не спросили, что тронуто');
+  assert.match(textOf(root), /тронуто: parse_status/);
 });

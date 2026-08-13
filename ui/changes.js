@@ -162,6 +162,15 @@
     state.open = state.open === path ? '' : path;
     render();
     if (!state.open) return;
+    // «Что именно он трогал» — список функций читается быстрее сорока номеров
+    // строк. Спрашиваем параллельно с диффом: ответ маленький, ждать нечего.
+    bridge.sessionTouched(state.sessionId, path).then((r) => {
+      if (state.open !== path || !r || !r.ok) return;
+      const box = root && root.querySelector ? root.querySelector('.chg-touched') : null;
+      if (!box) return;
+      const names = (r.touched || []).map((t) => t.name);
+      box.textContent = names.length ? `тронуто: ${names.join(', ')}` : '';
+    }).catch(() => {});
     const res = await bridge.sessionChangeDiff(state.sessionId, path);
     if (state.open !== path) return; // успели переключить
     const box = root && root.querySelector ? root.querySelector('.chg-diff') : null;
@@ -277,7 +286,10 @@
       );
       if (state.open === r.path) line.classList.add('open');
       list.appendChild(line);
-      if (state.open === r.path) list.appendChild(el('div.chg-diff'));
+      if (state.open === r.path) {
+        list.appendChild(el('div.chg-touched'));
+        list.appendChild(el('div.chg-diff'));
+      }
     }
     root.appendChild(list);
 

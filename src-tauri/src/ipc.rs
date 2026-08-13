@@ -3594,6 +3594,26 @@ pub async fn session_commit(
     }
 }
 
+/// Позвать агента посмотреть на правки.
+///
+/// Ревью идёт там же, где правки: у задачи на узле — на узле. Модель берём из
+/// настроек цикловского критика, чтобы «кем ревьюить» настраивалось в одном
+/// месте, а не в двух.
+#[tauri::command]
+pub async fn session_review(app: AppHandle, session_id: String) -> Value {
+    let (host, cwd) = match session_place(&app, &session_id) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let d = Daemon::get(&app);
+    let model = d.settings.string("reviewModel");
+    let model = if model.trim().is_empty() { None } else { Some(model) };
+    match crate::changes::review(&host, &cwd, model.as_deref()).await {
+        Ok((verdict, text)) => json!({ "ok": true, "verdict": verdict, "text": text }),
+        Err(e) => err(e),
+    }
+}
+
 /// Откатить правку файла к последнему коммиту.
 #[tauri::command]
 pub async fn session_revert(app: AppHandle, session_id: String, path: String) -> Value {

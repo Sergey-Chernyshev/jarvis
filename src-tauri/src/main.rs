@@ -169,6 +169,7 @@ fn main() {
             ipc::session_change_diff,
             ipc::session_commit,
             ipc::session_revert,
+            ipc::session_review,
             ipc::url_open,
             ipc::ui_error,
             ipc::chat_close,

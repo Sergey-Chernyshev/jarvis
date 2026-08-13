@@ -226,6 +226,14 @@
     await reload();
   }
 
+  /* Отправка — отдельным нажатием после приёма: push виден всей команде, и
+   * решать, когда работа агента становится общей, человеку. */
+  async function push() {
+    const res = await bridge.sessionPush(state.sessionId);
+    if (!res || !res.ok) { onToast((res && res.error) || 'Отправить не вышло'); return; }
+    onToast(`Отправлено: ${res.branch || 'ветка'}`);
+  }
+
   async function revert(path) {
     const res = await bridge.sessionRevert(state.sessionId, path);
     if (!res || !res.ok) { onToast((res && res.error) || 'Откат не прошёл'); return; }
@@ -305,6 +313,11 @@
           onclick: review,
         }),
         msg,
+        el('button.chg-review-btn', {
+          text: 'Отправить',
+          title: 'git push текущей ветки в origin',
+          onclick: push,
+        }),
         el('button.chg-accept', {
           text: state.busy ? 'Принимаю…' : 'Принять выбранное',
           disabled: state.busy || undefined,
@@ -314,5 +327,5 @@
     );
   }
 
-  return { mount, open, reload, render, summary, row, defaultMessage, plural, verdictWord, noteText, _state: () => state };
+  return { mount, open, reload, render, summary, row, defaultMessage, plural, verdictWord, noteText, push, _state: () => state };
 });

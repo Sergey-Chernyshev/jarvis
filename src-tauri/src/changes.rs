@@ -207,6 +207,31 @@ pub async fn commit(
     Ok(sha.trim().to_string())
 }
 
+/// Отправить коммиты в удалённый репозиторий.
+///
+/// Кнопкой, а не автоматом после коммита: push виден всей команде, и решать,
+/// когда работа агента становится общей, — человеку. Ветка без upstream
+/// заводится сама (`-u`): иначе первый push каждой песочницы упирался бы в
+/// совет из четырёх слов, который всё равно набирают руками.
+pub async fn push(host: &Host, cwd: &str) -> Result<String, String> {
+    let (code, branch) = host.git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).await;
+    let branch = branch.trim().to_string();
+    if code != 0 || branch.is_empty() || branch == "HEAD" {
+        return Err("не понял, какая ветка сейчас выписана".into());
+    }
+    let (has_remote, remotes) = host.git(cwd, &["remote"]).await;
+    if has_remote != 0 || remotes.trim().is_empty() {
+        return Err("у репозитория нет удалённого адреса — отправлять некуда".into());
+    }
+    let (code, out) = host
+        .git(cwd, &["push", "--set-upstream", "origin", &branch])
+        .await;
+    if code != 0 {
+        return Err(format!("git push: {}", crate::util::one_line(out.trim())));
+    }
+    Ok(branch)
+}
+
 /// Откатить правку файла к состоянию последнего коммита.
 pub async fn revert(host: &Host, cwd: &str, path: &str) -> Result<(), String> {
     let (code, out) = host.git(cwd, &["checkout", "HEAD", "--", path]).await;
@@ -445,6 +470,16 @@ mod tests {
         std::fs::write(std::path::Path::new(&dir).join("main.rs"), "x\n").unwrap();
         assert!(commit(H, &dir, "  ", &["main.rs".to_string()]).await.is_err());
         assert!(commit(H, &dir, "есть сообщение", &[]).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Отправлять некуда — так и говорим: «push не прошёл» отправил бы
+    /// человека искать причину в сети, а её нет вовсе.
+    #[tokio::test]
+    async fn push_without_a_remote_says_so() {
+        let dir = repo("push").await;
+        let e = push(H, &dir).await.unwrap_err();
+        assert!(e.contains("удалённого адреса"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

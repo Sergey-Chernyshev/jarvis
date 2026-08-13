@@ -3844,6 +3844,19 @@ pub async fn session_search(app: AppHandle, session_id: String, query: String) -
     }
 }
 
+/// Отправить коммиты задачи в удалённый репозиторий.
+#[tauri::command]
+pub async fn session_push(app: AppHandle, session_id: String) -> Value {
+    let (host, cwd) = match session_place(&app, &session_id) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    match crate::changes::push(&host, &cwd).await {
+        Ok(branch) => json!({ "ok": true, "branch": branch }),
+        Err(e) => err(e),
+    }
+}
+
 /// Откатить правку файла к последнему коммиту.
 #[tauri::command]
 pub async fn session_revert(app: AppHandle, session_id: String, path: String) -> Value {

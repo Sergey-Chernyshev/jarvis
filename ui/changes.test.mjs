@@ -90,6 +90,7 @@ function harness(files = FILES, extra = {}) {
     sessionRevert: async (id, path) => { calls.push(['revert', path]); return { ok: true }; },
     sessionReview: async () => { calls.push(['review']); return { ok: true, verdict: 'return', text: 'тесты сняты, а не починены' }; },
     sendReply: async (id, text) => { calls.push(['reply', text]); return { ok: true }; },
+    sessionPush: async () => { calls.push(['push']); return { ok: true, branch: 'task/api' }; },
     sessionTouched: async (id, path) => { calls.push(['touched', path]); return { ok: true, touched: [{ line: 3, name: 'parse_status', kind: 'функция' }] }; },
     ...extra,
   };
@@ -222,4 +223,14 @@ test('открытый файл показывает, какие объявле�
   await new Promise((r) => setTimeout(r, 0));
   assert.ok(calls.some((c) => c[0] === 'touched'), 'не спросили, что тронуто');
   assert.match(textOf(root), /тронуто: parse_status/);
+});
+
+test('отправка — отдельное нажатие, и её итог называет ветку', async () => {
+  const { api, root, calls, toasts } = harness();
+  await api.open('s1');
+  const btn = find(root, (n) => n.className.includes('chg-review-btn')).find((b) => b.textContent === 'Отправить');
+  assert.ok(btn, 'кнопки отправки нет');
+  await btn.listeners.click[0]();
+  assert.ok(calls.some((c) => c[0] === 'push'));
+  assert.match(toasts.join('|'), /task\/api/);
 });

@@ -136,6 +136,7 @@
     sessionChangeDiff: (sessionId, path) => invoke('session_change_diff', { sessionId, path }),
     sessionCommit: (sessionId, message, paths) => invoke('session_commit', { sessionId, message, paths }),
     sessionRevert: (sessionId, path) => invoke('session_revert', { sessionId, path }),
+    sessionPush: (sessionId) => invoke('session_push', { sessionId }),
     sessionReview: (sessionId) => invoke('session_review', { sessionId }),
     sessionSearch: (sessionId, query) => invoke('session_search', { sessionId, query }),
     previewOpen: (url) => invoke('preview_open', { url }),

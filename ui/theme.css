@@ -970,3 +970,4 @@ textarea.lp-ask-text { width: 100%; min-height: 66px; }
   font: 400 12.5px/1.4 var(--font);
 }
 .chg-note:focus { outline: none; }
+.chg-touched { margin: 2px 0 0 26px; font: 400 12px/1.5 var(--font); color: var(--ink-dim); }

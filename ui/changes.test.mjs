@@ -88,6 +88,7 @@ function harness(files = FILES, extra = {}) {
     sessionChangeDiff: async (id, path) => { calls.push(['diff', path]); return { ok: true, hunks: [] }; },
     sessionCommit: async (id, message, paths) => { calls.push(['commit', message, paths]); return { ok: true, sha: 'abc1234' }; },
     sessionRevert: async (id, path) => { calls.push(['revert', path]); return { ok: true }; },
+    sessionReview: async () => { calls.push(['review']); return { ok: true, verdict: 'return', text: 'тесты сняты, а не починены' }; },
     ...extra,
   };
   const toasts = [];
@@ -173,4 +174,30 @@ test('клик по файлу просит дифф именно этого ф�
   const path = find(root, (n) => n.className.includes('chg-path'))[0];
   await path.listeners.click[0]();
   assert.deepEqual(calls.find((c) => c[0] === 'diff'), ['diff', 'src/main.rs']);
+});
+
+test('ревью агентом показывает вердикт словом и его замечания', async () => {
+  const { api, root, calls } = harness();
+  await api.open('s1');
+  await root.querySelector('.chg-review-btn').listeners.click[0]();
+  assert.ok(calls.some((c) => c[0] === 'review'), 'ревью не запрошено');
+  const text = textOf(root);
+  assert.match(text, /есть замечания/, 'вердикт не назван словом');
+  assert.match(text, /тесты сняты/, 'замечания не показаны');
+});
+
+test('вердикт «ok» не выдаёт себя за галочку, а говорит словами', () => {
+  globalThis.document = makeDom();
+  const api = load();
+  assert.equal(api.verdictWord('ok'), 'можно принимать');
+  assert.equal(api.verdictWord('ask'), 'нужен ты');
+  assert.equal(api.verdictWord('return'), 'есть замечания');
+  assert.equal(api.verdictWord('чушь'), 'не вышло');
+});
+
+test('отказ ревью не притворяется вердиктом', async () => {
+  const { api, root } = harness(FILES, { sessionReview: async () => ({ ok: false, error: 'claude не найден' }) });
+  await api.open('s1');
+  await root.querySelector('.chg-review-btn').listeners.click[0]();
+  assert.match(textOf(root), /claude не найден/);
 });

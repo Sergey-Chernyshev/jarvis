@@ -80,7 +80,13 @@
     return n;
   };
 
-  let state = { sessionId: '', branch: '', files: [], picked: new Set(), open: '', busy: false, error: '' };
+  let state = {
+    sessionId: '', branch: '', files: [], picked: new Set(), open: '',
+    busy: false, error: '',
+    /* Ревью агентом: вердикт и что он сказал. Живёт до перезагрузки свода —
+     * после коммита оно уже про другое. */
+    review: null, reviewing: false,
+  };
   let root = null;
   let bridge = null;
   let onToast = () => {};
@@ -92,7 +98,10 @@
   }
 
   async function open(sessionId) {
-    state = { sessionId, branch: '', files: [], picked: new Set(), open: '', busy: true, error: '' };
+    state = {
+      sessionId, branch: '', files: [], picked: new Set(), open: '',
+      busy: true, error: '', review: null, reviewing: false,
+    };
     render();
     await reload();
   }
@@ -134,6 +143,33 @@
       return;
     }
     if (typeof JarvisDiffView !== 'undefined') JarvisDiffView.renderTo(box, res.hunks);
+  }
+
+  /* Ревью агентом. Отдельная кнопка, а не автомат: чужой агент, читающий твой
+   * дифф, стоит токенов и времени — это решение человека. */
+  async function review() {
+    if (state.reviewing) return;
+    state.reviewing = true;
+    state.review = null;
+    render();
+    let res = null;
+    try {
+      res = await bridge.sessionReview(state.sessionId);
+    } catch (e) {
+      res = { ok: false, error: String((e && e.message) || e) };
+    }
+    state.reviewing = false;
+    state.review = res && res.ok ? { verdict: res.verdict, text: res.text } : { verdict: 'fail', text: (res && res.error) || 'ревью не вышло' };
+    render();
+  }
+
+  /* Как назвать вердикт человеку. Слово важнее значка: «замечания» — это
+   * приглашение прочитать, а галочка приглашает не читать. */
+  function verdictWord(v) {
+    if (v === 'ok') return 'можно принимать';
+    if (v === 'ask') return 'нужен ты';
+    if (v === 'return') return 'есть замечания';
+    return 'не вышло';
   }
 
   async function commit() {
@@ -178,6 +214,17 @@
       return;
     }
 
+    if (state.review || state.reviewing) {
+      const r = state.review;
+      root.appendChild(
+        el(
+          'div.chg-review',
+          el('div.chg-verdict', { text: state.reviewing ? 'агент читает дифф…' : verdictWord(r.verdict) }),
+          r && r.text ? el('div.chg-reviewtext', { text: r.text }) : null
+        )
+      );
+    }
+
     const list = el('div.chg-list');
     for (const f of state.files) {
       const r = row(f);
@@ -208,6 +255,12 @@
     root.appendChild(
       el(
         'div.chg-foot',
+        el('button.chg-review-btn', {
+          text: state.reviewing ? 'Проверяю…' : 'Пусть проверит',
+          title: 'Позвать агента отревьюить эти правки',
+          disabled: state.reviewing || undefined,
+          onclick: review,
+        }),
         msg,
         el('button.chg-accept', {
           text: state.busy ? 'Принимаю…' : 'Принять выбранное',
@@ -218,5 +271,5 @@
     );
   }
 
-  return { mount, open, reload, render, summary, row, defaultMessage, plural, _state: () => state };
+  return { mount, open, reload, render, summary, row, defaultMessage, plural, verdictWord, _state: () => state };
 });

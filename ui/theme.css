@@ -937,3 +937,9 @@ textarea.lp-ask-text { width: 100%; min-height: 66px; }
 }
 .taskopt:hover { color: var(--ink); }
 .taskopt.on { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); }
+.taskinput {
+  flex: 1; min-width: 180px; padding: 5px 9px; border-radius: var(--r-chip);
+  background: var(--surface-2); border: 1px solid transparent; color: var(--ink);
+  font: 400 12.5px/1.4 var(--font);
+}
+.taskinput:focus { outline: none; border-color: var(--accent); }

@@ -3246,7 +3246,7 @@ function resumeCommand(s, cwd) {
  * настройки на всё разом — но выбор липкий, потому что человек обычно работает
  * пачкой однотипных задач. Продолжение сессии песочницу игнорирует: она живёт
  * там, где начиналась. */
-let taskOpts = { isolate: false, mode: 'ask', task: '' };
+let taskOpts = { isolate: false, mode: 'ask', task: '', container: false };
 const TASK_MODES = [
   ['ask', 'спросит', 'Агент спрашивает перед действиями'],
   ['plan', 'план', 'Только разведка и план — файлов не тронет'],
@@ -3273,6 +3273,14 @@ function renderTaskOpts(host) {
   box.title = 'Отдельный worktree и ветка рядом с проектом — правки не смешаются с твоими';
   box.addEventListener('click', (e) => { e.stopPropagation(); taskOpts.isolate = !taskOpts.isolate; renderHistory(); });
   row.appendChild(box);
+  // Вторая изоляция: worktree разводит файлы, контейнер — инструменты.
+  const cont = Object.assign(document.createElement('button'), {
+    className: 'taskopt' + (taskOpts.container ? ' on' : ''),
+    textContent: 'контейнер',
+  });
+  cont.title = 'Запустить агента в docker: свои зависимости, не общие (нужен образ в настройках)';
+  cont.addEventListener('click', (e) => { e.stopPropagation(); taskOpts.container = !taskOpts.container; renderHistory(); });
+  row.appendChild(cont);
   for (const [id, label, hint] of TASK_MODES) {
     const b = Object.assign(document.createElement('button'), {
       className: 'taskopt' + (taskOpts.mode === id ? ' on' : ''),

@@ -963,3 +963,10 @@ textarea.lp-ask-text { width: 100%; min-height: 66px; }
 .srch-no { min-width: 42px; text-align: right; font: 400 12px/1.5 var(--mono, monospace); color: var(--ink-dim); }
 .srch-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre;
   font: 400 12px/1.5 var(--mono, monospace); color: var(--ink-dim); }
+.diff-row.clickable:hover { background: var(--accent-soft); }
+.chg-note {
+  width: 100%; margin: 4px 0 8px; padding: 6px 9px; border-radius: var(--r-chip);
+  background: var(--surface-2); border: 1px solid var(--accent); color: var(--ink);
+  font: 400 12.5px/1.4 var(--font);
+}
+.chg-note:focus { outline: none; }

@@ -50,7 +50,10 @@
   }
 
   // Построить узлы диффа в контейнере через DOM API (без innerHTML).
-  function renderTo(root, hunks) {
+  /* onLine(номер, текст) — необязательный обработчик клика по строке. Нужен
+   * ревью: замечание к строке — это то, ради чего дифф и читают, и уводить
+   * человека за этим в редактор значит потерять мысль. */
+  function renderTo(root, hunks, onLine) {
     const doc = root.ownerDocument || document;
     root.textContent = '';
     const items = rows(hunks);
@@ -66,7 +69,13 @@
         continue;
       }
       const row = doc.createElement('div');
-      row.className = 'diff-row ' + r.cls;
+      row.className = 'diff-row ' + r.cls + (onLine ? ' clickable' : '');
+      if (onLine) {
+        // Номер новой строки, а если её нет (строка удалена) — старой: адрес
+        // должен указывать туда, где человек её увидит.
+        const no = r.newNo != null ? r.newNo : r.oldNo;
+        row.addEventListener('click', () => onLine(no, r.s));
+      }
       row.appendChild(span(doc, 'diff-ln', r.oldNo == null ? '' : String(r.oldNo)));
       row.appendChild(span(doc, 'diff-ln', r.newNo == null ? '' : String(r.newNo)));
       row.appendChild(span(doc, 'diff-mark', r.mark));

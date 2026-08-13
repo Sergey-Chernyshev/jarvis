@@ -3781,6 +3781,53 @@ pub async fn session_revert(app: AppHandle, session_id: String, path: String) ->
 mod turn_ipc_tests {
     use super::*;
 
+    /* Песочница задачи на НАСТОЯЩЕМ git: без этого «изоляция» — обещание на
+     * словах. CI гоняет тест на macos-14, то есть там, где живёт панель. */
+    #[tokio::test]
+    async fn a_task_sandbox_is_a_real_worktree_next_to_the_project() {
+        let repo = std::env::temp_dir()
+            .join(format!("jarvis-sandbox-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let h = &Host::Local;
+        assert_eq!(h.git(&repo, &["init", "-q", "-b", "main", "."]).await.0, 0);
+        h.git(&repo, &["config", "user.email", "test@jarvis"]).await;
+        h.git(&repo, &["config", "user.name", "jarvis"]).await;
+        std::fs::write(std::path::Path::new(&repo).join("main.rs"), "fn main() {}\n").unwrap();
+        h.git(&repo, &["add", "."]).await;
+        assert_eq!(h.git(&repo, &["commit", "-q", "-m", "первый"]).await.0, 0);
+
+        let dir = sandbox_for(h, &repo).await.expect("песочница");
+        // Соседом с проектом, а не внутри него: туда заглядывают и открывают
+        // редактором, а вложенный worktree путал бы сам себя.
+        assert!(!dir.starts_with(&format!("{repo}/")), "песочница внутри проекта: {dir}");
+        assert!(std::path::Path::new(&dir).join("main.rs").exists(), "рабочая копия пуста");
+        // Своя ветка: правки задачи не смешаются с чужой работой.
+        let (_, branch) = h.git(&dir, &["rev-parse", "--abbrev-ref", "HEAD"]).await;
+        assert!(branch.trim().starts_with("task/"), "ветка песочницы: {branch}");
+
+        let _ = h.git(&repo, &["worktree", "remove", "--force", &dir]).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Не репозиторий — честный отказ с советом, а не запуск мимо изоляции.
+    #[tokio::test]
+    async fn a_sandbox_for_a_plain_directory_is_refused_with_a_reason() {
+        let dir = std::env::temp_dir()
+            .join(format!("jarvis-sandbox-plain-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = sandbox_for(&Host::Local, &dir).await.unwrap_err();
+        assert!(e.contains("не репозиторий"), "{e}");
+        assert!(e.contains("галочку"), "совет, что делать, не дан: {e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn resolve_user_file_relative_and_missing() {
         let dir = std::env::temp_dir().join(format!("jarvis-ipc-{}", std::process::id()));

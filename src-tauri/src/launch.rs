@@ -137,6 +137,56 @@ pub fn inner_command(cwd: &str, proxy_cmd: &str, agent_cmd: &str, path_dirs: &[P
     parts.join(" && ")
 }
 
+/// Есть ли docker на этой машине. Спрашиваем перед запуском: «не нашёлся
+/// docker» человек чинит за минуту, а молчаливо не открывшийся терминал — нет.
+pub async fn has_docker() -> bool {
+    tokio::process::Command::new("docker")
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Обернуть команду агента в контейнер.
+///
+/// Вторая изоляция из Air: worktree разводит ФАЙЛЫ, контейнер — инструменты и
+/// зависимости. Задача трогает свой node_modules и свой питон, а не общие.
+///
+/// Три вещи, без которых контейнер был бы бесполезен, и потому они не
+/// настройки, а часть команды:
+///
+/// * каталог проекта монтируется ПО ТОМУ ЖЕ пути. Пути из хуков (cwd сессии,
+///   файлы ходов) уезжают в панель как есть; переименуй мы каталог внутри — и
+///   ни один файл из чата не открылся бы;
+/// * `~/.jarvis` — там сокет демона и шимы: через него сессия внутри
+///   контейнера вообще становится видимой панели. Без него агент отработает
+///   молча и в списке не появится;
+/// * `~/.claude` — авторизация и настройки агента; без них он попросит логин в
+///   контейнере, где его некому дать.
+///
+/// `TMUX_PANE` пробрасываем переменной: пану держит хост (docker запускается
+/// внутри неё), а хук внутри контейнера читает её из окружения — иначе панель
+/// не сможет ни ответить в сессию, ни нажать клавишу.
+pub fn docker_command(image: &str, cwd: &str, home: &str, agent_cmd: &str) -> String {
+    let mounts = [
+        format!("-v {}:{}", shell_quote(cwd), shell_quote(cwd)),
+        format!("-v {}/.jarvis:{}/.jarvis", shell_quote(home), shell_quote(home)),
+        format!("-v {}/.claude:{}/.claude", shell_quote(home), shell_quote(home)),
+    ]
+    .join(" ");
+    format!(
+        "docker run --rm -it {mounts} -w {cwd} -e TMUX_PANE -e JARVIS_DIR {image} \
+         bash -lc {inner}",
+        cwd = shell_quote(cwd),
+        image = shell_quote(image),
+        inner = shell_quote(agent_cmd),
+    )
+}
+
 /// Экранирование под двойные кавычки AppleScript-строки: `\`, `"` и переводы
 /// строк (сырой `\n` внутри "…" — синтаксическая ошибка osascript).
 /// Одинарные кавычки (из shell_quote) внутри неё безопасны.
@@ -220,6 +270,33 @@ pub async fn spawn(terminal: &str, custom_cmd: &str, inner: &str) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
+
+    /// Контейнер обязан монтировать проект ПО ТОМУ ЖЕ пути: пути из хуков
+    /// уезжают в панель как есть, и переименование каталога внутри оставило бы
+    /// её с файлами, которых «нет».
+    #[test]
+    fn docker_keeps_the_project_path_and_carries_the_socket() {
+        let cmd = docker_command("jarvis/agent", "/Users/bob/proj", "/Users/bob", "claude");
+        assert!(cmd.contains("-v '/Users/bob/proj':'/Users/bob/proj'"), "{cmd}");
+        // Сокет демона и авторизация агента — иначе сессия не появится в
+        // панели, а агент попросит логин там, где его некому дать.
+        assert!(cmd.contains("/.jarvis:"), "{cmd}");
+        assert!(cmd.contains("/.claude:"), "{cmd}");
+        // Пану держит хост, внутрь её отдаём переменной.
+        assert!(cmd.contains("-e TMUX_PANE"), "{cmd}");
+        assert!(cmd.contains("-w '/Users/bob/proj'"), "{cmd}");
+        assert!(cmd.contains("'jarvis/agent'"), "{cmd}");
+    }
+
+    /// Команда агента уезжает внутрь строкой — кавычки обязаны её удержать.
+    #[test]
+    fn the_agent_command_is_quoted_whole() {
+        let cmd = docker_command("img", "/p", "/h", "claude --resume abc --dangerously-skip-permissions");
+        assert!(
+            cmd.contains("'claude --resume abc --dangerously-skip-permissions'"),
+            "{cmd}"
+        );
+    }
 
     /// Режим — свойство задачи, и «непонятное» обязано быть самым осторожным:
     /// молча дать агенту больше прав, чем просили, нельзя.

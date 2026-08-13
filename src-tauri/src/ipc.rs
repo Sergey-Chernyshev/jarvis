@@ -2023,6 +2023,9 @@ pub async fn terminal_focus(app: AppHandle, session_id: String) -> Value {
 /// `session_id == None` → новая сессия; иначе `--resume`/`resume`. Параметры
 /// запуска (терминал, прокси-команда, «опасный режим») берутся из настроек.
 ///
+/// `container` — запуск агента в докере (вторая изоляция из Air: worktree
+/// разводит файлы, контейнер — инструменты и зависимости).
+///
 /// `isolate` и `mode` — свойства ЗАДАЧИ, а не настройки на все разом: поднять
 /// ли её в отдельном worktree-песочнице и с каким доверием («ask» | «plan» |
 /// «yolo»). Разведать чужой код и переписать свой требуют разного.
@@ -2040,6 +2043,7 @@ pub async fn session_launch(
     isolate: Option<bool>,
     mode: Option<String>,
     task: Option<String>,
+    container: Option<bool>,
 ) -> Value {
     let d = Daemon::get(&app);
     // cwd бывает null: история группирует сессии без директории в «другое».
@@ -2086,6 +2090,17 @@ pub async fn session_launch(
             return err(format!("не создал {}: {e}", cwd.trim()));
         }
     }
+    // Контейнер — вторая изоляция из Air: worktree разводит файлы, docker —
+    // инструменты. Образ задаётся в настройках: своего мы не собираем, а
+    // угадывать чужой нельзя.
+    let in_docker = container.unwrap_or(false);
+    let image = d.settings.string("launchDockerImage");
+    if in_docker && image.trim().is_empty() {
+        return err("для запуска в контейнере укажи образ в настройках («Запуск» → образ контейнера)");
+    }
+    if in_docker && !crate::launch::has_docker().await {
+        return err("docker не найден на этой машине");
+    }
     let terminal = d.settings.string("launchTerminal");
     let custom = d.settings.string("launchCustomCmd");
     let proxy = d.settings.string("launchProxyCmd");
@@ -2110,6 +2125,16 @@ pub async fn session_launch(
     // PATH запускаемой команды достраиваем сами: терминал выполняет её в
     // неинтерактивном шелле, где PATH-блока Jarvis (и шима) ещё нет.
     let path_dirs = crate::launch::launch_path_dirs();
+    let agent_cmd = if in_docker {
+        crate::launch::docker_command(
+            image.trim(),
+            &cwd,
+            &crate::util::home_dir().to_string_lossy(),
+            &agent_cmd,
+        )
+    } else {
+        agent_cmd
+    };
     let inner = crate::launch::inner_command(&cwd, &proxy, &agent_cmd, &path_dirs);
     match crate::launch::spawn(&terminal, &custom, &inner).await {
         Ok(()) => {

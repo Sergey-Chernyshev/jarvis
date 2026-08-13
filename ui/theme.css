@@ -943,3 +943,23 @@ textarea.lp-ask-text { width: 100%; min-height: 66px; }
   font: 400 12.5px/1.4 var(--font);
 }
 .taskinput:focus { outline: none; border-color: var(--accent); }
+
+/* Поиск по проекту (search.js). */
+.srch { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; overflow-y: auto; }
+.srch-head { display: flex; gap: 8px; align-items: center; }
+.srch-input {
+  flex: 1; min-width: 0; padding: 7px 10px; border-radius: var(--r-chip);
+  background: var(--surface-2); border: 1px solid transparent; color: var(--ink); font: 400 13px/1.4 var(--font);
+}
+.srch-input:focus { outline: none; border-color: var(--accent); }
+.srch-go { padding: 7px 12px; border-radius: var(--r-chip); border: 0; cursor: default;
+  background: var(--accent); color: var(--on-accent, #fff); font: 600 13px/1.2 var(--font); }
+.srch-sum { font: 400 12.5px/1.4 var(--font); color: var(--ink-dim); }
+.srch-file { display: flex; flex-direction: column; gap: 2px; padding-bottom: 6px; }
+.srch-path { align-self: flex-start; background: none; border: 0; padding: 2px 0; cursor: default;
+  font: 500 12.5px/1.4 var(--mono, monospace); color: var(--ink); }
+.srch-path:hover { color: var(--accent); }
+.srch-line { display: flex; gap: 8px; padding: 1px 0 1px 10px; }
+.srch-no { min-width: 42px; text-align: right; font: 400 12px/1.5 var(--mono, monospace); color: var(--ink-dim); }
+.srch-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre;
+  font: 400 12px/1.5 var(--mono, monospace); color: var(--ink-dim); }

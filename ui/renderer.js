@@ -996,6 +996,10 @@ function updateChatChannelMark() {
     changesBtn.hidden = !s || !s.cwd;
     if (changesBtn.hidden && chgOpen) closeChanges();
   }
+  if (searchBtn) {
+    searchBtn.hidden = !s || !s.cwd;
+    if (searchBtn.hidden && srchOpen) closeSearch();
+  }
   // tmux-сессии — без пометки; вне tmux помечаем
   chatChannelEl.hidden = !s || !!s.tmuxPane;
   // статус-точка справа — цвет по состоянию, пульс если работает
@@ -1623,6 +1627,41 @@ document.getElementById('chgClose')?.addEventListener('click', closeChanges);
 document.getElementById('chgScrim')?.addEventListener('click', closeChanges);
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && chgOpen) { e.preventDefault(); e.stopImmediatePropagation(); closeChanges(); }
+}, true);
+
+/* Поиск по проекту: та же панель поверх чата, что и изменения. */
+const searchBtn = document.getElementById('searchBtn');
+const srchWrap = document.getElementById('srchWrap');
+let srchOpen = false;
+let srchMounted = false;
+
+function openSearch() {
+  if (!chatSessionId || !srchWrap) return;
+  if (!srchMounted) {
+    JarvisSearch.mount(document.getElementById('srchBody'), window.jarvis, async (path) => {
+      // Открываем системным редактором: панель — надзиратель, а не IDE.
+      const res = await window.jarvis.openFile(chatSessionId, path, false);
+      if (res && res.error) showToast(res.error);
+    });
+    srchMounted = true;
+  }
+  srchOpen = true;
+  srchWrap.hidden = false;
+  searchBtn.classList.add('open');
+  JarvisSearch.open(chatSessionId);
+}
+
+function closeSearch() {
+  srchOpen = false;
+  if (srchWrap) srchWrap.hidden = true;
+  if (searchBtn) searchBtn.classList.remove('open');
+}
+
+if (searchBtn) searchBtn.addEventListener('click', () => (srchOpen ? closeSearch() : openSearch()));
+document.getElementById('srchClose')?.addEventListener('click', closeSearch);
+document.getElementById('srchScrim')?.addEventListener('click', closeSearch);
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && srchOpen) { e.preventDefault(); e.stopImmediatePropagation(); closeSearch(); }
 }, true);
 
 function closeDocViewer() {

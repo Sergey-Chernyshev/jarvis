@@ -39,6 +39,7 @@ mod remote; // удалённые узлы: ssh-туннель, HTTP-клиен�
 mod route; // голосовая маршрутизация: скоринг → tie-break → пикер → stage-then-send
 mod ru;
 mod screen_prompt;
+mod search; // поиск по проекту задачи: git grep там, где живёт сессия
 mod server;
 mod settings;
 mod shutdown;
@@ -170,6 +171,7 @@ fn main() {
             ipc::session_commit,
             ipc::session_revert,
             ipc::session_review,
+            ipc::session_search,
             ipc::url_open,
             ipc::ui_error,
             ipc::chat_close,

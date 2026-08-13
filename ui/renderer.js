@@ -1609,6 +1609,10 @@ let chgMounted = false;
 
 function openChanges() {
   if (!chatSessionId || !chgWrap) return;
+  // Модуль экрана грузится отдельным скриптом: если он не доехал, панель
+  // обязана сказать это словами, а не упасть на ReferenceError и утащить с
+  // собой весь интерфейс (урок «Циклов», где ошибка отрисовки гасила раздел).
+  if (typeof JarvisChanges === 'undefined') { showToast('Экран изменений не загрузился'); return; }
   if (!chgMounted) {
     JarvisChanges.mount(document.getElementById('chgBody'), window.jarvis, showToast);
     chgMounted = true;
@@ -1653,6 +1657,7 @@ let srchMounted = false;
 
 function openSearch() {
   if (!chatSessionId || !srchWrap) return;
+  if (typeof JarvisSearch === 'undefined') { showToast('Экран поиска не загрузился'); return; }
   if (!srchMounted) {
     JarvisSearch.mount(document.getElementById('srchBody'), window.jarvis, async (path) => {
       // Открываем системным редактором: панель — надзиратель, а не IDE.

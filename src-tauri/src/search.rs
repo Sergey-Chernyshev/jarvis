@@ -28,35 +28,45 @@ pub const MAX_HITS: usize = 200;
 
 /// Разбор вывода `grep -n`: `путь:строка:текст`.
 ///
-/// Путь может содержать двоеточие (редко, но бывает), поэтому режем по первым
-/// двум разделителям слева и только там, где второй кусок — число.
+/// Двоеточие бывает и в пути, и в самом коде, поэтому режем не по первому
+/// разделителю, а по первому, ЗА КОТОРЫМ идёт число со следующим двоеточием:
+/// «src/a:b.rs:7:код» — это файл «src/a:b.rs», а не файл «src/a». Наивный
+/// разбор молча терял такое совпадение, и человек не узнал бы, что оно было.
 pub fn parse_hits(out: &str) -> Vec<Hit> {
     let mut hits = Vec::new();
     for raw in out.lines() {
         if raw.trim().is_empty() {
             continue;
         }
-        let Some((path, rest)) = raw.split_once(':') else {
-            continue;
-        };
-        let Some((num, text)) = rest.split_once(':') else {
-            continue;
-        };
-        let Ok(line) = num.trim().parse::<u32>() else {
-            // «Binary file … matches» и прочие строки без номера — не находки.
-            continue;
-        };
-        hits.push(Hit {
-            path: path.to_string(),
-            line,
-            // Длинные минифицированные строки убивают список: показываем начало.
-            text: crate::util::ellipsize(text.trim_end(), 300),
-        });
+        let Some(hit) = parse_line(raw) else { continue };
+        hits.push(hit);
         if hits.len() >= MAX_HITS {
             break;
         }
     }
     hits
+}
+
+fn parse_line(raw: &str) -> Option<Hit> {
+    let mut from = 0usize;
+    while let Some(rel) = raw[from..].find(':') {
+        let at = from + rel;
+        let rest = &raw[at + 1..];
+        if let Some((num, text)) = rest.split_once(':') {
+            if let Ok(line) = num.trim().parse::<u32>() {
+                return Some(Hit {
+                    path: raw[..at].to_string(),
+                    line,
+                    // Отступ в списке съедает ширину, а строка и так вырвана
+                    // из контекста: показываем её содержимое, не колонку.
+                    text: crate::util::ellipsize(text.trim(), 300),
+                });
+            }
+        }
+        from = at + 1;
+    }
+    // «Binary file … matches» и прочее без номера строки — не находки.
+    None
 }
 
 /// Команда поиска. Отдельной функцией, потому что уезжает на чужую машину
@@ -113,12 +123,25 @@ mod tests {
         assert!(parse_hits("мусор без двоеточий\n").is_empty());
     }
 
-    /// Двоеточие в пути не должно превращаться в номер строки.
+    /// Двоеточие в пути не должно съедать совпадение: «src/a:b.rs:7:код» —
+    /// это файл «src/a:b.rs», а не «src/a». Наивный разбор терял такую строку
+    /// молча, и человек не узнал бы, что находка была.
     #[test]
-    fn a_colon_in_the_path_does_not_break_the_split() {
+    fn a_colon_in_the_path_keeps_the_hit() {
         let hits = parse_hits("src/a:b.rs:7:код\n");
-        assert_eq!(hits[0].path, "src/a");
-        assert_eq!(hits[0].line, 0.max(hits[0].line), "разбор не паникует");
+        assert_eq!(hits.len(), 1, "совпадение потерялось");
+        assert_eq!(hits[0].path, "src/a:b.rs");
+        assert_eq!(hits[0].line, 7);
+        assert_eq!(hits[0].text, "код");
+    }
+
+    /// Двоеточие в самом коде тоже не должно ломать разбор.
+    #[test]
+    fn a_colon_in_the_code_stays_in_the_text() {
+        let hits = parse_hits("src/main.rs:3:let m: Map = x;\n");
+        assert_eq!(hits[0].path, "src/main.rs");
+        assert_eq!(hits[0].line, 3);
+        assert_eq!(hits[0].text, "let m: Map = x;");
     }
 
     #[test]

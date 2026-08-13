@@ -171,6 +171,7 @@ fn main() {
             ipc::session_change_diff,
             ipc::session_commit,
             ipc::session_revert,
+            ipc::session_push,
             ipc::session_review,
             ipc::session_search,
             ipc::preview_open,

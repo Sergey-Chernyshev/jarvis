@@ -229,6 +229,60 @@ pub fn create_agent_chat(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     Ok(win)
 }
 
+/// Превью работы агента: отдельное окно с локальным адресом проекта.
+///
+/// Обычные декорации и никакого блюра — это чужая страница, и делать вид, что
+/// она часть панели, нечестно: человек должен видеть, что смотрит своё
+/// приложение, а не наш интерфейс.
+///
+/// Адрес разрешаем только локальный: окно панели живёт с её правами, и
+/// открывать в нём произвольный сайт по строке из webview — не то, что стоит
+/// уметь. Проверка — в `preview_url`.
+pub fn create_preview(app: &AppHandle, url: &str) -> tauri::Result<WebviewWindow> {
+    let parsed: tauri::Url = url.parse().map_err(|_| tauri::Error::WebviewNotFound)?;
+    if let Some(win) = app.get_webview_window("preview") {
+        let _ = win.close();
+    }
+    let win = WebviewWindowBuilder::new(app, "preview", WebviewUrl::External(parsed))
+        .title(format!("Превью · {url}"))
+        .inner_size(900.0, 700.0)
+        .min_inner_size(320.0, 320.0)
+        .visible(true)
+        .resizable(true)
+        .center()
+        .theme(window_theme(app))
+        .build()?;
+    let _ = win.set_focus();
+    Ok(win)
+}
+
+/// Адрес превью: только свой компьютер.
+///
+/// Превью существует, чтобы посмотреть, что подняла задача, — это всегда
+/// localhost. Пускать сюда любой адрес значило бы дать webview открывать чужие
+/// сайты в окне с правами панели.
+pub fn preview_url(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    let with_scheme = if raw.starts_with("http://") || raw.starts_with("https://") {
+        raw.to_string()
+    } else {
+        format!("http://{raw}")
+    };
+    let host = with_scheme
+        .split("//")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .map(|hostport| hostport.split(':').next().unwrap_or("").to_string())
+        .unwrap_or_default();
+    match host.as_str() {
+        "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]" | "::1" => Ok(with_scheme),
+        "" => Err("пустой адрес".into()),
+        other => Err(format!(
+            "превью открывает только адреса этого компьютера, а «{other}» — чужой"
+        )),
+    }
+}
+
 pub fn create_toast(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let win = WebviewWindowBuilder::new(app, "toast", WebviewUrl::App("toast.html".into()))
         .title("")
@@ -504,6 +558,17 @@ pub fn toast_resize(d: &Arc<Daemon>, h: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Превью — про своё приложение. Чужой адрес из webview открывать нельзя,
+    /// и отказ обязан объяснить, почему.
+    #[test]
+    fn preview_takes_only_local_addresses() {
+        assert_eq!(preview_url("localhost:3000").unwrap(), "http://localhost:3000");
+        assert_eq!(preview_url("http://127.0.0.1:8080/app").unwrap(), "http://127.0.0.1:8080/app");
+        let e = preview_url("https://example.com").unwrap_err();
+        assert!(e.contains("example.com"), "{e}");
+        assert!(preview_url("").is_err());
+    }
 
     #[test]
     fn configured_toast_ttl_reaches_payload_in_milliseconds() {

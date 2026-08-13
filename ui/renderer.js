@@ -1000,6 +1000,9 @@ function updateChatChannelMark() {
     searchBtn.hidden = !s || !s.cwd;
     if (searchBtn.hidden && srchOpen) closeSearch();
   }
+  // Превью — только у местной задачи: адрес узла на этом компьютере не
+  // откроется, а обещать превью и не показать его хуже, чем не обещать.
+  if (previewBtn) previewBtn.hidden = !s || !s.cwd || !!s.remote;
   // tmux-сессии — без пометки; вне tmux помечаем
   chatChannelEl.hidden = !s || !!s.tmuxPane;
   // статус-точка справа — цвет по состоянию, пульс если работает
@@ -1628,6 +1631,19 @@ document.getElementById('chgScrim')?.addEventListener('click', closeChanges);
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && chgOpen) { e.preventDefault(); e.stopImmediatePropagation(); closeChanges(); }
 }, true);
+
+/* Превью: окно с локальным адресом того, что подняла задача. Адрес спрашиваем
+ * и запоминаем — у каждого проекта свой порт, и набирать его каждый раз глупо. */
+const previewBtn = document.getElementById('previewBtn');
+let previewUrl = '';
+
+if (previewBtn) previewBtn.addEventListener('click', async () => {
+  const url = window.prompt('Адрес превью (только этот компьютер)', previewUrl || 'localhost:3000');
+  if (!url) return;
+  previewUrl = url;
+  const res = await window.jarvis.previewOpen(url);
+  if (!res || !res.ok) showToast((res && res.error) || 'Превью не открылось');
+});
 
 /* Поиск по проекту: та же панель поверх чата, что и изменения. */
 const searchBtn = document.getElementById('searchBtn');

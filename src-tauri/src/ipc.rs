@@ -3754,6 +3754,18 @@ pub async fn session_review(app: AppHandle, session_id: String) -> Value {
     }
 }
 
+/// Открыть превью: локальный адрес того, что подняла задача.
+#[tauri::command]
+pub async fn preview_open(app: AppHandle, url: String) -> Value {
+    match crate::windows::preview_url(&url) {
+        Err(e) => err(e),
+        Ok(u) => match crate::windows::create_preview(&app, &u) {
+            Ok(_) => json!({ "ok": true, "url": u }),
+            Err(e) => err(format!("окно превью не открылось: {e}")),
+        },
+    }
+}
+
 /// Поиск по проекту задачи.
 #[tauri::command]
 pub async fn session_search(app: AppHandle, session_id: String, query: String) -> Value {

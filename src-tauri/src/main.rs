@@ -172,6 +172,7 @@ fn main() {
             ipc::session_revert,
             ipc::session_review,
             ipc::session_search,
+            ipc::preview_open,
             ipc::url_open,
             ipc::ui_error,
             ipc::chat_close,

@@ -6,7 +6,8 @@
     "main",
     "toast",
     "onboarding",
-    "agent-chat"
+    "agent-chat",
+    "preview"
   ],
   "permissions": [
     "core:default",

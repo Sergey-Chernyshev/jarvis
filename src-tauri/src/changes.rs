@@ -336,6 +336,122 @@ pub async fn review(
 mod tests {
     use super::*;
 
+    /* Ниже — тесты на НАСТОЯЩЕМ git: временный репозиторий, правки, коммит,
+     * откат. Разбор строк можно проверить и всухую, но обещание команды —
+     * «правки агента видно и их можно принять» — держится не на разборе, а на
+     * том, что git отвечает так, как мы думаем. CI гоняет их на macOS, то есть
+     * там же, где живёт настольная версия. */
+    const H: &Host = &Host::Local;
+
+    async fn repo(tag: &str) -> String {
+        let dir = std::env::temp_dir()
+            .join(format!("jarvis-chg-{tag}-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(H.git(&dir, &["init", "-q", "-b", "main", "."]).await.0, 0);
+        // Личность в репозитории, а не в глобальном конфиге: у машины CI его
+        // может не быть вовсе, и коммит бы не прошёл.
+        H.git(&dir, &["config", "user.email", "test@jarvis"]).await;
+        H.git(&dir, &["config", "user.name", "jarvis"]).await;
+        std::fs::write(std::path::Path::new(&dir).join("main.rs"), "fn main() {}\n").unwrap();
+        assert_eq!(H.git(&dir, &["add", "."]).await.0, 0);
+        assert_eq!(H.git(&dir, &["commit", "-q", "-m", "первый"]).await.0, 0);
+        dir
+    }
+
+    #[tokio::test]
+    async fn a_real_repo_shows_edits_and_new_files() {
+        let dir = repo("collect").await;
+        std::fs::write(
+            std::path::Path::new(&dir).join("main.rs"),
+            "fn main() {\n    println!(\"привет\");\n}\n",
+        )
+        .unwrap();
+        std::fs::write(std::path::Path::new(&dir).join("новый файл.txt"), "раз\nдва\n").unwrap();
+
+        let v = collect(H, &dir).await.expect("свод изменений");
+        let files = v["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2, "{files:?}");
+        let edited = files.iter().find(|f| f["path"] == "main.rs").unwrap();
+        assert_eq!(edited["state"], "изменён");
+        assert!(edited["added"].as_u64().unwrap() >= 2, "счётчик правок: {edited}");
+        // Путь с пробелом и кириллицей обязан дойти целым — ради этого
+        // core.quotePath=false, и проверяется это только живым git.
+        let fresh = files.iter().find(|f| f["path"] == "новый файл.txt").unwrap();
+        assert_eq!(fresh["state"], "новый");
+        assert_eq!(fresh["untracked"], true);
+        assert_eq!(v["branch"], "main");
+
+        // Дифф нового файла: git показывает его только сравнением с пустотой.
+        let d = file_diff(H, &dir, "новый файл.txt", true).await.unwrap();
+        assert!(!d["hunks"].as_array().unwrap().is_empty(), "дифф нового файла пуст");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn commit_takes_only_the_chosen_file() {
+        let dir = repo("commit").await;
+        std::fs::write(std::path::Path::new(&dir).join("main.rs"), "fn main() { }\n").unwrap();
+        std::fs::write(std::path::Path::new(&dir).join("side.txt"), "чужая работа\n").unwrap();
+
+        let sha = commit(H, &dir, "правка агента", &["main.rs".to_string()])
+            .await
+            .expect("коммит выбранного");
+        assert!(!sha.is_empty(), "короткий sha не вернулся");
+
+        // Рядом лежала работа человека — она обязана остаться неприкосновенной.
+        let left = collect(H, &dir).await.unwrap();
+        let files = left["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1, "в коммит уехало лишнее: {files:?}");
+        assert_eq!(files[0]["path"], "side.txt");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn revert_returns_the_file_to_the_last_commit() {
+        let dir = repo("revert").await;
+        let file = std::path::Path::new(&dir).join("main.rs");
+        std::fs::write(&file, "всё сломал\n").unwrap();
+        assert_eq!(collect(H, &dir).await.unwrap()["files"].as_array().unwrap().len(), 1);
+
+        revert(H, &dir, "main.rs").await.expect("откат");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "fn main() {}\n");
+        assert!(
+            collect(H, &dir).await.unwrap()["files"].as_array().unwrap().is_empty(),
+            "после отката дерево обязано быть чистым"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Пустое сообщение и пустой выбор — отказы, а не «тихий коммит ни о чём».
+    #[tokio::test]
+    async fn commit_refuses_the_meaningless() {
+        let dir = repo("refuse").await;
+        std::fs::write(std::path::Path::new(&dir).join("main.rs"), "x\n").unwrap();
+        assert!(commit(H, &dir, "  ", &["main.rs".to_string()]).await.is_err());
+        assert!(commit(H, &dir, "есть сообщение", &[]).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Не репозиторий — понятный отказ, а не пустой список «изменений нет».
+    #[tokio::test]
+    async fn a_plain_directory_says_it_is_not_a_repo() {
+        let dir = std::env::temp_dir()
+            .join(format!("jarvis-chg-plain-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = collect(H, &dir).await.unwrap_err();
+        assert!(!e.is_empty(), "отказ обязан объяснить причину");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn status_reads_states_and_paths() {
         let out = " M src/main.rs\n?? ui/new.js\n D docs/old.md\nR  a.rs -> b.rs\nA  added.rs\n";

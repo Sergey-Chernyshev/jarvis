@@ -3186,7 +3186,7 @@ function resumeCommand(s, cwd) {
  * настройки на всё разом — но выбор липкий, потому что человек обычно работает
  * пачкой однотипных задач. Продолжение сессии песочницу игнорирует: она живёт
  * там, где начиналась. */
-let taskOpts = { isolate: false, mode: 'ask' };
+let taskOpts = { isolate: false, mode: 'ask', task: '' };
 const TASK_MODES = [
   ['ask', 'спросит', 'Агент спрашивает перед действиями'],
   ['plan', 'план', 'Только разведка и план — файлов не тронет'],
@@ -3196,6 +3196,16 @@ const TASK_MODES = [
 function renderTaskOpts(host) {
   const row = document.createElement('div');
   row.className = 'taskopts';
+  // Задача сразу: иначе «поставить агенту работу» — это два шага (подними,
+  // потом найди чат и напиши), и именно на втором дело откладывается.
+  const task = Object.assign(document.createElement('input'), {
+    className: 'taskinput', type: 'text', spellcheck: false,
+    placeholder: 'что сделать (необязательно)', value: taskOpts.task,
+  });
+  task.title = 'Уедет агенту, как только он встанет';
+  task.addEventListener('input', () => { taskOpts.task = task.value; });
+  task.addEventListener('keydown', (e) => { if (!e.metaKey && !e.ctrlKey) e.stopPropagation(); });
+  row.appendChild(task);
   const box = Object.assign(document.createElement('button'), {
     className: 'taskopt' + (taskOpts.isolate ? ' on' : ''),
     textContent: 'песочница',
@@ -3217,12 +3227,17 @@ function renderTaskOpts(host) {
 
 async function launchSession(agent, sessionId, cwd, machine) {
   try {
-    const r = await window.jarvis.launchSession(cwd, agent, sessionId, machine || 'local', sessionId ? null : taskOpts);
+    const opts = sessionId ? null : { ...taskOpts };
+    const r = await window.jarvis.launchSession(cwd, agent, sessionId, machine || 'local', opts);
     if (!r || !r.ok) { showToast((r && r.error) || 'Не удалось запустить'); return; }
     // На узле терминала нет и быть не может: сессия поднимается отсоединённой в
     // tmux на той стороне и приезжает к нам в список сама — так и говорим.
-    if (r.channel === 'node') showToast(`Поднял на узле «${r.machine || machine}» — сессия появится в списке`);
-    else showToast('Запускаю в терминале…');
+    // Текст задачи одноразовый: он про эту работу, а не про следующую.
+    const hadTask = !sessionId && !!taskOpts.task.trim();
+    if (!sessionId) { taskOpts.task = ''; renderHistory(); }
+    const tail = hadTask ? ' · задача уедет, как только агент встанет' : '';
+    if (r.channel === 'node') showToast(`Поднял на узле «${r.machine || machine}»${tail || ' — сессия появится в списке'}`);
+    else showToast(`Запускаю в терминале…${tail}`);
   } catch { showToast('Не удалось запустить'); }
 }
 

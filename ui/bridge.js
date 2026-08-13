@@ -151,6 +151,7 @@
     launchSession: (cwd, agent, sessionId, machine, opts) => invoke('session_launch', {
       cwd: cwd ?? null, agent, sessionId: sessionId ?? null, machine: machine ?? null,
       isolate: !!(opts && opts.isolate), mode: (opts && opts.mode) || 'ask',
+      task: (opts && opts.task) || null,
     }),
     machinesList: () => invoke('machines_list'),
     sendReply: (sessionId, text) => invoke('session_reply', { sessionId, text }),

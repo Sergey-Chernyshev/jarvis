@@ -2026,6 +2026,10 @@ pub async fn terminal_focus(app: AppHandle, session_id: String) -> Value {
 /// `isolate` и `mode` — свойства ЗАДАЧИ, а не настройки на все разом: поднять
 /// ли её в отдельном worktree-песочнице и с каким доверием («ask» | «plan» |
 /// «yolo»). Разведать чужой код и переписать свой требуют разного.
+///
+/// `task` — текст, который уедет агенту, как только он встанет. Без него
+/// «поставить задачу» — это два шага (подними, потом найди чат и напиши), и
+/// именно на втором работа откладывается «на потом».
 #[tauri::command]
 pub async fn session_launch(
     app: AppHandle,
@@ -2035,6 +2039,7 @@ pub async fn session_launch(
     machine: Option<String>,
     isolate: Option<bool>,
     mode: Option<String>,
+    task: Option<String>,
 ) -> Value {
     let d = Daemon::get(&app);
     // cwd бывает null: история группирует сессии без директории в «другое».
@@ -2068,7 +2073,11 @@ pub async fn session_launch(
         cwd
     };
     if !machine.is_empty() && machine != "local" {
-        return launch_on_node(&d, &machine, &cwd, &agent, session_id.as_deref(), mode).await;
+        let res = launch_on_node(&d, &machine, &cwd, &agent, session_id.as_deref(), mode).await;
+        if res.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            deliver_task(&d, &machine, &cwd, task);
+        }
+        return res;
     }
     // Новый проект на этой машине: каталога может ещё не быть, и требовать
     // сходить создать его руками — значит не сделать работу.
@@ -2103,9 +2112,69 @@ pub async fn session_launch(
     let path_dirs = crate::launch::launch_path_dirs();
     let inner = crate::launch::inner_command(&cwd, &proxy, &agent_cmd, &path_dirs);
     match crate::launch::spawn(&terminal, &custom, &inner).await {
-        Ok(()) => ok(),
+        Ok(()) => {
+            deliver_task(&d, "", &cwd, task);
+            ok()
+        }
         Err(e) => err(e),
     }
+}
+
+/// Отдать задачу агенту, как только он встанет.
+///
+/// Сессия появляется не в момент запуска, а когда агент дошлёт первый хук:
+/// терминал открывается, TUI поднимается, и всё это занимает секунды. Поэтому
+/// ждём её в фоне, а не заставляем человека сторожить список.
+///
+/// Ждём ограниченно и молча сдаёмся: не встал за полторы минуты — значит
+/// что-то не так, и текст, вылетевший в неизвестно чей чат через пять минут,
+/// был бы хуже ненаписанного.
+fn deliver_task(d: &Arc<Daemon>, machine: &str, cwd: &str, task: Option<String>) {
+    let Some(text) = task.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) else {
+        return;
+    };
+    let (d, machine, cwd) = (d.clone(), machine.to_string(), cwd.trim_end_matches('/').to_string());
+    let since = crate::util::now_ms();
+    tauri::async_runtime::spawn(async move {
+        for _ in 0..90 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let found = {
+                let sessions = d.sessions.lock().unwrap_or_else(|e| e.into_inner());
+                sessions
+                    .values()
+                    .filter(|s| {
+                        let same_host = if machine.is_empty() || machine == "local" {
+                            s.remote.is_none()
+                        } else {
+                            s.remote.as_deref() == Some(machine.as_str())
+                        };
+                        // Сессия ИМЕННО этого запуска: тот же каталог и
+                        // появилась после него. Иначе задача уехала бы в чужой
+                        // давно открытый чат того же проекта.
+                        same_host
+                            && s.cwd.as_deref().map(|c| c.trim_end_matches('/')) == Some(cwd.as_str())
+                            && s.created_at >= since
+                    })
+                    .max_by_key(|s| s.created_at)
+                    .and_then(|s| s.tmux_pane.clone().map(|p| (s.id.clone(), p)))
+            };
+            let Some((id, pane)) = found else { continue };
+            let sent = if machine.is_empty() || machine == "local" {
+                crate::tmux::reply(&pane, &text).await
+            } else {
+                match d.remotes.node(&machine).and_then(|n| n.client().ok()) {
+                    Some(c) => c.reply(&pane, &text).await,
+                    None => Err("узел пропал из настроек".into()),
+                }
+            };
+            match sent {
+                Ok(()) => crate::log::line(&format!("launch: задача уехала в {id}")),
+                Err(e) => crate::log::line(&format!("launch: задача не доехала: {e}")),
+            }
+            return;
+        }
+        crate::log::line("launch: агент не встал за 90 с — задачу не отдал");
+    });
 }
 
 /// Запуск на удалённой машине. Терминала там нет и открывать нечего: сессия

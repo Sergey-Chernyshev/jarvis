@@ -13,14 +13,58 @@ use std::process::Stdio;
 /// включённом «опасном режиме». Флаги сверены с `resumeCommand` в renderer.js:
 /// claude → `--dangerously-skip-permissions`, codex → `--dangerously-bypass-approvals-and-sandbox`.
 pub fn agent_command(agent: &str, session_id: Option<&str>, dangerous: bool) -> String {
+    let mode = if dangerous { Mode::Yolo } else { Mode::Ask };
+    agent_command_mode(agent, session_id, mode)
+}
+
+/// С чем агент стартует: сколько ему позволено без вопросов.
+///
+/// Раньше выбор был двоичным — «спрашивает» или «делает всё молча», и жил он в
+/// настройках на все задачи разом. Но режим — свойство ЗАДАЧИ: разведать чужой
+/// код и переписать свой требуют разного доверия. Отсюда третий режим — план:
+/// агент разбирается и предлагает, не трогая файлов.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Спросит перед каждым действием — как по умолчанию у самого агента.
+    Ask,
+    /// Только разведка и план: правок не будет.
+    Plan,
+    /// Ничего не спрашивает. Для песочницы и рутины.
+    Yolo,
+}
+
+impl Mode {
+    /// Из строки панели. Неизвестное — самый осторожный режим: молча дать
+    /// агенту больше прав, чем просили, нельзя.
+    pub fn parse(s: &str) -> Mode {
+        match s.trim() {
+            "plan" => Mode::Plan,
+            "yolo" => Mode::Yolo,
+            _ => Mode::Ask,
+        }
+    }
+}
+
+/// Команда агента с учётом режима.
+pub fn agent_command_mode(agent: &str, session_id: Option<&str>, mode: Mode) -> String {
     if agent == "codex" {
-        let flag = if dangerous { " --dangerously-bypass-approvals-and-sandbox" } else { "" };
+        // У codex режима плана нет; просить его «только посмотреть» словами —
+        // не гарантия, поэтому не притворяемся: план = обычный режим с
+        // вопросами.
+        let flag = match mode {
+            Mode::Yolo => " --dangerously-bypass-approvals-and-sandbox",
+            _ => "",
+        };
         match session_id {
             Some(id) => format!("codex resume {id}{flag}"),
             None => format!("codex{flag}"),
         }
     } else {
-        let flag = if dangerous { " --dangerously-skip-permissions" } else { "" };
+        let flag = match mode {
+            Mode::Yolo => " --dangerously-skip-permissions",
+            Mode::Plan => " --permission-mode plan",
+            Mode::Ask => "",
+        };
         match session_id {
             Some(id) => format!("claude --resume {id}{flag}"),
             None => format!("claude{flag}"),
@@ -176,6 +220,32 @@ pub async fn spawn(terminal: &str, custom_cmd: &str, inner: &str) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
+
+    /// Режим — свойство задачи, и «непонятное» обязано быть самым осторожным:
+    /// молча дать агенту больше прав, чем просили, нельзя.
+    #[test]
+    fn unknown_mode_is_the_careful_one() {
+        assert_eq!(Mode::parse("plan"), Mode::Plan);
+        assert_eq!(Mode::parse("yolo"), Mode::Yolo);
+        assert_eq!(Mode::parse(""), Mode::Ask);
+        assert_eq!(Mode::parse("что-то новое"), Mode::Ask);
+    }
+
+    #[test]
+    fn mode_shapes_the_command() {
+        assert_eq!(agent_command_mode("claude", None, Mode::Plan), "claude --permission-mode plan");
+        assert_eq!(
+            agent_command_mode("claude", Some("abc"), Mode::Yolo),
+            "claude --resume abc --dangerously-skip-permissions"
+        );
+        assert_eq!(agent_command_mode("claude", None, Mode::Ask), "claude");
+        // У codex плана нет — притворяться не будем.
+        assert_eq!(agent_command_mode("codex", None, Mode::Plan), "codex");
+        assert_eq!(
+            agent_command_mode("codex", None, Mode::Yolo),
+            "codex --dangerously-bypass-approvals-and-sandbox"
+        );
+    }
     use super::*;
 
     #[test]

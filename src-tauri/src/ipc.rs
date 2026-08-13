@@ -2029,6 +2029,10 @@ pub async fn session_launch(
     agent: String,
     session_id: Option<String>,
     machine: Option<String>,
+    /// Поднять задачу в отдельном worktree — песочнице рядом с проектом.
+    isolate: Option<bool>,
+    /// Режим разрешений: "ask" | "plan" | "yolo".
+    mode: Option<String>,
 ) -> Value {
     let d = Daemon::get(&app);
     // cwd бывает null: история группирует сессии без директории в «другое».
@@ -2039,8 +2043,30 @@ pub async fn session_launch(
         return err("Не указана директория проекта");
     }
     let machine = machine.unwrap_or_default();
+    let mode = crate::launch::Mode::parse(mode.as_deref().unwrap_or(""));
+    // Песочница — только для НОВОЙ задачи: продолжение живёт там, где начиналось,
+    // и переносить его в свежий worktree значило бы оторвать от своей работы.
+    let cwd = if isolate.unwrap_or(false) && session_id.is_none() {
+        let host = if machine.is_empty() || machine == "local" {
+            Host::Local
+        } else {
+            match d.remotes.node(&machine) {
+                Some(node) => Host::Ssh {
+                    machine: machine.clone(),
+                    host: node.cfg.ssh_host.clone(),
+                },
+                None => return err(format!("Узел «{machine}» не подключён")),
+            }
+        };
+        match sandbox_for(&host, &cwd).await {
+            Ok(dir) => dir,
+            Err(e) => return err(e),
+        }
+    } else {
+        cwd
+    };
     if !machine.is_empty() && machine != "local" {
-        return launch_on_node(&d, &machine, &cwd, &agent, session_id.as_deref()).await;
+        return launch_on_node(&d, &machine, &cwd, &agent, session_id.as_deref(), mode).await;
     }
     // Новый проект на этой машине: каталога может ещё не быть, и требовать
     // сходить создать его руками — значит не сделать работу.
@@ -2052,14 +2078,23 @@ pub async fn session_launch(
     let terminal = d.settings.string("launchTerminal");
     let custom = d.settings.string("launchCustomCmd");
     let proxy = d.settings.string("launchProxyCmd");
-    let dangerous = d.settings.bool("launchDangerous");
+    // Режим задачи сильнее общей настройки: человек выбрал его для ЭТОЙ работы.
+    let dangerous = mode == crate::launch::Mode::Yolo || d.settings.bool("launchDangerous");
 
     // Свой агент из реестра — раньше зашитой пары: команду для него собирает
     // реестр (шим + шаблон возобновления человека), а не наши догадки.
     let customs = crate::agents::parse(&d.settings.load());
     let agent_cmd = match crate::agents::find(&customs, &agent) {
         Some(a) => crate::agents::command(a, session_id.as_deref(), dangerous),
-        None => crate::launch::agent_command(&agent, session_id.as_deref(), dangerous),
+        None => crate::launch::agent_command_mode(
+            &agent,
+            session_id.as_deref(),
+            if dangerous {
+                crate::launch::Mode::Yolo
+            } else {
+                mode
+            },
+        ),
     };
     // PATH запускаемой команды достраиваем сами: терминал выполняет её в
     // неинтерактивном шелле, где PATH-блока Jarvis (и шима) ещё нет.
@@ -2083,6 +2118,7 @@ async fn launch_on_node(
     cwd: &str,
     agent: &str,
     session_id: Option<&str>,
+    mode: crate::launch::Mode,
 ) -> Value {
     let Some(node) = d.remotes.node(machine) else {
         return err(format!("Узел «{machine}» не подключён"));
@@ -2098,7 +2134,15 @@ async fn launch_on_node(
     if crate::agents::find(&crate::agents::parse(&d.settings.load()), agent).is_some() {
         return err("свои агенты пока запускаются только на этой машине — на узле нет их шима");
     }
-    let cmd = crate::launch::agent_command(agent, bare, dangerous);
+    let cmd = crate::launch::agent_command_mode(
+        agent,
+        bare,
+        if dangerous {
+            crate::launch::Mode::Yolo
+        } else {
+            mode
+        },
+    );
     let name = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("project");
     match client.launch(cwd, &cmd, name).await {
         Ok(()) => json!({ "ok": true, "channel": "node", "machine": machine }),
@@ -3484,6 +3528,31 @@ fn remotes_array(d: &Arc<Daemon>) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+
+/// Песочница задачи: отдельный worktree рядом с проектом.
+///
+/// Так же, как у «Связки»: рабочая копия соседом (`../wt-<имя>`), ветка
+/// `task/<имя>`. Соседом, а не в недрах `~/.jarvis`, — человек в неё
+/// заглядывает, открывает редактором и коммитит руками.
+///
+/// Не репозиторий — не беда и не повод отказывать: задача поднимется прямо в
+/// каталоге, просто без изоляции. Отказ здесь стоил бы дороже, чем польза.
+async fn sandbox_for(host: &Host, cwd: &str) -> Result<String, String> {
+    let cwd = cwd.trim_end_matches('/').to_string();
+    if !crate::bundle::git::is_repo(host, &cwd).await {
+        return Err(format!(
+            "{cwd} — не репозиторий git: песочнице неоткуда взяться (сними галочку или заведи репозиторий)"
+        ));
+    }
+    let base = crate::bundle::git::base_branch(host, &cwd).await?;
+    let name = crate::util::basename(&cwd);
+    let stamp = crate::util::now_ms() % 100_000;
+    let slug = format!("{name}-{stamp}");
+    let parent = crate::bundle::host::parent_of(&cwd);
+    let dir = format!("{parent}/wt-{slug}");
+    crate::bundle::git::add_worktree(host, &cwd, &dir, &format!("task/{slug}"), &base).await?;
+    Ok(dir)
+}
 
 /* ================= изменения задачи ================= */
 

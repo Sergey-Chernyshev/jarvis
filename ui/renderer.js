@@ -3182,9 +3182,42 @@ function resumeCommand(s, cwd) {
 // сессия, иначе продолжение; cwd — директория проекта; machine — где запускать
 // ('local' | имя узла). Реальную команду (терминал, прокси, флаги «опасного
 // режима») собирает бэкенд session_launch, он же создаёт каталог.
+/* Как запускать задачу: песочница и режим разрешений. Свойства задачи, не
+ * настройки на всё разом — но выбор липкий, потому что человек обычно работает
+ * пачкой однотипных задач. Продолжение сессии песочницу игнорирует: она живёт
+ * там, где начиналась. */
+let taskOpts = { isolate: false, mode: 'ask' };
+const TASK_MODES = [
+  ['ask', 'спросит', 'Агент спрашивает перед действиями'],
+  ['plan', 'план', 'Только разведка и план — файлов не тронет'],
+  ['yolo', 'без спроса', 'Ничего не спрашивает: для песочницы и рутины'],
+];
+
+function renderTaskOpts(host) {
+  const row = document.createElement('div');
+  row.className = 'taskopts';
+  const box = Object.assign(document.createElement('button'), {
+    className: 'taskopt' + (taskOpts.isolate ? ' on' : ''),
+    textContent: 'песочница',
+  });
+  box.title = 'Отдельный worktree и ветка рядом с проектом — правки не смешаются с твоими';
+  box.addEventListener('click', (e) => { e.stopPropagation(); taskOpts.isolate = !taskOpts.isolate; renderHistory(); });
+  row.appendChild(box);
+  for (const [id, label, hint] of TASK_MODES) {
+    const b = Object.assign(document.createElement('button'), {
+      className: 'taskopt' + (taskOpts.mode === id ? ' on' : ''),
+      textContent: label,
+    });
+    b.title = hint;
+    b.addEventListener('click', (e) => { e.stopPropagation(); taskOpts.mode = id; renderHistory(); });
+    row.appendChild(b);
+  }
+  host.appendChild(row);
+}
+
 async function launchSession(agent, sessionId, cwd, machine) {
   try {
-    const r = await window.jarvis.launchSession(cwd, agent, sessionId, machine || 'local');
+    const r = await window.jarvis.launchSession(cwd, agent, sessionId, machine || 'local', sessionId ? null : taskOpts);
     if (!r || !r.ok) { showToast((r && r.error) || 'Не удалось запустить'); return; }
     // На узле терминала нет и быть не может: сессия поднимается отсоединённой в
     // tmux на той стороне и приезжает к нам в список сама — так и говорим.
@@ -3406,6 +3439,7 @@ function renderHistNew(remote) {
     return b;
   };
   form.append(input, btn('claude', 'Claude'), btn('codex', 'Codex'));
+  renderTaskOpts(form);
   // Свои агенты — теми же кнопками: на узлах их шима нет, поэтому только локально.
   if (!remote) for (const a of customAgents) form.append(btn(a.id, a.name || a.id));
   historyEl.appendChild(form);
@@ -3445,6 +3479,7 @@ function renderHistChats(g, q) {
     head.appendChild(newCodex);
   }
   historyEl.appendChild(head);
+  if (g.cwd) renderTaskOpts(historyEl);
 
   historyEl.appendChild(Object.assign(document.createElement('div'), {
     className: 'hhint',

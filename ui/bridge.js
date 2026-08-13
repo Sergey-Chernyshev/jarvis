@@ -145,8 +145,12 @@
     onChatSummary: (cb) => on('chat:summary', cb),
     focusTerminal: (sessionId) => invoke('terminal_focus', { sessionId }),
     // machine: 'local' | имя узла — где запускать (вкладка «Проекты», шаг 1)
-    launchSession: (cwd, agent, sessionId, machine) => invoke('session_launch', {
+    // opts: { isolate: bool, mode: 'ask'|'plan'|'yolo' } — свойства ЗАДАЧИ,
+    // а не общей настройки: разведать чужой код и переписать свой требуют
+    // разного доверия
+    launchSession: (cwd, agent, sessionId, machine, opts) => invoke('session_launch', {
       cwd: cwd ?? null, agent, sessionId: sessionId ?? null, machine: machine ?? null,
+      isolate: !!(opts && opts.isolate), mode: (opts && opts.mode) || 'ask',
     }),
     machinesList: () => invoke('machines_list'),
     sendReply: (sessionId, text) => invoke('session_reply', { sessionId, text }),

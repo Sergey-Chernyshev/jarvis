@@ -97,6 +97,35 @@
     if (typeof toast === 'function') onToast = toast;
   }
 
+  /* Замечание к строке — то, ради чего дифф и читают. Адрес собираем сами:
+   * «файл:строка» плюс сама строка, чтобы агент не искал её по описанию. */
+  function noteText(path, line, code, comment) {
+    const where = `${path}:${line}`;
+    const quote = String(code || '').trim();
+    return quote ? `${where}\n> ${quote}\n\n${comment}` : `${where}\n\n${comment}`;
+  }
+
+  /* Поле замечания под строкой диффа. Enter отправляет, Esc убирает: разговор
+   * с агентом здесь короткий, и уводить за ним в чат — терять мысль. */
+  function askAboutLine(box, path, line, code) {
+    const old = box.querySelector('.chg-note');
+    if (old && old.remove) old.remove();
+    const input = el('input.chg-note', { type: 'text', placeholder: `сказать агенту про строку ${line}` });
+    input.addEventListener('keydown', async (e) => {
+      e.stopPropagation();
+      if (e.key === 'Escape' && input.remove) { input.remove(); return; }
+      if (e.key !== 'Enter') return;
+      const comment = (input.value || '').trim();
+      if (!comment) return;
+      const res = await bridge.sendReply(state.sessionId, noteText(path, line, code, comment));
+      if (!res || res.ok === false) { onToast((res && res.error) || 'Не доехало'); return; }
+      if (input.remove) input.remove();
+      onToast(`Сказал агенту про ${path.split('/').pop()}:${line}`);
+    });
+    box.appendChild(input);
+    if (input.focus) input.focus();
+  }
+
   async function open(sessionId) {
     state = {
       sessionId, branch: '', files: [], picked: new Set(), open: '',
@@ -142,7 +171,9 @@
       box.appendChild(el('div.chg-empty', { text: (res && res.error) || 'Дифф пуст' }));
       return;
     }
-    if (typeof JarvisDiffView !== 'undefined') JarvisDiffView.renderTo(box, res.hunks);
+    if (typeof JarvisDiffView !== 'undefined') {
+      JarvisDiffView.renderTo(box, res.hunks, (line, code) => askAboutLine(box, path, line, code));
+    }
   }
 
   /* Ревью агентом. Отдельная кнопка, а не автомат: чужой агент, читающий твой
@@ -271,5 +302,5 @@
     );
   }
 
-  return { mount, open, reload, render, summary, row, defaultMessage, plural, verdictWord, _state: () => state };
+  return { mount, open, reload, render, summary, row, defaultMessage, plural, verdictWord, noteText, _state: () => state };
 });

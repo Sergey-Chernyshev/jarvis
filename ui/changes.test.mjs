@@ -89,6 +89,7 @@ function harness(files = FILES, extra = {}) {
     sessionCommit: async (id, message, paths) => { calls.push(['commit', message, paths]); return { ok: true, sha: 'abc1234' }; },
     sessionRevert: async (id, path) => { calls.push(['revert', path]); return { ok: true }; },
     sessionReview: async () => { calls.push(['review']); return { ok: true, verdict: 'return', text: 'тесты сняты, а не починены' }; },
+    sendReply: async (id, text) => { calls.push(['reply', text]); return { ok: true }; },
     ...extra,
   };
   const toasts = [];
@@ -200,4 +201,15 @@ test('отказ ревью не притворяется вердиктом', a
   await api.open('s1');
   await root.querySelector('.chg-review-btn').listeners.click[0]();
   assert.match(textOf(root), /claude не найден/);
+});
+
+test('замечание к строке несёт адрес и саму строку — агенту не придётся её искать', () => {
+  globalThis.document = makeDom();
+  const api = load();
+  const t = api.noteText('src/main.rs', 42, '    let x = 1;', 'зачем тут единица?');
+  assert.match(t, /src\/main\.rs:42/);
+  assert.match(t, /> {4}let x = 1;|> let x = 1;/, 'строка не процитирована: ' + t);
+  assert.match(t, /зачем тут единица\?/);
+  // Без кода — только адрес и вопрос, без пустой цитаты.
+  assert.equal(api.noteText('a.rs', 7, '   ', 'почему?'), 'a.rs:7\n\nпочему?');
 });

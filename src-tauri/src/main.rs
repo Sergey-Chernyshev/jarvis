@@ -13,6 +13,7 @@ mod backend;
 mod bundle; // режим «Связка»: несколько агентов в worktree над одним проектом + очередь слияний
 #[allow(dead_code)] // проекции/фасады подключаются по фазам (инкр. 8)
 mod capability;
+mod changes; // свод правок задачи: список файлов, дифф, приём и откат
 mod claude_bin;
 mod commands_catalog;
 mod convo; // голосовой разговор: снапшот → Haiku-план → скилы → голосовой ответ (п/п-2)
@@ -164,6 +165,10 @@ fn main() {
             ipc::file_open,
             ipc::file_read,
             ipc::file_diff,
+            ipc::session_changes,
+            ipc::session_change_diff,
+            ipc::session_commit,
+            ipc::session_revert,
             ipc::url_open,
             ipc::ui_error,
             ipc::chat_close,

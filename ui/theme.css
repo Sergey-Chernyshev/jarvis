@@ -875,3 +875,48 @@ textarea.lp-ask-text { width: 100%; min-height: 66px; }
 .bd-dir-row.up { color: var(--ink-dim); font-family: var(--font); }
 .bd-dir-known { display: flex; flex-direction: column; gap: 6px; }
 .bd-dir-known .lp-chip { align-self: flex-start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+
+/* Изменения задачи (changes.js): свод правок агента поверх чата.
+   Строка файла — одна: путь, состояние, счётчики, откат. Читается взглядом
+   сверху вниз, поэтому колонки фиксированы справа, а путь тянется. */
+.chg { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; overflow-y: auto; }
+.chg-head { display: flex; align-items: center; gap: 8px; }
+.chg-title { font: 600 13.5px/1.3 var(--font); color: var(--ink); }
+.chg-branch {
+  font: 400 12px/1.3 var(--mono, monospace); color: var(--ink-dim);
+  padding: 2px 7px; border-radius: var(--r-chip); background: var(--surface-2);
+}
+.chg-sum { font: 400 12.5px/1.3 var(--font); color: var(--ink-dim); }
+.chg-list { display: flex; flex-direction: column; }
+.chg-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: var(--r-chip);
+}
+.chg-row:hover { background: var(--accent-soft); }
+.chg-row.open { background: var(--accent-soft); }
+.chg-path {
+  flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 400 13px/1.5 var(--mono, monospace); color: var(--ink);
+  background: none; border: 0; cursor: default; padding: 0;
+}
+.chg-state { font: 400 12px/1.3 var(--font); color: var(--ink-dim); }
+.chg-counts { font: 400 12px/1.3 var(--mono, monospace); color: var(--ink-dim); min-width: 74px; text-align: right; }
+.chg-revert {
+  font: 400 12px/1.3 var(--font); color: var(--ink-dim);
+  background: none; border: 0; padding: 2px 6px; border-radius: var(--r-chip); cursor: default;
+}
+.chg-revert:hover { background: var(--surface-2); color: var(--ink); }
+.chg-diff { margin: 4px 0 10px 26px; overflow-x: auto; }
+.chg-empty { font: 400 13px/1.5 var(--font); color: var(--ink-dim); padding: 8px 2px; }
+.chg-foot { display: flex; align-items: center; gap: 8px; padding-top: 4px; }
+.chg-msg {
+  flex: 1; min-width: 0; padding: 7px 10px; border-radius: var(--r-chip);
+  background: var(--surface-2); border: 1px solid transparent; color: var(--ink);
+  font: 400 13px/1.4 var(--font);
+}
+.chg-msg:focus { outline: none; border-color: var(--accent); }
+.chg-accept {
+  padding: 7px 12px; border-radius: var(--r-chip); border: 0; cursor: default;
+  background: var(--accent); color: var(--on-accent, #fff); font: 600 13px/1.2 var(--font);
+}
+.chg-accept[disabled] { opacity: 0.6; }

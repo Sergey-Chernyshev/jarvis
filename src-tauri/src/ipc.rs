@@ -11,6 +11,7 @@ use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
+use crate::bundle::host::Host;
 use crate::daemon::Daemon;
 use crate::model::Status;
 use crate::util::*;
@@ -3483,6 +3484,138 @@ fn remotes_array(d: &Arc<Daemon>) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+
+/* ================= изменения задачи ================= */
+
+/// Где считать git-изменения сессии: здесь или на её узле.
+///
+/// Дифф с ЧУЖОЙ машины бессмысленно считать у себя: одноимённый каталог тут —
+/// другой репозиторий, и человек увидел бы неправду (тот же довод, что у
+/// file_read).
+fn host_of(d: &std::sync::Arc<Daemon>, s: &crate::model::Session) -> Result<Host, String> {
+    match &s.remote {
+        None => Ok(Host::Local),
+        Some(name) => match d.remotes.node(name) {
+            Some(node) => Ok(Host::Ssh {
+                machine: name.clone(),
+                host: node.cfg.ssh_host.clone(),
+            }),
+            None => Err(format!("узел «{name}» не найден в настройках")),
+        },
+    }
+}
+
+/// Где и в каком каталоге считать изменения этой сессии.
+fn session_place(app: &AppHandle, session_id: &str) -> Result<(Host, String), String> {
+    let d = Daemon::get(app);
+    let s = d.session(session_id).ok_or("сессия не найдена")?;
+    let cwd = s
+        .cwd
+        .clone()
+        .filter(|c| !c.trim().is_empty())
+        .ok_or("у сессии нет рабочего каталога")?;
+    Ok((host_of(&d, &s)?, cwd))
+}
+
+/// Свод изменений задачи: что агент наделал в рабочем каталоге.
+#[tauri::command]
+pub async fn session_changes(app: AppHandle, session_id: String) -> Value {
+    match session_place(&app, &session_id) {
+        Err(e) => err(e),
+        Ok((host, cwd)) => match crate::changes::collect(&host, &cwd).await {
+            Ok(v) => v,
+            Err(e) => err(e),
+        },
+    }
+}
+
+/// Дифф файла из свода. Гейт — сам свод: показываем только то, что git и
+/// правда считает изменённым, а не любой путь, пришедший из webview.
+#[tauri::command]
+pub async fn session_change_diff(app: AppHandle, session_id: String, path: String) -> Value {
+    let (host, cwd) = match session_place(&app, &session_id) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let listed = match crate::changes::collect(&host, &cwd).await {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let Some(file) = listed_file(&listed, &path) else {
+        return err("файл не в списке изменений");
+    };
+    match crate::changes::file_diff(&host, &cwd, &path, file.1).await {
+        Ok(v) => v,
+        Err(e) => err(e),
+    }
+}
+
+/// Найти файл в своде: возвращает (есть ли, неотслеживаемый ли).
+fn listed_file(listed: &Value, path: &str) -> Option<(bool, bool)> {
+    listed
+        .get("files")?
+        .as_array()?
+        .iter()
+        .find(|f| f.get("path").and_then(Value::as_str) == Some(path))
+        .map(|f| {
+            (
+                true,
+                f.get("untracked").and_then(Value::as_bool).unwrap_or(false),
+            )
+        })
+}
+
+/// Принять правки: закоммитить выбранные файлы.
+#[tauri::command]
+pub async fn session_commit(
+    app: AppHandle,
+    session_id: String,
+    message: String,
+    paths: Vec<String>,
+) -> Value {
+    let (host, cwd) = match session_place(&app, &session_id) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let listed = match crate::changes::collect(&host, &cwd).await {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    // Каждый путь обязан быть в своде: коммит по подделанному пути забрал бы в
+    // историю файл, которого человек не видел.
+    for p in &paths {
+        if listed_file(&listed, p).is_none() {
+            return err(format!("«{p}» не в списке изменений"));
+        }
+    }
+    match crate::changes::commit(&host, &cwd, &message, &paths).await {
+        Ok(sha) => json!({ "ok": true, "sha": sha }),
+        Err(e) => err(e),
+    }
+}
+
+/// Откатить правку файла к последнему коммиту.
+#[tauri::command]
+pub async fn session_revert(app: AppHandle, session_id: String, path: String) -> Value {
+    let (host, cwd) = match session_place(&app, &session_id) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let listed = match crate::changes::collect(&host, &cwd).await {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    match listed_file(&listed, &path) {
+        None => err("файл не в списке изменений"),
+        // Новый файл git не помнит — откатывать его нечем, а удалять молча
+        // панель не станет: это единственная копия работы.
+        Some((_, true)) => err("файл новый: git его не помнит — убери сам, если он лишний"),
+        Some(_) => match crate::changes::revert(&host, &cwd, &path).await {
+            Ok(_) => json!({ "ok": true }),
+            Err(e) => err(e),
+        },
+    }
+}
 
 #[cfg(test)]
 mod turn_ipc_tests {

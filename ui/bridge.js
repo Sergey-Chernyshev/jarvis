@@ -131,6 +131,11 @@
     openFile: (sessionId, path, reveal) => invoke('file_open', { sessionId, path, reveal: !!reveal }),
     // вьюер документов (спека 2026-07-18 §3.1): чтение файла из фактов сессии
     readFile: (sessionId, path) => invoke('file_read', { sessionId, path }),
+    // свод правок задачи: список файлов, дифф, приём и откат (changes.rs)
+    sessionChanges: (sessionId) => invoke('session_changes', { sessionId }),
+    sessionChangeDiff: (sessionId, path) => invoke('session_change_diff', { sessionId, path }),
+    sessionCommit: (sessionId, message, paths) => invoke('session_commit', { sessionId, message, paths }),
+    sessionRevert: (sessionId, path) => invoke('session_revert', { sessionId, path }),
     // дифф файла для таба «Изменения» (§3.2): git-ханки или mode:"none"
     diffFile: (sessionId, path) => invoke('file_diff', { sessionId, path }),
     // внешняя http(s)-ссылка из отрендеренного дока → системный браузер

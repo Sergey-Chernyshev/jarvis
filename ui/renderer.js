@@ -990,6 +990,12 @@ function updateChatChannelMark() {
     chatRemoteEl.hidden = !rem;
     chatRemoteEl.title = rem ? `Агент работает на узле «${rem}» — ответы уходят туда по SSH` : '';
   }
+  // «Изменения» — только когда есть где их считать: без рабочего каталога
+  // git спрашивать не о чем, и кнопка вела бы в тупик
+  if (changesBtn) {
+    changesBtn.hidden = !s || !s.cwd;
+    if (changesBtn.hidden && chgOpen) closeChanges();
+  }
   // tmux-сессии — без пометки; вне tmux помечаем
   chatChannelEl.hidden = !s || !!s.tmuxPane;
   // статус-точка справа — цвет по состоянию, пульс если работает
@@ -1586,6 +1592,38 @@ async function openDocViewer(path, kind) {
     docSelectTab(kind === 'edited' ? 'diff' : 'doc');
   }
 }
+
+/* Свод правок задачи. Панель поверх чата: смотреть изменения человек уходит
+ * из разговора, но не из задачи — возвращаться должно одним Esc. */
+const changesBtn = document.getElementById('changesBtn');
+const chgWrap = document.getElementById('chgWrap');
+let chgOpen = false;
+let chgMounted = false;
+
+function openChanges() {
+  if (!chatSessionId || !chgWrap) return;
+  if (!chgMounted) {
+    JarvisChanges.mount(document.getElementById('chgBody'), window.jarvis, showToast);
+    chgMounted = true;
+  }
+  chgOpen = true;
+  chgWrap.hidden = false;
+  changesBtn.classList.add('open');
+  JarvisChanges.open(chatSessionId);
+}
+
+function closeChanges() {
+  chgOpen = false;
+  if (chgWrap) chgWrap.hidden = true;
+  if (changesBtn) changesBtn.classList.remove('open');
+}
+
+if (changesBtn) changesBtn.addEventListener('click', () => (chgOpen ? closeChanges() : openChanges()));
+document.getElementById('chgClose')?.addEventListener('click', closeChanges);
+document.getElementById('chgScrim')?.addEventListener('click', closeChanges);
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && chgOpen) { e.preventDefault(); e.stopImmediatePropagation(); closeChanges(); }
+}, true);
 
 function closeDocViewer() {
   docOpen = false;

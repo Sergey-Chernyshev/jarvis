@@ -2022,6 +2022,10 @@ pub async fn terminal_focus(app: AppHandle, session_id: String) -> Value {
 /// (опц.) выполнить прокси-команду, затем `claude`/`codex` в директории `cwd`.
 /// `session_id == None` → новая сессия; иначе `--resume`/`resume`. Параметры
 /// запуска (терминал, прокси-команда, «опасный режим») берутся из настроек.
+///
+/// `isolate` и `mode` — свойства ЗАДАЧИ, а не настройки на все разом: поднять
+/// ли её в отдельном worktree-песочнице и с каким доверием («ask» | «plan» |
+/// «yolo»). Разведать чужой код и переписать свой требуют разного.
 #[tauri::command]
 pub async fn session_launch(
     app: AppHandle,
@@ -2029,9 +2033,7 @@ pub async fn session_launch(
     agent: String,
     session_id: Option<String>,
     machine: Option<String>,
-    /// Поднять задачу в отдельном worktree — песочнице рядом с проектом.
     isolate: Option<bool>,
-    /// Режим разрешений: "ask" | "plan" | "yolo".
     mode: Option<String>,
 ) -> Value {
     let d = Daemon::get(&app);

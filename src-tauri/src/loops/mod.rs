@@ -13,6 +13,7 @@ pub mod compose;
 pub mod engine;
 pub mod ipc;
 pub mod model;
+pub mod pipeline; // цикл как граф шагов: агент → команда → ревью, с ветвлением
 pub mod presets;
 pub mod runner;
 pub mod schedule;

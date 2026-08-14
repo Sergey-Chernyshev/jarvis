@@ -196,6 +196,10 @@ pub struct Loop {
     pub schedule: Schedule,
     pub limits: Limits,
     pub sampling: Sampling,
+    /// Пайплайн: цикл как граф шагов. Пусто — обычный линейный цикл, каким он
+    /// и был; так старые циклы продолжают работать без переделки.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<super::pipeline::Pipeline>,
     pub created_at: i64,
     /// Когда цикл в последний раз просыпался.
     pub last_run_at: i64,
@@ -213,6 +217,23 @@ impl Loop {
         }
         if self.sandbox.repo.trim().is_empty() {
             out.push("не указан репозиторий".into());
+        }
+        // У пайплайна свои требования: шаги вместо цели и переходы вместо
+        // условия выхода. Смешивать проверки нельзя — человек получил бы
+        // претензии к полям, которых в его цикле нет.
+        if let Some(p) = &self.pipeline {
+            out.extend(p.problems());
+            if self.limits.tokens == 0 && self.limits.iterations == 0 && self.limits.minutes == 0 {
+                out.push("нет ни одного ограничителя".into());
+            }
+            if self.name.trim().is_empty() {
+                out.push("у цикла нет имени".into());
+            }
+            if self.sandbox.repo.trim().is_empty() {
+                out.push("не указан репозиторий".into());
+            }
+            out.dedup();
+            return out;
         }
         if self.source.goal.trim().is_empty() && self.source.command.trim().is_empty() {
             out.push("не задан источник задач: ни цели, ни команды".into());
@@ -417,6 +438,46 @@ impl Run {
 
 #[cfg(test)]
 mod tests {
+
+    /// Файл общий с прошлыми версиями: цикл без пайплайна обязан читаться и
+    /// проверяться по-старому, иначе обновление сломает заведённые циклы.
+    #[test]
+    fn a_loop_without_a_pipeline_is_the_old_linear_one() {
+        let old = r#"{"id":"l1","name":"ночной","agent":"claude",
+            "source":{"goal":"чинить"},"sandbox":{"repo":"/srv/p"},
+            "exit":{"gates":[{"name":"тесты","command":"cargo test"}]},
+            "limits":{"iterations":5}}"#;
+        let l: Loop = serde_json::from_str(old).unwrap();
+        assert!(l.pipeline.is_none(), "пайплайн взялся из ниоткуда");
+        assert!(l.problems().is_empty(), "{:?}", l.problems());
+    }
+
+    /// У пайплайна свои требования: претензии к цели и критику здесь были бы
+    /// разговором о полях, которых в этом цикле нет.
+    #[test]
+    fn a_pipeline_loop_is_judged_by_its_steps() {
+        use super::super::pipeline::{Cond, Flow, Pipeline, Step, StepKind};
+        let mut l = Loop {
+            name: "сборка".into(),
+            ..Default::default()
+        };
+        l.sandbox.repo = "/srv/p".into();
+        l.limits.iterations = 3;
+        l.pipeline = Some(Pipeline {
+            start: String::new(),
+            steps: vec![Step {
+                id: "правка".into(),
+                name: String::new(),
+                kind: StepKind::Agent { prompt: "делай".into(), model: String::new() },
+                retries: 0,
+                next: vec![Flow { to: String::new(), when: Cond::Always }],
+            }],
+        });
+        assert!(l.problems().is_empty(), "{:?}", l.problems());
+        // Пустой пайплайн — это дыра, и о ней говорят прямо.
+        l.pipeline = Some(Pipeline::default());
+        assert!(l.problems().iter().any(|x| x.contains("ни одного шага")), "{:?}", l.problems());
+    }
     use super::*;
 
     #[test]

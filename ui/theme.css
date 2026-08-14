@@ -971,3 +971,16 @@ textarea.lp-ask-text { width: 100%; min-height: 66px; }
 }
 .chg-note:focus { outline: none; }
 .chg-touched { margin: 2px 0 0 26px; font: 400 12px/1.5 var(--font); color: var(--ink-dim); }
+
+/* Конструктор пайплайна (pipeline.js): шаги карточками, переходы строками. */
+.pl-editor { display: flex; flex-direction: column; gap: 10px; }
+.pl-step { position: relative; display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px; border-radius: var(--r-card, 10px); background: var(--surface-2); }
+.pl-step-h { display: flex; align-items: center; gap: 8px; }
+.pl-step-kind { font: 600 11.5px/1.2 var(--font); color: var(--ink-dim); text-transform: uppercase; letter-spacing: .04em; }
+.pl-step-b { display: flex; flex-direction: column; gap: 6px; }
+.pl-flows { display: flex; flex-direction: column; gap: 4px; }
+.pl-flow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pl-add, .pl-presets { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pl-start { position: absolute; top: -8px; left: 10px; padding: 1px 7px; border-radius: var(--r-chip);
+  background: var(--accent); color: var(--on-accent, #fff); font: 600 10.5px/1.5 var(--font); }

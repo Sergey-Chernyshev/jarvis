@@ -524,6 +524,32 @@
           (v) => { d.exit.critic.model = v; refresh(); },
           'на ревью обычно ставят сильнее, чем на исполнение');
 
+    /* Режим цикла: простой (один сценарий: агент → гейты → критик) или
+     * пайплайн (граф шагов). Переключатель, а не два разных экрана: цикл
+     * остаётся одной сущностью, меняется только его середина. */
+    const isPipe = !!d.pipeline;
+    const modeSeg = el('div.lp-seg',
+      [['простой', false], ['пайплайн', true]].map(([word, want]) => {
+        const b = el('button', {
+          text: word,
+          onclick: () => {
+            if (want === isPipe) return;
+            // Черновик другого режима не выбрасываем молча: человек мог
+            // случайно ткнуть, а собранный граф жалко.
+            if (want) d.pipeline = d.pipelineDraft || { start: '', steps: [] };
+            else { d.pipelineDraft = d.pipeline; d.pipeline = null; }
+            render();
+          },
+        });
+        if (want === isPipe) b.classList.add('on');
+        return b;
+      }));
+
+    const pipeBox = el('div.pl-editor');
+    if (isPipe && typeof JarvisPipeline !== 'undefined') {
+      JarvisPipeline.renderTo(pipeBox, d.pipeline, () => refresh());
+    }
+
     const box = el('div.lp-builder',
       el('div.lp-h1', { text: isNew ? 'Новый цикл' : `Настройка · ${l.name || 'без имени'}` }),
       el('div.lp-h2', { text: 'пять шагов и ограничители — а внизу, человеческим языком, что из этого выйдет' }),
@@ -536,8 +562,10 @@
       el('div.lp-headrow',
         field('имя цикла', d.name, (v) => { d.name = v; }),
         el('label.lp-field', el('span.lp-field-label', { text: 'агент' }), seg),
+        el('label.lp-field', el('span.lp-field-label', { text: 'как крутить' }), modeSeg),
       ),
-      step(1, 'откуда берутся задачи', 'источник',
+      isPipe ? step(1, 'шаги пайплайна', 'что делается и куда ход идёт дальше', pipeBox) : null,
+      isPipe ? null : step(1, 'откуда берутся задачи', 'источник',
         field('цель цикла', d.source.goal, (v) => { d.source.goal = v; }, 'своими словами — она уйдёт в промт каждой итерации'),
         el('label.lp-field',
           el('span.lp-field-label', { text: 'команда' }),
@@ -551,7 +579,7 @@
         check('отдельный worktree', d.sandbox.worktree, (v) => { d.sandbox.worktree = v; },
           'без него агент правит рабочее дерево, в котором ты сам работаешь'),
       ),
-      step(3, 'условие выхода', 'когда цикл поймёт, что сделал',
+      isPipe ? null : step(3, 'условие выхода', 'когда цикл поймёт, что сделал',
         el('div.lp-sub', { text: 'детерминированные гейты' }), gates,
         check('субагент-критик', d.exit.critic.enabled, (v) => { d.exit.critic.enabled = v; },
           'мнение полезно, но выпускать работу в мир по одному мнению нельзя'),

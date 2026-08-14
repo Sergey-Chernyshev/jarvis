@@ -339,7 +339,7 @@ fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::pipeline::{Cond, Flow};
+    use super::super::pipeline::Flow;
 
     fn step(id: &str, kind: StepKind, next: Vec<Flow>) -> Step {
         Step {

@@ -325,6 +325,10 @@ pub struct Iteration {
     pub sampled: bool,
     /// Человек посмотрел.
     pub reviewed: bool,
+    /// Шаг пайплайна, которым была эта итерация. Пусто — обычный цикл, где
+    /// итерация одна на всё.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub step: String,
 }
 
 /// Почему запуск закончился.
@@ -378,6 +382,9 @@ pub struct Ask {
     pub options: Vec<String>,
     /// Итерация, на которой цикл встал.
     pub iteration: u32,
+    /// Шаг пайплайна, задавший вопрос: с него и продолжим.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub step: String,
 }
 
 /// Один запуск цикла.

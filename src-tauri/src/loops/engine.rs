@@ -178,6 +178,13 @@ pub async fn run_loop(store: Arc<Store>, item: Loop, run_n: u32, on_change: impl
     store.put_run(run.clone());
     on_change(&run);
 
+    // Пайплайн — другой порядок исполнения, но та же песочница, тот же журнал
+    // и те же ограничители: развилка ровно здесь, ниже — прежний линейный цикл.
+    if let Some(p) = item.pipeline.clone() {
+        super::pipeline_run::run_pipeline(store, item, p, run, dir, on_change).await;
+        return;
+    }
+
     let mut last_return = String::new();
     loop {
         // Человек мог остановить цикл, пока шла итерация: стор — единственный
@@ -271,6 +278,9 @@ pub async fn run_loop(store: Arc<Store>, item: Loop, run_n: u32, on_change: impl
                         question: what,
                         options: Vec::new(),
                         iteration: n,
+                        // Обычный цикл — не граф: возобновлять его с шага
+                        // нечего, он один.
+                        step: String::new(),
                     });
                     store.put_run(run.clone());
                     on_change(&run);

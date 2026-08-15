@@ -777,8 +777,32 @@ impl NodeClient {
     }
 
     /// Закрыть пану на узле: сессия там завершается вместе с ней.
+    ///
+    /// Успеха мало — нужен ОТВЕТ С ТЕЛОМ. Узел старой версии про `/kill` не
+    /// знает, а POST на неизвестный путь у него означает «конверт от хука»:
+    /// он молча кладёт тело в буфер и отвечает 204. Принять это за успех
+    /// значило бы сказать «сессия завершена» живому агенту в лицо.
     pub async fn kill(&self, pane: &str) -> Result<(), String> {
-        self.post("/kill", &serde_json::json!({ "pane": pane })).await
+        let resp = self
+            .http
+            .post(format!("{}/kill", self.base))
+            .json(&serde_json::json!({ "pane": pane }))
+            .send()
+            .await
+            .map_err(|e| format!("узел недоступен: {e}"))?;
+        let status = resp.status();
+        if status.as_u16() == 204 {
+            return Err("узел не умеет завершать сессии — обнови jarvis-node".into());
+        }
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        if !status.is_success() {
+            return Err(body
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("узел отказал")
+                .to_string());
+        }
+        Ok(())
     }
 
     /// Живые паны узла — по ним видно, что удалённая сессия ещё жива.

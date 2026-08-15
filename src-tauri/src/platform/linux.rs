@@ -10,10 +10,13 @@ use tauri::{LogicalPosition, LogicalSize, WebviewWindow};
 
 /* ================= окна ================= */
 
-/// Накладка ⌘J: поверх всего и на всех рабочих столах.
+/// Накладка: поверх всего и на всех рабочих столах.
 ///
-/// На macOS для этого нужен уровень screen-saver, на Linux хватает штатного
-/// always-on-top: оконные менеджеры X11/Wayland сами держат такое окно сверху.
+/// На X11 хватает штатного always-on-top — менеджер окон честно держит такое
+/// окно сверху. На Wayland (Sway и прочие wlroots) обе просьбы клиенту НЕ
+/// принадлежат: и «поверх всех», и «на всех столах» решает композитор. Зовём
+/// их всё равно — там, где протокол это умеет, сработает, — а на Sway то же
+/// самое делается правилом `floating enable, sticky enable` (docs/sway).
 pub fn float_above_everything(win: &WebviewWindow) {
     let _ = win.set_always_on_top(true);
     let _ = win.set_visible_on_all_workspaces(true);
@@ -53,6 +56,10 @@ fn target_monitor(win: &WebviewWindow) -> Option<(LogicalPosition<f64>, LogicalS
 /// Панель: по центру монитора с отступом сверху ~⅓ (как накладка Raycast),
 /// либо в правом верхнем углу. Размер адаптируется к высоте экрана — та же
 /// формула, что и в macOS-реализации, чтобы поведение совпадало.
+///
+/// На Wayland позицию клиент не выбирает — `set_position` там ничего не
+/// делает, и панель встанет туда, куда решит композитор (у sway — по правилу
+/// floating). Размер при этом уважается, поэтому считаем его в любом случае.
 pub fn place_panel(win: &WebviewWindow, w: f64, h: f64, corner: bool) {
     let Some((origin, screen)) = target_monitor(win) else {
         return;

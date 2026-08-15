@@ -7,12 +7,20 @@
 use super::host::Host;
 use std::time::Duration;
 
+/// Одна git-операция: stdout — данные, stderr — объяснение неудачи.
+///
+/// Потоки врозь принципиально. У ssh-хоста удалённый `bash -lc` ворчит на
+/// старте про локаль, и в слитом потоке это ворчание становилось
+/// «незакоммиченной правкой» в чистом дереве (`dirty`), лишним конфликтным
+/// файлом при ребейзе и мусором в sha — то есть связка отказывалась вливать
+/// по причине, которой нет.
 async fn ok(host: &Host, dir: &str, args: &[&str]) -> Result<String, String> {
-    let (code, out) = host.git(dir, args).await;
+    let (code, out, err) = host.git_split(dir, args).await;
     if code == 0 {
         Ok(out)
     } else {
-        Err(crate::util::ellipsize(&crate::util::one_line(&out), 300))
+        let why = format!("{} {}", out.trim(), err.trim());
+        Err(crate::util::ellipsize(&crate::util::one_line(why.trim()), 300))
     }
 }
 

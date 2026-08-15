@@ -89,15 +89,14 @@ pub async fn search(host: &Host, cwd: &str, query: &str) -> Result<Vec<Hit>, Str
         return Err("что искать?".into());
     }
     let in_repo = crate::bundle::git::is_repo(host, cwd).await;
-    let (_, out) = host
-        .sh(
-            cwd,
-            &grep_cmd(query, in_repo),
-            std::time::Duration::from_secs(30),
-        )
-        .await;
-    // Код возврата не смотрим: у grep «ничего не нашлось» — это 1, и отличить
-    // его от настоящей беды всё равно нечем. Пустой список честнее ошибки.
+    // stdout — находки, stderr — чужое ворчание (удалённый шелл про локаль,
+    // grep про недоступные каталоги). Код возврата не смотрим: у grep «ничего
+    // не нашлось» — это 1, и отличить его от настоящей беды всё равно нечем.
+    // Пустой список честнее ошибки.
+    let out = host
+        .sh_data(cwd, &grep_cmd(query, in_repo), std::time::Duration::from_secs(30))
+        .await
+        .unwrap_or_default();
     Ok(parse_hits(&out))
 }
 

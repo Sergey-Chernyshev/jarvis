@@ -3129,6 +3129,36 @@ function renderArgMode() {
   setTimeout(() => focusArgField(), 20);
 }
 
+/* ---------- завершение сессии ---------- */
+
+// Подтверждение вторым нажатием, как у остальных разрушительных кнопок панели:
+// живого агента закрывают насовсем, и промах по пункту меню не должен этого
+// стоить. Хранится id: подтверждение относится к КОНКРЕТНОЙ сессии, иначе
+// «ещё раз» после смены выбора убило бы соседнюю.
+let killArmed = { id: null, at: 0 };
+const KILL_ARM_MS = 4000;
+
+function killArmedFor(id) {
+  return killArmed.id === id && Date.now() - killArmed.at < KILL_ARM_MS;
+}
+
+function killSession(s) {
+  if (!s) return;
+  if (!killArmedFor(s.id)) {
+    killArmed = { id: s.id, at: Date.now() };
+    showToast('Завершить сессию? Нажми ещё раз');
+    return;
+  }
+  killArmed = { id: null, at: 0 };
+  window.jarvis.killSession(s.id).then((res) => {
+    if (!res || res.ok !== true) { showToast((res && res.error) || 'Не получилось завершить'); return; }
+    // Говорим, что именно случилось: закрыли живого агента или убрали
+    // строку от давно умершего. Разница человеку важна.
+    showToast(res.killed ? 'Сессия завершена' : 'Сессия убрана из списка');
+    if (res.note) showToast(res.note);
+  });
+}
+
 /* ---------- футер и меню действий (⌘K) ---------- */
 
 const footerEl = document.getElementById('footer');
@@ -3146,6 +3176,11 @@ function actionItems() {
     items.push({ label: 'Перейти в терминал', key: '⌘↵', run: () => focusTerminal(s.id, s.project) });
     items.push({ label: s.pinned ? 'Открепить' : 'Закрепить', key: '⌘P', run: () => window.jarvis.setPin(s.id, !s.pinned) });
     if (s.tmuxPane) items.push({ label: 'Где этот терминал?', key: '⌘G', run: () => window.jarvis.pingTerminal(s.id) });
+    items.push({
+      label: killArmedFor(s.id) ? 'Точно завершить?' : 'Завершить сессию',
+      key: '⌘⇧⌫',
+      run: () => killSession(s),
+    });
   }
   if (view !== 'chat') items.push({ label: 'Очистить завершённые', key: '⌘⌫', run: () => window.jarvis.clearFinished() });
   items.push({ label: 'Проекты и история', key: '⌘2', run: () => setView('history') });
@@ -4837,6 +4872,13 @@ window.addEventListener('keydown', async (e) => {
   if (e.metaKey && e.key === ',') { // ⌘, — настройки, как в macOS
     e.preventDefault();
     if (view === 'settings') { setView('list'); render(); } else setView('settings');
+    return;
+  }
+
+  if (e.metaKey && e.shiftKey && e.key === 'Backspace') { // ⌘⇧⌫ — завершить сессию
+    if (editingText()) return;
+    e.preventDefault();
+    killSession(view === 'list' ? filtered()[sel] : state.find((x) => x.id === chatSessionId));
     return;
   }
 

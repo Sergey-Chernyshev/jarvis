@@ -776,6 +776,11 @@ impl NodeClient {
         }
     }
 
+    /// Закрыть пану на узле: сессия там завершается вместе с ней.
+    pub async fn kill(&self, pane: &str) -> Result<(), String> {
+        self.post("/kill", &serde_json::json!({ "pane": pane })).await
+    }
+
     /// Живые паны узла — по ним видно, что удалённая сессия ещё жива.
     pub async fn panes(&self) -> Result<PanesReply, String> {
         self.get_json(&self.http, "/panes", &[]).await

@@ -111,6 +111,14 @@ impl Target {
         }
     }
 
+    /// Закрыть пану вместе с агентом: конец сессии, а не прерывание хода.
+    pub async fn kill(&self, pane: &str) -> Result<(), String> {
+        match self {
+            Target::Local => kill_pane(pane).await,
+            Target::Remote(n) => n.client()?.kill(pane).await,
+        }
+    }
+
     pub async fn paste_slash(&self, pane: &str, text: &str) -> Result<(), String> {
         match self {
             Target::Local => paste_slash(pane, text).await,
@@ -138,6 +146,13 @@ impl Target {
             }
         }
     }
+}
+
+/// Закрыть пану: tmux шлёт SIGHUP тому, что в ней работает.
+///
+/// Это «сессии больше нет», а не «прерви ход» (для того — Escape в пану).
+pub async fn kill_pane(pane: &str) -> Result<(), String> {
+    tmux_j(&["kill-pane", "-t", pane]).await.map(|_| ())
 }
 
 pub async fn pane_alive(pane: &str) -> bool {

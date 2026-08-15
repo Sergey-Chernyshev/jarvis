@@ -117,7 +117,7 @@ A registry of every interactive Claude Code / Codex session: status (idle / work
 <details>
 <summary>How it works</summary>
 
-No screen parsing — only structured events from the agents themselves, via their native hooks: `SessionStart` → idle, `UserPromptSubmit` → working, `Notification` → waiting (+a notification), `Stop` → done (+a notification), `SessionEnd` → the session disappears. The registry-reducer lives in the Rust daemon; state survives a daemon restart (`~/.jarvis/state.json`) and live tmux sessions are re-adopted. The pane's screen is read only by the interactive-prompt detector and the remote (a regex, not screenshots).
+No screen parsing — only structured events from the agents themselves, via their native hooks: `SessionStart` → idle, `UserPromptSubmit` → working, `Notification` → waiting (+a notification), `Stop` → done (+a notification), `SessionEnd` → the session disappears. A session can also be ended by hand — ⌘⇧⌫ or "Завершить сессию" in ⌘K: a live one loses its pane along with the agent, while a stuck one (the agent died, no `SessionEnd` arrived, the node is unreachable — the liveness sweep has nothing to judge by) is simply dropped from the list. The registry-reducer lives in the Rust daemon; state survives a daemon restart (`~/.jarvis/state.json`) and live tmux sessions are re-adopted. The pane's screen is read only by the interactive-prompt detector and the remote (a regex, not screenshots).
 
 </details>
 

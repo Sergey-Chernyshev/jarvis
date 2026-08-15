@@ -50,6 +50,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/reply", post(reply))
         .route("/control", post(control))
         .route("/keys", post(keys))
+        .route("/kill", post(kill))
         .route("/projects", get(projects))
         .route("/launch", post(launch))
         .route("/screen", get(screen))
@@ -188,6 +189,22 @@ async fn keys(body: Bytes) -> Response {
         return json_err(StatusCode::BAD_REQUEST, "пустая пана или пустой план");
     }
     tmux_result(tmux::play_keys(pane, &plan).await)
+}
+
+/// POST /kill — {pane}: закрыть пану вместе с агентом.
+///
+/// Отдельно от `/control`: там слэш-команда внутрь живого агента, здесь —
+/// конец сессии. Уже мёртвая пана отвечает ошибкой tmux, и это нормальный
+/// ответ: ноут по нему поймёт, что убирать нечего, и просто забудет сессию.
+async fn kill(body: Bytes) -> Response {
+    let Ok(v) = serde_json::from_slice::<Value>(&body) else {
+        return json_err(StatusCode::BAD_REQUEST, "ожидаю {pane}");
+    };
+    let pane = v.get("pane").and_then(Value::as_str).unwrap_or_default().trim();
+    if pane.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "пустая пана");
+    }
+    tmux_result(tmux::kill(pane).await)
 }
 
 /// GET /projects — где на этой машине работали. Только оглавление: ноут сам

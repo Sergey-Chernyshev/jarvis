@@ -178,6 +178,8 @@
     setModel: (sessionId, model) => invoke('session_set_model', { sessionId, model }),
     setEffort: (sessionId, level) => invoke('session_set_effort', { sessionId, level }),
     setPin: (sessionId, pinned) => invoke('session_set_pin', { sessionId, pinned }),
+    // завершить сессию: закрыть пану, если жива, и убрать из списка в любом случае
+    killSession: (sessionId) => invoke('session_kill', { sessionId }),
     getMeta: () => invoke('app_meta'),
     updateCheckInstall: () => invoke('update_check_install'),
     relaunch: () => invoke('app_relaunch'),

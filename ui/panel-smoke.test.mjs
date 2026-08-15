@@ -251,3 +251,32 @@ test('Esc закрывает открытый экран, а не выкидыв
   assert.equal(doc.getElementById('chgWrap').hidden, true, 'Esc не закрыл панель изменений');
   assert.equal(doc.getElementById('chat').hidden, false, 'Esc заодно выкинул из чата');
 });
+
+test('сессия завершается вторым нажатием, а не первым', async () => {
+  const { doc, calls, subs } = await boot({ state: [SESSION] });
+  subs.onState([SESSION]);
+  await new Promise((r) => setTimeout(r, 0));
+
+  const open = () => doc.getElementById('actionsBtn').dispatchEvent(click(doc));
+  const item = (re) => [...doc.querySelectorAll('#actionsPop .ap-item')].find((r) => re.test(r.textContent));
+
+  open();
+  const kill = item(/Завершить сессию/);
+  assert.ok(kill, 'пункта «Завершить сессию» нет в меню действий');
+  kill.dispatchEvent(click(doc));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(
+    !calls.some((c) => c[0] === 'killSession'),
+    'первое нажатие уже завершило сессию — подтверждения нет'
+  );
+
+  // Второе нажатие — то же самое место, но пункт уже спрашивает.
+  open();
+  const armed = item(/Точно завершить/);
+  assert.ok(armed, 'подтверждение не показано: ' + doc.getElementById('actionsPop').textContent);
+  armed.dispatchEvent(click(doc));
+  await new Promise((r) => setTimeout(r, 0));
+  const call = calls.find((c) => c[0] === 'killSession');
+  assert.ok(call, 'сессия не завершена вторым нажатием');
+  assert.equal(call[1], 's1', 'завершили не ту сессию');
+});

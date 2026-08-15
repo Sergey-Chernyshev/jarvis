@@ -1436,6 +1436,75 @@ pub fn session_set_pin(app: AppHandle, session_id: String, pinned: bool) -> Valu
     json!({ "ok": found })
 }
 
+/// Завершить сессию: закрыть пану, если она ещё жива, и убрать сессию из
+/// списка в любом случае.
+///
+/// Два случая — один жест. Живая сессия: агент работает, человек решил, что
+/// хватит; паны не станет вместе с ним. Зомби: агент давно умер — терминал
+/// закрыли, машина ушла в сон, узел отвалился, — `session-end` не пришёл, и
+/// сессия висит «в работе» навсегда. Сверка живости её не снимет: у сессии с
+/// недоступного узла судить не по чему, а у сессии без паны и без pid — нечем.
+/// До сих пор такую сессию нельзя было убрать вообще ничем.
+///
+/// Порядок важен: сперва пана, потом реестр. Если пана жива, но закрыть её не
+/// вышло, — сессию НЕ забываем: список без строки и живой агент за спиной хуже
+/// висящей строки.
+#[tauri::command]
+pub async fn session_kill(app: AppHandle, session_id: String) -> Value {
+    let d = Daemon::get(&app);
+    kill_core(&d, &session_id).await
+}
+
+/// Попросить процесс завершиться (SIGTERM). `false` — процесса уже нет.
+///
+/// Только для местных сессий: pid с чужой машины здесь не значит ничего и
+/// вполне может совпасть с чужим живым процессом.
+fn signal_term(pid: i64) -> bool {
+    // SAFETY: обычный вызов kill(2); опасен он не памятью, а последствиями —
+    // поэтому и зовётся только по явной команде человека.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) == 0 }
+}
+
+pub(crate) async fn kill_core(d: &Arc<Daemon>, session_id: &str) -> Value {
+    let Some(s) = d.session(session_id) else {
+        return err("Сессия не найдена");
+    };
+    let mut killed = false;
+    let mut note = String::new();
+    if let Some(pane) = s.tmux_pane.clone() {
+        match d.pane_target(&s) {
+            Ok(target) => {
+                if target.pane_alive(&pane).await {
+                    if let Err(e) = target.kill(&pane).await {
+                        return err(format!("не закрылась пана: {}", ellipsize(&one_line(&e), 120)));
+                    }
+                    killed = true;
+                }
+            }
+            // Узел недоступен — спросить про пану некого. Сессию всё равно
+            // забываем (за этим и звали), но говорим вслух: там мог остаться
+            // живой агент, и вернётся он сам — первым же своим событием.
+            Err(e) => note = format!("{e}: пана могла остаться"),
+        }
+    } else if s.remote.is_none() {
+        // Сессия не в tmux (терминал IDE): закрывать нечего, но агент жив и
+        // после «завершить» обязан завершиться — иначе кнопка просто прячет
+        // строку, а работа продолжается за спиной. Просим по-хорошему:
+        // SIGTERM, а не SIGKILL — claude успеет закрыть транскрипт.
+        if let Some(pid) = s.pid.filter(|p| *p > 0) {
+            killed = signal_term(pid);
+        }
+    }
+    d.sessions.lock().unwrap().remove(session_id);
+    d.push();
+    crate::log::line(&format!(
+        "[kill] сессия {} — {}",
+        ellipsize(session_id, 8),
+        if killed { "агент остановлен" } else { "убрана из списка" }
+    ));
+    json!({ "ok": true, "killed": killed, "note": note })
+}
+
 /// Пульт: слэш-команда с аргументом в живую пану + оптимистичное состояние.
 pub(crate) async fn set_via_slash(
     d: &Arc<Daemon>,

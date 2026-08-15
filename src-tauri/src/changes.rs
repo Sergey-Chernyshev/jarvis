@@ -576,11 +576,16 @@ mod tests {
     /// «master bash: warning: …».
     #[test]
     fn noise_in_the_stream_is_not_a_file() {
-        let out = "bash: warning: setlocale: LC_ALL: cannot change locale (en_GB.UTF-8)\n\
-                   warning: LF will be replaced by CRLF in src/main.rs\n\
-                   fatal: not a git repository\n\
-                    M src/main.rs\n\
-                   ?? новый.txt\n";
+        // Строки собираем concat!, а не переносом через «\»: он съедает
+        // отступ следующей строки вместе с ведущим пробелом статуса — и
+        // « M src/main.rs» превращается в «M src/main.rs», то есть в мусор.
+        let out = concat!(
+            "bash: warning: setlocale: LC_ALL: cannot change locale (en_GB.UTF-8)\n",
+            "warning: LF will be replaced by CRLF in src/main.rs\n",
+            "fatal: not a git repository\n",
+            " M src/main.rs\n",
+            "?? новый.txt\n",
+        );
         let list = parse_status(out);
         assert_eq!(list.len(), 2, "лишние строки стали файлами: {list:?}");
         assert_eq!(list[0].path, "src/main.rs");

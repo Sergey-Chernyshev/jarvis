@@ -67,6 +67,30 @@ use tauri::Manager;
 
 use daemon::Daemon;
 
+/// Что просит второй запуск у уже работающего приложения.
+///
+/// Список намеренно короткий: это не CLI, а мостик для горячих клавиш
+/// оконного менеджера. Всё остальное панель умеет сама.
+#[derive(Debug, PartialEq)]
+enum Command {
+    Show,
+    Hide,
+    Toggle,
+    Quit,
+}
+
+impl Command {
+    fn parse(arg: &str) -> Option<Self> {
+        match arg.trim_start_matches('-') {
+            "toggle" => Some(Command::Toggle),
+            "show" | "open" => Some(Command::Show),
+            "hide" => Some(Command::Hide),
+            "quit" | "exit" => Some(Command::Quit),
+            _ => None,
+        }
+    }
+}
+
 fn main() {
     // До всего остального: паника, случившаяся раньше установки крючка, уйдёт
     // только в stderr — то есть мимо лога, который и присылают при разборе.
@@ -77,8 +101,20 @@ fn main() {
     // single-instance — только в проде; в dev-сборке (JARVIS_DEV=1) НЕ ставим,
     // чтобы dev и установленный прод крутились рядом, не гася друг друга.
     if std::env::var("JARVIS_DEV").is_err() {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            windows::show_panel(&Daemon::get(app));
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // Второй запуск — это не «подними ещё одно окно», а команда уже
+            // работающему. На Wayland (Sway) без этого никак: глобальные
+            // хоткеи там перехватывает композитор, а не приложение, и
+            // `bindsym $mod+j exec jarvis --toggle` — единственный честный
+            // способ дать панели горячую клавишу. Аргумента нет — прежнее
+            // поведение, «покажись».
+            let d = Daemon::get(app);
+            match argv.iter().find_map(|a| Command::parse(a)) {
+                Some(Command::Toggle) => windows::toggle_panel(&d),
+                Some(Command::Hide) => windows::hide_panel(&d),
+                Some(Command::Quit) => d.app.exit(0),
+                Some(Command::Show) | None => windows::show_panel(&d),
+            }
         }));
     }
 

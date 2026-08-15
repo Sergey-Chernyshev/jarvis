@@ -86,13 +86,20 @@ The app checks for updates itself (built-in updater). You can reinstall the inte
 sudo apt install tmux libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
                  librsvg2-dev libasound2-dev libxdo-dev patchelf cmake
 
+# Arch (the port's main bench: Arch + Sway)
+# sudo pacman -S tmux webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg \
+#                alsa-lib patchelf cmake wtype wl-clipboard playerctl
+
 npm ci
 npm run setup          # hooks into ~/.claude/settings.json
 npm run start:linux    # build and launch
 npm run bundle:linux   # optional: .deb / .AppImage / .rpm
 ```
 
-The panel hotkey is **Ctrl+J** here: Super belongs to the desktop environment
+On Wayland (Sway, Hyprland, GNOME) global shortcuts belong to the compositor, not
+to the app: bind them there — `bindsym $mod+j exec jarvis --toggle` — and add the
+window rules from [`docs/sway/jarvis.conf`](docs/sway/jarvis.conf), otherwise the
+panel arrives as an ordinary tile. On X11 the panel hotkey is **Ctrl+J**: Super belongs to the desktop environment
 (GNOME uses Super+1..4 for the dock). Full list of differences and of the
 optional helpers (`playerctl`, `wmctrl`, `xdotool`) — [`docs/linux.md`](docs/linux.md).
 

@@ -285,7 +285,11 @@ pub fn preview_url(raw: &str) -> Result<String, String> {
 
 pub fn create_toast(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let win = WebviewWindowBuilder::new(app, "toast", WebviewUrl::App("toast.html".into()))
-        .title("")
+        // Заголовок нужен не человеку (декораций у окна нет), а оконному
+        // менеджеру: на Wayland правила пишут по app_id и title, и безымянное
+        // окно от панели не отличить. С ним правило Sway «тост не берёт фокус
+        // и висит поверх» пишется одной строкой.
+        .title("Jarvis · уведомление")
         .inner_size(TOAST_W, 120.0)
         .visible(false)
         .decorations(false)

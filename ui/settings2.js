@@ -1367,6 +1367,21 @@
   // 7. Горячие клавиши (keys) — hotkey_bindings (единый реестр действий)
   async function renderKeys(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Горячие клавиши' }));
+    // На Wayland (Sway, Hyprland, GNOME) клавиатуру раздаёт композитор:
+    // приложение не может перехватить сочетание глобально, и молчать об этом
+    // нельзя — человек будет думать, что сломалось у него.
+    const meta = await safe(() => window.jarvis.getMeta(), null);
+    if (meta && meta.wayland) {
+      pane.appendChild(el('div.dgroup', null, [
+        drow(
+          'Wayland: клавиши у композитора',
+          'Глобальные сочетания здесь раздаёт не приложение. Повесь их в конфиге: '
+            + 'bindsym $mod+j exec jarvis --toggle (ещё понимает --show, --hide, --quit). '
+            + 'Готовый кусок — docs/sway/jarvis.conf.',
+          []
+        ),
+      ]));
+    }
     const _sk = skelGroup(4); pane.appendChild(_sk);
     const r = await safe(() => window.jarvis.hotkeyBindings(), null);
     _sk.remove();

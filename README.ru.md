@@ -88,13 +88,20 @@ Jarvis — инструмент для power-пользователей. Он о
 sudo apt install tmux libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
                  librsvg2-dev libasound2-dev libxdo-dev patchelf cmake
 
+# Arch (основной стенд порта: Arch + Sway)
+# sudo pacman -S tmux webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg \
+#                alsa-lib patchelf cmake wtype wl-clipboard playerctl
+
 npm ci
 npm run setup          # хуки в ~/.claude/settings.json
 npm run start:linux    # собрать и запустить
 npm run bundle:linux   # по желанию: .deb / .AppImage / .rpm
 ```
 
-Хоткей панели здесь — **Ctrl+J**: Super принадлежит окружению рабочего стола
+На Wayland (Sway, Hyprland, GNOME) глобальные сочетания принадлежат
+композитору, а не приложению: вешай их там — `bindsym $mod+j exec jarvis
+--toggle` — и добавь правила окон из [`docs/sway/jarvis.conf`](docs/sway/jarvis.conf),
+иначе панель приедет обычным тайлом. На X11 хоткей панели — **Ctrl+J**: Super принадлежит окружению рабочего стола
 (в GNOME Super+1..4 переключает приложения дока). Полный список отличий и
 необязательных утилит (`playerctl`, `wmctrl`, `xdotool`) — в
 [`docs/linux.md`](docs/linux.md).

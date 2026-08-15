@@ -183,9 +183,35 @@ mod imp {
             .map(|a| (*a).to_string())
     }
 
-    /// Активация окна по pid: сперва wmctrl (умеет искать по pid),
-    /// затем xdotool. Нет ни того, ни другого — ступень просто не сработала.
+    /// Wayland ли снаружи. На Sway (и любом wlroots) X11-утилиты видят только
+    /// окна XWayland — то есть почти ничего: терминалы там нативные. Поэтому
+    /// сперва спрашиваем композитор, а X11 остаётся запасным путём.
+    pub(super) fn wayland() -> bool {
+        std::env::var_os("WAYLAND_DISPLAY").is_some()
+    }
+
+    /// Фокус через IPC композитора. Sway понимает критерий `pid`, а pid у нас
+    /// уже есть — его дал обход дерева процессов.
+    ///
+    /// `swaymsg` ставим первым на Wayland и не зовём вовсе на X11: он там
+    /// просто не найдёт сокет и потратит время.
+    async fn sway_focus(criteria: &str) -> bool {
+        run(
+            "swaymsg",
+            &["--", &format!("[{criteria}] focus")],
+            Duration::from_secs(4),
+        )
+        .await
+        .is_some_and(|o| o.status.success())
+    }
+
+    /// Активация окна по pid: на Wayland — через swaymsg, на X11 — сперва
+    /// wmctrl (умеет искать по pid), затем xdotool. Нет ни того, ни другого —
+    /// ступень просто не сработала.
     pub async fn activate_app_by_pid(pid: i64) -> bool {
+        if wayland() && sway_focus(&format!("pid={pid}")).await {
+            return true;
+        }
         // wmctrl -l -p печатает: <winid> <desktop> <pid> <host> <title>
         if let Some(out) = run("wmctrl", &["-l", "-p"], Duration::from_secs(4)).await {
             if out.status.success() {
@@ -216,8 +242,22 @@ mod imp {
         .is_some_and(|o| o.status.success())
     }
 
-    /// Активация по имени: wmctrl ищет подстроку в заголовке окна.
+    /// Активация по имени: на Wayland просим Sway по app_id и по заголовку,
+    /// на X11 wmctrl ищет подстроку в заголовке окна.
+    ///
+    /// Критерии Sway — регулярные выражения, поэтому имя экранируем: у
+    /// эмуляторов вроде `st` короткое имя иначе совпадёт с чем угодно, а
+    /// точка в `org.kde.konsole` матчила бы любой символ.
     pub async fn activate_app_by_name(name: &str) -> bool {
+        if wayland() {
+            let rx = regex_quote(name);
+            if sway_focus(&format!("app_id=(?i)^{rx}$")).await
+                || sway_focus(&format!("class=(?i)^{rx}$")).await
+                || sway_focus(&format!("title=(?i){rx}")).await
+            {
+                return true;
+            }
+        }
         if run("wmctrl", &["-a", name], Duration::from_secs(4))
             .await
             .is_some_and(|o| o.status.success())
@@ -231,6 +271,18 @@ mod imp {
         )
         .await
         .is_some_and(|o| o.status.success())
+    }
+
+    /// Экранирование для критериев Sway: они регулярные выражения.
+    fn regex_quote(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 8);
+        for c in s.chars() {
+            if "\\.+*?()|[]{}^$".contains(c) {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
     }
 
     /// Переносимого способа найти вкладку терминала по tty на Linux нет:

@@ -83,7 +83,25 @@ pub fn settings_get(app: AppHandle) -> Value {
 }
 
 /// Регистрация глобального хоткея с откатом на прежний при провале.
+/// Раздаёт ли клавиатуру композитор, а не мы.
+///
+/// На Wayland глобальных сочетаний у приложения нет по устройству протокола:
+/// перехват клавиш — привилегия композитора. Плагин при этом «регистрирует»
+/// комбинацию в XWayland и молча не срабатывает — худший вид поломки: настройка
+/// показывает клавишу, а клавиша не работает. Поэтому здесь мы честно
+/// отказываемся и объясняем, куда её вешать.
+pub fn compositor_owns_keys() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
+
 pub fn register_hotkey(d: &Arc<Daemon>, accelerator: &str) -> Result<(), String> {
+    if compositor_owns_keys() {
+        return Err(
+            "На Wayland глобальные клавиши раздаёт композитор. Повесь их в его конфиге: \
+             bindsym $mod+j exec jarvis --toggle"
+                .into(),
+        );
+    }
     let gs = d.app.global_shortcut();
     let current = d.settings.string("hotkey");
     if accelerator.is_empty() {
@@ -477,6 +495,9 @@ pub fn is_quiet_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
 
 /// Зарегистрировать хоткей тихого режима на старте (best-effort).
 pub fn register_quiet_hotkey(d: &Arc<Daemon>) {
+    if compositor_owns_keys() {
+        return; // клавиши раздаёт композитор — см. register_hotkey
+    }
     let accel = quiet_accelerator(d);
     if accel.is_empty() {
         return; // «не назначен»
@@ -500,6 +521,9 @@ pub fn is_continue_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
 }
 
 pub fn register_continue_hotkey(d: &Arc<Daemon>) {
+    if compositor_owns_keys() {
+        return; // клавиши раздаёт композитор — см. register_hotkey
+    }
     let accel = continue_accelerator(d);
     if accel.is_empty() {
         return; // «не назначен»
@@ -525,6 +549,9 @@ pub fn is_dictation_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
 
 /// Зарегистрировать хоткей диктовки на старте (best-effort).
 pub fn register_dictation_hotkey(d: &Arc<Daemon>) {
+    if compositor_owns_keys() {
+        return; // клавиши раздаёт композитор — см. register_hotkey
+    }
     let accel = dictation_accelerator(d);
     if accel.is_empty() {
         return; // «не назначен»
@@ -552,6 +579,9 @@ pub fn is_repeat_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
 }
 
 pub fn register_repeat_hotkey(d: &Arc<Daemon>) {
+    if compositor_owns_keys() {
+        return; // клавиши раздаёт композитор — см. register_hotkey
+    }
     let accel = repeat_accelerator(d);
     if accel.is_empty() {
         return; // «не назначен»
@@ -575,6 +605,9 @@ pub fn is_mute_hotkey(d: &Arc<Daemon>, shortcut: &Shortcut) -> bool {
 }
 
 pub fn register_mute_hotkey(d: &Arc<Daemon>) {
+    if compositor_owns_keys() {
+        return; // клавиши раздаёт композитор — см. register_hotkey
+    }
     let accel = mute_accelerator(d);
     if accel.is_empty() {
         return; // «не назначен»
@@ -630,6 +663,9 @@ pub fn set_select_hotkeys(d: &Arc<Daemon>, on: bool) {
 /// То же с явным шаблоном — при смене selectHotkeyTemplate старый набор
 /// снимается по прежнему шаблону, новый ставится по новому.
 pub fn set_select_hotkeys_tpl(d: &Arc<Daemon>, on: bool, template: &str) {
+    if compositor_owns_keys() {
+        return; // клавиши раздаёт композитор — см. register_hotkey
+    }
     let gs = d.app.global_shortcut();
     let mut touched = 0;
     let mut failed = 0;
@@ -1227,6 +1263,10 @@ pub fn app_meta(app: AppHandle) -> Value {
     json!({
         "effortLevels": *d.effort_levels.lock().unwrap(),
         "version": env!("CARGO_PKG_VERSION"),
+        // Wayland отдаём в UI не ради красоты: там глобальные клавиши
+        // приложению недоступны — их раздаёт композитор, — и настройка обязана
+        // сказать это вслух, а не молча не работать.
+        "wayland": std::env::var_os("WAYLAND_DISPLAY").is_some(),
     })
 }
 

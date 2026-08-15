@@ -39,6 +39,7 @@ type Stamp = Option<(std::time::SystemTime, u64)>;
 fn stamp_of(path: &Path) -> Stamp {
     let m = fs::metadata(path).ok()?;
     Some((m.modified().ok()?, m.len()))
+}
 
 /// Главный модификатор приложения в терминах аксельератора Tauri.
 /// macOS — `Command`, остальные — `Control`.

@@ -8,6 +8,13 @@
 //! тиков = спали): ноль unsafe-кода, та же семантика suspend/resume.
 
 pub mod assertion;
+// closed-display mode — маковское понятие (pmset + крышка ноутбука MacBook).
+// На Linux подставляется заглушка с тем же API: режим честно отвечает
+// «не поддерживается», UI его прячет. См. clamshell_linux.rs.
+#[cfg(target_os = "macos")]
+pub mod clamshell;
+#[cfg(not(target_os = "macos"))]
+#[path = "clamshell_linux.rs"]
 pub mod clamshell;
 pub mod keep_awake;
 
@@ -924,8 +931,6 @@ async fn install_sudoers(d: &Arc<Daemon>) -> Value {
 }
 
 /// Кандидаты «пока жив процесс»: claude-сессии Jarvis + GUI-приложения.
-/// GUI — два ОТДЕЛЬНЫХ AppleScript-вызова, как у Raycast Coffee: несколько
-/// -e в одном osascript — это один скрипт, печатается только последний результат.
 async fn list_processes(d: &Arc<Daemon>) -> Vec<(i64, String)> {
     let mut own = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -939,6 +944,23 @@ async fn list_processes(d: &Arc<Daemon>) -> Vec<(i64, String)> {
             }
         }
     }
+    let me = std::process::id() as i64;
+    let mut apps: Vec<(i64, String)> = gui_processes()
+        .await
+        .into_iter()
+        .filter(|(pid, name)| *pid != me && !seen.contains(pid) && !name.is_empty())
+        .collect();
+    apps.sort_by_key(|(_, name)| name.to_lowercase()); // ≈ localeCompare('ru')
+    own.extend(apps);
+    own
+}
+
+/// Видимые пользователю приложения (pid + имя). Пустой список — не ошибка:
+/// значит, спросить систему не удалось, и в UI останутся только claude-сессии.
+#[cfg(target_os = "macos")]
+async fn gui_processes() -> Vec<(i64, String)> {
+    // Два ОТДЕЛЬНЫХ AppleScript-вызова, как у Raycast Coffee: несколько -e
+    // в одном osascript — это один скрипт, печатается только последний результат.
     let osa = |line: &'static str| async move {
         let out = tokio::time::timeout(
             std::time::Duration::from_millis(1500),
@@ -955,19 +977,44 @@ async fn list_processes(d: &Arc<Daemon>) -> Vec<(i64, String)> {
         osa("tell application \"System Events\" to get the unix id of every process whose background only is false"),
         osa("tell application \"System Events\" to get the name of every process whose background only is false"),
     );
-    // нет пермишена Automation — покажем хотя бы claude-сессии
-    if let (Some(ids_line), Some(names_line)) = (ids_line, names_line) {
-        let ids: Vec<i64> = ids_line.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-        let names: Vec<&str> = names_line.split(',').map(str::trim).collect();
-        let me = std::process::id() as i64;
-        let mut apps: Vec<(i64, String)> = ids
-            .iter()
-            .zip(names.iter())
-            .filter(|(pid, name)| **pid != me && !seen.contains(*pid) && !name.is_empty())
-            .map(|(pid, name)| (*pid, one_line(name)))
-            .collect();
-        apps.sort_by_key(|(_, name)| name.to_lowercase()); // ≈ localeCompare('ru')
-        own.extend(apps);
+    // нет пермишена Automation — вернём пусто, вызывающий покажет claude-сессии
+    let (Some(ids_line), Some(names_line)) = (ids_line, names_line) else {
+        return Vec::new();
+    };
+    let ids: Vec<i64> = ids_line.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    let names: Vec<&str> = names_line.split(',').map(str::trim).collect();
+    ids.iter()
+        .zip(names.iter())
+        .map(|(pid, name)| (*pid, one_line(name)))
+        .collect()
+}
+
+/// Linux: приложения с окнами берём у оконного менеджера. `wmctrl -l -p` печатает
+/// `<winid> <desktop> <pid> <host> <title>` — pid и заголовок как раз то, что нужно.
+/// Нет wmctrl — пустой список, как и при отказе Automation на macOS.
+#[cfg(not(target_os = "macos"))]
+async fn gui_processes() -> Vec<(i64, String)> {
+    let out = tokio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        tokio::process::Command::new("wmctrl").args(["-l", "-p"]).output(),
+    )
+    .await;
+    let Ok(Ok(out)) = out else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
     }
-    own
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut seen = std::collections::HashSet::new();
+    text.lines()
+        .filter_map(|line| {
+            let mut it = line.splitn(5, char::is_whitespace).filter(|p| !p.is_empty());
+            let _winid = it.next()?;
+            let _desktop = it.next()?;
+            let pid: i64 = it.next()?.parse().ok()?;
+            let _host = it.next()?;
+            let title = it.next().unwrap_or("").trim();
+            // у приложения может быть несколько окон — берём первое
+            (pid > 0 && seen.insert(pid)).then(|| (pid, one_line(title)))
+        })
+        .collect()
 }

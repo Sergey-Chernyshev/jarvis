@@ -246,6 +246,8 @@ window.openSessionById = (id) => {
 
 /* ---------- список сессий ---------- */
 
+// TERM_PROGRAM сессии → человеческое имя. Значения маковских терминалов
+// (iTerm.app, Apple_Terminal) остаются: сессия могла прийти и с мака.
 const HOST_LABEL = {
   'iTerm.app': 'iTerm',
   Apple_Terminal: 'Terminal',
@@ -253,6 +255,17 @@ const HOST_LABEL = {
   'JetBrains-JediTerm': 'JetBrains',
   WezTerm: 'WezTerm',
   ghostty: 'Ghostty',
+  // Linux-эмуляторы
+  'gnome-terminal': 'GNOME Terminal',
+  konsole: 'Konsole',
+  kitty: 'kitty',
+  alacritty: 'Alacritty',
+  foot: 'foot',
+  tilix: 'Tilix',
+  terminator: 'Terminator',
+  'xfce4-terminal': 'Xfce Terminal',
+  ptyxis: 'Ptyxis',
+  xterm: 'xterm',
 };
 
 function hostLabel(s) {
@@ -797,7 +810,7 @@ function buildCard(key, card) {
       const isDoc = JarvisMarkdown.isDocPath(f.path);
       const chip = document.createElement('span');
       chip.className = 'fchip';
-      chip.title = `${f.path} — клик: посмотреть, ⌥клик: показать в Finder`;
+      chip.title = `${f.path} — клик: посмотреть, ${window.jarvisKeys.ALT}+клик: показать в ${window.jarvisKeys.NOUNS.fileManager}`;
       const p = document.createElement('span');
       p.textContent = (isDoc ? '📄 ' : '') + f.path.split('/').pop();
       chip.appendChild(p);
@@ -813,7 +826,7 @@ function buildCard(key, card) {
         n.textContent = '· ' + f.note;
         chip.appendChild(n);
       }
-      // клик — вьюер в панели; ⌥ — Finder (открытие в редакторе — из вьюера)
+      // клик — вьюер в панели; Alt/⌥ — файловый менеджер (редактор — из вьюера)
       chip.addEventListener('click', async (ev) => {
         if (!ev.altKey) { openDocViewer(f.path, kindOf(f)); return; }
         const res = await window.jarvis.openFile(chatSessionId, f.path, true);
@@ -1547,7 +1560,7 @@ const docDiffLabelEl = document.getElementById('docDiffLabel');
 const docTabDiffEl = document.getElementById('docTabDiff');
 const docTabDocEl = document.getElementById('docTabDoc');
 let docOpen = false;
-let docPath = null; // путь открытого файла — для «Редактор»/«Finder»
+let docPath = null; // путь открытого файла — для «Редактор»/«Папка»
 let docHasDiff = false;
 
 // Переключить активный таб вьюера. «Документ» — рендер файла (docBody);
@@ -2142,7 +2155,7 @@ replyEl.addEventListener('paste', (e) => {
 replyEl.addEventListener('input', () => { autoGrowReply(); refreshPalette(); });
 
 replyEl.addEventListener('keydown', (e) => {
-  if (e.metaKey) return; // ⌘↵ — в терминал, обрабатывается глобально
+  if (isMod(e)) return; // ⌘↵ — в терминал, обрабатывается глобально
   if (paletteOpen()) {
     if (e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); cmdSel = Math.min(paletteItems.length - 1, cmdSel + 1); paintPalette(); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); cmdSel = Math.max(0, cmdSel - 1); paintPalette(); return; }
@@ -2391,7 +2404,7 @@ tlSettingsEl.addEventListener('click', () => {
 
 document.getElementById('winClose').addEventListener('click', () => window.jarvis.winClose());
 document.getElementById('winMin').addEventListener('click', () => window.jarvis.winMinimize());
-// зелёная кнопка — фуллскрин, с Alt — зум по содержимому: ровно как в macOS
+// зелёная кнопка — фуллскрин, с Alt — зум по содержимому (соглашение macOS)
 document.getElementById('winZoom').addEventListener('click', (e) => {
   if (e.altKey) window.jarvis.winZoom();
   else window.jarvis.winToggleFullscreen().then(syncFullscreen).catch(() => {});
@@ -3173,20 +3186,20 @@ function actionItems() {
     : null;
   const items = [];
   if (s) {
-    items.push({ label: 'Перейти в терминал', key: '⌘↵', run: () => focusTerminal(s.id, s.project) });
-    items.push({ label: s.pinned ? 'Открепить' : 'Закрепить', key: '⌘P', run: () => window.jarvis.setPin(s.id, !s.pinned) });
-    if (s.tmuxPane) items.push({ label: 'Где этот терминал?', key: '⌘G', run: () => window.jarvis.pingTerminal(s.id) });
+    items.push({ label: 'Перейти в терминал', key: K(KN('enter')), run: () => focusTerminal(s.id, s.project) });
+    items.push({ label: s.pinned ? 'Открепить' : 'Закрепить', key: K('P'), run: () => window.jarvis.setPin(s.id, !s.pinned) });
+    if (s.tmuxPane) items.push({ label: 'Где этот терминал?', key: K('G'), run: () => window.jarvis.pingTerminal(s.id) });
     items.push({
       label: killArmedFor(s.id) ? 'Точно завершить?' : 'Завершить сессию',
-      key: '⌘⇧⌫',
+      key: K(KN('del'), { shift: true }),
       run: () => killSession(s),
     });
   }
-  if (view !== 'chat') items.push({ label: 'Очистить завершённые', key: '⌘⌫', run: () => window.jarvis.clearFinished() });
-  items.push({ label: 'Проекты и история', key: '⌘2', run: () => setView('history') });
-  items.push({ label: 'Статистика usage', key: '⌘3', run: () => setView('stats') });
-  items.push({ label: 'История голоса', key: '⌘4', run: () => setView('voicehist') });
-  items.push({ label: 'Настройки', key: '⌘,', run: () => setView('settings') });
+  if (view !== 'chat') items.push({ label: 'Очистить завершённые', key: K(KN('del')), run: () => window.jarvis.clearFinished() });
+  items.push({ label: 'Проекты и история', key: K('2'), run: () => setView('history') });
+  items.push({ label: 'Статистика usage', key: K('3'), run: () => setView('stats') });
+  items.push({ label: 'История голоса', key: K('4'), run: () => setView('voicehist') });
+  items.push({ label: 'Настройки', key: K(','), run: () => setView('settings') });
   return items;
 }
 
@@ -3894,12 +3907,15 @@ function startRecording(btn, key) {
   btn.textContent = 'нажми сочетание…';
 }
 
-function displayHotkey(acc) {
-  return acc
-    .replace('CommandOrControl', '⌘').replace('Command', '⌘')
-    .replace('Control', '⌃').replace('Option', '⌥').replace('Alt', '⌥')
-    .replace('Shift', '⇧').replaceAll('+', ' ');
-}
+// подписи клавиш живут в keys.js — там же ветвление macOS/Linux
+const displayHotkey = (acc) => window.jarvisKeys.displayHotkey(acc);
+const K = (key, opts) => window.jarvisKeys.k(key, opts);
+const KN = (name) => window.jarvisKeys.NAMES[name] || name;
+
+/** Нажат ли главный модификатор приложения. На маке это ⌘ (metaKey), на Linux —
+ *  Ctrl: Super там принадлежит окружению рабочего стола (в GNOME Super+1..4
+ *  переключает приложения дока, и панель бы с ним дралась). */
+const isMod = (e) => (window.jarvisKeys.isMac ? e.metaKey : e.ctrlKey);
 
 async function loadSettings() {
   // Новая страница настроек (settings2.js): сайдбар + детальные панели в дизайне
@@ -4083,7 +4099,7 @@ async function renderIntegrationCard() {
     stoggle(!!info.quiet, (v) => window.jarvis.quietSet(v)), { hairtop: true }));
   const qhint = document.createElement('div');
   qhint.className = 'ahint';
-  qhint.textContent = 'Фон копит статистику с хуков, но без тостов/голоса/показа. Тумблер — ⌘⌥J.';
+  qhint.textContent = `Фон копит статистику с хуков, но без тостов/голоса/показа. Тумблер — ${K('J', { alt: true })}.`;
   box.appendChild(qhint);
 
   // кнопки
@@ -4668,7 +4684,8 @@ for (const id of ['notifyDone', 'notifyWaiting', 'autoResume']) {
   });
 }
 
-// Автозапуск — отдельно: macOS может отказать (LaunchAgent), поэтому после
+// Автозапуск — отдельно: система может отказать (LaunchAgent на macOS,
+// autostart-каталог на Linux), поэтому после
 // переключения перечитываем РЕАЛЬНОЕ состояние из системы и честно говорим,
 // если не сработало. Иначе галка «врёт», что включила.
 document.getElementById('openAtLogin').addEventListener('change', async (e) => {
@@ -4677,7 +4694,7 @@ document.getElementById('openAtLogin').addEventListener('change', async (e) => {
   const s = await window.jarvis.getSettings();
   e.target.checked = !!s.openAtLogin; // отражаем то, что реально записалось в систему
   if (!!s.openAtLogin !== want) {
-    showToast(want ? 'macOS не дала включить автозапуск' : 'Не вышло выключить автозапуск');
+    showToast(want ? 'Система не дала включить автозапуск' : 'Не вышло выключить автозапуск');
   } else {
     showToast(want ? 'Автозапуск включён' : 'Автозапуск выключен');
   }
@@ -4693,7 +4710,8 @@ const CODE_KEYS = { Space: 'Space', Enter: 'Enter', Backspace: 'Backspace', Tab:
 
 function accelFromEvent(e) {
   const mods = [];
-  if (e.metaKey) mods.push('Command');
+  if (e.metaKey) mods.push(window.jarvisKeys.isMac ? 'Command' : 'Super');
+  if (e.ctrlKey && !window.jarvisKeys.isMac) mods.push('Control');
   if (e.ctrlKey) mods.push('Control');
   if (e.altKey) mods.push('Option');
   if (e.shiftKey) mods.push('Shift');
@@ -4736,7 +4754,7 @@ window.addEventListener('keydown', async (e) => {
     return;
   }
 
-  if (view === 'chat' && e.metaKey && e.key === 'Enter') { // ⌘↵ из чата — в терминал
+  if (view === 'chat' && isMod(e) && e.key === 'Enter') { // ⌘↵ из чата — в терминал
     e.preventDefault();
     e.stopPropagation();
     if (chatSessionId) focusTerminal(chatSessionId, chatTitleEl.textContent);
@@ -4748,51 +4766,53 @@ window.addEventListener('keydown', async (e) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); apSel = Math.min(items.length - 1, apSel + 1); paintActions(items); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); apSel = Math.max(0, apSel - 1); paintActions(items); }
     else if (e.key === 'Enter') { e.preventDefault(); closeActions(); items[apSel] && items[apSel].run(); }
-    else if (e.key === 'Escape' || (e.metaKey && (e.key === 'k' || e.key === 'K'))) { e.preventDefault(); closeActions(); }
+    else if (e.key === 'Escape' || (isMod(e) && (e.key === 'k' || e.key === 'K'))) { e.preventDefault(); closeActions(); }
     return;
   }
 
-  // Оконные сочетания macOS. Своего меню у нас нет, поэтому системные ⌘W / ⌘M /
-  // ⌃⌘F не привязаны сами — вешаем их руками, чтобы окно вело себя как окно.
-  if (windowMode() && e.metaKey && (e.key === 'w' || e.key === 'W')) { // ⌘W — закрыть (спрятать)
+  // Оконные сочетания. Своего меню у приложения нет, поэтому системные
+  // «закрыть»/«свернуть»/«фуллскрин» не привязываются сами — вешаем руками,
+  // чтобы окно вело себя как окно. Клавиши берём по факту нажатия (metaKey —
+  // ⌘ на маке, Super на Linux), а не по зашитой раскладке.
+  if (windowMode() && isMod(e) && (e.key === 'w' || e.key === 'W')) { // закрыть (спрятать)
     e.preventDefault();
     window.jarvis.winClose();
     return;
   }
-  if (windowMode() && e.metaKey && !e.ctrlKey && (e.key === 'm' || e.key === 'M')) { // ⌘M — свернуть
+  if (windowMode() && isMod(e) && !e.shiftKey && (e.key === 'm' || e.key === 'M')) { // свернуть
     e.preventDefault();
     window.jarvis.winMinimize();
     return;
   }
-  if (windowMode() && e.metaKey && e.ctrlKey && (e.key === 'f' || e.key === 'F')) { // ⌃⌘F — фуллскрин
+  if (windowMode() && isMod(e) && e.shiftKey && (e.key === 'f' || e.key === 'F')) { // фуллскрин
     e.preventDefault();
     window.jarvis.winToggleFullscreen().then(syncFullscreen).catch(() => {});
     return;
   }
 
-  if (e.metaKey && (e.key === 'k' || e.key === 'K')) { // ⌘K — меню действий
+  if (isMod(e) && (e.key === 'k' || e.key === 'K')) { // ⌘K — меню действий
     e.preventDefault();
     toggleActions();
     return;
   }
 
-  if (e.metaKey && e.key === '1') { // ⌘1 — Чаты
+  if (isMod(e) && e.key === '1') { // ⌘1 — Чаты
     e.preventDefault();
     setView('list');
     render();
     return;
   }
-  if (e.metaKey && e.key === '2') { // ⌘2 — История
+  if (isMod(e) && e.key === '2') { // ⌘2 — История
     e.preventDefault();
     setView('history');
     return;
   }
-  if (e.metaKey && e.key === '3') { // ⌘3 — Статистика
+  if (isMod(e) && e.key === '3') { // ⌘3 — Статистика
     e.preventDefault();
     setView('stats');
     return;
   }
-  if (e.metaKey && e.key === '4') { // ⌘4 — История голоса
+  if (isMod(e) && e.key === '4') { // ⌘4 — История голоса
     e.preventDefault();
     setView('voicehist');
     return;
@@ -4869,20 +4889,20 @@ window.addEventListener('keydown', async (e) => {
     return; // прочие клавиши экран вопроса проглатывает
   }
 
-  if (e.metaKey && e.key === ',') { // ⌘, — настройки, как в macOS
+  if (isMod(e) && e.key === ',') { // модификатор + «,» — настройки, как принято в системе
     e.preventDefault();
     if (view === 'settings') { setView('list'); render(); } else setView('settings');
     return;
   }
 
-  if (e.metaKey && e.shiftKey && e.key === 'Backspace') { // ⌘⇧⌫ — завершить сессию
+  if (isMod(e) && e.shiftKey && e.key === 'Backspace') { // завершить сессию
     if (editingText()) return;
     e.preventDefault();
     killSession(view === 'list' ? filtered()[sel] : state.find((x) => x.id === chatSessionId));
     return;
   }
 
-  if (e.metaKey && e.key === 'Backspace') { // ⌘⌫ — очистить завершённые
+  if (isMod(e) && e.key === 'Backspace') { // очистить завершённые
     // НЕ в поле ввода: иначе ⌘⌫ (удалить до начала строки) при печати в чате
     // молча сносил все Done/Idle сессии. В поле — отдаём комбо нативному редактору.
     if (editingText()) return;
@@ -4891,7 +4911,7 @@ window.addEventListener('keydown', async (e) => {
     return;
   }
 
-  if (e.metaKey && (e.key === 'p' || e.key === 'P')) { // ⌘P — закрепить/открепить
+  if (isMod(e) && (e.key === 'p' || e.key === 'P')) { // ⌘P — закрепить/открепить
     e.preventDefault();
     const s = view === 'list' ? filtered()[sel]
       : view === 'chat' ? state.find((x) => x.id === chatSessionId)
@@ -4900,7 +4920,7 @@ window.addEventListener('keydown', async (e) => {
     return;
   }
 
-  if (e.metaKey && (e.key === 'g' || e.key === 'G')) { // ⌘G — «где это?»: оверлей в терминале
+  if (isMod(e) && (e.key === 'g' || e.key === 'G')) { // ⌘G — «где это?»: оверлей в терминале
     e.preventDefault();
     const s = view === 'list' ? filtered()[sel] : state.find((x) => x.id === chatSessionId);
     if (s) window.jarvis.pingTerminal(s.id).then((res) => {
@@ -4937,7 +4957,7 @@ window.addEventListener('keydown', async (e) => {
       render();
     } else if (e.key === 'Enter' && list.length) {
       e.preventDefault();
-      if (e.metaKey) focusTerminal(list[sel].id, list[sel].project); // ⌘↵ — прыжок в терминал
+      if (isMod(e)) focusTerminal(list[sel].id, list[sel].project); // ⌘↵ — прыжок в терминал
       else openChat(list[sel].id, list[sel].project); // ↵ — чат сессии
     }
   }

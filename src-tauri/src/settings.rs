@@ -41,14 +41,32 @@ fn stamp_of(path: &Path) -> Stamp {
     Some((m.modified().ok()?, m.len()))
 }
 
+/// Главный модификатор приложения в терминах аксельератора Tauri.
+/// macOS — `Command`, остальные — `Control`.
+fn main_mod() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Command"
+    } else {
+        "Control"
+    }
+}
+
+/// `concat_mod("Alt+J")` → `"Command+Alt+J"` | `"Control+Alt+J"`.
+fn concat_mod(rest: &str) -> String {
+    format!("{}+{rest}", main_mod())
+}
+
 fn defaults() -> Value {
     json!({
-        "hotkey": "Command+J",
-        "quietHotkey": "Command+Alt+J",
-        "continueHotkey": "Command+Alt+C",
-        "repeatHotkey": "Command+Alt+R",
-        "muteHotkey": "Command+Alt+M",
-        "selectHotkeyTemplate": "Command+Alt+{n}",
+        // Главный модификатор платформенный: на macOS это Command, на Linux —
+        // Control. Super на Linux принадлежит окружению рабочего стола (в GNOME
+        // Super+1..4 переключает приложения дока), поэтому мы его не занимаем.
+        "hotkey": concat_mod("J"),
+        "quietHotkey": concat_mod("Alt+J"),
+        "continueHotkey": concat_mod("Alt+C"),
+        "repeatHotkey": concat_mod("Alt+R"),
+        "muteHotkey": concat_mod("Alt+M"),
+        "selectHotkeyTemplate": concat_mod("Alt+{n}"),
         "notifyDone": true,
         "notifyWaiting": true,
         "position": "center", // 'center' | 'corner'

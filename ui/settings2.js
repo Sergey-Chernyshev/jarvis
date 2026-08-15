@@ -2,7 +2,7 @@
  * settings2.js — самодостаточный модуль страницы настроек Jarvis.
  *
  * Экспортирует window.initSettings2(rootEl): строит сайдбар + детальные панели
- * в стиле macOS System Settings / Raycast, грузит значения из IPC (window.jarvis)
+ * в стиле системных настроек / Raycast, грузит значения из IPC (window.jarvis)
  * и подписывается на live-события. Полностью изолирован: все стили под #settings2,
  * иконки — инлайновый SVG (офлайн, без CDN). Повторный вызов перестраивает UI
  * без утечек слушателей и без дублей стилей.
@@ -52,21 +52,16 @@
     return Math.max(1, Math.round(mb)) + ' МБ';
   }
 
-  // ── displayHotkey (порт из renderer.js): акселератор → символы клавиш ────
-  function displayHotkey(acc) {
-    return String(acc || '')
-      .replace('CommandOrControl', '⌘').replace('Command', '⌘')
-      .replace('Control', '⌃').replace('Option', '⌥').replace('Alt', '⌥')
-      .replace('Shift', '⇧').replaceAll('+', ' ');
-  }
-  // акселератор → массив отдельных клавиш-капсов
-  function hotkeyKeys(acc) {
-    return displayHotkey(acc).split(' ').filter(Boolean);
-  }
-  /* Имя одиночной клавиши для подписи. Единственный источник правды —
-   * window.jarvisKeys (ui/keys.js): он знает про ОС и рисует ⌘ только там,
-   * где такая клавиша есть. Модуль могут ещё не подключить — тогда отдаём
-   * нейтральное слово, но маковских символов руками не пишем никогда. */
+  /* Подписи клавиш — из keys.js: он знает про ОС и рисует ⌘ только там, где
+   * такая клавиша есть. Модуль могут ещё не подключить (окно настроек грузят
+   * и отдельно) — тогда отдаём нейтральные слова, но маковских символов руками
+   * не пишем никогда. */
+  const displayHotkey = (acc) =>
+    (window.jarvisKeys ? window.jarvisKeys.displayHotkey(acc) : String(acc || '').replaceAll('+', ' '));
+  const hotkeyKeys = (acc) =>
+    (window.jarvisKeys ? window.jarvisKeys.hotkeyKeys(acc) : displayHotkey(acc).split(' ').filter(Boolean));
+  /** Перечисление модификаторов для подсказок — под текущую ОС. */
+  const MODS_HINT = window.jarvisKeys && window.jarvisKeys.isMac ? '⌘/⌥/⌃' : 'Ctrl/Alt/Super';
   const KEY_FALLBACK = { enter: 'Enter', esc: 'Esc', del: 'Backspace', tab: 'Tab' };
   function keyName(n) {
     const K = window.jarvisKeys;
@@ -484,9 +479,9 @@
         if (!key) { note('Эта клавиша не поддерживается'); return; }
         if (isSel) {
           if (!/^\d$/.test(key)) { note('Нужна цифра 1–9'); return; }
-          if (!mods.length) { note('Нужен модификатор (⌘/⌥/⌃)'); return; }
+          if (!mods.length) { note(`Нужен модификатор (${MODS_HINT})`); return; }
         } else if (!isFn && mods.length === 0) {
-          note('Нужен модификатор (⌘/⌥/⌃) или F-клавиша'); return;
+          note(`Нужен модификатор (${MODS_HINT}) или F-клавиша`); return;
         }
         const next = mods.concat(isSel ? '{n}' : key).join('+');
         recording = false;
@@ -891,7 +886,7 @@
         s.position || 'center',
         (v) => fire(() => window.jarvis.setSettings({ position: v })))));
 
-    // автозапуск (перечитываем реальное состояние — macOS может отказать)
+    // автозапуск (перечитываем реальное состояние — система может отказать)
     group.appendChild(drow('Запускать при старте', 'Автозапуск при входе в систему.',
       toggle(s.openAtLogin, async (on) => {
         await safe(() => window.jarvis.setSettings({ openAtLogin: on }), null);
@@ -1372,6 +1367,21 @@
   // 7. Горячие клавиши (keys) — hotkey_bindings (единый реестр действий)
   async function renderKeys(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Горячие клавиши' }));
+    // На Wayland (Sway, Hyprland, GNOME) клавиатуру раздаёт композитор:
+    // приложение не может перехватить сочетание глобально, и молчать об этом
+    // нельзя — человек будет думать, что сломалось у него.
+    const meta = await safe(() => window.jarvis.getMeta(), null);
+    if (meta && meta.wayland) {
+      pane.appendChild(el('div.dgroup', null, [
+        drow(
+          'Wayland: клавиши у композитора',
+          'Глобальные сочетания здесь раздаёт не приложение. Повесь их в конфиге: '
+            + 'bindsym $mod+j exec jarvis --toggle (ещё понимает --show, --hide, --quit). '
+            + 'Готовый кусок — docs/sway/jarvis.conf.',
+          []
+        ),
+      ]));
+    }
     const _sk = skelGroup(4); pane.appendChild(_sk);
     const r = await safe(() => window.jarvis.hotkeyBindings(), null);
     _sk.remove();
@@ -1442,7 +1452,7 @@
     // разработчик: тихий режим
     pane.appendChild(el('div.dsection', { text: 'Разработчик' }));
     const devGroup = el('div.dgroup');
-    devGroup.appendChild(drow('Тихий режим', 'Копить статистику без тостов, голоса и показа панели · ⌘⌥J.',
+    devGroup.appendChild(drow('Тихий режим', `Копить статистику без тостов, голоса и показа панели · ${window.jarvisKeys.k('J', { alt: true })}.`,
       toggle(!!info.quiet, (on) => fire(() => window.jarvis.quietSet(on)))));
     pane.appendChild(devGroup);
 
@@ -1754,12 +1764,29 @@
     const group = el('div.dgroup');
 
     // выбор терминала
+    // на Linux Terminal.app/iTerm2 не существует — предлагаем тамошние эмуляторы;
+    // «Авто» отдаёт выбор коду: он берёт первый найденный в PATH
+    const TERMINALS = window.jarvisKeys.isMac
+      ? [
+          { value: 'terminal-app', label: 'Terminal.app' },
+          { value: 'iterm2', label: 'iTerm2' },
+        ]
+      : [
+          { value: 'terminal-app', label: 'Авто (первый найденный)' },
+          { value: 'gnome-terminal', label: 'GNOME Terminal' },
+          { value: 'konsole', label: 'Konsole' },
+          { value: 'ptyxis', label: 'Ptyxis' },
+          { value: 'xfce4-terminal', label: 'Xfce Terminal' },
+          { value: 'kitty', label: 'kitty' },
+          { value: 'alacritty', label: 'Alacritty' },
+          { value: 'wezterm', label: 'WezTerm' },
+          { value: 'foot', label: 'foot' },
+          { value: 'tilix', label: 'Tilix' },
+          { value: 'terminator', label: 'Terminator' },
+          { value: 'xterm', label: 'xterm' },
+        ];
     const termSel = customSelect(
-      [
-        { value: 'terminal-app', label: 'Terminal.app' },
-        { value: 'iterm2', label: 'iTerm2' },
-        { value: 'custom', label: 'Кастомная команда' },
-      ],
+      [...TERMINALS, { value: 'custom', label: 'Кастомная команда' }],
       term,
       async (v) => {
         await safe(() => window.jarvis.setSettings({ launchTerminal: v }), null);
@@ -1771,7 +1798,8 @@
     // шаблон кастомной команды — только для custom
     if (term === 'custom') {
       const tmplInput = el('input.s2-secret', {
-        type: 'text', placeholder: 'ghostty -e bash -lc {cmd}',
+        type: 'text',
+        placeholder: window.jarvisKeys.isMac ? 'ghostty -e bash -lc {cmd}' : 'kitty sh -lc {cmd}',
         autocomplete: 'off', spellcheck: 'false', value: s.launchCustomCmd || '',
       });
       const tmplCap = el('span.loadcap', { style: 'display:none' });
@@ -1839,8 +1867,9 @@
 
     // режим окна: накладка ⌘J поверх всего или обычное окно со списком слева (14h)
     group.appendChild(drow('Режим',
-      'Накладка — панель поверх всего по ⌘J, прячется по клику мимо. Окно — обычное окно: '
-      + 'список слева, диалог справа, иконка в доке (появится со следующего запуска).',
+      `Накладка — панель поверх всего по ${window.jarvisKeys.k('J')}, прячется по клику мимо. `
+      + 'Окно — обычное окно: список слева, диалог справа, своё место в панели задач '
+      + '(появится со следующего запуска).',
       segmented(
         [{ value: 'overlay', label: 'накладка' }, { value: 'window', label: 'окно' }],
         cur.mode || 'overlay',

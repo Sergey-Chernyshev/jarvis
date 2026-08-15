@@ -294,13 +294,15 @@ pub fn prepare_clean_start() -> io::Result<()> {
     Ok(())
 }
 
-/// PATH с добавленными Homebrew + nvm путями. GUI-приложение из /Applications
-/// наследует урезанный PATH (без /opt/homebrew/bin и ~/.nvm/.../bin) — поэтому
-/// tmux (Homebrew) и claude (nvm) не находятся. Префиксуем их явно.
+/// PATH с добавленными пользовательскими путями. Приложение, запущенное из
+/// графической оболочки, наследует урезанный PATH — без Homebrew (macOS),
+/// без ~/.local/bin (Linux) и без ~/.nvm/.../bin. Поэтому tmux и claude
+/// не находятся; префиксуем их явно. Несуществующие пути безвредны.
 fn augmented_path() -> String {
     let base = std::env::var("PATH").unwrap_or_default();
     let mut extra = vec![
-        "/opt/homebrew/bin".to_string(),
+        home().join(".local/bin").display().to_string(), // Linux: npm -g, pipx
+        "/opt/homebrew/bin".to_string(),                 // macOS: Apple Silicon
         "/usr/local/bin".to_string(),
     ];
     if let Ok(rd) = fs::read_dir(home().join(".nvm/versions/node")) {

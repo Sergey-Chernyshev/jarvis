@@ -51,7 +51,7 @@ pub fn value_confirms_insert(
 
 // ── AX FFI (только вне тестов: в CI/юнитах системного AX нет) ───────────────
 
-#[cfg(not(test))]
+#[cfg(all(target_os = "macos", not(test)))]
 mod ffi {
     use super::FocusSnapshot;
     use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
@@ -206,12 +206,16 @@ mod ffi {
 
 /// Снимок сфокусированного элемента (best-effort; в тестах всегда None).
 pub fn focus_snapshot() -> Option<FocusSnapshot> {
-    #[cfg(not(test))]
+    #[cfg(all(target_os = "macos", not(test)))]
     {
         // AX-вызовы уходят в чужие процессы — защищаемся от любых сюрпризов.
         std::panic::catch_unwind(ffi::focus_snapshot).unwrap_or(None)
     }
-    #[cfg(test)]
+    // Аналог AX на Linux — AT-SPI, но он даёт снимок фокуса только когда
+    // приложение-цель само его отдаёт (GTK/Qt с включённой доступностью), а у
+    // терминалов и Electron это не работает. Поэтому снимка нет: вставка
+    // проверяется по факту, а не предсказанием. См. insert.rs.
+    #[cfg(any(not(target_os = "macos"), test))]
     {
         None
     }

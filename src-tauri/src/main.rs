@@ -29,7 +29,7 @@ mod launch; // запуск новой/возобновляемой сессии
 mod limits;
 mod log;
 mod loops; // режим «Циклы»: рутина, которую агент крутит сам — с концом и стенами
-mod macos;
+mod platform; // окна, медиа, звук: платформенное за общим API (macos.rs / linux.rs)
 mod metrics;
 mod model;
 mod onboarding;
@@ -67,6 +67,30 @@ use tauri::Manager;
 
 use daemon::Daemon;
 
+/// Что просит второй запуск у уже работающего приложения.
+///
+/// Список намеренно короткий: это не CLI, а мостик для горячих клавиш
+/// оконного менеджера. Всё остальное панель умеет сама.
+#[derive(Debug, PartialEq)]
+enum Command {
+    Show,
+    Hide,
+    Toggle,
+    Quit,
+}
+
+impl Command {
+    fn parse(arg: &str) -> Option<Self> {
+        match arg.trim_start_matches('-') {
+            "toggle" => Some(Command::Toggle),
+            "show" | "open" => Some(Command::Show),
+            "hide" => Some(Command::Hide),
+            "quit" | "exit" => Some(Command::Quit),
+            _ => None,
+        }
+    }
+}
+
 fn main() {
     // До всего остального: паника, случившаяся раньше установки крючка, уйдёт
     // только в stderr — то есть мимо лога, который и присылают при разборе.
@@ -77,8 +101,20 @@ fn main() {
     // single-instance — только в проде; в dev-сборке (JARVIS_DEV=1) НЕ ставим,
     // чтобы dev и установленный прод крутились рядом, не гася друг друга.
     if std::env::var("JARVIS_DEV").is_err() {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            windows::show_panel(&Daemon::get(app));
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // Второй запуск — это не «подними ещё одно окно», а команда уже
+            // работающему. На Wayland (Sway) без этого никак: глобальные
+            // хоткеи там перехватывает композитор, а не приложение, и
+            // `bindsym $mod+j exec jarvis --toggle` — единственный честный
+            // способ дать панели горячую клавишу. Аргумента нет — прежнее
+            // поведение, «покажись».
+            let d = Daemon::get(app);
+            match argv.iter().find_map(|a| Command::parse(a)) {
+                Some(Command::Toggle) => windows::toggle_panel(&d),
+                Some(Command::Hide) => windows::hide_panel(&d),
+                Some(Command::Quit) => d.app.exit(0),
+                Some(Command::Show) | None => windows::show_panel(&d),
+            }
         }));
     }
 
@@ -298,6 +334,10 @@ fn main() {
             // Оконный режим (макет 14h) — обычное приложение: док, ⌘Tab, меню.
             // Политика ставится один раз на старте; смена режима на лету
             // перестраивает окно сразу, а иконку в доке — со следующего запуска.
+            // Понятие политики активации есть только у AppKit: на Linux место
+            // приложения в панели задач решает сам оконный менеджер по
+            // skip_taskbar, который выставляется при создании окна.
+            #[cfg(target_os = "macos")]
             app.set_activation_policy(if d.settings.string("mode") == "window" {
                 tauri::ActivationPolicy::Regular
             } else {
@@ -643,7 +683,7 @@ fn spawn_timers(d: &Arc<Daemon>) {
         loop {
             tokio::time::sleep(Duration::from_millis(200)).await;
             if let Some(toast) = dd.app.get_webview_window("toast") {
-                macos::poll_toast_hover(&toast);
+                platform::poll_toast_hover(&toast);
             }
         }
     });

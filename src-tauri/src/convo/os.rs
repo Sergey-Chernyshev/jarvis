@@ -37,11 +37,11 @@ pub fn parse_media_action(action: &str) -> Option<MediaAction> {
 pub fn run_media(action: &str) -> Result<(), String> {
     let a = parse_media_action(action).ok_or_else(|| format!("неизвестное медиа-действие: {action}"))?;
     match a {
-        MediaAction::Play => crate::macos::media_play(),
-        MediaAction::Pause => crate::macos::media_pause(),
-        MediaAction::Toggle => crate::macos::media_toggle(),
-        MediaAction::Next => crate::macos::media_next(),
-        MediaAction::Prev => crate::macos::media_prev(),
+        MediaAction::Play => crate::platform::media_play(),
+        MediaAction::Pause => crate::platform::media_pause(),
+        MediaAction::Toggle => crate::platform::media_toggle(),
+        MediaAction::Next => crate::platform::media_next(),
+        MediaAction::Prev => crate::platform::media_prev(),
     }
     Ok(())
 }
@@ -69,21 +69,64 @@ pub fn validate_app_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Запустить приложение по имени (`open -a <name>`, без shell).
+/// Запустить приложение по имени (без shell).
+///
+/// macOS ищет бандл через `open -a`. На Linux бандлов нет: сначала пробуем
+/// `.desktop`-запись через `gio launch` (так приложение стартует правильно —
+/// с иконкой, в своей сессии), потом просто бинарь из PATH.
 pub fn run_open_app(name: &str) -> Result<(), String> {
     validate_app_name(name)?;
-    let status = std::process::Command::new("open")
-        .arg("-a")
-        .arg(name.trim())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| format!("не удалось запустить open: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("приложение не найдено: {}", name.trim()))
+    imp::open_app(name.trim())
+}
+
+#[cfg(target_os = "macos")]
+mod imp {
+    use std::process::{Command, Stdio};
+
+    pub(super) fn open_app(name: &str) -> Result<(), String> {
+        let status = Command::new("open")
+            .arg("-a")
+            .arg(name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| format!("не удалось запустить open: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("приложение не найдено: {name}"))
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod imp {
+    use std::process::{Command, Stdio};
+
+    fn spawn_ok(cmd: &str, args: &[&str]) -> bool {
+        Command::new(cmd)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+    }
+
+    pub(super) fn open_app(name: &str) -> Result<(), String> {
+        // 1) .desktop-запись: firefox → firefox.desktop, «Files» → org.gnome.Nautilus…
+        //    Точное имя файла угадать нельзя, поэтому пробуем самый частый вид.
+        let lower = name.to_lowercase().replace(' ', "-");
+        let desktop = format!("{lower}.desktop");
+        if spawn_ok("gio", &["launch", &desktop]) {
+            return Ok(());
+        }
+        // 2) просто исполняемый файл из PATH
+        if spawn_ok(&lower, &[]) || spawn_ok(name, &[]) {
+            return Ok(());
+        }
+        Err(format!("приложение не найдено: {name}"))
     }
 }
 
@@ -134,11 +177,13 @@ pub fn parse_volume_op(args: &Value) -> Result<VolumeOp, String> {
 }
 
 /// AppleScript-выражение для абсолютного уровня (0..100) — число уже валидно.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn volume_set_script(level: u8) -> String {
     format!("set volume output volume {level}")
 }
 
 /// AppleScript для mute/unmute.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn volume_mute_script(muted: bool) -> String {
     if muted {
         "set volume with output muted".to_string()
@@ -147,50 +192,113 @@ pub fn volume_mute_script(muted: bool) -> String {
     }
 }
 
-/// Прочитать текущий уровень системной громкости (0..100) через osascript.
-fn current_volume() -> Option<u8> {
-    let out = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg("output volume of (get volume settings)")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse::<i64>()
-        .ok()
-        .map(clamp_volume)
-}
-
-/// Применить AppleScript-команду (без shell).
-fn run_osascript(script: &str) -> Result<(), String> {
-    let status = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| format!("osascript: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("не удалось изменить громкость".into())
-    }
-}
-
 /// Исполнить операцию над системной громкостью.
+///
+/// Скрипты AppleScript (`volume_set_script`/`volume_mute_script`) остаются
+/// общими — они же покрыты тестами; на Linux вместо них зовётся PipeWire/Pulse
+/// через `pactl`, с откатом на ALSA `amixer`.
 pub fn run_volume(args: &Value) -> Result<(), String> {
     match parse_volume_op(args)? {
-        VolumeOp::Set(level) => run_osascript(&volume_set_script(level)),
-        VolumeOp::Mute(m) => run_osascript(&volume_mute_script(m)),
+        VolumeOp::Set(level) => vol::set(level),
+        VolumeOp::Mute(m) => vol::mute(m),
         VolumeOp::Delta(d) => {
-            let cur = current_volume().unwrap_or(50);
-            let target = clamp_volume(cur as i64 + d);
-            run_osascript(&volume_set_script(target))
+            let cur = vol::current().unwrap_or(50);
+            vol::set(clamp_volume(cur as i64 + d))
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod vol {
+    use super::{clamp_volume, volume_mute_script, volume_set_script};
+    use std::process::{Command, Stdio};
+
+    /// Применить AppleScript-команду (без shell).
+    fn run_osascript(script: &str) -> Result<(), String> {
+        let status = Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| format!("osascript: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("не удалось изменить громкость".into())
+        }
+    }
+
+    pub(super) fn set(level: u8) -> Result<(), String> {
+        run_osascript(&volume_set_script(level))
+    }
+    pub(super) fn mute(m: bool) -> Result<(), String> {
+        run_osascript(&volume_mute_script(m))
+    }
+    pub(super) fn current() -> Option<u8> {
+        let out = Command::new("osascript")
+            .arg("-e")
+            .arg("output volume of (get volume settings)")
+            .output()
+            .ok()?;
+        out.status.success().then_some(())?;
+        String::from_utf8_lossy(&out.stdout).trim().parse::<i64>().ok().map(clamp_volume)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod vol {
+    use super::clamp_volume;
+    use std::process::{Command, Stdio};
+
+    const SINK: &str = "@DEFAULT_SINK@";
+
+    fn run(cmd: &str, args: &[&str]) -> bool {
+        Command::new(cmd)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    pub(super) fn set(level: u8) -> Result<(), String> {
+        let pct = format!("{level}%");
+        if run("pactl", &["set-sink-volume", SINK, &pct]) {
+            return Ok(());
+        }
+        if run("amixer", &["-q", "sset", "Master", &pct]) {
+            return Ok(());
+        }
+        Err("не удалось изменить громкость (нужен pactl или amixer)".into())
+    }
+
+    pub(super) fn mute(m: bool) -> Result<(), String> {
+        let on = if m { "1" } else { "0" };
+        if run("pactl", &["set-sink-mute", SINK, on]) {
+            return Ok(());
+        }
+        if run("amixer", &["-q", "sset", "Master", if m { "mute" } else { "unmute" }]) {
+            return Ok(());
+        }
+        Err("не удалось изменить громкость (нужен pactl или amixer)".into())
+    }
+
+    /// `pactl get-sink-volume` печатает вид «Volume: front-left: 45875 /  70% / …»
+    /// — берём первый процент.
+    pub(super) fn current() -> Option<u8> {
+        let out = Command::new("pactl")
+            .args(["get-sink-volume", SINK])
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        out.status.success().then_some(())?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let pct = text.split('%').next()?.rsplit(char::is_whitespace).next()?;
+        pct.parse::<i64>().ok().map(clamp_volume)
     }
 }
 

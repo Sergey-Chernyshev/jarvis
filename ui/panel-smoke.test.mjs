@@ -23,6 +23,8 @@ const read = (name) => readFileSync(new URL(name, HERE), 'utf8');
  * зовёт Tauri, которого в тесте нет, — вместо него ставим свой window.jarvis. */
 const SCRIPTS = [
   'theme.js',
+  // подписи клавиш: renderer зовёт window.jarvisKeys уже при первой отрисовке
+  'keys.js',
   'markdown.js',
   'diffview.js',
   'question-answer.js',

@@ -10,7 +10,7 @@ members = ["node"]
 [package]
 name = "jarvis"
 version = "0.3.3"
-description = "macOS menu-bar mission control for Claude Code and Codex sessions"
+description = "Menu-bar/tray mission control for Claude Code and Codex sessions (macOS, Linux)"
 license = "MIT"
 edition = "2021"
 rust-version = "1.77.2"
@@ -20,6 +20,8 @@ default-run = "jarvis"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# macos-private-api нужен прозрачным окнам на macOS; на Linux фича
+# просто не задействуется — код за ней и так под cfg внутри tauri.
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
@@ -40,11 +42,6 @@ hound = "3"
 flate2 = "1" # gzip для сжатого хранения аудио диктовок (перегенерация распознавания)
 # клиент к Silero-сайдкару (localhost HTTP), blocking — зовём из voice-воркера
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-core-foundation = "0.10"
-core-graphics = "0.24"
-objc2 = "0.6"
-# блоки Objective-C для AVCaptureDevice.requestAccessForMediaType:completionHandler:
-block2 = "0.6"
 # base64 для stt.transcribe capability (кодирование PCM в аргументах MCP)
 base64 = "0.22"
 # аудио-захват (инкр. 9, фаза 4): микрофон через CPAL + ресемпл 16кГц
@@ -52,6 +49,24 @@ cpal = "0.17.1"
 rubato = "0.16.2"
 # вставка текста (инкр. 9, фаза 5): clipboard snapshot/restore для ⌘V-вставки
 arboard = "3"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Платформенные зависимости. Всё, что говорит с AppKit/CoreFoundation/IOKit,
+# живёт только в macOS-сборке; Linux-сборка их не видит и не требует.
+# ─────────────────────────────────────────────────────────────────────────────
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-graphics = "0.24"
+objc2 = "0.6"
+# блоки Objective-C для AVCaptureDevice.requestAccessForMediaType:completionHandler:
+block2 = "0.6"
+# whisper.cpp: на macOS с Metal-ускорением
+whisper-rs = { version = "0.16", features = ["metal"], optional = true }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# whisper.cpp на CPU: OpenBLAS/Vulkan требуют системных библиотек,
+# поэтому в дефолтную сборку не тянем
+whisper-rs = { version = "0.16", optional = true }
 
 [[bin]]
 name = "jarvis"
@@ -86,10 +101,6 @@ wakeword-ort = ["dep:ort"]
 # что и wakeword — одна onnxruntime на бинарь. ВКЛ в сборке (package.json/release.yml).
 stt-vad = ["dep:voice_activity_detector"]
 
-[dependencies.whisper-rs]
-version = "0.16"
-features = ["metal"]
-optional = true
 
 # ort запинен =2.0.0-rc.10: links=onnxruntime ⇒ одна версия ort на бинарь
 # (совместимость с voice_activity_detector). Под фичами wakeword-ort / stt-vad.

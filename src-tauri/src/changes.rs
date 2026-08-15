@@ -34,6 +34,10 @@ pub struct Change {
     pub untracked: bool,
 }
 
+/// Буквы состояния `git status --porcelain`: изменено, добавлено, удалено,
+/// переименовано, скопировано, конфликт, неотслеживаемое, игнорируемое.
+const STATUS_CODES: &str = " MADRCU?!";
+
 /// Разбор `git status --porcelain`.
 ///
 /// Читаем только то, что нужно списку: путь и состояние. Переименование git
@@ -46,6 +50,14 @@ pub fn parse_status(out: &str) -> Vec<Change> {
             continue;
         }
         let (x, y) = (line.as_bytes()[0] as char, line.as_bytes()[1] as char);
+        // Строка porcelain — две буквы состояния и пробел, и ничего кроме.
+        // Проверяем, а не верим: в поток попадает чужое (ворчание удалённого
+        // шелла про локаль, предупреждения самого git), и без проверки
+        // «bash: warning: …» становилась файлом «h: warning: …» с нулями
+        // правок.
+        if !STATUS_CODES.contains(x) || !STATUS_CODES.contains(y) || line.as_bytes()[2] != b' ' {
+            continue;
+        }
         let rest = line[3..].trim();
         if rest.is_empty() {
             continue;
@@ -105,8 +117,10 @@ pub fn apply_numstat(list: &mut [Change], numstat: &str) {
 
 /// Свод изменений рабочего каталога.
 pub async fn collect(host: &Host, cwd: &str) -> Result<Value, String> {
-    let (code, out) = host
-        .git(
+    // Всё, что здесь разбирается, читается ТОЛЬКО из stdout: в слитом потоке
+    // ворчание удалённого шелла становится строкой статуса, то есть файлом.
+    let (code, out, err) = host
+        .git_split(
             cwd,
             &[
                 // Кириллица в путях иначе приезжает в escape-последовательностях
@@ -120,19 +134,17 @@ pub async fn collect(host: &Host, cwd: &str) -> Result<Value, String> {
         )
         .await;
     if code != 0 {
-        return Err(if out.trim().is_empty() {
-            "не репозиторий git".to_string()
-        } else {
-            crate::util::one_line(out.trim())
-        });
+        // А в ошибке диагностика и есть ответ — там она из stderr.
+        let why = crate::util::one_line(format!("{} {}", out.trim(), err.trim()).trim());
+        return Err(if why.is_empty() { "не репозиторий git".to_string() } else { why });
     }
     let mut list = parse_status(&out);
-    let (_, numstat) = host
-        .git(cwd, &["-c", "core.quotePath=false", "diff", "--numstat", "HEAD"])
+    let (_, numstat, _) = host
+        .git_split(cwd, &["-c", "core.quotePath=false", "diff", "--numstat", "HEAD"])
         .await;
     apply_numstat(&mut list, &numstat);
 
-    let (_, branch) = host.git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).await;
+    let (_, branch, _) = host.git_split(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).await;
     Ok(json!({
         "ok": true,
         "branch": branch.trim(),
@@ -166,9 +178,10 @@ pub async fn file_hunks(
     } else {
         vec!["diff", "HEAD", "--", path]
     };
-    let (_, out) = host.git(cwd, &args).await;
-    // Код возврата не смотрим: `git diff` отдаёт 1 просто потому, что различия
-    // есть — это не ошибка.
+    // Дифф — тоже данные: чужая строка в слитом потоке читалась бы как строка
+    // ханка. Код возврата не смотрим: `git diff` отдаёт 1 просто потому, что
+    // различия есть — это не ошибка.
+    let (_, out, _) = host.git_split(cwd, &args).await;
     crate::gitdiff::parse_unified(&out)
 }
 
@@ -203,7 +216,7 @@ pub async fn commit(
         // догадка «что-то пошло не так» стоила бы человеку получаса.
         return Err(format!("git commit: {}", crate::util::one_line(out.trim())));
     }
-    let (_, sha) = host.git(cwd, &["rev-parse", "--short", "HEAD"]).await;
+    let (_, sha, _) = host.git_split(cwd, &["rev-parse", "--short", "HEAD"]).await;
     Ok(sha.trim().to_string())
 }
 
@@ -214,12 +227,15 @@ pub async fn commit(
 /// заводится сама (`-u`): иначе первый push каждой песочницы упирался бы в
 /// совет из четырёх слов, который всё равно набирают руками.
 pub async fn push(host: &Host, cwd: &str) -> Result<String, String> {
-    let (code, branch) = host.git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).await;
+    // Имя ветки уходит в аргументы push — тем более читается только из stdout:
+    // ворчание шелла, приклеенное к «master», отправилось бы на сервер как имя
+    // ветки. Пробел в имени невозможен, и это заодно вторая застава.
+    let (code, branch, _) = host.git_split(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).await;
     let branch = branch.trim().to_string();
-    if code != 0 || branch.is_empty() || branch == "HEAD" {
+    if code != 0 || branch.is_empty() || branch == "HEAD" || branch.contains(char::is_whitespace) {
         return Err("не понял, какая ветка сейчас выписана".into());
     }
-    let (has_remote, remotes) = host.git(cwd, &["remote"]).await;
+    let (has_remote, remotes, _) = host.git_split(cwd, &["remote"]).await;
     if has_remote != 0 || remotes.trim().is_empty() {
         return Err("у репозитория нет удалённого адреса — отправлять некуда".into());
     }
@@ -283,7 +299,9 @@ pub async fn review(
     cwd: &str,
     model: Option<&str>,
 ) -> Result<(String, String), String> {
-    let (_, diff) = host.git(cwd, &["diff", "HEAD"]).await;
+    // Дифф уходит агенту как данные — чужие предупреждения в нём читались бы
+    // как правки.
+    let (_, diff, _) = host.git_split(cwd, &["diff", "HEAD"]).await;
     let listed = collect(host, cwd).await?;
     let untracked: Vec<String> = listed
         .get("files")
@@ -550,4 +568,24 @@ mod tests {
         assert!(parse_status("").is_empty());
         assert!(parse_status("\n").is_empty());
     }
+    /// Чужие строки в потоке не должны становиться файлами.
+    ///
+    /// Так и выглядел баг: удалённый `bash -lc` ворчал «setlocale: LC_ALL:
+    /// cannot change locale», строка приезжала слитой со stdout — и панель
+    /// показывала два «изменённых файла» с нулями правок, а веткой звала
+    /// «master bash: warning: …».
+    #[test]
+    fn noise_in_the_stream_is_not_a_file() {
+        let out = "bash: warning: setlocale: LC_ALL: cannot change locale (en_GB.UTF-8)\n\
+                   warning: LF will be replaced by CRLF in src/main.rs\n\
+                   fatal: not a git repository\n\
+                    M src/main.rs\n\
+                   ?? новый.txt\n";
+        let list = parse_status(out);
+        assert_eq!(list.len(), 2, "лишние строки стали файлами: {list:?}");
+        assert_eq!(list[0].path, "src/main.rs");
+        assert_eq!(list[1].path, "новый.txt");
+        assert!(list[1].untracked);
+    }
+
 }

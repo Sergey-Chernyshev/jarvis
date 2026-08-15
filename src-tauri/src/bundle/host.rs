@@ -41,6 +41,19 @@ impl Host {
     /// `git -C dir <args>`: локально — argv как есть, по ssh — с цитированием
     /// каждого аргумента.
     pub async fn git(&self, dir: &str, args: &[&str]) -> (i32, String) {
+        let (code, out, err) = self.git_split(dir, args).await;
+        (code, merge(out, err))
+    }
+
+    /// То же, но потоками врозь: stdout — ДАННЫЕ, stderr — диагностика.
+    ///
+    /// Разделять обязательно везде, где вывод РАЗБИРАЮТ. Удалённый `bash -lc`
+    /// ворчит на старте («setlocale: LC_ALL: cannot change locale»), git — про
+    /// CRLF и detached HEAD; в слитом потоке это ворчание становится строкой
+    /// `git status --porcelain`, то есть выдуманным файлом в списке правок, и
+    /// веткой по имени «master bash: warning: …». Ровно это панель и
+    /// показывала.
+    pub async fn git_split(&self, dir: &str, args: &[&str]) -> (i32, String, String) {
         match self {
             Host::Local => local_git(dir, args).await,
             Host::Ssh { host, .. } => {
@@ -49,13 +62,13 @@ impl Host {
                     full.push(' ');
                     full.push_str(&crate::util::shell_quote(a));
                 }
-                ssh(host, &full, Duration::from_secs(120)).await
+                ssh_split(host, &full, Duration::from_secs(120)).await
             }
         }
     }
 }
 
-async fn local_git(dir: &str, args: &[&str]) -> (i32, String) {
+async fn local_git(dir: &str, args: &[&str]) -> (i32, String, String) {
     let mut cmd = tokio::process::Command::new("git");
     cmd.arg("-C")
         .arg(dir)
@@ -65,7 +78,7 @@ async fn local_git(dir: &str, args: &[&str]) -> (i32, String) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    collect(cmd, Duration::from_secs(120)).await
+    collect_split(cmd, Duration::from_secs(120)).await
 }
 
 /// `ssh -o BatchMode=yes host bash -lc <строка>`. BatchMode — принципиально:
@@ -111,11 +124,6 @@ fn merge(mut out: String, err: String) -> String {
         out.push_str(err.trim_end());
     }
     out
-}
-
-async fn collect(cmd: tokio::process::Command, timeout: Duration) -> (i32, String) {
-    let (code, out, err) = collect_split(cmd, timeout).await;
-    (code, merge(out, err))
 }
 
 async fn collect_split(mut cmd: tokio::process::Command, timeout: Duration) -> (i32, String, String) {

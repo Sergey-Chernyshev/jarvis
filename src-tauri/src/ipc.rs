@@ -3797,17 +3797,19 @@ pub async fn session_touched(app: AppHandle, session_id: String, path: String) -
         return err("файл не в списке изменений");
     };
     let hunks = crate::changes::file_hunks(&host, &cwd, &path, untracked).await;
-    // Содержимое читаем на той машине, где файл лежит.
-    let (code, text) = host
-        .sh(
+    // Содержимое читаем на той машине, где файл лежит, и ТОЛЬКО из stdout:
+    // ворчание удалённого шелла, подмешанное к тексту файла, поехало бы в
+    // разбор объявлений как строка кода.
+    let Ok(text) = host
+        .sh_data(
             &cwd,
             &format!("cat -- {}", crate::util::shell_quote(&path)),
             std::time::Duration::from_secs(20),
         )
-        .await;
-    if code != 0 {
+        .await
+    else {
         return err("файл не прочитался");
-    }
+    };
     let syms = crate::symbols::symbols_of(&text);
     let touched = crate::symbols::touched(&syms, &crate::symbols::changed_lines(&hunks));
     json!({ "ok": true, "touched": touched })

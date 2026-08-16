@@ -45,8 +45,30 @@ Running several coding agents at once turns **you** into the bottleneck. Session
 - **✅ Read-only task board** — live `TodoWrite` progress (done / in-progress / queued) per session.
 - **📦 Model manager** — download, delete and hot-swap the local TTS/STT/wake-word models from settings; guided first-run onboarding.
 - **🔒 Event-driven & private** — built on the agents' own hooks (no screen scraping), everything runs locally, no telemetry, removable with one command.
+- **📟 Terminal and phone too** — the same fleet from a TUI ([jarvis-cli](https://github.com/arklual/jarvis-cli)) or from Android ([jarvis-mobile](https://github.com/arklual/jarvis-mobile)); see [the stack](#the-jarvis-stack).
 
 > **Boundary:** Jarvis is a **monitor and a remote, not an orchestrator.** It does not spawn agents and does not own the plan; it complements orchestrators (Claude Squad, Conductor, Crystal, native Agent Teams) and the sessions you already run.
+
+## The Jarvis stack
+
+The panel is one of three ways into the same fleet — not a client/server split.
+Each program talks to the agents' own hooks, and the ones on **one machine share
+one data directory** (`~/.jarvis`): a loop started in the terminal shows up in the
+panel, and a bundle started in the panel is driven from the terminal. The phone
+is deliberately narrower — sessions, chat and replies, nothing else.
+
+| | What it is | Where |
+| --- | --- | --- |
+| **Jarvis** | the panel: menu bar / tray, toasts over fullscreen, voice, dictation, usage | this repo |
+| **jarvis-cli** | the same fleet from a terminal: live TUI, chat, loops, bundles — over SSH, inside tmux, no windows | [arklual/jarvis-cli](https://github.com/arklual/jarvis-cli) |
+| **jarvis-mobile** | Android client for agents that run on **other** machines: see, read, reply | [arklual/jarvis-mobile](https://github.com/arklual/jarvis-mobile) |
+| **jarvis-node** | the thin node on the remote machine: buffers hook events, serves them over SSH | [`src-tauri/node`](src-tauri/node/README.md), in this repo |
+
+The panel and the CLI are two faces of one local state, so use whichever is in
+front of you. The phone never touches `~/.jarvis` — it talks to `jarvis-node` over
+your own SSH, which is exactly what lets it work while the laptop is closed
+([docs/remote.md](docs/remote.md)). The node is also what the panel and the CLI
+reach for when an agent runs on a VPS.
 
 ## Who it's for
 
@@ -200,7 +222,7 @@ Model and reasoning are changed via Codex's own `/model` picker (there is no sep
 
 ### 🛰 Remote sessions (an agent on another machine)
 
-An agent running on a VPS or an office workstation appears in the same list as your local ones — same statuses, toasts, voice, chat, reply-into-session and remote, with the node's name as a badge. A thin **node** (`jarvis-node`) lives on that machine: it receives the agents' hooks locally and **buffers the events**, so a closed laptop doesn't lose the night. Jarvis reaches it over your own SSH (`ssh -N -L` onto a unix socket) — the node opens no ports and Jarvis creates no new secrets.
+An agent running on a VPS or an office workstation appears in the same list as your local ones — same statuses, toasts, voice, chat, reply-into-session and remote, with the node's name as a badge. A thin **node** (`jarvis-node`) lives on that machine: it receives the agents' hooks locally and **buffers the events**, so a closed laptop doesn't lose the night. Jarvis reaches it over your own SSH (`ssh -N -L` onto a unix socket) — the node opens no ports and Jarvis creates no new secrets. The same node is what [jarvis-cli](https://github.com/arklual/jarvis-cli) (`jarvis -m vps …`) and the [Android client](https://github.com/arklual/jarvis-mobile) talk to, so a VPS agent is reachable from a terminal or a phone with nothing extra installed on it.
 
 Set up straight from the panel: **Settings → «Удалённые»** → enter the ssh host → "Проверить машину" (shows what's there) → "Установить". Jarvis delivers the node itself, wires the agents' hooks and sets up autostart, showing each step as it goes. If ssh doesn't let it in yet, the panel offers the public key to add on that side. Same thing from a terminal — `jarvis-setup remote add vps dev@203.0.113.10`.
 

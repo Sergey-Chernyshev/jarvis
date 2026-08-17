@@ -3,7 +3,6 @@
 //! Провенанс untrusted ВСЕГДА: содержимое — то, что обрабатывал Claude Code
 //! (веб, файлы, вывод команд), потенциальный носитель инъекции (§6, §8).
 
-use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -37,15 +36,15 @@ pub fn register(reg: &mut DaemonRegistry) {
             let Some(s) = d.session(&sid) else {
                 return Err(format!("сессия не найдена: {sid}"));
             };
-            let Some(tr) = s.transcript else {
+            // транскрипт читаем с машины сессии: у удалённой он на её узле
+            let Some(text) = d.transcript_text(&s, 512 * 1024).await else {
                 return Err("нет транскрипта — сессия ещё не слала событий".into());
             };
-            let items: Vec<transcript::ChatItem> = transcript::chain_from_entries(
-                transcript::read_recent_entries(Path::new(&tr), 512 * 1024),
-            )
-            .iter()
-            .flat_map(transcript::to_chat_items)
-            .collect();
+            let items: Vec<transcript::ChatItem> =
+                transcript::chain_from_entries(transcript::entries_from_text(&text))
+                    .iter()
+                    .flat_map(transcript::to_chat_items)
+                    .collect();
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(80) as usize;
             let start = items.len().saturating_sub(limit);
             let tail = &items[start..];

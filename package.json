@@ -2,7 +2,7 @@
   "name": "jarvis-mvp",
   "version": "0.3.3",
   "private": true,
-  "description": "macOS menu-bar mission control for Claude Code and Codex sessions: status panel, notifications, voice (Rust + Tauri)",
+  "description": "Menu-bar/tray mission control for Claude Code and Codex sessions: status panel, notifications, voice (Rust + Tauri). macOS and Linux.",
   "license": "MIT",
   "scripts": {
     "start": "JARVIS_DEV_SIGN=1 cargo build --release --manifest-path src-tauri/Cargo.toml --features wakeword-ort,whisper-native,stt-vad --bin jarvis && codesign --force --sign - --entitlements src-tauri/entitlements.plist src-tauri/target/release/jarvis && JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 src-tauri/target/release/jarvis",
@@ -13,9 +13,12 @@
     "teardown": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- uninstall",
     "status": "cargo run --release --manifest-path src-tauri/Cargo.toml --bin jarvis-setup -- status",
     "tauri": "tauri",
-    "bundle": "tauri build --features wakeword-ort,whisper-native,stt-vad"
+    "bundle": "tauri build --features wakeword-ort,whisper-native,stt-vad",
+    "start:linux": "cargo build --release --manifest-path src-tauri/Cargo.toml --features whisper-native --bin jarvis && JARVIS_DIR=\"$HOME/.jarvis-dev\" JARVIS_DEV=1 src-tauri/target/release/jarvis",
+    "bundle:linux": "tauri build --features whisper-native --bundles deb,appimage,rpm"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.2"
+    "@tauri-apps/cli": "^2.11.2",
+    "linkedom": "^0.18.13"
   }
 }

@@ -11,7 +11,7 @@ use tauri::window::{Effect, EffectState};
 use tauri::{AppHandle, Emitter, Manager, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 use crate::daemon::Daemon;
-use crate::macos;
+use crate::platform;
 
 pub const PANEL_W: f64 = 820.0;
 pub const PANEL_H: f64 = 620.0;
@@ -102,9 +102,9 @@ pub fn create_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .accept_first_mouse(true)
         .build()?;
     if window_mode {
-        macos::float_normal(&win);
+        platform::float_normal(&win);
     } else {
-        macos::float_above_everything(&win);
+        platform::float_above_everything(&win);
     }
     Ok(win)
 }
@@ -117,12 +117,24 @@ pub fn apply_mode(d: &Arc<Daemon>) {
         return;
     };
     let window_mode = d.settings.string("mode") == "window";
+    // Место в доке — часть режима, а не косметика: без иконки окно нельзя
+    // вернуть ни ⌘Tab, ни кликом, и оно выглядит «пропавшим». Раньше политика
+    // ставилась только на старте, поэтому переключение режима на лету
+    // оставляло окно без дока до перезапуска.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = d.app.set_activation_policy(if window_mode {
+            tauri::ActivationPolicy::Regular
+        } else {
+            tauri::ActivationPolicy::Accessory
+        });
+    }
     let _ = win.set_resizable(window_mode);
     let _ = win.set_maximizable(window_mode);
     let _ = win.set_minimizable(window_mode);
     let _ = win.set_skip_taskbar(!window_mode);
     if window_mode {
-        macos::float_normal(&win);
+        platform::float_normal(&win);
         let (w, h) = window_size(&d.app);
         let _ = win.set_size(tauri::LogicalSize::new(w, h));
         let _ = win.center();
@@ -131,7 +143,7 @@ pub fn apply_mode(d: &Arc<Daemon>) {
     } else {
         // из фуллскрина накладку не построишь — выходим до смены геометрии
         let _ = win.set_fullscreen(false);
-        macos::float_above_everything(&win);
+        platform::float_above_everything(&win);
         let _ = win.set_size(tauri::LogicalSize::new(PANEL_W, PANEL_H));
         position_panel(d);
     }
@@ -217,9 +229,67 @@ pub fn create_agent_chat(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     Ok(win)
 }
 
+/// Превью работы агента: отдельное окно с локальным адресом проекта.
+///
+/// Обычные декорации и никакого блюра — это чужая страница, и делать вид, что
+/// она часть панели, нечестно: человек должен видеть, что смотрит своё
+/// приложение, а не наш интерфейс.
+///
+/// Адрес разрешаем только локальный: окно панели живёт с её правами, и
+/// открывать в нём произвольный сайт по строке из webview — не то, что стоит
+/// уметь. Проверка — в `preview_url`.
+pub fn create_preview(app: &AppHandle, url: &str) -> tauri::Result<WebviewWindow> {
+    let parsed: tauri::Url = url.parse().map_err(|_| tauri::Error::WebviewNotFound)?;
+    if let Some(win) = app.get_webview_window("preview") {
+        let _ = win.close();
+    }
+    let win = WebviewWindowBuilder::new(app, "preview", WebviewUrl::External(parsed))
+        .title(format!("Превью · {url}"))
+        .inner_size(900.0, 700.0)
+        .min_inner_size(320.0, 320.0)
+        .visible(true)
+        .resizable(true)
+        .center()
+        .theme(window_theme(app))
+        .build()?;
+    let _ = win.set_focus();
+    Ok(win)
+}
+
+/// Адрес превью: только свой компьютер.
+///
+/// Превью существует, чтобы посмотреть, что подняла задача, — это всегда
+/// localhost. Пускать сюда любой адрес значило бы дать webview открывать чужие
+/// сайты в окне с правами панели.
+pub fn preview_url(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    let with_scheme = if raw.starts_with("http://") || raw.starts_with("https://") {
+        raw.to_string()
+    } else {
+        format!("http://{raw}")
+    };
+    let host = with_scheme
+        .split("//")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .map(|hostport| hostport.split(':').next().unwrap_or("").to_string())
+        .unwrap_or_default();
+    match host.as_str() {
+        "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]" | "::1" => Ok(with_scheme),
+        "" => Err("пустой адрес".into()),
+        other => Err(format!(
+            "превью открывает только адреса этого компьютера, а «{other}» — чужой"
+        )),
+    }
+}
+
 pub fn create_toast(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let win = WebviewWindowBuilder::new(app, "toast", WebviewUrl::App("toast.html".into()))
-        .title("")
+        // Заголовок нужен не человеку (декораций у окна нет), а оконному
+        // менеджеру: на Wayland правила пишут по app_id и title, и безымянное
+        // окно от панели не отличить. С ним правило Sway «тост не берёт фокус
+        // и висит поверх» пишется одной строкой.
+        .title("Jarvis · уведомление")
         .inner_size(TOAST_W, 120.0)
         .visible(false)
         .decorations(false)
@@ -233,7 +303,7 @@ pub fn create_toast(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .accept_first_mouse(true)
         .theme(window_theme(app))
         .build()?;
-    macos::float_above_everything(&win);
+    platform::float_above_everything(&win);
     Ok(win)
 }
 
@@ -361,7 +431,7 @@ fn toast_payload(
 
 /* ================= позиционирование и показ панели ================= */
 
-/// Панель — на дисплей с курсором (геометрия — в macos::place_panel:
+/// Панель — на дисплей с курсором (геометрия — в platform::place_panel:
 /// AppKit-поинты, без конвертаций Tauri, иначе на смешанном DPI окно
 /// уезжает на предыдущий экран).
 pub fn position_panel(d: &Arc<Daemon>) {
@@ -373,7 +443,7 @@ pub fn position_panel(d: &Arc<Daemon>) {
         return;
     }
     let corner = d.settings.string("position") == "corner";
-    macos::place_panel(&panel, PANEL_W, PANEL_H, corner);
+    platform::place_panel(&panel, PANEL_W, PANEL_H, corner);
 }
 
 /// Тихий режим: трей, клик по уведомлению — показать, не забирая фокус
@@ -392,7 +462,7 @@ pub fn show_panel(d: &Arc<Daemon>) {
     if d.settings.string("mode") == "window" {
         let _ = panel.show();
     } else {
-        macos::show_inactive(&panel);
+        platform::show_inactive(&panel);
     }
     d.push();
 }
@@ -430,23 +500,37 @@ pub fn hide_panel(d: &Arc<Daemon>) {
 
 pub fn toggle_panel(d: &Arc<Daemon>) {
     if panel_visible(d) {
+        // Та же логика, что у хоткея: окно обычно стоит под чужими окнами,
+        // и клик по трею по нему — это «покажи», а не «спрячь». Прячем лишь
+        // когда оно уже в фокусе, то есть человек видит его прямо сейчас.
+        if window_mode(d) && !panel_focused(d) {
+            show_panel_focused(d);
+            return;
+        }
         hide_panel(d);
     } else {
         show_panel(d);
     }
 }
 
+/// Оконный режим по настройкам.
+fn window_mode(d: &Arc<Daemon>) -> bool {
+    d.settings.string("mode") == "window"
+}
+
+/// Окно сейчас в фокусе?
+fn panel_focused(d: &Arc<Daemon>) -> bool {
+    d.app
+        .get_webview_window("main")
+        .and_then(|w| w.is_focused().ok())
+        .unwrap_or(false)
+}
+
 pub fn toggle_hotkey_panel(d: &Arc<Daemon>) {
     if panel_visible(d) {
         // Окно живёт под другими окнами: ⌘J по нему должен поднимать, а не прятать.
         // Прячем только когда оно уже в фокусе — тогда хоткей читается как «убрать».
-        if d.settings.string("mode") == "window"
-            && !d
-                .app
-                .get_webview_window("main")
-                .and_then(|w| w.is_focused().ok())
-                .unwrap_or(false)
-        {
+        if window_mode(d) && !panel_focused(d) {
             show_panel_focused(d);
             return;
         }
@@ -469,15 +553,26 @@ pub fn toast_resize(d: &Arc<Daemon>, h: f64) {
         return;
     }
     let height = h.round().clamp(1.0, TOAST_MAX_H);
-    macos::place_toast(&toast, TOAST_W, height);
+    platform::place_toast(&toast, TOAST_W, height);
     if !toast.is_visible().unwrap_or(false) {
-        macos::show_inactive(&toast);
+        platform::show_inactive(&toast);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Превью — про своё приложение. Чужой адрес из webview открывать нельзя,
+    /// и отказ обязан объяснить, почему.
+    #[test]
+    fn preview_takes_only_local_addresses() {
+        assert_eq!(preview_url("localhost:3000").unwrap(), "http://localhost:3000");
+        assert_eq!(preview_url("http://127.0.0.1:8080/app").unwrap(), "http://127.0.0.1:8080/app");
+        let e = preview_url("https://example.com").unwrap_err();
+        assert!(e.contains("example.com"), "{e}");
+        assert!(preview_url("").is_err());
+    }
 
     #[test]
     fn configured_toast_ttl_reaches_payload_in_milliseconds() {

@@ -7,10 +7,13 @@
 
 #[allow(dead_code)] // UI-потребитель подключается в фазе 7 (chat UI)
 mod agent;
+mod agents; // реестр внешних агентов: qwen/opencode/свои — шимы и жизненный цикл
 #[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
 mod backend;
+mod bundle; // режим «Связка»: несколько агентов в worktree над одним проектом + очередь слияний
 #[allow(dead_code)] // проекции/фасады подключаются по фазам (инкр. 8)
 mod capability;
+mod changes; // свод правок задачи: список файлов, дифф, приём и откат
 mod claude_bin;
 mod commands_catalog;
 mod convo; // голосовой разговор: снапшот → Haiku-план → скилы → голосовой ответ (п/п-2)
@@ -25,14 +28,19 @@ mod ipc;
 mod launch; // запуск новой/возобновляемой сессии в терминале из вкладки «Проекты»
 mod limits;
 mod log;
-mod macos;
+mod loops; // режим «Циклы»: рутина, которую агент крутит сам — с концом и стенами
+mod platform; // окна, медиа, звук: платформенное за общим API (macos.rs / linux.rs)
 mod metrics;
 mod model;
 mod onboarding;
 mod power;
+#[allow(dead_code)] // потребитель — daemon (маршрутизация удалённых сессий), следующий шаг инкремента
+mod remote; // удалённые узлы: ssh-туннель, HTTP-клиент узла, поллер событий
 mod route; // голосовая маршрутизация: скоринг → tie-break → пикер → stage-then-send
 mod ru;
 mod screen_prompt;
+mod symbols; // что именно тронул агент: объявления под правкой
+mod search; // поиск по проекту задачи: git grep там, где живёт сессия
 mod server;
 mod settings;
 mod shutdown;
@@ -48,6 +56,7 @@ mod turnsum;
 mod usage;
 mod util;
 mod voice;
+mod watchdog; // сторож главного потока: «зависло» → строка в логе с длительностью
 mod wakeword; // wake-word детектор + шов верификации
 mod windows;
 
@@ -58,14 +67,54 @@ use tauri::Manager;
 
 use daemon::Daemon;
 
+/// Что просит второй запуск у уже работающего приложения.
+///
+/// Список намеренно короткий: это не CLI, а мостик для горячих клавиш
+/// оконного менеджера. Всё остальное панель умеет сама.
+#[derive(Debug, PartialEq)]
+enum Command {
+    Show,
+    Hide,
+    Toggle,
+    Quit,
+}
+
+impl Command {
+    fn parse(arg: &str) -> Option<Self> {
+        match arg.trim_start_matches('-') {
+            "toggle" => Some(Command::Toggle),
+            "show" | "open" => Some(Command::Show),
+            "hide" => Some(Command::Hide),
+            "quit" | "exit" => Some(Command::Quit),
+            _ => None,
+        }
+    }
+}
+
 fn main() {
+    // До всего остального: паника, случившаяся раньше установки крючка, уйдёт
+    // только в stderr — то есть мимо лога, который и присылают при разборе.
+    log::install_panic_hook();
+
     let mut builder = tauri::Builder::default();
 
     // single-instance — только в проде; в dev-сборке (JARVIS_DEV=1) НЕ ставим,
     // чтобы dev и установленный прод крутились рядом, не гася друг друга.
     if std::env::var("JARVIS_DEV").is_err() {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            windows::show_panel(&Daemon::get(app));
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // Второй запуск — это не «подними ещё одно окно», а команда уже
+            // работающему. На Wayland (Sway) без этого никак: глобальные
+            // хоткеи там перехватывает композитор, а не приложение, и
+            // `bindsym $mod+j exec jarvis --toggle` — единственный честный
+            // способ дать панели горячую клавишу. Аргумента нет — прежнее
+            // поведение, «покажись».
+            let d = Daemon::get(app);
+            match argv.iter().find_map(|a| Command::parse(a)) {
+                Some(Command::Toggle) => windows::toggle_panel(&d),
+                Some(Command::Hide) => windows::hide_panel(&d),
+                Some(Command::Quit) => d.app.exit(0),
+                Some(Command::Show) | None => windows::show_panel(&d),
+            }
         }));
     }
 
@@ -119,6 +168,31 @@ fn main() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
+            loops::ipc::loops_get,
+            loops::ipc::loops_draft,
+            loops::ipc::loops_catalog,
+            bundle::ipc::bundle_get,
+            bundle::ipc::bundle_draft,
+            bundle::ipc::bundle_save,
+            bundle::ipc::bundle_start,
+            bundle::ipc::bundle_add_hand,
+            bundle::ipc::bundle_pause,
+            bundle::ipc::bundle_merge,
+            bundle::ipc::bundle_remove,
+            bundle::ipc::bundle_places,
+            bundle::ipc::bundle_browse,
+            loops::ipc::loops_compose,
+            loops::ipc::loops_save,
+            loops::ipc::loops_remove,
+            loops::ipc::loops_start,
+            loops::ipc::loops_stop,
+            loops::ipc::loops_intervene,
+            loops::ipc::loops_answer,
+            loops::ipc::loops_review,
+            loops::ipc::loops_resume,
+            loops::ipc::loops_diff,
+            ipc::agents_list,
+            ipc::agents_save,
             ipc::state_get,
             ipc::state_clear,
             ipc::panel_hide,
@@ -129,7 +203,17 @@ fn main() {
             ipc::file_open,
             ipc::file_read,
             ipc::file_diff,
+            ipc::session_changes,
+            ipc::session_change_diff,
+            ipc::session_commit,
+            ipc::session_revert,
+            ipc::session_push,
+            ipc::session_review,
+            ipc::session_search,
+            ipc::preview_open,
+            ipc::session_touched,
             ipc::url_open,
+            ipc::ui_error,
             ipc::chat_close,
             ipc::commands_get,
             ipc::app_meta,
@@ -142,6 +226,7 @@ fn main() {
             ipc::history_get,
             ipc::usage_session,
             ipc::session_set_pin,
+            ipc::session_kill,
             ipc::session_set_model,
             ipc::session_set_effort,
             ipc::terminal_ping,
@@ -166,6 +251,15 @@ fn main() {
             ipc::agent_chat_open,
             ipc::terminal_focus,
             ipc::session_launch,
+            ipc::remotes_list,
+            ipc::remotes_add,
+            ipc::remotes_remove,
+            ipc::remotes_test,
+            ipc::remotes_preflight,
+            ipc::remotes_install,
+            ipc::remotes_ssh_key,
+            ipc::remotes_ssh_authorize,
+            ipc::machines_list,
             ipc::toast_resize,
             ipc::toast_ready,
             ipc::toast_click,
@@ -240,6 +334,10 @@ fn main() {
             // Оконный режим (макет 14h) — обычное приложение: док, ⌘Tab, меню.
             // Политика ставится один раз на старте; смена режима на лету
             // перестраивает окно сразу, а иконку в доке — со следующего запуска.
+            // Понятие политики активации есть только у AppKit: на Linux место
+            // приложения в панели задач решает сам оконный менеджер по
+            // skip_taskbar, который выставляется при создании окна.
+            #[cfg(target_os = "macos")]
             app.set_activation_policy(if d.settings.string("mode") == "window" {
                 tauri::ActivationPolicy::Regular
             } else {
@@ -254,6 +352,7 @@ fn main() {
             );
 
             d.restore_state(); // реестр переживает перезапуск
+            d.start_remotes(); // ssh-туннели к удалённым узлам, если они настроены
             windows::create_panel(app.handle())?;
             windows::create_toast(app.handle())?;
             tray::init(&d)?;
@@ -284,7 +383,11 @@ fn main() {
             // prod-путь ~/.jarvis после смены на dev-профиль ~/.jarvis-dev) — и
             // пишем health-снимок в лог. Дёшево и без сети, но в отдельном потоке,
             // чтобы не тормозить создание окна.
-            std::thread::spawn(|| {
+            // Шимы своих агентов — к настройкам: их могли поправить руками
+            // в settings.json, пока приложение не работало.
+            let cfg = d.settings.load();
+            std::thread::spawn(move || {
+                crate::install::sync_custom_shims(&crate::agents::shim_specs(&crate::agents::parse(&cfg)));
                 crate::install::reconcile_hooks(&|s| {
                     if !s.msg.is_empty() {
                         crate::log::line(&format!("[integration] {}: {}", s.phase, s.msg));
@@ -378,6 +481,9 @@ fn main() {
                         windows::remember_window_size(&d, l.width, l.height);
                     }
                 }
+                // ssh-дети не должны пережить приложение: без этого туннели
+                // висят до конца сессии терминала и держат порты
+                d.remotes.stop_all_now();
                 power::Power::dispose(&d); // снять assertion, вернуть disablesleep
                 d.voice.dispose(); // погасить Silero-сайдкар, если был поднят
                 d.stt.dispose(); // погасить Qwen3-MLX-сайдкар, если был поднят
@@ -426,6 +532,41 @@ fn spawn_timers(d: &Arc<Daemon>) {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             power::Power::tick(&dd).await;
+        }
+    });
+
+    // Кто именно запущен. Без этой строки любой отчёт о поломке начинается с
+    // выяснения, та ли сборка на руках, — а выяснить это по логу было нечем.
+    // Отпечаток панели считается по содержимому `ui/`: он же показывает, что
+    // ассеты пересобрались, а не остались от прошлого раза.
+    log::line(&format!(
+        "[jarvis] сборка {} · панель {} · v{}",
+        env!("JARVIS_BUILD_REF"),
+        env!("JARVIS_UI_FINGERPRINT"),
+        env!("CARGO_PKG_VERSION"),
+    ));
+
+    // Сторож главного потока: если окно встанет, в логе останется след с
+    // длительностью — иначе от «зависло» нет ни места, ни времени.
+    watchdog::start(d.app.clone());
+
+    // такт связки: следит за руками, ребейзит готовых, гоняет гейты. Чаще
+    // семи секунд незачем — он ходит в git, а руки работают минутами.
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(7)).await;
+            bundle::ipc::tick(&dd).await;
+        }
+    });
+
+    // расписание циклов: раз в 30с смотрим, чьё время пришло. Чаще незачем —
+    // самое частое расписание меряется минутами, а запуск всё равно один за раз.
+    let dd = d.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            loops::ipc::tick(&dd);
         }
     });
 
@@ -542,7 +683,7 @@ fn spawn_timers(d: &Arc<Daemon>) {
         loop {
             tokio::time::sleep(Duration::from_millis(200)).await;
             if let Some(toast) = dd.app.get_webview_window("toast") {
-                macos::poll_toast_hover(&toast);
+                platform::poll_toast_hover(&toast);
             }
         }
     });

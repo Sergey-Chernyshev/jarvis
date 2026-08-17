@@ -152,7 +152,7 @@ pub fn diff_for_file(cwd: &str, file: &Path) -> FileDiff {
 /// шапка коммита у `git show`) не отдаются; «Binary files … differ» ханков не
 /// образует. Счётчики @@-заголовка задают точную длину ханка, поэтому строка
 /// коммит-сообщения, начинающаяся с пробела или минуса, в ханк не просочится.
-fn parse_unified(out: &str) -> Vec<Hunk> {
+pub(crate) fn parse_unified(out: &str) -> Vec<Hunk> {
     let mut hunks: Vec<Hunk> = Vec::new();
     let (mut old_left, mut new_left) = (0u32, 0u32); // сколько строк ханка ещё ждём
     for line in out.lines() {

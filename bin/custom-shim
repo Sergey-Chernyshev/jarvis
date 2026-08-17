@@ -1,0 +1,91 @@
+#!/bin/sh
+# jarvis-custom-agent — шим своего агента (%AGENT%).
+# Сгенерирован Jarvis из настроек «Агенты»; правки перезапишутся.
+#
+# Что он делает и зачем:
+#  1. Оборачивает интерактивный запуск в tmux (-L jarvis) — только так демон
+#     может показывать живой экран и вставлять ответы в пану.
+#  2. Сообщает демону о жизненном цикле: session-start при запуске и
+#     session-end по завершении. У чужого CLI нет хуков Claude Code — это
+#     ЕДИНСТВЕННОЕ, что Jarvis честно знает о такой сессии, и этого хватает,
+#     чтобы она появилась в списке и жила в пане.
+#
+# Приём с самоперезапуском: tmux выполняет этот же скрипт с --jarvis-run —
+# внутри паны, где уже есть $TMUX_PANE. Так хуки уходят из правильного места,
+# а квотирование аргументов решается один раз.
+
+JARVIS_DIR="${JARVIS_DIR:-$HOME/.jarvis}"
+AGENT='%AGENT%'
+BIN='%BIN%'
+SHIM_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+
+# --- резолв настоящего бинаря ---
+case "$BIN" in
+  */*) REAL="$BIN" ;;
+  *)
+    CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SHIM_DIR" | paste -sd: -)
+    REAL=$(PATH="$CLEAN_PATH" command -v "$BIN" 2>/dev/null)
+    ;;
+esac
+if [ -z "$REAL" ] || [ ! -x "$REAL" ]; then
+  echo "jarvis-shim: бинарь агента «$AGENT» не найден: $BIN" >&2
+  echo "jarvis-shim: поправь путь в Jarvis → Настройки → Агенты" >&2
+  exit 127
+fi
+
+json_safe() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\r\n\t' '   '
+}
+
+# --- режим исполнения внутри tmux-паны: хук, агент, хук ---
+if [ "${1:-}" = --jarvis-run ]; then
+  shift
+  SID="$AGENT-$(date +%s)-$$"
+  PAYLOAD=$(printf '{"session_id":"%s","cwd":"%s"}' "$(json_safe "$SID")" "$(json_safe "$PWD")")
+  HOOK="$JARVIS_DIR/bin/jarvis-hook"
+  # Хук всегда выходит нулём и мгновенно: демона нет — агент всё равно работает.
+  [ -x "$HOOK" ] && printf '%s' "$PAYLOAD" | "$HOOK" "$AGENT" session-start >/dev/null 2>&1
+  "$@"
+  RC=$?
+  [ -x "$HOOK" ] && printf '%s' "$PAYLOAD" | "$HOOK" "$AGENT" session-end >/dev/null 2>&1
+  exit $RC
+fi
+
+# --- решаем, оборачивать ли ---
+wrap=1
+case "${JARVIS_TMUX:-}" in off|0|no|false|plain|disable) wrap=0 ;; esac
+[ -n "$JARVIS_SHIM" ] && wrap=0          # рекурсия
+[ -n "$TMUX" ] && wrap=0                 # уже в tmux
+[ -t 0 ] && [ -t 1 ] || wrap=0           # нет терминала — headless
+# Про чужие сабкоманды мы не знаем ничего, но одноразовые флаги универсальны:
+# открывать tmux ради --version было бы издевательством.
+for a in "$@"; do
+  case "$a" in --version|-V|--help|-h) wrap=0 ;; esac
+done
+command -v tmux >/dev/null 2>&1 || wrap=0
+
+if [ "$wrap" = 0 ]; then
+  JARVIS_SHIM=1 export JARVIS_SHIM
+  exec "$REAL" "$@"
+fi
+
+# --- обёртка в tmux ---
+CONF="$JARVIS_DIR/tmux.conf"
+[ -f "$CONF" ] && CONF_OPT="-f $CONF" || CONF_OPT=''
+NAME="$(basename -- "$PWD" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-32)$$"
+
+SELF="$SHIM_DIR/$(basename -- "$0")"
+quoted=''
+for a in "$SELF" --jarvis-run "$REAL" "$@"; do
+  q=$(printf '%s' "$a" | sed "s/'/'\\\\''/g")
+  quoted="$quoted '$q'"
+done
+
+JARVIS_SHIM=1 export JARVIS_SHIM
+CMD="exec$quoted"
+
+CC=''
+[ "$TERM_PROGRAM" = "iTerm.app" ] && CC='-CC'
+
+# shellcheck disable=SC2086  # $CC и $CONF_OPT должны расщепляться
+exec tmux $CC -L jarvis $CONF_OPT new-session -s "$NAME" "$CMD"

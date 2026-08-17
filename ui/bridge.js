@@ -5,13 +5,57 @@
  * изменений. Требует withGlobalTauri (см. tauri.conf.json). */
 
 (() => {
-  const { invoke } = window.__TAURI__.core;
+  const raw = window.__TAURI__.core.invoke;
+
+  /**
+   * Вызов команды с присмотром.
+   *
+   * Обещание, которое не завершается ни успехом, ни отказом, — худший вид
+   * поломки: экран пуст, ошибок нет, ждать можно вечно. Так бывает, когда
+   * команда на той стороне паникует: задача умирает, и ответить уже некому.
+   * Сам вызов не трогаем — только замечаем вслух, что ответа нет.
+   */
+  const invoke = (cmd, args) => {
+    const p = raw(cmd, args);
+    let done = false;
+    const stop = () => { done = true; };
+    p.then(stop, stop);
+    setTimeout(() => {
+      if (done) return;
+      try { raw('ui_error', { place: 'invoke', message: `команда ${cmd} не ответила за 10 с` }); } catch (e) { /* тишина */ }
+    }, 10_000);
+    return p;
+  };
   const { listen } = window.__TAURI__.event;
 
   const on = (event, cb) => { listen(event, (e) => cb(e.payload)); };
 
   // собственный светофор оконного режима: декораций нет, кнопки рисуем сами
   const self = () => window.__TAURI__.window.getCurrentWindow();
+
+  /* Отказ оконного вызова — в лог, не в тишину. Кнопки светофора уже были
+   * декорацией по вине ACL: вызов отклонялся политикой разрешений, отказ
+   * обещания глотался, и снаружи это выглядело как «не работают». Боковая
+   * ветка catch помечает отказ обработанным, но само обещание возвращается
+   * как есть — свои обработчики вызывающих продолжают работать. */
+  const guard = (p, what) => {
+    p.catch((e) => report(`window.${what}`, e));
+    return p;
+  };
+
+  // Ошибки панели уезжают в общий лог: белый экран это почти всегда
+  // исключение, оборвавшее отрисовку, и видеть его только в девтулзах —
+  // значит не видеть вовсе.
+  const report = (place, message) => {
+    try { invoke('ui_error', { place, message: String(message) }); } catch (e) { /* лог не должен ронять панель */ }
+  };
+  window.addEventListener('error', (e) => {
+    report(`${e.filename || '?'}:${e.lineno || 0}`, (e.error && e.error.stack) || e.message);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e.reason;
+    report('promise', (r && r.stack) || (r && r.message) || r);
+  });
 
   window.jarvis = {
     onState: (cb) => on('state', cb),
@@ -21,17 +65,63 @@
     clearFinished: () => invoke('state_clear'),
     hidePanel: () => invoke('panel_hide'),
     getSettings: () => invoke('settings_get'),
+    // удалённые узлы (спека 2026-08-05): список, добавление, удаление, проверка связи
+    remotesList: () => invoke('remotes_list'),
+    remotesAdd: (cfg) => invoke('remotes_add', { cfg }),
+    remotesRemove: (name) => invoke('remotes_remove', { name }),
+    remotesTest: (name) => invoke('remotes_test', { name }),
+    // установка узла с нуля: разведка машины, сама установка (ход едет
+    // событиями) и публичный ssh-ключ для машин, куда доступа ещё нет
+    remotesPreflight: (sshHost, jarvisDir) => invoke('remotes_preflight', { sshHost, jarvisDir }),
+    remotesInstall: (cfg) => invoke('remotes_install', { cfg }),
+    remotesSshKey: (create) => invoke('remotes_ssh_key', { create }),
+    // разовый вход по паролю: кладём наш ключ в authorized_keys той машины
+    remotesSshAuthorize: (sshHost, password) => invoke('remotes_ssh_authorize', { sshHost, password }),
+    onRemoteInstallStep: (cb) => on('remote_install_progress', cb),
+    onRemoteInstallDone: (cb) => on('remote_install_done', cb),
+    // режим «Циклы»: рутина, которую агент крутит сам
+    loopsGet: () => invoke('loops_get'),
+    loopsDraft: (template) => invoke('loops_draft', { template }),
+    loopsCatalog: () => invoke('loops_catalog'),
+    // режим «Связка»: руки над одним проектом + очередь слияний
+    bundleGet: () => invoke('bundle_get'),
+    bundleDraft: () => invoke('bundle_draft'),
+    bundleSave: (item) => invoke('bundle_save', { item }),
+    bundleStart: (id) => invoke('bundle_start', { id }),
+    bundleAddHand: (id, task, name) => invoke('bundle_add_hand', { id, task, name }),
+    bundlePause: (id, on) => invoke('bundle_pause', { id, on }),
+    bundleMerge: (id, hand) => invoke('bundle_merge', { id, hand }),
+    bundleRemove: (id) => invoke('bundle_remove', { id }),
+    bundlePlaces: (machine) => invoke('bundle_places', { machine }),
+    bundleBrowse: (machine, path) => invoke('bundle_browse', { machine, path }),
+    onBundleState: (cb) => on('bundle-state', cb),
+    loopsCompose: (text, item) => invoke('loops_compose', { text, item }),
+    // свои агенты: qwen/opencode/внутренние CLI — реестр в настройках
+    agentsList: () => invoke('agents_list'),
+    agentsSave: (agents) => invoke('agents_save', { agents }),
+    loopsSave: (item) => invoke('loops_save', { item }),
+    loopsRemove: (id) => invoke('loops_remove', { id }),
+    loopsStart: (id) => invoke('loops_start', { id }),
+    loopsStop: (id) => invoke('loops_stop', { id }),
+    loopsIntervene: (id, text) => invoke('loops_intervene', { id, text }),
+    loopsAnswer: (id, answer) => invoke('loops_answer', { id, answer }),
+    loopsReview: (id, n, accept, comment) => invoke('loops_review', { id, n, accept, comment }),
+    loopsResume: (id, extraTokens) => invoke('loops_resume', { id, extraTokens }),
+    loopsDiff: (id) => invoke('loops_diff', { id }),
+    onLoopsState: (cb) => on('loops-state', cb),
+
     // тема/краска сменились в другом окне (демон рассылает всем)
     onAppearance: (cb) => on('appearance', cb),
-    winMinimize: () => self().minimize(),
-    winZoom: () => self().toggleMaximize(),
-    winClose: () => self().close(),  // CloseRequested перехвачен → просто прячет
+    reportError: report,
+    winMinimize: () => guard(self().minimize(), 'minimize'),
+    winZoom: () => guard(self().toggleMaximize(), 'toggleMaximize'),
+    winClose: () => guard(self().close(), 'close'),  // CloseRequested перехвачен → просто прячет
     // зелёная кнопка macOS — фуллскрин (зум под Alt, как в системе)
-    winIsFullscreen: () => self().isFullscreen(),
-    winToggleFullscreen: async () => {
+    winIsFullscreen: () => guard(self().isFullscreen(), 'isFullscreen'),
+    winToggleFullscreen: () => guard((async () => {
       const w = self();
       await w.setFullscreen(!(await w.isFullscreen()));
-    },
+    })(), 'setFullscreen'),
     // светофор горит только у активного окна — как у системных кнопок
     onWinFocus: (cb) => { self().onFocusChanged(({ payload }) => cb(!!payload)); },
     setSettings: (patch) => invoke('settings_set', { patch }),
@@ -41,6 +131,16 @@
     openFile: (sessionId, path, reveal) => invoke('file_open', { sessionId, path, reveal: !!reveal }),
     // вьюер документов (спека 2026-07-18 §3.1): чтение файла из фактов сессии
     readFile: (sessionId, path) => invoke('file_read', { sessionId, path }),
+    // свод правок задачи: список файлов, дифф, приём и откат (changes.rs)
+    sessionChanges: (sessionId) => invoke('session_changes', { sessionId }),
+    sessionChangeDiff: (sessionId, path) => invoke('session_change_diff', { sessionId, path }),
+    sessionCommit: (sessionId, message, paths) => invoke('session_commit', { sessionId, message, paths }),
+    sessionRevert: (sessionId, path) => invoke('session_revert', { sessionId, path }),
+    sessionPush: (sessionId) => invoke('session_push', { sessionId }),
+    sessionReview: (sessionId) => invoke('session_review', { sessionId }),
+    sessionSearch: (sessionId, query) => invoke('session_search', { sessionId, query }),
+    previewOpen: (url) => invoke('preview_open', { url }),
+    sessionTouched: (sessionId, path) => invoke('session_touched', { sessionId, path }),
     // дифф файла для таба «Изменения» (§3.2): git-ханки или mode:"none"
     diffFile: (sessionId, path) => invoke('file_diff', { sessionId, path }),
     // внешняя http(s)-ссылка из отрендеренного дока → системный браузер
@@ -48,7 +148,17 @@
     onChatAppend: (cb) => on('chat:append', cb),
     onChatSummary: (cb) => on('chat:summary', cb),
     focusTerminal: (sessionId) => invoke('terminal_focus', { sessionId }),
-    launchSession: (cwd, agent, sessionId) => invoke('session_launch', { cwd: cwd ?? null, agent, sessionId: sessionId ?? null }),
+    // machine: 'local' | имя узла — где запускать (вкладка «Проекты», шаг 1)
+    // opts: { isolate: bool, mode: 'ask'|'plan'|'yolo' } — свойства ЗАДАЧИ,
+    // а не общей настройки: разведать чужой код и переписать свой требуют
+    // разного доверия
+    launchSession: (cwd, agent, sessionId, machine, opts) => invoke('session_launch', {
+      cwd: cwd ?? null, agent, sessionId: sessionId ?? null, machine: machine ?? null,
+      isolate: !!(opts && opts.isolate), mode: (opts && opts.mode) || 'ask',
+      task: (opts && opts.task) || null,
+      container: !!(opts && opts.container),
+    }),
+    machinesList: () => invoke('machines_list'),
     sendReply: (sessionId, text) => invoke('session_reply', { sessionId, text }),
     // вставленная картинка → временный файл; путь уйдёт агенту в промпте
     saveImage: (dataBase64, ext) => invoke('session_save_image', { dataBase64, ext }),
@@ -68,6 +178,8 @@
     setModel: (sessionId, model) => invoke('session_set_model', { sessionId, model }),
     setEffort: (sessionId, level) => invoke('session_set_effort', { sessionId, level }),
     setPin: (sessionId, pinned) => invoke('session_set_pin', { sessionId, pinned }),
+    // завершить сессию: закрыть пану, если жива, и убрать из списка в любом случае
+    killSession: (sessionId) => invoke('session_kill', { sessionId }),
     getMeta: () => invoke('app_meta'),
     updateCheckInstall: () => invoke('update_check_install'),
     relaunch: () => invoke('app_relaunch'),
@@ -78,7 +190,7 @@
     getLimit: () => invoke('limit_get'),
     onLimitState: (cb) => on('limit-state', cb),
     getSessionUsage: (id) => invoke('usage_session', { id }),
-    getHistory: () => invoke('history_get'),
+    getHistory: (machine) => invoke('history_get', { machine: machine ?? null }),
     // интеграция и модели (настройки)
     integrationGet: () => invoke('integration_get'),
     integrationRemove: () => invoke('integration_remove'),

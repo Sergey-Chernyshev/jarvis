@@ -67,6 +67,9 @@ pub trait Backend: Send + Sync {
     /// Прочитать хвост транскрипта в массив записей (Claude: read+chain;
     /// Codex: просто read — лог линейный).
     fn read_entries(&self, file: &Path, max_bytes: u64) -> Vec<Value>;
+    /// То же над уже прочитанным текстом. Транскрипт удалённой сессии приезжает
+    /// по HTTP с узла: файла на этой машине нет, а разбор нужен тот же самый.
+    fn entries_from_text(&self, text: &str) -> Vec<Value>;
     fn to_chat_items(&self, entry: &Value) -> Vec<ChatItem>;
     fn extract_title(&self, entries: &[Value]) -> Option<String>;
     fn extract_branch(&self, entries: &[Value]) -> Option<String>;
@@ -99,6 +102,9 @@ impl Backend for ClaudeBackend {
     }
     fn read_entries(&self, file: &Path, max_bytes: u64) -> Vec<Value> {
         crate::transcript::chain_from_entries(crate::transcript::read_recent_entries(file, max_bytes))
+    }
+    fn entries_from_text(&self, text: &str) -> Vec<Value> {
+        crate::transcript::chain_from_entries(crate::transcript::entries_from_text(text))
     }
     fn to_chat_items(&self, entry: &Value) -> Vec<ChatItem> {
         crate::transcript::to_chat_items(entry)

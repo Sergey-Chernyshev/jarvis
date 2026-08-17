@@ -562,3 +562,425 @@ body {
   .j-wave.is-live i { animation: none; }
   * { transition-duration: 1ms !important; }
 }
+
+/* ================= режим «Циклы» =================
+ *
+ * Одна краска, как и везде: состояния различаются формой и весом. Цветной
+ * светофор на журнале из двадцати итераций превращается в шум, и человек
+ * перестаёт замечать ровно ту строку, ради которой открыл экран. */
+
+.loops { height: 100%; overflow: hidden; }
+.lp-wrap { display: flex; height: 100%; min-height: 0; }
+.lp-side {
+  width: 232px; flex: 0 0 232px; padding: 10px;
+  overflow-y: auto; border-right: 1px solid var(--hair);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.lp-main { flex: 1; min-width: 0; overflow-y: auto; padding: 18px 22px 28px; }
+
+.lp-row { padding: 9px 11px; border-radius: var(--r-chip); cursor: default; position: relative; }
+.lp-row:hover { background: var(--surface-2); }
+.lp-row.active { background: var(--accent-soft); }
+.lp-row-name { font: 500 13.5px/1.3 var(--font); color: var(--ink); }
+.lp-row-sub { font: 400 11.5px/1.4 var(--font); color: var(--ink-dim); margin-top: 2px; }
+/* Идущий цикл — пульсирующая точка: он единственный, что меняется сам собой. */
+.lp-row.running .lp-row-name::before {
+  content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 6px;
+  border-radius: 50%; background: var(--accent); animation: lpPulse 1.6s ease-in-out infinite;
+}
+@keyframes lpPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.lp-row.needs-you .lp-row-name { font-weight: 600; }
+.lp-dot {
+  position: absolute; top: 12px; right: 10px;
+  width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+}
+.lp-new { margin-top: auto; height: 34px; font-size: 13px; }
+
+.lp-h1 { font: 600 19px/1.25 var(--font); color: var(--ink); }
+.lp-h2 { font: 400 13px/1.5 var(--font); color: var(--ink-dim); margin: 3px 0 16px; }
+.lp-sub { font: 500 12px/1.4 var(--font); color: var(--ink-dim); margin: 14px 0 6px; }
+.lp-hint { font: 400 11.5px/1.45 var(--font); color: var(--ink-faint); }
+.lp-empty { font: 400 13px/1.5 var(--font); color: var(--ink-faint); padding: 10px 0; }
+
+.lp-note {
+  margin-bottom: 12px; padding: 9px 12px; border-radius: var(--r-chip);
+  font: 400 12.5px/1.45 var(--font); background: var(--surface-2); color: var(--ink);
+}
+.lp-note.bad { background: var(--danger-soft, var(--surface-2)); color: var(--danger, var(--ink)); }
+
+/* --- библиотека шаблонов --- */
+.lp-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); gap: 10px; }
+.lp-card {
+  padding: 13px 14px; border-radius: var(--r-card);
+  background: var(--surface-2); cursor: default;
+  transition: background var(--dur) ease;
+}
+.lp-card:hover { background: var(--accent-soft); }
+.lp-card-name { font: 500 14px/1.3 var(--font); color: var(--ink); }
+.lp-card-hint { font: 400 11.5px/1.45 var(--font); color: var(--ink-dim); margin-top: 4px; }
+.lp-scratch { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+
+/* --- конструктор --- */
+.lp-step { margin: 16px 0; padding: 14px 16px; border-radius: var(--r-card); background: var(--surface-2); }
+.lp-step-h { display: flex; align-items: baseline; gap: 9px; margin-bottom: 10px; }
+.lp-step-n {
+  width: 20px; height: 20px; flex: 0 0 20px; border-radius: 50%;
+  background: var(--accent); color: var(--on-accent);
+  font: 600 11.5px/20px var(--font); text-align: center;
+}
+.lp-step-t { font: 600 14px/1.3 var(--font); color: var(--ink); }
+.lp-step-s { font: 400 12px/1.4 var(--font); color: var(--ink-dim); }
+.lp-step-b { display: flex; flex-direction: column; gap: 10px; }
+
+.lp-field { display: flex; flex-direction: column; gap: 4px; }
+.lp-field-label { font: 500 12px/1.3 var(--font); color: var(--ink-dim); }
+.lp-input {
+  height: 34px; padding: 0 11px; width: 100%;
+  border: 1px solid var(--hair); border-radius: var(--r-chip);
+  font: 400 13px/1 var(--font); color: var(--ink); background: var(--surface);
+  appearance: none; outline: none;
+}
+.lp-input:focus { border-color: var(--accent); }
+.lp-input.narrow { width: 130px; flex: 0 0 130px; }
+textarea.lp-input { height: auto; padding: 9px 11px; line-height: 1.45; resize: vertical; }
+.lp-check { display: flex; align-items: center; gap: 8px; font: 400 13px/1.4 var(--font); color: var(--ink); }
+.lp-check .lp-hint { margin-left: 4px; }
+.lp-gates { display: flex; flex-direction: column; gap: 8px; }
+.lp-gate { display: flex; gap: 8px; align-items: center; }
+.j-btn.lp-ghost { height: 32px; padding: 0 13px; font-size: 13px; background: transparent; box-shadow: inset 0 0 0 1px var(--hair); }
+.lp-wake { display: flex; gap: 8px; align-items: center; }
+.lp-actions { display: flex; gap: 9px; margin-top: 16px; flex-wrap: wrap; }
+
+.lp-problems { margin-top: 14px; display: flex; flex-direction: column; gap: 5px; }
+.lp-problem {
+  font: 400 12.5px/1.45 var(--font); color: var(--ink-dim);
+  padding-left: 14px; position: relative;
+}
+.lp-problem::before { content: '·'; position: absolute; left: 4px; color: var(--ink-faint); }
+
+/* --- пульт --- */
+.lp-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; margin: 6px 0 8px; }
+.lp-metric { padding: 11px 13px; border-radius: var(--r-card); background: var(--surface-2); }
+.lp-metric-v { font: 600 19px/1.15 var(--font); color: var(--ink); font-variant-numeric: tabular-nums; }
+.lp-metric-l { font: 400 11.5px/1.4 var(--font); color: var(--ink-dim); margin-top: 3px; }
+.lp-metric-s { font: 400 11px/1.4 var(--font); color: var(--ink-faint); margin-top: 1px; }
+
+.lp-journal { margin-top: 6px; }
+.lp-it {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 8px 10px; border-radius: var(--r-chip); cursor: default;
+}
+.lp-it:hover { background: var(--surface-2); }
+.lp-it-n { font: 500 12px/1 var(--font); color: var(--ink-faint); width: 22px; flex: 0 0 22px; font-variant-numeric: tabular-nums; }
+.lp-it-sum { flex: 1; min-width: 0; font: 400 13px/1.4 var(--font); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-it-v { font: 400 11.5px/1 var(--font); color: var(--ink-dim); }
+/* Красное — только настоящая поломка. Возврат критика это нормальный ход
+ * работы, а не авария, и красить его в тревогу значит обесценить тревогу. */
+.lp-it-v[data-kind='bad'] { color: var(--danger, var(--ink)); }
+.lp-it-v[data-kind='ok'] { color: var(--accent-ink, var(--ink-dim)); }
+.lp-it-t { font: 400 11.5px/1 var(--font); color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+.lp-it-eye { font: 500 11px/1 var(--font); color: var(--accent-ink, var(--ink)); }
+
+.lp-intervene { margin-top: 14px; }
+.lp-intervene .lp-input { height: 38px; }
+
+.lp-stopped { margin: 12px 0; padding: 13px 15px; border-radius: var(--r-card); background: var(--surface-2); }
+.lp-stopped-h { font: 600 14px/1.3 var(--font); color: var(--ink); }
+.lp-stopped-b { font: 400 12.5px/1.5 var(--font); color: var(--ink-dim); margin-top: 5px; }
+
+.lp-ask {
+  margin: 10px 0; padding: 14px 16px; border-radius: var(--r-card);
+  background: var(--accent-soft); font: 400 14px/1.5 var(--font); color: var(--ink);
+}
+.lp-answer { margin-top: 10px; }
+
+/* --- экран итерации --- */
+.lp-summary { font: 400 14.5px/1.5 var(--font); color: var(--ink); margin: 4px 0 10px; }
+.lp-files { display: flex; flex-direction: column; gap: 2px; }
+.lp-file { font: 400 12px/1.5 var(--mono, var(--font)); color: var(--ink-dim); }
+.lp-gate-run { padding: 8px 10px; border-radius: var(--r-chip); background: var(--surface-2); margin-bottom: 6px; }
+.lp-gate-n { font: 500 12.5px/1.4 var(--font); color: var(--ink); }
+.lp-gate-v { float: right; font: 500 12.5px/1.4 var(--font); color: var(--ink-dim); }
+.lp-gate-run[data-ok='нет'] .lp-gate-v { color: var(--danger, var(--ink)); }
+.lp-gate-o {
+  margin: 6px 0 0; padding: 8px; border-radius: var(--r-chip);
+  background: var(--surface); font: 400 11.5px/1.5 var(--mono, monospace);
+  color: var(--ink-dim); max-height: 180px; overflow: auto; white-space: pre-wrap;
+}
+.lp-critic { margin: 12px 0; font: 400 13px/1.5 var(--font); color: var(--ink); }
+.lp-diff {
+  margin: 0; padding: 11px; border-radius: var(--r-card);
+  background: var(--surface-2); font: 400 11.5px/1.55 var(--mono, monospace);
+  color: var(--ink-dim); max-height: 340px; overflow: auto; white-space: pre;
+}
+
+/* Вход в конструктор — первая строка колонки, а не кнопка, прижатая к низу:
+ * новый цикл начинают чаще, чем удаляют старый. */
+.lp-new { width: 100%; height: 34px; justify-content: center; font-size: 13px; margin-bottom: 4px; }
+.lp-side-h {
+  font: 500 11px/1.4 var(--font); color: var(--ink-faint);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  margin: 10px 4px 2px;
+}
+.lp-row.tmpl .lp-row-name { color: var(--ink-dim); font-weight: 400; }
+
+/* --- конструктор циклов: сегмент агента, каталог, «как это будет работать» --- */
+.loops { position: relative; }
+.lp-headrow { display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: start; margin-bottom: 4px; }
+.lp-withrow { display: flex; gap: 8px; align-items: center; }
+.lp-withrow .lp-input { flex: 1; min-width: 0; }
+.lp-gate-add { display: flex; gap: 8px; }
+
+.lp-seg { display: inline-flex; background: var(--surface-2); border-radius: var(--r-chip); padding: 3px; gap: 2px; }
+.lp-seg button {
+  appearance: none; border: 0; cursor: default;
+  padding: 6px 14px; border-radius: calc(var(--r-chip) - 3px);
+  font: 500 13px/1 var(--font); color: var(--ink-dim); background: transparent;
+}
+.lp-seg button.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+
+/* Оверлей каталога. Лежит внутри режима, а не поверх всего окна: каталог —
+ * часть конструктора, и закрывать собой чужие экраны ему не положено. */
+.lp-shade {
+  position: absolute; inset: 0; z-index: 30;
+  background: rgba(18, 24, 19, 0.38);
+  display: flex; align-items: center; justify-content: center; padding: 26px;
+}
+.lp-cat {
+  width: min(680px, 100%); max-height: 100%; overflow-y: auto;
+  background: var(--surface); border-radius: var(--r-card);
+  padding: 16px 18px 20px; box-shadow: 0 18px 48px rgba(0,0,0,.22);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.lp-cat-head { display: flex; align-items: center; justify-content: space-between; }
+.lp-cat-title { font: 600 15px/1.3 var(--font); color: var(--ink); }
+.lp-cat-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.lp-chip {
+  appearance: none; border: 0; cursor: default;
+  padding: 5px 12px; border-radius: 999px;
+  font: 500 12px/1 var(--font); color: var(--ink-dim); background: var(--surface-2);
+}
+.lp-chip.on { background: var(--accent-soft); color: var(--accent-ink, var(--ink)); }
+.lp-cat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px; }
+.lp-cat-card {
+  padding: 11px 13px; border-radius: var(--r-card);
+  background: var(--surface-2); cursor: default;
+  transition: background var(--dur) ease;
+}
+.lp-cat-card:hover { background: var(--accent-soft); }
+.lp-cat-name { font: 500 13.5px/1.3 var(--font); color: var(--ink); }
+.lp-cat-hint { font: 400 11.5px/1.45 var(--font); color: var(--ink-dim); margin-top: 2px; }
+.lp-cat-cmd {
+  margin-top: 7px; font: 400 11px/1.5 var(--mono, monospace); color: var(--ink-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Итог конфигурации человеческим языком — главный съёмщик когнитивной
+ * нагрузки: форма отвечает «что настроить», абзац — «что произойдёт». */
+.lp-explain {
+  margin-top: 16px; padding: 13px 15px;
+  border-radius: var(--r-card); background: var(--accent-soft);
+}
+.lp-explain-label {
+  font: 500 11px/1.4 var(--font); color: var(--accent-ink, var(--ink-dim));
+  text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 5px;
+}
+.lp-explain-text { font: 400 13.5px/1.55 var(--font); color: var(--ink); }
+
+/* «Опиши словами»: вход в конструктор для тех, кто думает задачей, а не полями. */
+.lp-ask {
+  margin: 12px 0 4px; padding: 14px 16px;
+  border-radius: var(--r-card); background: var(--surface-2);
+}
+.lp-ask-h { display: flex; align-items: baseline; gap: 9px; margin-bottom: 8px; flex-wrap: wrap; }
+.lp-ask-title { font: 600 14px/1.3 var(--font); color: var(--ink); }
+.lp-ask-sub { font: 400 12px/1.4 var(--font); color: var(--ink-dim); }
+textarea.lp-ask-text { width: 100%; min-height: 66px; }
+.lp-ask-row { display: flex; align-items: center; gap: 10px; margin-top: 9px; flex-wrap: wrap; }
+
+/* ================= режим «Связка» ================= */
+.bundle { height: 100%; overflow-y: auto; }
+.bd-wrap { padding: 18px 22px 28px; }
+.bd-note {
+  margin-bottom: 12px; padding: 9px 12px; border-radius: var(--r-chip);
+  font: 400 12.5px/1.45 var(--font); background: var(--surface-2); color: var(--ink);
+}
+.bd-note.bad { background: var(--danger-soft, var(--surface-2)); color: var(--danger, var(--ink)); }
+
+/* --- старт --- */
+.bd-start-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.bd-field { display: flex; flex-direction: column; gap: 4px; }
+.bd-label { font: 500 12px/1.3 var(--font); color: var(--ink-dim); }
+.bd-hands { display: flex; flex-direction: column; gap: 10px; }
+.bd-hand-row { padding: 10px 12px; border-radius: var(--r-card); background: var(--surface-2); }
+.bd-hand-head { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; }
+.bd-hand-n {
+  width: 20px; height: 20px; flex: 0 0 20px; border-radius: 50%;
+  background: var(--accent); color: var(--on-accent);
+  font: 600 11.5px/20px var(--font); text-align: center;
+}
+.bd-task { width: 100%; }
+
+/* --- пульт --- */
+.bd-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.bd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; margin-top: 12px; }
+.bd-card {
+  padding: 12px 14px; border-radius: var(--r-card); background: var(--surface-2);
+  transition: background var(--dur) ease;
+}
+.bd-card.open { cursor: default; }
+.bd-card.open:hover { background: var(--accent-soft); }
+.bd-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.bd-card-name { font: 600 14px/1.3 var(--font); color: var(--ink); }
+.bd-card-state { font: 500 11px/1.3 var(--font); color: var(--ink-dim); }
+/* Исключения — единственное, что выделено: за ними и приходят на пульт. */
+.bd-card[data-state='conflict'] .bd-card-state { color: var(--danger, var(--ink)); }
+.bd-card[data-state='ready'] .bd-card-state { color: var(--accent-ink, var(--ink)); }
+.bd-card[data-state='merged'] { opacity: 0.62; }
+.bd-card-line { font: 400 12.5px/1.5 var(--font); color: var(--ink); margin-top: 5px; }
+.bd-card-meta { font: 400 11.5px/1.4 var(--mono, monospace); color: var(--ink-faint); margin-top: 6px; }
+
+.bd-add { display: flex; gap: 8px; align-items: flex-start; margin-top: 12px; }
+.bd-add .bd-task { flex: 1; }
+
+.bd-bottom { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 20px; margin-top: 18px; }
+@media (max-width: 760px) { .bd-bottom { grid-template-columns: 1fr; } }
+
+.bd-queue, .bd-side { min-width: 0; }
+.bd-qrow {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 11px; border-radius: var(--r-chip); background: var(--surface-2); margin-top: 6px;
+}
+.bd-qrow.out { opacity: 0.85; }
+.bd-qpos { font: 600 12px/1 var(--font); color: var(--accent-ink, var(--ink-dim)); flex: 0 0 auto; }
+.bd-qname { flex: 1; min-width: 0; font: 400 13px/1.4 var(--font); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bd-merge { height: 34px; padding: 0 14px; font-size: 13px; }
+
+.bd-hot { display: flex; align-items: baseline; gap: 8px; padding: 4px 0; }
+.bd-hot-file { font: 400 12px/1.4 var(--mono, monospace); color: var(--ink); }
+.bd-ev { display: flex; gap: 8px; padding: 3px 0; align-items: baseline; }
+.bd-ev-t { font: 400 11px/1.4 var(--font); color: var(--ink-faint); flex: 0 0 34px; font-variant-numeric: tabular-nums; }
+.bd-ev-x { font: 400 12px/1.45 var(--font); color: var(--ink-dim); }
+
+/* --- обзор директорий связки --- */
+.bd-dir-path { font: 400 12.5px/1.5 var(--mono, monospace); color: var(--ink); word-break: break-all; }
+.bd-dir-act { margin-top: 0; align-items: center; }
+.bd-dir-new { flex: 1; min-width: 200px; }
+.bd-dir-list { display: flex; flex-direction: column; max-height: 300px; overflow-y: auto; }
+.bd-dir-row {
+  padding: 7px 10px; border-radius: var(--r-chip); cursor: default;
+  font: 400 13px/1.4 var(--mono, monospace); color: var(--ink);
+}
+.bd-dir-row:hover { background: var(--accent-soft); }
+.bd-dir-row.up { color: var(--ink-dim); font-family: var(--font); }
+.bd-dir-known { display: flex; flex-direction: column; gap: 6px; }
+.bd-dir-known .lp-chip { align-self: flex-start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+
+/* Изменения задачи (changes.js): свод правок агента поверх чата.
+   Строка файла — одна: путь, состояние, счётчики, откат. Читается взглядом
+   сверху вниз, поэтому колонки фиксированы справа, а путь тянется. */
+.chg { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; overflow-y: auto; }
+.chg-head { display: flex; align-items: center; gap: 8px; }
+.chg-title { font: 600 13.5px/1.3 var(--font); color: var(--ink); }
+.chg-branch {
+  font: 400 12px/1.3 var(--mono, monospace); color: var(--ink-dim);
+  padding: 2px 7px; border-radius: var(--r-chip); background: var(--surface-2);
+}
+.chg-sum { font: 400 12.5px/1.3 var(--font); color: var(--ink-dim); }
+.chg-list { display: flex; flex-direction: column; }
+.chg-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: var(--r-chip);
+}
+.chg-row:hover { background: var(--accent-soft); }
+.chg-row.open { background: var(--accent-soft); }
+.chg-path {
+  flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 400 13px/1.5 var(--mono, monospace); color: var(--ink);
+  background: none; border: 0; cursor: default; padding: 0;
+}
+.chg-state { font: 400 12px/1.3 var(--font); color: var(--ink-dim); }
+.chg-counts { font: 400 12px/1.3 var(--mono, monospace); color: var(--ink-dim); min-width: 74px; text-align: right; }
+.chg-revert {
+  font: 400 12px/1.3 var(--font); color: var(--ink-dim);
+  background: none; border: 0; padding: 2px 6px; border-radius: var(--r-chip); cursor: default;
+}
+.chg-revert:hover { background: var(--surface-2); color: var(--ink); }
+.chg-diff { margin: 4px 0 10px 26px; overflow-x: auto; }
+.chg-empty { font: 400 13px/1.5 var(--font); color: var(--ink-dim); padding: 8px 2px; }
+.chg-foot { display: flex; align-items: center; gap: 8px; padding-top: 4px; }
+.chg-msg {
+  flex: 1; min-width: 0; padding: 7px 10px; border-radius: var(--r-chip);
+  background: var(--surface-2); border: 1px solid transparent; color: var(--ink);
+  font: 400 13px/1.4 var(--font);
+}
+.chg-msg:focus { outline: none; border-color: var(--accent); }
+.chg-accept {
+  padding: 7px 12px; border-radius: var(--r-chip); border: 0; cursor: default;
+  background: var(--accent); color: var(--on-accent, #fff); font: 600 13px/1.2 var(--font);
+}
+.chg-accept[disabled] { opacity: 0.6; }
+.chg-review { padding: 8px 10px; border-radius: var(--r-chip); background: var(--surface-2); display: flex; flex-direction: column; gap: 4px; }
+.chg-verdict { font: 600 12.5px/1.3 var(--font); color: var(--ink); }
+.chg-reviewtext { font: 400 12.5px/1.55 var(--font); color: var(--ink-dim); white-space: pre-wrap; }
+.chg-review-btn {
+  padding: 7px 10px; border-radius: var(--r-chip); border: 0; cursor: default;
+  background: var(--surface-2); color: var(--ink); font: 400 13px/1.2 var(--font);
+}
+.chg-review-btn[disabled] { opacity: 0.6; }
+
+/* Как запускать задачу: песочница и режим разрешений (Air-подобный выбор). */
+.taskopts { display: flex; gap: 6px; align-items: center; padding: 6px 2px 2px; flex-wrap: wrap; }
+.taskopt {
+  padding: 4px 9px; border-radius: var(--r-chip); border: 1px solid var(--surface-2);
+  background: transparent; color: var(--ink-dim); font: 400 12px/1.3 var(--font); cursor: default;
+}
+.taskopt:hover { color: var(--ink); }
+.taskopt.on { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); }
+.taskinput {
+  flex: 1; min-width: 180px; padding: 5px 9px; border-radius: var(--r-chip);
+  background: var(--surface-2); border: 1px solid transparent; color: var(--ink);
+  font: 400 12.5px/1.4 var(--font);
+}
+.taskinput:focus { outline: none; border-color: var(--accent); }
+
+/* Поиск по проекту (search.js). */
+.srch { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; overflow-y: auto; }
+.srch-head { display: flex; gap: 8px; align-items: center; }
+.srch-input {
+  flex: 1; min-width: 0; padding: 7px 10px; border-radius: var(--r-chip);
+  background: var(--surface-2); border: 1px solid transparent; color: var(--ink); font: 400 13px/1.4 var(--font);
+}
+.srch-input:focus { outline: none; border-color: var(--accent); }
+.srch-go { padding: 7px 12px; border-radius: var(--r-chip); border: 0; cursor: default;
+  background: var(--accent); color: var(--on-accent, #fff); font: 600 13px/1.2 var(--font); }
+.srch-sum { font: 400 12.5px/1.4 var(--font); color: var(--ink-dim); }
+.srch-file { display: flex; flex-direction: column; gap: 2px; padding-bottom: 6px; }
+.srch-path { align-self: flex-start; background: none; border: 0; padding: 2px 0; cursor: default;
+  font: 500 12.5px/1.4 var(--mono, monospace); color: var(--ink); }
+.srch-path:hover { color: var(--accent); }
+.srch-line { display: flex; gap: 8px; padding: 1px 0 1px 10px; }
+.srch-no { min-width: 42px; text-align: right; font: 400 12px/1.5 var(--mono, monospace); color: var(--ink-dim); }
+.srch-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre;
+  font: 400 12px/1.5 var(--mono, monospace); color: var(--ink-dim); }
+.diff-row.clickable:hover { background: var(--accent-soft); }
+.chg-note {
+  width: 100%; margin: 4px 0 8px; padding: 6px 9px; border-radius: var(--r-chip);
+  background: var(--surface-2); border: 1px solid var(--accent); color: var(--ink);
+  font: 400 12.5px/1.4 var(--font);
+}
+.chg-note:focus { outline: none; }
+.chg-touched { margin: 2px 0 0 26px; font: 400 12px/1.5 var(--font); color: var(--ink-dim); }
+
+/* Конструктор пайплайна (pipeline.js): шаги карточками, переходы строками. */
+.pl-editor { display: flex; flex-direction: column; gap: 10px; }
+.pl-step { position: relative; display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px; border-radius: var(--r-card, 10px); background: var(--surface-2); }
+.pl-step-h { display: flex; align-items: center; gap: 8px; }
+.pl-step-kind { font: 600 11.5px/1.2 var(--font); color: var(--ink-dim); text-transform: uppercase; letter-spacing: .04em; }
+.pl-step-b { display: flex; flex-direction: column; gap: 6px; }
+.pl-flows { display: flex; flex-direction: column; gap: 4px; }
+.pl-flow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pl-add, .pl-presets { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pl-start { position: absolute; top: -8px; left: 10px; padding: 1px 7px; border-radius: var(--r-chip);
+  background: var(--accent); color: var(--on-accent, #fff); font: 600 10.5px/1.5 var(--font); }

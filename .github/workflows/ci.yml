@@ -4,7 +4,10 @@ on:
   pull_request:
     branches: [master]
   push:
-    branches: [master]
+    # dev — интеграционная ветка: в неё сливают всё, что висит в PR, и
+    # проверять её надо так же, как master. Иначе смысл ветки теряется:
+    # по отдельности PR зелёные, а вместе могут и не собраться.
+    branches: [master, dev]
 
 # Отменяем устаревшие прогоны на той же ветке/PR.
 concurrency:
@@ -16,7 +19,7 @@ env:
 
 jobs:
   rust:
-    name: fmt · clippy · test
+    name: fmt · clippy · test (macOS)
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +34,7 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
 
@@ -60,3 +63,52 @@ jobs:
         run: >
           cargo test --manifest-path src-tauri/Cargo.toml
           --features wakeword-ort,whisper-native,stt-vad
+
+      # Узел удалённых агентов — отдельный крейт воркспейса, и фичи приложения к
+      # нему неприменимы, поэтому своим шагом. Он же проверяет главное свойство
+      # узла: что он собирается БЕЗ tauri и прочих macOS-зависимостей.
+      - name: Clippy · tests (узел)
+        run: >
+          cargo clippy --manifest-path src-tauri/node/Cargo.toml --all-targets &&
+          cargo test --manifest-path src-tauri/node/Cargo.toml
+
+  linux:
+    name: clippy · test · сборка (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cargo cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Tauri на Linux рисует через WebKitGTK, трей — через appindicator.
+      # cmake нужен whisper.cpp, alsa — cpal (микрофон и воспроизведение).
+      - name: Системные зависимости
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libasound2-dev libxdo-dev patchelf cmake
+
+      - name: Clippy
+        run: >
+          cargo clippy --manifest-path src-tauri/Cargo.toml
+          --features whisper-native --all-targets
+
+      - name: Tests
+        run: >
+          cargo test --manifest-path src-tauri/Cargo.toml
+          --features whisper-native
+
+      # Главная проверка ветки: бинарь под Linux действительно собирается.
+      - name: Сборка
+        run: >
+          cargo build --manifest-path src-tauri/Cargo.toml
+          --release --features whisper-native --bin jarvis

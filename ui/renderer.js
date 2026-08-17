@@ -7,6 +7,7 @@ const chatlogEl = document.getElementById('chatlog');
 const chatTitleEl = document.getElementById('chatTitle');
 const chatChannelEl = document.getElementById('chatChannel');
 const chatModelEl = document.getElementById('chatModel');
+const chatRemoteEl = document.getElementById('chatRemote');
 const chatDotEl = document.getElementById('chatDot');
 const settingsEl = document.getElementById('settings');
 const queryEl = document.getElementById('query');
@@ -35,6 +36,10 @@ const footerLeftEl = document.getElementById('footerLeft');
 const tabSessionsEl = document.getElementById('tabSessions');
 const tabSettingsEl = document.getElementById('tabSettings');
 const voicehistEl = document.getElementById('voicehist');
+const loopsEl = document.getElementById('loops');
+const tabLoopsEl = document.getElementById('tabLoops');
+const bundlePaneEl = document.getElementById('bundlePane');
+const tabBundleEl = document.getElementById('tabBundle');
 const tabVoiceEl = document.getElementById('tabVoice');
 
 const STATUS_LABEL = {
@@ -129,7 +134,9 @@ function setView(next) {
     chatSessionId = null;
   }
   if (view === 'question' && next !== 'question') qSessionId = null;
-  if (next === 'history' && view !== 'history') histProject = null; // вкладка всегда открывается со списка проектов
+  // вкладка всегда открывается с верхнего уровня: выбор машины (или сразу
+  // проекты локальной, если узлов не настроено)
+  if (next === 'history' && view !== 'history') { histProject = null; histMachine = null; histNewOpen = false; }
   view = next;
   closeActions();
   // Оконный режим (14h): список слева живёт всегда, поиск и вкладки — тоже.
@@ -147,6 +154,8 @@ function setView(next) {
   settingsEl.hidden = next !== 'settings';
   statsEl.hidden = next !== 'stats';
   voicehistEl.hidden = next !== 'voicehist';
+  loopsEl.hidden = next !== 'loops';
+  bundlePaneEl.hidden = next !== 'bundle';
   historyEl.hidden = next !== 'history';
   // чат и вопрос несут собственные нижние бары — парящий футер только тут.
   // В окне полоска не парит, а стоит в сетке под обеими колонками — она нужна всегда.
@@ -159,14 +168,64 @@ function setView(next) {
   tabStatsEl.classList.toggle('active', next === 'stats');
   tabHistoryEl.classList.toggle('active', next === 'history');
   tabVoiceEl.classList.toggle('active', next === 'voicehist');
+  tabLoopsEl.classList.toggle('active', next === 'loops');
+  tabBundleEl.classList.toggle('active', next === 'bundle');
   tabSessionsEl.classList.toggle('active', next === 'list' || next === 'chat');
-  if (next === 'settings') loadSettings();
-  if (next === 'stats') renderStats();
+  // Каждый раздел поднимается в своей обёртке: исключение в одном не должно
+  // оставлять панель с белым экраном — раньше первая же ошибка обрывала
+  // setView, и соседние разделы переставали показываться вместе с ним.
+  const safely = (what, fn, host) => {
+    const at = Date.now();
+    const blame = (e) => {
+      console.error(`[view:${what}]`, e);
+      try { window.jarvis.reportError(`view:${what}`, (e && e.stack) || e); } catch (_) { /* лог не обязателен */ }
+    };
+    // Молчаливые беды не менее вредны, чем исключения: раздел может отрисоваться
+    // пустым или отрисовываться десять секунд, и об этом не узнает никто, кроме
+    // человека перед экраном. Поэтому меряем и считаем нарисованное.
+    const audit = () => {
+      const ms = Date.now() - at;
+      if (!host) return;
+      const kids = host.childElementCount;
+      // Высота нужна отдельно от числа детей: «белый экран» бывает и при
+      // непустом DOM — когда раздел отрисовался, но схлопнут в нулевую высоту
+      // или спрятан. Одно число этих двух случаев не различает, а чинятся они
+      // в разных местах.
+      const h = Math.round(host.getBoundingClientRect().height);
+      const bad = kids === 0 || h === 0;
+      // Только о беде: раздел пуст, схлопнут в ноль или рисовался слишком
+      // долго. Строка на каждый переход была нужна, пока искали зависание, —
+      // теперь это лишний шум в логе у всех.
+      if (!bad && ms < 1500) return;
+      try {
+        window.jarvis.reportError(
+          `view:${what}`,
+          `дети=${kids} высота=${h}px за ${ms} мс${host.hidden ? ' (скрыт)' : ''}`,
+        );
+      } catch (_) { /* лог не обязателен */ }
+    };
+    try {
+      const r = fn();
+      // Разделы бывают асинхронными: у них ошибка приходит отказом обещания,
+      // и обычный catch её не увидит.
+      if (r && typeof r.then === 'function') r.then(audit, blame);
+      else audit();
+    } catch (e) { blame(e); }
+  };
+  if (next === 'settings') safely('settings', loadSettings);
+  if (next === 'stats') safely('stats', renderStats, statsEl);
   if (next === 'voicehist') {
     voicehistEl.style.cssText = 'padding:0;height:100%;overflow:hidden';
-    try { window.initVoiceHistory(voicehistEl); } catch (e) { console.error('[voicehist] init:', e); }
+    safely('voicehist', () => window.initVoiceHistory(voicehistEl));
   }
-  if (next === 'history') renderHistory();
+  if (next === 'loops') {
+    // Режим живёт своим модулем: панель только даёт ему место и уходит.
+    safely('loops', () => window.initLoops(loopsEl), loopsEl);
+  }
+  if (next === 'bundle') {
+    safely('bundle', () => window.initBundle(bundlePaneEl), bundlePaneEl);
+  }
+  if (next === 'history') safely('history', renderHistory, historyEl);
   else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
   if (next === 'list') queryEl.focus();
 }
@@ -179,8 +238,16 @@ function openSession(s) {
   });
 }
 
+/* Открыть чат по id сессии — для чужих модулей (карточки связки). */
+window.openSessionById = (id) => {
+  const s = state.find((x) => x.id === id);
+  if (s) openSession(s);
+};
+
 /* ---------- список сессий ---------- */
 
+// TERM_PROGRAM сессии → человеческое имя. Значения маковских терминалов
+// (iTerm.app, Apple_Terminal) остаются: сессия могла прийти и с мака.
 const HOST_LABEL = {
   'iTerm.app': 'iTerm',
   Apple_Terminal: 'Terminal',
@@ -188,6 +255,17 @@ const HOST_LABEL = {
   'JetBrains-JediTerm': 'JetBrains',
   WezTerm: 'WezTerm',
   ghostty: 'Ghostty',
+  // Linux-эмуляторы
+  'gnome-terminal': 'GNOME Terminal',
+  konsole: 'Konsole',
+  kitty: 'kitty',
+  alacritty: 'Alacritty',
+  foot: 'foot',
+  tilix: 'Tilix',
+  terminator: 'Terminator',
+  'xfce4-terminal': 'Xfce Terminal',
+  ptyxis: 'Ptyxis',
+  xterm: 'xterm',
 };
 
 function hostLabel(s) {
@@ -228,17 +306,23 @@ function filtered() {
   const q = queryEl.value.trim().toLowerCase();
   if (!q) return ordered;
   return ordered.filter((s) =>
-    `${s.project || ''} ${s.detail || ''} ${s.agent || ''}`.toLowerCase().includes(q));
+    `${s.project || ''} ${s.detail || ''} ${s.agent || ''} ${s.remote || ''}`.toLowerCase().includes(q));
 }
 
 function render() {
-  if (view !== 'list') return;
+  // Гейт — видимость списка, а не имя вида. В оконном режиме список стоит
+  // рядом с открытым чатом, и прежняя проверка «вид — не список» замораживала
+  // его на всё время чата: статусы не обновлялись, а открытый чат никак не
+  // выделялся среди строк.
+  if (listEl.hidden) return;
   // hover-выбор разоружаем на каждую перерисовку: дальше его снова взведёт только
   // реальное mousemove (см. listEl.mousemove). Иначе фон-обновления (data push)
   // пересоздают строки под неподвижным курсором → mouseenter таскает выделение.
   palHoverEnabled = false;
-  // палитра быстрых команд: «/» в главном поиске вместо списка сессий
-  if (argMode || queryEl.value.trim().startsWith('/')) { renderCmdPalette(); return; }
+  // палитра быстрых команд: «/» в главном поиске вместо списка сессий.
+  // Только в виде списка: в оконном режиме рядом с чатом список остаётся
+  // списком — палитре там рисоваться не на чем.
+  if (view === 'list' && (argMode || queryEl.value.trim().startsWith('/'))) { renderCmdPalette(); return; }
   argMode = null;
   listEl.textContent = '';
 
@@ -246,6 +330,14 @@ function render() {
 
   const list = filtered();
   sel = Math.min(sel, Math.max(0, list.length - 1));
+
+  // Открытый чат и есть выделение: курсор списка ведём за ним, а не отдельно.
+  // Заодно Esc из чата возвращает к той же строке, а не куда курсор укатился.
+  const openId = view === 'chat' ? chatSessionId : view === 'question' ? qSessionId : null;
+  if (openId) {
+    const oi = list.findIndex((x) => x.id === openId);
+    if (oi >= 0) sel = oi;
+  }
 
   if (!list.length) {
     const empty = document.createElement('div');
@@ -260,7 +352,8 @@ function render() {
   list.forEach((s, i) => {
     const row = document.createElement('div');
     row.className = `row ${s.status}${i === sel ? ' selected' : ''}`;
-    row.title = [s.cwd, s.title, ...(s.todoList || [])].filter(Boolean).join('\n');
+    row.title = [s.remote ? `узел ${s.remote}` : null, s.cwd, s.title, ...(s.todoList || [])]
+      .filter(Boolean).join('\n');
 
     const dot = document.createElement('span');
     dot.className = 'dot';
@@ -283,6 +376,16 @@ function render() {
       agentBadge = document.createElement('span');
       agentBadge.className = 'badge agent';
       agentBadge.textContent = s.agent;
+    }
+
+    // сессия живёт не на этой машине: бейдж с именем узла рядом с бейджем агента.
+    // Контурный, а не залитый — как точка «закончила»: другая машина, не другой цвет.
+    let remoteBadge = null;
+    if (s.remote) {
+      remoteBadge = document.createElement('span');
+      remoteBadge.className = 'badge remote';
+      remoteBadge.textContent = s.remote;
+      remoteBadge.title = `Агент работает на узле «${s.remote}»`;
     }
 
     const badge = document.createElement('span');
@@ -320,6 +423,7 @@ function render() {
     row.append(dot, name);
     if (branch) row.appendChild(branch);
     if (agentBadge) row.appendChild(agentBadge);
+    if (remoteBadge) row.appendChild(remoteBadge);
     row.appendChild(badge);
     if (hostBadge) row.appendChild(hostBadge);
     row.append(summary);
@@ -340,7 +444,7 @@ function render() {
       if (!palHoverEnabled || sel === i) return;
       sel = i; render();
     });
-    row.addEventListener('click', () => openSession(s));
+    row.addEventListener('click', () => { sel = i; openSession(s); });
     listEl.appendChild(row);
   });
 }
@@ -706,7 +810,7 @@ function buildCard(key, card) {
       const isDoc = JarvisMarkdown.isDocPath(f.path);
       const chip = document.createElement('span');
       chip.className = 'fchip';
-      chip.title = `${f.path} — клик: посмотреть, ⌥клик: показать в Finder`;
+      chip.title = `${f.path} — клик: посмотреть, ${window.jarvisKeys.ALT}+клик: показать в ${window.jarvisKeys.NOUNS.fileManager}`;
       const p = document.createElement('span');
       p.textContent = (isDoc ? '📄 ' : '') + f.path.split('/').pop();
       chip.appendChild(p);
@@ -722,7 +826,7 @@ function buildCard(key, card) {
         n.textContent = '· ' + f.note;
         chip.appendChild(n);
       }
-      // клик — вьюер в панели; ⌥ — Finder (открытие в редакторе — из вьюера)
+      // клик — вьюер в панели; Alt/⌥ — файловый менеджер (редактор — из вьюера)
       chip.addEventListener('click', async (ev) => {
         if (!ev.altKey) { openDocViewer(f.path, kindOf(f)); return; }
         const res = await window.jarvis.openFile(chatSessionId, f.path, true);
@@ -827,6 +931,26 @@ function appendPendingReply(text, queued) {
   pendingReplies.push({ text: text.trim(), el: msg });
 }
 
+/* Сколько верхних блоков держим в ленте чата.
+ *
+ * Лента росла всю сессию: у агента, работающего часами, в ней накапливались
+ * десятки тысяч узлов, и каждое следующее добавление пересчитывало вёрстку по
+ * всей этой куче. Отсюда и «чат подтормаживает, а потом встаёт»: чем дольше
+ * смотришь, тем медленнее. Хвоста хватает с запасом — выше него всё равно
+ * листают до начала не глазами, а поиском. */
+const CHATLOG_MAX_BLOCKS = 400;
+
+function trimChatlog() {
+  let extra = chatlogEl.childElementCount - CHATLOG_MAX_BLOCKS;
+  while (extra-- > 0) {
+    const first = chatlogEl.firstElementChild;
+    // Текущий ход не трогаем ни при каких условиях: в него ещё пишет стрим, и
+    // унесённый из документа узел проглотил бы все следующие реплики молча.
+    if (!first || (curTurn && first === curTurn.wrap)) break;
+    first.remove();
+  }
+}
+
 function appendChatItems(items) {
   const nearBottom =
     chatlogEl.scrollHeight - chatlogEl.scrollTop - chatlogEl.clientHeight < 60;
@@ -850,6 +974,7 @@ function appendChatItems(items) {
       turnTarget().appendChild(assistantMsg(it));
     }
   }
+  if (items.length) trimChatlog();
   if (items.length && nearBottom) chatlogEl.scrollTop = chatlogEl.scrollHeight;
 }
 
@@ -859,6 +984,38 @@ function updateChatChannelMark() {
   const model = s && (s.model || s.agent);
   chatModelEl.textContent = model || '';
   chatModelEl.hidden = !model;
+  // рука связки: ветка в шапке + пометка конфликта. Человек, открывший чат из
+  // пульта, должен видеть, ГДЕ он, — обычный чат и рука выглядят одинаково.
+  const chatBundleEl = document.getElementById('chatBundle');
+  if (chatBundleEl) {
+    const hand = window.bundleHandOf ? window.bundleHandOf(chatSessionId) : null;
+    chatBundleEl.textContent = hand
+      ? `связка · ${hand.branch}${hand.state === 'conflict' ? ' · конфликт' : ''}`
+      : '';
+    chatBundleEl.hidden = !hand;
+    chatBundleEl.title = hand ? `worktree ${hand.worktree}` : '';
+  }
+  // сессия с удалённого узла — имя узла в шапке, чтобы не спутать с локальной:
+  // ответы и пульт уходят туда по SSH, а не в терминал на этой машине
+  if (chatRemoteEl) {
+    const rem = s && s.remote ? String(s.remote) : '';
+    chatRemoteEl.textContent = rem;
+    chatRemoteEl.hidden = !rem;
+    chatRemoteEl.title = rem ? `Агент работает на узле «${rem}» — ответы уходят туда по SSH` : '';
+  }
+  // «Изменения» — только когда есть где их считать: без рабочего каталога
+  // git спрашивать не о чем, и кнопка вела бы в тупик
+  if (changesBtn) {
+    changesBtn.hidden = !s || !s.cwd;
+    if (changesBtn.hidden && chgOpen) closeChanges();
+  }
+  if (searchBtn) {
+    searchBtn.hidden = !s || !s.cwd;
+    if (searchBtn.hidden && srchOpen) closeSearch();
+  }
+  // Превью — только у местной задачи: адрес узла на этом компьютере не
+  // откроется, а обещать превью и не показать его хуже, чем не обещать.
+  if (previewBtn) previewBtn.hidden = !s || !s.cwd || !!s.remote;
   // tmux-сессии — без пометки; вне tmux помечаем
   chatChannelEl.hidden = !s || !!s.tmuxPane;
   // статус-точка справа — цвет по состоянию, пульс если работает
@@ -916,12 +1073,17 @@ function gateReply(s) {
   replyEl.placeholder = isTmux ? 'Ответить агенту…  ( / — команды )' : 'Сессия вне tmux';
   if (!s || isTmux) return;
   tmuxHintEl.textContent = '';
-  tmuxHintEl.appendChild(document.createTextNode('Сессия не в tmux — управлять из Jarvis нельзя. Запусти в терминале: '));
+  const where = s.remote ? `Сессия на узле «${s.remote}» не в tmux — управлять из Jarvis нельзя. Запусти ТАМ: `
+    : 'Сессия не в tmux — управлять из Jarvis нельзя. Запусти в терминале: ';
+  tmuxHintEl.appendChild(document.createTextNode(where));
   const code = document.createElement('code');
   code.className = 'tmuxcmd';
+  // id, под которым сессию знает САМ агент: у сессии с узла ключ реестра
+  // выглядит как «<узел>:<id>», и `--resume` с ним не найдёт ничего
+  const sid = s.remote && s.id.startsWith(s.remote + ':') ? s.id.slice(s.remote.length + 1) : s.id;
   // команда возобновления зависит от агента: codex resume <id> vs claude --resume <id>.
   // Раньше было захардкожено «claude --resume» — для codex-сессий это вело не туда.
-  const resumeCmd = s.agent === 'codex' ? `codex resume ${s.id}` : `claude --resume ${s.id}`;
+  const resumeCmd = resumeBase(s.agent, sid);
   code.textContent = resumeCmd;
   code.title = 'Скопировать';
   code.addEventListener('click', () => {
@@ -929,7 +1091,9 @@ function gateReply(s) {
     showToast('Скопировано');
   });
   tmuxHintEl.appendChild(code);
-  tmuxHintEl.appendChild(document.createTextNode(' — shim подхватит её в tmux.'));
+  tmuxHintEl.appendChild(document.createTextNode(s.remote
+    ? ' — под tmux -L jarvis, иначе Jarvis до неё не дотянется.'
+    : ' — shim подхватит её в tmux.'));
 }
 
 // индикатор: думает / выполняет тул / генерирует / ждёт
@@ -998,6 +1162,7 @@ function openQuestion(s) {
   qTexts = qItems.map(() => null);
   loadQ();
   setView('question');
+  render(); // выделение в оконном списке — за открытым вопросом
   renderQuestion();
   qOptsEl.focus?.();
 }
@@ -1173,6 +1338,9 @@ async function openChat(sessionId, project) {
   hidePalette();
   loadCommands();
   setView('chat');
+  // В оконном режиме список стоит рядом: выделение должно переехать на
+  // открытый чат сейчас, а не со следующим пушем состояния.
+  render();
   replyEl.focus();
   if (res.items.length) {
     appendChatItems(res.items);
@@ -1392,7 +1560,7 @@ const docDiffLabelEl = document.getElementById('docDiffLabel');
 const docTabDiffEl = document.getElementById('docTabDiff');
 const docTabDocEl = document.getElementById('docTabDoc');
 let docOpen = false;
-let docPath = null; // путь открытого файла — для «Редактор»/«Finder»
+let docPath = null; // путь открытого файла — для «Редактор»/«Папка»
 let docHasDiff = false;
 
 // Переключить активный таб вьюера. «Документ» — рендер файла (docBody);
@@ -1444,6 +1612,91 @@ async function openDocViewer(path, kind) {
     docSelectTab(kind === 'edited' ? 'diff' : 'doc');
   }
 }
+
+/* Свод правок задачи. Панель поверх чата: смотреть изменения человек уходит
+ * из разговора, но не из задачи — возвращаться должно одним Esc. */
+const changesBtn = document.getElementById('changesBtn');
+const chgWrap = document.getElementById('chgWrap');
+let chgOpen = false;
+let chgMounted = false;
+
+function openChanges() {
+  if (!chatSessionId || !chgWrap) return;
+  // Модуль экрана грузится отдельным скриптом: если он не доехал, панель
+  // обязана сказать это словами, а не упасть на ReferenceError и утащить с
+  // собой весь интерфейс (урок «Циклов», где ошибка отрисовки гасила раздел).
+  if (typeof JarvisChanges === 'undefined') { showToast('Экран изменений не загрузился'); return; }
+  if (!chgMounted) {
+    JarvisChanges.mount(document.getElementById('chgBody'), window.jarvis, showToast);
+    chgMounted = true;
+  }
+  chgOpen = true;
+  chgWrap.hidden = false;
+  changesBtn.classList.add('open');
+  JarvisChanges.open(chatSessionId);
+}
+
+function closeChanges() {
+  chgOpen = false;
+  if (chgWrap) chgWrap.hidden = true;
+  if (changesBtn) changesBtn.classList.remove('open');
+}
+
+if (changesBtn) changesBtn.addEventListener('click', () => (chgOpen ? closeChanges() : openChanges()));
+document.getElementById('chgClose')?.addEventListener('click', closeChanges);
+document.getElementById('chgScrim')?.addEventListener('click', closeChanges);
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && chgOpen) { e.preventDefault(); e.stopImmediatePropagation(); closeChanges(); }
+}, true);
+
+/* Превью: окно с локальным адресом того, что подняла задача. Адрес спрашиваем
+ * и запоминаем — у каждого проекта свой порт, и набирать его каждый раз глупо. */
+const previewBtn = document.getElementById('previewBtn');
+let previewUrl = '';
+
+if (previewBtn) previewBtn.addEventListener('click', async () => {
+  const url = window.prompt('Адрес превью (только этот компьютер)', previewUrl || 'localhost:3000');
+  if (!url) return;
+  previewUrl = url;
+  const res = await window.jarvis.previewOpen(url);
+  if (!res || !res.ok) showToast((res && res.error) || 'Превью не открылось');
+});
+
+/* Поиск по проекту: та же панель поверх чата, что и изменения. */
+const searchBtn = document.getElementById('searchBtn');
+const srchWrap = document.getElementById('srchWrap');
+let srchOpen = false;
+let srchMounted = false;
+
+function openSearch() {
+  if (!chatSessionId || !srchWrap) return;
+  if (typeof JarvisSearch === 'undefined') { showToast('Экран поиска не загрузился'); return; }
+  if (!srchMounted) {
+    JarvisSearch.mount(document.getElementById('srchBody'), window.jarvis, async (path) => {
+      // Открываем системным редактором: панель — надзиратель, а не IDE.
+      const res = await window.jarvis.openFile(chatSessionId, path, false);
+      if (res && res.error) showToast(res.error);
+    });
+    srchMounted = true;
+  }
+  srchOpen = true;
+  srchWrap.hidden = false;
+  searchBtn.classList.add('open');
+  JarvisSearch.open(chatSessionId);
+}
+
+function closeSearch() {
+  srchOpen = false;
+  if (srchWrap) srchWrap.hidden = true;
+  if (searchBtn) searchBtn.classList.remove('open');
+}
+
+if (searchBtn) searchBtn.addEventListener('click', () => (srchOpen ? closeSearch() : openSearch()));
+document.getElementById('srchClose')?.addEventListener('click', closeSearch);
+document.getElementById('srchScrim')?.addEventListener('click', closeSearch);
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && srchOpen) { e.preventDefault(); e.stopImmediatePropagation(); closeSearch(); }
+}, true);
 
 function closeDocViewer() {
   docOpen = false;
@@ -1902,7 +2155,7 @@ replyEl.addEventListener('paste', (e) => {
 replyEl.addEventListener('input', () => { autoGrowReply(); refreshPalette(); });
 
 replyEl.addEventListener('keydown', (e) => {
-  if (e.metaKey) return; // ⌘↵ — в терминал, обрабатывается глобально
+  if (isMod(e)) return; // ⌘↵ — в терминал, обрабатывается глобально
   if (paletteOpen()) {
     if (e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); cmdSel = Math.min(paletteItems.length - 1, cmdSel + 1); paintPalette(); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); cmdSel = Math.max(0, cmdSel - 1); paintPalette(); return; }
@@ -1930,7 +2183,9 @@ replyEl.addEventListener('keydown', (e) => {
 
 async function focusTerminal(sessionId, project) {
   const res = await window.jarvis.focusTerminal(sessionId);
-  if (res.ok) { window.jarvis.hidePanel(); return; }
+  // Накладка своё дело сделала — уходит с глаз. Окно так себя не ведёт:
+  // из него ушли в терминал, а не закрыли его.
+  if (res.ok) { if (!windowMode()) window.jarvis.hidePanel(); return; }
   // нижняя ступень лесенки — не ошибка, а чат сессии прямо в панели
   if (res.fallbackChat && view !== 'chat') openChat(sessionId, project);
   else showToast(res.error || 'Не нашёл терминал');
@@ -1948,6 +2203,23 @@ window.jarvis.onState((list) => {
   }
 });
 window.jarvis.getState().then((list) => { state = list; rebuildOrder(); render(); });
+
+/* Свои агенты (qwen/opencode/внутренние CLI): нужны кнопкам «Нового проекта»
+ * и командам возобновления. Старый бэкенд без реестра — просто пустой список. */
+let customAgents = [];
+if (typeof window.jarvis.agentsList === 'function') {
+  window.jarvis.agentsList().then((r) => { if (r && r.ok) customAgents = r.agents || []; }).catch(() => {});
+}
+
+/* Команда возобновления по агенту: свои агенты несут шаблон в настройках;
+ * без шаблона честно запускаем новую сессию тем же шимом, а не выдумываем флаг. */
+function resumeBase(agent, sid) {
+  if (agent === 'codex') return `codex resume ${sid}`;
+  if (!agent || agent === 'claude') return `claude --resume ${sid}`;
+  const a = customAgents.find((x) => x.id === agent);
+  if (a && a.resume) return a.resume.replaceAll('{sid}', sid);
+  return agent; // новая сессия через шим — resume у агента не описан
+}
 
 /* ---------- лимит-баннер ---------- */
 
@@ -2020,11 +2292,34 @@ function paintFooterWave() {
   footerWaveEl.classList.toggle('is-live', !!(wakeStatus?.listening && !wakeStatus.muted));
 }
 
-/** «лимит 62% · до 14:30» — или «$14.20 за день», если выбран расход. */
+/**
+ * Полоска лимитов: «5ч 62% · нед 94% · до 21:59».
+ *
+ * Планка — по УЗКОМУ месту: сессия может быть полупустой, когда неделя уже
+ * упирается в стену, и полоска только с сессией врала бы спокойствием. Время —
+ * сброс того окна, что узкое.
+ */
+function limitStrip() {
+  const o = footerUsage?.official;
+  const sess = o?.session;
+  const week = o?.week;
+  if (!sess && !week) return null;
+  const worst = (week?.pct ?? -1) > (sess?.pct ?? -1) ? week : sess;
+  const pct = Math.max(0, Math.min(100, Math.round(worst.pct)));
+  const parts = [];
+  if (sess && typeof sess.pct === 'number') parts.push(`5ч ${Math.round(sess.pct)}%`);
+  if (week && typeof week.pct === 'number') parts.push(`нед ${Math.round(week.pct)}%`);
+  if (worst.resetAt > Date.now()) {
+    const d = new Date(worst.resetAt);
+    parts.push(`до ${pad2(d.getHours())}:${pad2(d.getMinutes())}`);
+  }
+  return { pct, text: parts.join(' · ') };
+}
+
+/** «5ч 62% · нед 94%» — или «$14.20 за день», если выбран расход. */
 function paintFooterLimit() {
   if (!footerLimitEl) return;
   const bar = footerMeterEl?.firstElementChild;
-  const sess = footerUsage?.official?.session;
 
   if (footerBottom === 'spend') {
     const t = footerUsage?.total;
@@ -2036,19 +2331,31 @@ function paintFooterLimit() {
     return;
   }
 
-  if (!sess || typeof sess.pct !== 'number') { footerLimitEl.hidden = true; return; }
-  footerMeterEl.hidden = false;
-  const pct = Math.max(0, Math.min(100, Math.round(sess.pct)));
-  if (bar) bar.style.width = `${pct}%`;
-  footerMeterEl.classList.toggle('is-crit', pct > 90);
-  footerMeterEl.classList.toggle('is-warn', pct > 75 && pct <= 90);
-  // окно до сброса — часами, как в макете («до 14:30»)
-  let until = '';
-  if (sess.resetAt > Date.now()) {
-    const d = new Date(sess.resetAt);
-    until = ` · до ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const strip = limitStrip();
+  if (!strip) {
+    // Данных нет — но пустота неотличима от «всё выключено». Если добытчик
+    // назвал причину, показываем факт и держим причину в подсказке: человек,
+    // авторизованный только на узле, увидит здесь ровно свою ситуацию.
+    const why = footerUsage?.officialError;
+    if (why) {
+      footerMeterEl.hidden = true;
+      footerLimitTextEl.textContent = 'лимиты недоступны';
+      footerLimitEl.title = why;
+      footerLimitEl.hidden = false;
+    } else {
+      footerLimitEl.hidden = true;
+    }
+    return;
   }
-  footerLimitTextEl.textContent = `лимит ${pct}%${until}`;
+  footerMeterEl.hidden = false;
+  if (bar) bar.style.width = `${strip.pct}%`;
+  footerMeterEl.classList.toggle('is-crit', strip.pct > 90);
+  footerMeterEl.classList.toggle('is-warn', strip.pct > 75 && strip.pct <= 90);
+  footerLimitTextEl.textContent = strip.text;
+  // Чьи это проценты — важно, когда авторизаций несколько: подсказка называет
+  // источник («local» или имя узла).
+  const src = footerUsage?.official?.source;
+  footerLimitEl.title = src && src !== 'local' ? `лимиты с узла «${src}»` : '';
   footerLimitEl.hidden = false;
 }
 
@@ -2097,7 +2404,7 @@ tlSettingsEl.addEventListener('click', () => {
 
 document.getElementById('winClose').addEventListener('click', () => window.jarvis.winClose());
 document.getElementById('winMin').addEventListener('click', () => window.jarvis.winMinimize());
-// зелёная кнопка — фуллскрин, с Alt — зум по содержимому: ровно как в macOS
+// зелёная кнопка — фуллскрин, с Alt — зум по содержимому (соглашение macOS)
 document.getElementById('winZoom').addEventListener('click', (e) => {
   if (e.altKey) window.jarvis.winZoom();
   else window.jarvis.winToggleFullscreen().then(syncFullscreen).catch(() => {});
@@ -2131,19 +2438,25 @@ window.addEventListener('blur', () => paintWinFocus(false));
 
 /** Лимит в титульной полосе — тот же расчёт, что внизу панели. */
 function paintTitlebarLimit() {
-  const sess = footerUsage?.official?.session;
-  if (!sess || typeof sess.pct !== 'number') { tlLimitEl.hidden = true; return; }
-  const pct = Math.max(0, Math.min(100, Math.round(sess.pct)));
-  const bar = tlMeterEl.firstElementChild;
-  if (bar) bar.style.width = `${pct}%`;
-  tlMeterEl.classList.toggle('is-crit', pct > 90);
-  tlMeterEl.classList.toggle('is-warn', pct > 75 && pct <= 90);
-  let until = '';
-  if (sess.resetAt > Date.now()) {
-    const d = new Date(sess.resetAt);
-    until = ` · до ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const strip = limitStrip();
+  if (!strip) {
+    const why = footerUsage?.officialError;
+    if (why) {
+      tlMeterEl.hidden = true;
+      tlLimitTextEl.textContent = 'лимиты недоступны';
+      tlLimitEl.title = why;
+      tlLimitEl.hidden = false;
+    } else {
+      tlLimitEl.hidden = true;
+    }
+    return;
   }
-  tlLimitTextEl.textContent = `лимит ${pct}%${until}`;
+  tlMeterEl.hidden = false;
+  const bar = tlMeterEl.firstElementChild;
+  if (bar) bar.style.width = `${strip.pct}%`;
+  tlMeterEl.classList.toggle('is-crit', strip.pct > 90);
+  tlMeterEl.classList.toggle('is-warn', strip.pct > 75 && strip.pct <= 90);
+  tlLimitTextEl.textContent = strip.text;
   tlLimitEl.hidden = false;
 }
 
@@ -2829,6 +3142,36 @@ function renderArgMode() {
   setTimeout(() => focusArgField(), 20);
 }
 
+/* ---------- завершение сессии ---------- */
+
+// Подтверждение вторым нажатием, как у остальных разрушительных кнопок панели:
+// живого агента закрывают насовсем, и промах по пункту меню не должен этого
+// стоить. Хранится id: подтверждение относится к КОНКРЕТНОЙ сессии, иначе
+// «ещё раз» после смены выбора убило бы соседнюю.
+let killArmed = { id: null, at: 0 };
+const KILL_ARM_MS = 4000;
+
+function killArmedFor(id) {
+  return killArmed.id === id && Date.now() - killArmed.at < KILL_ARM_MS;
+}
+
+function killSession(s) {
+  if (!s) return;
+  if (!killArmedFor(s.id)) {
+    killArmed = { id: s.id, at: Date.now() };
+    showToast('Завершить сессию? Нажми ещё раз');
+    return;
+  }
+  killArmed = { id: null, at: 0 };
+  window.jarvis.killSession(s.id).then((res) => {
+    if (!res || res.ok !== true) { showToast((res && res.error) || 'Не получилось завершить'); return; }
+    // Говорим, что именно случилось: закрыли живого агента или убрали
+    // строку от давно умершего. Разница человеку важна.
+    showToast(res.killed ? 'Сессия завершена' : 'Сессия убрана из списка');
+    if (res.note) showToast(res.note);
+  });
+}
+
 /* ---------- футер и меню действий (⌘K) ---------- */
 
 const footerEl = document.getElementById('footer');
@@ -2843,15 +3186,20 @@ function actionItems() {
     : null;
   const items = [];
   if (s) {
-    items.push({ label: 'Перейти в терминал', key: '⌘↵', run: () => focusTerminal(s.id, s.project) });
-    items.push({ label: s.pinned ? 'Открепить' : 'Закрепить', key: '⌘P', run: () => window.jarvis.setPin(s.id, !s.pinned) });
-    if (s.tmuxPane) items.push({ label: 'Где этот терминал?', key: '⌘G', run: () => window.jarvis.pingTerminal(s.id) });
+    items.push({ label: 'Перейти в терминал', key: K(KN('enter')), run: () => focusTerminal(s.id, s.project) });
+    items.push({ label: s.pinned ? 'Открепить' : 'Закрепить', key: K('P'), run: () => window.jarvis.setPin(s.id, !s.pinned) });
+    if (s.tmuxPane) items.push({ label: 'Где этот терминал?', key: K('G'), run: () => window.jarvis.pingTerminal(s.id) });
+    items.push({
+      label: killArmedFor(s.id) ? 'Точно завершить?' : 'Завершить сессию',
+      key: K(KN('del'), { shift: true }),
+      run: () => killSession(s),
+    });
   }
-  if (view !== 'chat') items.push({ label: 'Очистить завершённые', key: '⌘⌫', run: () => window.jarvis.clearFinished() });
-  items.push({ label: 'Проекты и история', key: '⌘2', run: () => setView('history') });
-  items.push({ label: 'Статистика usage', key: '⌘3', run: () => setView('stats') });
-  items.push({ label: 'История голоса', key: '⌘4', run: () => setView('voicehist') });
-  items.push({ label: 'Настройки', key: '⌘,', run: () => setView('settings') });
+  if (view !== 'chat') items.push({ label: 'Очистить завершённые', key: K(KN('del')), run: () => window.jarvis.clearFinished() });
+  items.push({ label: 'Проекты и история', key: K('2'), run: () => setView('history') });
+  items.push({ label: 'Статистика usage', key: K('3'), run: () => setView('stats') });
+  items.push({ label: 'История голоса', key: K('4'), run: () => setView('voicehist') });
+  items.push({ label: 'Настройки', key: K(','), run: () => setView('settings') });
   return items;
 }
 
@@ -2903,9 +3251,24 @@ const tabHistoryEl = document.getElementById('tabHistory');
 tabHistoryEl.addEventListener('click', () => setView('history'));
 
 let historyData = [];
-let histRows = []; // плоский список выбираемых строк: проекты или чаты (для ↑↓/Enter)
+let histRows = []; // плоский список выбираемых строк: машины, проекты или чаты (для ↑↓/Enter)
 let histSel = 0;
 let histProject = null; // ключ открытого проекта (cwd) — null = список проектов
+// Уровень 0: где работать. Проекты и чаты живут ВНУТРИ выбранной машины —
+// история локальной машины и история узла это разные списки.
+let histMachines = [];
+let histMachine = null; // id машины ('local' | имя узла); null = список машин
+let histError = ''; // отказ getHistory (узел не ответил) — показываем текстом
+let histNewOpen = false; // раскрыта форма «Новый проект»
+let histNewPath = ''; // введённый путь переживает перерисовку списка
+let histNewFocus = false; // форму только что раскрыли — увести в неё курсор ровно один раз
+
+// Одна машина (узлов не настроено) — уровень выбора бессмысленен: это был бы
+// экран из одной строки на каждом заходе. Сразу показываем её проекты.
+const histMultiMachine = () => histMachines.length > 1;
+const histMachineOf = (id) => histMachines.find((m) => m.id === id) || null;
+const histMachineName = (id) => (histMachineOf(id)?.name) || id || 'Эта машина';
+const histIsRemote = (id) => !!histMachineOf(id) && histMachineOf(id).kind === 'remote';
 
 function histTime(ts) {
   const d = new Date(ts);
@@ -2917,18 +3280,89 @@ function histTime(ts) {
 function resumeCommand(s, cwd) {
   // Подсказка для tooltip. Реальная команда собирается на бэкенде из настроек
   // «Запуска» — честно предупреждаем, что она может отличаться (прокси, dangerous-флаги).
-  const base = s.agent === 'codex' ? `codex resume ${s.id}` : `claude --resume ${s.id}`;
+  // У сессии с узла id несёт префикс узла — resume ждёт «голый» agentId.
+  const id = s.agentId || s.id;
+  const base = resumeBase(s.agent, id);
   return (cwd ? `cd "${cwd}" && ${base}` : base) + '\n(+ параметры из настроек «Запуск»)';
 }
 
-// Запуск сессии в терминале из настроек: agent='claude'|'codex'; sessionId=null —
-// новая сессия, иначе продолжение; cwd — директория проекта. Реальную команду
-// (терминал, прокси, флаги «опасного режима») собирает бэкенд session_launch.
-async function launchSession(agent, sessionId, cwd) {
+// Запуск сессии из настроек: agent='claude'|'codex'; sessionId=null — новая
+// сессия, иначе продолжение; cwd — директория проекта; machine — где запускать
+// ('local' | имя узла). Реальную команду (терминал, прокси, флаги «опасного
+// режима») собирает бэкенд session_launch, он же создаёт каталог.
+/* Как запускать задачу: песочница и режим разрешений. Свойства задачи, не
+ * настройки на всё разом — но выбор липкий, потому что человек обычно работает
+ * пачкой однотипных задач. Продолжение сессии песочницу игнорирует: она живёт
+ * там, где начиналась. */
+let taskOpts = { isolate: false, mode: 'ask', task: '', container: false };
+const TASK_MODES = [
+  ['ask', 'спросит', 'Агент спрашивает перед действиями'],
+  ['plan', 'план', 'Только разведка и план — файлов не тронет'],
+  ['yolo', 'без спроса', 'Ничего не спрашивает: для песочницы и рутины'],
+];
+
+function renderTaskOpts(host) {
+  const row = document.createElement('div');
+  row.className = 'taskopts';
+  // Задача сразу: иначе «поставить агенту работу» — это два шага (подними,
+  // потом найди чат и напиши), и именно на втором дело откладывается.
+  const task = Object.assign(document.createElement('input'), {
+    className: 'taskinput', type: 'text', spellcheck: false,
+    placeholder: 'что сделать (необязательно)', value: taskOpts.task,
+  });
+  task.title = 'Уедет агенту, как только он встанет';
+  task.addEventListener('input', () => { taskOpts.task = task.value; });
+  task.addEventListener('keydown', (e) => { if (!e.metaKey && !e.ctrlKey) e.stopPropagation(); });
+  row.appendChild(task);
+  const box = Object.assign(document.createElement('button'), {
+    className: 'taskopt' + (taskOpts.isolate ? ' on' : ''),
+    textContent: 'песочница',
+  });
+  box.title = 'Отдельный worktree и ветка рядом с проектом — правки не смешаются с твоими';
+  box.addEventListener('click', (e) => { e.stopPropagation(); taskOpts.isolate = !taskOpts.isolate; renderHistory(); });
+  row.appendChild(box);
+  // Вторая изоляция: worktree разводит файлы, контейнер — инструменты.
+  const cont = Object.assign(document.createElement('button'), {
+    className: 'taskopt' + (taskOpts.container ? ' on' : ''),
+    textContent: 'контейнер',
+  });
+  cont.title = 'Запустить агента в docker: свои зависимости, не общие (нужен образ в настройках)';
+  cont.addEventListener('click', (e) => { e.stopPropagation(); taskOpts.container = !taskOpts.container; renderHistory(); });
+  row.appendChild(cont);
+  for (const [id, label, hint] of TASK_MODES) {
+    const b = Object.assign(document.createElement('button'), {
+      className: 'taskopt' + (taskOpts.mode === id ? ' on' : ''),
+      textContent: label,
+    });
+    b.title = hint;
+    b.addEventListener('click', (e) => { e.stopPropagation(); taskOpts.mode = id; renderHistory(); });
+    row.appendChild(b);
+  }
+  host.appendChild(row);
+}
+
+async function launchSession(agent, sessionId, cwd, machine) {
   try {
-    const r = await window.jarvis.launchSession(cwd, agent, sessionId);
-    showToast(r && r.ok ? 'Запускаю в терминале…' : ((r && r.error) || 'Не удалось запустить'));
+    const opts = sessionId ? null : { ...taskOpts };
+    const r = await window.jarvis.launchSession(cwd, agent, sessionId, machine || 'local', opts);
+    if (!r || !r.ok) { showToast((r && r.error) || 'Не удалось запустить'); return; }
+    // На узле терминала нет и быть не может: сессия поднимается отсоединённой в
+    // tmux на той стороне и приезжает к нам в список сама — так и говорим.
+    // Текст задачи одноразовый: он про эту работу, а не про следующую.
+    const hadTask = !sessionId && !!taskOpts.task.trim();
+    if (!sessionId) { taskOpts.task = ''; renderHistory(); }
+    const tail = hadTask ? ' · задача уедет, как только агент встанет' : '';
+    if (r.channel === 'node') showToast(`Поднял на узле «${r.machine || machine}»${tail || ' — сессия появится в списке'}`);
+    else showToast(`Запускаю в терминале…${tail}`);
   } catch { showToast('Не удалось запустить'); }
+}
+
+function openHistMachine(id) {
+  histMachine = id;
+  histProject = null;
+  histNewOpen = false;
+  queryEl.value = ''; // фильтр машин к проектам не относится
+  renderHistory();
 }
 
 function openHistProject(key) {
@@ -2937,14 +3371,45 @@ function openHistProject(key) {
   renderHistory();
 }
 
+// Шаг назад: чаты → проекты → машины. Ниже машин (или когда их нет) — вкладка «Чаты».
+function histBack() {
+  if (histProject != null) { histProject = null; renderHistory(); return true; }
+  if (histMachine != null && histMultiMachine()) { histMachine = null; histNewOpen = false; renderHistory(); return true; }
+  return false;
+}
+
+async function loadHistMachines() {
+  const local = [{ id: 'local', name: 'Эта машина', kind: 'local', online: true }];
+  try {
+    const r = typeof window.jarvis.machinesList === 'function' ? await window.jarvis.machinesList() : null;
+    histMachines = Array.isArray(r) && r.length ? r : local;
+  } catch { histMachines = local; }
+}
+
 async function renderHistory() {
-  try { historyData = await window.jarvis.getHistory(); } catch { historyData = []; }
+  await loadHistMachines();
   if (view !== 'history') return;
+  if (!histMultiMachine()) histMachine = histMachines[0].id;
+  // узел убрали из настроек, пока вкладка была открыта — возвращаемся к выбору
+  if (histMachine != null && !histMachineOf(histMachine)) { histMachine = null; histProject = null; }
+
+  histError = '';
+  if (histMachine != null) {
+    let data;
+    try { data = await window.jarvis.getHistory(histMachine); } catch { data = { error: 'Не удалось получить историю' }; }
+    if (view !== 'history') return;
+    // узел мог не ответить: бэкенд отдаёт {error} вместо массива
+    if (Array.isArray(data)) historyData = data;
+    else { historyData = []; histError = (data && data.error) ? String(data.error) : 'История недоступна'; }
+  } else historyData = [];
+
   historyEl.textContent = '';
   histRows = [];
   histSel = 0;
 
   const q = queryEl.value.trim().toLowerCase();
+
+  if (histMachine == null) { renderHistMachines(q); paintHistSel(); return; }
 
   let g = null;
   if (histProject != null) {
@@ -2957,11 +3422,69 @@ async function renderHistory() {
   paintHistSel();
 }
 
-/* уровень 1: проекты */
+/* уровень 0: где работать — эта машина или один из узлов */
+function renderHistMachines(q) {
+  primaryLabelEl.textContent = 'Выбрать машину';
+  historyEl.appendChild(Object.assign(document.createElement('div'), {
+    className: 'hhint', textContent: 'Проекты и чаты хранятся на той машине, где работает агент — выбери, где смотреть.',
+  }));
+
+  const list = q ? histMachines.filter((m) => `${m.name} ${m.sshHost || ''}`.toLowerCase().includes(q)) : histMachines;
+  if (!list.length) {
+    historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'empty', textContent: 'Ничего не найдено' }));
+    return;
+  }
+
+  for (const m of list) {
+    const idx = histRows.length;
+    histRows.push({ type: 'machine', key: m.id });
+    const row = document.createElement('div');
+    row.className = 'hrow' + (m.online ? '' : ' off');
+    row.dataset.idx = idx;
+    // не на связи — всё равно выбираем: причину назовёт сама попытка запуска
+    row.title = [m.sshHost || null, m.online ? null : 'не на связи', m.error || null].filter(Boolean).join('\n') || m.name;
+
+    row.appendChild(Object.assign(document.createElement('span'), { className: 'hdot' }));
+    row.appendChild(Object.assign(document.createElement('span'), { className: 'htitle', textContent: m.name }));
+
+    const meta = [];
+    if (m.kind === 'remote' && m.sshHost) meta.push(m.sshHost);
+    if (!m.online) meta.push(m.error ? `не на связи · ${m.error}` : 'не на связи');
+    row.appendChild(Object.assign(document.createElement('span'), { className: 'hmeta hmeta-wide', textContent: meta.join(' · ') }));
+    row.appendChild(Object.assign(document.createElement('span'), { className: 'hchev', textContent: '›' }));
+
+    row.addEventListener('mouseenter', () => { histSel = idx; paintHistSel(); });
+    row.addEventListener('click', () => openHistMachine(m.id));
+    historyEl.appendChild(row);
+  }
+}
+
+/* уровень 1: проекты выбранной машины */
 function renderHistProjects(q) {
   primaryLabelEl.textContent = 'Открыть проект';
+  const remote = histIsRemote(histMachine);
+
+  // крошка есть только когда есть куда возвращаться (узлы настроены)
+  if (histMultiMachine()) {
+    const head = document.createElement('div');
+    head.className = 'hgroup';
+    const back = Object.assign(document.createElement('span'), { className: 'hback', textContent: '‹ Машины' });
+    back.addEventListener('click', () => { histMachine = null; histNewOpen = false; renderHistory(); });
+    head.appendChild(back);
+    head.appendChild(Object.assign(document.createElement('span'), { textContent: histMachineName(histMachine) }));
+    if (remote) head.appendChild(Object.assign(document.createElement('span'), { className: 'hcount', textContent: 'узел' }));
+    historyEl.appendChild(head);
+  }
+
+  renderHistNew(remote);
+
+  if (histError) {
+    historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'empty', textContent: histError }));
+    return;
+  }
+
   const groups = q
-    ? historyData.filter((x) => x.project.toLowerCase().includes(q) || x.sessions.some((s) => s.title.toLowerCase().includes(q)))
+    ? historyData.filter((x) => (x.project || '').toLowerCase().includes(q) || x.sessions.some((s) => (s.title || '').toLowerCase().includes(q)))
     : historyData;
 
   if (!groups.length) {
@@ -2989,11 +3512,84 @@ function renderHistProjects(q) {
     row.addEventListener('click', () => openHistProject(key));
     historyEl.appendChild(row);
   }
+
+  // по умолчанию под курсором первый ПРОЕКТ, а не строка создания: Enter сразу
+  // после открытия вкладки должен работать как раньше
+  const first = histRows.findIndex((r) => r.type === 'project');
+  if (first > 0) histSel = first;
+}
+
+/* строка «Новый проект» и её форма: путь на выбранной машине + выбор агента.
+   Каталог создаст бэкенд (рекурсивно, на нужной машине) — от UI нужен только путь. */
+function renderHistNew(remote) {
+  const idx = histRows.length;
+  histRows.push({ type: 'new' });
+  const row = document.createElement('div');
+  row.className = 'hrow hnew' + (histNewOpen ? ' open' : '');
+  row.dataset.idx = idx;
+  row.title = 'Запустить агента в новой директории';
+  row.appendChild(Object.assign(document.createElement('span'), { className: 'htitle', textContent: 'Новый проект' }));
+  row.appendChild(Object.assign(document.createElement('span'), {
+    className: 'hmeta',
+    textContent: remote ? `путь на узле «${histMachineName(histMachine)}»` : 'путь на этой машине',
+  }));
+  row.appendChild(Object.assign(document.createElement('span'), { className: 'hchev', textContent: histNewOpen ? '−' : '+' }));
+  row.addEventListener('mouseenter', () => { histSel = idx; paintHistSel(); });
+  row.addEventListener('click', () => { histNewOpen = !histNewOpen; histNewFocus = histNewOpen; renderHistory(); });
+  historyEl.appendChild(row);
+  if (!histNewOpen) return;
+
+  const form = document.createElement('div');
+  form.className = 'hnewform';
+  const input = Object.assign(document.createElement('input'), {
+    type: 'text', placeholder: '~/projects/my-app', value: histNewPath, spellcheck: false,
+  });
+  input.addEventListener('input', () => { histNewPath = input.value; });
+  // поле живёт внутри вкладки с ↑↓/↵/esc на window — гасим всплытие, иначе
+  // стрелки будут двигать выбор строки вместо каретки
+  input.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey) return;
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); start('claude'); }
+    else if (e.key === 'Escape') { e.preventDefault(); histNewOpen = false; renderHistory(); }
+  });
+
+  function start(agent) {
+    const path = input.value.trim();
+    if (!path) { input.focus(); showToast('Укажи путь к проекту'); return; }
+    histNewOpen = false;
+    histNewPath = '';
+    launchSession(agent, null, path, histMachine);
+    renderHistory();
+  }
+
+  const btn = (agent, label) => {
+    const b = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: label });
+    b.title = `Новая сессия ${label} по этому пути`;
+    b.addEventListener('click', (e) => { e.stopPropagation(); start(agent); });
+    return b;
+  };
+  form.append(input, btn('claude', 'Claude'), btn('codex', 'Codex'));
+  renderTaskOpts(form);
+  // Свои агенты — теми же кнопками: на узлах их шима нет, поэтому только локально.
+  if (!remote) for (const a of customAgents) form.append(btn(a.id, a.name || a.id));
+  historyEl.appendChild(form);
+  historyEl.appendChild(Object.assign(document.createElement('div'), {
+    className: 'hhint',
+    textContent: remote
+      ? 'Каталог создастся сам. На узле сессия поднимется в tmux — терминал не откроется, чат появится в списке.'
+      : 'Каталог создастся сам, если его ещё нет. ↵ — Claude, кнопка — выбрать агента.',
+  }));
+  // курсор уводим только при раскрытии: список перерисовывается и на каждую
+  // букву в поиске — иначе фокус улетал бы из строки поиска в путь
+  if (histNewFocus) { histNewFocus = false; setTimeout(() => input.focus(), 0); }
 }
 
 /* уровень 2: чаты проекта */
 function renderHistChats(g, q) {
-  primaryLabelEl.textContent = 'Запустить в терминале';
+  // на узле терминала нет: сессия уходит в tmux на той стороне
+  const remote = histIsRemote(histMachine);
+  primaryLabelEl.textContent = remote ? 'Поднять на узле' : 'Запустить в терминале';
   const head = document.createElement('div');
   head.className = 'hgroup';
   const back = Object.assign(document.createElement('span'), { className: 'hback', textContent: '‹ Проекты' });
@@ -3006,18 +3602,24 @@ function renderHistChats(g, q) {
   if (g.cwd) {
     const newClaude = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Claude' });
     newClaude.title = 'Новая сессия Claude в этой директории';
-    newClaude.addEventListener('click', (e) => { e.stopPropagation(); launchSession('claude', null, g.cwd); });
+    newClaude.addEventListener('click', (e) => { e.stopPropagation(); launchSession('claude', null, g.cwd, histMachine); });
     const newCodex = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Codex' });
     newCodex.title = 'Новая сессия Codex в этой директории';
-    newCodex.addEventListener('click', (e) => { e.stopPropagation(); launchSession('codex', null, g.cwd); });
+    newCodex.addEventListener('click', (e) => { e.stopPropagation(); launchSession('codex', null, g.cwd, histMachine); });
     head.appendChild(newClaude);
     head.appendChild(newCodex);
   }
   historyEl.appendChild(head);
+  if (g.cwd) renderTaskOpts(historyEl);
 
-  historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'hhint', textContent: '↵ — запустить продолжение в терминале · + Claude / + Codex — новая сессия · esc — к проектам' }));
+  historyEl.appendChild(Object.assign(document.createElement('div'), {
+    className: 'hhint',
+    textContent: remote
+      ? `↵ — поднять продолжение на узле «${histMachineName(histMachine)}» (терминал не откроется) · + Claude / + Codex — новая сессия · esc — к проектам`
+      : '↵ — запустить продолжение в терминале · + Claude / + Codex — новая сессия · esc — к проектам',
+  }));
 
-  const sessions = q ? g.sessions.filter((s) => s.title.toLowerCase().includes(q)) : g.sessions;
+  const sessions = q ? g.sessions.filter((s) => (s.title || '').toLowerCase().includes(q)) : g.sessions;
   if (!sessions.length) {
     historyEl.appendChild(Object.assign(document.createElement('div'), { className: 'empty', textContent: 'Ничего не найдено' }));
     return;
@@ -3029,11 +3631,15 @@ function renderHistChats(g, q) {
     const row = document.createElement('div');
     row.className = 'hrow';
     row.dataset.idx = idx;
-    row.title = `${s.title}\n${resumeCommand(s, g.cwd)}`;
+    // id сессии с узла несёт префикс «узел:» — человеку показываем «голый» agentId
+    const sid = String(s.agentId || s.id || '');
+    row.title = [s.title || `сессия ${sid}`, resumeCommand(s, g.cwd)].join('\n');
 
     const title = document.createElement('span');
-    title.className = 'htitle';
-    title.textContent = s.title || s.id.slice(0, 8);
+    title.className = 'htitle' + (s.title ? '' : ' dim');
+    // заголовков с узла нет и взяться им неоткуда: показываем id (время уже
+    // справа, в метаданных — дублировать его в заголовке незачем)
+    title.textContent = s.title || `сессия ${sid.slice(0, 8)}`;
     row.appendChild(title);
 
     const meta = document.createElement('span');
@@ -3045,10 +3651,10 @@ function renderHistChats(g, q) {
     meta.textContent = parts.join(' · ');
     row.appendChild(meta);
 
-    row.appendChild(Object.assign(document.createElement('span'), { className: 'hcopy', textContent: 'запустить ↵' }));
+    row.appendChild(Object.assign(document.createElement('span'), { className: 'hcopy', textContent: remote ? 'поднять ↵' : 'запустить ↵' }));
 
     row.addEventListener('mouseenter', () => { histSel = idx; paintHistSel(); });
-    row.addEventListener('click', () => launchSession(s.agent, s.id, g.cwd));
+    row.addEventListener('click', () => launchSession(s.agent, s.id, g.cwd, histMachine));
     historyEl.appendChild(row);
   }
 }
@@ -3066,6 +3672,8 @@ const statsEl = document.getElementById('stats');
 const tabStatsEl = document.getElementById('tabStats');
 tabStatsEl.addEventListener('click', () => setView('stats'));
 tabVoiceEl.addEventListener('click', () => setView('voicehist'));
+tabLoopsEl.addEventListener('click', () => setView('loops'));
+tabBundleEl.addEventListener('click', () => setView('bundle'));
 
 const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(n || 0));
 
@@ -3157,9 +3765,12 @@ async function renderStats() {
       statsEl.appendChild(row);
     };
 
+    if (o.source && o.source !== 'local') {
+      statsEl.appendChild(el('div', 'uhover', `лимиты с узла «${o.source}» — локальной авторизации нет`));
+    }
     if (o.session) limitRow('Сессия', o.session.pct, `${resetText(o.session.resetAt)}${o.windowTokens ? ` · ${fmtTok(o.windowTokens)} ткн` : ''}`);
     if (o.week) limitRow('Неделя', o.week.pct, resetText(o.week.resetAt));
-    if (o.weekSonnet) limitRow('Sonnet', o.weekSonnet.pct, '');
+    if (o.weekModel) limitRow(o.weekModel.model, o.weekModel.pct, resetText(o.weekModel.resetAt));
   } else if (u.window.resetInMs > 0) {
     // официальные данные ещё не приехали — локальная оценка
     const min = Math.round(u.window.resetInMs / 60000);
@@ -3296,12 +3907,15 @@ function startRecording(btn, key) {
   btn.textContent = 'нажми сочетание…';
 }
 
-function displayHotkey(acc) {
-  return acc
-    .replace('CommandOrControl', '⌘').replace('Command', '⌘')
-    .replace('Control', '⌃').replace('Option', '⌥').replace('Alt', '⌥')
-    .replace('Shift', '⇧').replaceAll('+', ' ');
-}
+// подписи клавиш живут в keys.js — там же ветвление macOS/Linux
+const displayHotkey = (acc) => window.jarvisKeys.displayHotkey(acc);
+const K = (key, opts) => window.jarvisKeys.k(key, opts);
+const KN = (name) => window.jarvisKeys.NAMES[name] || name;
+
+/** Нажат ли главный модификатор приложения. На маке это ⌘ (metaKey), на Linux —
+ *  Ctrl: Super там принадлежит окружению рабочего стола (в GNOME Super+1..4
+ *  переключает приложения дока, и панель бы с ним дралась). */
+const isMod = (e) => (window.jarvisKeys.isMac ? e.metaKey : e.ctrlKey);
 
 async function loadSettings() {
   // Новая страница настроек (settings2.js): сайдбар + детальные панели в дизайне
@@ -3485,7 +4099,7 @@ async function renderIntegrationCard() {
     stoggle(!!info.quiet, (v) => window.jarvis.quietSet(v)), { hairtop: true }));
   const qhint = document.createElement('div');
   qhint.className = 'ahint';
-  qhint.textContent = 'Фон копит статистику с хуков, но без тостов/голоса/показа. Тумблер — ⌘⌥J.';
+  qhint.textContent = `Фон копит статистику с хуков, но без тостов/голоса/показа. Тумблер — ${K('J', { alt: true })}.`;
   box.appendChild(qhint);
 
   // кнопки
@@ -4070,7 +4684,8 @@ for (const id of ['notifyDone', 'notifyWaiting', 'autoResume']) {
   });
 }
 
-// Автозапуск — отдельно: macOS может отказать (LaunchAgent), поэтому после
+// Автозапуск — отдельно: система может отказать (LaunchAgent на macOS,
+// autostart-каталог на Linux), поэтому после
 // переключения перечитываем РЕАЛЬНОЕ состояние из системы и честно говорим,
 // если не сработало. Иначе галка «врёт», что включила.
 document.getElementById('openAtLogin').addEventListener('change', async (e) => {
@@ -4079,7 +4694,7 @@ document.getElementById('openAtLogin').addEventListener('change', async (e) => {
   const s = await window.jarvis.getSettings();
   e.target.checked = !!s.openAtLogin; // отражаем то, что реально записалось в систему
   if (!!s.openAtLogin !== want) {
-    showToast(want ? 'macOS не дала включить автозапуск' : 'Не вышло выключить автозапуск');
+    showToast(want ? 'Система не дала включить автозапуск' : 'Не вышло выключить автозапуск');
   } else {
     showToast(want ? 'Автозапуск включён' : 'Автозапуск выключен');
   }
@@ -4095,7 +4710,8 @@ const CODE_KEYS = { Space: 'Space', Enter: 'Enter', Backspace: 'Backspace', Tab:
 
 function accelFromEvent(e) {
   const mods = [];
-  if (e.metaKey) mods.push('Command');
+  if (e.metaKey) mods.push(window.jarvisKeys.isMac ? 'Command' : 'Super');
+  if (e.ctrlKey && !window.jarvisKeys.isMac) mods.push('Control');
   if (e.ctrlKey) mods.push('Control');
   if (e.altKey) mods.push('Option');
   if (e.shiftKey) mods.push('Shift');
@@ -4138,7 +4754,7 @@ window.addEventListener('keydown', async (e) => {
     return;
   }
 
-  if (view === 'chat' && e.metaKey && e.key === 'Enter') { // ⌘↵ из чата — в терминал
+  if (view === 'chat' && isMod(e) && e.key === 'Enter') { // ⌘↵ из чата — в терминал
     e.preventDefault();
     e.stopPropagation();
     if (chatSessionId) focusTerminal(chatSessionId, chatTitleEl.textContent);
@@ -4150,53 +4766,65 @@ window.addEventListener('keydown', async (e) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); apSel = Math.min(items.length - 1, apSel + 1); paintActions(items); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); apSel = Math.max(0, apSel - 1); paintActions(items); }
     else if (e.key === 'Enter') { e.preventDefault(); closeActions(); items[apSel] && items[apSel].run(); }
-    else if (e.key === 'Escape' || (e.metaKey && (e.key === 'k' || e.key === 'K'))) { e.preventDefault(); closeActions(); }
+    else if (e.key === 'Escape' || (isMod(e) && (e.key === 'k' || e.key === 'K'))) { e.preventDefault(); closeActions(); }
     return;
   }
 
-  // Оконные сочетания macOS. Своего меню у нас нет, поэтому системные ⌘W / ⌘M /
-  // ⌃⌘F не привязаны сами — вешаем их руками, чтобы окно вело себя как окно.
-  if (windowMode() && e.metaKey && (e.key === 'w' || e.key === 'W')) { // ⌘W — закрыть (спрятать)
+  // Оконные сочетания. Своего меню у приложения нет, поэтому системные
+  // «закрыть»/«свернуть»/«фуллскрин» не привязываются сами — вешаем руками,
+  // чтобы окно вело себя как окно. Клавиши берём по факту нажатия (metaKey —
+  // ⌘ на маке, Super на Linux), а не по зашитой раскладке.
+  if (windowMode() && isMod(e) && (e.key === 'w' || e.key === 'W')) { // закрыть (спрятать)
     e.preventDefault();
     window.jarvis.winClose();
     return;
   }
-  if (windowMode() && e.metaKey && !e.ctrlKey && (e.key === 'm' || e.key === 'M')) { // ⌘M — свернуть
+  if (windowMode() && isMod(e) && !e.shiftKey && (e.key === 'm' || e.key === 'M')) { // свернуть
     e.preventDefault();
     window.jarvis.winMinimize();
     return;
   }
-  if (windowMode() && e.metaKey && e.ctrlKey && (e.key === 'f' || e.key === 'F')) { // ⌃⌘F — фуллскрин
+  if (windowMode() && isMod(e) && e.shiftKey && (e.key === 'f' || e.key === 'F')) { // фуллскрин
     e.preventDefault();
     window.jarvis.winToggleFullscreen().then(syncFullscreen).catch(() => {});
     return;
   }
 
-  if (e.metaKey && (e.key === 'k' || e.key === 'K')) { // ⌘K — меню действий
+  if (isMod(e) && (e.key === 'k' || e.key === 'K')) { // ⌘K — меню действий
     e.preventDefault();
     toggleActions();
     return;
   }
 
-  if (e.metaKey && e.key === '1') { // ⌘1 — Чаты
+  if (isMod(e) && e.key === '1') { // ⌘1 — Чаты
     e.preventDefault();
     setView('list');
     render();
     return;
   }
-  if (e.metaKey && e.key === '2') { // ⌘2 — История
+  if (isMod(e) && e.key === '2') { // ⌘2 — История
     e.preventDefault();
     setView('history');
     return;
   }
-  if (e.metaKey && e.key === '3') { // ⌘3 — Статистика
+  if (isMod(e) && e.key === '3') { // ⌘3 — Статистика
     e.preventDefault();
     setView('stats');
     return;
   }
-  if (e.metaKey && e.key === '4') { // ⌘4 — История голоса
+  if (isMod(e) && e.key === '4') { // ⌘4 — История голоса
     e.preventDefault();
     setView('voicehist');
+    return;
+  }
+  if (e.metaKey && e.key === '5') { // ⌘5 — Циклы
+    e.preventDefault();
+    setView('loops');
+    return;
+  }
+  if (e.metaKey && e.key === '6') { // ⌘6 — Связка
+    e.preventDefault();
+    setView('bundle');
     return;
   }
 
@@ -4218,20 +4846,22 @@ window.addEventListener('keydown', async (e) => {
     return; // прочее (печать) идёт в #query
   }
 
-  if (view === 'history') { // ↑↓ выбор · ↵ открыть проект / запустить в терминале · esc — на уровень вверх
+  if (view === 'history') { // ↑↓ выбор · ↵ выбрать машину / открыть проект / запустить · esc — на уровень вверх
     if (e.key === 'ArrowDown') { e.preventDefault(); histSel = Math.min(histRows.length - 1, histSel + 1); paintHistSel(); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); histSel = Math.max(0, histSel - 1); paintHistSel(); return; }
     if (e.key === 'Enter' && histRows[histSel]) {
       e.preventDefault();
       const r = histRows[histSel];
-      if (r.type === 'project') openHistProject(r.key);
-      else launchSession(r.s.agent, r.s.id, r.cwd);
+      if (r.type === 'machine') openHistMachine(r.key);
+      else if (r.type === 'project') openHistProject(r.key);
+      else if (r.type === 'new') { histNewOpen = true; histNewFocus = true; renderHistory(); }
+      else launchSession(r.s.agent, r.s.id, r.cwd, r.s.remote || histMachine || 'local'); // машина сессии важнее текущего уровня
       return;
     }
     if (e.key === 'Escape') {
       e.preventDefault();
-      if (histProject != null) { histProject = null; renderHistory(); }
-      else { setView('list'); render(); }
+      if (histNewOpen) { histNewOpen = false; renderHistory(); }
+      else if (!histBack()) { setView('list'); render(); }
       return;
     }
     return; // прочее (печать в поиск) — пусть идёт в инпут
@@ -4259,13 +4889,20 @@ window.addEventListener('keydown', async (e) => {
     return; // прочие клавиши экран вопроса проглатывает
   }
 
-  if (e.metaKey && e.key === ',') { // ⌘, — настройки, как в macOS
+  if (isMod(e) && e.key === ',') { // модификатор + «,» — настройки, как принято в системе
     e.preventDefault();
     if (view === 'settings') { setView('list'); render(); } else setView('settings');
     return;
   }
 
-  if (e.metaKey && e.key === 'Backspace') { // ⌘⌫ — очистить завершённые
+  if (isMod(e) && e.shiftKey && e.key === 'Backspace') { // завершить сессию
+    if (editingText()) return;
+    e.preventDefault();
+    killSession(view === 'list' ? filtered()[sel] : state.find((x) => x.id === chatSessionId));
+    return;
+  }
+
+  if (isMod(e) && e.key === 'Backspace') { // очистить завершённые
     // НЕ в поле ввода: иначе ⌘⌫ (удалить до начала строки) при печати в чате
     // молча сносил все Done/Idle сессии. В поле — отдаём комбо нативному редактору.
     if (editingText()) return;
@@ -4274,7 +4911,7 @@ window.addEventListener('keydown', async (e) => {
     return;
   }
 
-  if (e.metaKey && (e.key === 'p' || e.key === 'P')) { // ⌘P — закрепить/открепить
+  if (isMod(e) && (e.key === 'p' || e.key === 'P')) { // ⌘P — закрепить/открепить
     e.preventDefault();
     const s = view === 'list' ? filtered()[sel]
       : view === 'chat' ? state.find((x) => x.id === chatSessionId)
@@ -4283,7 +4920,7 @@ window.addEventListener('keydown', async (e) => {
     return;
   }
 
-  if (e.metaKey && (e.key === 'g' || e.key === 'G')) { // ⌘G — «где это?»: оверлей в терминале
+  if (isMod(e) && (e.key === 'g' || e.key === 'G')) { // ⌘G — «где это?»: оверлей в терминале
     e.preventDefault();
     const s = view === 'list' ? filtered()[sel] : state.find((x) => x.id === chatSessionId);
     if (s) window.jarvis.pingTerminal(s.id).then((res) => {
@@ -4320,7 +4957,7 @@ window.addEventListener('keydown', async (e) => {
       render();
     } else if (e.key === 'Enter' && list.length) {
       e.preventDefault();
-      if (e.metaKey) focusTerminal(list[sel].id, list[sel].project); // ⌘↵ — прыжок в терминал
+      if (isMod(e)) focusTerminal(list[sel].id, list[sel].project); // ⌘↵ — прыжок в терминал
       else openChat(list[sel].id, list[sel].project); // ↵ — чат сессии
     }
   }

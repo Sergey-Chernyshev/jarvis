@@ -167,3 +167,52 @@ mod tests {
         assert_eq!(mode, 0o600);
     }
 }
+
+/// Замер долгого шага: пишем в лог, только если он и правда долгий.
+///
+/// «Зависло» без цифр неотличимо от «медленно», а два этих случая чинятся
+/// по-разному. Порог такой, чтобы обычная работа молчала: всё, что человек
+/// успевает заметить глазом, начинается примерно отсюда.
+pub struct Step {
+    what: &'static str,
+    at: std::time::Instant,
+}
+
+impl Step {
+    pub fn new(what: &'static str) -> Self {
+        Self { what, at: std::time::Instant::now() }
+    }
+}
+
+impl Drop for Step {
+    fn drop(&mut self) {
+        let ms = self.at.elapsed().as_millis();
+        if ms >= 300 {
+            line(&format!("[slow] {} — {ms} мс", self.what));
+        }
+    }
+}
+
+/// Паники — в общий лог.
+///
+/// По умолчанию они уходят в stderr, то есть мимо файла, который человек и
+/// присылает. А паника внутри асинхронной команды не просто теряется: задача
+/// умирает, обещание в панели не завершается ни успехом, ни отказом, и раздел
+/// висит белым навсегда. Без этой строки такое неотличимо от «просто пусто».
+pub fn install_panic_hook() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let what = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "паника без описания".into());
+        let at = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "?".into());
+        line(&format!("[panic] {at} — {what}"));
+        prev(info);
+    }));
+}

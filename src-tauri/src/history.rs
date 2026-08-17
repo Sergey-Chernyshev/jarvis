@@ -372,6 +372,7 @@ impl History {
 
     /// [{project, cwd, count, lastAt, sessions:[{id,title,model,tokens,cost,billing,lastAt}]}]
     pub fn projects(&self, usage: &crate::usage::Usage) -> Value {
+        let _t = crate::log::Step::new("history.projects");
         struct Group {
             project: String,
             cwd: Option<String>,
@@ -379,7 +380,13 @@ impl History {
             sessions: Vec<Value>,
         }
         let mut by_project: HashMap<String, Group> = HashMap::new();
-        for meta in self.cache.lock().unwrap().values() {
+        // Снимок под замком, сборка — без него. Раньше замок кэша держался всю
+        // дорогу, а внутри цикла бралcя ещё и замок расхода: на большой истории
+        // это ставило в очередь и сканер, и запись кэша. Копия дороже на одну
+        // аллокацию и дешевле на всё остальное.
+        let snapshot: Vec<Meta> =
+            self.cache.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
+        for meta in &snapshot {
             if meta.service || meta.title.is_empty() {
                 continue;
             }

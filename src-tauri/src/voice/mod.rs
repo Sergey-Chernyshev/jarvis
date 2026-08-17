@@ -135,9 +135,9 @@ impl Voice {
     fn ensure_ducked(&self) {
         if self.duck.load(Ordering::SeqCst)
             && !self.ducked.load(Ordering::SeqCst)
-            && crate::macos::media_is_playing()
+            && crate::platform::media_is_playing()
         {
-            crate::macos::media_pause();
+            crate::platform::media_pause();
             self.ducked.store(true, Ordering::SeqCst);
         }
     }
@@ -145,7 +145,7 @@ impl Voice {
     /// Немедленно вернуть медиа, если мы его паузили.
     fn force_unduck(&self) {
         if self.ducked.swap(false, Ordering::SeqCst) {
-            crate::macos::media_play();
+            crate::platform::media_play();
         }
     }
 
@@ -207,7 +207,7 @@ impl Voice {
         }
         // BT-гейт: если bluetooth_only=true и BT-выход не подключён — пропускаем.
         // Fail-open: bluetooth_audio_output_connected() возвращает true при ошибке.
-        if self.cfg_bluetooth_only() && !crate::macos::bluetooth_audio_output_connected() {
+        if self.cfg_bluetooth_only() && !crate::platform::bluetooth_audio_output_connected() {
             crate::log::line(&format!("[voice] speech suppressed — no BT output (kind={kind})"));
             return;
         }

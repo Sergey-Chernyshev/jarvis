@@ -107,6 +107,9 @@ impl Backend for CodexBackend {
         // Codex rollout линейный (без uuid/parentUuid) → просто хвост JSONL.
         crate::transcript::read_recent_entries(file, max_bytes)
     }
+    fn entries_from_text(&self, text: &str) -> Vec<Value> {
+        crate::transcript::entries_from_text(text)
+    }
     fn to_chat_items(&self, entry: &Value) -> Vec<ChatItem> {
         super::codex_transcript::to_chat_items(entry)
     }

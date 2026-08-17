@@ -65,3 +65,41 @@ test('renderTo строит узлы без innerHTML и экранирует с
   const sSpan = row.children.find((c) => c.className === 'diff-s');
   assert.equal(sSpan.textContent, '<script>alert("x")</script>');
 });
+
+function clickableDoc() {
+  const mk = () => {
+    const n = {
+      className: '', textContent: '', children: [], listeners: {},
+      appendChild(c) { n.children.push(c); return c; },
+      addEventListener(ev, fn) { (n.listeners[ev] ||= []).push(fn); },
+      ownerDocument: null,
+    };
+    return n;
+  };
+  const doc = { createElement: mk };
+  const root = { ownerDocument: doc, textContent: '', children: [], appendChild(c) { root.children.push(c); return c; } };
+  return { doc, root };
+}
+
+test('клик по строке отдаёт её номер и текст — на этом стоит замечание к ревью', () => {
+  const { root } = clickableDoc();
+  const seen = [];
+  DiffView.renderTo(root, [
+    { old_start: 10, new_start: 10, lines: [{ t: ' ', s: 'контекст' }, { t: '+', s: 'новая' }, { t: '-', s: 'старая' }] },
+  ], (no, text) => seen.push([no, text]));
+  const rows = root.children.filter((c) => (c.className || '').includes('diff-row'));
+  rows[1].listeners.click[0]();
+  assert.deepEqual(seen[0], [11, 'новая'], 'добавленная строка адресуется новым номером');
+  rows[2].listeners.click[0]();
+  // У удалённой строки нового номера нет — адресуем старым, иначе замечание
+  // указывало бы в никуда.
+  assert.equal(seen[1][0], 11);
+  assert.equal(seen[1][1], 'старая');
+});
+
+test('без обработчика строки не притворяются кликабельными', () => {
+  const { root } = clickableDoc();
+  DiffView.renderTo(root, [{ old_start: 1, new_start: 1, lines: [{ t: '+', s: 'x' }] }]);
+  const row = root.children.find((c) => (c.className || '').includes('diff-row'));
+  assert.ok(!(row.className || '').includes('clickable'));
+});

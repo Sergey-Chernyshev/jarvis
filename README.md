@@ -3,20 +3,21 @@
 <h1 align="center">Jarvis</h1>
 
 <p align="center">
-  Mission control for your coding agents, right in the macOS menu bar.<br>
+  Mission control for your coding agents, right in the menu bar / tray.<br>
   Jarvis watches every Claude&nbsp;Code and Codex session you run — and tells you, even out loud, the moment one needs you.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/macOS-11%2B%20·%20Apple%20Silicon-black?logo=apple" alt="macOS 11+, Apple Silicon">
+  <img src="https://img.shields.io/badge/Linux-X11%20·%20Wayland-black?logo=linux&logoColor=white" alt="Linux: X11, Wayland">
   <img src="https://img.shields.io/github/v/release/Sergey-Chernyshev/jarvis?include_prereleases&sort=semver&label=release" alt="Latest release">
   <img src="https://img.shields.io/github/actions/workflow/status/Sergey-Chernyshev/jarvis/ci.yml?branch=master&label=CI" alt="CI">
   <img src="https://img.shields.io/badge/status-pre--1.0-orange" alt="Status: pre-1.0">
 </p>
 
 <p align="center"><i>🖼 Screenshot and demo coming soon. What to capture and how to wire it in: <a href="docs/assets/README.md">docs/assets/README.md</a>.</i></p>
-<!-- <p align="center"><img src="docs/assets/hero.png" alt="Jarvis: the ⌘J panel, menu-bar counters, a toast over fullscreen" width="760"></p> -->
+<!-- <p align="center"><img src="docs/assets/hero.png" alt="Jarvis: the hotkey panel, menu-bar counters, a toast over fullscreen" width="760"></p> -->
 
 ## Why Jarvis
 
@@ -24,7 +25,7 @@ Running several coding agents at once turns **you** into the bottleneck. Session
 
 **Jarvis is that missing single pane.** It sits in the menu bar, watches every interactive Claude Code and Codex CLI session on your machine, and makes sure no agent ever waits on you silently:
 
-- you **see** the aggregate state at all times (live counters in the menu bar, a Raycast-style ⌘J panel);
+- you **see** the aggregate state at all times (live counters in the menu bar, a Raycast-style panel on ⌘J / Ctrl+J);
 - you **hear** it — toast notifications that render over fullscreen apps, and an optional local voice that speaks session events out loud;
 - you **act** without hunting for the right terminal — reply straight into any session, switch its model or reasoning effort, and let Jarvis keep the Mac awake through the night.
 
@@ -32,9 +33,10 @@ Running several coding agents at once turns **you** into the bottleneck. Session
 
 - **🖥 Multi-session monitor** — every Claude Code and Codex session across every terminal, with live **⏸ waiting · ⚙ working** counters in the menu bar.
 - **🔔 Toasts over fullscreen** — "needs permission" is visible even inside a fullscreen app, with customizable content (branch, model, effort, tokens, duration).
-- **🎛 Always-on-top ⌘J panel** — open, glance, act, dismiss (Raycast-style); never steals focus.
+- **🎛 Always-on-top hotkey panel** (⌘J on macOS, Ctrl+J on Linux) — open, glance, act, dismiss (Raycast-style); never steals focus.
 - **↩️ Reply into any session** — type back into a session via tmux even if its window is minimized or on another Space; a `/` command palette included.
 - **⚙️ Remote control** — switch model (Opus / Sonnet / Haiku) and reasoning effort from the panel; answer multi-choice agent questions with native pickers.
+- **🛰 Remote sessions** — agents running on a VPS show up in the same list, over your own SSH; a thin node buffers events while the laptop sleeps ([docs/remote.md](docs/remote.md)).
 - **📊 Usage, costs and limits** — token and cost tracking per model and project; when a session hits the usage limit, Jarvis shows when it resets and can auto-resume it.
 - **🗣 Jarvis speaks** — a local TTS voice reads out what a session did or what it's waiting for (Russian-first for now).
 - **🎤 "Hey Jarvis" voice assistant** *(experimental)* — say the wake word and talk to your sessions: route a reply by voice, ask what an agent did, control media/volume, ask a general question.
@@ -43,8 +45,30 @@ Running several coding agents at once turns **you** into the bottleneck. Session
 - **✅ Read-only task board** — live `TodoWrite` progress (done / in-progress / queued) per session.
 - **📦 Model manager** — download, delete and hot-swap the local TTS/STT/wake-word models from settings; guided first-run onboarding.
 - **🔒 Event-driven & private** — built on the agents' own hooks (no screen scraping), everything runs locally, no telemetry, removable with one command.
+- **📟 Terminal and phone too** — the same fleet from a TUI ([jarvis-cli](https://github.com/arklual/jarvis-cli)) or from Android ([jarvis-mobile](https://github.com/arklual/jarvis-mobile)); see [the stack](#the-jarvis-stack).
 
 > **Boundary:** Jarvis is a **monitor and a remote, not an orchestrator.** It does not spawn agents and does not own the plan; it complements orchestrators (Claude Squad, Conductor, Crystal, native Agent Teams) and the sessions you already run.
+
+## The Jarvis stack
+
+The panel is one of three ways into the same fleet — not a client/server split.
+Each program talks to the agents' own hooks, and the ones on **one machine share
+one data directory** (`~/.jarvis`): a loop started in the terminal shows up in the
+panel, and a bundle started in the panel is driven from the terminal. The phone
+is deliberately narrower — sessions, chat and replies, nothing else.
+
+| | What it is | Where |
+| --- | --- | --- |
+| **Jarvis** | the panel: menu bar / tray, toasts over fullscreen, voice, dictation, usage | this repo |
+| **jarvis-cli** | the same fleet from a terminal: live TUI, chat, loops, bundles — over SSH, inside tmux, no windows | [arklual/jarvis-cli](https://github.com/arklual/jarvis-cli) |
+| **jarvis-mobile** | Android client for agents that run on **other** machines: see, read, reply | [arklual/jarvis-mobile](https://github.com/arklual/jarvis-mobile) |
+| **jarvis-node** | the thin node on the remote machine: buffers hook events, serves them over SSH | [`src-tauri/node`](src-tauri/node/README.md), in this repo |
+
+The panel and the CLI are two faces of one local state, so use whichever is in
+front of you. The phone never touches `~/.jarvis` — it talks to `jarvis-node` over
+your own SSH, which is exactly what lets it work while the laptop is closed
+([docs/remote.md](docs/remote.md)). The node is also what the panel and the CLI
+reach for when an agent runs on a VPS.
 
 ## Who it's for
 
@@ -59,7 +83,11 @@ It's probably **not** for you if you run one session in one terminal (native not
 
 ## Install
 
-### From a release (recommended)
+> **Platforms.** macOS and Linux. macOS is the primary target and the only one
+> with prebuilt releases; on Linux you build from source — setup and the list of
+> platform differences live in [`docs/linux.md`](docs/linux.md).
+
+### macOS — from a release (recommended)
 
 1. Download `Jarvis_x.y.z_aarch64.dmg` from the [releases](https://github.com/Sergey-Chernyshev/jarvis/releases) page.
 2. Open the DMG, drag **Jarvis** into **Applications**, launch it.
@@ -73,16 +101,40 @@ It's probably **not** for you if you run one session in one terminal (native not
 
 The app checks for updates itself (built-in updater). You can reinstall the integration anytime: menu bar → "Reinstall integration…".
 
+### Linux — from source
+
+```bash
+# Debian / Ubuntu — see docs/linux.md for Fedora and Arch
+sudo apt install tmux libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+                 librsvg2-dev libasound2-dev libxdo-dev patchelf cmake
+
+# Arch (the port's main bench: Arch + Sway)
+# sudo pacman -S tmux webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg \
+#                alsa-lib patchelf cmake wtype wl-clipboard playerctl
+
+npm ci
+npm run setup          # hooks into ~/.claude/settings.json
+npm run start:linux    # build and launch
+npm run bundle:linux   # optional: .deb / .AppImage / .rpm
+```
+
+On Wayland (Sway, Hyprland, GNOME) global shortcuts belong to the compositor, not
+to the app: bind them there — `bindsym $mod+j exec jarvis --toggle` — and add the
+window rules from [`docs/sway/jarvis.conf`](docs/sway/jarvis.conf), otherwise the
+panel arrives as an ordinary tile. On X11 the panel hotkey is **Ctrl+J**: Super belongs to the desktop environment
+(GNOME uses Super+1..4 for the dock). Full list of differences and of the
+optional helpers (`playerctl`, `wmctrl`, `xdotool`) — [`docs/linux.md`](docs/linux.md).
+
 **Requirements:**
 
-- an **Apple Silicon** Mac (M1 or newer), macOS 11+ — the prebuilt DMG is aarch64-only; Intel Macs can build from source (below);
-- **tmux** for the reply-into-session and remote-control features: `brew install tmux`;
+- **macOS 11+** on **Apple Silicon** (M1 or newer) — the prebuilt DMG is aarch64-only; Intel Macs build from source (below). Or **Linux** with WebKitGTK, GTK 3 and an appindicator-capable tray;
+- **tmux** — required for replying into sessions and the remote (`brew install tmux` / `apt install tmux`);
 - **Claude Code** (CLI) and/or **Codex** (CLI) — the agents Jarvis monitors.
 
 <details>
 <summary>Build from source / for developers</summary>
 
-You need: Rust stable ([rustup](https://rustup.rs/); the minimum version is the `rust-version` field in [`src-tauri/Cargo.toml`](src-tauri/Cargo.toml)), Node.js 20+, CMake (`brew install cmake`), tmux (optional).
+You need: Rust stable ([rustup](https://rustup.rs/); the minimum version is the `rust-version` field in [`src-tauri/Cargo.toml`](src-tauri/Cargo.toml)), Node.js 20+, CMake, tmux. On Linux also the system libraries listed above.
 
 ```bash
 npm ci
@@ -111,23 +163,23 @@ Check the daemon is alive: `curl -s --unix-socket ~/.jarvis/run.sock http://jarv
 
 ### 🖥 Session monitoring
 
-A registry of every interactive Claude Code / Codex session: status (idle / working / waiting / finished / hit the limit), project, branch, model, activity. The menu-bar counter (**◇ ⏸N ⚙M**) is the cross-terminal summary; the ⌘J panel is the detailed view.
+A registry of every interactive Claude Code / Codex session: status (idle / working / waiting / finished / hit the limit), project, branch, model, activity. The menu-bar counter (**◇ ⏸N ⚙M**) is the cross-terminal summary; the hotkey panel is the detailed view.
 
 <details>
 <summary>How it works</summary>
 
-No screen parsing — only structured events from the agents themselves, via their native hooks: `SessionStart` → idle, `UserPromptSubmit` → working, `Notification` → waiting (+a notification), `Stop` → done (+a notification), `SessionEnd` → the session disappears. The registry-reducer lives in the Rust daemon; state survives a daemon restart (`~/.jarvis/state.json`) and live tmux sessions are re-adopted. The pane's screen is read only by the interactive-prompt detector and the remote (a regex, not screenshots).
+No screen parsing — only structured events from the agents themselves, via their native hooks: `SessionStart` → idle, `UserPromptSubmit` → working, `Notification` → waiting (+a notification), `Stop` → done (+a notification), `SessionEnd` → the session disappears. A session can also be ended by hand — ⌘⇧⌫ or "Завершить сессию" in ⌘K: a live one loses its pane along with the agent, while a stuck one (the agent died, no `SessionEnd` arrived, the node is unreachable — the liveness sweep has nothing to judge by) is simply dropped from the list. The registry-reducer lives in the Rust daemon; state survives a daemon restart (`~/.jarvis/state.json`) and live tmux sessions are re-adopted. The pane's screen is read only by the interactive-prompt detector and the remote (a regex, not screenshots).
 
 </details>
 
-### 🔔 Notifications & 🎛 the ⌘J panel
+### 🔔 Notifications & 🎛 the hotkey panel
 
-Jarvis's own toast notifications render **over fullscreen**; the panel (`alwaysOnTop`) does not steal focus. The global **⌘J** hotkey opens the panel centered on screen — Esc, a click outside, or ⌘J again closes it.
+Jarvis's own toast notifications render **over fullscreen**; the panel (`alwaysOnTop`) does not steal focus. The global hotkey (**⌘J** on macOS, **Ctrl+J** on Linux) opens the panel centered on screen — Esc, a click outside, or the hotkey again closes it.
 
 <details>
 <summary>Details</summary>
 
-Click ◇ for the panel. Right-click for the menu (test notification, autostart, quit). The hotkey, panel position, notification toggles and autostart live in settings (⚙ in the panel header), stored in `~/.jarvis/settings.json`. Notification content is composable from segments (branch · model · effort · tokens · duration) with a live preview; a separate toggle speaks notifications only when a Bluetooth headset is connected. Note: the global ⌘J intercepts that key across all apps (Chrome "downloads", VS Code "panel") — change the shortcut in settings if it gets in the way.
+Click ◇ for the panel. Right-click for the menu (test notification, autostart, quit). The hotkey, panel position, notification toggles and autostart live in settings (⚙ in the panel header), stored in `~/.jarvis/settings.json`. Notification content is composable from segments (branch · model · effort · tokens · duration) with a live preview; a separate toggle speaks notifications only when a Bluetooth headset is connected. Note: the global hotkey intercepts that combination across all apps (Chrome "downloads", VS Code "panel") — change it in settings if it gets in the way.
 
 </details>
 
@@ -138,7 +190,7 @@ The interface is a **sheet of paper**: one opaque surface, one accent colour, an
 <details>
 <summary>Details</summary>
 
-**Settings → Look**: mode (overlay / window), theme (light / dark / system), paint (Coal · Clover · Raspberry, or **your own** — pick one hue and the rest is derived from it), and what the bottom strip shows — the subscription limit or the day's spend. Below that: row **density**, corner **radius** and interface **scale** (85–140%), with a reset button. In **window mode** Jarvis is an ordinary window: sessions on the left, the conversation on the right, the limit in the title bar; it resizes, minimises, does not vanish when you click away, and lives in the Dock (the icon appears on the next launch). **Overlay** is the familiar ⌘J panel that floats above everything. Changes apply immediately across every window: panel, toasts, agent chat, onboarding. The typeface is Golos Text, bundled with the app so the UI renders identically with no network. The full visual language is documented in [`docs/superpowers/specs/2026-08-02-clover-redesign.md`](docs/superpowers/specs/2026-08-02-clover-redesign.md).
+**Settings → Look**: mode (overlay / window), theme (light / dark / system), paint (Coal · Clover · Raspberry, or **your own** — pick one hue and the rest is derived from it), and what the bottom strip shows — the subscription limit or the day's spend. Below that: row **density**, corner **radius** and interface **scale** (85–140%), with a reset button. In **window mode** Jarvis is an ordinary window: sessions on the left, the conversation on the right, the limit in the title bar; it resizes, minimises, does not vanish when you click away, and lives in the Dock (the icon appears on the next launch). **Overlay** is the familiar hotkey panel that floats above everything. Changes apply immediately across every window: panel, toasts, agent chat, onboarding. The typeface is Golos Text, bundled with the app so the UI renders identically with no network. The full visual language is documented in [`docs/superpowers/specs/2026-08-02-clover-redesign.md`](docs/superpowers/specs/2026-08-02-clover-redesign.md).
 
 </details>
 
@@ -167,6 +219,14 @@ If `codex` is found during setup, Jarvis wires it up too: hooks in `~/.codex/hoo
 Model and reasoning are changed via Codex's own `/model` picker (there is no separate `/effort`). **Headless `codex exec` does not fire hooks** — such runs aren't monitored (by design, same as `claude -p`). On a fresh machine Codex may ask you to trust `~/.codex/hooks.json`; Jarvis never injects the global `--dangerously-bypass-hook-trust` flag. Codex usage/cost numbers are estimates.
 
 </details>
+
+### 🛰 Remote sessions (an agent on another machine)
+
+An agent running on a VPS or an office workstation appears in the same list as your local ones — same statuses, toasts, voice, chat, reply-into-session and remote, with the node's name as a badge. A thin **node** (`jarvis-node`) lives on that machine: it receives the agents' hooks locally and **buffers the events**, so a closed laptop doesn't lose the night. Jarvis reaches it over your own SSH (`ssh -N -L` onto a unix socket) — the node opens no ports and Jarvis creates no new secrets. The same node is what [jarvis-cli](https://github.com/arklual/jarvis-cli) (`jarvis -m vps …`) and the [Android client](https://github.com/arklual/jarvis-mobile) talk to, so a VPS agent is reachable from a terminal or a phone with nothing extra installed on it.
+
+Set up straight from the panel: **Settings → «Удалённые»** → enter the ssh host → "Проверить машину" (shows what's there) → "Установить". Jarvis delivers the node itself, wires the agents' hooks and sets up autostart, showing each step as it goes. If ssh doesn't let it in yet, the panel offers the public key to add on that side. Same thing from a terminal — `jarvis-setup remote add vps dev@203.0.113.10`.
+
+The remote machine needs SSH access, `curl` (used by the hooks, and to fetch the node) and `tmux` — the latter only for replying into a session and the remote control. Setup, what it looks like in the UI, diagnostics, security and boundaries: **[docs/remote.md](docs/remote.md)**.
 
 ### 📊 Usage, costs and limits
 
@@ -273,7 +333,7 @@ claude / codex (any terminal)
        └─ ~/.jarvis/bin/jarvis-hook        ← fail-silent shim, 0.3 s curl
             └─ unix socket ~/.jarvis/run.sock
                  └─ Rust daemon (Tauri) = session registry + effects
-                      ├─ toasts over fullscreen · ⌘J panel (always-on-top)
+                      ├─ toasts over fullscreen · hotkey panel (always-on-top)
                       ├─ tmux reply & remote · TTS/STT sidecars · power plugins
                       └─ menu-bar counter: ⏸ waiting · ⚙ working
 ```
@@ -284,11 +344,11 @@ The frontend (panel `ui/index.html` + `ui/renderer.js`, toasts `ui/toast.*`) run
 
 ## Tips & recommended setup
 
-- **Install tmux** (`brew install tmux`) — without it Jarvis still monitors and notifies, but can't reply into sessions or drive the remote. In iTerm2 sessions get native tabs (tmux control mode).
+- **Install tmux** (`brew install tmux` / `apt install tmux`) — without it Jarvis still monitors and notifies, but can't reply into sessions or drive the remote. In iTerm2 sessions get native tabs (tmux control mode).
 - **Pair with an orchestrator.** Claude Squad, Conductor, Crystal, native Agent Teams — they spawn and plan; Jarvis watches everything they (and you) run interactively, in one place.
 - **Overnight runs:** enable **Keep awake → auto** (awake while agents work) and let the clamshell guard handle the lid; enable auto-resume so a limit reset doesn't strand the run.
 - **Office-friendly voice:** the "speak only into a Bluetooth headset" toggle keeps summaries out of the room's speakers.
-- **⌘J clashes** with Chrome's Downloads and VS Code's panel toggle — rebind it in settings if you use those.
+- **The panel hotkey clashes** with Chrome's Downloads and VS Code's panel toggle — rebind it in settings if you use those.
 - **Commercial use:** the default voice and wake-word models are non-commercial; switch to the commercial-clean set (Silero `v5_cis_base`, Whisper/Qwen3, own or no wake-word) — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 - A session started outside the shim shows as "outside tmux" — restart it via `claude --resume <session_id>` to make it controllable.
 
@@ -326,13 +386,13 @@ Jarvis is a solo-maintained pre-1.0 project; this is a direction, not a promise.
 
 **Exploring** — English UI and English spoken summaries (the interface and voice are currently Russian-first).
 
-**Explicitly out of scope:** spawning/orchestrating agents (by design — see the boundary note), Windows/Linux (deeply macOS-native: IOPMAssertion, `pmset`, WKWebView, MLX), and the Mac App Store (its sandbox is incompatible with hooks and tmux).
+**Explicitly out of scope:** spawning/orchestrating agents (by design — see the boundary note), Windows, and the Mac App Store (its sandbox is incompatible with hooks and tmux). Linux **is** supported — see [`docs/linux.md`](docs/linux.md); a few macOS-only capabilities (clamshell mode, the Accessibility focus snapshot) have no counterpart there and report themselves as unavailable.
 
 ## Status & limitations
 
 A pre-1.0 MVP, developed in the open. Deliberate boundaries and known issues:
 
-- **macOS-only**; **Claude Code (CLI)** and **Codex (CLI)** are supported — **interactive** sessions only (headless `claude -p` / `codex exec` don't fire hooks — not monitored); the remote and reply need **tmux**.
+- **macOS and Linux** (Linux from source; some capabilities differ — [`docs/linux.md`](docs/linux.md)); **Claude Code (CLI)** and **Codex (CLI)** are supported — **interactive** sessions only (headless `claude -p` / `codex exec` don't fire hooks — not monitored); the remote and reply need **tmux**.
 - **The UI and voice are currently Russian-first.** Monitoring, notifications, dictation and the remote work regardless of your language; English localization is on the roadmap.
 - **Effort** can't be read from outside → the panel keeps optimistic state.
 - **Hook schemas drift between agent versions.** If events stop arriving after a `claude` update, compare against the current hooks docs and fix `EVENTS`/the format in `src-tauri/src/bin/setup.rs`.

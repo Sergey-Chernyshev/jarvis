@@ -106,9 +106,17 @@ pub struct PctReset {
     pub reset_at: i64,
 }
 
+/// Недельное окно конкретной модели: «Current week (Fable): 54% …».
+///
+/// Имя — какое пришло: раньше здесь было зашито «Sonnet only», и с приходом
+/// Fable строка молча исчезла из панели. Зашитая модель протухает с каждым
+/// релизом моделей — имя обязано быть данными.
 #[derive(Debug, Clone, Serialize)]
-pub struct PctOnly {
+#[serde(rename_all = "camelCase")]
+pub struct ModelWeek {
+    pub model: String,
     pub pct: i64,
+    pub reset_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,7 +132,10 @@ pub struct Account {
 pub struct OfficialInfo {
     pub session: Option<PctReset>,
     pub week: Option<PctReset>,
-    pub week_sonnet: Option<PctOnly>,
+    pub week_model: Option<ModelWeek>,
+    /// Чей это `/usage`: "local" или имя узла — человек должен видеть, про чью
+    /// авторизацию эти проценты.
+    pub source: String,
     pub at: i64,
     pub account: Account,
 }
@@ -133,7 +144,7 @@ pub struct OfficialInfo {
 struct Official {
     session: Option<PctReset>,
     week: Option<PctReset>,
-    week_sonnet: Option<PctOnly>,
+    week_model: Option<ModelWeek>,
     at: i64,
 }
 
@@ -190,6 +201,11 @@ pub struct Usage {
     msg_seen: Mutex<OrderedRing>,
     billing_cache: Mutex<HashMap<String, String>>,
     official: Mutex<Option<Official>>,
+    /// Откуда приехали лимиты: "local" или имя узла. Пусто — ниоткуда.
+    official_source: Mutex<String>,
+    /// Почему лимитов нет — по всем источникам разом. Молчание добытчика
+    /// неотличимо от «всё хорошо», и его пришлось запретить.
+    official_err: Mutex<Option<String>>,
     scanning: AtomicBool,
     official_busy: AtomicBool,
     persist_pending: AtomicBool,
@@ -243,6 +259,8 @@ impl Usage {
             msg_seen: Mutex::new(msg_seen),
             billing_cache: Mutex::new(HashMap::new()),
             official: Mutex::new(None),
+            official_source: Mutex::new(String::new()),
+            official_err: Mutex::new(None),
             scanning: AtomicBool::new(false),
             official_busy: AtomicBool::new(false),
             persist_pending: AtomicBool::new(false),
@@ -739,8 +757,10 @@ impl Usage {
             v
         });
 
+        let official_err = self.official_err.lock().unwrap_or_else(|e| e.into_inner()).clone();
         serde_json::json!({
             "period": if week { "week" } else { "today" },
+            "officialError": official_err,
             "total": { "tok": total_tok, "api": total_api, "plan": total_plan, "n": total_n },
             "series": series,
             "byModel": by_model,
@@ -758,7 +778,7 @@ impl Usage {
 
     /// Расход одной сессии — для строки чата и истории.
     pub fn for_session(&self, id: &str) -> Option<Value> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let s = state.sessions.get(id)?;
         Some(serde_json::json!({
             "tok": s.tok.total(), "cost": s.cost, "billing": s.billing, "model": s.model,
@@ -774,7 +794,8 @@ impl Usage {
         Some(OfficialInfo {
             session: o.session,
             week: o.week,
-            week_sonnet: o.week_sonnet,
+            week_model: o.week_model,
+            source: self.official_source.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             at: o.at,
             account: read_account(),
         })
@@ -789,36 +810,76 @@ impl Usage {
         });
     }
 
+    /// Достать текст `/usage`: сначала локально, затем с узлов по порядку.
+    ///
+    /// Человек, работающий на узле, может быть не авторизован локально вовсе —
+    /// тогда правда о лимитах живёт только там. Ошибки всех источников
+    /// собираются в одну строку: чинить будут по ней.
+    async fn obtain_official(self: &Arc<Self>, d: &Arc<Daemon>) -> Result<(String, String), String> {
+        let mut errs: Vec<String> = Vec::new();
+        if crate::claude_bin::resolve_claude_bin().is_none() {
+            errs.push("локально: claude не найден".into());
+        } else {
+            match crate::claude_bin::run_claude(
+                &["-p", "--no-session-persistence", "/usage"],
+                Duration::from_secs(90),
+            )
+            .await
+            {
+                Some(text) => return Ok((text, "local".into())),
+                None => errs.push("локально: /usage не ответил — не авторизован или нет сети".into()),
+            }
+        }
+        for node in d.remotes.all() {
+            let name = node.cfg.name.clone();
+            match node.client() {
+                Ok(client) => match client.usage_text(false).await {
+                    Ok(text) => return Ok((text, name)),
+                    Err(e) => errs.push(format!("{name}: {e}")),
+                },
+                Err(e) => errs.push(format!("{name}: {e}")),
+            }
+        }
+        Err(if errs.is_empty() { "источников лимитов нет".into() } else { errs.join(" · ") })
+    }
+
     pub async fn fetch_official(self: &Arc<Self>, d: &Arc<Daemon>) {
         if self.official_busy.swap(true, Ordering::SeqCst) {
             return;
         }
-        let out = crate::claude_bin::run_claude(
-            &["-p", "--no-session-persistence", "/usage"],
-            Duration::from_secs(90),
-        )
-        .await;
+        let got = self.obtain_official(d).await;
         self.official_busy.store(false, Ordering::SeqCst);
-        let Some(text) = out else { return }; // нет сети/квоты — живём на локальной оценке
-
-        let grab = |p: &str| -> Option<PctReset> {
-            let re = regex::RegexBuilder::new(p).case_insensitive(true).build().unwrap();
-            let c = re.captures(&text)?;
-            Some(PctReset {
-                pct: c[1].parse().unwrap_or(0),
-                reset_at: parse_reset_date(c.get(2).map(|m| m.as_str()).unwrap_or("")),
-            })
+        let (text, source) = match got {
+            Ok(x) => x,
+            Err(why) => {
+                // Провал добытчика обязан быть виден: раньше он молчал, и
+                // человек смотрел на пустую полоску, гадая, где сломано.
+                let changed = {
+                    let mut e = self.official_err.lock().unwrap_or_else(|p| p.into_inner());
+                    let same = e.as_deref() == Some(why.as_str());
+                    *e = Some(why.clone());
+                    !same
+                };
+                if changed {
+                    crate::log::line(&format!("[usage] лимиты недоступны: {why}"));
+                }
+                return;
+            }
         };
-        let session = grab(r"Current session:\s*(\d+)%\s*used\s*·\s*resets\s+([^\n(]+)");
-        let week = grab(r"Current week \(all models\):\s*(\d+)%\s*used\s*·\s*resets\s+([^\n(]+)");
-        let ws = regex::RegexBuilder::new(r"Current week \(Sonnet only\):\s*(\d+)%")
-            .case_insensitive(true)
-            .build()
-            .unwrap()
-            .captures(&text)
-            .map(|c| PctOnly { pct: c[1].parse().unwrap_or(0) });
-        if session.is_none() && week.is_none() {
+        let Some((session, week, week_model)) = parse_official(&text) else {
+            let head = crate::util::ellipsize(&crate::util::one_line(&text), 120);
+            *self.official_err.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some(format!("{source}: формат /usage не разобрался — {head}"));
+            crate::log::line(&format!("[usage] формат /usage ({source}) не разобрался: {head}"));
             return; // формат уехал — не перетираем
+        };
+        *self.official_err.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        {
+            let mut src = self.official_source.lock().unwrap_or_else(|p| p.into_inner());
+            if *src != source {
+                crate::log::line(&format!("[usage] лимиты приехали: источник {source}"));
+                *src = source.clone();
+            }
         }
         let prev_pct = self
             .official
@@ -831,7 +892,7 @@ impl Usage {
         *self.official.lock().unwrap() = Some(Official {
             session,
             week,
-            week_sonnet: ws,
+            week_model,
             at: now_ms(),
         });
         // предупреждение ДО стены: пересекли 90% окна
@@ -962,9 +1023,55 @@ fn read_account() -> Account {
 }
 
 /// "Jun 11 at 9:30pm (Europe/Moscow)" → мс эпохи (МСК = UTC+3 круглый год).
+/// Разбор официального `/usage`: сессия, неделя и недельное окно модели.
+///
+/// Чистая функция ради тестов на живом выводе: формат внутренний и дрейфует,
+/// и каждый дрейф до сих пор замечал пользователь, а не тест.
+fn parse_official(text: &str) -> Option<(Option<PctReset>, Option<PctReset>, Option<ModelWeek>)> {
+    let grab = |p: &str| -> Option<PctReset> {
+        let re = regex::RegexBuilder::new(p).case_insensitive(true).build().unwrap();
+        let c = re.captures(text)?;
+        Some(PctReset {
+            pct: c[1].parse().unwrap_or(0),
+            reset_at: parse_reset_date(c.get(2).map(|m| m.as_str()).unwrap_or("")),
+        })
+    };
+    // Хвост строки берём целиком, со скобками: в них теперь живёт «(UTC)», и
+    // без него время сброса трактовалось бы в неведомо чьём поясе.
+    let session = grab(r"Current session:\s*(\d+)%\s*used\s*·\s*resets\s+([^\n]+)");
+    let week = grab(r"Current week \(all models\):\s*(\d+)%\s*used\s*·\s*resets\s+([^\n]+)");
+    // Модель в скобках — любая: Fable, Opus, Sonnet only… Жёсткое имя молча
+    // протухает при каждой смене модельного ряда.
+    let model_re = regex::RegexBuilder::new(
+        r"Current week \(([^)]+)\):\s*(\d+)%\s*used(?:\s*·\s*resets\s+([^\n]+))?",
+    )
+    .case_insensitive(true)
+    .build()
+    .unwrap();
+    let week_model = model_re
+        .captures_iter(text)
+        .find(|c| !c[1].eq_ignore_ascii_case("all models"))
+        .map(|c| ModelWeek {
+            model: c[1].trim().to_string(),
+            pct: c[2].parse().unwrap_or(0),
+            reset_at: parse_reset_date(c.get(3).map(|m| m.as_str()).unwrap_or("")),
+        });
+    if session.is_none() && week.is_none() {
+        return None;
+    }
+    Some((session, week, week_model))
+}
+
+/// «Aug 10, 6:59pm (UTC)» → миллисекунды эпохи.
+///
+/// Терпимо к дрейфу: запятая или «at» после числа, минуты необязательны,
+/// месяц полным словом или тремя буквами. Пояс — по хвосту строки: «(UTC)»
+/// значит UTC, иначе местное время машины. Прежний разбор требовал «at»
+/// (формат уже ушёл на запятую — и «до …» исчезло из панели), а пояс был
+/// зашит числом +3 — то есть время врало всем, кто не в Москве.
 fn parse_reset_date(s: &str) -> i64 {
     let re = regex::RegexBuilder::new(
-        r"([A-Z][a-z]{2})\s+(\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)",
+        r"([A-Z][a-z]{2})[a-z]*\s+(\d{1,2})(?:,|\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
     )
     .case_insensitive(true)
     .build()
@@ -973,23 +1080,52 @@ fn parse_reset_date(s: &str) -> i64 {
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     let Some(month) = MONTHS.iter().position(|m| m.eq_ignore_ascii_case(&c[1])) else { return 0 };
     let day: u32 = c[2].parse().unwrap_or(1);
-    let mut hh: i64 = c[3].parse::<i64>().unwrap_or(0) % 12;
-    if c[5].eq_ignore_ascii_case("pm") {
-        hh += 12;
+    let mut hh: u32 = c[3].parse::<u32>().unwrap_or(0);
+    let ampm = c.get(5).map(|m| m.as_str().to_ascii_lowercase());
+    match ampm.as_deref() {
+        Some("pm") if hh < 12 => hh += 12,
+        Some("am") if hh == 12 => hh = 0,
+        _ => {} // без am/pm — 24-часовой формат как есть
     }
     let min: u32 = c.get(4).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
+    // Пояс — из хвоста строки. Живьём видели два: «(UTC)» у нынешнего формата
+    // и «(Europe/Moscow)» у прежнего (Claude пишет время в поясе аккаунта;
+    // Москва без переводов с 2014-го, смещение константно). Незнакомое имя —
+    // это почти наверняка пояс самой машины: разбираем как местное время, что
+    // строго честнее прежнего зашитого +3 для всех подряд.
+    let tail_up = s.to_ascii_uppercase();
+    let fixed_offset_ms: Option<i64> = if tail_up.contains("UTC") {
+        Some(0)
+    } else if tail_up.contains("EUROPE/MOSCOW") {
+        Some(3 * 3_600_000)
+    } else {
+        None
+    };
     let now = now_ms();
     let year = chrono::DateTime::from_timestamp_millis(now)
         .map(|d| chrono::Datelike::year(&d))
         .unwrap_or(2026);
     let make = |y: i32| -> i64 {
-        chrono::NaiveDate::from_ymd_opt(y, month as u32 + 1, day)
-            .and_then(|d| d.and_hms_opt(0, min, 0))
-            .map(|dt| dt.and_utc().timestamp_millis() + (hh - 3) * 3_600_000)
-            .unwrap_or(0)
+        let Some(naive) = chrono::NaiveDate::from_ymd_opt(y, month as u32 + 1, day)
+            .and_then(|d| d.and_hms_opt(hh, min, 0))
+        else {
+            return 0;
+        };
+        match fixed_offset_ms {
+            Some(off) => naive.and_utc().timestamp_millis() - off,
+            None => {
+                use chrono::TimeZone;
+                chrono::Local
+                    .from_local_datetime(&naive)
+                    .single()
+                    .map(|dt| dt.timestamp_millis())
+                    .unwrap_or(0)
+            }
+        }
     };
     let mut ts = make(year);
-    if ts < now - 12 * 3_600_000 {
+    // Сброс всегда в будущем; «Jan 1» в конце декабря — это уже следующий год.
+    if ts != 0 && ts < now - 12 * 3_600_000 {
         ts = make(year + 1);
     }
     ts
@@ -998,6 +1134,68 @@ fn parse_reset_date(s: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Живой вывод `claude /usage` от 2026-08-10 — дословно. Каждый дрейф
+    /// формата до этого замечал пользователь, а не тест; теперь наоборот.
+    const REAL_USAGE: &str = "You are currently using your subscription to power your Claude Code usage\n\n\
+Current session: 62% used · resets Aug 10, 6:59pm (UTC)\n\
+Current week (all models): 94% used · resets Aug 10, 10:59pm (UTC)\n\
+Current week (Fable): 54% used · resets Aug 10, 11pm (UTC)\n";
+
+    #[test]
+    fn official_parses_the_real_output() {
+        let (session, week, model) = parse_official(REAL_USAGE).expect("живой формат обязан разбираться");
+        let s = session.expect("сессия");
+        assert_eq!(s.pct, 62);
+        assert!(s.reset_at > 0, "время сброса сессии не разобралось");
+        let w = week.expect("неделя");
+        assert_eq!(w.pct, 94);
+        assert!(w.reset_at > 0, "время сброса недели не разобралось");
+        let m = model.expect("модельная неделя — та самая строка про Fable");
+        assert_eq!(m.model, "Fable");
+        assert_eq!(m.pct, 54);
+        assert!(m.reset_at > 0, "«11pm» без минут обязан разбираться");
+    }
+
+    #[test]
+    fn old_sonnet_format_still_parses() {
+        let text = "Current session: 10% used · resets Aug 10 at 6:59pm\n\
+Current week (all models): 20% used · resets Aug 12 at 7am\n\
+Current week (Sonnet only): 30% used\n";
+        let (_, _, model) = parse_official(text).unwrap();
+        let m = model.unwrap();
+        assert_eq!(m.model, "Sonnet only");
+        assert_eq!(m.pct, 30);
+    }
+
+    #[test]
+    fn reset_date_honors_utc_marker() {
+        use chrono::{Datelike, TimeZone};
+        let ts = parse_reset_date("Aug 10, 6:59pm (UTC)");
+        assert!(ts > 0);
+        let dt = chrono::Utc.timestamp_millis_opt(ts).single().unwrap();
+        assert_eq!((dt.month(), dt.day()), (8, 10));
+        assert_eq!((chrono::Timelike::hour(&dt), chrono::Timelike::minute(&dt)), (18, 59));
+
+        // Без пометки — местное время машины, а не зашитый чей-то пояс.
+        let local = parse_reset_date("Aug 10, 6:59pm");
+        let ldt = chrono::Local.timestamp_millis_opt(local).single().unwrap();
+        assert_eq!((chrono::Timelike::hour(&ldt), chrono::Timelike::minute(&ldt)), (18, 59));
+    }
+
+    #[test]
+    fn reset_date_edge_forms() {
+        assert!(parse_reset_date("Aug 10, 11pm (UTC)") > 0, "без минут");
+        assert!(parse_reset_date("Aug 10 at 6:59pm") > 0, "старый формат с at");
+        assert!(parse_reset_date("August 10, 6:59pm (UTC)") > 0, "полное имя месяца");
+        assert_eq!(parse_reset_date("совсем не дата"), 0);
+        assert_eq!(parse_reset_date(""), 0);
+        // 12am — полночь, не полдень.
+        use chrono::Timelike;
+        let ts = parse_reset_date("Aug 10, 12am (UTC)");
+        let dt = chrono::DateTime::from_timestamp_millis(ts).unwrap();
+        assert_eq!(dt.hour(), 0);
+    }
 
     #[test]
     fn billing_host_extraction() {

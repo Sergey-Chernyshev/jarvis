@@ -7,6 +7,7 @@
 <title>Jarvis</title>
 <link rel="stylesheet" href="./theme.css" />
 <script src="./theme.js"></script>
+<script src="./keys.js"></script>
 <style>
   /* ============================================================================
      Панель Jarvis · дизайн «Клевер» (Jarvis Redesign.dc.html, Turn 14).
@@ -223,6 +224,13 @@
   .badge.host { color: var(--ink-faint); }
   /* бейдж агента (codex и т.п.) — тональная краска, чтобы отличать бэкенды */
   .badge.agent { color: var(--accent-ink); background: var(--accent-soft); }
+  /* бейдж удалённого узла: сессия идёт не на этой машине. Контур вместо
+     заливки — как точка «закончила»: отличаем формой, а не новым цветом */
+  .badge.remote {
+    color: var(--ink-mute);
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--line-strong);
+  }
 
   .gitbranch {
     font-size: 12px;
@@ -303,9 +311,38 @@
   .hrow.selected .hcopy, .hrow:hover .hcopy { visibility: visible; }
   .hhint { font-size: 12px; color: var(--ink-faint); padding: 4px 8px 8px; }
   .hrow .hchev { font-size: 15px; color: var(--ink-faint); flex: none; }
-  /* хлебная крошка «‹ Проекты» внутри проекта */
+  /* хлебная крошка «‹ Проекты» / «‹ Машины» — шаг на уровень вверх */
   .hgroup .hback { font-weight: 500; color: var(--ink-mute); cursor: default; }
   .hgroup .hback:hover { color: var(--ink); }
+
+  /* уровень машин: точка «на связи» и приглушённая строка узла, до которого
+     не достучались. Отличаем формой и тоном, а не отдельным цветом */
+  .hrow .hdot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--ink-faint); flex: none;
+  }
+  .hrow.off .hdot { background: transparent; box-shadow: inset 0 0 0 1px var(--ink-faint); }
+  .hrow.off .htitle { color: var(--ink-mute); }
+  /* причина отказа узла бывает длинной — метке нужно право сжиматься */
+  .hrow .hmeta-wide {
+    flex: 0 1 auto; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* у чата с узла заголовка нет — вместо него время и id, тоном потише */
+  .hrow .htitle.dim { color: var(--ink-mute); font-variant-numeric: tabular-nums; }
+
+  /* «Новый проект»: строка-переключатель и форма пути под ней */
+  .hrow.hnew .htitle { color: var(--ink-mute); }
+  .hrow.hnew.open .htitle { color: var(--ink); }
+  .hnewform { display: flex; align-items: center; gap: 8px; padding: 0 16px 8px; }
+  .hnewform input {
+    flex: 1; min-width: 0; height: 32px; padding: 0 10px;
+    background: var(--fill-1); border: 1px solid var(--line);
+    border-radius: var(--r-row); outline: none;
+    font-family: inherit; font-size: 13px; color: var(--ink);
+  }
+  .hnewform input:focus { border-color: var(--line-strong); background: transparent; }
+  .hnewform input::placeholder { color: var(--ink-faint); }
 
   /* ---------- статистика usage ---------- */
   .stats { padding: 20px 24px 64px; overflow-y: auto; }
@@ -775,14 +812,22 @@
     text-wrap: pretty;
   }
 
-  /* реплика юзера — та же колонка, отличается только подписью «ты» */
-  .msg.user { align-items: flex-start; gap: 6px; max-width: 560px; }
+  /* Реплика юзера — пузырь в единственной краске, у правого края.
+   * Раньше обе стороны были одинаковым текстом в одной колонке, и диалог
+   * читался как монолог: кто что сказал — только по смыслу. Форма и сторона
+   * разводят голоса без второй краски: агент — текст на бумаге слева, человек
+   * — пузырь клеверной подложки справа. Ровно так уже говорит мобильная
+   * версия — теперь языки совпадают. */
+  .msg.user { align-items: flex-end; align-self: flex-end; gap: 6px; max-width: 560px; }
   .msg.user.pending .bubble { opacity: 0.5; }
-  .msg.user .msg-status { font-size: 12px; color: var(--ink-faint); margin-top: 3px; }
+  .msg.user .msg-status { font-size: 12px; color: var(--ink-faint); margin-top: 3px; align-self: flex-end; }
   .msg.user .bubble {
-    background: transparent;
-    border-radius: 0;
-    padding: 0;
+    background: var(--accent-soft);
+    border-radius: var(--r-card);
+    /* правый нижний угол — «хвостик»: сторона говорящего видна даже у
+     * однострочной реплики, где выравнивание глазу не за что зацепить */
+    border-bottom-right-radius: 6px;
+    padding: 10px 14px;
     color: var(--ink);
     font-size: 14.5px;
     line-height: 1.6;
@@ -796,11 +841,13 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    background: var(--surface);
+    /* внутри клеверного пузыря бумага чипа должна оставаться бумагой */
+    background: var(--surface-2, var(--surface));
     border: 0;
     border-radius: var(--r-pill);
     padding: 5px 9px;
   }
+  .msg.user .attach { background: var(--surface); }
   .attach svg { flex: none; color: var(--ink-mute); }
   .attach span {
     font-family: var(--mono);
@@ -1364,7 +1411,7 @@
   .hint.primary { color: var(--ink); font-weight: 500; }
   .hint.primary:hover, .hint.clickable:hover { background: var(--fill-2); color: var(--ink); }
 
-  /* всплывающее меню действий (⌘K) */
+  /* всплывающее меню действий (главный модификатор + K) */
   .actions-pop {
     position: absolute;
     right: 12px;
@@ -1580,12 +1627,12 @@
          Тянется за пустое место (data-tauri-drag-region), лимит справа. -->
     <div class="titlebar" id="titlebar" data-tauri-drag-region>
       <span class="tl-lights">
-        <button class="tl-dot tl-close" id="winClose" title="Закрыть · ⌘W"></button>
+        <button class="tl-dot tl-close" id="winClose" title="Закрыть"></button>
         <button class="tl-dot tl-min" id="winMin" title="Свернуть"></button>
         <button class="tl-dot tl-zoom" id="winZoom" title="Развернуть"></button>
       </span>
       <span class="spacer" data-tauri-drag-region></span>
-      <button class="tl-btn" id="tlSettings" title="Настройки · ⌘,">
+      <button class="tl-btn" id="tlSettings" title="Настройки">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
       </button>
       <span class="tl-divider"></span>
@@ -1603,12 +1650,14 @@
     </div>
 
     <div class="tabs">
-      <div class="tab active" id="tabSessions">Чаты <span class="tabkey">⌘1</span></div>
-      <div class="tab" id="tabHistory">Проекты <span class="tabkey">⌘2</span></div>
-      <div class="tab" id="tabStats">Статистика <span class="tabkey">⌘3</span></div>
-      <div class="tab" id="tabVoice">Голос <span class="tabkey">⌘4</span></div>
+      <div class="tab active" id="tabSessions">Чаты <span class="tabkey" data-key="1"></span></div>
+      <div class="tab" id="tabHistory">Проекты <span class="tabkey" data-key="2"></span></div>
+      <div class="tab" id="tabStats">Статистика <span class="tabkey" data-key="3"></span></div>
+      <div class="tab" id="tabVoice">Голос <span class="tabkey" data-key="4"></span></div>
+      <div class="tab" id="tabLoops">Циклы <span class="tabkey" data-key="5"></span></div>
+      <div class="tab" id="tabBundle">Связка <span class="tabkey" data-key="6"></span></div>
       <span class="spacer"></span>
-      <div class="tab icon" id="tabSettings" title="Настройки · ⌘,">
+      <div class="tab icon" id="tabSettings" title="Настройки">
         <!-- lucide: sliders-horizontal -->
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
       </div>
@@ -1626,6 +1675,9 @@
           </button>
           <span class="chattitle" id="chatTitle"></span>
           <span class="badge" id="chatModel" hidden></span>
+          <!-- имя удалённого узла: агент работает не на этой машине -->
+          <span class="badge remote" id="chatRemote" hidden></span>
+          <span class="badge remote" id="chatBundle" hidden></span>
           <button id="sumToggle" class="sumtoggle" title="Сводка ходов / полная лента">Сводка</button>
           <span class="badge host" id="chatChannel" hidden>вне терминала</span>
           <span class="spacer"></span>
@@ -1639,6 +1691,18 @@
             </svg>
             <span class="tasksbtn-count" id="tasksBtnCount">0/0</span>
             <span class="tasksbtn-label">задач</span>
+          </button>
+          <!-- превью: посмотреть, что подняла задача (только localhost) -->
+          <button class="tasksbtn" id="previewBtn" hidden title="Превью: открыть локальный адрес проекта">
+            <span class="tasksbtn-label">превью</span>
+          </button>
+          <!-- поиск по проекту задачи: там же, где живёт сессия -->
+          <button class="tasksbtn" id="searchBtn" hidden title="Поиск по проекту задачи">
+            <span class="tasksbtn-label">поиск</span>
+          </button>
+          <!-- свод правок агента: виден, когда у сессии есть рабочий каталог -->
+          <button class="tasksbtn" id="changesBtn" hidden title="Изменения задачи · что агент наделал">
+            <span class="tasksbtn-label">изменения</span>
           </button>
           <!-- слайд-овер вариантов: кнопка-триггер, видна когда у сессии есть вопрос -->
           <button class="tasksbtn varbtn" id="varBtn" hidden title="Выбрать вариант ответа">
@@ -1705,6 +1769,36 @@
           </div>
         </div>
         <!-- вьюер документов: слайд-овер поверх чата (спека 2026-07-18 §3.1) -->
+        <div class="taskpanel-wrap" id="srchWrap" hidden>
+          <div class="taskpanel-scrim" id="srchScrim"></div>
+          <div class="taskpanel" id="srchPanel">
+            <div class="tp-head">
+              <div class="tp-titlerow">
+                <span class="tp-title">Поиск по проекту</span>
+                <span class="spacer"></span>
+                <button class="tp-close" id="srchClose" title="Закрыть · Esc">
+                  <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M3 3 L11 11 M11 3 L3 11" stroke="#9A9AA2" stroke-width="1.5" stroke-linecap="round"></path></svg>
+                </button>
+              </div>
+            </div>
+            <div class="srch" id="srchBody"></div>
+          </div>
+        </div>
+        <div class="taskpanel-wrap" id="chgWrap" hidden>
+          <div class="taskpanel-scrim" id="chgScrim"></div>
+          <div class="taskpanel" id="chgPanel">
+            <div class="tp-head">
+              <div class="tp-titlerow">
+                <span class="tp-title">Изменения задачи</span>
+                <span class="spacer"></span>
+                <button class="tp-close" id="chgClose" title="Закрыть · Esc">
+                  <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M3 3 L11 11 M11 3 L3 11" stroke="#9A9AA2" stroke-width="1.5" stroke-linecap="round"></path></svg>
+                </button>
+              </div>
+            </div>
+            <div class="chg" id="chgBody"></div>
+          </div>
+        </div>
         <div class="taskpanel-wrap" id="docWrap" hidden>
           <div class="taskpanel-scrim" id="docScrim"></div>
           <div class="taskpanel docpanel" id="docPanel">
@@ -1713,7 +1807,7 @@
                 <span class="tp-title doc-name" id="docTitle"></span>
                 <span class="spacer"></span>
                 <button class="tp-act" id="docEdit" title="Открыть в редакторе (системное приложение)">Редактор</button>
-                <button class="tp-act" id="docFinder" title="Показать в Finder">Finder</button>
+                <button class="tp-act" id="docFinder" title="Показать в папке">Папка</button>
                 <button class="tp-close" id="docClose" title="Закрыть · Esc">
                   <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M3 3 L11 11 M11 3 L3 11" stroke="#9A9AA2" stroke-width="1.5" stroke-linecap="round"></path></svg>
                 </button>
@@ -1746,6 +1840,8 @@
         <div class="qvfoot" id="qFoot"></div>
       </div>
       <div class="stats" id="stats" hidden></div>
+      <div class="loops" id="loops" hidden></div>
+      <div class="bundle" id="bundlePane" hidden></div>
       <div class="history" id="history" hidden></div>
       <div class="settings" id="settings" hidden>
         <div class="stitle">Основное</div>
@@ -1753,32 +1849,32 @@
         <div class="srow">
           <span class="slabel">Глобальный хоткей</span>
           <span class="spacer"></span>
-          <button class="keycap" id="hotkey">⌘ J</button>
+          <button class="keycap" id="hotkey" data-key="J"></button>
         </div>
         <div class="srow">
           <span class="slabel">Продолжить последнюю сессию</span>
           <span class="spacer"></span>
-          <button class="keycap" id="continueHotkey" data-hk="continueHotkey">⌘ ⌥ C</button>
+          <button class="keycap" id="continueHotkey" data-hk="continueHotkey" data-key="alt:C"></button>
         </div>
         <div class="srow">
           <span class="slabel">Повторить уведомление</span>
           <span class="spacer"></span>
-          <button class="keycap" id="repeatHotkey" data-hk="repeatHotkey">⌘ ⌥ R</button>
+          <button class="keycap" id="repeatHotkey" data-hk="repeatHotkey" data-key="alt:R"></button>
         </div>
         <div class="srow">
           <span class="slabel">Без звука (mute)</span>
           <span class="spacer"></span>
-          <button class="keycap" id="muteHotkey" data-hk="muteHotkey">⌘ ⌥ M</button>
+          <button class="keycap" id="muteHotkey" data-hk="muteHotkey" data-key="alt:M"></button>
         </div>
         <div class="srow">
           <span class="slabel">Тихий режим</span>
           <span class="spacer"></span>
-          <button class="keycap" id="quietHotkey" data-hk="quietHotkey">⌘ ⌥ J</button>
+          <button class="keycap" id="quietHotkey" data-hk="quietHotkey" data-key="alt:J"></button>
         </div>
         <div class="srow shint">
           <span class="slabel">Выбор варианта в уведомлении</span>
           <span class="spacer"></span>
-          <span class="keycap static">⌘ ⌥ 1–9</span>
+          <span class="keycap static" data-key="alt:1–9"></span>
         </div>
         <div class="serror" id="hotkeyError" hidden></div>
         <div class="srow">
@@ -1848,11 +1944,11 @@
       </span>
       <div class="factions">
         <div class="hint primary" id="primaryHint">
-          <span id="primaryLabel">Открыть чат</span><span class="keycap" id="primaryKey">↵</span>
+          <span id="primaryLabel">Открыть чат</span><span class="keycap" id="primaryKey" data-keyname="enter"></span>
         </div>
         <div class="fdivider"></div>
         <div class="hint clickable" id="actionsBtn">
-          <span>Действия</span><span class="keycap">⌘K</span>
+          <span>Действия</span><span class="keycap" data-key="K"></span>
         </div>
       </div>
     </footer>
@@ -1864,6 +1960,11 @@
   <script src="./question-answer.js"></script>
   <script src="./settings2.js"></script>
   <script src="./voice-history.js"></script>
+  <script src="./pipeline.js"></script>
+  <script src="./loops.js"></script>
+  <script src="./bundle.js"></script>
+  <script src="./changes.js"></script>
+  <script src="./search.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

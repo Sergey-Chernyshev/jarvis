@@ -33,12 +33,15 @@
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
+  // подписи клавиш — из keys.js (⌘1 на маке, Ctrl+1 на Linux)
+  const KEY = (k) => (window.jarvisKeys ? window.jarvisKeys.k(k) : 'Ctrl+' + k);
+
   // ── Библиотека преобразований для меню строки истории (стили enhance) ────
   const TRANSFORMS = [
-    { style: 'prompt',    name: 'Промпт для агента',     hint: '⌘1' },
-    { style: 'commit',    name: 'Коммит-сообщение',      hint: '⌘2' },
-    { style: 'clean',     name: 'Чистовик · грамматика', hint: '⌘3' },
-    { style: 'translate', name: 'Перевод на English',    hint: '⌘4' },
+    { style: 'prompt',    name: 'Промпт для агента',     hint: KEY('1') },
+    { style: 'commit',    name: 'Коммит-сообщение',      hint: KEY('2') },
+    { style: 'clean',     name: 'Чистовик · грамматика', hint: KEY('3') },
+    { style: 'translate', name: 'Перевод на English',    hint: KEY('4') },
   ];
 
   // ── Встроенные преобразования для раздела «Преобразования» (как в макете) ─

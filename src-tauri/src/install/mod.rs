@@ -11,6 +11,12 @@
 //! поэтому часть pub-API в каждом из них «не используется» — глушим dead_code.
 #![allow(dead_code)]
 
+/// Установка узла на удалённую машину (`jarvis-setup remote add|status`). Живёт
+/// здесь, а не рядом с CLI, чтобы переиспользовать шим `jarvis-hook`, список
+/// событий и слияние хуков: конфиг агента на VPS обязан быть той же формы, что
+/// и локальный, иначе они разъедутся при первой же правке формата.
+pub mod remote;
+
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
@@ -24,6 +30,7 @@ use std::sync::OnceLock;
 
 const HOOK_SRC: &str = include_str!("../../../bin/jarvis-hook");
 const SHIM_SRC: &str = include_str!("../../../bin/agent-shim");
+const CUSTOM_SHIM_SRC: &str = include_str!("../../../bin/custom-shim");
 const TMUX_CONF_SRC: &str = include_str!("../../../bin/jarvis-tmux.conf");
 const SILERO_SERVER_SRC: &str = include_str!("../../../bin/silero-server.py");
 /// STT-сайдкар (Qwen3-ASR MLX): Python-сервер для диктовки (инкр. 9, Phase 8).
@@ -287,13 +294,15 @@ pub fn prepare_clean_start() -> io::Result<()> {
     Ok(())
 }
 
-/// PATH с добавленными Homebrew + nvm путями. GUI-приложение из /Applications
-/// наследует урезанный PATH (без /opt/homebrew/bin и ~/.nvm/.../bin) — поэтому
-/// tmux (Homebrew) и claude (nvm) не находятся. Префиксуем их явно.
+/// PATH с добавленными пользовательскими путями. Приложение, запущенное из
+/// графической оболочки, наследует урезанный PATH — без Homebrew (macOS),
+/// без ~/.local/bin (Linux) и без ~/.nvm/.../bin. Поэтому tmux и claude
+/// не находятся; префиксуем их явно. Несуществующие пути безвредны.
 fn augmented_path() -> String {
     let base = std::env::var("PATH").unwrap_or_default();
     let mut extra = vec![
-        "/opt/homebrew/bin".to_string(),
+        home().join(".local/bin").display().to_string(), // Linux: npm -g, pipx
+        "/opt/homebrew/bin".to_string(),                 // macOS: Apple Silicon
         "/usr/local/bin".to_string(),
     ];
     if let Ok(rd) = fs::read_dir(home().join(".nvm/versions/node")) {
@@ -1447,51 +1456,12 @@ fn read_settings() -> Result<(bool, Value), String> {
 fn install_hooks_into(path: &Path, label: &str, events: &[(&str, &str)], progress: &Progress) {
     match read_hooks_file(path) {
         Ok((exists, mut json)) => {
-            if !json.is_object() {
-                json = json!({});
-            }
-            if json.get("hooks").map(|h| !h.is_object()).unwrap_or(true) {
-                json["hooks"] = json!({});
-            }
-            let mut added = Vec::new();
-            let mut healed = Vec::new();
-            for (event, arg) in events {
-                let want = format!("{} {label} {arg}", hook_dst().display());
-                let hooks = json["hooks"].as_object_mut().unwrap();
-                let arr = hooks.entry(*event).or_insert_with(|| json!([]));
-                if !arr.is_array() {
-                    *arr = json!([]);
-                }
-                let arr = arr.as_array_mut().unwrap();
-
-                let has_correct = arr.iter().any(|g| group_has_cmd(g, &want));
-                let stale_present = arr.iter().any(|g| group_has_stale_ours(g, &want));
-                if has_correct && !stale_present {
-                    continue; // уже верно — не трогаем (иначе бэкап+запись на каждом старте)
-                }
-
-                // Снимаем ВСЕ наши хуки (любой путь/метка), чужие — оставляем.
-                for group in arr.iter_mut() {
-                    if let Some(gh) = group.get_mut("hooks").and_then(Value::as_array_mut) {
-                        gh.retain(|h| !is_ours(h));
-                    }
-                }
-                arr.retain(|g| {
-                    g.get("hooks")
-                        .and_then(Value::as_array)
-                        .is_some_and(|h| !h.is_empty())
-                });
-
-                // Ставим единственный правильный.
-                arr.push(json!({
-                    "hooks": [{ "type": "command", "command": want, "timeout": 5 }],
-                }));
-                if stale_present {
-                    healed.push(*event);
-                } else {
-                    added.push(*event);
-                }
-            }
+            let (added, healed) = merge_hooks(
+                &mut json,
+                &hook_dst().display().to_string(),
+                label,
+                events,
+            );
             if added.is_empty() && healed.is_empty() {
                 progress(Step::done("Хуки", format!("{label}: уже установлены")));
                 return;
@@ -1503,20 +1473,91 @@ fn install_hooks_into(path: &Path, label: &str, events: &[(&str, &str)], progres
                 let _ = fs::create_dir_all(parent);
             }
             atomic_write(path, &(serde_json::to_string_pretty(&json).unwrap() + "\n"));
-            let mut msg = String::new();
-            if !added.is_empty() {
-                msg += &format!("добавлены {}", added.join(", "));
-            }
-            if !healed.is_empty() {
-                if !msg.is_empty() {
-                    msg += "; ";
-                }
-                msg += &format!("исправлены {}", healed.join(", "));
-            }
-            progress(Step::done("Хуки", format!("{label}: {msg}")));
+            progress(Step::done(
+                "Хуки",
+                format!("{label}: {}", hooks_msg(&added, &healed)),
+            ));
         }
         Err(e) => progress(Step::warn("Хуки", format!("{e} — пропускаю хуки {label}"))),
     }
+}
+
+/// Слияние наших хуков в уже прочитанный JSON — чистая часть `install_hooks_into`.
+///
+/// Отдельно от файловых операций, потому что конфиг агента правится не только
+/// локально: `install::remote` делает ровно то же самое с файлом на VPS, читая и
+/// записывая его по ssh. Логика обязана быть ОДНА — иначе форма записи на
+/// удалённой машине разъедется с локальной при первой же правке формата.
+///
+/// Возвращает `(добавленные, исправленные)` события; обе пусты = менять нечего.
+/// `hook_bin` — путь шима на ТОЙ машине, где конфиг будет жить.
+fn merge_hooks(
+    json: &mut Value,
+    hook_bin: &str,
+    label: &str,
+    events: &[(&str, &str)],
+) -> (Vec<String>, Vec<String>) {
+    if !json.is_object() {
+        *json = json!({});
+    }
+    if json.get("hooks").map(|h| !h.is_object()).unwrap_or(true) {
+        json["hooks"] = json!({});
+    }
+    let mut added = Vec::new();
+    let mut healed = Vec::new();
+    for (event, arg) in events {
+        let want = format!("{hook_bin} {label} {arg}");
+        let hooks = json["hooks"].as_object_mut().unwrap();
+        let arr = hooks.entry(*event).or_insert_with(|| json!([]));
+        if !arr.is_array() {
+            *arr = json!([]);
+        }
+        let arr = arr.as_array_mut().unwrap();
+
+        let has_correct = arr.iter().any(|g| group_has_cmd(g, &want));
+        let stale_present = arr.iter().any(|g| group_has_stale_ours(g, &want));
+        if has_correct && !stale_present {
+            continue; // уже верно — не трогаем (иначе бэкап+запись на каждом старте)
+        }
+
+        // Снимаем ВСЕ наши хуки (любой путь/метка), чужие — оставляем.
+        for group in arr.iter_mut() {
+            if let Some(gh) = group.get_mut("hooks").and_then(Value::as_array_mut) {
+                gh.retain(|h| !is_ours(h));
+            }
+        }
+        arr.retain(|g| {
+            g.get("hooks")
+                .and_then(Value::as_array)
+                .is_some_and(|h| !h.is_empty())
+        });
+
+        // Ставим единственный правильный.
+        arr.push(json!({
+            "hooks": [{ "type": "command", "command": want, "timeout": 5 }],
+        }));
+        if stale_present {
+            healed.push((*event).to_string());
+        } else {
+            added.push((*event).to_string());
+        }
+    }
+    (added, healed)
+}
+
+/// Человеческое описание правки хуков для шага установки.
+fn hooks_msg(added: &[String], healed: &[String]) -> String {
+    let mut msg = String::new();
+    if !added.is_empty() {
+        msg += &format!("добавлены {}", added.join(", "));
+    }
+    if !healed.is_empty() {
+        if !msg.is_empty() {
+            msg += "; ";
+        }
+        msg += &format!("исправлены {}", healed.join(", "));
+    }
+    msg
 }
 
 /// Снять наши хуки (любой метки — MARKER агент-агностичен) из файла агента.
@@ -1810,6 +1851,55 @@ fn write_executable(dst: &Path, content: &str) {
     fs::create_dir_all(dst.parent().unwrap()).expect("mkdir");
     fs::write(dst, content).expect("запись шима");
     fs::set_permissions(dst, fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+/// Метка, по которой свои шимы отличаются от всех прочих файлов.
+///
+/// Чистка по метке, а не по списку: агент, удалённый из настроек, должен унести
+/// свой шим с собой, а трогать чужие файлы в этом каталоге нельзя.
+const CUSTOM_SHIM_MARK: &str = "# jarvis-custom-agent";
+
+/// Привести шимы своих агентов к настройкам: недостающие написать, изменённые
+/// перезаписать, осиротевшие убрать.
+///
+/// Вход — пары (id, бинарь): ровно то, что нужно шиму. Полная модель агента
+/// живёт в приложении — install компилируется и в jarvis-setup через #[path]
+/// без остального crate, и тянуть сюда crate::agents нельзя.
+pub fn sync_custom_shims(agents: &[(String, String)]) {
+    sync_custom_shims_at(&shims_dir(), agents);
+}
+
+fn sync_custom_shims_at(dir: &Path, agents: &[(String, String)]) {
+    let _ = fs::create_dir_all(dir);
+    for (id, bin) in agents {
+        let shim = CUSTOM_SHIM_SRC
+            .replace("%AGENT%", id)
+            .replace("%BIN%", bin.trim())
+            .replacen(
+                "JARVIS_DIR=\"${JARVIS_DIR:-$HOME/.jarvis}\"",
+                &format!("JARVIS_DIR=\"${{JARVIS_DIR:-{}}}\"", jarvis_dir().display()),
+                1,
+            );
+        let dst = dir.join(id);
+        if fs::read_to_string(&dst).ok().as_deref() != Some(&shim) {
+            write_executable(&dst, &shim);
+        }
+    }
+    // Осиротевшие: наш маркер есть, а агента в настройках больше нет.
+    let keep: std::collections::HashSet<&str> = agents.iter().map(|(id, _)| id.as_str()).collect();
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if keep.contains(name.as_str()) {
+            continue;
+        }
+        let path = e.path();
+        let ours = fs::read_to_string(&path)
+            .is_ok_and(|t| t.lines().take(3).any(|l| l.contains(CUSTOM_SHIM_MARK)));
+        if ours {
+            let _ = fs::remove_file(&path);
+        }
+    }
 }
 
 /* ================= публичный API: status / install / uninstall ================= */
@@ -2606,10 +2696,21 @@ mod tests {
             "second process cannot take same profile"
         );
         drop(first);
-        assert!(
-            acquire_profile_lock(&path).is_ok(),
-            "OS releases lock after owner exits"
-        );
+        // Захват повторяем с коротким запасом. Проверяемое свойство — «ОС
+        // отпускает замок вместе с владельцем», и оно тут ни при чём: под
+        // нагрузкой параллельных тестов однократная попытка в CI срывалась,
+        // давая плавающее падение, которое уже дважды стоило разбирательства.
+        // Запас в четверть секунды не ослабляет утверждение — незанятый замок
+        // берётся сразу, а занятый не возьмётся и через час.
+        let mut retaken = false;
+        for _ in 0..25 {
+            if acquire_profile_lock(&path).is_ok() {
+                retaken = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(retaken, "OS releases lock after owner exits");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3305,5 +3406,66 @@ mod tests {
     #[test]
     fn unknown_engine_never_ready() {
         assert!(!stt_engine_ready("banana", true, true, true, true));
+    }
+}
+
+#[cfg(test)]
+mod custom_shim_tests {
+    use super::*;
+
+    fn agent(id: &str, bin: &str) -> (String, String) {
+        (id.into(), bin.into())
+    }
+
+    /// Свой каталог на тест; JARVIS_DIR не трогаем — он процессно-глобальный,
+    /// и его подмена уже давала плавающие падения соседям.
+    fn scoped(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("jarvis-custom-shims-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn shims_are_written_updated_and_orphans_removed() {
+        let dir = scoped("sync");
+        sync_custom_shims_at(&dir, &[agent("qwen", "/opt/qwen"), agent("pi", "pi")]);
+        let qwen = fs::read_to_string(dir.join("qwen")).unwrap();
+        assert!(qwen.contains("AGENT='qwen'"), "id не запёкся");
+        assert!(qwen.contains("BIN='/opt/qwen'"), "путь бинаря не запёкся");
+        assert!(qwen.contains(CUSTOM_SHIM_MARK), "без метки шим не вычистится");
+        assert!(!qwen.contains("%AGENT%") && !qwen.contains("%BIN%"), "плейсхолдеры остались");
+        // исполняемость
+        let mode = fs::metadata(dir.join("pi")).unwrap().permissions().mode();
+        assert_ne!(mode & 0o111, 0, "шим не исполняемый");
+
+        // агент ушёл из настроек — его шим уходит следом
+        sync_custom_shims_at(&dir, &[agent("pi", "pi")]);
+        assert!(!dir.join("qwen").exists(), "осиротевший шим остался");
+        assert!(dir.join("pi").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn foreign_files_are_never_touched() {
+        let dir = scoped("foreign");
+        // Чужие файлы в каталоге шимов: настоящий claude-шим и что-то ручное.
+        fs::write(dir.join("claude"), "#!/bin/sh\n# настоящий шим\n").unwrap();
+        fs::write(dir.join("моё"), "не трогать").unwrap();
+        sync_custom_shims_at(&dir, &[]);
+        assert!(dir.join("claude").exists(), "снесли чужой шим");
+        assert!(dir.join("моё").exists(), "снесли чужой файл");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Хуки жизненного цикла — весь смысл шима: без session-start сессия не
+    /// появится в списке, без session-end не исчезнет.
+    #[test]
+    fn shim_template_emits_both_lifecycle_hooks() {
+        assert!(CUSTOM_SHIM_SRC.contains("session-start"));
+        assert!(CUSTOM_SHIM_SRC.contains("session-end"));
+        assert!(CUSTOM_SHIM_SRC.contains("--jarvis-run"), "самоперезапуск внутри tmux пропал");
+        assert!(CUSTOM_SHIM_SRC.contains("jarvis-hook"), "хуки должны идти общим транспортом");
     }
 }

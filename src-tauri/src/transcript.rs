@@ -24,26 +24,27 @@ pub struct ChatItem {
 
 /// Хвост файла → массив распарсенных JSONL-строк.
 pub fn read_recent_entries(file: &Path, max_bytes: u64) -> Vec<Value> {
-    let mut out = Vec::new();
-    let Ok(meta) = fs::metadata(file) else { return out };
-    let size = meta.len();
+    read_recent_text(file, max_bytes).map_or_else(Vec::new, |t| entries_from_text(&t))
+}
+
+/// Хвост файла целыми строками. Отдельно от разбора: тот же текст у удалённой
+/// сессии приезжает по HTTP, и дальше по коду разница исчезает.
+pub fn read_recent_text(file: &Path, max_bytes: u64) -> Option<String> {
+    let size = fs::metadata(file).ok()?.len();
     let start = size.saturating_sub(max_bytes);
-    let Ok(mut f) = fs::File::open(file) else { return out };
-    if f.seek(SeekFrom::Start(start)).is_err() {
-        return out;
-    }
+    let mut f = fs::File::open(file).ok()?;
+    f.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::with_capacity((size - start) as usize);
-    if f.read_to_end(&mut buf).is_err() {
-        return out;
-    }
-    let mut text = String::from_utf8_lossy(&buf).into_owned();
-    if start > 0 {
-        // первая строка могла обрезаться посередине
-        text = match text.find('\n') {
-            Some(i) => text[i + 1..].to_string(),
-            None => return out,
-        };
-    }
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    Some(whole_lines(&text, start > 0).to_string())
+}
+
+/// Разбор JSONL в записи. Отдельно от чтения файла: транскрипт удалённой
+/// сессии приезжает по HTTP — файла на этой машине нет, а разбирать его надо
+/// ровно так же.
+pub fn entries_from_text(text: &str) -> Vec<Value> {
+    let mut out = Vec::new();
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
@@ -53,6 +54,17 @@ pub fn read_recent_entries(file: &Path, max_bytes: u64) -> Vec<Value> {
         }
     }
     out
+}
+
+/// Отрезать оборванную первую строку, если чтение началось не с начала файла.
+pub fn whole_lines(text: &str, mid_file: bool) -> &str {
+    if !mid_file {
+        return text;
+    }
+    match text.find('\n') {
+        Some(i) => &text[i + 1..],
+        None => "", // кусок целиком внутри одной строки — целых записей нет
+    }
 }
 
 /// Лог — дерево (resume/форки): идём от последней user/assistant-записи вверх
@@ -238,7 +250,12 @@ pub fn squeeze_reply(t: &str) -> String {
 /// Полный финальный ответ агента: все текст-блоки после последнего промпта юзера.
 pub fn full_final_reply(transcript: &str) -> Option<String> {
     let entries = read_recent_entries(Path::new(transcript), 256 * 1024);
-    let items: Vec<ChatItem> = chain_from_entries(entries)
+    final_reply_from(chain_from_entries(entries))
+}
+
+/// То же над готовой цепочкой: у удалённой сессии записи приезжают по HTTP.
+pub fn final_reply_from(chain: Vec<Value>) -> Option<String> {
+    let items: Vec<ChatItem> = chain
         .iter()
         .flat_map(to_chat_items)
         .filter(|i| i.kind == "text")

@@ -108,17 +108,19 @@ impl Backend for KimiBackend {
     fn entries_from_text(&self, text: &str) -> Vec<Value> {
         crate::transcript::entries_from_text(text)
     }
-    fn to_chat_items(&self, _entry: &Value) -> Vec<ChatItem> {
-        Vec::new() // инкремент 4: kimi_transcript::to_chat_items
+    fn to_chat_items(&self, entry: &Value) -> Vec<ChatItem> {
+        super::kimi_transcript::to_chat_items(entry)
     }
-    fn extract_title(&self, _entries: &[Value]) -> Option<String> {
-        None // инкремент 4: заголовок живёт в state.json рядом с wire.jsonl
+    fn extract_title(&self, entries: &[Value]) -> Option<String> {
+        // основной заголовок живёт в state.json рядом с wire.jsonl (читает демон);
+        // здесь фолбэк — первая реплика юзера, как у Codex.
+        super::kimi_transcript::extract_title(entries)
     }
     fn extract_branch(&self, _entries: &[Value]) -> Option<String> {
         None // Kimi не сохраняет ветку нигде — фолбэк по .git/HEAD от cwd
     }
-    fn extract_model(&self, _entries: &[Value]) -> Option<String> {
-        None // инкремент 4: последний llm.request.modelAlias
+    fn extract_model(&self, entries: &[Value]) -> Option<String> {
+        super::kimi_transcript::extract_model(entries)
     }
     fn transcript_dir_for(&self, _cwd: &str) -> Option<PathBuf> {
         None // путь к транскрипту резолвится по sid, а не по cwd — см. wire_path_for_sid

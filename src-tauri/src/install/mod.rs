@@ -85,6 +85,28 @@ const CODEX_EVENTS: [(&str, &str); 8] = [
     ("SubagentStop", "subagent-stop"),
 ];
 
+/// Событие Kimi Code CLI → аргумент шима. У Kimi богаче остальных: есть и
+/// `PermissionRequest` (waiting напрямую, без скрин-скрейпа), и `SessionEnd`
+/// (которого нет у Codex), и `SessionHeartbeat` — пульс раз в 60 с, дающий
+/// честную живость без опроса pid. (Дублируется с backend осознанно: этот
+/// модуль компилируется отдельным бинарём jarvis-setup без остального крейта.)
+///
+/// Важно: таймер heartbeat запускается ТОЛЬКО если на событие повешен хук —
+/// то есть пульс появляется ровно потому, что мы его просим.
+const KIMI_EVENTS: [(&str, &str); 11] = [
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt"),
+    ("PreToolUse", "pre-tool"),
+    ("PostToolUse", "post-tool"),
+    ("PermissionRequest", "permission"),
+    ("Stop", "stop"),
+    ("StopFailure", "stop-failure"),
+    ("SessionEnd", "session-end"),
+    ("SessionHeartbeat", "heartbeat"),
+    ("SubagentStart", "subagent-start"),
+    ("SubagentStop", "subagent-stop"),
+];
+
 /* ================= публичные типы (прогресс/статус) ================= */
 
 /// Состояние шага установки для UI/CLI.
@@ -535,6 +557,41 @@ fn codex_hooks_path() -> PathBuf {
 }
 fn jarvis_settings_path() -> PathBuf {
     jarvis_dir().join("settings.json")
+}
+
+fn kimi_shim_dst() -> PathBuf {
+    shims_dir().join("kimi")
+}
+/// Kimi Code CLI: `$KIMI_CODE_HOME` или `~/.kimi-code`.
+///
+/// Именно `.kimi-code`, а НЕ `.kimi`: `~/.kimi` — дом старого продукта kimi-cli,
+/// у него другой набор хуков. Перепутать эти два — значит писать хуки в конфиг,
+/// который никто не читает.
+fn kimi_home() -> PathBuf {
+    match std::env::var("KIMI_CODE_HOME") {
+        Ok(d) if !d.is_empty() => PathBuf::from(d),
+        _ => home().join(".kimi-code"),
+    }
+}
+/// У Kimi хуки живут не отдельным файлом, а секциями `[[hooks]]` в общем конфиге.
+fn kimi_config_path() -> PathBuf {
+    kimi_home().join("config.toml")
+}
+
+/// Установлен ли `kimi` в PATH (минуя наш шим). Штатная установка кладёт бинарь
+/// в `<дом>/bin`, который может быть ещё не в PATH — проверяем и его.
+fn kimi_found() -> bool {
+    let bin = kimi_home().join("bin/kimi");
+    if fs::metadata(&bin).map(|m| m.is_file()).unwrap_or(false) {
+        return true;
+    }
+    Command::new("/bin/sh")
+        .args(["-c", "command -v kimi"])
+        .env("PATH", augmented_path())
+        .stdout(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Установлен ли `codex` в PATH (минуя наш шим).
@@ -1380,7 +1437,13 @@ fn has_block(content: &str) -> bool {
 
 /// Вставить или заменить блок. Идемпотентно.
 fn merge_block(content: &str, shims_dir: &str) -> String {
-    let block = block_body(shims_dir);
+    merge_marked_block(content, &block_body(shims_dir))
+}
+
+/// Вставить или заменить блок между маркерами. Общее ядро: тем же приёмом
+/// правится и `~/.zshrc` (PATH-шимы), и `config.toml` Kimi (секции `[[hooks]]`) —
+/// маркеры `# >>> jarvis >>>` валидны и как комментарий шелла, и как комментарий TOML.
+fn merge_marked_block(content: &str, block: &str) -> String {
     if has_block(content) {
         let re = regex::Regex::new(&format!(
             "{}[\\s\\S]*?{}",
@@ -1388,9 +1451,7 @@ fn merge_block(content: &str, shims_dir: &str) -> String {
             regex::escape(END)
         ))
         .unwrap();
-        return re
-            .replace_all(content, regex::NoExpand(block.as_str()))
-            .into_owned();
+        return re.replace_all(content, regex::NoExpand(block)).into_owned();
     }
     let sep = if !content.is_empty() && !content.ends_with('\n') {
         "\n"
@@ -1480,6 +1541,127 @@ fn install_hooks_into(path: &Path, label: &str, events: &[(&str, &str)], progres
         }
         Err(e) => progress(Step::warn("Хуки", format!("{e} — пропускаю хуки {label}"))),
     }
+}
+
+/* ================= хуки Kimi: TOML вместо JSON ================= */
+
+/// Экранирование для базовой TOML-строки: только `\` и `"` (остальное в путях
+/// не встречается, а control-символы в пути к бинарю — не наш случай).
+fn toml_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Блок `[[hooks]]` для `config.toml`.
+///
+/// Схема Kimi строгая (zod `.strict()`): допустимы ровно `event`, `command`,
+/// `matcher`, `timeout` — ЛЮБОЕ лишнее поле роняет загрузку всего конфига, а с
+/// ним и сам Kimi. Поэтому пишем только три из них и никогда не «улучшаем»
+/// запись. `matcher` не задаём: пустой matcher совпадает со всем, а нам нужны
+/// все события целиком.
+fn kimi_hooks_block(hook_bin: &str) -> String {
+    let mut out = String::from(BEGIN);
+    out.push_str("\n# Управляется Jarvis (npm run setup/teardown) — не редактируй вручную\n");
+    for (event, arg) in KIMI_EVENTS {
+        out.push_str(&format!(
+            "\n[[hooks]]\nevent = \"{event}\"\ncommand = \"{} kimi {arg}\"\ntimeout = 5\n",
+            toml_escape(hook_bin)
+        ));
+    }
+    out.push_str(END);
+    out
+}
+
+/// Все ли наши хуки уже прописаны в тексте конфига Kimi.
+fn kimi_hooks_present(content: &str, hook_bin: &str) -> bool {
+    has_block(content) && content.contains(&kimi_hooks_block(hook_bin))
+}
+
+/// Прописать хуки Jarvis в `~/.kimi-code/config.toml`.
+///
+/// Отличие от JSON-пути (Claude/Codex): конфиг Kimi — это ОБЩИЙ файл пользователя
+/// с его провайдерами, моделями и правилами прав, а не выделенный файл хуков.
+/// Поэтому: (1) правим managed-блоком, не переписывая остальное; (2) после записи
+/// прогоняем `kimi doctor` и при невалидности ОТКАТЫВАЕМСЯ на бэкап. Цена ошибки
+/// здесь — не «хуки не работают», а «Kimi не запускается вообще».
+fn install_kimi_hooks(progress: &Progress) {
+    let path = kimi_config_path();
+    let hook_bin = hook_dst().display().to_string();
+    let existed = path.exists();
+    let content = if existed {
+        match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                progress(Step::warn("Хуки", format!("{e} — пропускаю хуки kimi")));
+                return;
+            }
+        }
+    } else {
+        String::new()
+    };
+
+    if kimi_hooks_present(&content, &hook_bin) {
+        progress(Step::done("Хуки", "kimi: уже установлены"));
+        return;
+    }
+
+    let merged = merge_marked_block(&content, &kimi_hooks_block(&hook_bin));
+    let saved = if existed { backup(&path) } else { None };
+    atomic_write(&path, &merged);
+
+    match kimi_config_valid() {
+        Some(false) => {
+            // Откат: конфиг важнее наших хуков.
+            match &saved {
+                Some(b) => {
+                    let _ = fs::copy(b, &path);
+                    progress(Step::warn(
+                        "Хуки",
+                        "kimi: конфиг не прошёл проверку — вернул как было",
+                    ));
+                }
+                None => {
+                    let _ = fs::remove_file(&path);
+                    progress(Step::warn("Хуки", "kimi: конфиг не прошёл проверку — убрал"));
+                }
+            }
+        }
+        Some(true) => progress(Step::done(
+            "Хуки",
+            format!("kimi: {} событий", KIMI_EVENTS.len()),
+        )),
+        // `kimi doctor` не запустился — записали, но поручиться не можем.
+        None => progress(Step::done(
+            "Хуки",
+            format!("kimi: {} событий (без проверки)", KIMI_EVENTS.len()),
+        )),
+    }
+}
+
+/// `kimi doctor`: `Some(true)` — конфиг валиден, `Some(false)` — нет,
+/// `None` — не смогли спросить (бинарь не найден/не запустился).
+fn kimi_config_valid() -> Option<bool> {
+    Command::new("/bin/sh")
+        .args(["-c", "kimi doctor"])
+        .env("PATH", augmented_path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()
+        .map(|s| s.success())
+}
+
+/// Снять наши хуки из конфига Kimi, не тронув остальное.
+fn uninstall_kimi_hooks(progress: &Progress) {
+    let path = kimi_config_path();
+    let Ok(content) = fs::read_to_string(&path) else {
+        return; // нет файла — нечего снимать
+    };
+    if !has_block(&content) {
+        return;
+    }
+    backup(&path);
+    atomic_write(&path, &remove_block(&content));
+    progress(Step::done("Хуки", "kimi: записи сняты"));
 }
 
 /// Слияние наших хуков в уже прочитанный JSON — чистая часть `install_hooks_into`.
@@ -1724,27 +1906,35 @@ pub struct IntegrationHealth {
     pub codex_present: bool,
     /// Все хуки Codex в ~/.codex/hooks.json — с актуальной командой (n/a → true).
     pub codex_hooks_ok: bool,
+    /// `kimi` найден (PATH или `<дом>/bin`).
+    pub kimi_present: bool,
+    /// Наш блок `[[hooks]]` в ~/.kimi-code/config.toml актуален (n/a → true).
+    pub kimi_hooks_ok: bool,
     /// Шим `claude` установлен в shims-каталог.
     pub claude_shim: bool,
     /// Шим `codex` установлен (опциональный tmux remote transport).
     pub codex_shim: bool,
+    /// Шим `kimi` установлен.
+    pub kimi_shim: bool,
 }
 
 impl IntegrationHealth {
-    /// Всё критичное на месте: бинарь хука + корректные регистрации обоих агентов
-    /// (codex учитывается, только если установлен).
+    /// Всё критичное на месте: бинарь хука + корректные регистрации всех агентов
+    /// (codex и kimi учитываются, только если установлены).
     pub fn ok(&self) -> bool {
-        let any_agent = self.claude_present || self.codex_present;
+        let any_agent = self.claude_present || self.codex_present || self.kimi_present;
         self.hook_bin
             && any_agent
             && (!self.claude_present || self.claude_hooks_ok)
             && (!self.codex_present || self.codex_hooks_ok)
+            && (!self.kimi_present || self.kimi_hooks_ok)
     }
 }
 
 /// Снять health-снимок интеграции. `codex_found()` дёргает `command -v` — несколько мс.
 pub fn integration_health() -> IntegrationHealth {
     let codex_present = codex_found();
+    let kimi_present = kimi_found();
     IntegrationHealth {
         jarvis_dir: jarvis_dir().display().to_string(),
         hook_bin: hook_dst().exists(),
@@ -1754,8 +1944,16 @@ pub fn integration_health() -> IntegrationHealth {
         codex_present,
         codex_hooks_ok: !codex_present
             || hooks_all_correct(&codex_hooks_path(), "codex", &CODEX_EVENTS),
+        kimi_present,
+        kimi_hooks_ok: !kimi_present || {
+            let hb = hook_dst().display().to_string();
+            fs::read_to_string(kimi_config_path())
+                .map(|c| kimi_hooks_present(&c, &hb))
+                .unwrap_or(false)
+        },
         claude_shim: shim_dst().exists(),
         codex_shim: codex_shim_dst().exists(),
+        kimi_shim: kimi_shim_dst().exists(),
     }
 }
 
@@ -1769,6 +1967,9 @@ pub fn reconcile_hooks(progress: &Progress) {
     if codex_found() {
         install_hooks_into(&codex_hooks_path(), "codex", &CODEX_EVENTS, progress);
     }
+    if kimi_found() {
+        install_kimi_hooks(progress);
+    }
 }
 
 /// Починить/обновить ТОЛЬКО интеграцию агентов: hook binary + хуки
@@ -1781,13 +1982,17 @@ pub fn repair(progress: &Progress) {
     progress(Step::info(
         "Интеграция",
         format!(
-            "dir={} hook_bin={} claude_hooks={} codex={} codex_hooks={} codex_shim={} → {}",
+            "dir={} hook_bin={} claude_hooks={} codex={} codex_hooks={} codex_shim={} \
+             kimi={} kimi_hooks={} kimi_shim={} → {}",
             h.jarvis_dir,
             h.hook_bin,
             h.claude_hooks_ok,
             h.codex_present,
             h.codex_hooks_ok,
             h.codex_shim,
+            h.kimi_present,
+            h.kimi_hooks_ok,
+            h.kimi_shim,
             if h.ok() { "OK" } else { "НЕПОЛНО" },
         ),
     ));
@@ -2130,6 +2335,9 @@ pub fn install_core(progress: &Progress) -> IntegrationHealth {
     if codex_found() {
         install_hooks_into(&codex_hooks_path(), "codex", &CODEX_EVENTS, progress);
     }
+    if kimi_found() {
+        install_kimi_hooks(progress);
+    }
 
     // --- Фаза «Транспорт» (шим claude + tmux.conf + PATH-блок) ---
     progress(Step::start("Транспорт"));
@@ -2209,6 +2417,9 @@ fn install_tmux_transport(progress: &Progress) {
         // тот же скрипт под именем codex — поведение выбирается по basename "$0".
         write_executable(&codex_shim_dst(), &shim);
     }
+    if kimi_found() {
+        write_executable(&kimi_shim_dst(), &shim);
+    }
     fs::write(tmux_conf_dst(), TMUX_CONF_SRC).expect("запись tmux.conf");
 
     let shims = shims_dir().display().to_string();
@@ -2227,13 +2438,17 @@ fn install_tmux_transport(progress: &Progress) {
             atomic_write(&rc, &merged);
         }
     }
+    // Список агентов собираем, а не перечисляем тернарником: их уже трое.
+    let mut names = vec!["claude"];
+    if codex_found() {
+        names.push("codex");
+    }
+    if kimi_found() {
+        names.push("kimi");
+    }
     progress(Step::done(
         "Транспорт",
-        if codex_found() {
-            "шим claude+codex + tmux.conf + PATH-блок"
-        } else {
-            "шим claude + tmux.conf + PATH-блок"
-        },
+        format!("шим {} + tmux.conf + PATH-блок", names.join("+")),
     ));
 }
 
@@ -2242,7 +2457,8 @@ pub fn uninstall(progress: &Progress) {
     progress(Step::start("Хуки"));
     uninstall_hooks_from(&settings_path(), progress);
     uninstall_hooks_from(&codex_hooks_path(), progress);
-    progress(Step::done("Хуки", "записи Jarvis сняты (claude + codex)"));
+    uninstall_kimi_hooks(progress); // у Kimi хуки в общем config.toml — снимаем блоком
+    progress(Step::done("Хуки", "записи Jarvis сняты (claude + codex + kimi)"));
 
     progress(Step::start("Транспорт"));
     for f in [
@@ -2250,6 +2466,7 @@ pub fn uninstall(progress: &Progress) {
         jarvis_dir().join("run.sock"),
         shim_dst(),
         codex_shim_dst(),
+        kimi_shim_dst(),
         tmux_conf_dst(),
     ] {
         let _ = fs::remove_file(&f);
@@ -2647,6 +2864,70 @@ mod tests {
             .any(|phase| { matches!(*phase, "Голос" | "STT" | "STT-MLX" | "Модели") }));
     }
 
+    /// Конфиг Kimi — общий файл пользователя (провайдеры, модели, правила прав),
+    /// а не выделенный файл хуков. Наш блок обязан быть идемпотентным и НЕ
+    /// трогать ничего вокруг, включая чужие `[[hooks]]`.
+    #[test]
+    fn kimi_hooks_block_is_idempotent_and_keeps_foreign_config() {
+        let user = "default_model = \"kimi-code/k3\"\n\n\
+                    [[permission.rules]]\ndecision = \"deny\"\npattern = \"Bash(rm *)\"\n\n\
+                    [[hooks]]\nevent = \"PreToolUse\"\ncommand = \"my-own-guard\"\n";
+        let block = kimi_hooks_block("/home/u/.jarvis/bin/jarvis-hook");
+
+        let once = merge_marked_block(user, &block);
+        assert!(once.contains("default_model"), "чужие настройки на месте");
+        assert!(once.contains("my-own-guard"), "чужой хук не тронут");
+        assert!(once.contains("pattern = \"Bash(rm *)\""), "правила прав на месте");
+        assert_eq!(once.matches(BEGIN).count(), 1, "блок ровно один");
+
+        // Повторная установка не плодит блоки и не меняет файл.
+        let twice = merge_marked_block(&once, &block);
+        assert_eq!(twice, once, "идемпотентность");
+        assert_eq!(twice.matches(BEGIN).count(), 1);
+
+        // Снятие возвращает пользователю его конфиг без наших следов.
+        let cleaned = remove_block(&twice);
+        assert!(!cleaned.contains(BEGIN) && !cleaned.contains("jarvis-hook"));
+        assert!(cleaned.contains("my-own-guard"), "чужой хук пережил снятие");
+        assert!(cleaned.contains("default_model"));
+    }
+
+    /// Схема Kimi строгая: лишнее поле роняет ВЕСЬ конфиг, а с ним и Kimi.
+    /// Поэтому в записи ровно `event`, `command`, `timeout` — и ничего больше.
+    #[test]
+    fn kimi_hooks_block_writes_only_allowed_fields() {
+        let block = kimi_hooks_block("/tmp/hook");
+        assert_eq!(
+            block.matches("[[hooks]]").count(),
+            KIMI_EVENTS.len(),
+            "по записи на событие"
+        );
+        for (event, arg) in KIMI_EVENTS {
+            assert!(block.contains(&format!("event = \"{event}\"")));
+            assert!(block.contains(&format!("command = \"/tmp/hook kimi {arg}\"")));
+        }
+        for forbidden in ["matcher =", "type =", "hooks =", "agent ="] {
+            assert!(!block.contains(forbidden), "лишнее поле {forbidden} уронит конфиг Kimi");
+        }
+        // heartbeat есть только у Kimi — на нём держится живость без опроса pid
+        assert!(block.contains("SessionHeartbeat"));
+    }
+
+    #[test]
+    fn toml_escape_protects_quotes_and_backslashes() {
+        assert_eq!(toml_escape(r#"/tmp/a"b"#), r#"/tmp/a\"b"#);
+        assert_eq!(toml_escape(r"/tmp/a\b"), r"/tmp/a\\b");
+        assert_eq!(toml_escape("/plain/path"), "/plain/path");
+    }
+
+    #[test]
+    fn kimi_hooks_present_detects_stale_path() {
+        let cur = kimi_hooks_block("/new/bin/jarvis-hook");
+        let old = merge_marked_block("", &kimi_hooks_block("/old/bin/jarvis-hook"));
+        assert!(!kimi_hooks_present(&old, "/new/bin/jarvis-hook"), "старый путь = не актуально");
+        assert!(kimi_hooks_present(&merge_marked_block("", &cur), "/new/bin/jarvis-hook"));
+    }
+
     #[test]
     fn integration_health_needs_an_available_agent_and_its_hooks() {
         let mut health = IntegrationHealth {
@@ -2657,10 +2938,13 @@ mod tests {
             claude_hooks_ok: true,
             codex_present: false,
             codex_hooks_ok: true,
+            kimi_present: false,
+            kimi_hooks_ok: true,
             claude_shim: false,
             codex_shim: false,
+            kimi_shim: false,
         };
-        assert!(!health.ok(), "без Claude/Codex интеграция не готова");
+        assert!(!health.ok(), "без единого агента интеграция не готова");
         health.claude_present = true;
         assert!(
             health.ok(),
@@ -2668,6 +2952,14 @@ mod tests {
         );
         health.claude_hooks_ok = false;
         assert!(!health.ok(), "hooks доступного агента обязательны");
+
+        // Агент может быть и один — любой из трёх делает интеграцию применимой.
+        health.claude_present = false;
+        health.claude_hooks_ok = true;
+        health.kimi_present = true;
+        assert!(health.ok(), "одного Kimi достаточно");
+        health.kimi_hooks_ok = false;
+        assert!(!health.ok(), "hooks доступного агента обязательны и для kimi");
     }
 
     #[test]

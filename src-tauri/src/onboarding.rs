@@ -225,8 +225,8 @@ fn build_readiness(
 ) -> ReadinessSnapshot {
     let core_ready = health.ok();
     let mut warnings = Vec::new();
-    if !health.claude_present && !health.codex_present {
-        warnings.push("Не найден ни Claude Code, ни Codex CLI.".into());
+    if !health.claude_present && !health.codex_present && !health.kimi_present {
+        warnings.push("Не найден ни один агентский CLI (Claude Code, Codex, Kimi Code).".into());
     }
     if !health.hook_bin {
         warnings.push("Hook binary отсутствует — запусти восстановление интеграции.".into());
@@ -236,6 +236,9 @@ fn build_readiness(
     }
     if health.codex_present && !health.codex_hooks_ok {
         warnings.push("Codex hooks требуют восстановления или подтверждения доверия.".into());
+    }
+    if health.kimi_present && !health.kimi_hooks_ok {
+        warnings.push("Kimi hooks требуют восстановления.".into());
     }
     if !status.tmux_conf || !status.path_block {
         warnings.push(
@@ -271,6 +274,19 @@ fn build_readiness(
             },
         )
         .action("Установить Codex или подтвердить доверие hooks"),
+        ReadinessItem::new(
+            "kimi",
+            "Kimi Code",
+            health.kimi_present && health.kimi_hooks_ok && health.hook_bin,
+            health.kimi_present,
+            health.kimi_present,
+            if health.kimi_present {
+                "Hooks в ~/.kimi-code/config.toml; статусы, разрешения и пульс"
+            } else {
+                "CLI не найден в PATH"
+            },
+        )
+        .action("Установить Kimi Code CLI или обновить PATH"),
     ];
     let transport = vec![
         ReadinessItem::new(
@@ -756,8 +772,11 @@ mod tests {
             claude_hooks_ok: true,
             codex_present: false,
             codex_hooks_ok: true,
+            kimi_present: false,
+            kimi_hooks_ok: true,
             claude_shim: false,
             codex_shim: false,
+            kimi_shim: false,
         };
         let done_job = InstallJobSnapshot {
             state: InstallJobState::Done,

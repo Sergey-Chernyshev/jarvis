@@ -31,6 +31,9 @@ fn price(model: &str) -> (f64, f64) {
         "Opus" | "Fable" => (15.0, 75.0), // у Fable публичного прайса нет — как Opus
         "Haiku" => (1.0, 5.0),
         "GPT-5" | "Codex" => (1.25, 10.0), // ОЦЕНКА OpenAI gpt-5-класс ($/1M)
+        // ОЦЕНКА Moonshot (то же, что backend::kimi::price) — иначе Kimi считался
+        // бы по дефолту Sonnet и врал в пять раз.
+        "K3" | "K3-256k" | "K2.7 Coding" | "K2.7 Coding Highspeed" => (0.6, 2.5),
         _ => (3.0, 15.0), // Sonnet и дефолт
     }
 }
@@ -223,6 +226,10 @@ fn codex_sessions_dir() -> PathBuf {
     crate::util::codex_dir().join("sessions")
 }
 
+fn kimi_sessions_dir() -> PathBuf {
+    crate::backend::kimi::kimi_home().join("sessions")
+}
+
 /// cwd + session_id из ПЕРВОЙ строки rollout (session_meta). Нужно при
 /// инкрементальном скане: session_meta уже ниже from_offset, иначе токены
 /// уходят в "unknown"/"другое".
@@ -241,6 +248,30 @@ fn codex_meta_head(file: &str) -> (Option<String>, String) {
         }
     }
     (None, "unknown".into())
+}
+
+/// cwd + session_id для `<...>/sessions/<wd_*>/<sid>/agents/<агент>/wire.jsonl`.
+/// sid — имя каталога сессии, cwd — из `state.json` рядом (на два уровня выше
+/// wire). state.json живёт в двух версиях: v2 с `cwd`, legacy v1 с `workDir`;
+/// в живых сессиях встречаются обе, поэтому читаем обе.
+fn kimi_meta_for(file: &Path) -> (Option<String>, String) {
+    let Some(dir) = file.parent().and_then(Path::parent).and_then(Path::parent) else {
+        return (None, "unknown".into());
+    };
+    let sid = dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown".into());
+    let cwd = fs::read_to_string(dir.join("state.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| {
+            v.get("cwd")
+                .or_else(|| v.get("workDir"))
+                .and_then(Value::as_str)
+                .map(String::from)
+        });
+    (cwd, sid)
 }
 
 impl Usage {
@@ -480,6 +511,14 @@ impl Usage {
                 self.state.lock().unwrap().offsets.insert(file, next);
             }
         }
+        // Kimi wire.jsonl: usage.record всех агентов сессии → та же агрегация.
+        for file in Self::list_kimi_wires() {
+            let prev = self.state.lock().unwrap().offsets.get(&file).copied().unwrap_or(0);
+            let next = self.parse_kimi_file_part(&file, prev);
+            if next != prev {
+                self.state.lock().unwrap().offsets.insert(file, next);
+            }
+        }
         {
             let mut seen = self.msg_seen.lock().unwrap();
             if seen.len() > 6000 {
@@ -577,6 +616,81 @@ impl Usage {
             let friendly = crate::backend::backend(crate::backend::Agent::Codex).friendly_model(&model);
             let project = cwd.as_deref().map(basename).unwrap_or_else(|| "другое".into());
             Self::add_record(&mut self.state.lock().unwrap(), ts, &friendly, &project, "codex", &sid, tok);
+        }
+        from_offset + consumed
+    }
+
+    /// Все wire.jsonl Kimi: `<дом>/sessions/<wd_*>/<sid>/agents/<агент>/wire.jsonl`.
+    /// Сабагенты (`agent-N`) жгут те же токены, что и `main`, — берём всех, иначе
+    /// расход сессии с делегированием занижен в разы.
+    fn list_kimi_wires() -> Vec<String> {
+        let mut out = Vec::new();
+        let Ok(wds) = fs::read_dir(kimi_sessions_dir()) else { return out };
+        for wd in wds.filter_map(|e| e.ok()) {
+            let Ok(sessions) = fs::read_dir(wd.path()) else { continue };
+            for s in sessions.filter_map(|e| e.ok()) {
+                let Ok(agents) = fs::read_dir(s.path().join("agents")) else { continue };
+                for a in agents.filter_map(|e| e.ok()) {
+                    let p = a.path().join("wire.jsonl");
+                    if p.is_file() {
+                        out.push(p.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Разбор wire.jsonl Kimi: считаем ТОЛЬКО `usage.record` (оба scope: `turn` и
+    /// `session` — второй пишется при компакции). Рядом в том же файле лежит
+    /// `context.append_loop_event`/`step.end` с побайтово таким же `usage`
+    /// (сверено на 203 файлах, расхождений 0) — сложить оба значит ровно удвоить
+    /// расход, поэтому step.end не трогаем. billing="kimi", model — полный алиас
+    /// (`kimi-code/k3`) через friendly_model. `usage` всегда четыре поля, без
+    /// total/reasoning: input = inputOther (кэш отдельно, как в общем `Tok`).
+    fn parse_kimi_file_part(&self, file: &str, from_offset: u64) -> u64 {
+        let Ok(meta) = fs::metadata(file) else { return from_offset };
+        let size = meta.len();
+        if size <= from_offset {
+            return from_offset;
+        }
+        let Ok(mut f) = fs::File::open(file) else { return from_offset };
+        if f.seek(SeekFrom::Start(from_offset)).is_err() {
+            return from_offset;
+        }
+        let mut buf = Vec::with_capacity((size - from_offset) as usize);
+        if f.read_to_end(&mut buf).is_err() {
+            return from_offset;
+        }
+        let text = String::from_utf8_lossy(&buf);
+        let Some(last_nl) = text.rfind('\n') else { return from_offset };
+        let consumed = text[..=last_nl].len() as u64;
+        let text = &text[..last_nl];
+
+        // sid — имя каталога сессии, cwd — из state.json: оба переживают
+        // инкрементальный скан, в самих записях расхода их нет
+        let (cwd, sid) = kimi_meta_for(Path::new(file));
+        let project = cwd.as_deref().map(basename).unwrap_or_else(|| "другое".into());
+        for line in text.split('\n') {
+            if !line.contains("usage.record") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+            if v.get("type").and_then(Value::as_str) != Some("usage.record") {
+                continue;
+            }
+            let Some(u0) = v.get("usage") else { continue };
+            let num = |k: &str| u0.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+            let ts = v.get("time").and_then(Value::as_i64).unwrap_or_else(now_ms);
+            let tok = Tok {
+                input: num("inputOther"),
+                out: num("output"),
+                cw: num("inputCacheCreation"),
+                cr: num("inputCacheRead"),
+            };
+            let model = v.get("model").and_then(Value::as_str).unwrap_or("");
+            let friendly = crate::backend::backend(crate::backend::Agent::Kimi).friendly_model(model);
+            Self::add_record(&mut self.state.lock().unwrap(), ts, &friendly, &project, "kimi", &sid, tok);
         }
         from_offset + consumed
     }
@@ -1218,6 +1332,133 @@ Current week (Sonnet only): 30% used\n";
         let t = Tok { input: 1_000_000.0, out: 0.0, cw: 1_000_000.0, cr: 1_000_000.0 };
         // Sonnet: 3 + 3*1.25 + 3*0.1 = 7.05
         assert!((t.cost("Sonnet") - 7.05).abs() < 1e-9);
+    }
+
+    /* -------- сканер Kimi -------- */
+
+    const KIMI_STATE_V2: &str =
+        r#"{"id":"session_TEST","cwd":"/Users/me/Goool","createdAt":1787091343079}"#;
+    const KIMI_STATE_V1: &str =
+        r#"{"workDir":"/Users/me/Goool","createdAt":"2026-08-03T09:31:21.133Z"}"#;
+
+    /// Запись расхода и её step.end-двойник — в живых логах они всегда парой.
+    fn kimi_pair(other: i64, out: i64, cr: i64, cw: i64, ts: i64) -> String {
+        format!(
+            "{{\"type\":\"usage.record\",\"model\":\"kimi-code/k3\",\"usage\":{{\"inputOther\":{other},\"output\":{out},\"inputCacheRead\":{cr},\"inputCacheCreation\":{cw}}},\"usageScope\":\"turn\",\"time\":{ts}}}\n\
+{{\"type\":\"context.append_loop_event\",\"event\":{{\"type\":\"step.end\",\"step\":1,\"usage\":{{\"inputOther\":{other},\"output\":{out},\"inputCacheRead\":{cr},\"inputCacheCreation\":{cw}}},\"finishReason\":\"tool_use\"}},\"time\":{ts}}}\n"
+        )
+    }
+
+    /// `<root>/wd_*/session_TEST/{state.json,agents/<агент>/wire.jsonl}`.
+    fn kimi_tree(name: &str, state_json: &str, agents: &[(&str, String)]) -> (PathBuf, Vec<String>) {
+        let root = std::env::temp_dir().join(format!("jarvis-kimi-usage-{name}"));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("wd_proj_0123456789ab").join("session_TEST");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("state.json"), state_json).unwrap();
+        let mut files = Vec::new();
+        for (agent, body) in agents {
+            let ad = dir.join("agents").join(agent);
+            fs::create_dir_all(&ad).unwrap();
+            let p = ad.join("wire.jsonl");
+            fs::write(&p, body).unwrap();
+            files.push(p.to_string_lossy().into_owned());
+        }
+        (root, files)
+    }
+
+    /// На диске лежит реальное ~/.jarvis/usage.json — считать по нему нельзя.
+    fn fresh_usage() -> Usage {
+        let u = Usage::load();
+        *u.state.lock().unwrap() = State { v: STATE_V, ..Default::default() };
+        u
+    }
+
+    fn kimi_scan(u: &Usage, files: &[String]) {
+        for f in files {
+            u.parse_kimi_file_part(f, 0);
+        }
+    }
+
+    #[test]
+    fn kimi_counts_usage_record_once_ignoring_step_end() {
+        // step.end несёт побайтовый дубль usage.record — сложить оба значит удвоить
+        let mut body = kimi_pair(100, 10, 1000, 5, 1787091343079);
+        body.push_str("{\"type\":\"usage.record\",\"model\":\"kimi-code/k3\",\"usage\":{\"inputOther\":7,\"output\":1,\"inputCacheRead\":0,\"inputCacheCreation\":0},\"usageScope\":\"session\",\"time\":1787091344000}\n");
+        let (root, files) = kimi_tree("nodouble", KIMI_STATE_V2, &[("main", body)]);
+        let u = fresh_usage();
+        kimi_scan(&u, &files);
+
+        let st = u.state.lock().unwrap();
+        let s = st.sessions.get("session_TEST").expect("сессия по имени каталога");
+        assert_eq!(s.tok.total(), 1123.0, "одинарный расход: 1115 turn + 8 компакции");
+        assert_eq!((s.tok.input, s.tok.out, s.tok.cr, s.tok.cw), (107.0, 11.0, 1000.0, 5.0));
+        assert_eq!((s.model.as_str(), s.billing.as_str(), s.project.as_str()), ("K3", "kimi", "Goool"));
+        drop(st);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn kimi_sums_over_all_agents() {
+        // сабагенты жгут те же токены — расход сессии складывается по main + agent-N
+        let (root, files) = kimi_tree(
+            "agents",
+            KIMI_STATE_V2,
+            &[
+                ("main", kimi_pair(100, 10, 0, 0, 1787091343079)),
+                ("agent-0", kimi_pair(20, 3, 0, 0, 1787091343999)),
+            ],
+        );
+        assert_eq!(files.len(), 2);
+        let u = fresh_usage();
+        kimi_scan(&u, &files);
+
+        let st = u.state.lock().unwrap();
+        assert_eq!(st.sessions.len(), 1, "агенты одной сессии — одна строка");
+        assert_eq!(st.sessions["session_TEST"].tok.total(), 133.0);
+        drop(st);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn kimi_cwd_from_both_state_versions() {
+        for (name, state) in [("v2", KIMI_STATE_V2), ("v1", KIMI_STATE_V1)] {
+            let (root, files) = kimi_tree(
+                &format!("state-{name}"),
+                state,
+                &[("main", kimi_pair(1, 1, 0, 0, 1787091343079))],
+            );
+            let u = fresh_usage();
+            kimi_scan(&u, &files);
+            let st = u.state.lock().unwrap();
+            assert_eq!(st.sessions["session_TEST"].project, "Goool", "state.json {name}");
+            drop(st);
+            let _ = fs::remove_dir_all(&root);
+        }
+        // без state.json — проект «другое», но токены не теряются
+        let (root, files) = kimi_tree("state-none", "не json вовсе", &[("main", kimi_pair(1, 1, 0, 0, 1))]);
+        let u = fresh_usage();
+        kimi_scan(&u, &files);
+        let st = u.state.lock().unwrap();
+        assert_eq!(st.sessions["session_TEST"].project, "другое");
+        drop(st);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn kimi_survives_broken_lines() {
+        let mut body = String::from("{\"type\":\"usage.record\", это не json\n");
+        // подстрока-приманка в чужой записи: тип обязан проверяться после разбора
+        body.push_str("{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"tool.result\",\"text\":\"usage.record\"}}\n");
+        body.push_str(&kimi_pair(50, 5, 0, 0, 1787091343079));
+        let (root, files) = kimi_tree("broken", KIMI_STATE_V2, &[("main", body)]);
+        let u = fresh_usage();
+        kimi_scan(&u, &files);
+
+        let st = u.state.lock().unwrap();
+        assert_eq!(st.sessions["session_TEST"].tok.total(), 55.0, "битая строка не роняет и не искажает");
+        drop(st);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

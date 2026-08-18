@@ -17,6 +17,7 @@ pub mod codex;
 pub mod codex_agent;
 pub mod codex_transcript;
 pub mod kimi;
+pub mod kimi_transcript;
 
 /// Какой CLI-агент стоит за сессией/вызовом.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

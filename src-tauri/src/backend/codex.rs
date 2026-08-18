@@ -125,6 +125,15 @@ impl Backend for CodexBackend {
     fn transcript_dir_for(&self, _cwd: &str) -> Option<PathBuf> {
         None // Codex не кодирует cwd в путь; индекс — инкремент 6 (history)
     }
+    fn supports_custom_answer(&self) -> bool {
+        false // в codex-пикере строки «Other» нет — свой текст доставить некуда
+    }
+    fn validate_model(&self, model: &str) -> Result<(), String> {
+        // Аллоулистом НЕ ограничиваем: набор моделей OpenAI дрейфует от релиза к
+        // релизу, и `models()` здесь — подсказка для пикера, а не полный список.
+        // Проверку на «чистоту» оставляем: строка уходит в tmux-пану.
+        crate::convo::skills::ensure_clean(model, "модель")
+    }
     fn resume_cmd(&self, sid: &str) -> String {
         format!("codex resume {sid}")
     }

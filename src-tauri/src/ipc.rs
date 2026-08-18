@@ -1648,15 +1648,14 @@ pub(crate) async fn set_model_core(d: &Arc<Daemon>, session_id: &str, model: &st
         .session(session_id)
         .map(|s| crate::backend::Agent::from_opt(s.agent.as_deref()))
         .unwrap_or_default();
-    // Аллоулист модели для Claude-сессий (SEC-3: недоверенный голос не должен
-    // пастить свободный текст в `/model …`). У Codex набор моделей иной — там не
-    // ограничиваем (валидация — Claude-специфична).
-    if agent != crate::backend::Agent::Codex {
-        if let Err(e) = crate::convo::skills::validate_model(model) {
-            return err(e);
-        }
+    // Валидация модели — политика бэкенда (SEC-3: недоверенный голос не должен
+    // пастить свободный текст в `/model …`). Claude ограничен аллоулистом, Codex —
+    // только «чистотой» строки, потому что его набор моделей дрейфует.
+    let be = crate::backend::backend(agent);
+    if let Err(e) = be.validate_model(model) {
+        return err(e);
     }
-    let friendly = crate::backend::backend(agent).friendly_model(model);
+    let friendly = be.friendly_model(model);
     set_via_slash(d, session_id, format!("/model {model}"), move |s| {
         s.model = Some(friendly); // оптимистично; транскрипт подтвердит
         s.model_at = Some(now_ms());
@@ -1684,10 +1683,11 @@ pub(crate) async fn set_effort_core(d: &Arc<Daemon>, session_id: &str, level: &s
         .session(session_id)
         .map(|s| crate::backend::Agent::from_opt(s.agent.as_deref()))
         .unwrap_or_default();
-    if agent == crate::backend::Agent::Codex {
+    let be = crate::backend::backend(agent);
+    if !be.has_separate_effort() {
         return err("Codex: reasoning effort меняется через /model-пикер (отдельной команды нет)");
     }
-    if let Err(e) = crate::convo::skills::validate_effort(level) {
+    if let Err(e) = be.validate_effort(level) {
         return err(e);
     }
     let lv = level.to_string();
@@ -1806,9 +1806,13 @@ pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) 
     }
 
     let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
-    // в codex-пикере строки «Other» нет — свой текст доставить некуда
-    if agent == crate::backend::Agent::Codex && texts.iter().any(Option::is_some) {
-        return err("Свой ответ недоступен в codex-сессии — выбери вариант");
+    // если в пикере агента нет строки «Other» — свой текст доставить некуда
+    if !crate::backend::backend(agent).supports_custom_answer() && texts.iter().any(Option::is_some)
+    {
+        return err(format!(
+            "Свой ответ недоступен в {}-сессии — выбери вариант",
+            agent.label()
+        ));
     }
     match target.answer_question(&pane, agent, &q, &answers, &texts).await {
         Ok(()) => {

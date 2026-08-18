@@ -85,6 +85,34 @@ pub trait Backend: Send + Sync {
     fn transcript_dir_for(&self, cwd: &str) -> Option<PathBuf>;
 
     // — control / identity —
+    /// Умеет ли пикер агента строку «Other» (свой ответ текстом). У Claude есть,
+    /// у Codex нет. Раньше это выражалось сравнением с `Agent::Codex` в трёх
+    /// местах сразу (ipc, tmux, UI) — теперь одна точка правды.
+    fn supports_custom_answer(&self) -> bool {
+        true
+    }
+    /// Проверить модель перед вставкой в `/model …`.
+    ///
+    /// Дефолт: значение «чистое» И входит в `models()`. Проверка на «чистоту»
+    /// (SEC-3: без пробелов и control-символов) обязательна для ЛЮБОГО агента —
+    /// строка уходит слэш-командой в tmux-пану.
+    fn validate_model(&self, model: &str) -> Result<(), String> {
+        crate::convo::skills::ensure_clean(model, "модель")?;
+        if self.models().iter().any(|(id, _)| *id == model) {
+            Ok(())
+        } else {
+            Err(format!("неизвестная модель: {model}"))
+        }
+    }
+    /// Проверить уровень effort перед вставкой в `/effort …`. Дефолт — как у модели.
+    fn validate_effort(&self, level: &str) -> Result<(), String> {
+        crate::convo::skills::ensure_clean(level, "effort")?;
+        if self.effort_levels().contains(&level) {
+            Ok(())
+        } else {
+            Err(format!("неизвестный effort: {level}"))
+        }
+    }
     fn resume_cmd(&self, sid: &str) -> String;
     fn friendly_model(&self, id: &str) -> String;
     fn models(&self) -> &'static [(&'static str, &'static str)];
@@ -195,6 +223,60 @@ mod tests {
         assert_eq!(b.resume_cmd("abc"), "claude --resume abc");
         assert!(b.has_separate_effort());
         assert_eq!(b.models().len(), 4);
+    }
+
+    /// Аллоулист Claude — тот же, что был в `convo::skills` до переезда в трейт
+    /// (SEC-3). Ассерты перенесены дословно: инвариант «Claude байт-в-байт».
+    #[test]
+    fn claude_validates_model_and_effort_by_allowlist() {
+        let b = backend(Agent::Claude);
+        assert!(b.validate_model("opus").is_ok());
+        assert!(b.validate_model("sonnet").is_ok());
+        assert!(b.validate_model("gpt-4").is_err());
+        assert!(b.validate_model("opus; rm -rf").is_err());
+        assert!(b.validate_effort("high").is_ok());
+        assert!(b.validate_effort("ultra").is_err());
+        // пробелы и control-символы — инъекция в slash-команду
+        assert!(b.validate_model("op us").is_err());
+        assert!(b.validate_model("opus\n").is_err());
+        assert!(b.validate_effort("hi gh").is_err());
+    }
+
+    /// У Codex набор моделей дрейфует между релизами, поэтому аллоулистом его не
+    /// ограничиваем — но «чистоту» строки проверяем, она уходит в tmux-пану.
+    #[test]
+    fn codex_validates_only_cleanliness() {
+        let b = backend(Agent::Codex);
+        assert!(b.validate_model("gpt-5.1-something-new").is_ok());
+        assert!(b.validate_model("gpt-5; rm -rf /").is_err(), "инъекция обязана падать");
+        assert!(b.validate_model("").is_err());
+    }
+
+    #[test]
+    fn custom_answer_capability_matches_pickers() {
+        assert!(backend(Agent::Claude).supports_custom_answer(), "у Claude есть «Other»");
+        assert!(!backend(Agent::Codex).supports_custom_answer());
+        assert!(!backend(Agent::Kimi).supports_custom_answer());
+    }
+
+    #[test]
+    fn kimi_backend_basics() {
+        let b = backend(Agent::Kimi);
+        assert_eq!(b.agent(), Agent::Kimi);
+        assert_eq!(b.resume_cmd("session_abc"), "kimi -S session_abc");
+        assert!(b.has_separate_effort(), "effort у Kimi отдельный, как у Claude");
+        assert!(b.validate_model("kimi-code/k3").is_ok());
+        assert!(b.validate_model("kimi-code/k3; rm -rf").is_err());
+        assert!(b.validate_effort("max").is_ok());
+        assert!(b.validate_effort("medium").is_err(), "у Kimi нет medium");
+    }
+
+    #[test]
+    fn all_agents_are_dispatchable_and_labels_round_trip() {
+        for a in Agent::all() {
+            assert_eq!(backend(*a).agent(), *a, "диспетчер обязан вернуть тот же агент");
+            assert_eq!(Agent::from_label(a.label()), *a, "метка обязана читаться обратно");
+        }
     }
 
     #[test]

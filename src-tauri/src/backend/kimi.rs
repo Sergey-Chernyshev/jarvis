@@ -123,6 +123,11 @@ impl Backend for KimiBackend {
     fn transcript_dir_for(&self, _cwd: &str) -> Option<PathBuf> {
         None // путь к транскрипту резолвится по sid, а не по cwd — см. wire_path_for_sid
     }
+    fn supports_custom_answer(&self) -> bool {
+        // Пикер `AskUserQuestion` вживую не откалиброван; пока не проверено —
+        // не обещаем. Инкремент 5.
+        false
+    }
     fn resume_cmd(&self, sid: &str) -> String {
         format!("kimi -S {sid}")
     }

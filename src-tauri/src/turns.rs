@@ -133,6 +133,9 @@ fn collect_facts(agent: Agent, entry: &Value, f: &mut TurnFacts) {
     match agent {
         Agent::Claude => facts_claude(entry, f),
         Agent::Codex => facts_codex(entry, f),
+        // инкремент 4: факты Kimi берутся из tool.call в wire.jsonl. До парсера
+        // молчим — пустые факты честнее, чем разбор чужого формата наугад.
+        Agent::Kimi => {}
     }
 }
 

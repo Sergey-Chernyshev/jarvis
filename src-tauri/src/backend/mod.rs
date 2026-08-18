@@ -1,5 +1,5 @@
 //! Бэкенд-абстракция: один шов между Jarvis и разными CLI-агентами
-//! (Claude Code, Codex). Принцип — `enum Agent` + sync dyn-safe `trait Backend`
+//! (Claude Code, Codex, Kimi Code). Принцип — `enum Agent` + sync dyn-safe `trait Backend`
 //! для чистых данных/форматирования (диспетч `backend(agent)`), а вся
 //! async/stateful-логика (контроль, usage, service-LLM, agent-host) живёт
 //! свободными функциями `match agent` в своих модулях — как `claude_bin.rs`.
@@ -16,6 +16,7 @@ use crate::transcript::ChatItem;
 pub mod codex;
 pub mod codex_agent;
 pub mod codex_transcript;
+pub mod kimi;
 
 /// Какой CLI-агент стоит за сессией/вызовом.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -24,17 +25,21 @@ pub enum Agent {
     #[default]
     Claude,
     Codex,
+    Kimi,
 }
 
 impl Agent {
     /// Метка из конверта хука (`{"agent":"codex"}`). Неизвестное → Claude
     /// (обратная совместимость: старые state.json без метки = claude).
+    ///
+    /// Таблично по `label()`: добавляя агента, правишь одно место, а не цепочку
+    /// `if`-ов, где легко забыть ветку и молча получить чужое поведение.
     pub fn from_label(s: &str) -> Agent {
-        if s.eq_ignore_ascii_case("codex") {
-            Agent::Codex
-        } else {
-            Agent::Claude
-        }
+        Agent::all()
+            .iter()
+            .copied()
+            .find(|a| s.eq_ignore_ascii_case(a.label()))
+            .unwrap_or(Agent::Claude)
     }
     pub fn from_opt(s: Option<&str>) -> Agent {
         s.map(Agent::from_label).unwrap_or(Agent::Claude)
@@ -43,10 +48,13 @@ impl Agent {
         match self {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
+            Agent::Kimi => "kimi",
         }
     }
-    pub fn all() -> [Agent; 2] {
-        [Agent::Claude, Agent::Codex]
+    /// Все известные агенты. Срез, а не массив фиксированной длины: список растёт,
+    /// и типу незачем ломаться на каждом новом бэкенде.
+    pub fn all() -> &'static [Agent] {
+        &[Agent::Claude, Agent::Codex, Agent::Kimi]
     }
 }
 
@@ -155,6 +163,7 @@ pub fn backend(a: Agent) -> &'static dyn Backend {
     match a {
         Agent::Claude => &CLAUDE,
         Agent::Codex => &codex::CODEX,
+        Agent::Kimi => &kimi::KIMI,
     }
 }
 

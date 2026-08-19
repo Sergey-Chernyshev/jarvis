@@ -49,9 +49,60 @@ fn focus_args<'a>(command: &'a str, pane: &'a str) -> [&'a str; 5] {
     ["-L", "jarvis", command, "-t", pane]
 }
 
+/// Путь к `tmux`. Звать по имени нельзя: приложение, запущенное из Finder или
+/// дока, получает от macOS урезанный PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), где
+/// Homebrew нет — и вызов не находит бинарь. Симптом коварный: не «tmux не
+/// установлен», а «пана мертва», потому что на ней падает опрос живости, и
+/// сессия молча теряет управляемость. Ищем так же, как проект ищет claude/kimi.
+///
+/// Резолвим один раз: PATH процесса за время жизни демона не меняется, а вызов
+/// уходит на каждый опрос паны.
+fn tmux_bin() -> &'static str {
+    static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        let mut dirs: Vec<std::path::PathBuf> = std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .collect();
+        for extra in [
+            std::path::PathBuf::from("/opt/homebrew/bin"),
+            std::path::PathBuf::from("/usr/local/bin"),
+            crate::util::home_dir().join(".local/bin"),
+        ] {
+            if !dirs.contains(&extra) {
+                dirs.push(extra);
+            }
+        }
+        for d in dirs {
+            let p = d.join("tmux");
+            if p.is_file() {
+                return p.to_string_lossy().into_owned();
+            }
+        }
+        "tmux".into() // не нашли — пусть падает как раньше, с внятной ошибкой
+    })
+    .as_str()
+}
+
+/// Запускается ли `tmux` вообще. Нужно, чтобы отличать «не смог спросить» от
+/// «паны нет»: путать их — значит стирать живую пану из-за своей же ошибки.
+pub async fn reachable() -> bool {
+    tokio::process::Command::new(tmux_bin())
+        .arg("-V")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// `tmux -L jarvis <args>`: stdout при успехе, текст ошибки при провале.
 pub async fn tmux_j(args: &[&str]) -> Result<String, String> {
-    let mut cmd = tokio::process::Command::new("tmux");
+    let mut cmd = tokio::process::Command::new(tmux_bin());
     cmd.arg("-L")
         .arg("jarvis")
         .args(args)
@@ -230,7 +281,7 @@ pub struct PaneInfo {
 /// Разделитель полей — таб: ни id, ни имя сессии, ни pid его не содержат, а путь
 /// идёт последним полем.
 pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
-    let mut cmd = tokio::process::Command::new("tmux");
+    let mut cmd = tokio::process::Command::new(tmux_bin());
     cmd.args([
         "-L",
         "jarvis",
@@ -485,7 +536,7 @@ pub fn answer_keys(
 /// Фокус-лесенка, ступень tmux: switch-client, не вышло — select-window.
 pub async fn focus(pane: &str) -> bool {
     let direct_args = focus_args("switch-client", pane);
-    let direct = tokio::process::Command::new("tmux")
+    let direct = tokio::process::Command::new(tmux_bin())
         .args(direct_args)
         .output()
         .await;
@@ -493,7 +544,7 @@ pub async fn focus(pane: &str) -> bool {
         return true;
     }
     let select_args = focus_args("select-window", pane);
-    let select = tokio::process::Command::new("tmux")
+    let select = tokio::process::Command::new(tmux_bin())
         .args(select_args)
         .output()
         .await;
@@ -739,5 +790,28 @@ mod transport_tests {
             focus_args("select-window", "%3"),
             ["-L", "jarvis", "select-window", "-t", "%3"]
         );
+    }
+
+    /// Резолвер обязан отдавать существующий бинарь либо честное «tmux».
+    /// Именно эта функция чинит баг «сессия вне tmux» у приложения, запущенного
+    /// из дока: там PATH урезан до /usr/bin:/bin:/usr/sbin:/sbin, Homebrew в нём нет.
+    #[test]
+    fn tmux_bin_resolves_to_existing_file_or_plain_name() {
+        let bin = tmux_bin();
+        assert!(!bin.is_empty());
+        if bin != "tmux" {
+            assert!(
+                std::path::Path::new(bin).is_file(),
+                "резолвер вернул путь, которого нет: {bin}"
+            );
+            assert!(bin.ends_with("/tmux"), "должен указывать на сам бинарь: {bin}");
+        }
+    }
+
+    /// Кэш: PATH за время жизни демона не меняется, а резолв дёргается на каждый
+    /// опрос паны — второй вызов обязан вернуть то же самое.
+    #[test]
+    fn tmux_bin_is_stable() {
+        assert_eq!(tmux_bin(), tmux_bin());
     }
 }

@@ -2161,6 +2161,13 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
             }
             return err("Агент не подтвердил получение — проверь терминал");
         }
+        // «Не смог спросить» и «паны нет» — разные вещи. Если tmux вообще не
+        // запускается, опрос живости провалится на ЛЮБОЙ пане, и стереть её —
+        // значит своей же ошибкой сделать живую сессию неуправляемой навсегда
+        // (до перезапуска агента). Лучше честная ошибка.
+        if !crate::tmux::reachable().await {
+            return err("tmux не найден — ответ в сессию недоступен (brew install tmux)");
+        }
         d.with_session(&session_id, |s| s.tmux_pane = None); // пана умерла
         d.push();
     }

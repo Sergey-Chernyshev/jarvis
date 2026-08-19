@@ -2592,6 +2592,11 @@ pub struct ModelInfo {
     pub present: bool,
     /// Активна сейчас (для STT — текущий движок; для wake — единственная модель).
     pub active: bool,
+    /// Движок для этой модели вкомпилирован в бинарь. Whisper и wake-word живут
+    /// под cargo-фичами: без них веса скачаются, но работать будет нечему —
+    /// предлагать загрузку нечестно. Остальным всегда true (Qwen и Silero —
+    /// сайдкары, от фич сборки не зависят).
+    pub usable: bool,
 }
 
 /// Каталог локальных весов Qwen для ключа движка (qwen3-0.6b → …/stt-mlx/models/qwen3-0.6b).
@@ -2663,6 +2668,7 @@ pub fn model_inventory() -> Vec<ModelInfo> {
         bytes: fs::metadata(&wmp).map(|m| m.len()).unwrap_or(0),
         present: wmp.exists(),
         active: active_stt == "whisper-turbo",
+        usable: cfg!(feature = "whisper-native"),
     });
 
     // STT: Qwen3 веса (локальная папка сайдкара).
@@ -2678,6 +2684,7 @@ pub fn model_inventory() -> Vec<ModelInfo> {
             bytes: if dir.exists() { dir_size(&dir) } else { 0 },
             present: qwen_weights_present(key),
             active: active_stt == key,
+            usable: true,
         });
     }
 
@@ -2691,6 +2698,7 @@ pub fn model_inventory() -> Vec<ModelInfo> {
             bytes: dir_size_cached(&venv),
             present: stt_python().exists(),
             active: false,
+            usable: true,
         });
     }
 
@@ -2710,6 +2718,7 @@ pub fn model_inventory() -> Vec<ModelInfo> {
         bytes: silero_bytes,
         present: silero_ready(),
         active: voice_engine() == "silero",
+        usable: true,
     });
 
     // Wake-word: openWakeWord «Hey Jarvis» (3 ONNX).
@@ -2724,6 +2733,7 @@ pub fn model_inventory() -> Vec<ModelInfo> {
         bytes: wbytes,
         present: wakeword_models_present(),
         active: true,
+        usable: cfg!(feature = "wakeword-ort"),
     });
 
     v
@@ -3493,6 +3503,20 @@ mod tests {
         ] {
             assert!(ids.contains(&id), "инвентарь должен содержать {id}");
         }
+    }
+
+    /// Инвентарь обязан честно говорить, есть ли движок в ЭТОЙ сборке: иначе
+    /// настройки предложат скачать веса, которым нечем работать.
+    #[test]
+    fn model_inventory_reports_engine_availability() {
+        let inv = model_inventory();
+        let usable = |id: &str| inv.iter().find(|m| m.id == id).map(|m| m.usable);
+
+        assert_eq!(usable("whisper-turbo"), Some(cfg!(feature = "whisper-native")));
+        assert_eq!(usable("hey_jarvis"), Some(cfg!(feature = "wakeword-ort")));
+        // Qwen и Silero — сайдкары, от фич сборки не зависят
+        assert_eq!(usable("qwen3-0.6b"), Some(true));
+        assert_eq!(usable("silero"), Some(true));
     }
 
     #[test]

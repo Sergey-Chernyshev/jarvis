@@ -1037,6 +1037,8 @@
   // выбор download-action по id (порт downloadActionFor из renderer.js)
   function downloadActionFor(m) {
     if (m.present) return null;
+    // движка нет в сборке — веса скачаются, работать будет нечему
+    if (m.usable === false) return null;
     switch (m.id) {
       case 'whisper-turbo': return { label: 'Скачать (~574 МБ)', run: () => window.jarvis.sttInstallWhisper() };
       case 'qwen3-0.6b': return { label: 'Скачать (~1 ГБ)', run: () => window.jarvis.sttInstallQwen('qwen3-0.6b') };
@@ -1065,7 +1067,12 @@
     }
     grow.appendChild(titleRow);
     // Статус: явный успех «✓ размер» (видно, что скачалось) либо «не скачана».
-    grow.appendChild(el('div.dd', { text: m.present ? '✓ установлена · ' + fmtBytes(m.bytes) : 'не скачана' }));
+    // Движка нет в сборке — говорим прямо: иначе «не скачана» без кнопки
+    // читается как поломка, а не как осознанное ограничение сборки.
+    const status = m.usable === false
+      ? 'недоступно в этой сборке'
+      : m.present ? '✓ установлена · ' + fmtBytes(m.bytes) : 'не скачана';
+    grow.appendChild(el('div.dd', { text: status }));
     // Ошибка прошлой попытки — прямо в строке (вместо тихого сброса), с подсказкой про retry.
     if (dlState[m.id] && dlState[m.id].error) grow.appendChild(dlErrorNote(dlState[m.id].error));
 

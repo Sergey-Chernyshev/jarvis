@@ -61,6 +61,24 @@ pub fn agent_command_mode(agent: &str, session_id: Option<&str>, mode: Mode) -> 
             Some(id) => format!("codex resume {id}{flag}"),
             None => format!("codex{flag}"),
         }
+    } else if agent == "kimi" {
+        // У Kimi два «опасных» флага, и это не синонимы: `--yolo` авто-апрувит
+        // обычные вызовы инструментов, но вопросы агент задавать может, а
+        // `--auto` снимает и их. Берём `--yolo` — это ровный аналог
+        // `--dangerously-skip-permissions` у Claude; `--auto` заодно отключил бы
+        // пикер вопросов, которым Jarvis и рулит из панели.
+        // Режим плана у Kimi настоящий (`--plan`), притворяться не нужно.
+        let flag = match mode {
+            Mode::Yolo => " --yolo",
+            Mode::Plan => " --plan",
+            Mode::Ask => "",
+        };
+        // Возобновление — `-S <id>`: `sid` уже вида `session_<uuid>`, и это тот
+        // же флаг, что отдаёт `resume_cmd` бэкенда.
+        match session_id {
+            Some(id) => format!("kimi -S {id}{flag}"),
+            None => format!("kimi{flag}"),
+        }
     } else {
         let flag = match mode {
             Mode::Yolo => " --dangerously-skip-permissions",
@@ -477,6 +495,15 @@ mod tests {
             agent_command_mode("codex", None, Mode::Yolo),
             "codex --dangerously-bypass-approvals-and-sandbox"
         );
+        // А у Kimi план настоящий — и `--yolo`, а не `--auto`: второй снял бы и
+        // вопросы, которыми Jarvis рулит из панели.
+        assert_eq!(agent_command_mode("kimi", None, Mode::Ask), "kimi");
+        assert_eq!(agent_command_mode("kimi", None, Mode::Plan), "kimi --plan");
+        assert_eq!(agent_command_mode("kimi", None, Mode::Yolo), "kimi --yolo");
+        assert_eq!(
+            agent_command_mode("kimi", Some("session_abc"), Mode::Yolo),
+            "kimi -S session_abc --yolo"
+        );
     }
     use super::*;
 
@@ -488,6 +515,19 @@ mod tests {
         assert_eq!(agent_command("codex", None, false), "codex");
         assert_eq!(agent_command("codex", None, true), "codex --dangerously-bypass-approvals-and-sandbox");
         assert_eq!(agent_command("codex", Some("x1"), false), "codex resume x1");
+        assert_eq!(agent_command("kimi", None, false), "kimi");
+        assert_eq!(agent_command("kimi", None, true), "kimi --yolo");
+        assert_eq!(agent_command("kimi", Some("session_x"), false), "kimi -S session_x");
+    }
+
+    /// Команда возобновления обязана совпадать с той, что бэкенд отдаёт в панель
+    /// «скопировать»: разойдись они — человек скопировал бы нерабочую строку.
+    #[test]
+    fn resume_matches_the_backend_for_every_agent() {
+        for a in crate::backend::Agent::all() {
+            let want = crate::backend::backend(*a).resume_cmd("sid-1");
+            assert_eq!(agent_command(a.label(), Some("sid-1"), false), want, "{}", a.label());
+        }
     }
 
     #[test]

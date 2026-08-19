@@ -33,9 +33,9 @@ pub struct CustomAgent {
 
 /// Имена, под которыми свой агент жить не может.
 ///
-/// claude и codex заняты настоящими бэкендами; остальное — служебные имена,
+/// claude, codex и kimi заняты настоящими бэкендами; остальное — служебные имена,
 /// столкновение с которыми превращает отладку в археологию.
-const RESERVED: &[&str] = &["claude", "codex", "jarvis", "tmux", "sh", "bash", "zsh"];
+const RESERVED: &[&str] = &["claude", "codex", "kimi", "jarvis", "tmux", "sh", "bash", "zsh"];
 
 /// Чем плох этот агент; пусто — годен.
 pub fn problems(a: &CustomAgent) -> Vec<String> {
@@ -142,13 +142,19 @@ mod tests {
 
     #[test]
     fn reserved_and_junk_ids_are_rejected() {
-        for bad in ["claude", "codex", "jarvis", "tmux"] {
+        for bad in ["claude", "codex", "kimi", "jarvis", "tmux"] {
             let a = CustomAgent { id: bad.into(), bin: "x".into(), ..Default::default() };
             assert!(!problems(&a).is_empty(), "{bad} не должен пройти");
         }
         for bad in ["Мой Агент", "with space", "UPPER", ""] {
             let a = CustomAgent { id: bad.into(), bin: "x".into(), ..Default::default() };
             assert!(!problems(&a).is_empty(), "«{bad}» не должен пройти");
+        }
+        // Метка КАЖДОГО настоящего бэкенда обязана быть занята: свой агент с
+        // таким id получил бы шим поверх шима и метку чужих сессий.
+        for a in crate::backend::Agent::all() {
+            let x = CustomAgent { id: a.label().into(), bin: "x".into(), ..Default::default() };
+            assert!(!problems(&x).is_empty(), "{} обязан быть зарезервирован", a.label());
         }
         assert!(problems(&ok_agent()).is_empty());
     }
@@ -167,6 +173,7 @@ mod tests {
         let v = json!({ "customAgents": [
             { "id": "qwen", "bin": "qwen" },
             { "id": "claude", "bin": "x" },          // занято
+            { "id": "kimi", "bin": "x" },             // занято
             { "id": "qwen", "bin": "другой" },        // дубль
             { "id": "плохой id", "bin": "x" },        // кириллица
             "мусор",

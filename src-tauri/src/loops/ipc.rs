@@ -46,19 +46,23 @@ pub fn loops_get(app: AppHandle) -> Value {
 /// платить за него каждые несколько секунд. Панель зовёт это один раз и кэширует.
 #[tauri::command]
 pub fn loops_catalog() -> Value {
-    let models = |a: crate::backend::Agent| -> Vec<Value> {
-        crate::backend::backend(a)
-            .models()
-            .iter()
-            .map(|(id, label)| json!({ "id": id, "label": label }))
-            .collect()
-    };
+    // Карта собирается из Agent::all(), а не перечислением ключей: раньше здесь
+    // жили ровно два литерала, и третий агент молча остался бы без моделей в
+    // конструкторе. Форма ответа прежняя — панель читает `models[agent]`.
+    let models: serde_json::Map<String, Value> = crate::backend::Agent::all()
+        .iter()
+        .map(|a| {
+            let list: Vec<Value> = crate::backend::backend(*a)
+                .models()
+                .iter()
+                .map(|(id, label)| json!({ "id": id, "label": label }))
+                .collect();
+            (a.label().to_string(), Value::Array(list))
+        })
+        .collect();
     json!({
         "ok": true,
-        "models": {
-            "claude": models(crate::backend::Agent::Claude),
-            "codex": models(crate::backend::Agent::Codex),
-        },
+        "models": models,
         "presets": super::presets::all(),
     })
 }
@@ -395,6 +399,20 @@ mod tests {
 
         let run = Run { tokens: 200_000, ..Default::default() };
         assert_eq!(run.tripped(&item.limits, 0), None, "после подъёма стена отодвинулась");
+    }
+
+    /// Ключ на КАЖДОГО агента и прежняя форма `{id,label}`: панель читает
+    /// `catalog.models[agent]`, и пропущенный ключ — пустой селект моделей.
+    #[test]
+    fn catalog_lists_models_of_every_agent() {
+        let cat = loops_catalog();
+        let models = cat.get("models").and_then(Value::as_object).expect("models — объект");
+        assert_eq!(models.len(), crate::backend::Agent::all().len());
+        for a in crate::backend::Agent::all() {
+            let list = models.get(a.label()).and_then(Value::as_array).expect(a.label());
+            assert!(!list.is_empty(), "{} без моделей", a.label());
+            assert!(list.iter().all(|m| m.get("id").is_some() && m.get("label").is_some()));
+        }
     }
 
     #[test]

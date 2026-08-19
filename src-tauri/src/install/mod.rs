@@ -188,6 +188,9 @@ pub struct Status {
     pub stt_engine_active: String,
     /// 3 ONNX-модели wake-word (инкр. 10) на месте (~3.5 МБ).
     pub wakeword_models: bool,
+    /// Движок wake-word вкомпилирован (feature `wakeword-ort`). Без неё детектор —
+    /// стаб: «Hey Jarvis» молчит даже со скачанными весами; источник правды для гейта.
+    pub wakeword_ort_built: bool,
 }
 
 impl Status {
@@ -2156,6 +2159,7 @@ pub fn status() -> Status {
         codex_sdk_sidecar: codex_sdk_sidecar_present(),
         stt_engine_active: stt_engine(),
         wakeword_models: wakeword_models_present(),
+        wakeword_ort_built: cfg!(feature = "wakeword-ort"),
     }
 }
 

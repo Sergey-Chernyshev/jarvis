@@ -3106,7 +3106,16 @@ pub async fn stt_test(app: AppHandle) -> Value {
 /// Статус wake-word + аудио-входа для панели.
 #[tauri::command]
 pub fn wake_get(app: AppHandle) -> Value {
-    Daemon::get(&app).wake.status()
+    let mut status = Daemon::get(&app).wake.status();
+    // Без фичи `wakeword-ort` движок — стаб: UI должен видеть, что «Hey Jarvis»
+    // в этой сборке не заработает даже со скачанными весами (ср. whisperNativeBuilt).
+    if let Some(map) = status.as_object_mut() {
+        map.insert(
+            "ort_built".into(),
+            json!(crate::install::status().wakeword_ort_built),
+        );
+    }
+    status
 }
 
 /// Вкл/выкл always-on детектор. Поднимает/гасит consumer-поток и аудио-захват.
@@ -3115,7 +3124,11 @@ pub fn wake_set_enabled(app: AppHandle, on: bool) -> Value {
     let d = Daemon::get(&app);
     // Гейт: без скачанных моделей openWakeWord детектор молча инертен (стаб) —
     // не даём включить, пока модель не установлена в разделе «Модели».
-    if on && !crate::install::status().wakeword_models {
+    let st = crate::install::status();
+    if on && !st.wakeword_ort_built {
+        return err("Wake-word недоступен в этой сборке (нужна --features wakeword-ort)");
+    }
+    if on && !st.wakeword_models {
         return err("Сначала скачайте модели wake-word в разделе «Модели»");
     }
     let mut patch = serde_json::Map::new();

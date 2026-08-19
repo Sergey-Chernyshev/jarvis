@@ -350,8 +350,8 @@ fn build_readiness(
         ReadinessItem::new(
             "hey_jarvis",
             "Wake word",
-            status.wakeword_models,
-            true,
+            status.wakeword_models && status.wakeword_ort_built,
+            status.wakeword_ort_built,
             false,
             "Опциональная голосовая активация",
         ),
@@ -759,6 +759,57 @@ mod tests {
         let reopened = jobs.current();
         assert_eq!(reopened.state, InstallJobState::Failed);
         assert_eq!(reopened.failures, vec!["silero: сеть недоступна"]);
+    }
+
+    /// Скачанные веса без вкомпилированного движка — не «почти готово», а
+    /// недоступная возможность: по этому полю онбординг не предлагает загрузку.
+    #[test]
+    fn capability_without_compiled_engine_is_unavailable() {
+        let health = install::IntegrationHealth {
+            jarvis_dir: "/tmp/jarvis".into(),
+            hook_bin: true,
+            socket: true,
+            claude_present: true,
+            claude_hooks_ok: true,
+            codex_present: false,
+            codex_hooks_ok: true,
+            kimi_present: false,
+            kimi_hooks_ok: true,
+            claude_shim: true,
+            codex_shim: false,
+            kimi_shim: false,
+        };
+        let mut status = Status {
+            whisper_model: true,
+            wakeword_models: true,
+            ..Status::default()
+        };
+        let cap = |snapshot: &ReadinessSnapshot, id: &str| {
+            snapshot
+                .capabilities
+                .iter()
+                .find(|item| item.id == id)
+                .cloned()
+                .expect("capability present")
+        };
+
+        let stub = build_readiness(
+            health.clone(),
+            status.clone(),
+            InstallJobSnapshot::default(),
+            false,
+        );
+        for id in ["whisper-turbo", "hey_jarvis"] {
+            assert!(!cap(&stub, id).available, "{id} offered without engine");
+            assert!(!cap(&stub, id).ready, "{id} pretends to be ready");
+        }
+
+        status.whisper_native_built = true;
+        status.wakeword_ort_built = true;
+        let built = build_readiness(health, status, InstallJobSnapshot::default(), false);
+        for id in ["whisper-turbo", "hey_jarvis"] {
+            assert!(cap(&built, id).available && cap(&built, id).ready);
+        }
     }
 
     #[test]

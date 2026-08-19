@@ -62,15 +62,33 @@
     return { ...base, screen: 'capabilities', primaryAction: 'continue' };
   }
 
-  function selectedPlan(selection) {
+  // Ключ галочки → id возможности в снимке: у Qwen выбирают вес, а возможностью
+  // числится рантайм.
+  const CAPABILITY_ID = {
+    whisper: 'whisper-turbo',
+    qwen: 'qwen3-runtime',
+    wake: 'hey_jarvis',
+    silero: 'silero',
+  };
+
+  // Недоступно, только если снимок сказал это прямо: движок под cargo-фичей может
+  // отсутствовать в сборке. Молчание бэкенда не отнимает то, что раньше работало.
+  function capabilityAvailable(capabilities, key) {
+    const id = CAPABILITY_ID[key] || key;
+    const item = (Array.isArray(capabilities) ? capabilities : []).find((x) => x && x.id === id);
+    return !item || item.available !== false;
+  }
+
+  function selectedPlan(selection, capabilities) {
     const value = selection || {};
+    const on = (key) => Boolean(value[key]) && capabilityAvailable(capabilities, key);
     const ids = [];
-    if (value.whisper) ids.push('whisper-turbo');
-    if (value.qwen) ids.push(value.qwenSize === 'qwen3-1.7b' ? 'qwen3-1.7b' : 'qwen3-0.6b');
-    if (value.wake) ids.push('hey_jarvis');
-    if (value.silero) ids.push('silero');
+    if (on('whisper')) ids.push('whisper-turbo');
+    if (on('qwen')) ids.push(value.qwenSize === 'qwen3-1.7b' ? 'qwen3-1.7b' : 'qwen3-0.6b');
+    if (on('wake')) ids.push('hey_jarvis');
+    if (on('silero')) ids.push('silero');
     return ids;
   }
 
-  return Object.freeze({ derive, selectedPlan, classifyFailure });
+  return Object.freeze({ derive, selectedPlan, capabilityAvailable, classifyFailure });
 });

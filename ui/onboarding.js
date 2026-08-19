@@ -151,6 +151,14 @@
   function capabilityRow(meta) {
     const current = findCapability(meta.id);
     const ready = Boolean(current && current.ready);
+    // Движок под выключенной cargo-фичей: показываем строку честно, но без
+    // галочки — иначе пользователь качает сотни мегабайт, которые молча не заведутся.
+    if (!State.capabilityAvailable(snapshot && snapshot.capabilities, meta.key)) {
+      return readinessItem({
+        id: meta.id, label: meta.title, ready: false, available: false,
+        detail: `${meta.detail} · недоступно в этой сборке`,
+      });
+    }
     const input = h('input', {
       type: 'checkbox',
       checked: selection[meta.key] ? '' : null,
@@ -290,7 +298,7 @@
       primary.textContent = snapshot.coreReady ? 'К возможностям' : 'Подключить агентов';
       secondary.textContent = 'Назад';
     } else if (active === 'capabilities') {
-      const count = State.selectedPlan(selection).length;
+      const count = State.selectedPlan(selection, snapshot && snapshot.capabilities).length;
       primary.textContent = count ? `Скачать выбранное · ${count}` : 'Продолжить без загрузок';
       secondary.textContent = 'Назад';
     } else if (active === 'installing') {
@@ -358,7 +366,7 @@
       return;
     }
     if (active === 'capabilities') {
-      const ids = State.selectedPlan(selection);
+      const ids = State.selectedPlan(selection, snapshot && snapshot.capabilities);
       if (ids.length) {
         await invoke('models_install', { ids }).catch(() => null);
         await refresh();

@@ -5,10 +5,13 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
-  // Свой текст доступен только в Claude-пикере: у codex строки «Other» нет,
-  // доставить текст туда некуда.
-  function customAllowed(agent) {
-    return agent !== 'codex';
+  // Свой текст доступен не каждому агенту: у пикера codex строки «Other» нет,
+  // доставить текст туда некуда. Кто умеет — говорит каталог агентов
+  // (app_meta.agents), список передают снаружи: модуль остаётся чистым.
+  // Незнакомый агент и сессия без метки — разрешаем, как было до меток.
+  function customAllowed(agent, agents) {
+    const a = (agents || []).find((x) => x && x.id === (agent || 'claude'));
+    return a ? a.supportsCustomAnswer !== false : true;
   }
 
   // Нормализация поля «Свой ответ…»: пробельный ввод — не ответ.

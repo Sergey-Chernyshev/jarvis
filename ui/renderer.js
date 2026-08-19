@@ -1,5 +1,9 @@
 /* Панель Jarvis: сессии, чат сессии, настройки. Все данные — через textContent, без innerHTML. */
 
+// Каталог агентов (agents.js): модели, уровни усилия, умения и список кнопок
+// запуска — оттуда, а не тернарником по id. Наполняется из app_meta ниже.
+const AGENTS = window.JarvisAgents;
+
 const panelEl = document.getElementById('panel');
 const listEl = document.getElementById('list');
 const chatEl = document.getElementById('chat');
@@ -369,13 +373,14 @@ function render() {
       branch.textContent = `⎇ ${s.branch}`;
     }
 
-    // бейдж агента: показываем только для не-claude (codex), чтобы отличать
-    // сессии разных бэкендов в общем списке; для claude — как раньше (без пилла).
+    // бейдж агента: показываем всем, кроме агента по умолчанию, — чтобы
+    // отличать сессии разных бэкендов в общем списке; для claude как раньше
+    // (без пилла). Подпись — из каталога, незнакомый агент остаётся собой.
     let agentBadge = null;
-    if (s.agent && s.agent !== 'claude') {
+    if (s.agent && s.agent !== AGENTS.DEFAULT_ID) {
       agentBadge = document.createElement('span');
       agentBadge.className = 'badge agent';
-      agentBadge.textContent = s.agent;
+      agentBadge.textContent = AGENTS.title(s.agent).toLowerCase();
     }
 
     // сессия живёт не на этой машине: бейдж с именем узла рядом с бейджем агента.
@@ -390,9 +395,10 @@ function render() {
 
     const badge = document.createElement('span');
     badge.className = 'badge';
-    // claude: s.model||'claude' (как было). codex: модель из payload, иначе «…»
-    // (не дублируем «codex» — его показывает agentBadge).
-    badge.textContent = s.model || (!s.agent || s.agent === 'claude' ? 'claude' : '…');
+    // Модель из payload; пока агент её не назвал — имя агента, чтобы плитка не
+    // пустовала. У кого имя уже стоит рядом (agentBadge) — там многоточие, а не
+    // дубль: раньше в эту ветку по id проваливался любой не-claude.
+    badge.textContent = modelLabel(s.agent, s.model) || (agentBadge ? '…' : AGENTS.title(s.agent).toLowerCase());
 
     const host = hostLabel(s);
     let hostBadge = null;
@@ -981,7 +987,7 @@ function appendChatItems(items) {
 function updateChatChannelMark() {
   const s = state.find((x) => x.id === chatSessionId);
   // модель — бейдж рядом с именем проекта (как в строке списка)
-  const model = s && (s.model || s.agent);
+  const model = s && (modelLabel(s.agent, s.model) || s.agent);
   chatModelEl.textContent = model || '';
   chatModelEl.hidden = !model;
   // рука связки: ветка в шапке + пометка конфликта. Человек, открывший чат из
@@ -1039,28 +1045,37 @@ function updateChatChannelMark() {
 const tmuxHintEl = document.getElementById('tmuxHint');
 const chatStatusEl = document.getElementById('chatStatus');
 
-const MODELS = [['fable', 'Fable'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku']];
-// Набор моделей Codex — зеркало backend/codex.rs::models(). У codex-сессии
-// `/model`-пикер не должен предлагать модели Claude (issue #10 — тот же класс
-// бага: claude-специфика в codex-сессии). Значение = id для `/model <id>`.
-const MODELS_CODEX = [['gpt-5.5', 'GPT-5.5'], ['gpt-5-codex', 'Codex'], ['gpt-5', 'GPT-5']];
-
+// Пары [id, подпись] для пикера `/model <id>`. Модели чужого агента в его
+// сессии предлагать нельзя (issue #10), а незнакомый агент получает claude.
 function modelsFor(agent) {
-  return agent === 'codex' ? MODELS_CODEX : MODELS;
+  return AGENTS.models(agent).map((m) => [m.id, m.name]);
+}
+
+// Подпись модели для бейджей: id бывает длинным («kimi-code/k3-256k») и в
+// узкой строке списка не читается — берём короткое имя из каталога.
+function modelLabel(agent, model) {
+  if (!model) return '';
+  const hit = AGENTS.models(agent).find((m) => m.id === model);
+  return hit ? hit.name : model;
 }
 
 // базовые уровни приезжают из `claude --help` через демона (не отстаём от CLI);
 // ultracode в help не публикуется — это знание с живого слайдера Fable/Opus
 let effortBase = ['low', 'medium', 'high', 'xhigh', 'max'];
 window.jarvis.getMeta().then((m) => {
-  if (m && Array.isArray(m.effortLevels) && m.effortLevels.length) effortBase = m.effortLevels;
+  if (!m) return;
+  if (Array.isArray(m.effortLevels) && m.effortLevels.length) effortBase = m.effortLevels;
+  AGENTS.setAll(m.agents);
 }).catch(() => {});
 
 const EFFORT_SHORT = { medium: 'med' };
 
-function effortsFor(model) {
+// Уровни — у каждого агента свои (у kimi их три, а не пять); общий список из
+// app_meta остаётся запасным, если агент своих не назвал.
+function effortsFor(agent, model) {
   const m = (model || '').toLowerCase();
-  const list = [['auto', 'auto'], ...effortBase.map((l) => [l, EFFORT_SHORT[l] || l])];
+  const own = AGENTS.efforts(agent);
+  const list = [['auto', 'auto'], ...(own.length ? own : effortBase).map((l) => [l, EFFORT_SHORT[l] || l])];
   if (m === 'fable' || m === 'opus') list.push(['ultracode', 'ultracode']);
   return list;
 }
@@ -1239,10 +1254,10 @@ function renderQOpts(optsEl, footEl) {
 }
 
 // Поле «Свой ответ…» под опциями — аналог строки Other пикера Claude;
-// в codex-сессии скрыто (у codex-пикера строки Other нет).
+// у агентов без такой строки скрыто (кто умеет — знает каталог).
 function renderQCustom(rowEl, inputEl) {
   const s = state.find((x) => x.id === qSessionId);
-  rowEl.hidden = !JarvisQuestionAnswer.customAllowed(s && s.agent);
+  rowEl.hidden = !JarvisQuestionAnswer.customAllowed(s && s.agent, AGENTS.all());
   inputEl.value = qTexts[qIdx] || '';
   activeQCustom = rowEl.hidden ? null : inputEl;
 }
@@ -1933,15 +1948,18 @@ function buildValuePicker(kind) {
   const s = curSession();
   if (kind === 'model') {
     const cur = ((s && s.model) || '').toLowerCase();
+    // отметка «сейчас»: сессия хранит id, а раньше сравнивали только с
+    // подписью — у агента с длинными id (kimi-code/…) галочка не появлялась
     paletteItems = modelsFor(s && s.agent).map(([val, label]) => ({
-      name: label, desc: 'модель сессии', active: cur === label.toLowerCase(),
+      name: label, desc: 'модель сессии', active: cur === val.toLowerCase() || cur === label.toLowerCase(),
       apply: () => applyValue('setModel', val),
     }));
   } else {
-    // У Codex отдельного /effort нет — reasoning меняется в /model-пикере; не
-    // показываем claude-only уровни в codex-сессии (бэкенд их всё равно отклонит).
-    if (s && s.agent === 'codex') { hidePalette(); return; }
-    paletteItems = effortsFor(s && s.model).map(([val, label]) => ({
+    // Отдельная ручка усилия есть не у всех: у codex reasoning меняется в
+    // /model-пикере. Спрашиваем каталог, а не id — иначе третий агент получил
+    // бы чужие уровни, которые бэкенд всё равно отклонит.
+    if (!AGENTS.hasSeparateEffort(s && s.agent)) { hidePalette(); return; }
+    paletteItems = effortsFor(s && s.agent, s && s.model).map(([val, label]) => ({
       name: label, desc: 'уровень рассуждения', active: !!(s && s.effort === val),
       apply: () => applyValue('setEffort', val),
     }));
@@ -2211,14 +2229,33 @@ if (typeof window.jarvis.agentsList === 'function') {
   window.jarvis.agentsList().then((r) => { if (r && r.ok) customAgents = r.agents || []; }).catch(() => {});
 }
 
-/* Команда возобновления по агенту: свои агенты несут шаблон в настройках;
- * без шаблона честно запускаем новую сессию тем же шимом, а не выдумываем флаг. */
+/* Кем можно поднять новую сессию — одним списком на все экраны истории.
+ * Раньше кнопки «Claude/Codex» стояли в двух местах руками, и списки успели
+ * разъехаться: в одном свои агенты были, в другом нет. Встроенные берём из
+ * каталога и только найденные в системе; свои живут шимом на этой машине —
+ * на узле их нет. */
+function launchAgents(remote) {
+  const list = AGENTS.present().map((a) => ({ id: a.id, name: a.title }));
+  if (!remote) for (const a of customAgents) list.push({ id: a.id, name: a.name || a.id });
+  return list;
+}
+
+/* Команда возобновления по агенту: у встроенных флаг свой у каждого CLI —
+ * держим их одной таблицей, а не лесенкой if-ов. Свои агенты несут шаблон в
+ * настройках; без шаблона честно запускаем новую сессию тем же шимом, а не
+ * выдумываем флаг. */
+const BUILTIN_RESUME = {
+  claude: (sid) => `claude --resume ${sid}`,
+  codex: (sid) => `codex resume ${sid}`,
+  kimi: (sid) => `kimi -S ${sid}`,
+};
 function resumeBase(agent, sid) {
-  if (agent === 'codex') return `codex resume ${sid}`;
-  if (!agent || agent === 'claude') return `claude --resume ${sid}`;
-  const a = customAgents.find((x) => x.id === agent);
+  const id = agent || AGENTS.DEFAULT_ID;
+  const builtin = BUILTIN_RESUME[id];
+  if (builtin) return builtin(sid);
+  const a = customAgents.find((x) => x.id === id);
   if (a && a.resume) return a.resume.replaceAll('{sid}', sid);
-  return agent; // новая сессия через шим — resume у агента не описан
+  return id; // новая сессия через шим — resume у агента не описан
 }
 
 /* ---------- лимит-баннер ---------- */
@@ -3286,7 +3323,8 @@ function resumeCommand(s, cwd) {
   return (cwd ? `cd "${cwd}" && ${base}` : base) + '\n(+ параметры из настроек «Запуск»)';
 }
 
-// Запуск сессии из настроек: agent='claude'|'codex'; sessionId=null — новая
+// Запуск сессии из настроек: agent — id из каталога (или свой из реестра);
+// sessionId=null — новая
 // сессия, иначе продолжение; cwd — директория проекта; machine — где запускать
 // ('local' | имя узла). Реальную команду (терминал, прокси, флаги «опасного
 // режима») собирает бэкенд session_launch, он же создаёт каталог.
@@ -3539,6 +3577,12 @@ function renderHistNew(remote) {
   historyEl.appendChild(row);
   if (!histNewOpen) return;
 
+  // Кем можно запуститься отсюда и кто отвечает на ↵: агент по умолчанию, если
+  // он на месте, иначе первый доступный — Enter не должен звать отсутствующий CLI.
+  const agents = launchAgents(remote);
+  const defaultAgent = agents.find((a) => a.id === AGENTS.DEFAULT_ID) || agents[0]
+    || { id: AGENTS.DEFAULT_ID, name: AGENTS.title(AGENTS.DEFAULT_ID) };
+
   const form = document.createElement('div');
   form.className = 'hnewform';
   const input = Object.assign(document.createElement('input'), {
@@ -3550,7 +3594,7 @@ function renderHistNew(remote) {
   input.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey) return;
     e.stopPropagation();
-    if (e.key === 'Enter') { e.preventDefault(); start('claude'); }
+    if (e.key === 'Enter') { e.preventDefault(); start(defaultAgent.id); }
     else if (e.key === 'Escape') { e.preventDefault(); histNewOpen = false; renderHistory(); }
   });
 
@@ -3569,16 +3613,17 @@ function renderHistNew(remote) {
     b.addEventListener('click', (e) => { e.stopPropagation(); start(agent); });
     return b;
   };
-  form.append(input, btn('claude', 'Claude'), btn('codex', 'Codex'));
+  form.append(input);
+  // Кнопка на агента — из общего списка, а не парой руками: третий агент
+  // появляется сам, отсутствующий не появляется вовсе.
+  for (const a of agents) form.append(btn(a.id, a.name));
   renderTaskOpts(form);
-  // Свои агенты — теми же кнопками: на узлах их шима нет, поэтому только локально.
-  if (!remote) for (const a of customAgents) form.append(btn(a.id, a.name || a.id));
   historyEl.appendChild(form);
   historyEl.appendChild(Object.assign(document.createElement('div'), {
     className: 'hhint',
     textContent: remote
       ? 'Каталог создастся сам. На узле сессия поднимется в tmux — терминал не откроется, чат появится в списке.'
-      : 'Каталог создастся сам, если его ещё нет. ↵ — Claude, кнопка — выбрать агента.',
+      : `Каталог создастся сам, если его ещё нет. ↵ — ${defaultAgent.name}, кнопка — выбрать агента.`,
   }));
   // курсор уводим только при раскрытии: список перерисовывается и на каждую
   // букву в поиске — иначе фокус улетал бы из строки поиска в путь
@@ -3597,17 +3642,16 @@ function renderHistChats(g, q) {
   head.appendChild(back);
   head.appendChild(Object.assign(document.createElement('span'), { textContent: g.project }));
   head.appendChild(Object.assign(document.createElement('span'), { className: 'hcount', textContent: `${g.count} ${plural(g.count, 'чат', 'чата', 'чатов')}` }));
-  // новые сессии в директории проекта — отдельно для Claude и Codex; для групп
-  // без известной директории («другое», g.cwd == null) новая сессия бессмысленна
+  // новые сессии в директории проекта — кнопка на агента из того же списка, что
+  // и в «Новом проекте»: два списка руками уже разъезжались. Для групп без
+  // известной директории («другое», g.cwd == null) новая сессия бессмысленна
   if (g.cwd) {
-    const newClaude = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Claude' });
-    newClaude.title = 'Новая сессия Claude в этой директории';
-    newClaude.addEventListener('click', (e) => { e.stopPropagation(); launchSession('claude', null, g.cwd, histMachine); });
-    const newCodex = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: '+ Codex' });
-    newCodex.title = 'Новая сессия Codex в этой директории';
-    newCodex.addEventListener('click', (e) => { e.stopPropagation(); launchSession('codex', null, g.cwd, histMachine); });
-    head.appendChild(newClaude);
-    head.appendChild(newCodex);
+    for (const a of launchAgents(remote)) {
+      const b = Object.assign(document.createElement('button'), { className: 'abtn small', textContent: `+ ${a.name}` });
+      b.title = `Новая сессия ${a.name} в этой директории`;
+      b.addEventListener('click', (e) => { e.stopPropagation(); launchSession(a.id, null, g.cwd, histMachine); });
+      head.appendChild(b);
+    }
   }
   historyEl.appendChild(head);
   if (g.cwd) renderTaskOpts(historyEl);
@@ -3615,8 +3659,8 @@ function renderHistChats(g, q) {
   historyEl.appendChild(Object.assign(document.createElement('div'), {
     className: 'hhint',
     textContent: remote
-      ? `↵ — поднять продолжение на узле «${histMachineName(histMachine)}» (терминал не откроется) · + Claude / + Codex — новая сессия · esc — к проектам`
-      : '↵ — запустить продолжение в терминале · + Claude / + Codex — новая сессия · esc — к проектам',
+      ? `↵ — поднять продолжение на узле «${histMachineName(histMachine)}» (терминал не откроется) · «+ агент» — новая сессия · esc — к проектам`
+      : '↵ — запустить продолжение в терминале · «+ агент» — новая сессия · esc — к проектам',
   }));
 
   const sessions = q ? g.sessions.filter((s) => (s.title || '').toLowerCase().includes(q)) : g.sessions;

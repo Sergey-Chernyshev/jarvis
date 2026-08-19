@@ -409,7 +409,8 @@ mod tests {
         let models = cat.get("models").and_then(Value::as_object).expect("models — объект");
         assert_eq!(models.len(), crate::backend::Agent::all().len());
         for a in crate::backend::Agent::all() {
-            let list = models.get(a.label()).and_then(Value::as_array).expect(a.label());
+            let list = models.get(a.label()).and_then(Value::as_array);
+            let list = list.unwrap_or_else(|| panic!("нет ключа {}", a.label()));
             assert!(!list.is_empty(), "{} без моделей", a.label());
             assert!(list.iter().all(|m| m.get("id").is_some() && m.get("label").is_some()));
         }

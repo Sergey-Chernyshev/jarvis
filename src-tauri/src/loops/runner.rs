@@ -109,6 +109,9 @@ pub async fn run_agent(
     if agent == "codex" {
         return run_codex(cwd, prompt, timeout).await;
     }
+    if agent == "kimi" {
+        return run_kimi(cwd, prompt, model, timeout).await;
+    }
     let Some(bin) = crate::claude_bin::resolve_claude_bin() else {
         return AgentOut { failed: true, text: "claude не найден".into(), ..Default::default() };
     };
@@ -179,6 +182,75 @@ async fn run_codex(cwd: &Path, prompt: &str, timeout: Duration) -> AgentOut {
     );
     let (code, out) = shell(cwd, &cmd, timeout).await;
     AgentOut { text: out, failed: code != 0, ..Default::default() }
+}
+
+/// Headless-вызов Kimi.
+///
+/// Бинарь ищем через `resolve_kimi_bin`, а не через `sh -lc`: тот резолвил бы
+/// `kimi` в наш шим, и цикл поднял бы вместо себя интерактивную сессию в tmux.
+///
+/// Флага «опасного режима» здесь нет НАМЕРЕННО: Kimi отказывается сочетать `-p`
+/// с `--yolo`, `--auto` и `--plan` («Cannot combine --prompt with --yolo»), а
+/// headless и так выполняет инструменты без вопросов — проверено запуском.
+/// Добавить флаг «для надёжности» значило бы получить exit 1 на каждой итерации.
+async fn run_kimi(cwd: &Path, prompt: &str, model: Option<&str>, timeout: Duration) -> AgentOut {
+    let Some(bin) = crate::backend::kimi::resolve_kimi_bin() else {
+        return AgentOut { failed: true, text: "kimi не найден".into(), ..Default::default() };
+    };
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.arg("-p").arg(prompt).arg("--output-format").arg("stream-json");
+    if let Some(m) = model {
+        cmd.arg("-m").arg(m);
+    }
+    cmd.current_dir(cwd)
+        .env("JARVIS_IGNORE", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let Ok(Ok(out)) = tokio::time::timeout(timeout, cmd.output()).await else {
+        return AgentOut { failed: true, text: "агент не уложился в отведённое время".into(), ..Default::default() };
+    };
+    if !out.status.success() {
+        return AgentOut { failed: true, text: "агент завершился с ошибкой".into(), ..Default::default() };
+    }
+    parse_kimi_stream_json(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Разбор `--output-format stream-json` у Kimi.
+///
+/// Схема НЕ клодовская: не конверты с полем `type`, а OpenAI-подобные записи с
+/// полем `role` — `assistant` (текст ЛИБО `tool_calls`), `tool`, `meta`
+/// (`system.version`, `session.resume_hint`).
+///
+/// Финал — `content` ПОСЛЕДНЕЙ записи `role=="assistant"` с непустым текстом.
+/// Именно с непустым: у записи с `tool_calls` поля `content` нет вовсе, и
+/// «просто последняя assistant-запись» отдала бы пустой ответ ровно тогда, когда
+/// итерация закончилась работой инструмента.
+///
+/// Расхода в потоке нет ни в одной записи, поэтому tokens/cost остаются нулями —
+/// как у Codex: ограничитель по токенам для Kimi не работает, и это честнее
+/// выдуманного числа.
+pub fn parse_kimi_stream_json(stdout: &str) -> AgentOut {
+    let mut text = String::new();
+    let mut parsed_any = false;
+    for line in stdout.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+        parsed_any = true;
+        if v.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+        if let Some(c) = v.get("content").and_then(|c| c.as_str()).filter(|c| !c.trim().is_empty()) {
+            text = c.trim().to_string();
+        }
+    }
+    // Ни одной разобранной записи — значит агент печатал обычным текстом (чужая
+    // версия, `--output-format` не понят). Работа сделана, терять её из-за
+    // формата нельзя — ведём себя как разбор клодовского json.
+    if !parsed_any {
+        text = stdout.trim().to_string();
+    }
+    AgentOut { text, ..Default::default() }
 }
 
 /// Прогнать гейты по порядку. Первый красный останавливает: гонять остальные
@@ -257,6 +329,47 @@ mod tests {
         assert_eq!(out.tokens, 0);
         assert_eq!(out.cost_usd, 0.0);
         assert_eq!(out.text, "готово");
+    }
+
+    /// Живой вывод `kimi -p … --output-format stream-json` (0.37, снят запуском).
+    /// Итерация закончилась вызовом инструмента и ответом — финал обязан быть
+    /// текстом ассистента, а не пустотой от записи с `tool_calls`.
+    #[test]
+    fn kimi_stream_json_takes_the_last_assistant_text() {
+        let out = parse_kimi_stream_json(concat!(
+            r#"{"role":"meta","type":"system.version","version":"0.37.0"}"#, "\n",
+            r#"{"role":"assistant","content":"Сейчас запишу файл."}"#, "\n",
+            r#"{"role":"assistant","tool_calls":[{"type":"function","id":"tool_A","function":{"name":"Write","arguments":"{\"path\":\"probe.txt\"}"}}]}"#, "\n",
+            r#"{"role":"tool","tool_call_id":"tool_A","content":"Wrote 12 bytes to probe.txt"}"#, "\n",
+            r#"{"role":"assistant","content":"готово"}"#, "\n",
+            r#"{"role":"meta","type":"session.resume_hint","session_id":"session_d64","command":"kimi -r session_d64"}"#, "\n",
+        ));
+        assert_eq!(out.text, "готово");
+        assert!(!out.failed);
+        // Расхода в потоке нет ни в одной записи — ноль честнее выдуманного числа.
+        assert_eq!(out.tokens, 0);
+        assert_eq!(out.cost_usd, 0.0);
+    }
+
+    #[test]
+    fn kimi_stream_json_survives_tool_tail_and_plain_text() {
+        // Последняя запись — инструмент: берём предыдущий текст ассистента,
+        // а не пустой `content`, которого у tool_calls нет вовсе.
+        let out = parse_kimi_stream_json(concat!(
+            r#"{"role":"assistant","content":"почти"}"#, "\n",
+            r#"{"role":"assistant","tool_calls":[{"id":"t1"}]}"#, "\n",
+            r#"{"role":"tool","tool_call_id":"t1","content":"ok"}"#, "\n",
+        ));
+        assert_eq!(out.text, "почти");
+
+        // Формат не понят (чужая версия) — вывод не теряем.
+        let plain = parse_kimi_stream_json("просто текст без json");
+        assert_eq!(plain.text, "просто текст без json");
+        assert!(!plain.failed);
+
+        // Битая строка посреди потока не должна съедать ответ.
+        let broken = parse_kimi_stream_json("{\"role\":\"assist\n{\"role\":\"assistant\",\"content\":\"жив\"}\n");
+        assert_eq!(broken.text, "жив");
     }
 
     #[test]

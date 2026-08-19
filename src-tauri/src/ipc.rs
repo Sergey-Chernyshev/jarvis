@@ -1246,9 +1246,19 @@ pub fn commands_get(app: AppHandle, session_id: String) -> Value {
     let Some(s) = d.session(&session_id) else {
         return json!([]);
     };
-    if crate::backend::Agent::from_opt(s.agent.as_deref()) == crate::backend::Agent::Codex {
-        return serde_json::to_value(crate::commands_catalog::codex_commands())
-            .unwrap_or_else(|_| json!([]));
+    // Свои слэш-команды есть у каждого агента; проектные из `.claude/commands`
+    // читает только Claude — у остальных такой механики нет (у Kimi это skills,
+    // отдельная история).
+    match crate::backend::Agent::from_opt(s.agent.as_deref()) {
+        crate::backend::Agent::Codex => {
+            return serde_json::to_value(crate::commands_catalog::codex_commands())
+                .unwrap_or_else(|_| json!([]))
+        }
+        crate::backend::Agent::Kimi => {
+            return serde_json::to_value(crate::commands_catalog::kimi_commands())
+                .unwrap_or_else(|_| json!([]))
+        }
+        crate::backend::Agent::Claude => {}
     }
     // Проектные команды каталог собирает из .claude/commands по cwd — на ЭТОЙ
     // машине. У сессии с узла её проект на той стороне, поэтому отдаём только
@@ -1260,7 +1270,26 @@ pub fn commands_get(app: AppHandle, session_id: String) -> Value {
 #[tauri::command]
 pub fn app_meta(app: AppHandle) -> Value {
     let d = Daemon::get(&app);
+    // Способности агентов — из бэкендов, а не литералами во фронте: раньше UI
+    // сам решал «codex → скрыть effort, запретить свой ответ», и с третьим
+    // агентом это молча разъехалось бы с Rust-стороной.
+    let agents: Vec<Value> = crate::backend::Agent::all()
+        .iter()
+        .map(|a| {
+            let be = crate::backend::backend(*a);
+            json!({
+                "id": a.label(),
+                "title": a.title(),
+                "models": be.models().iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>(),
+                "effortLevels": be.effort_levels(),
+                "hasSeparateEffort": be.has_separate_effort(),
+                "supportsCustomAnswer": be.supports_custom_answer(),
+                "present": be.cli_found(),
+            })
+        })
+        .collect();
     json!({
+        "agents": agents,
         "effortLevels": *d.effort_levels.lock().unwrap(),
         "version": env!("CARGO_PKG_VERSION"),
         // Wayland отдаём в UI не ради красоты: там глобальные клавиши

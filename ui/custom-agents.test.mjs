@@ -18,10 +18,14 @@ test('мост знает команды реестра', () => {
 });
 
 test('кнопки своих агентов есть в «Новом проекте» и только локально', () => {
-  const at = renderer.indexOf('customAgents) form.append(btn(');
-  assert.ok(at > 0, 'кнопок своих агентов нет в форме');
-  const line = renderer.slice(renderer.lastIndexOf('\n', at), at);
-  assert.ok(line.includes('!remote'), 'на узле шима нет — кнопка там была бы обманом');
+  // Список кнопок собирает одна точка (launchAgents) — она же обязана добавлять
+  // своих агентов и обязана не добавлять их на узел, где шима нет.
+  const at = renderer.indexOf('function launchAgents(');
+  assert.ok(at > 0, 'общей точки списка агентов нет');
+  const body = renderer.slice(at, renderer.indexOf('\n}', at));
+  assert.ok(body.includes('customAgents'), 'свои агенты не попадают в кнопки запуска');
+  assert.ok(/if \(!remote\)/.test(body), 'на узле шима нет — кнопка там была бы обманом');
+  assert.ok(renderer.includes('for (const a of agents) form.append(btn('), 'форма «Нового проекта» рисует кнопки не из списка');
 });
 
 test('команда возобновления не выдумывает флаги чужому CLI', () => {

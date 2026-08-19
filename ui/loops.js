@@ -192,8 +192,30 @@
     } catch (e) { /* останемся на встроенных списках */ }
     return catalog;
   }
-  const modelsFor = (agent) =>
-    (catalog && catalog.models && catalog.models[agent]) || FALLBACK_MODELS[agent] || FALLBACK_MODELS.claude;
+  /* Каталог агентов панели (agents.js) — общий на всё приложение; здесь он
+   * запасной источник моделей и единственный список агентов, чтобы в цикле
+   * можно было выбрать любого, кого знает бэкенд, а не двух вписанных руками.
+   * В отдельном окне без него живём на loopsCatalog, как раньше. */
+  const agentsApi = () => (typeof window !== 'undefined' && window.JarvisAgents) || null;
+  const agentIds = () => {
+    const api = agentsApi();
+    if (api) return api.present().map((a) => a.id);
+    if (catalog && catalog.models) return Object.keys(catalog.models);
+    return Object.keys(FALLBACK_MODELS);
+  };
+  /* Отдельная ручка усилия/модели есть не у всех: у codex и модель, и reasoning
+   * критика задаёт он сам — селект был бы враньём. */
+  const picksItsOwnModel = (agent) => {
+    const api = agentsApi();
+    return api ? !api.hasSeparateEffort(agent) : agent === 'codex';
+  };
+  const modelsFor = (agent) => {
+    const own = catalog && catalog.models && catalog.models[agent];
+    if (own && own.length) return own;
+    const api = agentsApi();
+    const known = api ? api.models(agent).map((m) => ({ id: m.id, label: m.name })) : null;
+    return (known && known.length) ? known : (FALLBACK_MODELS[agent] || FALLBACK_MODELS.claude);
+  };
   const modelLabel = (agent, id) => {
     const hit = modelsFor(agent).find((m) => m.id === id);
     return hit ? hit.label : id;
@@ -424,11 +446,12 @@
     const summary = el('div.lp-explain-text', { text: explain(d) });
     const refresh = () => { summary.textContent = explain(d); };
 
-    /* Агент — сегмент из двух, а не поле по памяти. Смена агента меняет и
-     * список моделей критика, поэтому конструктор перерисовывается целиком:
-     * черновик это переживает, он живёт отдельно от DOM. */
+    /* Агент — сегмент по каталогу, а не поле по памяти и не пара вписанных
+     * руками. Смена агента меняет и список моделей критика, поэтому
+     * конструктор перерисовывается целиком: черновик это переживает, он живёт
+     * отдельно от DOM. */
     const seg = el('div.lp-seg',
-      ['claude', 'codex'].map((a) => {
+      agentIds().map((a) => {
         const b = el('button', {
           text: a,
           onclick: () => { if (d.agent !== a) { d.agent = a; render(); } },
@@ -516,11 +539,13 @@
     };
     paintProblems(l.problems);
 
-    /* У Codex модель критика задаётся его собственными настройками — рисовать
-     * селект, который ни на что не влияет, было бы нечестно. */
-    const criticModel = (d.agent || 'claude') === 'codex'
-      ? el('div.lp-hint', { text: 'модель и усилие критика задаёт сам Codex — в его настройках' })
-      : selectField('модель критика', modelsFor('claude'), d.exit.critic.model,
+    /* Там, где модель критика задаёт сам агент (codex), селект был бы
+     * нечестен — показываем строку. Остальным даём ЕГО модели: раньше здесь
+     * жёстко стояли модели claude, и в цикле на другом агенте выбор был чужим. */
+    const criticAgent = d.agent || 'claude';
+    const criticModel = picksItsOwnModel(criticAgent)
+      ? el('div.lp-hint', { text: `модель и усилие критика задаёт сам ${criticAgent} — в его настройках` })
+      : selectField('модель критика', modelsFor(criticAgent), d.exit.critic.model,
           (v) => { d.exit.critic.model = v; refresh(); },
           'на ревью обычно ставят сильнее, чем на исполнение');
 

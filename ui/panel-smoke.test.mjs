@@ -27,6 +27,8 @@ const SCRIPTS = [
   'keys.js',
   'markdown.js',
   'diffview.js',
+  // каталог агентов: renderer и settings2 спрашивают его уже на первой отрисовке
+  'agents.js',
   'question-answer.js',
   'settings2.js',
   'voice-history.js',
@@ -177,6 +179,18 @@ test('панель поднимается со всеми скриптами и 
   await new Promise((r) => setTimeout(r, 0));
   const text = doc.getElementById('list').textContent;
   assert.match(text, /jarvis/, 'сессия не появилась в списке: ' + text);
+});
+
+/* Третий агент — такой же житель списка: бейдж с его именем, модель короткой
+ * подписью из каталога, а не сырым id вроде «kimi-code/k3-256k». */
+test('сессия третьего агента рисуется бейджами, а не многоточием', async () => {
+  const kimi = { ...SESSION, id: 's2', agent: 'kimi', model: 'kimi-code/k3-256k' };
+  const { doc, subs } = await boot({ state: [kimi] });
+  subs.onState([kimi]);
+  await new Promise((r) => setTimeout(r, 0));
+  const badges = [...doc.querySelectorAll('#list .badge')].map((b) => b.textContent);
+  assert.ok(badges.includes('kimi'), 'бейджа агента нет: ' + badges.join(' | '));
+  assert.ok(badges.includes('K3-256k'), 'модель показана сырым id: ' + badges.join(' | '));
 });
 
 test('новые кнопки есть в шапке чата и подключены к своим экранам', async () => {

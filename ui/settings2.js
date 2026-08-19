@@ -2168,9 +2168,12 @@
       grow.appendChild(remoteHintLine('alert-triangle',
         'tmux на машине нет — узел встанет, но вставить ответ в сессию с него не выйдет, ровно как локально.', true));
     }
-    if (!p.claude && !p.codex) {
+    // Разведка отмечает найденные CLI по id агента — спрашиваем каталог, а не
+    // два имени: агентов больше двух, и текст не должен об этом врать.
+    const known = (window.JarvisAgents ? window.JarvisAgents.all() : [{ id: 'claude' }, { id: 'codex' }]);
+    if (!known.some((a) => p[a.id])) {
       grow.appendChild(remoteHintLine('alert-triangle',
-        'Ни Claude Code, ни Codex там не нашлось — вести сессии на этой машине пока некому.', true));
+        'Ни одного агентского CLI там не нашлось — вести сессии на этой машине пока некому.', true));
     }
 
     // пока идёт (или упала) установка, единственная точка действия — карточка

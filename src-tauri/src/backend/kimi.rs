@@ -125,6 +125,14 @@ impl Backend for KimiBackend {
     fn transcript_dir_for(&self, _cwd: &str) -> Option<PathBuf> {
         None // путь к транскрипту резолвится по sid, а не по cwd — см. wire_path_for_sid
     }
+    fn find_transcript_by_sid(&self, sid: &str) -> Option<PathBuf> {
+        // Для Kimi это не фолбэк, а основной путь: его хуки `transcript_path`
+        // не приносят вовсе — проверено на живом payload всех событий.
+        wire_path_for_sid(sid).filter(|p| p.exists())
+    }
+    fn final_reply(&self, entries: &[Value]) -> Option<String> {
+        super::kimi_transcript::full_final_reply(entries)
+    }
     fn supports_custom_answer(&self) -> bool {
         // Пикер `AskUserQuestion` вживую не откалиброван; пока не проверено —
         // не обещаем. Инкремент 5.

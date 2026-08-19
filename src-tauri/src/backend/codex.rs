@@ -125,6 +125,12 @@ impl Backend for CodexBackend {
     fn transcript_dir_for(&self, _cwd: &str) -> Option<PathBuf> {
         None // Codex не кодирует cwd в путь; индекс — инкремент 6 (history)
     }
+    fn find_transcript_by_sid(&self, sid: &str) -> Option<PathBuf> {
+        find_rollout_by_sid(sid)
+    }
+    fn final_reply(&self, entries: &[Value]) -> Option<String> {
+        super::codex_transcript::full_final_reply(entries)
+    }
     fn supports_custom_answer(&self) -> bool {
         false // в codex-пикере строки «Other» нет — свой текст доставить некуда
     }

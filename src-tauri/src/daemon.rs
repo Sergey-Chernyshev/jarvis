@@ -1003,6 +1003,10 @@ impl Daemon {
             .to_string();
         let now = now_ms();
         let event = evt_obj.get("event").and_then(Value::as_str).unwrap_or("");
+
+        if !from_terminal_client(p) {
+            return;
+        }
         // SessionStart несёт source: startup|resume|clear|compact — нас интересует compact.
         let source = p.get("source").and_then(Value::as_str).unwrap_or("");
 
@@ -1078,11 +1082,12 @@ impl Daemon {
             {
                 s.remote = Some(remote.to_string());
             }
-            // Codex кладёт модель в КАЖДЫЙ хук-payload — ставим напрямую (у Claude
-            // модель майнится из транскрипта в refresh_meta). Не перетираем свежий
-            // ручной выбор: тот же 30с-guard по model_at, что и в refresh_meta.
+            // Codex кладёт модель в КАЖДЫЙ хук-payload, Kimi — в SessionStart.
+            // Ставим напрямую (у Claude модель майнится из транскрипта в
+            // refresh_meta). Не перетираем свежий ручной выбор: тот же 30с-guard
+            // по model_at, что и в refresh_meta.
             let agent = crate::backend::Agent::from_opt(s.agent.as_deref());
-            if agent == crate::backend::Agent::Codex {
+            if matches!(agent, crate::backend::Agent::Codex | crate::backend::Agent::Kimi) {
                 if let Some(m) = p
                     .get("model")
                     .and_then(Value::as_str)
@@ -1140,6 +1145,12 @@ impl Daemon {
 
             /* ---- сам переход ---- */
             match event {
+                // Пульс живой сессии (только Kimi: SessionHeartbeat раз в 60 с).
+                // Статус НЕ трогаем — сессия может законно молчать часами, будучи
+                // живой. Ценность в `updated_at`, который обновлён выше: он и
+                // спасает working-сессию от «связь потеряна» в reconcile.
+                "heartbeat" => {}
+
                 "session-start" => {
                     s.status = Status::Idle;
                     s.detail = String::new();
@@ -1299,14 +1310,15 @@ impl Daemon {
                     });
                 }
 
-                // Codex: PermissionRequest — агент ждёт подтверждения инструмента
-                // (аналог Claude notification, но без поля message). → Waiting.
+                // PermissionRequest — агент ждёт подтверждения инструмента (аналог
+                // Claude notification, но без поля message). → Waiting.
+                // Шлют Codex и Kimi; имя берём у агента, а не пишем литералом.
                 "permission" => {
                     let tool = p.get("tool_name").and_then(Value::as_str).unwrap_or("");
                     let msg = if tool.is_empty() {
-                        "Codex ждёт подтверждения".to_string()
+                        format!("{} ждёт подтверждения", agent.title())
                     } else {
-                        format!("Codex: подтвердить {tool}")
+                        format!("{}: подтвердить {tool}", agent.title())
                     };
                     let is_new = !(s.status == Status::Waiting && s.detail == msg);
                     s.status = Status::Waiting;
@@ -1636,18 +1648,9 @@ impl Daemon {
             // Хук финал не принёс — достаём из транскрипта ТОЙ машины, где
             // живёт сессия (для удалённой это круг по ssh к её узлу).
             let reply = prefer_final_reply(hook_reply, || async {
-                let is_claude = agent == crate::backend::Agent::Claude;
-                let max = if is_claude { 256 * 1024 } else { 512 * 1024 };
-                let text = self.transcript_text(&s, max).await?;
-                if is_claude {
-                    transcript::final_reply_from(transcript::chain_from_entries(
-                        transcript::entries_from_text(&text),
-                    ))
-                } else {
-                    crate::backend::codex_transcript::full_final_reply(
-                        &crate::backend::backend(agent).entries_from_text(&text),
-                    )
-                }
+                let be = crate::backend::backend(agent);
+                let text = self.transcript_text(&s, be.transcript_tail_bytes()).await?;
+                be.final_reply(&be.entries_from_text(&text))
             })
             .await?;
             // длинный ответ режем — haiku отвечает быстрее, а сути хватает
@@ -1701,8 +1704,9 @@ impl Daemon {
             d.busy_release("meta", &sid);
             let Some(snap) = d.session(&sid) else { return };
 
-            let is_codex = crate::backend::Agent::from_opt(snap.agent.as_deref())
-                == crate::backend::Agent::Codex;
+            let be = crate::backend::backend(crate::backend::Agent::from_opt(
+                snap.agent.as_deref(),
+            ));
 
             // Транскрипт: обычно из hook-payload (transcript_path). Codex на машине
             // с невыданным hook-trust мог пропустить SessionStart → payload без пути.
@@ -1713,8 +1717,8 @@ impl Daemon {
             // чужой одноимённый лог. Удалённой сессии путь приносит её хук.
             match snap.transcript.as_ref() {
                 Some(_) => {}
-                None if is_codex && snap.remote.is_none() => {
-                    let Some(path) = crate::backend::codex::find_rollout_by_sid(&sid) else {
+                None if snap.remote.is_none() => {
+                    let Some(path) = be.find_transcript_by_sid(&sid) else {
                         return;
                     };
                     let p = path.to_string_lossy().into_owned();
@@ -1736,19 +1740,9 @@ impl Daemon {
                 None => return,
             };
 
-            // ветка: Claude — gitBranch в каждой записи; в rollout Codex её нет —
-            // фоллбэк для обоих: .git/HEAD по cwd сессии (#24).
-            let branch = if is_codex {
-                None
-            } else {
-                entries.iter().rev().find_map(|e| {
-                    e.get("gitBranch")
-                        .and_then(Value::as_str)
-                        .filter(|b| !b.is_empty() && *b != "HEAD")
-                        .map(String::from)
-                })
-            }
-            .or_else(|| {
+            // ветка: Claude — gitBranch в каждой записи; Codex и Kimi её в лог не
+            // пишут — общий фолбэк: .git/HEAD по cwd сессии (#24).
+            let branch = be.extract_branch(&entries).or_else(|| {
                 // .git читаем на ЭТОЙ машине: у сессии с узла тот же путь может
                 // случайно существовать и здесь — и тогда мы показали бы ветку
                 // чужого рабочего дерева. Лучше без ветки, чем неправильная.
@@ -1757,23 +1751,11 @@ impl Daemon {
                     .filter(|_| snap.remote.is_none())
                     .and_then(|cwd| crate::git::branch_of(std::path::Path::new(cwd)))
             });
-            // заголовок: Claude — type:ai-title/summary; Codex — первая user-реплика.
-            let raw_title = if is_codex {
-                crate::backend::codex_transcript::extract_title(&entries)
-            } else {
-                entries.iter().rev().find_map(|e| {
-                    let t = match e.get("type").and_then(Value::as_str) {
-                        Some("ai-title") => e.get("aiTitle"),
-                        Some("summary") => e.get("summary"),
-                        _ => None,
-                    };
-                    t.and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|t| !t.is_empty())
-                        .map(String::from)
-                })
-            };
-            let title = raw_title.map(|t| d.ru(&ellipsize(&one_line(&t), 60)));
+            // заголовок: Claude — type:ai-title/summary; Codex и Kimi — первая
+            // user-реплика (свой заголовок они не генерируют).
+            let title = be
+                .extract_title(&entries)
+                .map(|t| d.ru(&ellipsize(&one_line(&t), 60)));
 
             // модель: свежий ручной выбор (/model) не трогаем. Codex — из последнего
             // turn_context.model в rollout (раньше полагались только на hook-payload;
@@ -1782,28 +1764,18 @@ impl Daemon {
             let model_fresh = snap.model_at.is_some_and(|at| now_ms() - at <= 30_000);
             let model = if model_fresh {
                 None
-            } else if is_codex {
-                crate::backend::codex_transcript::extract_model(&entries).map(|m| {
-                    crate::backend::backend(crate::backend::Agent::Codex).friendly_model(&m)
-                })
             } else {
-                entries
-                    .iter()
-                    .rev()
-                    .find_map(|e| {
-                        (e.get("type").and_then(Value::as_str) == Some("assistant"))
-                            .then(|| e.pointer("/message/model").and_then(Value::as_str))
-                            .flatten()
-                            .map(friendly_model)
-                    })
+                be.extract_model(&entries)
+                    .map(|m| be.friendly_model(&m))
                     .or_else(|| {
-                        // Фолбэк роется в ~/.claude/projects ЭТОЙ машины: для
+                        // Фолбэк роется в каталоге проектов ЭТОЙ машины: для
                         // сессии с узла это в лучшем случае мимо, в худшем —
-                        // модель чужого проекта с тем же путём.
+                        // модель чужого проекта с тем же путём. Есть только у
+                        // агентов, раскладывающих логи по проектам (Claude).
                         snap.cwd
                             .as_deref()
                             .filter(|_| snap.remote.is_none())
-                            .and_then(transcript::read_model_from_project)
+                            .and_then(|cwd| be.fallback_model_for_cwd(cwd))
                     })
             };
 
@@ -2623,6 +2595,21 @@ fn freeze_board(s: &mut Session) {
     }
 }
 
+/// Пришло ли событие из терминального клиента агента.
+///
+/// Kimi обслуживает одним конфигом несколько поверхностей: CLI, `kimi web` и
+/// ACP-режим для IDE — и хуки шлют все. У не-CLI сессий нет ни терминала, ни
+/// tmux-паны: в панели они были бы неуправляемыми призраками, которым нельзя ни
+/// ответить, ни сменить модель. Поэтому пускаем только `kimi_code_cli`.
+///
+/// Claude и Codex поля `client_type` не шлют вовсе — для них проверка прозрачна.
+fn from_terminal_client(p: &serde_json::Map<String, Value>) -> bool {
+    match p.get("client_type").and_then(Value::as_str) {
+        Some(ct) => ct == "kimi_code_cli",
+        None => true,
+    }
+}
+
 /// Жив ли процесс с таким pid. `kill(pid, 0)`: 0 — жив; EPERM — жив, но чужой
 /// (всё равно существует); ESRCH — мёртв. Дёшево, без spawn. Используется в
 /// reconcile для уборки сессий, чей claude завершился.
@@ -2839,6 +2826,25 @@ mod tests {
 
         let fallback = prefer_final_reply(None, || async { Some("ответ из rollout".into()) }).await;
         assert_eq!(fallback.as_deref(), Some("ответ из rollout"));
+    }
+
+    /// `kimi web` и ACP шлют те же хуки, что CLI, но управлять такой сессией
+    /// нечем — в реестр их не пускаем. Claude и Codex поля не шлют и проходят.
+    #[test]
+    fn only_terminal_clients_are_ingested() {
+        use serde_json::json;
+        let obj = |v: Value| v.as_object().unwrap().clone();
+        assert!(from_terminal_client(&obj(json!({"client_type": "kimi_code_cli"}))));
+        assert!(!from_terminal_client(&obj(json!({"client_type": "kimi_code_desktop"}))));
+        assert!(!from_terminal_client(&obj(json!({"client_type": "kimi_code_web"}))));
+        assert!(
+            from_terminal_client(&obj(json!({"session_id": "abc"}))),
+            "нет поля — это Claude или Codex, пускаем"
+        );
+        assert!(
+            !from_terminal_client(&obj(json!({"client_type": ""}))),
+            "пустая метка — не CLI"
+        );
     }
 
     #[test]

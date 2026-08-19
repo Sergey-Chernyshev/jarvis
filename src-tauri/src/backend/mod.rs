@@ -52,6 +52,15 @@ impl Agent {
             Agent::Kimi => "kimi",
         }
     }
+    /// Имя агента для текстов интерфейса, тостов и озвучки (`label()` — машинная
+    /// метка в нижнем регистре, её людям не показываем).
+    pub fn title(self) -> &'static str {
+        match self {
+            Agent::Claude => "Claude",
+            Agent::Codex => "Codex",
+            Agent::Kimi => "Kimi",
+        }
+    }
     /// Все известные агенты. Срез, а не массив фиксированной длины: список растёт,
     /// и типу незачем ломаться на каждом новом бэкенде.
     pub fn all() -> &'static [Agent] {
@@ -84,6 +93,30 @@ pub trait Backend: Send + Sync {
     fn extract_branch(&self, entries: &[Value]) -> Option<String>;
     fn extract_model(&self, entries: &[Value]) -> Option<String>;
     fn transcript_dir_for(&self, cwd: &str) -> Option<PathBuf>;
+    /// Найти транскрипт по `session_id`, когда хук не принёс путь.
+    ///
+    /// У Claude путь всегда в payload. У Codex это safety-net на случай
+    /// невыданного hook-trust. У Kimi — ЕДИНСТВЕННЫЙ способ: его хуки поля
+    /// `transcript_path` не содержат вовсе.
+    ///
+    /// Ищет по ЭТОЙ файловой системе, поэтому для удалённой сессии не годится —
+    /// звать только при `remote.is_none()`.
+    fn find_transcript_by_sid(&self, _sid: &str) -> Option<PathBuf> {
+        None
+    }
+    /// Фолбэк модели по рабочей папке, когда в транскрипте её нет. Только для
+    /// агентов, чьи логи разложены по проектам (Claude) — остальным чужой
+    /// каталог подсунул бы неверную модель. Возвращает уже «человеческое» имя.
+    fn fallback_model_for_cwd(&self, _cwd: &str) -> Option<String> {
+        None
+    }
+    /// Сколько хвоста транскрипта читать для финального ответа. У Claude JSONL
+    /// плотнее (цепочка), остальным нужно больше.
+    fn transcript_tail_bytes(&self) -> u64 {
+        512 * 1024
+    }
+    /// Полный финальный ответ агента из записей транскрипта.
+    fn final_reply(&self, entries: &[Value]) -> Option<String>;
 
     // — control / identity —
     /// Умеет ли пикер агента строку «Other» (свой ответ текстом). У Claude есть,
@@ -146,19 +179,51 @@ impl Backend for ClaudeBackend {
     fn to_chat_items(&self, entry: &Value) -> Vec<ChatItem> {
         crate::transcript::to_chat_items(entry)
     }
-    // extract_* — Claude майнит из daemon.rs::refresh_meta; вынос за бэкенд в
-    // инкременте 3 (тогда же подключаются call-sites). Пока не вызываются.
-    fn extract_title(&self, _entries: &[Value]) -> Option<String> {
-        None
+    /// Заголовок: Claude пишет его сам записями `ai-title`/`summary`.
+    fn extract_title(&self, entries: &[Value]) -> Option<String> {
+        entries.iter().rev().find_map(|e| {
+            let t = match e.get("type").and_then(Value::as_str) {
+                Some("ai-title") => e.get("aiTitle"),
+                Some("summary") => e.get("summary"),
+                _ => None,
+            };
+            t.and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+        })
     }
-    fn extract_branch(&self, _entries: &[Value]) -> Option<String> {
-        None
+    /// Ветка: у Claude `gitBranch` есть в каждой записи (у остальных агентов нет —
+    /// им остаётся общий фолбэк по `.git/HEAD` от cwd).
+    fn extract_branch(&self, entries: &[Value]) -> Option<String> {
+        entries.iter().rev().find_map(|e| {
+            e.get("gitBranch")
+                .and_then(Value::as_str)
+                .filter(|b| !b.is_empty() && *b != "HEAD")
+                .map(String::from)
+        })
     }
-    fn extract_model(&self, _entries: &[Value]) -> Option<String> {
-        None
+    /// Модель — СЫРЫМ идентификатором; «человеческое» имя наводит вызывающий
+    /// через `friendly_model`. Так одинаково у всех трёх бэкендов.
+    fn extract_model(&self, entries: &[Value]) -> Option<String> {
+        entries.iter().rev().find_map(|e| {
+            (e.get("type").and_then(Value::as_str) == Some("assistant"))
+                .then(|| e.pointer("/message/model").and_then(Value::as_str))
+                .flatten()
+                .map(String::from)
+        })
     }
     fn transcript_dir_for(&self, cwd: &str) -> Option<PathBuf> {
         Some(crate::transcript::project_dir_for(cwd))
+    }
+    fn fallback_model_for_cwd(&self, cwd: &str) -> Option<String> {
+        crate::transcript::read_model_from_project(cwd)
+    }
+    fn transcript_tail_bytes(&self) -> u64 {
+        256 * 1024
+    }
+    fn final_reply(&self, entries: &[Value]) -> Option<String> {
+        crate::transcript::final_reply_from(entries.to_vec())
     }
     fn resume_cmd(&self, sid: &str) -> String {
         format!("claude --resume {sid}")
@@ -270,6 +335,50 @@ mod tests {
         assert!(b.validate_model("kimi-code/k3; rm -rf").is_err());
         assert!(b.validate_effort("max").is_ok());
         assert!(b.validate_effort("medium").is_err(), "у Kimi нет medium");
+    }
+
+    /// Майнинг меты Claude переехал из `daemon::refresh_meta` за трейт. Логика
+    /// перенесена дословно — тест фиксирует именно её, чтобы переезд не оказался
+    /// молчаливой сменой поведения.
+    #[test]
+    fn claude_mines_meta_from_transcript_entries() {
+        use serde_json::json;
+        let b = backend(Agent::Claude);
+        let entries = vec![
+            json!({"type": "assistant", "gitBranch": "main", "message": {"model": "claude-opus-4-8"}}),
+            json!({"type": "summary", "summary": "  старая сводка  "}),
+            json!({"type": "assistant", "gitBranch": "feat/x", "message": {"model": "claude-sonnet-4-5"}}),
+            json!({"type": "ai-title", "aiTitle": "Свежий заголовок"}),
+        ];
+        // берётся ПОСЛЕДНЕЕ вхождение — идём с конца
+        assert_eq!(b.extract_branch(&entries).as_deref(), Some("feat/x"));
+        assert_eq!(b.extract_title(&entries).as_deref(), Some("Свежий заголовок"));
+        assert_eq!(b.extract_model(&entries).as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(b.friendly_model("claude-sonnet-4-5"), "Sonnet");
+
+        // мусорные значения ветки игнорируются
+        let junk = vec![json!({"gitBranch": "HEAD"}), json!({"gitBranch": ""})];
+        assert_eq!(b.extract_branch(&junk), None);
+        assert_eq!(b.extract_title(&[]), None);
+    }
+
+    /// Ветка и заголовок Claude не должны «находиться» у других агентов: формат
+    /// чужой, и совпадение поля означало бы случайную мету.
+    #[test]
+    fn other_agents_do_not_mine_claude_fields() {
+        use serde_json::json;
+        let claude_shaped = vec![json!({"type": "assistant", "gitBranch": "main"})];
+        for a in [Agent::Codex, Agent::Kimi] {
+            assert_eq!(backend(a).extract_branch(&claude_shaped), None, "{a:?}");
+        }
+    }
+
+    /// Фолбэк модели по каталогу проектов есть только у Claude: у остальных он
+    /// рылся бы в ~/.claude/projects и подсунул чужую модель.
+    #[test]
+    fn project_model_fallback_is_claude_only() {
+        assert!(backend(Agent::Codex).fallback_model_for_cwd("/tmp/x").is_none());
+        assert!(backend(Agent::Kimi).fallback_model_for_cwd("/tmp/x").is_none());
     }
 
     #[test]

@@ -38,21 +38,16 @@ fn claude_notification_requires_attention(payload: &serde_json::Map<String, Valu
     }
 }
 
-/// Codex Stop carries the final assistant reply directly. Keep it in the
-/// in-memory effect path instead of persisting it in Session/state.json.
+/// Финал из Stop-хука, если агент его туда кладёт (умеет только Codex).
+/// Держим в in-memory эффекте, а не в Session/state.json.
+///
+/// Сам разбор payload — за бэкендом: имя поля принадлежит формату агента,
+/// а редьюсеру незачем его знать.
 fn stop_hook_reply(
     agent: crate::backend::Agent,
     payload: &serde_json::Map<String, Value>,
 ) -> Option<String> {
-    if agent != crate::backend::Agent::Codex {
-        return None;
-    }
-    payload
-        .get("last_assistant_message")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|reply| !reply.is_empty())
-        .map(String::from)
+    crate::backend::backend(agent).final_reply_from_stop(payload)
 }
 
 /// Асинхронна из-за удалённых сессий: их транскрипт лежит на другой машине.

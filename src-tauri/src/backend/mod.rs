@@ -117,6 +117,17 @@ pub trait Backend: Send + Sync {
     }
     /// Полный финальный ответ агента из записей транскрипта.
     fn final_reply(&self, entries: &[Value]) -> Option<String>;
+    /// Финальный ответ прямо из payload Stop-хука, если агент его туда кладёт.
+    ///
+    /// Так умеет только Codex (`last_assistant_message`). Claude и Kimi финал в
+    /// хук не приносят — им остаётся транскрипт. Знание о ключе живёт здесь,
+    /// а не в редьюсере: имя поля — часть формата конкретного агента.
+    ///
+    /// Ценно не ради экономии: у Codex rollout на момент Stop может быть ещё не
+    /// дописан, и payload оказывается единственным надёжным источником.
+    fn final_reply_from_stop(&self, _payload: &serde_json::Map<String, Value>) -> Option<String> {
+        None
+    }
 
     // — control / identity —
     /// Умеет ли пикер агента строку «Other» (свой ответ текстом). У Claude есть,

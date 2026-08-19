@@ -131,6 +131,14 @@ impl Backend for CodexBackend {
     fn final_reply(&self, entries: &[Value]) -> Option<String> {
         super::codex_transcript::full_final_reply(entries)
     }
+    fn final_reply_from_stop(&self, payload: &serde_json::Map<String, Value>) -> Option<String> {
+        payload
+            .get("last_assistant_message")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|reply| !reply.is_empty())
+            .map(String::from)
+    }
     fn supports_custom_answer(&self) -> bool {
         false // в codex-пикере строки «Other» нет — свой текст доставить некуда
     }

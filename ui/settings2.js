@@ -2531,7 +2531,30 @@
     paintRemoteWiz(box);
   }
 
-  /* 1d. Агенты (agents) — свои CLI помимо claude и codex.
+  /* Доверие агент-чату: поимённый список капабилити, которые гейт пропускает без
+   * карточки подтверждения (settings.grants.agent.autoApprove). Пусто — спрашиваем
+   * про всё, как раньше; тумблер ведает ровно одним id, остальное правится файлом. */
+  const TRUST_REPLY = 'sessions.reply';
+  async function renderAgentTrust(pane) {
+    const s = await safe(() => window.jarvis.getSettings(), {});
+    const grants = s.grants || {};
+    const auto = ((grants.agent || {}).autoApprove) || [];
+    pane.appendChild(el('div.dsection', { text: 'Чат с агентом' }));
+    const group = el('div.dgroup');
+    group.appendChild(drow('Писать в сессии без подтверждения',
+      'Промпт из чата уходит в сессию сразу, без карточки «разрешить». '
+      + 'Риск: текст, который агент где-то прочитал (письмо, страница, чужой репозиторий), '
+      + 'уйдёт промптом в сессию с доступом к твоим файлам. Остальные действия агент по-прежнему спрашивает.',
+      toggle(auto.indexOf(TRUST_REPLY) >= 0, (on) => {
+        const next = auto.filter((x) => x !== TRUST_REPLY).concat(on ? [TRUST_REPLY] : []);
+        const agent = Object.assign({}, grants.agent, { autoApprove: next });
+        // settings мержит только верхний уровень — шлём весь объект grants целиком
+        fire(() => window.jarvis.setSettings({ grants: Object.assign({}, grants, { agent }) }));
+      })));
+    pane.appendChild(group);
+  }
+
+  /* 1d. Агенты (agents) — доверие агент-чату и свои CLI помимо claude и codex.
    *
    * Человек вводит путь до бинарника — остальное (tmux-шим и хуки жизненного
    * цикла) настраивается само при сохранении. Возможности честно ограничены:
@@ -2539,6 +2562,7 @@
    * спрашивает» и транскрипта у чужого CLI нет — их не выдумываем. */
   async function renderAgents(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Агенты' }));
+    await renderAgentTrust(pane);
     const ready = typeof window.jarvis.agentsList === 'function';
     const _sk = skelGroup(2); pane.appendChild(_sk);
     const res = ready ? await safe(() => window.jarvis.agentsList(), null) : null;
@@ -2630,6 +2654,7 @@
       note,
     ]);
 
+    pane.appendChild(el('div.dsection', { text: 'Свои CLI' })); // список встаёт под этот заголовок
     pane.appendChild(form);
     paintList();
   }

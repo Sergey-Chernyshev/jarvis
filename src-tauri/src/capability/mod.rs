@@ -217,6 +217,59 @@ mod tests {
         assert_eq!(audit.last().unwrap().outcome, "ok");
     }
 
+    // Авто-одобрение: id из списка пользователя исполняется, хотя confirmer
+    // отвечает «нет» — значит его вообще не спрашивали.
+    #[tokio::test]
+    async fn auto_approved_id_runs_without_confirm() {
+        let reg = test_registry();
+        let audit = MemAudit::new();
+        let agent =
+            Consumer::agent().with_auto_approve(["echo.control".to_string()].into_iter().collect());
+        let out = super::invoke(&reg, (), &agent, "echo.control", json!({"to":"recrew"}), &AutoDeny, &audit, GateConfig::default())
+            .await
+            .expect("авто-одобренная капабилити идёт мимо подтверждения");
+        assert_eq!(out.value["did"]["to"], "recrew");
+        assert_eq!(audit.last().unwrap().outcome, "ok");
+    }
+
+    // …а её сосед по классу — нет: список поимённый, а не «весь Control».
+    #[tokio::test]
+    async fn non_listed_id_still_confirmed() {
+        let reg = test_registry();
+        let audit = MemAudit::new();
+        let agent =
+            Consumer::agent().with_auto_approve(["sessions.reply".to_string()].into_iter().collect());
+        let err = super::invoke(&reg, (), &agent, "echo.control", json!({}), &AutoDeny, &audit, GateConfig::default())
+            .await
+            .unwrap_err();
+        assert_eq!(err, GateError::Rejected);
+        assert_eq!(audit.last().unwrap().outcome, "rejected");
+    }
+
+    // R7 поверх авто-одобрения: даже с авто-одобренным settings.set агент не
+    // выпишет себе новых прав — security-ключ закрыт до подтверждения.
+    #[tokio::test]
+    async fn auto_approve_cannot_be_self_granted() {
+        let reg = test_registry();
+        let audit = MemAudit::new();
+        let agent =
+            Consumer::agent().with_auto_approve(["settings.set".to_string()].into_iter().collect());
+        let err = super::invoke(
+            &reg,
+            (),
+            &agent,
+            "settings.set",
+            json!({ "patch": { "grants": { "agent": { "autoApprove": ["sessions.reply"] } } } }),
+            &AutoApprove,
+            &audit,
+            GateConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, GateError::Denied(_)));
+        assert_eq!(audit.last().unwrap().outcome, "denied:security-key");
+    }
+
     // неизвестная капабилити — NotFound, тоже в аудите.
     #[tokio::test]
     async fn unknown_capability_not_found() {

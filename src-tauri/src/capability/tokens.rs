@@ -3,13 +3,14 @@
 //! Панель (in-process) токена не требует и здесь не резолвится: Consumer::panel()
 //! не выдаётся ни по какому токену (INV-PANEL).
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
 use super::contract::RiskClass;
-use super::grant::Consumer;
+use super::grant::{auto_approve_from_settings, Consumer};
 use crate::util::jarvis_dir;
 
 /// Доступ к таблице токенов. Файл читается на каждый резолв (вызовы редки).
@@ -58,6 +59,17 @@ impl TokenStore {
         tok
     }
 
+    /// Поимённое авто-одобрение потребителя из settings.json (лежит рядом с
+    /// tokens.json). Читаем на резолве, а не на старте: правку настроек видно со
+    /// следующего вызова, без перезапуска демона.
+    fn auto_approve(&self, consumer: &str) -> HashSet<String> {
+        let settings = std::fs::read_to_string(self.path.with_file_name("settings.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .unwrap_or_else(|| json!({}));
+        auto_approve_from_settings(&settings, consumer)
+    }
+
     /// Резолв токена в потребителя. Неизвестный/пустой → None. panel НИКОГДА.
     pub fn resolve(&self, token: &str) -> Option<Consumer> {
         if token.is_empty() {
@@ -65,7 +77,7 @@ impl TokenStore {
         }
         let v = self.read();
         if v.get("agent").and_then(|t| t.as_str()) == Some(token) {
-            return Some(Consumer::agent());
+            return Some(Consumer::agent().with_auto_approve(self.auto_approve("agent")));
         }
         // плагины: { "plugins": { "<id>": { "token": "...", "classes": ["read",...] } } }
         let plugins = v.get("plugins").and_then(|p| p.as_object())?;
@@ -139,6 +151,37 @@ mod tests {
         let s = TokenStore::at(tmp());
         let agent = s.ensure_agent_token();
         assert_ne!(s.resolve(&agent).unwrap().id, "panel");
+    }
+
+    /// Свой каталог: авто-одобрение читается из settings.json РЯДОМ с токенами.
+    fn tmp_home() -> PathBuf {
+        let dir = tmp().with_extension("dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn agent_gets_auto_approve_from_settings() {
+        let dir = tmp_home();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"grants":{"agent":{"autoApprove":["sessions.reply"]}}}"#,
+        )
+        .unwrap();
+        let s = TokenStore::at(dir.join("tokens.json"));
+        let t = s.ensure_agent_token();
+        let c = s.resolve(&t).unwrap();
+        assert!(!c.grant.needs_confirm("sessions.reply", RiskClass::Control), "разрешено человеком");
+        assert!(c.grant.needs_confirm("sessions.control", RiskClass::Control), "остальное со спросом");
+    }
+
+    #[test]
+    fn agent_without_settings_asks_as_before() {
+        // Нет файла настроек — поведение прежнее: подтверждение на каждый side-effect.
+        let s = TokenStore::at(tmp_home().join("tokens.json"));
+        let t = s.ensure_agent_token();
+        let c = s.resolve(&t).unwrap();
+        assert!(c.grant.needs_confirm("sessions.reply", RiskClass::Control));
     }
 
     #[test]

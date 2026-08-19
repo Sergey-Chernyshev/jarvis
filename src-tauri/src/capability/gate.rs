@@ -4,7 +4,8 @@
 //!
 //! Порядок проверок: реестр (notfound) → грант по классу (+ поимённый denylist)
 //! → запрет самоэскалации (класс Settings: security-ключи всем + allowlist для
-//! agent/plugin) → подтверждение side-effect (дедлайн 60с) → исполнение
+//! agent/plugin) → подтверждение side-effect, кроме поимённо авто-одобренных
+//! пользователем капабилити (дедлайн 60с) → исполнение
 //! (дедлайн 30с) → аудит каждого исхода.
 
 use std::time::Duration;
@@ -112,7 +113,9 @@ pub async fn invoke<C>(
     }
 
     // 3. Подтверждение side-effect — с дедлайном (R3): нет ответа → Rejected.
-    if consumer.grant.needs_confirm(meta.class) {
+    //    Молча пропускаем только то, что пользователь сам внёс в авто-одобрение
+    //    гранта (grants.<consumer>.autoApprove) — поимённо, см. Grant::needs_confirm.
+    if consumer.grant.needs_confirm(meta.id, meta.class) {
         let approved = match tokio::time::timeout(cfg.confirm_timeout, confirmer.confirm(meta, &args)).await {
             Ok(a) => a,
             Err(_) => {

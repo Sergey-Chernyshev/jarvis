@@ -799,6 +799,16 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
         }
     }
 
+    // «grants» — security-ключ: капабилити settings.set не пишет его НИКОМУ,
+    // включая панель (гейт, §7). Законный путь один — эта команда, то есть руки
+    // пользователя в настройках. Форму нормализуем, чтобы и через UI нельзя было
+    // записать ничего, кроме поимённого авто-одобрения.
+    if let Some(g) = rest.remove("grants") {
+        let mut patch = serde_json::Map::new();
+        patch.insert("grants".into(), normalize_grants(&g));
+        d.settings.save(patch);
+    }
+
     const APPEARANCE_KEYS: [&str; 7] =
         ["theme", "paint", "mode", "accent", "density", "radius", "scale"];
     let appearance_changed = APPEARANCE_KEYS.iter().any(|k| rest.contains_key(*k));
@@ -827,6 +837,22 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
         windows::position_panel(&d); // позиция могла смениться
     }
     ok()
+}
+
+/// Свести патч грантов к единственной поддерживаемой форме:
+/// `{"<потребитель>": {"autoApprove": ["<id капабилити>", …]}}`. Всё прочее
+/// отбрасываем — иначе панель стала бы каналом для произвольных прав.
+fn normalize_grants(v: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    for (consumer, body) in v.as_object().into_iter().flatten() {
+        let ids: Vec<Value> = body
+            .get("autoApprove")
+            .and_then(|a| a.as_array())
+            .map(|a| a.iter().filter(|x| x.is_string()).cloned().collect())
+            .unwrap_or_default();
+        out.insert(consumer.clone(), json!({ "autoApprove": ids }));
+    }
+    Value::Object(out)
 }
 
 /* ================= чат сессии ================= */
@@ -4195,6 +4221,18 @@ mod turn_ipc_tests {
         assert_eq!(got[0]["project"], "другое");
         assert_eq!(got[0]["cwd"], "");
         assert!(remote_projects_to_history("vps", json!("не массив")).as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn grants_patch_keeps_only_auto_approve() {
+        // Через панель проходит поимённый список — и ничего сверх него: попытка
+        // дописать классы/политику из патча вылетает при нормализации.
+        let got = normalize_grants(&json!({
+            "agent": { "autoApprove": ["sessions.reply", 7], "classes": ["admin"], "confirm": "never" },
+        }));
+        assert_eq!(got, json!({ "agent": { "autoApprove": ["sessions.reply"] } }));
+        assert_eq!(normalize_grants(&json!({ "agent": "admin" })), json!({ "agent": { "autoApprove": [] } }));
+        assert_eq!(normalize_grants(&json!("мусор")), json!({}));
     }
 
     #[test]

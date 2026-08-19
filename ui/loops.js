@@ -192,10 +192,7 @@
     } catch (e) { /* останемся на встроенных списках */ }
     return catalog;
   }
-  /* Каталог агентов панели (agents.js) — общий на всё приложение; здесь он
-   * запасной источник моделей и единственный список агентов, чтобы в цикле
-   * можно было выбрать любого, кого знает бэкенд, а не двух вписанных руками.
-   * В отдельном окне без него живём на loopsCatalog, как раньше. */
+  /* Каталог агентов панели; в отдельном окне его нет — живём на loopsCatalog. */
   const agentsApi = () => (typeof window !== 'undefined' && window.JarvisAgents) || null;
   const agentIds = () => {
     const api = agentsApi();
@@ -203,8 +200,7 @@
     if (catalog && catalog.models) return Object.keys(catalog.models);
     return Object.keys(FALLBACK_MODELS);
   };
-  /* Отдельная ручка усилия/модели есть не у всех: у codex и модель, и reasoning
-   * критика задаёт он сам — селект был бы враньём. */
+  /* У codex модель и reasoning критика задаёт он сам — селект был бы враньём. */
   const picksItsOwnModel = (agent) => {
     const api = agentsApi();
     return api ? !api.hasSeparateEffort(agent) : agent === 'codex';
@@ -446,10 +442,8 @@
     const summary = el('div.lp-explain-text', { text: explain(d) });
     const refresh = () => { summary.textContent = explain(d); };
 
-    /* Агент — сегмент по каталогу, а не поле по памяти и не пара вписанных
-     * руками. Смена агента меняет и список моделей критика, поэтому
-     * конструктор перерисовывается целиком: черновик это переживает, он живёт
-     * отдельно от DOM. */
+    /* Смена агента меняет и модели критика — перерисовываем целиком;
+     * черновик это переживает, он живёт отдельно от DOM. */
     const seg = el('div.lp-seg',
       agentIds().map((a) => {
         const b = el('button', {
@@ -539,9 +533,7 @@
     };
     paintProblems(l.problems);
 
-    /* Там, где модель критика задаёт сам агент (codex), селект был бы
-     * нечестен — показываем строку. Остальным даём ЕГО модели: раньше здесь
-     * жёстко стояли модели claude, и в цикле на другом агенте выбор был чужим. */
+    /* Модели ЕГО агента: раньше здесь жёстко стояли claude, и выбор был чужим. */
     const criticAgent = d.agent || 'claude';
     const criticModel = picksItsOwnModel(criticAgent)
       ? el('div.lp-hint', { text: `модель и усилие критика задаёт сам ${criticAgent} — в его настройках` })

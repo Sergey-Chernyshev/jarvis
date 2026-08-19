@@ -2168,8 +2168,7 @@
       grow.appendChild(remoteHintLine('alert-triangle',
         'tmux на машине нет — узел встанет, но вставить ответ в сессию с него не выйдет, ровно как локально.', true));
     }
-    // Разведка отмечает найденные CLI по id агента — спрашиваем каталог, а не
-    // два имени: агентов больше двух, и текст не должен об этом врать.
+    // спрашиваем каталог, а не два имени: агентов больше двух
     const known = (window.JarvisAgents ? window.JarvisAgents.all() : [{ id: 'claude' }, { id: 'codex' }]);
     if (!known.some((a) => p[a.id])) {
       grow.appendChild(remoteHintLine('alert-triangle',

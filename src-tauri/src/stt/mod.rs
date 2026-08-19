@@ -285,22 +285,24 @@ mod tests {
         assert_eq!(svc.engine_name(), "mock");
     }
 
-    // SttService с Qwen3Engine (явный engine=qwen3-0.6b): available()==false
-    // когда сайдкар не запущен (порт 8732 закрыт в тестах)
+    // Конфиг qwen3 обязан собрать именно qwen3-движок (а не молча упасть в
+    // whisper). Про поведение НЕДОСТУПНОГО сайдкара — отдельный тест на уровне
+    // движка (`engine_qwen3::available_unreachable_returns_false`, закрытый
+    // порт): судить об этом здесь нельзя, у сервиса адрес настоящий, и на
+    // машине, где диктовкой пользуются, сайдкар живой — тест ловил окружение,
+    // а не код.
     #[test]
-    fn qwen3_engine_service_not_available() {
+    fn qwen3_config_builds_qwen3_engine() {
         let cfg = SttConfig { engine: "qwen3-0.6b".into(), ..SttConfig::default() };
         let svc = SttService::new(cfg);
-        assert!(!svc.available());
+        assert_eq!(svc.engine_name(), "qwen3-0.6b");
     }
 
-    // SttService с Qwen3Engine: transcribe → Err когда сайдкар не запущен
     #[test]
-    fn qwen3_engine_service_transcribe_errors() {
-        let cfg = SttConfig { engine: "qwen3-0.6b".into(), ..SttConfig::default() };
-        let svc = SttService::new(cfg);
-        let result = svc.transcribe(&[0.0f32; 16], &SttOptions::default());
-        assert!(result.is_err());
+    fn qwen3_switch_keeps_engine_in_sync() {
+        let svc = SttService::new(SttConfig::default());
+        svc.set_engine(SttConfig { engine: "qwen3-1.7b".into(), ..SttConfig::default() });
+        assert_eq!(svc.engine_name(), "qwen3-1.7b");
     }
 
     // options() из конфига: dominant_lang и task передаются правильно

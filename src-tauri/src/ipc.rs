@@ -2717,9 +2717,13 @@ pub fn reconcile_limit(d: &Arc<Daemon>) {
 
 /* ================= агент-хост (фаза 5) ================= */
 
-/// Отправить сообщение агенту и немедленно вернуть `{ok:true}`.
+/// Отправить сообщение агенту и немедленно вернуть `{ok:true, chatId}`.
 ///
-/// Потоковые события поступают через канал `agent:event` (тип `AgentEvent`).
+/// Потоковые события поступают через канал `agent:event` (тип `AgentEvent` плюс
+/// метка `chatId`, см. `agent::TaggedEvent`). Канал один на все чаты, поэтому
+/// окно раскладывает поток по метке — и переключаться во время хода можно.
+/// `chatId` в ответе — тот чат, которым помечен ход: адресата выбирает ядро
+/// (окно могло прислать только id разговора), и знать его окно должно сразу.
 /// `session_id` — необязателен; при наличии используется для возобновления (--resume).
 #[tauri::command]
 pub async fn agent_send(
@@ -2766,7 +2770,7 @@ pub async fn agent_send(
         let host = ClaudeCliHost {
             app: app.clone(),
             mcp_config,
-            chat_id,
+            chat_id: chat_id.clone(),
         };
         tauri::async_runtime::spawn(async move {
             host.run(&message, &tools, resume.as_deref()).await;
@@ -2782,7 +2786,7 @@ pub async fn agent_send(
             app: app.clone(),
             mcp_bin,
             token,
-            chat_id,
+            chat_id: chat_id.clone(),
         };
         tauri::async_runtime::spawn(async move {
             host.run(&message, &tools, resume.as_deref()).await;
@@ -2791,7 +2795,7 @@ pub async fn agent_send(
         return err("Не нашёл ни claude, ни codex — поставь один из них, и агент заработает");
     }
 
-    json!({ "ok": true })
+    json!({ "ok": true, "chatId": chat_id })
 }
 
 /// Достать (путь к jarvis-mcp, токен агента) из jarvis-mcp.json — для Codex-хоста,
@@ -2859,8 +2863,14 @@ pub fn agent_chat_state(app: AppHandle) -> Value {
 /// Список сшивается с диском: настройки знают имена и порядок, а какие разговоры
 /// вообще были — знают только транскрипты.
 fn chat_book_json(book: &crate::agent::ChatBook) -> Value {
-    let chats = crate::agent::history::chats_json(book, &agent_threads());
-    json!({ "ok": true, "current": book.current().id, "chats": chats })
+    let threads = agent_threads();
+    json!({
+        "ok": true,
+        "current": book.current().id,
+        "chats": crate::agent::history::chats_json(book, &threads),
+        // Скрытых в списке нет — окну нужно чем-то нарисовать «скрыто N · вернуть».
+        "hidden": crate::agent::history::hidden_count(book, &threads),
+    })
 }
 
 /// Изменить список и сохранить. Отказ на любом шаге — с причиной наружу.
@@ -2917,6 +2927,56 @@ pub fn agent_chat_open(app: AppHandle, session_id: String) -> Value {
         Some(p) if p.is_file() => edit_chat_book(&app, |b| b.adopt(&sid)),
         _ => err(format!("разговора {sid} нет на диске — открыть его не получится")),
     }
+}
+
+/// Убрать разговор из списка, оставив файл на диске: обратимое «с глаз долой».
+/// Прятать можно только НЕпривязанный разговор — за привязанным стоит чат, и
+/// убирается он через `agent_chat_delete`.
+#[tauri::command]
+pub fn agent_history_hide(app: AppHandle, session_id: String) -> Value {
+    edit_chat_book(&app, |b| b.hide(&session_id))
+}
+
+/// Вернуть в список все скрытые разговоры — та самая обратимость, ради которой
+/// скрытие и отделено от забвения.
+#[tauri::command]
+pub fn agent_history_unhide_all(app: AppHandle) -> Value {
+    edit_chat_book(&app, |b| {
+        b.unhide_all();
+        Ok(())
+    })
+}
+
+/// Забыть разговор насовсем: удалить транскрипт с диска.
+///
+/// Единственное необратимое действие приложения. Подтверждение спрашивает окно,
+/// ядро его не дублирует — но и не смягчает отказы: привязанный к чату разговор
+/// и разговор под идущим ходом не удаляются, а id проверяется как путь (он им и
+/// становится). В лог — строкой: у необратимого обязан оставаться след.
+#[tauri::command]
+pub fn agent_history_forget(app: AppHandle, session_id: String) -> Value {
+    let sid = session_id.trim().to_string();
+    let Some(dir) = agent_transcript_dir() else {
+        return err("не нашёл каталог транскриптов агента — удалять нечего");
+    };
+    let book = crate::agent::chat_book(&app);
+    let busy = crate::agent::turn_in_flight(&sid);
+    let path = match crate::agent::history::forget_decision(&dir, &book, &sid, busy) {
+        Ok(p) => p,
+        Err(e) => return err(e),
+    };
+    let turns = match crate::agent::history::forget_file(&path) {
+        Ok(n) => n,
+        Err(e) => return err(e),
+    };
+    crate::log::line(&format!(
+        "[agent] разговор {sid} забыт насовсем: транскрипт удалён, записей было {turns}"
+    ));
+    // Пометка «скрыт» пережила бы файл и висела в настройках мусором.
+    edit_chat_book(&app, |b| {
+        b.unhide(&sid);
+        Ok(())
+    })
 }
 
 /// Прошлая переписка главного агента — чтобы окно рисовало ленту, а не пустоту.

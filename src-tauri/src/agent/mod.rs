@@ -34,6 +34,24 @@ pub enum AgentEvent {
     Other,
 }
 
+/// Событие с меткой чата — единственная форма, в которой поток уходит наружу.
+///
+/// Канал `agent:event` один на все чаты, а ход длится минуты: без метки ответ
+/// одного разговора дорисовывался бы в ленту другого, стоит человеку уйти в
+/// соседний проект. Из-за этого переключение чатов и было запрещено словами.
+///
+/// Метка — поле РЯДОМ с полями события (`flatten`), а не конверт вокруг него:
+/// форма payload'а остаётся прежней, разбор в окне и `parse_stream_line` не
+/// меняются, добавилось ровно одно поле.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaggedEvent<'a> {
+    /// camelCase — по внешнему уговору с окном (поля самих событий не трогаем).
+    #[serde(rename = "chatId")]
+    pub chat_id: &'a str,
+    #[serde(flatten)]
+    pub event: &'a AgentEvent,
+}
+
 // ── Парсинг одной строки stream-json ──────────────────────────────────────
 
 /// Разобрать одну newline-delimited JSON строку потока `claude --output-format stream-json`.
@@ -231,6 +249,9 @@ pub const CHAT_BLOCK: &str = "agentChat";
 pub const CHAT_KEY: &str = "sessionId";
 const CHATS_KEY: &str = "chats";
 const CURRENT_KEY: &str = "current";
+/// Разговоры, убранные из списка. Плоский список id, а не флаг у чата: прячут
+/// как раз то, за чем чата НЕТ, — признак хранить негде.
+const HIDDEN_KEY: &str = "hidden";
 
 /// Один разговор с главным агентом.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -254,6 +275,9 @@ pub struct Chat {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatBook {
     pub chats: Vec<Chat>,
+    /// Id разговоров, убранных из списка. Файлы на месте — это «с глаз долой»,
+    /// обратимое одним движением, а не забвение.
+    pub hidden: Vec<String>,
     current: usize,
 }
 
@@ -327,7 +351,22 @@ pub fn read_chats(settings: &Value) -> ChatBook {
         .and_then(Value::as_str)
         .and_then(|id| chats.iter().position(|c| c.id == id))
         .unwrap_or(0);
-    ChatBook { chats, current }
+    // Ключа `hidden` в старых настройках нет — это просто «ничего не спрятано».
+    let mut hidden: Vec<String> = block
+        .and_then(|b| b.get(HIDDEN_KEY))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    hidden.retain(|s| seen.insert(s.clone()));
+    ChatBook { chats, hidden, current }
 }
 
 impl ChatBook {
@@ -391,6 +430,8 @@ impl ChatBook {
         if sid.is_empty() {
             return Err("пустой id разговора — привязывать нечего".into());
         }
+        // Разговор переезжает в чат — прятать его больше нечем и незачем.
+        self.unhide(sid);
         if let Some(i) = self
             .chats
             .iter()
@@ -401,6 +442,50 @@ impl ChatBook {
         }
         let id = self.create(None)?;
         self.set_session(&id, Some(sid))
+    }
+
+    /// Спрятан ли разговор из списка.
+    pub fn is_hidden(&self, sid: &str) -> bool {
+        self.hidden.iter().any(|h| h == sid)
+    }
+
+    /// Убрать разговор из списка, не трогая файл.
+    ///
+    /// Только НЕпривязанный: за привязанным стоит чат, и убирается он через
+    /// удаление чата. Иначе одно и то же пряталось бы двумя способами с разным
+    /// смыслом — и человек не знал бы, что именно он сейчас сделал.
+    pub fn hide(&mut self, sid: &str) -> Result<(), String> {
+        let sid = sid.trim();
+        if !history::is_session_id(sid) {
+            return Err(format!("«{sid}» не похож на id разговора — прятать нечего"));
+        }
+        if let Some(c) = self
+            .chats
+            .iter()
+            .find(|c| c.session_id.as_deref() == Some(sid))
+        {
+            return Err(format!(
+                "разговор {sid} — это чат «{}»; убрать его можно только вместе с чатом",
+                c.id
+            ));
+        }
+        if !self.is_hidden(sid) {
+            self.hidden.push(sid.to_string());
+        }
+        Ok(())
+    }
+
+    /// Вернуть в список все скрытые: ради этой обратимости скрытие и выбрано —
+    /// прячут по одному, а передумывают обычно про всё сразу.
+    pub fn unhide_all(&mut self) {
+        self.hidden.clear();
+    }
+
+    /// Снять пометку с одного разговора: он либо переехал в чат, либо забыт
+    /// насовсем — в обоих случаях прятать больше нечего.
+    pub fn unhide(&mut self, sid: &str) {
+        let sid = sid.trim();
+        self.hidden.retain(|h| h != sid);
     }
 
     pub fn rename(&mut self, id: &str, raw: &str) -> Result<String, String> {
@@ -446,6 +531,10 @@ impl ChatBook {
                 serde_json::to_value(&self.chats).unwrap_or_else(|_| Value::Array(vec![])),
             ),
             (CURRENT_KEY.to_string(), Value::String(self.current().id.clone())),
+            (
+                HIDDEN_KEY.to_string(),
+                Value::Array(self.hidden.iter().cloned().map(Value::String).collect()),
+            ),
             (
                 CHAT_KEY.to_string(),
                 Value::String(self.current().session_id.clone().unwrap_or_default()),
@@ -541,6 +630,71 @@ pub fn is_lost_session(message: &str) -> bool {
         || (m.contains("session") && m.contains("not found"))
 }
 
+// ── Идущий ход ────────────────────────────────────────────────────────────
+//
+// Пока ход идёт, хост дописывает транскрипт — «забыть насовсем» обязано об это
+// споткнуться. Нить свежего чата известна не сразу (её приносит Init), поэтому
+// метка переставляется по ходу, а снимается сама: выходов из `run` десяток, и
+// забытая метка означала бы вечный отказ на удаление.
+
+fn turns_in_flight() -> &'static std::sync::Mutex<std::collections::HashMap<String, usize>> {
+    static T: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> =
+        std::sync::OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+/// Идёт ли прямо сейчас ход по этому разговору.
+pub fn turn_in_flight(sid: &str) -> bool {
+    let sid = sid.trim();
+    turns_in_flight().lock().is_ok_and(|t| t.contains_key(sid))
+}
+
+/// Пометка «по этой нити идёт ход», снимающаяся сама.
+pub struct TurnMark(Option<String>);
+
+impl TurnMark {
+    pub fn new(sid: Option<&str>) -> Self {
+        let mut m = TurnMark(None);
+        if let Some(s) = sid {
+            m.track(s);
+        }
+        m
+    }
+
+    /// Ход узнал свою нить (или сменил её) — переставить метку.
+    pub fn track(&mut self, sid: &str) {
+        let sid = sid.trim();
+        if sid.is_empty() || self.0.as_deref() == Some(sid) {
+            return;
+        }
+        self.clear();
+        if let Ok(mut t) = turns_in_flight().lock() {
+            *t.entry(sid.to_string()).or_insert(0) += 1;
+        }
+        self.0 = Some(sid.to_string());
+    }
+
+    fn clear(&mut self) {
+        let Some(sid) = self.0.take() else { return };
+        if let Ok(mut t) = turns_in_flight().lock() {
+            // Считаем ходы, а не держим флаг: один разговор могут вести два окна.
+            let gone = t.get_mut(&sid).map(|n| {
+                *n = n.saturating_sub(1);
+                *n == 0
+            });
+            if gone == Some(true) {
+                t.remove(&sid);
+            }
+        }
+    }
+}
+
+impl Drop for TurnMark {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
 // ── Тестируемый драйвер потока (без живого процесса) ──────────────────────
 
 /// Результат обработки одной строки (для `drive_stream`).
@@ -613,7 +767,7 @@ impl ClaudeCliHost {
         let Some(bin) = crate::claude_bin::resolve_claude_bin() else {
             crate::log::line("[agent] claude не найден");
             // Молча выйти нельзя: окно осталось бы в «думает…» навсегда.
-            emit_event(&self.app, &failure("claude не найден — агент не запустился", false));
+            self.fail("claude не найден — агент не запустился");
             return;
         };
 
@@ -636,7 +790,7 @@ impl ClaudeCliHost {
             Ok(c) => c,
             Err(e) => {
                 crate::log::line(&format!("[agent] spawn claude: {e}"));
-                emit_event(&self.app, &failure(&format!("claude не запустился: {e}"), false));
+                self.fail(&format!("claude не запустился: {e}"));
                 return;
             }
         };
@@ -645,7 +799,7 @@ impl ClaudeCliHost {
             Some(s) => s,
             None => {
                 crate::log::line("[agent] нет stdout от claude");
-                emit_event(&self.app, &failure("агент не отдал вывод", false));
+                self.fail("агент не отдал вывод");
                 return;
             }
         };
@@ -654,6 +808,8 @@ impl ClaudeCliHost {
         let app = self.app.clone();
         // Помним последний записанный id, чтобы не писать настройки на каждое событие.
         let mut saved = chat_book(&app).session_of(&self.chat_id);
+        // Пока ход идёт, транскрипт нельзя удалять из-под хоста: он в него пишет.
+        let mut mark = TurnMark::new(resume);
         let mut finished = false; // дошло ли до Done/Failed
 
         while let Ok(Some(line)) = reader.next_line().await {
@@ -665,7 +821,7 @@ impl ClaudeCliHost {
                         crate::log::line(&format!("[agent] {msg}"));
                         // Убиваем процесс (kill_on_drop = true; явный kill для надёжности)
                         let _ = child.kill().await;
-                        emit_event(&app, &failure(&msg, false));
+                        self.fail(&msg);
                         return;
                     }
                 }
@@ -684,13 +840,14 @@ impl ClaudeCliHost {
                     saved = None;
                 }
                 if let Some(id) = event_session_id(&ev) {
+                    mark.track(id); // у свежего чата нить появляется только сейчас
                     if let Some(fresh) = session_id_to_persist(saved.as_deref(), id) {
                         remember_chat_session(&app, &self.chat_id, &fresh);
                         saved = Some(fresh);
                     }
                 }
                 finished |= matches!(ev, AgentEvent::Done { .. } | AgentEvent::Failed { .. });
-                emit_event(&app, &ev);
+                emit_event(&app, &self.chat_id, &ev);
             }
         }
 
@@ -701,14 +858,16 @@ impl ClaudeCliHost {
                 Ok(st) => st.code().map(|c| c.to_string()).unwrap_or_else(|| "сигнал".into()),
                 Err(_) => "?".into(),
             };
-            emit_event(&app, &failure(&format!("агент оборвался без ответа (код {code})"), false));
+            self.fail(&format!("агент оборвался без ответа (код {code})"));
         }
     }
-}
 
-/// Событие отказа — единая точка, чтобы «тихих» веток выхода не заводилось.
-fn failure(message: &str, lost_session: bool) -> AgentEvent {
-    AgentEvent::Failed { message: message.to_string(), lost_session }
+    /// Отказ наружу — единая точка, чтобы «тихих» веток выхода не заводилось.
+    /// Метку берёт из хоста: чат хода выбран при отправке и уже не меняется.
+    fn fail(&self, message: &str) {
+        let ev = AgentEvent::Failed { message: message.to_string(), lost_session: false };
+        emit_event(&self.app, &self.chat_id, &ev);
+    }
 }
 
 /// Список чатов из живых настроек.
@@ -749,14 +908,19 @@ fn set_chat_session(app: &tauri::AppHandle, chat_id: &str, id: Option<&str>) {
     }
 }
 
-/// Отправить событие в главное окно Tauri.
-fn emit_event(app: &tauri::AppHandle, ev: &AgentEvent) {
+/// Отправить событие в главное окно Tauri — ЕДИНСТВЕННЫЙ эмит `agent:event` на
+/// всё приложение (сюда же ходит codex-хост). Метка чата не опциональна: её
+/// требует подпись, поэтому «тихого» непомеченного события не бывает.
+pub(crate) fn emit_event(app: &tauri::AppHandle, chat_id: &str, ev: &AgentEvent) {
     use tauri::Emitter;
     // Игнорируем Other события
     if matches!(ev, AgentEvent::Other) {
         return;
     }
-    if let Err(e) = app.emit("agent:event", ev) {
+    // Пустой id окну некуда положить: чаты приходят из ChatBook, где id непусты
+    // по построению, — если инвариант поедет, пусть падает на разработчике.
+    debug_assert!(!chat_id.trim().is_empty(), "событие без метки чата");
+    if let Err(e) = app.emit("agent:event", TaggedEvent { chat_id, event: ev }) {
         crate::log::line(&format!("[agent] emit error: {e}"));
     }
 }
@@ -1189,6 +1353,74 @@ mod tests {
         assert_eq!(book.chats[3].human_name(), Some("Чат"));
     }
 
+    /// Скрытие — про разговоры БЕЗ чата: за привязанным стоит чат, и убирается
+    /// он вместе с ним. Иначе два способа спрятать одно и то же.
+    #[test]
+    fn hiding_is_only_for_threads_without_a_chat() {
+        let mut book = read_chats(&json!({ "agentChat": {
+            "chats": [{ "id": "c1", "name": "Главный", "sessionId": "s-1" }], "current": "c1",
+        }}));
+        let e = book.hide("s-1").unwrap_err();
+        assert!(e.contains("c1"), "отказ обязан назвать чат: {e}");
+        assert!(book.hidden.is_empty(), "после отказа ничего не спрятано");
+
+        book.hide(" s-249 ").unwrap();
+        book.hide("s-249").unwrap();
+        assert_eq!(book.hidden, vec!["s-249".to_string()], "дважды спрятать — не два раза");
+        assert!(book.is_hidden("s-249"));
+        // id уходит в сравнение с именем файла — мусору тут не место
+        assert!(book.hide("../evil").is_err());
+        assert!(book.hide("   ").is_err());
+
+        // круг через настройки: список скрытых обязан пережить перезапуск
+        let again = read_chats(&json!({ "agentChat": Value::Object(book.to_patch()) }));
+        assert_eq!(again, book, "скрытые не должны теряться в настройках");
+
+        // разговор въехал в чат — прятать больше нечего
+        book.adopt("s-249").unwrap();
+        assert!(book.hidden.is_empty());
+        assert_eq!(book.current().session_id.as_deref(), Some("s-249"));
+    }
+
+    #[test]
+    fn settings_without_hidden_are_read_as_nothing_hidden() {
+        // У владельца в настройках уже лежат chats и current — и ничего больше.
+        let book = read_chats(&json!({ "agentChat": {
+            "chats": [{ "id": "c1", "name": "Главный", "sessionId": "s-1" }], "current": "c1",
+        }}));
+        assert!(book.hidden.is_empty());
+        assert_eq!(book.current().session_id.as_deref(), Some("s-1"));
+
+        // мусор в списке скрытых не роняет чтение и не переживает круг
+        let book = read_chats(&json!({ "agentChat": { "hidden": ["s-1", "s-1", " ", 7, "s-2"] }}));
+        assert_eq!(book.hidden, vec!["s-1".to_string(), "s-2".to_string()]);
+        assert_eq!(read_chats(&json!({ "agentChat": Value::Object(book.to_patch()) })), book);
+        assert_eq!(read_chats(&json!({ "agentChat": { "hidden": "не список" }})).hidden, Vec::<String>::new());
+    }
+
+    /// Пока ход идёт, его нить помечена — на этом и спотыкается удаление файла.
+    #[test]
+    fn a_running_turn_marks_its_thread_and_unmarks_itself() {
+        assert!(!turn_in_flight("s-mark"));
+        {
+            let mut m = TurnMark::new(None);
+            assert!(!turn_in_flight("s-mark"), "у свежего чата нити ещё нет");
+            m.track("s-mark"); // id приносит Init
+            assert!(turn_in_flight(" s-mark "));
+            m.track("s-mark"); // Done несёт тот же id — метка одна
+            assert!(turn_in_flight("s-mark"));
+        }
+        assert!(!turn_in_flight("s-mark"), "ход кончился — метка снялась сама");
+
+        // один разговор могут вести два окна: метка держится, пока жив хоть один
+        let a = TurnMark::new(Some("s-two"));
+        let b = TurnMark::new(Some("s-two"));
+        drop(a);
+        assert!(turn_in_flight("s-two"));
+        drop(b);
+        assert!(!turn_in_flight("s-two"));
+    }
+
     #[test]
     fn session_id_to_persist_skips_noise() {
         assert_eq!(session_id_to_persist(None, ""), None);
@@ -1283,5 +1515,90 @@ mod tests {
         let (events, violation) = drive_stream(lines.into_iter());
         assert!(violation.is_none());
         assert_eq!(events.len(), 1);
+    }
+
+    // ── метка чата на потоке ─────────────────────────────────────────────
+
+    /// Все события, какие вообще уходят наружу (Other не уходит — он ниже).
+    fn every_outgoing_event() -> Vec<AgentEvent> {
+        vec![
+            AgentEvent::Init {
+                tools: vec!["mcp__jarvis__sessions.reply".into()],
+                model: "claude".into(),
+                session_id: "s-1".into(),
+            },
+            AgentEvent::Delta { text: "текст".into() },
+            AgentEvent::ToolUse { name: "sessions_reply".into(), input: json!({ "sid": "1" }) },
+            AgentEvent::Done { result: "готово".into(), session_id: "s-1".into() },
+            AgentEvent::Failed { message: "агент оборвался".into(), lost_session: true },
+            AgentEvent::Failed { message: "claude не найден".into(), lost_session: false },
+        ]
+    }
+
+    #[test]
+    fn every_event_type_carries_the_chat_tag() {
+        for ev in every_outgoing_event() {
+            let v = serde_json::to_value(TaggedEvent { chat_id: "c7", event: &ev }).unwrap();
+            assert_eq!(v["chatId"], json!("c7"), "событие без метки чата: {v}");
+            assert!(v["type"].is_string(), "тип события не потерялся: {v}");
+        }
+    }
+
+    #[test]
+    fn tag_adds_a_field_and_does_not_touch_the_rest() {
+        // Форма прежняя: окно разбирает те же поля, метка только добавилась.
+        let failed = AgentEvent::Failed { message: "нет разговора".into(), lost_session: true };
+        assert_eq!(
+            serde_json::to_value(TaggedEvent { chat_id: "c2", event: &failed }).unwrap(),
+            json!({ "type": "failed", "message": "нет разговора", "lost_session": true, "chatId": "c2" })
+        );
+        let done = AgentEvent::Done { result: "ок".into(), session_id: "s-9".into() };
+        assert_eq!(
+            serde_json::to_value(TaggedEvent { chat_id: "c2", event: &done }).unwrap(),
+            json!({ "type": "done", "result": "ок", "session_id": "s-9", "chatId": "c2" })
+        );
+        // Вложенный input инструмента метка тоже не портит.
+        let tool = AgentEvent::ToolUse {
+            name: "sessions_reply".into(),
+            input: json!({ "sid": "1", "n": 2, "deep": { "a": [1, "два"] } }),
+        };
+        assert_eq!(
+            serde_json::to_value(TaggedEvent { chat_id: "c2", event: &tool }).unwrap(),
+            json!({
+                "type": "tool_use", "name": "sessions_reply",
+                "input": { "sid": "1", "n": 2, "deep": { "a": [1, "два"] } },
+                "chatId": "c2",
+            })
+        );
+    }
+
+    /// Метку не обойти: `emit_event` требует её подписью, а эмит `agent:event` в
+    /// крейте ровно один — и claude-хост, и codex-хост (включая ветки отказов)
+    /// ходят через него. Тест сторожит именно это: новый прямой `app.emit` мимо
+    /// метки не заведётся молча — иначе вернётся тот же баг, только тише.
+    #[test]
+    fn agent_event_is_emitted_from_the_single_tagged_place() {
+        // Иглу склеиваем: иначе тест нашёл бы сам себя.
+        let needle = format!("{}{}", "emit(\"agent", ":event\"");
+        let mut found: Vec<String> = Vec::new();
+        let mut dirs = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(dir) = dirs.pop() {
+            for e in std::fs::read_dir(&dir).expect("исходники крейта на месте") {
+                let p = e.expect("запись каталога").path();
+                if p.is_dir() {
+                    dirs.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs")
+                    && std::fs::read_to_string(&p).unwrap_or_default().contains(&needle)
+                {
+                    found.push(p.display().to_string());
+                }
+            }
+        }
+        assert_eq!(found.len(), 1, "эмит agent:event должен быть один: {found:?}");
+        assert!(found[0].ends_with("agent/mod.rs"), "и жить в emit_event: {found:?}");
+        assert!(
+            include_str!("mod.rs").contains("emit(\"agent:event\", TaggedEvent {"),
+            "единственный эмит обязан слать помеченное событие"
+        );
     }
 }

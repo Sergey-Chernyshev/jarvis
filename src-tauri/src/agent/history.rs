@@ -215,9 +215,11 @@ pub fn display_name(human: Option<&str>, preview: &str) -> String {
 ///
 /// Второй кусок и есть вся суть: удалённый (или потерявший указатель) чат
 /// остаётся видимым, потому что файл никуда не делся.
+///
+/// Скрытые разговоры (`ChatBook::hidden`) из хвоста выпадают: файл на месте,
+/// строки нет. Сколько их — говорит `hidden_count`.
 pub fn chats_json(book: &ChatBook, threads: &[Thread]) -> Value {
     let thread_of = |sid: Option<&str>| sid.and_then(|s| threads.iter().find(|t| t.session_id == s));
-    let bound = |sid: &str| book.chats.iter().any(|c| c.session_id.as_deref() == Some(sid));
 
     let mut out: Vec<Value> = book
         .chats
@@ -234,12 +236,78 @@ pub fn chats_json(book: &ChatBook, threads: &[Thread]) -> Value {
         })
         .collect();
     out.extend(
-        threads
-            .iter()
-            .filter(|t| !bound(&t.session_id))
+        unbound(book, threads)
+            .filter(|t| !book.is_hidden(&t.session_id))
             .map(|t| entry(None, None, Some(&t.session_id), false, Some(t))),
     );
     Value::Array(out)
+}
+
+/// Разговоры с диска, за которыми не стоит чата, — тот самый хвост списка.
+fn unbound<'a>(book: &'a ChatBook, threads: &'a [Thread]) -> impl Iterator<Item = &'a Thread> {
+    threads.iter().filter(|t| {
+        !book
+            .chats
+            .iter()
+            .any(|c| c.session_id.as_deref() == Some(t.session_id.as_str()))
+    })
+}
+
+/// Сколько разговоров сейчас спрятано — окну на строку «скрыто N · вернуть».
+/// Считаем по диску, а не по длине списка скрытых: id, за которым файла уже нет,
+/// ничего не прячет, и предлагать «вернуть» из-за него нечестно.
+pub fn hidden_count(book: &ChatBook, threads: &[Thread]) -> usize {
+    unbound(book, threads)
+        .filter(|t| book.is_hidden(&t.session_id))
+        .count()
+}
+
+/// Решение «забыть насовсем»: файл, который можно удалить, — или отказ.
+///
+/// Единственное необратимое действие приложения, поэтому решение отделено от
+/// исполнения и проверяется целиком. Три условия: id — это id (он уходит в имя
+/// файла, см. `is_session_id`), разговор ничей (за привязанным стоит чат) и по
+/// нему не идёт ход (в этот файл прямо сейчас пишет хост).
+pub fn forget_decision(
+    dir: &Path,
+    book: &ChatBook,
+    sid: &str,
+    busy: bool,
+) -> Result<PathBuf, String> {
+    let sid = sid.trim();
+    let Some(path) = transcript_path(dir, sid) else {
+        return Err(format!("«{sid}» не похож на id разговора — удалять нечего"));
+    };
+    if let Some(c) = book
+        .chats
+        .iter()
+        .find(|c| c.session_id.as_deref() == Some(sid))
+    {
+        return Err(format!(
+            "разговор {sid} привязан к чату «{}» — сначала удали чат",
+            c.id
+        ));
+    }
+    if busy {
+        return Err(format!(
+            "по разговору {sid} прямо сейчас идёт ход — дождись ответа агента"
+        ));
+    }
+    if !path.is_file() {
+        return Err(format!("разговора {sid} нет на диске — удалять нечего"));
+    }
+    Ok(path)
+}
+
+/// Удалить транскрипт и сказать, сколько записей в нём было, — необратимое
+/// действие обязано оставить след в логе. Кому можно, решает `forget_decision`.
+pub fn forget_file(path: &Path) -> Result<usize, String> {
+    let turns = thread_of(path).map(|t| t.turns).unwrap_or(0);
+    fs::remove_file(path).map_err(|e| format!("не удалил транскрипт: {e}"))?;
+    if let Ok(mut c) = cache().lock() {
+        c.remove(path);
+    }
+    Ok(turns)
 }
 
 fn entry(
@@ -427,6 +495,97 @@ mod tests {
         assert_eq!(arr[1]["name"], json!("Второй разговор"));
         assert_eq!(arr[2]["id"], Value::Null, "непривязанным остался один");
         assert_eq!(arr[2]["sessionId"], json!("s-1"));
+    }
+
+    // ── скрыть и забыть ───────────────────────────────────────────────────
+
+    /// Скрытие обратимо по построению: строка уходит из списка, файл остаётся,
+    /// и всё скрытое возвращается одним движением.
+    #[test]
+    fn a_hidden_thread_leaves_the_list_and_comes_back() {
+        let d = dir("hide");
+        write_thread(&d, "s-1", "Первый разговор", "2026-08-20T10:00:00Z", 1);
+        write_thread(&d, "s-2", "Второй разговор", "2026-08-20T12:00:00Z", 1);
+        let threads = scan(&d);
+        let mut book = read_chats(&json!({}));
+        assert_eq!(chats_json(&book, &threads).as_array().unwrap().len(), 3);
+        assert_eq!(hidden_count(&book, &threads), 0);
+
+        book.hide("s-1").unwrap();
+        let list = chats_json(&book, &threads);
+        let arr = list.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "скрытого в списке нет: {list}");
+        assert!(arr.iter().all(|c| c["sessionId"] != json!("s-1")));
+        assert_eq!(arr[1]["sessionId"], json!("s-2"), "сосед на месте");
+        assert_eq!(hidden_count(&book, &threads), 1);
+        assert!(d.join("s-1.jsonl").is_file(), "файл скрытие не трогает");
+
+        book.unhide_all();
+        assert_eq!(chats_json(&book, &threads).as_array().unwrap().len(), 3, "вернулись все");
+        assert_eq!(hidden_count(&book, &threads), 0);
+
+        // id без файла ничего не прячет — предлагать «вернуть» из-за него нечестно
+        book.hide("s-ghost").unwrap();
+        assert_eq!(hidden_count(&book, &threads), 0);
+    }
+
+    #[test]
+    fn forget_deletes_exactly_its_own_file() {
+        let d = dir("forget");
+        let p1 = write_thread(&d, "s-1", "Первый разговор", "2026-08-20T10:00:00Z", 1);
+        let p2 = write_thread(&d, "s-2", "Второй разговор", "2026-08-20T12:00:00Z", 1);
+        let book = read_chats(&json!({}));
+
+        let path = forget_decision(&d, &book, "  s-1  ", false).unwrap();
+        assert_eq!(path, p1);
+        assert_eq!(forget_file(&path).unwrap(), 3, "размер разговора — в лог");
+        assert!(!p1.exists(), "свой файл удалён");
+        assert!(p2.is_file(), "соседний цел");
+        let left = scan(&d);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].session_id, "s-2");
+
+        // второй раз — отказ вслух, а не тихое «ок»
+        let e = forget_decision(&d, &book, "s-1", false).unwrap_err();
+        assert!(e.contains("нет на диске"), "{e}");
+    }
+
+    /// Забвение — единственное необратимое действие, поэтому отказов у него
+    /// больше, чем у остальных: чужой путь, живой чат за спиной, идущий ход.
+    #[test]
+    fn forget_refuses_traversal_a_bound_chat_and_a_running_turn() {
+        let d = dir("forget-guard");
+        write_thread(&d, "s-1", "Первый разговор", "2026-08-20T10:00:00Z", 1);
+        // файл СНАРУЖИ каталога агента: он обязан пережить любую попытку
+        let outside = d.join("..").join(format!("jarvis-outside-{}.jsonl", std::process::id()));
+        fs::write(&outside, "{\"type\":\"user\"}\n").unwrap();
+
+        let free = read_chats(&json!({}));
+        let bound = read_chats(&json!({ "agentChat": {
+            "chats": [{ "id": "c1", "name": "Главный", "sessionId": "s-1" }], "current": "c1",
+        }}));
+
+        let e = forget_decision(&d, &bound, "s-1", false).unwrap_err();
+        assert!(e.contains("c1") && e.contains("чат"), "отказ обязан назвать чат: {e}");
+        let e = forget_decision(&d, &free, "s-1", true).unwrap_err();
+        assert!(e.contains("ход"), "хост пишет в этот файл прямо сейчас: {e}");
+
+        let stem = outside.file_stem().unwrap().to_str().unwrap().to_string();
+        for evil in [
+            "../../etc/passwd",
+            "/etc/passwd",
+            "..",
+            "s-1/../s-1",
+            "s 1",
+            "",
+            &format!("../{stem}"),
+        ] {
+            let e = forget_decision(&d, &free, evil, false).unwrap_err();
+            assert!(e.contains("не похож на id"), "«{evil}» прошёл как id: {e}");
+        }
+        assert!(d.join("s-1.jsonl").is_file(), "после отказов файл цел");
+        assert!(outside.is_file(), "за каталог агента удаление не выходит");
+        let _ = fs::remove_file(&outside);
     }
 
     #[test]

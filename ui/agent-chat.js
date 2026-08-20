@@ -9,6 +9,11 @@
  * соседи). Открытый чат и есть адресат следующей реплики — его же историю
  * рисует лента.
  *
+ * И отвечают они разом: каждое событие потока помечено chatId, поэтому лента,
+ * нить и занятость живут у КАЖДОГО чата своя (threads ниже). Смысл был именно
+ * такой — дать промпт одному Джарвису и уйти работать со вторым; пока пузырь
+ * был один на окно, переключаться во время ответа приходилось запрещать.
+ *
  * Мест у чата два — вкладка панели и отдельное окно из трея, — но логика одна:
  * mount() навешивается на готовую разметку и получает команды демона объектом.
  * Две копии стрима разъехались бы на первой же правке; в этом коде так уже
@@ -124,14 +129,37 @@
     const hintTpl = msgs.querySelector('.hint').cloneNode(true);
 
     let chats = []; // история разговоров: чаты из настроек плюс найденные на диске
+    let hidden = 0; // спрятанных разговоров, чьи файлы ещё на диске
     let chatId = null; // открытый здесь чат — он же адресат следующей реплики
     let histOpen = false; // история свёрнута: место у переписки дороже места у списка
-    let histGen = 0; // номер запроса истории: ответ отставшего не затрёт свежий
-    let sessionId = null; // для многоходового диалога (--resume)
-    let curBubble = null; // текущий стриминговый пузырь ассистента
-    let curRaw = ''; // его сырой текст: маркдаун дописывается из него хвостом
-    let toolsRow = null; // группа подряд идущих тул-чипов
-    let busy = false;
+
+    /* Разговор целиком: его лента, нить, занятость и стриминговый пузырь. Всё
+     * это раньше было по одной переменной на окно — отсюда и запрет уходить из
+     * чата, пока агент пишет. Строки закрытого чата никуда не деваются: они
+     * лежат в rows и ждут, когда на них снова посмотрят. */
+    const threads = new Map(); // chatId → разговор
+    const HIST = {}; // ключ ленты «вне экрана»: прошлые реплики собираем в неё же
+    const thread = (id) => {
+      let t = threads.get(id);
+      if (!t) {
+        t = { id, rows: [], busy: false, session: null, bubble: null, raw: '', tools: null, gen: 0, loaded: false };
+        threads.set(id, t);
+      }
+      return t;
+    };
+    const here = () => thread(chatId); // разговор на экране
+    const shown = (t) => t.id === chatId;
+    const busyOf = (id) => !!(threads.get(id) || {}).busy;
+    // Тот же разговор под именем, которое ему дало ядро. Занятое имя не трогаем:
+    // склеивать две ленты в одну — врать про обе.
+    function relabel(t, id) {
+      if (t.id === id || threads.has(id)) return;
+      const was = t.id;
+      threads.delete(was);
+      t.id = id;
+      threads.set(id, t);
+      if (chatId === was) chatId = id;
+    }
 
     const el = (cls, text) => {
       const d = document.createElement('div');
@@ -170,104 +198,145 @@
     const scroll = () => { msgs.scrollTop = msgs.scrollHeight; };
     /* Гейт «человек внизу?» — тот же, что у ленты сессии (renderer.js,
      * appendChatItems). Без него отлистать вверх и почитать, пока агент пишет,
-     * невозможно: каждая дельта дёргала ленту обратно вниз. */
+     * невозможно: каждая дельта дёргала ленту обратно вниз. Скролл есть только
+     * у ленты на экране — у закрытого чата гейт всегда закрыт. */
     const atBottom = () => msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 60;
+    const near = (t) => (shown(t) ? atBottom() : false);
     const keepDown = (was) => { if (was) scroll(); };
+    const show = (t, row) => { if (shown(t)) msgs.appendChild(row); };
+    // Лента на экране — зеркало открытого разговора, а не место, где он живёт.
+    const draw = (t) => {
+      if (!shown(t)) return;
+      msgs.textContent = '';
+      for (const r of t.rows) msgs.appendChild(r);
+      scroll();
+    };
 
     /* Лента чата с агентом задумана переживающей закрытие окна: за пару суток
      * переписки в ней накопились бы тысячи узлов, и каждая новая реплика
-     * пересчитывала бы вёрстку по всей куче (renderer.js, trimChatlog). */
+     * пересчитывала бы вёрстку по всей куче (renderer.js, trimChatlog). Потолок
+     * у каждого разговора свой: закрытый иначе рос бы вовсе без предела. */
     const MAX_ROWS = 400;
-    function trimLog() {
-      let extra = msgs.childElementCount - MAX_ROWS;
+    function trimLog(t) {
+      let extra = t.rows.length - MAX_ROWS;
       if (extra <= 0) return;
-      for (const row of Array.from(msgs.children)) {
-        if (extra <= 0) break;
-        // В текущий пузырь ещё пишет стрим, а живая карточка обещает выбор:
-        // унести их значило бы молча проглотить ответ и вопрос. Пропускаем, а
-        // не останавливаемся: висящая наверху карточка иначе снимала бы потолок.
-        if ((curBubble && row.contains(curBubble)) || row.querySelector('.cbtns')) continue;
+      t.rows = t.rows.filter((row) => {
+        if (extra <= 0) return true;
+        // В этот пузырь ещё пишет стрим, а живая карточка обещает выбор: унести
+        // их значило бы молча проглотить ответ и вопрос. Пропускаем, а не
+        // останавливаемся: висящая наверху карточка иначе снимала бы потолок.
+        if ((t.bubble && row.contains(t.bubble)) || row.querySelector('.cbtns')) return true;
         row.remove();
         extra--;
-      }
+        return false;
+      });
     }
-    const clearHint = () => { const h = msgs.querySelector('.hint'); if (h) h.remove(); };
-    const setHint = (text) => { const h = msgs.querySelector('.hint'); if (h) h.textContent = text; };
+    const clearHint = (t) => {
+      t.rows = t.rows.filter((r) => {
+        if (!r.classList.contains('hint')) return true;
+        r.remove();
+        return false;
+      });
+    };
     // Пустая лента без слов — не «чисто», а непонятно: приглашение из разметки
     // либо названная причина. Лента чистится целиком при смене чата, поэтому
     // подсказку каждый раз ставим заново из шаблона.
-    const showHint = (text) => {
+    const showHint = (t, text) => {
       const h = hintTpl.cloneNode(true);
       if (text != null) h.textContent = text;
-      msgs.appendChild(h);
+      t.rows.push(h);
+      show(t, h);
     };
 
-    function addRow(kind, child) {
-      clearHint();
-      toolsRow = null;
+    function addRow(t, kind, child) {
       const row = el('msg ' + kind);
       row.appendChild(child);
-      const near = atBottom();
-      msgs.appendChild(row);
-      trimLog();
-      keepDown(near);
+      clearHint(t);
+      t.tools = null;
+      const was = near(t);
+      t.rows.push(row);
+      show(t, row);
+      trimLog(t);
+      keepDown(was);
       return child;
     }
-    const addUser = (t) => addRow('user', el('bubble', t));
-    const addErr = (t) => addRow('err', el('bubble', t));
-    const addNote = (t) => addRow('note', el('bubble', t));
-    const startBot = () => { curRaw = ''; return (curBubble = addRow('assistant', el('bubble', ''))); };
+    const addUser = (t, s) => addRow(t, 'user', el('bubble', s));
+    const addErr = (t, s) => addRow(t, 'err', el('bubble', s));
+    const addNote = (t, s) => addRow(t, 'note', el('bubble', s));
+    const startBot = (t) => { t.raw = ''; return (t.bubble = addRow(t, 'assistant', el('bubble', ''))); };
 
     // Тул-вызов — не реплика: тот же чип и та же группа, что у чата сессии
     // (renderer.js, addToolChip), иначе в одной панели было бы два языка для
     // одного и того же события.
-    function addTool(name) {
-      clearHint();
-      const near = atBottom();
-      if (!toolsRow) { toolsRow = el('msg tools'); msgs.appendChild(toolsRow); }
+    function addTool(t, name) {
+      clearHint(t);
+      const was = near(t);
+      if (!t.tools) {
+        t.tools = el('msg tools');
+        t.rows.push(t.tools);
+        show(t, t.tools);
+        trimLog(t);
+      }
       const chip = el('chip');
       chip.appendChild(el('tverb', name));
-      toolsRow.appendChild(chip);
-      curBubble = null;
-      keepDown(near);
+      t.tools.appendChild(chip);
+      t.bubble = null;
+      keepDown(was);
     }
 
-    function setBusy(v) {
-      busy = v;
-      sendBtn.disabled = v;
-      sendBtn.textContent = v ? '…' : '⏎';
-      sub.textContent = v ? 'думает…' : 'готов';
+    /* Шапка и поле ввода — про ОТКРЫТЫЙ разговор, а не про окно. Занят один
+     * чат — в соседний пишут как ни в чём не бывало: ради этого всё и затеяно. */
+    function syncHead() {
+      const t = here();
+      sendBtn.disabled = t.busy;
+      sendBtn.textContent = t.busy ? '…' : '⏎';
+      sub.textContent = t.busy ? 'думает…' : 'готов';
+    }
+    function setBusy(t, v) {
+      t.busy = v;
+      if (shown(t)) syncHead();
+      renderChats(); // занятость соседа обязана быть видна: иначе о нём забудут
     }
 
     // Метка в шапке: разговор тянется из прошлого запуска окна. Держим её до
     // «Нового чата» — иначе после первой реплики человек снова гадает.
-    const setResumed = (on) => { tag.hidden = !on; };
+    const syncTag = () => { tag.hidden = !here().session; };
 
     /* ---------- список разговоров: по чату на проект ---------- */
 
-    /* Все команды списка отвечают одинаково: `{ok:true, current, chats}` либо
-     * `{ok:false, error}`. Отказ показываем вслух — молча оставить прежний
+    /* Все команды списка отвечают одинаково: `{ok:true, current, chats, hidden}`
+     * либо `{ok:false, error}`. Отказ показываем вслух — молча оставить прежний
      * список значило бы соврать о том, куда уйдёт следующая реплика. */
     async function listCmd(what, run) {
       let res;
       try {
         res = await run();
       } catch (e) {
-        addErr(`Не удалось ${what}: ` + errText(e));
+        addErr(here(), `Не удалось ${what}: ` + errText(e));
         return null;
       }
       if (res && res.ok === false) {
-        addErr(`Не удалось ${what}: ` + why(res));
+        addErr(here(), `Не удалось ${what}: ` + why(res));
         return null;
       }
       // Не список — не трогаем показанный: пустая полоска хуже устаревшей.
       if (!res || !Array.isArray(res.chats)) return null;
       chats = res.chats;
+      hidden = Number(res.hidden) || 0; // скрытых в chats нет — их считает ядро
+      const was = chatId;
       chatId = res.current || (chats.find((c) => c.current) || {}).id || null;
+      /* Нить у каждого разговора своя. У занятого верим потоку, а не книжке:
+       * свежий id приехал в init, а демон запишет его только под конец. */
+      for (const c of chats) {
+        if (!c.id) continue;
+        const t = thread(c.id);
+        if (!t.busy) t.session = c.sessionId || null;
+      }
+      if (chatId !== was) draw(here()); // лента обязана совпасть с открытым сразу
       renderChats();
-      const cur = chats.find((c) => c.id === chatId) || null;
-      if (cur) { sessionId = cur.sessionId || null; setResumed(!!sessionId); }
-      return cur;
+      syncHead();
+      syncTag();
+      return chats.find((c) => c.id === chatId) || null;
     }
 
     /* История, а не полоска ярлыков. Полоска чипов держала два-три безымянных
@@ -283,7 +352,10 @@
       chatsRow.textContent = '';
       const head = el('aghead');
       const toggle = el('agtoggle' + (histOpen ? ' on' : ''));
-      toggle.appendChild(el('agtlabel', chats.length ? 'История · ' + chats.length : 'История пуста'));
+      // Скрытое называем и в свёрнутой шапке: колонку раскрывают не каждый день,
+      // а прятать в тишину — тот же способ потерять разговор, только своими руками.
+      const label = chats.length ? 'История · ' + chats.length : 'История пуста';
+      toggle.appendChild(el('agtlabel', hidden ? label + ' · скрыто ' + hidden : label));
       toggle.appendChild(chevron()); // тот же шеврон, что у свёрнутого Insight
       toggle.title = histOpen ? 'Свернуть историю' : 'Все разговоры: открыть, переименовать, убрать';
       toggle.addEventListener('click', () => { histOpen = !histOpen; renderChats(); });
@@ -291,7 +363,19 @@
       // Открытый чат виден и со свёрнутой историей: без него не понять, куда
       // уйдёт следующая реплика.
       const cur = chats.find((c) => c.id && c.id === chatId);
-      if (cur) { const n = el('agcur', cur.name); n.title = 'Открыт: ' + cur.name; head.appendChild(n); }
+      if (cur) {
+        const n = el('agcur' + (busyOf(cur.id) ? ' busy' : ''), cur.name);
+        n.title = 'Открыт: ' + cur.name;
+        head.appendChild(n);
+      }
+      /* Ушёл в соседний разговор — и потерял из виду, что первый ещё пишет.
+       * История свёрнута, поэтому занятых соседей называем прямо в шапке. */
+      const work = chats.filter((c) => c.id && c.id !== chatId && busyOf(c.id));
+      if (work.length) {
+        const b = el('agbusy', work.length === 1 ? '«' + cut(work[0].name, 22) + '» отвечает' : 'ещё ' + work.length + ' отвечают');
+        b.title = 'Отвечают прямо сейчас: ' + work.map((c) => c.name).join(', ');
+        head.appendChild(b);
+      }
       head.appendChild(el('spacer'));
       const add = el('agchat add', '+');
       add.title = 'Новый чат';
@@ -303,34 +387,66 @@
       const list = el('aglist');
       for (const c of chats) list.appendChild(chatRow(c));
       // Ни одного разговора — приглашение, а не пустая полоска.
-      if (!chats.length) list.appendChild(el('agempty', 'Разговоров пока нет — напиши первую реплику, и чат появится здесь.'));
+      if (!chats.length && !hidden) list.appendChild(el('agempty', 'Разговоров пока нет — напиши первую реплику, и чат появится здесь.'));
+      /* Скрытие обратимо только пока о нём помнят: без этой строки спрятанный
+       * разговор ничем не отличается от потерянного, а искать его негде. */
+      if (hidden) {
+        const back = el('aghidden', 'Скрыто ' + hidden + ' · вернуть');
+        back.title = 'Вернуть скрытые разговоры в список — файлы всё это время на диске';
+        back.addEventListener('click', unhideAll);
+        list.appendChild(back);
+      }
       chatsRow.appendChild(list);
     }
 
     /* Строка истории: заголовок от демона (своего фолбэка не заводим — имя
      * человека, первую реплику и «Новый чат» он уже сложил), время и размер.
-     * Разговор с диска отличаем формой — бейджем и отсутствием кнопок, а не
-     * второй краской: чата за ним ещё нет, переименовывать и убирать нечего, а
-     * клик его ПРИВЯЗЫВАЕТ (agent_chat_open), а не переключает. */
+     * Разговор с диска отличаем формой — бейджем, а не второй краской: чата за
+     * ним ещё нет, переименовывать нечего, а клик его ПРИВЯЗЫВАЕТ
+     * (agent_chat_open), а не переключает. Кнопки у него свои: чат убирают
+     * крестиком, а строку с диска — прячут, и это разные вещи. */
     function chatRow(c) {
       const disk = !c.id;
       const open = !!c.id && c.id === chatId;
-      const row = el('agchat' + (open ? ' on' : '') + (disk ? ' disk' : ''));
+      // Занят — точкой и весом имени, как у идущего цикла: одна краска, разная
+      // форма. Цветной светофор на списке из двадцати разговоров — шум.
+      const work = !disk && busyOf(c.id);
+      const row = el('agchat' + (open ? ' on' : '') + (disk ? ' disk' : '') + (work ? ' busy' : ''));
       const main = el('agmain');
       const line = el('agline');
       line.appendChild(el('agname', c.name));
       if (disk) line.appendChild(el('agdisk', 'с диска'));
       main.appendChild(line);
-      main.appendChild(el('agmeta', metaOf(c)));
+      const metaLine = el('agsub');
+      metaLine.appendChild(el('agmeta', metaOf(c)));
+      main.appendChild(metaLine);
       // Превью — только когда оно добавляет: у безымянного чата заголовок и есть
       // первая реплика, и вторая её копия под ней — просто шум.
       if (c.preview && c.preview !== c.name) main.appendChild(el('agprev', c.preview));
       row.appendChild(main);
       row.title = disk
         ? 'Разговор с диска — открыть и завести под него чат'
-        : open ? 'Открыт' : 'Открыть «' + c.name + '»';
+        : (work ? 'Отвечает прямо сейчас · ' : '') + (open ? 'Открыт' : 'Открыть «' + c.name + '»');
       row.addEventListener('click', () => (disk ? openThread(c) : open ? closeHist() : switchTo(c.id)));
-      if (disk) return row;
+      if (disk) {
+        /* Пока у строки с диска не было кнопок вовсе, убрать её было нечем —
+         * ровно с этого вопрос и начался. Крестик здесь ПРЯЧЕТ: файл остаётся,
+         * возврат — одним нажатием. У чата тот же знак значит «удалить чат»,
+         * поэтому подписи разные, а класс не общий: перепутать нечем. */
+        const h = el('aghide', '×');
+        h.title = 'Убрать из списка — разговор останется на диске';
+        h.addEventListener('click', (e) => { e.stopPropagation(); hideThread(c); });
+        /* Забвение необратимо, поэтому оно и не стоит рядом с крестиком: слово в
+         * строке слева, крестик — у правого края. Промахнуться из одного в
+         * другое нечем, а название действия читается, не наведя мышь: скрытым
+         * его знал бы только тот, кто это писал. */
+        const f = el('agforget', 'забыть насовсем');
+        f.title = 'Удалить транскрипт с диска — спросим перед удалением';
+        f.addEventListener('click', (e) => { e.stopPropagation(); askForget(c, row); });
+        metaLine.appendChild(f);
+        row.appendChild(h);
+        return row;
+      }
 
       // Переименование обязано НАХОДИТЬСЯ: клик по открытому чипу знал только
       // тот, кто это писал. Кнопка рядом с именем — на виду.
@@ -378,16 +494,7 @@
     const commitRename = (id, name) =>
       listCmd('переименовать чат', () => api.rename(id, name)).then((c) => { if (!c) renderChats(); });
 
-    /* Пока агент отвечает, менять открытый чат нельзя: дельты потока чатом не
-     * помечены, и ответ дорисовался бы в чужую ленту. Отказ — со словами. */
-    const answering = () => {
-      if (!busy) return false;
-      addNote('Агент сейчас отвечает — чат переключится, когда он закончит.');
-      return true;
-    };
-
     async function createChat(name) {
-      if (answering()) return;
       const cur = await listCmd('создать чат', () => api.create(name));
       if (!cur) return;
       closeHist();
@@ -396,8 +503,13 @@
     }
 
     async function removeChat(c) {
+      /* Уйти из отвечающего чата теперь можно всегда, а вот убрать его — нет:
+       * ответ ещё едет, и уносить ленту у него из-под ног нечестно. */
+      if (busyOf(c.id)) {
+        addNote(here(), '«' + c.name + '» сейчас отвечает — убрать его выйдет, когда закончит.');
+        return;
+      }
       const open = c.id === chatId;
-      if (open && answering()) return; // уносить ленту из-под живого ответа нечестно
       const cur = await listCmd('удалить чат', () => api.remove(c.id));
       if (!cur || !open) return;
       // Удалили тот, что был открыт, — демон уже перевёл нас на соседний.
@@ -405,7 +517,6 @@
     }
 
     async function switchTo(id) {
-      if (answering()) return;
       const cur = await listCmd('переключить чат', () => api.switch(id));
       if (!cur) return;
       closeHist();
@@ -419,9 +530,8 @@
      * него из окна было нельзя. Старого демона просим обновиться вслух —
      * молчащий клик выглядел бы как второй потерянный разговор. */
     async function openThread(c) {
-      if (answering()) return;
       if (!api.open) {
-        addErr('Разговор лежит на диске, а открыть его нечем: эта сборка Jarvis такого ещё не умеет — обнови.');
+        addErr(here(), 'Разговор лежит на диске, а открыть его нечем: эта сборка Jarvis такого ещё не умеет — обнови.');
         return;
       }
       const cur = await listCmd('открыть разговор', () => api.open(c.sessionId));
@@ -431,52 +541,105 @@
       input.focus();
     }
 
+    /* Спрятать и вернуть — обратимая пара, файл диска обе не трогают. Историю
+     * не сворачиваем: прячут обычно подряд несколько строк, и уезжающая из-под
+     * рук колонка тут только мешала бы. */
+    const hideThread = (c) => listCmd('убрать разговор из истории', () => api.hide(c.sessionId));
+    const unhideAll = () => listCmd('вернуть скрытые разговоры', () => api.unhideAll());
+
+    /* Единственное необратимое действие окна — и потому единственное, которое
+     * спрашивает. Спрашивает вслух, кнопкой: невидимый модификатор (alt-клик)
+     * нельзя обнаружить, а необратимое не должно зависеть от того, знал ли
+     * человек про комбинацию. Вопрос называет, ЧТО исчезнет: заголовок и размер
+     * разговора — по ним его и узнают в списке. */
+    function askForget(c, row) {
+      const box = row.parentElement;
+      if (!box) return;
+      const n = Number(c.turns) || 0;
+      const size = n
+        ? ' В нём ' + n + ' ' + window.JarvisMarkdown.plural(n, 'реплика', 'реплики', 'реплик') + ', и вернуть их будет нечем.'
+        : ' Вернуть его будет нечем.';
+      const ask = el('agask');
+      ask.appendChild(el('agasktext', 'Удалить разговор «' + cut(c.name, 60) + '» с диска?' + size));
+      const btns = el('agaskbtns');
+      const yes = el('agbtn danger', 'Удалить');
+      const no = el('agbtn', 'Отмена');
+      // Второе нажатие по уже отвеченному вопросу вернулось бы отказом «нет на
+      // диске» — отказом за то, что человек всё сделал правильно.
+      let sent = false;
+      yes.addEventListener('click', (e) => { e.stopPropagation(); if (!sent) { sent = true; forgetThread(c); } });
+      no.addEventListener('click', (e) => { e.stopPropagation(); renderChats(); });
+      btns.append(yes, no);
+      ask.appendChild(btns);
+      box.replaceChild(ask, row);
+    }
+
+    /* Отказы ядра тут не ошибки, а объяснение порядка: «привязан к чату» и «идёт
+     * ход» говорят, что сделать сначала. Их печатает listCmd; строку возвращаем
+     * на место — файл цел, и вопрос ещё может повториться. */
+    async function forgetThread(c) {
+      if (!(await listCmd('удалить разговор', () => api.forget(c.sessionId)))) renderChats();
+    }
+
     /* Лента конкретного чата: историю просим по id, а не «текущую». Иначе после
      * переключения окно рисовало бы переписку соседа — ровно та тихая неправда,
-     * которую не видно, пока не начнёшь читать. */
+     * которую не видно, пока не начнёшь читать. Прочитанную ленту не
+     * перечитываем: в ней уже лежит и живой поток, которого у демона ещё нет —
+     * транскрипт он допишет только под конец ответа. */
     async function loadHistory(id) {
-      const gen = ++histGen;
-      curBubble = null;
-      toolsRow = null;
-      msgs.textContent = '';
-      showHint('Загружаю переписку…'); // пока едет — видно, что идёт загрузка
+      chatId = id;
+      const t = thread(id);
+      draw(t);
+      syncHead();
+      syncTag();
+      if (t.loaded) return;
+      const gen = ++t.gen;
+      if (!t.rows.length) showHint(t, 'Загружаю переписку…'); // видно, что идёт загрузка
       let res;
       try {
         res = await api.history(id);
       } catch (e) {
-        if (gen !== histGen) return;
-        msgs.textContent = '';
-        addErr('Не удалось прочитать прошлую переписку: ' + errText(e));
+        // Прочитанной ленту не считаем: вернётся человек — попробуем ещё раз.
+        if (gen !== t.gen) return;
+        clearHint(t);
+        addErr(t, 'Не удалось прочитать прошлую переписку: ' + errText(e));
         return;
       }
-      if (gen !== histGen) return; // пока ехало, человек ушёл в другой чат
-      msgs.textContent = '';
+      if (gen !== t.gen) return; // пока ехало, историю этого чата уже прочитали
+      clearHint(t);
       if (res && res.ok === false) {
-        addErr('Не удалось прочитать прошлую переписку: ' + why(res));
+        addErr(t, 'Не удалось прочитать прошлую переписку: ' + why(res));
         return;
       }
+      t.loaded = true;
+      /* Прошлые реплики собираем вне экрана и ставим ПЕРЕД тем, что натекло из
+       * потока, пока история ехала: ответ, начавшийся в закрытом чате, иначе
+       * оказался бы выше собственного вопроса. */
+      const h = { id: HIST, rows: [], bubble: null, tools: null };
       const items = (res && res.items) || [];
       for (const it of items) {
-        if (it.kind === 'tool') addTool(it.text);
-        else if (it.role === 'user') addUser(it.text);
-        else paint(addRow('assistant', el('bubble', '')), it.text);
+        if (it.kind === 'tool') addTool(h, it.text);
+        else if (it.role === 'user') addUser(h, it.text);
+        else paint(addRow(h, 'assistant', el('bubble', '')), it.text);
       }
-      curBubble = null; // история дорисована: следующая дельта начнёт свой пузырь
       const total = (res && res.total) || items.length;
       if (items.length) {
         const n = items.length;
         if (total > n) {
           const word = window.JarvisMarkdown.plural(n, 'реплика', 'реплики', 'реплик');
-          addNote(`Показаны последние ${n} ${word} из ${total}.`);
+          addNote(h, `Показаны последние ${n} ${word} из ${total}.`);
         }
-      } else if (sessionId && res && res.reason) {
+      } else if (t.session && res && res.reason) {
         // Пустая лента при живом разговоре — повод объясниться, а не молчать.
-        showHint('Прошлых реплик здесь нет: ' + res.reason);
-      } else if (sessionId) {
-        showHint('Продолжаю прошлый разговор: агент помнит, о чём шла речь.');
-      } else {
-        showHint(); // разговора ещё не было — приглашение и есть нормальный вид
+        showHint(h, 'Прошлых реплик здесь нет: ' + res.reason);
+      } else if (t.session) {
+        showHint(h, 'Продолжаю прошлый разговор: агент помнит, о чём шла речь.');
+      } else if (!t.rows.length) {
+        showHint(h); // разговора ещё не было — приглашение и есть нормальный вид
       }
+      t.rows = h.rows.concat(t.rows);
+      trimLog(t);
+      draw(t);
     }
 
     // Восстановление: и список чатов, и id разговора, и сами реплики живут у
@@ -489,10 +652,10 @@
         // окно тихо начнёт новый диалог вместо прошлого.
         try {
           const st = await api.state();
-          if (st && st.sessionId) { sessionId = st.sessionId; setResumed(true); }
           if (st && st.chatId) chatId = st.chatId;
+          if (st && st.sessionId) here().session = st.sessionId;
         } catch (e) {
-          addErr('Не удалось узнать про прошлый разговор: ' + errText(e));
+          addErr(here(), 'Не удалось узнать про прошлый разговор: ' + errText(e));
         }
       }
       await loadHistory(chatId);
@@ -501,10 +664,9 @@
     /* Список мог поехать в соседнем окне (вкладка и трей смотрят в одну книжку).
      * При возвращении на вкладку сверяемся с демоном; ленту перерисовываем,
      * только если открытым стал другой чат — иначе переписка мигала бы на
-     * каждом переключении вкладок. Во время ответа не лезем совсем: нить
-     * этого окна сейчас важнее свежести списка. */
+     * каждом переключении вкладок. Идущему ответу это не мешает: он пишет в
+     * ленту своего чата, а не в ту, что на экране. */
     async function refresh() {
-      if (busy) return;
       const was = chatId;
       const cur = await listCmd('обновить список чатов', () => api.chats());
       if (cur && cur.id !== was) await loadHistory(cur.id);
@@ -515,48 +677,57 @@
       try {
         res = await api.reset();
       } catch (e) {
-        addErr('Не удалось начать новый чат: ' + errText(e)); // старый id остался — так и скажем
+        addErr(here(), 'Не удалось начать новый чат: ' + errText(e)); // старый id остался — так и скажем
         return;
       }
       if (res && res.ok === false) {
-        addErr('Не удалось начать новый чат: ' + why(res));
+        addErr(here(), 'Не удалось начать новый чат: ' + why(res));
         return;
       }
       // reset забывает нить открытого чата, имя и место оставляет: список
       // приезжает тем же ответом, и sessionId в нём уже пуст.
       if (res && Array.isArray(res.chats)) {
         chats = res.chats;
+        hidden = Number(res.hidden) || 0;
         chatId = res.current || chatId;
-        renderChats();
       }
-      sessionId = null;
-      setResumed(false);
-      curBubble = null;
-      toolsRow = null;
-      msgs.textContent = '';
-      showHint();
-      setBusy(false);
+      const t = here();
+      t.session = null;
+      t.bubble = null;
+      t.tools = null;
+      t.raw = '';
+      t.rows = [];
+      t.loaded = true; // пустая лента и есть весь новый разговор — читать нечего
+      showHint(t);
+      draw(t);
+      syncTag();
+      setBusy(t, false); // заодно перерисует историю: список приехал этим же ответом
       input.focus();
     }
     newBtn.addEventListener('click', newChat);
 
     async function send() {
+      const t = here(); // занят конкретный разговор, а не окно
       const text = input.value.trim();
-      if (!text || busy) return;
+      if (!text || t.busy) return;
       input.value = '';
       input.style.height = 'auto';
-      addUser(text);
+      addUser(t, text);
       scroll(); // своя реплика — единственное, за чем ленту доводим всегда
-      setBusy(true);
-      curBubble = null;
+      setBusy(t, true);
+      t.bubble = null;
       let res;
       try {
         // Адресуем чатом, а не нитью: у свежего чата нити ещё нет, и по пустой
         // реплика уезжала в тот чат, который в этот момент оказался текущим.
-        res = await api.send(text, chatId, sessionId);
+        res = await api.send(text, t.id, t.session);
+        /* Адресата хода называет ядро: окно могло послать только нить или вовсе
+         * ничего, а события придут помеченными. Перевешиваем разговор на эту
+         * метку сразу — иначе ответ на свою же реплику уедет в чужую ленту. */
+        if (res && res.chatId) relabel(t, res.chatId);
       } catch (e) {
-        addErr('Ошибка запуска агента: ' + errText(e));
-        setBusy(false);
+        addErr(t, 'Ошибка запуска агента: ' + errText(e));
+        setBusy(t, false);
         return;
       }
       /* Отказ приезжает РАЗРЕШЁННЫМ промисом: нет ни claude, ни codex, не
@@ -564,8 +735,8 @@
        * не срабатывает, а событий done/failed уже не будет — «думает…» висело
        * бы вечно, и следующее сообщение отправить было нечем. */
       if (res && res.ok === false) {
-        addErr('Агент не взял сообщение: ' + why(res));
-        setBusy(false);
+        addErr(t, 'Агент не взял сообщение: ' + why(res));
+        setBusy(t, false);
       }
     }
 
@@ -579,45 +750,52 @@
       input.style.height = Math.min(120, input.scrollHeight) + 'px';
     });
 
-    // поток ответа агента
+    /* Поток ответа агента. Событие адресовано ЧАТУ, а не окну: chatId в нагрузке
+     * и решает, чья это лента, — потому и можно уйти во второй разговор, пока
+     * первый пишет. Пометки нет — так шлёт только старый демон, у которого
+     * поток и был один: отдаём открытому. */
     api.onEvent((ev0) => {
       const ev = ev0 || {};
+      const t = ev.chatId ? thread(ev.chatId) : here();
+      // Пошёл поток — разговор занят, даже если реплику отправили в соседнем
+      // окне: иначе там «думает…», а здесь тот же чат выглядит свободным.
+      if (!t.busy && ev.type !== 'done' && ev.type !== 'failed') setBusy(t, true);
       switch (ev.type) {
         case 'init':
           // агент инициализирован (ev.tools — гранто-фильтрованный набор)
-          if (ev.session_id) sessionId = ev.session_id;
+          if (ev.session_id) t.session = ev.session_id;
           break;
         case 'delta': {
-          const near = atBottom();
-          if (!curBubble) startBot();
-          curRaw += ev.text || '';
-          grow(curBubble, curRaw);
-          keepDown(near);
+          const was = near(t);
+          if (!t.bubble) startBot(t);
+          t.raw += ev.text || '';
+          grow(t.bubble, t.raw);
+          keepDown(was);
           break;
         }
         case 'tool_use':
-          addTool(ev.name || '?');
+          addTool(t, ev.name || '?');
           break;
         case 'done':
-          if (ev.session_id) sessionId = ev.session_id;
+          if (ev.session_id) t.session = ev.session_id;
           // финальный текст, если дельт не было
-          if (ev.result && (!curBubble || !curBubble.textContent)) paint(startBot(), ev.result);
+          if (ev.result && (!t.bubble || !t.bubble.textContent)) paint(startBot(t), ev.result);
           // Дельты уже нарисованы дописыванием, и хвост в них дорисован тем же
           // разбором, что и целый текст: пересобирать пузырь заново незачем —
           // это только унесло бы выделение ровно в тот момент, когда его делают.
-          else if (curBubble) grow(curBubble, curRaw);
-          setBusy(false);
-          curBubble = null;
+          else if (t.bubble) grow(t.bubble, t.raw);
+          setBusy(t, false);
+          t.bubble = null;
           break;
         case 'failed':
           // Отказ агента — вслух. Тихо снять «думает…» значило бы соврать, что он ответил.
-          setBusy(false);
-          curBubble = null;
-          addErr(ev.message || 'Агент не ответил и причины не назвал.');
+          setBusy(t, false);
+          t.bubble = null;
+          addErr(t, ev.message || 'Агент не ответил и причины не назвал.');
           if (ev.lost_session) {
-            sessionId = null;
-            setResumed(false);
-            addNote('Прошлый разговор не открылся — дальше говорим с чистого листа. Он не удалён: транскрипт остался на диске.');
+            t.session = null;
+            if (shown(t)) syncTag();
+            addNote(t, 'Прошлый разговор не открылся — дальше говорим с чистого листа. Он не удалён: транскрипт остался на диске.');
           }
           break;
       }
@@ -647,8 +825,13 @@
     api.onConfirm((c0) => {
       const c = c0 || {};
       const cd = c.card || {};
-      clearHint();
-      toolsRow = null;
+      /* Карточка меткой чата НЕ помечена: демон шлёт её из другого места, куда
+       * chat_id не доходит, и при двух ходах в полёте угадать спросившего
+       * нельзя. Не угадываем: вопрос ложится в ту ленту, на которую человек
+       * сейчас смотрит, — решает он, и решает здесь. */
+      const t = here();
+      clearHint(t);
+      t.tools = null;
 
       const box = el('cbox');
       box.appendChild(el('ctitle', cmdTitle(c.id)));
@@ -687,11 +870,11 @@
           line.textContent = 'решение отправлено, жду ответа…';
         },
         settle: (outcome) => {
-          const near = atBottom();
+          const was = near(t);
           btns.remove();
           if (!line.parentElement) box.appendChild(line);
           line.textContent = outcomeText(outcome);
-          keepDown(near);
+          keepDown(was);
         },
       };
       const decide = async (approved) => {
@@ -702,7 +885,7 @@
         try {
           res = await api.confirm(c.nonce, approved);
         } catch (e) {
-          addErr('Решение не дошло до Jarvis: ' + errText(e));
+          addErr(t, 'Решение не дошло до Jarvis: ' + errText(e));
           settle(c.nonce, 'expired');
           return;
         }
@@ -718,11 +901,12 @@
 
       const row = el('msg confirm');
       row.appendChild(box);
-      const near = atBottom();
-      msgs.appendChild(row);
+      const was = near(t);
+      t.rows.push(row);
+      show(t, row);
       openCards.set(c.nonce, card);
-      trimLog();
-      keepDown(near);
+      trimLog(t);
+      keepDown(was);
     });
 
     input.focus();
@@ -752,6 +936,11 @@
           // привязать разговор, найденный на диске (не «открыть окно чата»:
           // окно поднимает agent_chat_window)
           open: (sessionId) => j.agentChatOpen(sessionId),
+          // спрятать строку с диска (файл цел), вернуть все спрятанные и —
+          // с подтверждением выше — удалить транскрипт насовсем
+          hide: (sessionId) => j.agentHistoryHide(sessionId),
+          unhideAll: () => j.agentHistoryUnhideAll(),
+          forget: (sessionId) => j.agentHistoryForget(sessionId),
           send: (message, chatId, sessionId) => j.agentSend(message, chatId, sessionId),
           confirm: (nonce, approved) => j.agentConfirm(nonce, approved),
           confirmDone,
@@ -795,6 +984,9 @@
         rename: (chatId, name) => invoke('agent_chat_rename', { chatId, name }),
         remove: (chatId) => invoke('agent_chat_delete', { chatId }),
         open: (sessionId) => invoke('agent_chat_open', { sessionId }),
+        hide: (sessionId) => invoke('agent_history_hide', { sessionId }),
+        unhideAll: () => invoke('agent_history_unhide_all'),
+        forget: (sessionId) => invoke('agent_history_forget', { sessionId }),
         send: (message, chatId, sessionId) => invoke('agent_send', { message, chatId, sessionId }),
         confirm: (nonce, approved) => invoke('agent_confirm', { nonce, approved }),
         confirmDone,

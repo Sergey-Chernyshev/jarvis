@@ -124,14 +124,14 @@ impl CodexCliHost {
         let Some(bin) = crate::backend::codex::resolve_codex_bin() else {
             crate::log::line("[codex-agent] codex не найден");
             // Молча выйти нельзя: окно осталось бы в «думает…» навсегда.
-            fail(&self.app, "codex не найден — агент не запустился");
+            self.fail("codex не найден — агент не запустился");
             return;
         };
         let home = match ensure_codex_agent_home() {
             Ok(h) => h,
             Err(e) => {
                 crate::log::line(&format!("[codex-agent] CODEX_HOME: {e}"));
-                fail(&self.app, &format!("не смог подготовить окружение codex: {e}"));
+                self.fail(&format!("не смог подготовить окружение codex: {e}"));
                 return;
             }
         };
@@ -169,13 +169,13 @@ impl CodexCliHost {
             Ok(c) => c,
             Err(e) => {
                 crate::log::line(&format!("[codex-agent] spawn: {e}"));
-                fail(&self.app, &format!("codex не запустился: {e}"));
+                self.fail(&format!("codex не запустился: {e}"));
                 return;
             }
         };
         let Some(stdout) = child.stdout.take() else {
             crate::log::line("[codex-agent] нет stdout от codex");
-            fail(&self.app, "агент не отдал вывод");
+            self.fail("агент не отдал вывод");
             return;
         };
         let mut reader = BufReader::new(stdout).lines();
@@ -188,7 +188,7 @@ impl CodexCliHost {
                     let _ = child.kill().await;
                     // Нарушение изоляции — тоже итог хода, и человек должен его
                     // увидеть: без события окно ждёт ответа, которого не будет.
-                    fail(&self.app, &msg);
+                    self.fail(&msg);
                     return;
                 }
                 CodexLine::Events(evs) => {
@@ -212,7 +212,7 @@ impl CodexCliHost {
                                 saved = Some(fresh);
                             }
                         }
-                        emit_event(&self.app, &ev);
+                        crate::agent::emit_event(&self.app, &self.chat_id, &ev);
                     }
                 }
             }
@@ -225,27 +225,17 @@ impl CodexCliHost {
                 Ok(st) => st.code().map(|c| c.to_string()).unwrap_or_else(|| "сигнал".into()),
                 Err(_) => "?".into(),
             };
-            fail(&self.app, &format!("агент оборвался без ответа (код {code})"));
+            self.fail(&format!("агент оборвался без ответа (код {code})"));
         }
     }
-}
 
-/// Отказ наружу событием — единая точка, чтобы «тихих» веток выхода не
-/// заводилось (как `failure` у claude-хоста).
-fn fail(app: &tauri::AppHandle, message: &str) {
-    emit_event(
-        app,
-        &AgentEvent::Failed { message: message.to_string(), lost_session: false },
-    );
-}
-
-fn emit_event(app: &tauri::AppHandle, ev: &AgentEvent) {
-    use tauri::Emitter;
-    if matches!(ev, AgentEvent::Other) {
-        return;
-    }
-    if let Err(e) = app.emit("agent:event", ev) {
-        crate::log::line(&format!("[codex-agent] emit error: {e}"));
+    /// Отказ наружу событием — единая точка, чтобы «тихих» веток выхода не
+    /// заводилось (как `fail` у claude-хоста). Метку берёт из хоста, эмитит
+    /// общим `agent::emit_event`: своего эмита у хоста нет, и непомеченному
+    /// событию отсюда не выйти.
+    fn fail(&self, message: &str) {
+        let ev = AgentEvent::Failed { message: message.to_string(), lost_session: false };
+        crate::agent::emit_event(&self.app, &self.chat_id, &ev);
     }
 }
 
@@ -304,5 +294,23 @@ mod tests {
         );
         assert_eq!(classify_codex_line("not json"), CodexLine::Events(vec![]));
         assert_eq!(classify_codex_line(""), CodexLine::Events(vec![]));
+    }
+
+    /// Своего эмита у хоста нет: и события потока, и ветки отказов (не найден
+    /// бинарь, не поднялось окружение, нет stdout, kill за изоляцию, обрыв без
+    /// ответа) уходят через `agent::emit_event` с меткой из хоста. Непомеченное
+    /// событие отсюда окно бы не разложило по чатам — это и был баг.
+    #[test]
+    fn every_outgoing_path_is_tagged_by_the_host() {
+        let src = include_str!("codex_agent.rs");
+        // Иглы склеиваем: иначе тест нашёл бы сам себя.
+        let own_emit = format!("{}{}", "emit(\"agent", ":event\"");
+        assert!(!src.contains(&own_emit), "свой эмит вернулся — метка снова необязательна");
+        let call = format!("crate::agent::{}", "emit_event(");
+        let calls: Vec<&str> = src.lines().filter(|l| l.contains(&call)).collect();
+        assert!(!calls.is_empty(), "хост обязан эмитить через общий помеченный эмит");
+        for l in calls {
+            assert!(l.contains("&self.chat_id"), "эмит без метки чата: {l}");
+        }
     }
 }

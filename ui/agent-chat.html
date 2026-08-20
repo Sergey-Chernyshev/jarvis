@@ -84,6 +84,17 @@
     min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   }
   .agchat.on .agname{ font-weight:600 }
+  /* Разговор, который отвечает прямо сейчас. Точка и вес имени — те же, что у
+     идущего цикла (theme.css, .lp-row.running): краска одна на всё, занятость
+     читается формой. Без этого уходишь в соседний чат и теряешь первый из виду */
+  .agchat.busy .agname{ font-weight:600 }
+  .agchat.busy .agname::before, .agcur.busy::before{
+    content:''; display:inline-block; width:6px; height:6px; margin-right:6px;
+    border-radius:50%; background: var(--accent); animation: agPulse 1.6s ease-in-out infinite;
+  }
+  @keyframes agPulse{ 0%,100%{ opacity:1 } 50%{ opacity:.35 } }
+  /* Сколько соседей пишет — в шапке: история свёрнута, и в ней их не видно */
+  .agbusy{ flex:none; font-size:11.5px; color: var(--ink-mute); white-space:nowrap }
   /* Разговор, найденный на диске: чата за ним ещё нет. Отличаем формой —
      контурный бейдж, как у удалённого узла в строке сессии, — а не краской */
   .agdisk{
@@ -91,13 +102,38 @@
     border-radius: var(--r-pill); padding:1px 6px;
     box-shadow: inset 0 0 0 1px var(--line-strong);
   }
+  .agsub{ display:flex; align-items:baseline; gap:8px; min-width:0 }
   .agmeta{ font-size:11.5px; color: var(--ink-faint); font-variant-numeric: tabular-nums }
   .agprev{ font-size:12px; color: var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-  /* Правка и крестик тихие: их зовут раз в месяц, а заголовок читают каждый раз */
-  .agedit, .agchat .agx{ flex:none; color: var(--ink-faint); opacity:0; font-size:13px; line-height:1 }
-  .agchat:hover .agedit, .agchat:hover .agx, .agchat.on .agedit, .agchat.on .agx{ opacity:1 }
-  .agedit:hover{ color: var(--ink) }
+  /* Правка и крестики тихие: их зовут раз в месяц, а заголовок читают каждый раз */
+  .agedit, .agchat .agx, .aghide{ flex:none; color: var(--ink-faint); opacity:0; font-size:13px; line-height:1 }
+  .agchat:hover .agedit, .agchat:hover .agx, .agchat:hover .aghide, .agchat.on .agedit, .agchat.on .agx{ opacity:1 }
+  .agedit:hover, .aghide:hover{ color: var(--ink) }
   .agchat .agx:hover{ color: var(--danger) }
+  /* Забвение необратимо и потому названо словом, а не знаком: его видно без
+     наведения, но стоит оно у метаданных, а не рядом с крестиком */
+  .agforget{ flex:none; font-size:11.5px; color: var(--ink-faint); line-height:1.4 }
+  .agforget:hover{ color: var(--danger) }
+  /* Вопрос встаёт на место самой строки: решают там же, где нажали, и промах в
+     соседний разговор исключён. Тональная плашка — как у .lp-note.bad */
+  .agask{
+    display:flex; flex-direction:column; gap:8px; flex:none;
+    padding:9px 10px; border-radius: var(--r-row); background: var(--danger-soft);
+  }
+  .agasktext{ font-size:12.5px; line-height:1.45; color: var(--ink) }
+  .agaskbtns{ display:flex; gap:6px }
+  .agbtn{
+    padding:5px 12px; border-radius: var(--r-chip); border:0; cursor:default;
+    background: var(--paper); color: var(--ink); font: 600 12.5px/1.35 var(--font);
+  }
+  .agbtn.danger{ background: var(--danger); color: var(--on-accent) }
+  .agbtn:hover{ filter: brightness(1.04) }
+  /* «Скрыто N · вернуть» — единственный след скрытия: без него оно тихая потеря */
+  .aghidden{
+    flex:none; margin-top:4px; padding:6px 10px; border-radius: var(--r-row);
+    font-size:12px; color: var(--ink-mute); cursor:default;
+  }
+  .aghidden:hover{ background: var(--fill-1); color: var(--ink) }
   .agempty{ padding:10px; font-size:12.5px; color: var(--ink-faint); line-height:1.5 }
   /* «+» остаётся чипом в шапке истории: завести чат — не строка списка */
   .agchat.add{

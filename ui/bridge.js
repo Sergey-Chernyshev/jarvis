@@ -125,6 +125,12 @@
     // Привязать к чату разговор, найденный на диске, и открыть его. Не «открыть
     // окно чата» — окно поднимает agent_chat_window.
     agentChatOpen: (sessionId) => invoke('agent_chat_open', { sessionId }),
+    // Убрать разговор из списка, оставив файл на диске, — и вернуть все убранные.
+    // Забыть насовсем стирает транскрипт: подтверждение спрашивает окно, ядро
+    // его не дублирует.
+    agentHistoryHide: (sessionId) => invoke('agent_history_hide', { sessionId }),
+    agentHistoryUnhideAll: () => invoke('agent_history_unhide_all'),
+    agentHistoryForget: (sessionId) => invoke('agent_history_forget', { sessionId }),
     agentSend: (message, chatId, sessionId) => invoke('agent_send', { message, chatId, sessionId }),
     agentConfirm: (nonce, approved) => invoke('agent_confirm', { nonce, approved }),
     onAgentEvent: (cb) => on('agent:event', cb),

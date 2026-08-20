@@ -53,7 +53,12 @@ function makeBridge(calls, data = {}) {
   /* Список сшивается с диском, как у демона: сперва чаты из настроек, потом
    * разговоры, найденные в транскриптах и ни к кому не привязанные (id: null).
    * Именно этот хвост и делает удалённый чат достижимым. */
-  const threads = () => (data.agentThreads || []).filter((t) => !chats.some((c) => c.sessionId === t.sessionId));
+  /* Спрятанные и забытые — как у демона: скрытая строка выпадает из списка, но
+   * файл на диске цел (его считает `hidden`), а забытая исчезает вместе с ним. */
+  const hidden = new Set(data.agentHidden || []);
+  const gone = new Set();
+  const threads = () =>
+    (data.agentThreads || []).filter((t) => !gone.has(t.sessionId) && !chats.some((c) => c.sessionId === t.sessionId));
   const book = (next, edit) => {
     if (edit) chats = edit(chats);
     if (next) current = next;
@@ -61,7 +66,8 @@ function makeBridge(calls, data = {}) {
     return {
       ok: true,
       current,
-      chats: chats.map((c) => ({ ...c, current: c.id === current })).concat(threads()),
+      chats: chats.map((c) => ({ ...c, current: c.id === current })).concat(threads().filter((t) => !hidden.has(t.sessionId))),
+      hidden: threads().filter((t) => hidden.has(t.sessionId)).length,
     };
   };
   const target = {
@@ -101,6 +107,16 @@ function makeBridge(calls, data = {}) {
       data.agentOpen ||
       book('c9', (list) =>
         list.concat({ ...(data.agentThreads || []).find((t) => t.sessionId === sessionId), id: 'c9' })),
+    // Спрятать строку с диска и вернуть все спрятанные: файла обе не касаются
+    agentHistoryHide: async (sessionId) => data.agentHide || (hidden.add(sessionId), book()),
+    agentHistoryUnhideAll: async () => { hidden.clear(); return book(); },
+    // Забыть насовсем: транскрипт исчезает, и пометка «скрыт» вместе с ним
+    agentHistoryForget: async (sessionId) => {
+      if (data.agentForget) return data.agentForget;
+      gone.add(sessionId);
+      hidden.delete(sessionId);
+      return book();
+    },
     // Историю иногда нужно подержать в пути — тогда тест даёт функцию.
     agentChatHistory: async (chatId) =>
       (typeof data.agentHistory === 'function' ? data.agentHistory(chatId) : data.agentHistory) || { ok: true, items: [] },
@@ -751,6 +767,139 @@ test('удалённый чат остаётся в истории разгов�
   assert.ok(disk, 'чат убрали — и разговор пропал вместе с ним: ' + rowNames(doc).join(' · '));
   assert.match(disk.textContent, /Главный разговор/);
   assert.match(disk.textContent, /249 реплик/, 'разговор в истории, но без размера его не узнать');
+});
+
+/* ---------- убрать и забыть ----------
+ *
+ * «Почему я не могу удалить некоторые чаты»: у строки, найденной на диске, не
+ * было ни одной кнопки — убрать её из списка было нечем. Теперь их две, и они
+ * значат разное. Крестик ПРЯЧЕТ: файл остаётся, возврат одним нажатием. Забыть
+ * насовсем стирает транскрипт и потому спрашивает вслух. */
+
+const DISK_ROW = (doc) => doc.querySelector('#agChats .agchat.disk');
+const withThread = (over = {}) => ({
+  agentChats: CHATS,
+  agentThreads: [THREAD('a25d01f8', 'Изучите текущие сессии')],
+  ...over,
+});
+
+test('крестик у строки с диска прячет её, а транскрипт не трогает', async () => {
+  const { doc, calls } = await boot(withThread());
+  await openAgent(doc);
+  openHist(doc);
+  const hide = DISK_ROW(doc).querySelector('.aghide');
+  assert.ok(hide, 'строку с диска по-прежнему нечем убрать: ' + DISK_ROW(doc).innerHTML);
+  hide.dispatchEvent(click(doc));
+  await settle();
+
+  assert.ok(calls.some((c) => c[0] === 'agentHistoryHide' && c[1] === 'a25d01f8'), 'крестик ничего не спрятал');
+  assert.equal(calls.filter((c) => c[0] === 'agentHistoryForget').length, 0, 'скрытие обернулось удалением файла');
+  assert.equal(doc.querySelectorAll('#agChats .agchat.disk').length, 0, 'спрятанная строка осталась в списке');
+  assert.deepEqual(rowNames(doc), ['Джарвис', 'Выборы', 'Грант'], 'вместе со строкой ушёл чей-то чат');
+});
+
+test('«скрыто N · вернуть» видно в истории и возвращает одним нажатием', async () => {
+  const { doc, calls } = await boot(withThread());
+  await openAgent(doc);
+  openHist(doc);
+  DISK_ROW(doc).querySelector('.aghide').dispatchEvent(click(doc));
+  await settle();
+
+  const back = doc.querySelector('#agChats .aghidden');
+  assert.ok(back, 'разговор спрятан бесследно: ' + doc.getElementById('agChats').textContent);
+  assert.match(back.textContent, /Скрыто 1 · вернуть/);
+  // и в свёрнутой шапке: колонку раскрывают не каждый день, а прятать легко
+  assert.match(doc.querySelector('#agChats .agtoggle').textContent, /скрыто 1/);
+
+  back.dispatchEvent(click(doc));
+  await settle();
+  assert.ok(calls.some((c) => c[0] === 'agentHistoryUnhideAll'), 'возврат не уехал демону');
+  assert.ok(DISK_ROW(doc), 'вернули — а строка не вернулась: ' + rowNames(doc).join(' · '));
+  assert.equal(doc.querySelectorAll('#agChats .aghidden').length, 0, 'прятать нечего, а строка про скрытое висит');
+});
+
+/* Необратимое действие обязано спросить — и спросить видимой кнопкой: alt-клик
+ * нельзя обнаружить, и человек стирал бы разговор, не зная, что согласился. */
+test('забыть насовсем спрашивает и до ответа ничего не удаляет', async () => {
+  const { doc, calls } = await boot(withThread());
+  await openAgent(doc);
+  openHist(doc);
+  const f = DISK_ROW(doc).querySelector('.agforget');
+  assert.ok(f, 'удалить разговор с диска нечем: ' + DISK_ROW(doc).innerHTML);
+  f.dispatchEvent(click(doc));
+  await settle();
+
+  const ask = doc.querySelector('#agChats .agask');
+  assert.ok(ask, 'удаление случилось без вопроса: ' + doc.getElementById('agChats').textContent);
+  assert.equal(calls.filter((c) => c[0] === 'agentHistoryForget').length, 0, 'спросили — и удалили, не дожидаясь ответа');
+  // вопрос называет, ЧТО исчезнет: по заголовку и размеру разговор и узнают
+  assert.match(ask.textContent, /Изучите текущие сессии/, 'вопрос не назвал разговор: ' + ask.textContent);
+  assert.match(ask.textContent, /249 реплик/, 'вопрос не сказал, сколько теряется: ' + ask.textContent);
+  assert.doesNotMatch(ask.textContent, /!/, 'спокойный тон разменяли на восклицание');
+  assert.equal(doc.querySelectorAll('#agChats .agchat.disk').length, 0, 'строка и вопрос показаны разом — есть куда промахнуться');
+
+  const yes = ask.querySelector('.agbtn.danger');
+  yes.dispatchEvent(click(doc));
+  yes.dispatchEvent(click(doc)); // повтор по уже отвеченному вопросу
+  await settle();
+  const forgot = calls.filter((c) => c[0] === 'agentHistoryForget').map((c) => c[1]);
+  assert.deepEqual(forgot, ['a25d01f8'], 'согласие не дошло до демона или уехало дважды');
+  assert.equal(doc.querySelectorAll('#agChats .agchat.disk').length, 0, 'забытый разговор остался в истории');
+  assert.deepEqual(rowNames(doc), ['Джарвис', 'Выборы', 'Грант'], 'вместе с разговором ушёл чей-то чат');
+});
+
+test('«Отмена» возвращает строку и оставляет транскрипт на месте', async () => {
+  const { doc, calls } = await boot(withThread());
+  await openAgent(doc);
+  openHist(doc);
+  DISK_ROW(doc).querySelector('.agforget').dispatchEvent(click(doc));
+  await settle();
+  const no = [...doc.querySelectorAll('#agChats .agask .agbtn')].find((b) => /Отмена/.test(b.textContent));
+  assert.ok(no, 'из вопроса нет выхода без удаления');
+  no.dispatchEvent(click(doc));
+  await settle();
+
+  assert.equal(calls.filter((c) => c[0] === 'agentHistoryForget').length, 0, 'отмена удалила разговор');
+  assert.ok(DISK_ROW(doc), 'строка не вернулась после отмены: ' + rowNames(doc).join(' · '));
+});
+
+/* Отказы ядра тут не ошибки, а порядок действий: «идёт ход» и «привязан к чату»
+ * говорят, что сделать сначала. Съесть их молча — значит показать список, из
+ * которого непонятно, почему разговор всё ещё здесь. */
+test('отказ «идёт ход» виден словами, а строка возвращается на место', async () => {
+  const { doc } = await boot(withThread({
+    agentForget: { ok: false, error: 'по разговору a25d01f8 прямо сейчас идёт ход — дождись ответа агента' },
+  }));
+  const log = await openAgent(doc);
+  openHist(doc);
+  DISK_ROW(doc).querySelector('.agforget').dispatchEvent(click(doc));
+  await settle();
+  doc.querySelector('#agChats .agask .agbtn.danger').dispatchEvent(click(doc));
+  await settle();
+
+  assert.match(log.textContent, /дождись ответа агента/, 'отказ съеден молча: ' + log.textContent);
+  assert.ok(log.querySelector('.msg.err'), 'отказ нарисован не как отказ');
+  assert.ok(DISK_ROW(doc), 'разговор цел, а строка пропала: ' + rowNames(doc).join(' · '));
+});
+
+/* Два крестика в одном списке значат разное. Перепутать их — это либо стёртый
+ * чат вместо спрятанной строки, либо наоборот; поэтому у них разные подписи, а
+ * не только разные обработчики. */
+test('крестик чата и крестик строки с диска зовут разное и подписаны по-разному', async () => {
+  const { doc, calls } = await boot(withThread());
+  await openAgent(doc);
+  openHist(doc);
+  const x = rowBy(doc, /Джарвис/).querySelector('.agx');
+  const hide = DISK_ROW(doc).querySelector('.aghide');
+  assert.notEqual(x.title, hide.title, 'два крестика обещают одно и то же');
+  assert.match(x.title, /чат/, 'крестик чата молчит про чат: ' + x.title);
+  assert.match(hide.title, /останется на диске/, 'скрытие не сказало, что файл цел: ' + hide.title);
+  assert.equal(DISK_ROW(doc).querySelectorAll('.agx').length, 0, 'на строке с диска обещают удалить чат, которого нет');
+
+  x.dispatchEvent(click(doc));
+  await settle();
+  assert.ok(calls.some((c) => c[0] === 'agentChatDelete' && c[1] === 'c1'), 'крестик чата перестал удалять чат');
+  assert.equal(calls.filter((c) => c[0] === 'agentHistoryHide').length, 0, 'крестик чата спрятал строку вместо удаления чата');
 });
 
 /* Заголовок собирает демон: имя человека → первая реплика → «Новый чат». Свой

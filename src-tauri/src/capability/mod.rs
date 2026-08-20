@@ -339,6 +339,52 @@ mod tests {
         assert!(!names.contains(&"settings.set"));
     }
 
+    // sessions.rename — side-effect (подтверждение обязательно), но класса
+    // Settings у неё быть НЕ может: гейт читает аргументы settings-капабилити
+    // как патч конфига, и 'session_id' сразу упёрся бы в SETTINGS_ALLOWLIST.
+    #[test]
+    fn sessions_rename_is_a_confirmed_capability_the_agent_can_see() {
+        let reg = super::build_registry();
+        let cap = reg.get("sessions.rename").expect("sessions.rename должна быть в реестре");
+        assert!(cap.meta.class.is_side_effect(), "переименование не должно идти без спроса");
+        assert_ne!(cap.meta.class, RiskClass::Settings, "аргументы — не патч настроек");
+        // агент обязан понимать по описанию, когда звать и как снять имя
+        assert!(cap.meta.description.contains("переименовать"));
+        assert!(cap.meta.description.contains("Пустая строка"));
+        assert_eq!(cap.meta.input_schema["required"], json!(["session_id", "title"]));
+        let tools = reg.tools_json(&Consumer::agent().grant);
+        let names: Vec<&str> =
+            tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"sessions.rename"), "агенту инструмент не виден");
+    }
+
+    /// Видеть инструмент мало — надо, чтобы вызов доходил до хендлера. С классом
+    /// Settings гейт отклонил бы его на самоэскалации («ключ 'session_id' не в
+    /// allowlist»), и переименование голосом не работало бы вообще.
+    #[tokio::test]
+    async fn agent_really_gets_through_the_gate_to_rename() {
+        let meta = super::build_registry().get("sessions.rename").unwrap().meta.clone();
+        let mut reg: Registry<()> = Registry::new();
+        reg.register(meta, make_handler(|_ctx: (), args| async move { Ok(json!({ "did": args })) }));
+        let args = json!({ "session_id": "abc", "title": "БД" });
+        let out = super::invoke(
+            &reg, (), &Consumer::agent(), "sessions.rename", args,
+            &AutoApprove, &MemAudit::new(), GateConfig::default(),
+        )
+        .await
+        .expect("агент обязан дойти до переименования");
+        assert_eq!(out.value["did"]["title"], "БД");
+
+        // …но только с подтверждением: молчаливый отказ пользователя = отказ вызова.
+        let denied = super::invoke(
+            &reg, (), &Consumer::agent(), "sessions.rename",
+            json!({ "session_id": "abc", "title": "БД" }),
+            &AutoDeny, &MemAudit::new(), GateConfig::default(),
+        )
+        .await;
+        assert!(matches!(denied, Err(GateError::Rejected)), "переименование прошло без спроса");
+    }
+
     // R4/least-priv: агент НЕ видит audit.query в tools/list (denied_ids).
     #[test]
     fn agent_tools_exclude_audit_query() {

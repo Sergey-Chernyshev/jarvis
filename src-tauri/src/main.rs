@@ -226,6 +226,7 @@ fn main() {
             ipc::history_get,
             ipc::usage_session,
             ipc::session_set_pin,
+            ipc::session_rename,
             ipc::session_kill,
             ipc::session_set_model,
             ipc::session_set_effort,

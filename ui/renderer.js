@@ -315,8 +315,9 @@ function filtered() {
   const ordered = orderedSessions();
   const q = queryEl.value.trim().toLowerCase();
   if (!q) return ordered;
+  // имя чата ищется наравне с проектом: его для того и дают, чтобы находить
   return ordered.filter((s) =>
-    `${s.project || ''} ${s.detail || ''} ${s.agent || ''} ${s.remote || ''}`.toLowerCase().includes(q));
+    `${s.project || ''} ${s.name || ''} ${s.detail || ''} ${s.agent || ''} ${s.remote || ''}`.toLowerCase().includes(q));
 }
 
 function render() {
@@ -325,6 +326,9 @@ function render() {
   // его на всё время чата: статусы не обновлялись, а открытый чат никак не
   // выделялся среди строк.
   if (listEl.hidden) return;
+  // пока правят имя — список не трогаем: пуш состояния прилетает несколько раз
+  // в секунду и стёр бы поле вместе с курсором
+  if (renaming) return;
   // hover-выбор разоружаем на каждую перерисовку: дальше его снова взведёт только
   // реальное mousemove (см. listEl.mousemove). Иначе фон-обновления (data push)
   // пересоздают строки под неподвижным курсором → mouseenter таскает выделение.
@@ -362,6 +366,7 @@ function render() {
   list.forEach((s, i) => {
     const row = document.createElement('div');
     row.className = `row ${s.status}${i === sel ? ' selected' : ''}`;
+    row.dataset.sid = s.id; // по нему правка имени находит свою строку
     row.title = [s.remote ? `узел ${s.remote}` : null, s.cwd, s.title, ...(s.todoList || [])]
       .filter(Boolean).join('\n');
 
@@ -410,13 +415,24 @@ function render() {
       hostBadge.textContent = host;
     }
 
+    // имя чата, данное человеком: оно и есть заголовок этой строки
+    let chatName = null;
+    if (s.name) {
+      chatName = document.createElement('span');
+      chatName.className = 'badge chatname';
+      chatName.textContent = s.name;
+      chatName.title = `Своё имя чата${s.autoTitle ? ` (авто: ${s.autoTitle})` : ''} — клик, чтобы изменить`;
+      chatName.addEventListener('click', (e) => { e.stopPropagation(); startRename(s); });
+    }
+
     const summary = document.createElement('span');
     summary.className = 'summary';
     // контекст по убыванию точности: текущая задача → саммари последних задач → промпт → ai-title
     const live = s.detail || STATUS_LABEL[s.status] || '';
+    // имя уже стоит чипом — вторым эхом в этой же строке оно не нужно
     const ctx = s.task
       ? `${s.taskProgress ? s.taskProgress + ' · ' : ''}${s.task}`
-      : (s.summary || s.lastPrompt || s.title || '');
+      : (s.summary || s.lastPrompt || (s.name ? '' : s.title) || '');
     if (s.status === 'working' || s.status === 'waiting') {
       summary.textContent = ctx && ctx !== live ? `${ctx} — ${live}` : (ctx || live);
     } else {
@@ -429,6 +445,7 @@ function render() {
     time.title = startTitle(s.createdAt);
 
     row.append(dot, name);
+    if (chatName) row.appendChild(chatName);
     if (branch) row.appendChild(branch);
     if (agentBadge) row.appendChild(agentBadge);
     if (remoteBadge) row.appendChild(remoteBadge);
@@ -3170,6 +3187,64 @@ function renderArgMode() {
   setTimeout(() => focusArgField(), 20);
 }
 
+/* ---------- своё имя чата ---------- */
+
+// id сессии, чьё имя правят прямо сейчас. Пока он стоит, render() не
+// перерисовывает список (см. render): иначе поле умрёт от первого же пуша.
+let renaming = null;
+
+function startRename(s) {
+  if (!s) return;
+  // прошлую правку бросаем ДО создания новой: иначе blur старого поля прилетит
+  // уже на новое и погасит его
+  if (renaming) { renaming = null; render(); }
+  const row = [...listEl.children].find((r) => r.dataset && r.dataset.sid === s.id);
+  // Говорим вслух: молча ничего не открыть — худший вид отказа.
+  if (!row) { showToast('Строка чата не видна — открой список'); return; }
+  renaming = s.id;
+
+  const inp = document.createElement('input');
+  inp.className = 'rename';
+  inp.value = s.name || '';
+  inp.placeholder = s.autoTitle || 'имя чата';
+  inp.maxLength = 60; // тот же потолок, что у демона
+  inp.addEventListener('keydown', (e) => {
+    e.stopPropagation(); // хоткеи панели не должны мешать печатать
+    if (e.key === 'Enter') { e.preventDefault(); commitRename(s.id, inp.value); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
+  });
+  inp.addEventListener('click', (e) => e.stopPropagation()); // клик в поле — не открытие чата
+  inp.addEventListener('blur', () => cancelRename());
+  const chip = row.querySelector('.badge.chatname');
+  if (chip) row.replaceChild(inp, chip); // правим на месте самого имени
+  else row.insertBefore(inp, row.querySelector('.summary'));
+  inp.focus();
+  inp.select?.();
+}
+
+function cancelRename() {
+  if (!renaming) return;
+  renaming = null;
+  render();
+}
+
+// Пустое значение снимает имя — так же, как в капабилити sessions.rename.
+function commitRename(id, value) {
+  renaming = null;
+  window.jarvis.renameSession(id, value).then((res) => {
+    if (!res || res.ok !== true) showToast((res && res.error) || 'Не получилось переименовать');
+    else if (!res.name) showToast('Имя снято — снова автозаголовок');
+    render();
+  });
+}
+
+// Сессия под курсором списка либо открытая в чате — цель ⌘R и меню действий.
+function currentSession() {
+  return view === 'list' ? filtered()[sel]
+    : view === 'chat' ? state.find((x) => x.id === chatSessionId)
+    : null;
+}
+
 /* ---------- завершение сессии ---------- */
 
 // Подтверждение вторым нажатием, как у остальных разрушительных кнопок панели:
@@ -3216,6 +3291,8 @@ function actionItems() {
   if (s) {
     items.push({ label: 'Перейти в терминал', key: K(KN('enter')), run: () => focusTerminal(s.id, s.project) });
     items.push({ label: s.pinned ? 'Открепить' : 'Закрепить', key: K('P'), run: () => window.jarvis.setPin(s.id, !s.pinned) });
+    items.push({ label: s.name ? 'Переименовать чат' : 'Дать чату имя', key: K('R'), run: () => startRename(s) });
+    if (s.name) items.push({ label: 'Вернуть автозаголовок', key: K('R', { shift: true }), run: () => commitRename(s.id, '') });
     if (s.tmuxPane) items.push({ label: 'Где этот терминал?', key: K('G'), run: () => window.jarvis.pingTerminal(s.id) });
     items.push({
       label: killArmedFor(s.id) ? 'Точно завершить?' : 'Завершить сессию',
@@ -4952,6 +5029,17 @@ window.addEventListener('keydown', async (e) => {
       : view === 'chat' ? state.find((x) => x.id === chatSessionId)
       : null;
     if (s) window.jarvis.setPin(s.id, !s.pinned);
+    return;
+  }
+
+  // ⌘R — имя чата, ⇧⌘R — вернуть авто. Поле поиска не помеха (как и у ⌘P):
+  // само поле правки имени свои нажатия не пропускает наверх.
+  if (isMod(e) && (e.key === 'r' || e.key === 'R')) {
+    e.preventDefault();
+    const s = currentSession();
+    if (!s) return;
+    if (e.shiftKey) { if (s.name) commitRename(s.id, ''); }
+    else startRename(s);
     return;
   }
 

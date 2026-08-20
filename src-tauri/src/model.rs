@@ -165,8 +165,20 @@ pub struct Session {
     /* ----- идентичность: ветка, заголовок, модель, effort ----- */
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// ВИДИМЫЙ заголовок чата — им пользуются все потребители (список, тосты,
+    /// голосовой снимок, tmux). Не пишется напрямую: собирается `retitle()` из
+    /// `name` и `auto_title`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Имя, которое дал человек. Живёт не здесь: источник истины — настройки
+    /// (`chatNames`), потому что сессия уходит из реестра по session-end, а имя
+    /// обязано пережить и её, и перезапуск.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Автозаголовок из транскрипта. Хранится отдельно от `title`, чтобы снятие
+    /// имени вернуло заголовок сразу, а не после следующего разбора транскрипта.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Момент ручного выбора модели — транскрипт не должен сразу перетирать.
@@ -223,6 +235,21 @@ impl Session {
         }
     }
 
+    /// Единственное место сборки видимого заголовка: имя человека сильнее
+    /// автозаголовка. Звать после любой правки `name`/`auto_title` — иначе
+    /// автогенерация затрёт имя, а сброс не вернёт заголовок.
+    pub fn retitle(&mut self) {
+        self.title = self.name.clone().or_else(|| self.auto_title.clone());
+    }
+
+    /// Старый state.json знает только `title`, и это был автозаголовок. Без
+    /// усыновления первый же `retitle()` стёр бы заголовок восстановленной сессии.
+    pub fn adopt_legacy_title(&mut self) {
+        if self.auto_title.is_none() {
+            self.auto_title = self.title.clone();
+        }
+    }
+
     pub fn new(id: String, now: i64) -> Self {
         Session {
             id,
@@ -241,6 +268,85 @@ pub fn sort_snapshot(list: &mut [Session]) {
             .cmp(&b.status.order())
             .then(b.updated_at.cmp(&a.updated_at))
     });
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    #[test]
+    fn user_name_beats_the_generated_title() {
+        let mut s = Session::new("sid".into(), 0);
+        s.auto_title = Some("Fix the migration parser".into());
+        s.retitle();
+        assert_eq!(s.title.as_deref(), Some("Fix the migration parser"));
+
+        s.name = Some("БД".into());
+        s.retitle();
+        assert_eq!(s.title.as_deref(), Some("БД"), "имя человека сильнее генерации");
+
+        // автогенерация продолжает работать, но видимое имя не трогает
+        s.auto_title = Some("Другой заголовок из транскрипта".into());
+        s.retitle();
+        assert_eq!(s.title.as_deref(), Some("БД"), "транскрипт затёр имя");
+    }
+
+    #[test]
+    fn dropping_the_name_brings_the_auto_title_back() {
+        let mut s = Session::new("sid".into(), 0);
+        s.auto_title = Some("Разбор транскрипта".into());
+        s.name = Some("БД".into());
+        s.retitle();
+
+        s.name = None;
+        s.retitle();
+        assert_eq!(
+            s.title.as_deref(),
+            Some("Разбор транскрипта"),
+            "сброс обязан вернуть автозаголовок сразу, не дожидаясь разбора"
+        );
+
+        // автозаголовка ещё не было — снятие имени оставляет строку без заголовка
+        let mut fresh = Session::new("sid2".into(), 0);
+        fresh.name = Some("БД".into());
+        fresh.retitle();
+        fresh.name = None;
+        fresh.retitle();
+        assert_eq!(fresh.title, None);
+    }
+
+    // Обратная совместимость: в старом state.json есть только `title`.
+    #[test]
+    fn legacy_state_file_keeps_its_title() {
+        let raw = r#"{"id":"abc","status":"idle","detail":"","createdAt":1,"updatedAt":2,
+            "title":"Старый заголовок","project":"jarvis"}"#;
+        let mut s: Session = serde_json::from_str(raw).expect("старая запись обязана читаться");
+        assert_eq!(s.auto_title, None);
+        s.adopt_legacy_title();
+        s.retitle();
+        assert_eq!(s.title.as_deref(), Some("Старый заголовок"), "заголовок потерян");
+        assert_eq!(s.auto_title.as_deref(), Some("Старый заголовок"));
+        assert_eq!(s.project.as_deref(), Some("jarvis"), "остальные поля целы");
+    }
+
+    // Панель читает те же поля, что демон пишет в state.json.
+    #[test]
+    fn name_and_auto_title_survive_a_round_trip() {
+        let mut s = Session::new("abc".into(), 7);
+        s.auto_title = Some("Auto".into());
+        s.name = Some("БД".into());
+        s.retitle();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"autoTitle\""), "camelCase для панели: {json}");
+        let back: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name.as_deref(), Some("БД"));
+        assert_eq!(back.auto_title.as_deref(), Some("Auto"));
+        assert_eq!(back.title.as_deref(), Some("БД"));
+
+        // безымянная сессия лишних ключей в файл не льёт
+        let plain = serde_json::to_string(&Session::new("x".into(), 0)).unwrap();
+        assert!(!plain.contains("autoTitle") && !plain.contains("\"name\""));
+    }
 }
 
 #[cfg(test)]

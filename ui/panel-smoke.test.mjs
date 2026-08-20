@@ -72,6 +72,8 @@ function makeBridge(calls, data = {}) {
     // главный агент: нить разговора и прошлая переписка
     agentChatState: async () => ({ sessionId: data.agentSession || null }),
     agentChatHistory: async () => data.agentHistory || { ok: true, items: [] },
+    // своё имя чата: по умолчанию удачно, тест на отказ подсовывает свой ответ
+    renameSession: async (id, title) => data.rename || { ok: true, name: title || null, title },
   };
   return new Proxy(target, {
     get(obj, prop) {
@@ -382,6 +384,111 @@ test('сообщение из вкладки уходит в ту же нить 
     calls.some((c) => c[0] === 'agentSend' && c[1] === 'привет' && c[2] === 's-42'),
     'реплика ушла мимо продолжаемого разговора: ' + JSON.stringify(calls.filter((c) => c[0] === 'agentSend')),
   );
+});
+
+/* Своё имя чата (спека «имена чатов»): имя сильнее автозаголовка, правится из
+ * строки и из меню действий, снимается пустым значением, а отказ — со словами. */
+
+// Сессия, которой человек уже дал имя: title приходит с бэкенда уже собранным.
+const NAMED = {
+  ...SESSION,
+  status: 'done',
+  detail: '',
+  name: 'БД',
+  autoTitle: 'Fix the migration parser',
+  title: 'БД',
+};
+
+async function withList(data) {
+  const b = await boot(data);
+  b.subs.onState(data.state);
+  await new Promise((r) => setTimeout(r, 0));
+  return b;
+}
+
+// Открыть правку через меню действий (⌘K) — тот же путь, что у человека.
+function openRename(doc, re = /чату имя|Переименовать чат/) {
+  doc.getElementById('actionsBtn').dispatchEvent(click(doc));
+  const item = [...doc.querySelectorAll('#actionsPop .ap-item')].find((r) => re.test(r.textContent));
+  assert.ok(item, 'пункта переименования нет в меню: ' + doc.getElementById('actionsPop').textContent);
+  item.dispatchEvent(click(doc));
+  return doc.querySelector('#list input.rename');
+}
+
+test('имя чата стоит в строке и не дублируется автозаголовком', async () => {
+  const { doc } = await withList({ state: [NAMED] });
+  const chip = doc.querySelector('#list .badge.chatname');
+  assert.ok(chip, 'имени чата в строке нет');
+  assert.equal(chip.textContent, 'БД');
+  const summary = doc.querySelector('#list .summary').textContent;
+  assert.ok(!summary.includes('Fix the migration'), 'автозаголовок повторяет имя: ' + summary);
+
+  // безымянная сессия живёт как раньше — на автозаголовке
+  const { doc: d2 } = await withList({ state: [{ ...SESSION, status: 'done', detail: '', title: 'Авто' }] });
+  assert.equal(d2.querySelector('#list .badge.chatname'), null, 'чип появился без имени');
+  assert.match(d2.querySelector('#list .summary').textContent, /Авто/);
+});
+
+test('имя чата ищется наравне с проектом', async () => {
+  const { doc } = await withList({ state: [NAMED, { ...SESSION, id: 's2', project: 'другое' }] });
+  const q = doc.getElementById('query');
+  q.value = 'бд';
+  q.dispatchEvent(new doc.defaultView.Event('input', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 0));
+  const rows = [...doc.querySelectorAll('#list .row')];
+  assert.equal(rows.length, 1, 'по имени чата нашлось не то: ' + doc.getElementById('list').textContent);
+  assert.equal(rows[0].dataset.sid, 's1');
+});
+
+test('правка имени уходит в демон по ↵ и не гасится пушем состояния', async () => {
+  const { doc, calls, subs } = await withList({ state: [NAMED] });
+  const inp = openRename(doc, /Переименовать чат/);
+  assert.ok(inp, 'поле правки не открылось');
+  assert.equal(inp.value, 'БД', 'в поле не подставлено текущее имя');
+
+  // демон продолжает слать состояние — поле обязано пережить это
+  subs.onState([NAMED]);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(doc.querySelector('#list input.rename'), 'пуш состояния стёр поле правки');
+
+  inp.value = 'Миграции';
+  inp.dispatchEvent(key(doc, 'Enter'));
+  await new Promise((r) => setTimeout(r, 0));
+  const call = calls.find((c) => c[0] === 'renameSession');
+  assert.ok(call, 'имя никуда не ушло');
+  assert.deepEqual([call[1], call[2]], ['s1', 'Миграции']);
+});
+
+test('пустое значение снимает имя и возвращает автозаголовок', async () => {
+  const { doc, calls } = await withList({ state: [NAMED] });
+  const inp = openRename(doc, /Переименовать чат/);
+  inp.value = '   ';
+  inp.dispatchEvent(key(doc, 'Enter'));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(calls.find((c) => c[0] === 'renameSession').slice(1), ['s1', '   ']);
+
+  // и отдельным пунктом меню — без открытия поля
+  const { doc: d2, calls: c2 } = await withList({ state: [NAMED] });
+  d2.getElementById('actionsBtn').dispatchEvent(click(d2));
+  const back = [...d2.querySelectorAll('#actionsPop .ap-item')].find((r) => /автозаголовок/.test(r.textContent));
+  assert.ok(back, 'пункта возврата к автозаголовку нет у именованного чата');
+  back.dispatchEvent(click(d2));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(c2.find((c) => c[0] === 'renameSession').slice(1), ['s1', '']);
+});
+
+test('отказ переименования называет причину, а не молчит', async () => {
+  const { doc } = await withList({
+    state: [NAMED],
+    rename: { ok: false, error: 'имя длиннее 60 символов (77) — сократи' },
+  });
+  const inp = openRename(doc, /Переименовать чат/);
+  inp.value = 'очень длинное имя';
+  inp.dispatchEvent(key(doc, 'Enter'));
+  await new Promise((r) => setTimeout(r, 0));
+  const toast = doc.querySelector('.toast');
+  assert.ok(toast, 'отказ прошёл молча — ни слова человеку');
+  assert.match(toast.textContent, /сократи/);
 });
 
 test('сессия завершается вторым нажатием, а не первым', async () => {

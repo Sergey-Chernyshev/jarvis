@@ -232,6 +232,34 @@
     box-shadow: inset 0 0 0 1px var(--line-strong);
   }
 
+  /* имя, данное человеком: чтение важнее автозаголовка, поэтому чернила
+     обычные, а не приглушённые. Кликом открывается правка */
+  .badge.chatname {
+    color: var(--ink);
+    font-weight: 600;
+    cursor: default;
+    max-width: 200px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .badge.chatname:hover { background: var(--fill-2); }
+
+  /* поле правки имени: живёт вместо чипа прямо в строке */
+  .row input.rename {
+    font: inherit;
+    font-size: 12.5px;
+    color: var(--ink);
+    background: var(--surface);
+    border: 0;
+    box-shadow: inset 0 0 0 1px var(--accent);
+    border-radius: var(--r-pill);
+    padding: 2px 8px;
+    flex: none;
+    width: 200px;
+    outline: none;
+  }
+
   .gitbranch {
     font-size: 12px;
     color: var(--ink-faint);
@@ -1354,6 +1382,9 @@
   [data-mode='window'] .row .gitbranch,
   [data-mode='window'] .row .badge,
   [data-mode='window'] .row .summary { display: none; }
+  /* …кроме своего имени чата: в узком сайдбаре оно как раз и различает строки
+     (имя проекта рядом ужимается само — у него flex:1 и min-width:0) */
+  [data-mode='window'] .row .badge.chatname { display: inline; max-width: 120px; }
   [data-mode='window'] .row .time { font-size: 12px; }
 
   [data-mode='window'] .content { grid-area: detail; }

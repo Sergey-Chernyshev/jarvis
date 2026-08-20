@@ -1504,10 +1504,12 @@ pub async fn history_get(app: AppHandle, machine: Option<String>) -> Value {
         // См. `machines_list`: паника здесь оставила бы вкладку «Проекты»
         // белой навсегда, потому что обещание в панели не завершится.
         let d2 = d.clone();
-        return std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let mut projects = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             d2.history.projects(&d2.usage)
         }))
         .unwrap_or_else(|_| json!({ "error": "история не собралась — подробности в логе" }));
+        apply_chat_names(&d, &mut projects);
+        return projects;
     }
     let Some(node) = d.remotes.node(&machine) else {
         return json!([]);
@@ -1517,8 +1519,37 @@ pub async fn history_get(app: AppHandle, machine: Option<String>) -> Value {
         Err(e) => return json!({ "error": format!("{e}: {}", node.why()) }),
     };
     match client.projects().await {
-        Ok(list) => remote_projects_to_history(&machine, list),
+        Ok(list) => {
+            let mut out = remote_projects_to_history(&machine, list);
+            apply_chat_names(&d, &mut out);
+            out
+        }
         Err(e) => json!({ "error": ellipsize(&one_line(&e), 160) }),
+    }
+}
+
+/// Имя, данное человеком, поверх заголовков истории. История собирает их сама
+/// из транскриптов и про переименование не знает — а чат в «Проектах» тот же
+/// самый, и называться в двух списках по-разному он не должен.
+fn apply_chat_names(d: &Arc<Daemon>, projects: &mut Value) {
+    overlay_names(projects, |id| d.chat_name(id));
+}
+
+/// Чистая часть наложения имён — источник имён отдельно, чтобы проверялось
+/// без демона.
+fn overlay_names(projects: &mut Value, name_of: impl Fn(&str) -> Option<String>) {
+    let Some(arr) = projects.as_array_mut() else { return };
+    for p in arr {
+        let Some(sessions) = p.get_mut("sessions").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for s in sessions {
+            let Some(name) = s.get("id").and_then(Value::as_str).and_then(&name_of) else {
+                continue;
+            };
+            s["name"] = json!(name);
+            s["title"] = json!(name);
+        }
     }
 }
 
@@ -1574,6 +1605,34 @@ pub fn usage_session(app: AppHandle, id: String) -> Value {
 }
 
 /* ================= управление сессией ================= */
+
+/// Дать чату своё имя (или снять его пустой строкой) — общее ядро для панели и
+/// капабилити `sessions.rename`. Отказ всегда с причиной: молча не переименовать
+/// хуже, чем не переименовать вслух.
+pub(crate) fn rename_core(d: &Arc<Daemon>, session_id: &str, title: &str) -> Value {
+    match d.rename_chat(session_id, title) {
+        Ok((name, shown)) => {
+            crate::log::line(&format!(
+                "[rename] чат {} → {}",
+                ellipsize(session_id, 8),
+                name.as_deref().unwrap_or("автозаголовок")
+            ));
+            json!({ "ok": true, "name": name, "title": shown })
+        }
+        Err(e) => err(e),
+    }
+}
+
+#[tauri::command]
+pub async fn session_rename(app: AppHandle, session_id: String, title: String) -> Value {
+    let d = Daemon::get(&app);
+    via_gate_panel(
+        &d,
+        "sessions.rename",
+        json!({ "session_id": session_id, "title": title }),
+    )
+    .await
+}
 
 #[tauri::command]
 pub fn session_set_pin(app: AppHandle, session_id: String, pinned: bool) -> Value {
@@ -4185,6 +4244,32 @@ pub async fn session_revert(app: AppHandle, session_id: String, path: String) ->
 #[cfg(test)]
 mod turn_ipc_tests {
     use super::*;
+
+    /// «Проекты» строят заголовки из транскриптов и про переименование не знают —
+    /// имя обязано лечь поверх, иначе один чат зовётся в двух списках по-разному.
+    #[test]
+    fn chat_name_overrides_the_history_title() {
+        let mut projects = json!([{
+            "project": "jarvis",
+            "sessions": [
+                { "id": "abc", "title": "Fix the migration parser" },
+                { "id": "xyz", "title": "Другой чат" },
+            ],
+        }]);
+        overlay_names(&mut projects, |id| (id == "abc").then(|| "БД".to_string()));
+        assert_eq!(projects[0]["sessions"][0]["title"], "БД");
+        assert_eq!(projects[0]["sessions"][0]["name"], "БД");
+        assert_eq!(
+            projects[0]["sessions"][1]["title"], "Другой чат",
+            "безымянный чат остаётся на автозаголовке"
+        );
+        assert!(projects[0]["sessions"][1].get("name").is_none());
+
+        // ошибка сборки истории приходит объектом, а не списком — не спотыкаемся
+        let mut broken = json!({ "error": "история не собралась" });
+        overlay_names(&mut broken, |_| Some("БД".into()));
+        assert_eq!(broken["error"], "история не собралась");
+    }
 
     /* Песочница задачи на НАСТОЯЩЕМ git: без этого «изоляция» — обещание на
      * словах. CI гоняет тест на macos-14, то есть там, где живёт панель. */

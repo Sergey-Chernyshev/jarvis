@@ -130,9 +130,75 @@ struct LastToast {
     question: Option<Value>,
 }
 
+/* ================= имена чатов, данные человеком ================= */
+
+/// Ключ настроек с именами чатов: `{ "<sid>": "имя" }`.
+const CHAT_NAMES_KEY: &str = "chatNames";
+/// Потолок длины имени — как у автозаголовка (`ellipsize(…, 60)`): длиннее в
+/// строку списка всё равно не влезет.
+pub const MAX_CHAT_NAME: usize = 60;
+
+/// Имена из настроек. Ключа нет (старый файл) или он не объект — пусто, без шума.
+fn chat_names_of(root: &Value) -> HashMap<String, String> {
+    root.get(CHAT_NAMES_KEY)
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Что делать с именем: `Ok(Some)` — поставить, `Ok(None)` — снять, `Err` —
+/// отказ с причиной. Чистая: решение принимается без демона, потому и проверяемо.
+///
+/// `known` — сессия в реестре, `named` — имя у этого id уже записано. Снять или
+/// поменять имя можно и у ушедшей сессии (запись-то осталась), а вот дать имя
+/// тому, чего мы никогда не видели, значит молча копить мусор в настройках.
+///
+/// Слишком длинное имя — отказ, а не молчаливая обрезка: автор должен узнать,
+/// что до списка доехало не то, что он написал. Управляющие символы вычищаем:
+/// этот же текст уезжает именем tmux-окна.
+pub fn rename_decision(raw: &str, known: bool, named: bool) -> Result<Option<String>, String> {
+    if !known && !named {
+        return Err("сессия не найдена — переименовывать нечего".into());
+    }
+    // управляющие меняем на пробел, а не выбрасываем: иначе перенос строки
+    // склеил бы соседние слова
+    let name = one_line(
+        &raw.chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>(),
+    );
+    if name.is_empty() {
+        return Ok(None);
+    }
+    let len = name.chars().count();
+    if len > MAX_CHAT_NAME {
+        return Err(format!(
+            "имя длиннее {MAX_CHAT_NAME} символов ({len}) — сократи"
+        ));
+    }
+    Ok(Some(name))
+}
+
+/// Восстановление заголовка записи из state.json: усыновить легаси-заголовок,
+/// подставить имя из настроек, пересобрать видимый. Чистая — чтобы «имя пережило
+/// перезапуск» проверялось без живого демона.
+fn restore_title(s: &mut Session, names: &HashMap<String, String>) {
+    s.adopt_legacy_title();
+    s.name = names.get(&s.id).cloned();
+    s.retitle();
+}
+
 pub struct Daemon {
     pub app: AppHandle,
     pub sessions: Mutex<HashMap<String, Session>>,
+    /// Имена чатов, данные человеком: sid → имя. Зеркало `chatNames` из настроек;
+    /// реестр сессий для этого не годится — из него сессия исчезает по session-end.
+    names: Mutex<HashMap<String, String>>,
     pub settings: settings::Store,
     pub translator: ru::Translator,
     pub usage: std::sync::Arc<crate::usage::Usage>,
@@ -318,6 +384,7 @@ impl Daemon {
         Self {
             app,
             sessions: Mutex::new(HashMap::new()),
+            names: Mutex::new(chat_names_of(&root)),
             settings,
             translator: ru::Translator::load(),
             usage: std::sync::Arc::new(crate::usage::Usage::load()),
@@ -440,20 +507,76 @@ impl Daemon {
             return;
         };
         let cutoff = now_ms() - 24 * 3600 * 1000; // суточный мусор не тащим
+        let names = self.names.lock().unwrap().clone();
         let mut sessions = self.sessions.lock().unwrap();
         for mut s in arr {
             if s.id.is_empty() || s.updated_at <= cutoff {
                 continue;
             }
-            // англ. заголовки доезжают переводом из кэша
-            if let Some(t) = &s.title {
-                s.title = Some(self.translator.ru(t).0);
+            restore_title(&mut s, &names);
+            // англ. заголовки доезжают переводом из кэша; имя человека не трогаем
+            if let Some(t) = &s.auto_title {
+                s.auto_title = Some(self.translator.ru(t).0);
+                s.retitle();
             }
             if let Some(t) = &s.task {
                 s.task = Some(self.translator.ru(t).0);
             }
             sessions.insert(s.id.clone(), s);
         }
+    }
+
+    /* ================= имена чатов ================= */
+    /* Имя переживает и сессию, и демона, поэтому лежит в настройках, а не в
+       реестре: из реестра сессия исчезает по session-end, а имя должно
+       подхватиться, если ту же сессию поднимут через --resume. */
+
+    pub fn chat_name(&self, sid: &str) -> Option<String> {
+        self.names.lock().unwrap().get(sid).cloned()
+    }
+
+    /// Дать чату имя или снять его пустой строкой; возвращает (имя, что видно).
+    ///
+    /// Записываем сперва на диск, и только потом в память: если настройки не
+    /// сохранились, имя не должно жить до перезапуска призраком.
+    pub fn rename_chat(
+        self: &std::sync::Arc<Self>,
+        sid: &str,
+        raw: &str,
+    ) -> Result<(Option<String>, Option<String>), String> {
+        let known = self.sessions.lock().unwrap().contains_key(sid);
+        let named = self.names.lock().unwrap().contains_key(sid);
+        let name = rename_decision(raw, known, named)?;
+
+        let next: HashMap<String, String> = {
+            let mut m = self.names.lock().unwrap().clone();
+            match &name {
+                Some(n) => m.insert(sid.to_string(), n.clone()),
+                None => m.remove(sid),
+            };
+            m
+        };
+        let saved = self
+            .settings
+            .save(serde_json::Map::from_iter([(
+                CHAT_NAMES_KEY.to_string(),
+                serde_json::to_value(&next).map_err(|e| e.to_string())?,
+            )]));
+        // settings.save при отказе записи возвращает ПРЕЖНИЕ настройки — молча
+        // разойтись с диском тут значит потерять имя на следующем старте.
+        if chat_names_of(&saved).get(sid) != name.as_ref() {
+            return Err("имя не сохранилось в настройках — подробности в логе".into());
+        }
+        *self.names.lock().unwrap() = next;
+
+        let mut shown = name.clone();
+        self.with_session(sid, |s| {
+            s.name = name.clone();
+            s.retitle(); // снятие имени тут же возвращает автозаголовок
+            shown = s.title.clone();
+        });
+        self.push();
+        Ok((name, shown))
     }
 
     /* ================= русификация ================= */
@@ -489,19 +612,25 @@ impl Daemon {
         }
     }
 
-    /// Долить готовые переводы в реестр (title/task хранят оригинал до перевода).
+    /// Долить готовые переводы в реестр (autoTitle/task хранят оригинал до
+    /// перевода). Имя человека переводу не подлежит — как он назвал, так и есть.
     fn apply_translations(self: &std::sync::Arc<Self>) {
         let mut changed = false;
         {
             let mut sessions = self.sessions.lock().unwrap();
             for s in sessions.values_mut() {
-                for field in [&mut s.title, &mut s.task] {
+                let mut hit = false;
+                for field in [&mut s.auto_title, &mut s.task] {
                     if let Some(v) = field {
                         if let Some(tr) = self.translator.lookup(v) {
                             *v = tr;
-                            changed = true;
+                            hit = true;
                         }
                     }
+                }
+                if hit {
+                    s.retitle();
+                    changed = true;
                 }
             }
         }
@@ -1020,6 +1149,9 @@ impl Daemon {
         }
 
         let mut effects: Vec<Effect> = Vec::new();
+        // до лока реестра: сессию могли переименовать в прошлой жизни и поднять
+        // через --resume — имя ждёт её в настройках
+        let known_name = self.chat_name(&sid);
         {
             let mut sessions = self.sessions.lock().unwrap();
 
@@ -1051,9 +1183,12 @@ impl Daemon {
                 }
             }
 
-            let s = sessions
-                .entry(sid.clone())
-                .or_insert_with(|| Session::new(sid.clone(), now));
+            let s = sessions.entry(sid.clone()).or_insert_with(|| {
+                let mut s = Session::new(sid.clone(), now);
+                s.name = known_name;
+                s.retitle();
+                s
+            });
 
             /* ---- общие поля события ---- */
             if let Some(cwd) = p.get("cwd").and_then(Value::as_str) {
@@ -1224,7 +1359,7 @@ impl Daemon {
                     } else {
                         s.status = Status::Working;
                         track_activity(s, tool, p.get("tool_input"));
-                        if s.branch.is_none() && s.title.is_none() {
+                        if s.branch.is_none() && s.auto_title.is_none() {
                             effects.push(Effect::RefreshMeta { sid: sid.clone() });
                             // ожила после рестарта демона
                         }
@@ -1783,17 +1918,21 @@ impl Daemon {
                         changed = true;
                     }
                 }
+                // автозаголовок кладём всегда, а видимый собирает retitle():
+                // имя человека сильнее генерации, иначе разбор транскрипта
+                // затирал бы его при каждом ходе
                 if let Some(t) = title {
-                    if s.title.as_deref() != Some(&t) {
-                        s.title = Some(t.clone());
+                    if s.auto_title.as_deref() != Some(&t) {
+                        s.auto_title = Some(t);
+                        s.retitle();
                         changed = true;
-                        // обратный канал: терминал подписывает сам себя
-                        if let Some(pane) = &s.tmux_pane {
-                            let name = ellipsize(&t, 24);
-                            if s.renamed_to.as_deref() != Some(&name) {
-                                rename = Some((pane.clone(), name));
-                            }
-                        }
+                    }
+                }
+                // обратный канал: терминал подписывает сам себя — тем, что видно
+                if let (Some(pane), Some(t)) = (&s.tmux_pane, s.title.as_deref()) {
+                    let name = ellipsize(t, 24);
+                    if s.renamed_to.as_deref() != Some(&name) {
+                        rename = Some((pane.clone(), name));
                     }
                 }
                 if let Some(m) = model {
@@ -2645,6 +2784,73 @@ fn evict_pane(
         sessions.remove(g);
     }
     ghosts
+}
+
+#[cfg(test)]
+mod chat_name_tests {
+    use super::*;
+
+    #[test]
+    fn empty_value_means_drop_the_name() {
+        assert_eq!(rename_decision("", true, false), Ok(None));
+        assert_eq!(rename_decision("   \n ", true, true), Ok(None));
+    }
+
+    #[test]
+    fn name_is_collapsed_to_one_clean_line() {
+        // тот же текст уезжает именем tmux-окна — управляющим символам там не место
+        assert_eq!(
+            rename_decision("  БД\u{7}  и\nмиграции ", true, false),
+            Ok(Some("БД и миграции".into()))
+        );
+    }
+
+    // Ни один отказ не молчит: у каждого названа причина.
+    #[test]
+    fn refusals_name_their_reason() {
+        let long = "я".repeat(MAX_CHAT_NAME + 1);
+        let e = rename_decision(&long, true, false).unwrap_err();
+        assert!(e.contains(&MAX_CHAT_NAME.to_string()) && e.contains("сократи"), "{e}");
+        // ровно на границе — ещё имя, а не отказ
+        assert!(rename_decision(&"я".repeat(MAX_CHAT_NAME), true, false).is_ok());
+
+        let e = rename_decision("БД", false, false).unwrap_err();
+        assert!(e.contains("не найдена"), "{e}");
+        // …а вот снять имя у ушедшей сессии можно: запись-то осталась
+        assert_eq!(rename_decision("", false, true), Ok(None));
+        assert_eq!(rename_decision("Иначе", false, true), Ok(Some("Иначе".into())));
+    }
+
+    #[test]
+    fn names_are_read_from_settings_and_missing_key_is_not_an_error() {
+        // старый settings.json ключа не знает — читается без потерь
+        assert!(chat_names_of(&serde_json::json!({ "theme": "dark" })).is_empty());
+        assert!(chat_names_of(&serde_json::json!({ "chatNames": "мусор" })).is_empty());
+        let m = chat_names_of(&serde_json::json!({
+            "chatNames": { "abc": "БД", "": "ничьё", "def": "", "ghi": 7 }
+        }));
+        assert_eq!(m.get("abc").map(String::as_str), Some("БД"));
+        assert_eq!(m.len(), 1, "пустые и не-строки не имена");
+    }
+
+    /// Главное обещание: имя переживает перезапуск демона. state.json его не
+    /// хранит как истину — истина в настройках, и она подхватывается при разборе.
+    #[test]
+    fn name_survives_a_restart_and_reset_gives_the_auto_title_back() {
+        let names = HashMap::from([("abc".to_string(), "БД".to_string())]);
+        // ...даже если запись писала прошлая версия и знает только title
+        let raw = r#"{"id":"abc","status":"done","detail":"","createdAt":1,"updatedAt":2,
+            "title":"Fix the migration parser"}"#;
+        let mut s: Session = serde_json::from_str(raw).unwrap();
+        restore_title(&mut s, &names);
+        assert_eq!(s.title.as_deref(), Some("БД"), "имя не пережило перезапуск");
+        assert_eq!(s.auto_title.as_deref(), Some("Fix the migration parser"));
+
+        // сняли имя (в настройках его больше нет) — вернулся автозаголовок
+        let mut again: Session = serde_json::from_str(raw).unwrap();
+        restore_title(&mut again, &HashMap::new());
+        assert_eq!(again.title.as_deref(), Some("Fix the migration parser"));
+    }
 }
 
 #[cfg(test)]

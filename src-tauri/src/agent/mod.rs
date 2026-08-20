@@ -448,7 +448,7 @@ fn failure(message: &str, lost_session: bool) -> AgentEvent {
 }
 
 /// Запомнить id разговора в настройках.
-fn remember_chat_session(app: &tauri::AppHandle, id: &str) {
+pub(crate) fn remember_chat_session(app: &tauri::AppHandle, id: &str) {
     let mut patch = serde_json::Map::new();
     patch.insert(CHAT_KEY.to_string(), Value::String(id.to_string()));
     crate::daemon::Daemon::get(app).settings.set_block(CHAT_BLOCK, patch);

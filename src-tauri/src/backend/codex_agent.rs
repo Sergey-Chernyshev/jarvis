@@ -166,6 +166,9 @@ impl CodexCliHost {
         };
         let Some(stdout) = child.stdout.take() else { return };
         let mut reader = BufReader::new(stdout).lines();
+        let mut saved = crate::agent::saved_chat_session(
+            &crate::daemon::Daemon::get(&self.app).settings.load(),
+        );
         while let Ok(Some(line)) = reader.next_line().await {
             match classify_codex_line(&line) {
                 CodexLine::Kill(msg) => {
@@ -175,6 +178,17 @@ impl CodexCliHost {
                 }
                 CodexLine::Events(evs) => {
                     for ev in evs {
+                        // Как и claude-хост, запоминаем нить чата: без этого чат
+                        // на чистом Codex остаётся одноразовым — окно закрыли,
+                        // и вернуться к разговору неоткуда.
+                        if let Some(id) = crate::agent::event_session_id(&ev) {
+                            if let Some(fresh) =
+                                crate::agent::session_id_to_persist(saved.as_deref(), id)
+                            {
+                                crate::agent::remember_chat_session(&self.app, &fresh);
+                                saved = Some(fresh);
+                            }
+                        }
                         emit_event(&self.app, &ev);
                     }
                 }

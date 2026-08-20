@@ -3025,6 +3025,131 @@ pub fn agent_chat_history(app: AppHandle, chat_id: Option<String>) -> Value {
     json!({ "ok": true, "sessionId": sid, "items": &items[start..], "total": items.len() })
 }
 
+/* ----- авто-цепочка: режим, шапка, стоп ----- */
+
+/// Чат, к которому относится команда цепочки. Тот же резолв, что у отправки:
+/// окно могло не передать id (после перезапуска) — тогда открытый чат.
+fn chain_chat(app: &AppHandle, chat_id: Option<String>) -> Result<String, String> {
+    let book = crate::agent::chat_book(app);
+    crate::agent::chat_for_send(&book, chat_id.as_deref(), None).map(|c| c.id.clone())
+}
+
+fn chain_ok(app: &AppHandle, chat_id: &str) -> Value {
+    json!({ "ok": true, "state": crate::agent::chain::state(app, chat_id) })
+}
+
+/// Ответ команде + рассылка среза остальным окнам: чат бывает открыт не в одном.
+fn chain_changed(app: &AppHandle, chat_id: &str) -> Value {
+    crate::agent::chain::push_state(app, chat_id);
+    chain_ok(app, chat_id)
+}
+
+/// Состояние цепочки для шапки чата: номер захода, что в работе, режим.
+#[tauri::command]
+pub fn agent_chain_state(app: AppHandle, chat_id: Option<String>) -> Value {
+    match chain_chat(&app, chat_id) {
+        Ok(id) => chain_ok(&app, &id),
+        Err(e) => err(e),
+    }
+}
+
+/// Включить/выключить «продолжать самому». Режим ложится в настройки чата —
+/// он обязан пережить перезапуск, иначе Джарвис молча перестанет продолжать.
+#[tauri::command]
+pub fn agent_chain_mode(app: AppHandle, chat_id: Option<String>, auto: bool) -> Value {
+    use crate::agent::chain::Mode;
+    let id = match chain_chat(&app, chat_id) {
+        Ok(id) => id,
+        Err(e) => return err(e),
+    };
+    let mode = if auto { Mode::Auto } else { Mode::Ask };
+    let mut book = crate::agent::chat_book(&app);
+    if let Err(e) = book
+        .set_mode(&id, mode)
+        .and_then(|()| crate::agent::save_chat_book(&app, &book))
+    {
+        return err(e);
+    }
+    crate::agent::chain::chains().set_mode(&id, mode);
+    chain_changed(&app, &id)
+}
+
+/// Стоп рвёт ЦЕПОЧКУ, а не текущий ход: завершения сессии больше никого не
+/// разбудят, пока человек не включит режим снова. Режим тоже гасим — иначе
+/// первый же следующий заход агента тихо перезапустил бы цепочку.
+#[tauri::command]
+pub fn agent_chain_stop(app: AppHandle, chat_id: Option<String>) -> Value {
+    use crate::agent::chain::Mode;
+    let id = match chain_chat(&app, chat_id) {
+        Ok(id) => id,
+        Err(e) => return err(e),
+    };
+    crate::agent::chain::chains().stop(&id);
+    let mut book = crate::agent::chat_book(&app);
+    if let Err(e) = book
+        .set_mode(&id, Mode::Ask)
+        .and_then(|()| crate::agent::save_chat_book(&app, &book))
+    {
+        return err(e);
+    }
+    chain_changed(&app, &id)
+}
+
+/// Привязать чат к сессии вручную («следи за этой»). Обычно привязка возникает
+/// сама — когда Джарвис отправляет промпт в сессию из этого чата.
+#[tauri::command]
+pub fn agent_chain_watch(app: AppHandle, chat_id: Option<String>, session_id: String) -> Value {
+    let id = match chain_chat(&app, chat_id) {
+        Ok(id) => id,
+        Err(e) => return err(e),
+    };
+    let sid = session_id.trim();
+    if sid.is_empty() {
+        return err("не сказано, за какой сессией следить");
+    }
+    if Daemon::get(&app).session(sid).is_none() {
+        return err(format!("сессии {sid} нет в списке — следить не за чем"));
+    }
+    let mode = crate::agent::chain::mode_of(&app, &id);
+    crate::agent::chain::chains().watch(&id, sid, mode);
+    chain_changed(&app, &id)
+}
+
+/// Отправить предложенный заход (кнопка в ручном режиме). `text` — если человек
+/// поправил формулировку; пусто — уходит предложенное.
+#[tauri::command]
+pub async fn agent_chain_send(
+    app: AppHandle,
+    chat_id: Option<String>,
+    text: Option<String>,
+) -> Value {
+    let id = match chain_chat(&app, chat_id) {
+        Ok(id) => id,
+        Err(e) => return err(e),
+    };
+    let chains = crate::agent::chain::chains();
+    let st = crate::agent::chain::state(&app, &id);
+    let Some(sid) = st.session_id.clone() else {
+        return err("цепочка ни за какой сессией не следит — отправлять некуда");
+    };
+    let prompt = text
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(|| chains.proposal(&id))
+        .unwrap_or_default();
+    if prompt.is_empty() {
+        return err("нечего отправлять — заход ещё не предложен");
+    }
+    let d = Daemon::get(&app);
+    let step = chains.next_step(&id);
+    // Отказ уже ушёл событием, но и ответ команды обязан быть честным: окно,
+    // получившее ok на неудавшуюся отправку, нарисовало бы «заход пошёл».
+    match crate::agent::chain::deliver(&d, &id, &sid, &prompt, step).await {
+        Ok(()) => chain_ok(&app, &id),
+        Err(e) => err(e),
+    }
+}
+
 /// «Начать заново»: забыть нить ОТКРЫТОГО чата, оставив его имя и место в
 /// списке. Прошлый разговор остаётся на диске — теряется только ниточка к нему,
 /// и вернуть её можно, вписав id обратно в настройки.

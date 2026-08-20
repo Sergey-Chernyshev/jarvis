@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod assistant;
+pub mod chain;
 pub mod history;
 
 // ── Структуры событий ──────────────────────────────────────────────────────
@@ -267,6 +268,11 @@ pub struct Chat {
     /// Нить разговора (`--resume`). Пусто у нового чата и у потерявшего транскрипт.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Режим авто-цепочки ИМЕННО этого чата: у владельца несколько разговоров по
+    /// проектам, и «продолжать самому» уместен не в каждом. Старые настройки
+    /// поля не знают — `default` читается как «спросить меня».
+    #[serde(default)]
+    pub chain: chain::Mode,
 }
 
 /// Список чатов и тот, что сейчас открыт. Инвариант: список непуст, `current` —
@@ -344,6 +350,7 @@ pub fn read_chats(settings: &Value) -> ChatBook {
             id: "c1".to_string(),
             name: String::new(),
             session_id: saved_chat_session(settings),
+            chain: chain::Mode::default(),
         });
     }
     let current = block
@@ -416,7 +423,8 @@ impl ChatBook {
             None => String::new(),
         };
         let id = format!("c{n}");
-        self.chats.push(Chat { id: id.clone(), name, session_id: None });
+        self.chats
+            .push(Chat { id: id.clone(), name, session_id: None, chain: chain::Mode::default() });
         self.current = self.chats.len() - 1;
         Ok(id)
     }
@@ -510,6 +518,22 @@ impl ChatBook {
         }
         self.chats.remove(i);
         self.current = self.current.min(self.chats.len() - 1);
+        Ok(())
+    }
+
+    /// Режим авто-цепочки чата. Чата нет — «спросить меня»: выдумывать за
+    /// исчезнувший разговор «продолжай сам» точно не надо.
+    pub fn mode_of(&self, chat_id: &str) -> chain::Mode {
+        self.index_of(chat_id)
+            .map(|i| self.chats[i].chain)
+            .unwrap_or_default()
+    }
+
+    pub fn set_mode(&mut self, chat_id: &str, mode: chain::Mode) -> Result<(), String> {
+        let i = self
+            .index_of(chat_id)
+            .ok_or_else(|| format!("чата «{}» нет в списке — режим некуда записать", chat_id.trim()))?;
+        self.chats[i].chain = mode;
         Ok(())
     }
 
@@ -920,6 +944,9 @@ pub(crate) fn emit_event(app: &tauri::AppHandle, chat_id: &str, ev: &AgentEvent)
     // Пустой id окну некуда положить: чаты приходят из ChatBook, где id непусты
     // по построению, — если инвариант поедет, пусть падает на разработчике.
     debug_assert!(!chat_id.trim().is_empty(), "событие без метки чата");
+    // Отсюда же цепочка узнаёт свою сессию и падения хоста: этот эмит —
+    // единственный на весь крейт, значит оба хоста покрыты без правок в каждом.
+    chain::observe(app, chat_id, ev);
     if let Err(e) = app.emit("agent:event", TaggedEvent { chat_id, event: ev }) {
         crate::log::line(&format!("[agent] emit error: {e}"));
     }
@@ -1139,6 +1166,28 @@ mod tests {
         // и переживает круг «прочитали → записали → прочитали»
         let again = read_chats(&json!({ "agentChat": Value::Object(book.to_patch()) }));
         assert_eq!(again, book, "круг через настройки не должен терять нить");
+    }
+
+    /// Режим авто-цепочки — свойство ЧАТА, и он обязан пережить круг через
+    /// настройки: иначе после перезапуска Джарвис молча перестанет продолжать.
+    #[test]
+    fn chain_mode_is_per_chat_and_survives_a_round_trip() {
+        let mut book = read_chats(&json!({ "agentChat": {
+            "chats": [{ "id": "c1", "name": "ГД-2026" }, { "id": "c2", "name": "Грант" }],
+            "current": "c1",
+        }}));
+        // старые настройки поля не знали — это «спросить меня», а не пустота
+        assert_eq!(book.mode_of("c1"), chain::Mode::Ask);
+        book.set_mode("c1", chain::Mode::Auto).unwrap();
+
+        let again = read_chats(&json!({ "agentChat": Value::Object(book.to_patch()) }));
+        assert_eq!(again.mode_of("c1"), chain::Mode::Auto, "режим не пережил настройки");
+        assert_eq!(again.mode_of("c2"), chain::Mode::Ask, "соседний чат не заражается");
+        assert_eq!(again, book);
+
+        // чата нет — отказ вслух, а не молчаливая запись в никуда
+        assert!(book.set_mode("c9", chain::Mode::Auto).unwrap_err().contains("c9"));
+        assert_eq!(book.mode_of("c9"), chain::Mode::Ask);
     }
 
     #[test]

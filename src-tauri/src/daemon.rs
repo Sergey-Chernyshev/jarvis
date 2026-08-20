@@ -328,6 +328,12 @@ enum Effect {
         sid: String,
         payload: Value,
     },
+    /// Ход сессии закончен — событие для авто-цепочки. `at` = `done_at`: ключ,
+    /// по которому один и тот же «закончил» не пинает цепочку дважды.
+    ChainDone {
+        sid: String,
+        at: i64,
+    },
 }
 
 impl Daemon {
@@ -1156,8 +1162,12 @@ impl Daemon {
             let mut sessions = self.sessions.lock().unwrap();
 
             if event == "session-end" {
-                sessions.remove(&sid);
+                let existed = sessions.remove(&sid).is_some();
                 drop(sessions);
+                // Цепочка ждала хода, которого уже не будет, — говорим словами.
+                if existed {
+                    crate::agent::chain::on_session_gone(self, &sid, "закрыта");
+                }
                 self.push();
                 return;
             }
@@ -1431,6 +1441,10 @@ impl Daemon {
                         hook_reply: stop_hook_reply(agent, p),
                     });
                     effects.push(Effect::TurnSummary { sid: sid.clone() });
+                    // Единственная точка, где ход сессии объявляется законченным:
+                    // сюда и подписана авто-цепочка. `now` = `done_at` — по нему
+                    // же она отличает повторный «закончил» от следующего.
+                    effects.push(Effect::ChainDone { sid: sid.clone(), at: now });
                 }
 
                 "stop-failure" => {
@@ -1546,8 +1560,11 @@ impl Daemon {
                     // подтверждённый лимит, не на транзиентные сбои
                     tauri::async_runtime::spawn(async move {
                         crate::limits::on_stop_failure(&d, &sid, &payload);
+                        // Сорванный ход — тоже итог: цепочка обязана узнать причину.
+                        crate::agent::chain::on_session_failed(&d, &sid, &payload);
                     });
                 }
+                Effect::ChainDone { sid, at } => crate::agent::chain::on_session_done(&d, &sid, at),
             }
         }
     }
@@ -2179,10 +2196,13 @@ impl Daemon {
         let remote_alive = self.remote_panes().await;
 
         let mut changed = false;
+        // Убитый терминал (в том числе снятый за изоляцию) не шлёт session-end:
+        // для цепочки это такой же «сессии больше нет», и молчать о нём нельзя.
+        let mut vanished: Vec<String> = Vec::new();
         {
             let mut sessions = self.sessions.lock().unwrap();
             let now = now_ms();
-            sessions.retain(|_, s| {
+            sessions.retain(|id, s| {
                 let dead = match &s.remote {
                     // Сессия с узла: её pid — из таблицы процессов ТОЙ машины.
                     // Локально он не значит ничего (а совпасть с чужим живым
@@ -2212,8 +2232,10 @@ impl Daemon {
                         freeze_board(s);
                         s.status = Status::Done;
                         s.detail = "сессия остановлена".into();
+                        vanished.push(id.clone()); // строка в списке остаётся, работа — нет
                         return true;
                     }
+                    vanished.push(id.clone());
                     return false; // claude мёртв — сессии нет
                 }
                 true
@@ -2226,6 +2248,9 @@ impl Daemon {
                     changed = true;
                 }
             }
+        }
+        for sid in vanished {
+            crate::agent::chain::on_session_gone(self, &sid, "оборвалась (терминал не отвечает)");
         }
         if changed {
             self.push();

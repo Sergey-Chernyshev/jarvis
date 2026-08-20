@@ -102,6 +102,9 @@ fn defaults() -> Value {
         // sessions.spawn. Не в SETTINGS_ALLOWLIST намеренно: агент, который
         // вправе поднять себе потолок, потолка не имеет.
         "sessionsSpawnMax": 4,
+        // Дописка человека к преамбуле главного агента (базовый текст —
+        // agent::AGENT_SYSTEM_PROMPT). Пусто — агент получает только базу.
+        "agentPreamble": "",
         // внешность (дизайн «Клевер», экран 14f «вид»)
         "theme": "light",   // 'light' | 'dark' | 'auto' (системная)
         "paint": "clover",  // 'clover' | 'coal' | 'raspberry' | 'custom'
@@ -833,6 +836,18 @@ mod persistence_tests {
         Store::with_path(path.clone()).migrate_on_startup();
         assert_eq!(fs::read_to_string(&path).unwrap(), raw, "файл не переписан");
         assert_eq!(fs::read_to_string(dir.join("settings.bak.json")).unwrap(), raw);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Дописка к преамбуле агента (agentPreamble): дефолт пуст, правка человека
+    /// читается обратно как строка.
+    #[test]
+    fn agent_preamble_roundtrips() {
+        let dir = temp_dir("preamble");
+        let store = store_at(&dir);
+        assert_eq!(store.string("agentPreamble"), "");
+        store.set_top("agentPreamble", Value::from("Отвечай кратко."));
+        assert_eq!(store.string("agentPreamble"), "Отвечай кратко.");
         let _ = fs::remove_dir_all(dir);
     }
 }

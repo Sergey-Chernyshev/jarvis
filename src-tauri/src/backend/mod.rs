@@ -329,11 +329,14 @@ mod tests {
         assert!(b.validate_model("").is_err());
     }
 
+    /// Строку «Other» рисуют Claude и Kimi — проверено на живых пикерах.
+    /// У Codex её нет: его вопрос детектится скрин-скрейпом и своего текста не
+    /// принимает.
     #[test]
     fn custom_answer_capability_matches_pickers() {
         assert!(backend(Agent::Claude).supports_custom_answer(), "у Claude есть «Other»");
+        assert!(backend(Agent::Kimi).supports_custom_answer(), "у Kimi «Other» тоже есть");
         assert!(!backend(Agent::Codex).supports_custom_answer());
-        assert!(!backend(Agent::Kimi).supports_custom_answer());
     }
 
     #[test]

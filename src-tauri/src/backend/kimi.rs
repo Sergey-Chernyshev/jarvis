@@ -134,9 +134,9 @@ impl Backend for KimiBackend {
         super::kimi_transcript::full_final_reply(entries)
     }
     fn supports_custom_answer(&self) -> bool {
-        // Пикер `AskUserQuestion` вживую не откалиброван; пока не проверено —
-        // не обещаем. Инкремент 5.
-        false
+        // Проверено на живом пикере Kimi Code 0.37: строка «Other» есть всегда
+        // и стоит последней — выбираешь её, печатаешь ответ, Enter сохраняет.
+        true
     }
     fn resume_cmd(&self, sid: &str) -> String {
         format!("kimi -S {sid}")

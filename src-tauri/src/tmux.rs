@@ -390,6 +390,8 @@ pub async fn ping(pane: &str) -> Result<(), String> {
 const CLAUDE_ADVANCE: &str = "Tab"; // уйти с multiSelect-таба к следующему
 const CLAUDE_SUBMIT_RIGHT: &str = "Right"; // Submit-таб одиночного multiSelect-вопроса
 const CLAUDE_SUBMIT_CONFIRM: &str = "1"; // на Review-экране «1. Submit answers»
+/// Kimi: тот же экран подтверждения — «Ready to submit? [1] Submit».
+const KIMI_SUBMIT_CONFIRM: &str = "1";
 
 /// Клавиша раскладки ответа: именованная (send-keys как есть) либо свой текст
 /// для строки «Other» — его вставляет транспорт через tmux-буфер, как `reply()`.
@@ -504,14 +506,47 @@ pub fn answer_keys(
             }
             keys.push(Key::named(CLAUDE_SUBMIT_CONFIRM));
         }
-        Agent::Codex | Agent::Kimi => {
+        Agent::Kimi => {
+            // Откалибровано на живом пикере Kimi Code 0.37:
+            //
+            //   ? Какой цвет выбрать?
+            //    → [1] Красный
+            //      [2] Зелёный
+            //      [3] Other
+            //    ↑↓ select  1-3 / ↵ choose  ←/→/tab switch  esc cancel
+            //
+            // Цифра выбирает И уводит на экран подтверждения («Ready to submit?
+            // [1] Submit [2] Cancel»), поэтому ответ — всегда ДВА нажатия, даже
+            // на одиночном вопросе. Этим Kimi отличается от Claude, где
+            // одиночный single-select подтверждается сам.
+            //
+            // Строка «Other» есть всегда и стоит последней (индекс = число
+            // опций + 1): выбираешь её, печатаешь текст, Enter сохраняет —
+            // и дальше тот же экран подтверждения.
+            let item = q.questions.first();
+            let n_opts = item.map(|x| x.options.len() as u32).unwrap_or(0);
+            match text_of(0) {
+                // свой ответ: строка Other → текст → сохранить
+                Some(text) => {
+                    keys.push(Key::Text((n_opts + 1).to_string()));
+                    keys.push(Key::Text(text.to_string()));
+                    keys.push(Key::named("Enter"));
+                }
+                // цифры выбранных опций; в мультивыборе их несколько подряд
+                None => {
+                    let mut targets: Vec<u32> = answers.first().cloned().unwrap_or_default();
+                    targets.sort_unstable();
+                    for t in targets {
+                        keys.push(Key::Text(t.to_string()));
+                    }
+                }
+            }
+            keys.push(Key::Text(KIMI_SUBMIT_CONFIRM.to_string())); // «[1] Submit» на экране подтверждения
+        }
+
+        Agent::Codex => {
             // Codex всегда один вопрос (скрин-скрейп) и без строки «Other» —
             // свой текст сюда не доставить, texts игнорируем (ipc отфильтрует).
-            //
-            // Kimi разделяет эту ветку сознательно: его пикер `AskUserQuestion`
-            // вживую не откалиброван, а навигация стрелками — консервативный
-            // выбор (предположение «цифра авто-подтверждает» ломает ввод молча,
-            // лишний Down — нет). Калибруется в инкременте 5.
             // Навигация стрелками от подсветки на опции 1; Space тогглит в
             // мультивыборе; Enter подтверждает.
             let item_multi = q.questions.first().map(|x| x.multi_select).unwrap_or(false);
@@ -730,6 +765,51 @@ mod answer_keys_tests {
             &[Some("мимо".into())],
         );
         assert_eq!(keys, seq(&["Down", "Down", "Enter"]));
+    }
+
+    // ── Kimi: хореография снята с живого пикера Kimi Code 0.37 ──────────────
+    //
+    //   ? Какой цвет выбрать?     ↑↓ select  1-3 / ↵ choose
+    //    → [1] Красный  [2] Зелёный  [3] Other
+    //
+    // Цифра выбирает И уводит на экран «Ready to submit? [1] Submit [2] Cancel»,
+    // поэтому ответ — всегда два нажатия, даже на одиночном вопросе. Этим Kimi
+    // отличается от Claude, где одиночный single-select подтверждается сам.
+
+    #[test]
+    fn kimi_single_select_is_digit_then_submit() {
+        let keys = answer_keys(Agent::Kimi, &q(vec![item(false, 4)]), &[vec![3]], &[]);
+        assert_eq!(keys, seq(&["~3", "~1"]));
+    }
+
+    // Строка «Other» стоит последней: при 4 опциях её индекс 5.
+    #[test]
+    fn kimi_custom_text_goes_through_other_row() {
+        let keys = answer_keys(
+            Agent::Kimi,
+            &q(vec![item(false, 4)]),
+            &[vec![]],
+            &[Some("манго".into())],
+        );
+        assert_eq!(keys, seq(&["~5", "~манго", "Enter", "~1"]));
+    }
+
+    // Свой текст приоритетнее выбранных опций — как у Claude.
+    #[test]
+    fn kimi_custom_text_wins_over_picked_options() {
+        let keys = answer_keys(
+            Agent::Kimi,
+            &q(vec![item(false, 3)]),
+            &[vec![2]],
+            &[Some("своё".into())],
+        );
+        assert_eq!(keys, seq(&["~4", "~своё", "Enter", "~1"]));
+    }
+
+    #[test]
+    fn kimi_multi_select_presses_each_digit_then_submits() {
+        let keys = answer_keys(Agent::Kimi, &q(vec![item(true, 4)]), &[vec![1, 3]], &[]);
+        assert_eq!(keys, seq(&["~1", "~3", "~1"]));
     }
 }
 

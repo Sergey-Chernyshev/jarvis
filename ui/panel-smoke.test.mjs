@@ -189,7 +189,7 @@ async function boot(data = {}) {
     const fn = new Function(
       'window', 'document', 'globalThis', 'localStorage', 'navigator',
       'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
-      'requestAnimationFrame', 'cancelAnimationFrame',
+      'requestAnimationFrame', 'cancelAnimationFrame', 'CustomEvent',
       read(name)
     );
     fn(
@@ -197,7 +197,11 @@ async function boot(data = {}) {
       // Периодику панели глушим: она нужна живому окну, а тест иначе никогда
       // не закончится — процесс держат её таймеры.
       setTimeout, clearTimeout, () => 0, () => {},
-      window.requestAnimationFrame, window.cancelAnimationFrame
+      window.requestAnimationFrame, window.cancelAnimationFrame,
+      // Событие берём у linkedom, а не у Node: чужой Event окно не принимает, и
+      // «внешность поменялась» (смена режима, темы) не доезжала бы вовсе —
+      // молча, потому что theme.js шлёт его из промиса.
+      window.CustomEvent
     );
   }
   // Дать промисам старта (getState/getSettings/getMeta) отработать.
@@ -577,24 +581,189 @@ test('чаты стоят по последней активности, свеж
   assert.deepEqual(rowNames(doc), ['Свежий', 'Старый', 'Позавчерашний']);
 });
 
-test('поиск в шапке колонки отсеивает лишнее и возвращает список пустым словом', async () => {
+/* Поиск на экране Джарвиса — один и общий: та же строка в шапке панели, что
+ * ищет сессии, здесь ищет его чаты. Своего поля колонка больше не рисует: два
+ * почти одинаковых поля стояли рядом, и по виду было не отличить, что где
+ * ищет. */
+test('поиск панели на экране Джарвиса отсеивает его чаты, а не сессии', async () => {
   const { doc, window } = await boot({ agentChats: CHATS });
   await openAgent(doc);
-  const find = doc.querySelector('#agChats .agfind');
-  assert.ok(find, 'искать по чатам нечем: ' + doc.getElementById('agChats').textContent);
-  find.value = 'выбор';
-  find.dispatchEvent(new window.Event('input', { bubbles: true }));
+  const find = doc.getElementById('query');
+  assert.equal(doc.querySelectorAll('#agChats .agfind').length, 0, 'колонка снова завела второе поле поиска');
+  assert.match(find.placeholder, /Джарвис/, 'поле не сказало, что теперь ищет чаты Джарвиса');
+
+  const type = (v) => { find.value = v; find.dispatchEvent(new window.Event('input', { bubbles: true })); };
+  type('выбор');
   assert.deepEqual(rowNames(doc), ['Выборы'], 'поиск не отсеял соседей');
 
-  find.value = 'ничего такого';
-  find.dispatchEvent(new window.Event('input', { bubbles: true }));
+  type('ничего такого');
   assert.equal(rows(doc).length, 0);
   // пустой результат объясняется словами, а не пустотой
   assert.match(doc.querySelector('#agChats .agempty').textContent, /Ничего не нашлось/);
 
-  find.value = '';
-  find.dispatchEvent(new window.Event('input', { bubbles: true }));
+  type('');
   assert.deepEqual(rowNames(doc), ['Джарвис', 'Выборы', 'Грант'], 'список не вернулся');
+});
+
+/* Два поиска — два разных: набранное в сессиях не уезжает к Джарвису и не
+ * пропадает, пока смотришь его чаты. Одно поле на двоих иначе значило бы, что
+ * возврат к сессиям каждый раз стирает фильтр. */
+test('поиск по сессиям и поиск по чатам Джарвиса не смешиваются', async () => {
+  const { doc, window } = await boot({ agentChats: CHATS, state: [SESSION] });
+  const find = doc.getElementById('query');
+  const type = (v) => { find.value = v; find.dispatchEvent(new window.Event('input', { bubbles: true })); };
+  const was = find.placeholder;
+  type('jarvis');
+
+  await openAgent(doc);
+  assert.equal(find.value, '', 'фильтр сессий уехал в поиск по чатам Джарвиса');
+  type('выбор');
+  assert.deepEqual(rowNames(doc), ['Выборы']);
+
+  doc.getElementById('tabSessions').dispatchEvent(click(doc));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(find.value, 'jarvis', 'фильтр сессий не вернулся');
+  assert.equal(find.placeholder, was, 'подпись поля осталась от Джарвиса');
+
+  await openAgent(doc);
+  assert.equal(find.value, 'выбор', 'поиск по чатам Джарвиса не вернулся');
+  assert.deepEqual(rowNames(doc), ['Выборы'], 'список чатов вернулся без своего фильтра');
+});
+
+/* ---------- «Джарвис» в оконном режиме: отдельный экран, а не третья колонка ----
+ *
+ * На живой сборке чаты Джарвиса открывались СПРАВА от списка сессий: на экране
+ * стояли разом и сессии CLI, и колонка его чатов, и переписка — окно делилось
+ * на лишние колонки. Вкладка — другой экран того же окна: слева либо сессии,
+ * либо чаты Джарвиса, но не оба списка бок о бок. */
+
+// то же окно, но в оконном режиме (14h): режим приезжает из settings.json
+const winBoot = (data = {}) => boot({ ...data, settings: { mode: 'window', ...(data.settings || {}) } });
+
+test('в окне «Джарвис» занимает левую колонку вместо сессий, а не рядом с ними', async () => {
+  const { doc } = await winBoot({ agentChats: CHATS, state: [SESSION] });
+  assert.equal(doc.documentElement.getAttribute('data-mode'), 'window', 'окно не встало в оконный режим');
+  // до вкладки слева сессии, колонка чатов ждёт спрятанной
+  assert.equal(doc.getElementById('list').hidden, false, 'сайдбар сессий пуст ещё до Джарвиса');
+  assert.equal(doc.getElementById('agChats').hidden, true, 'колонка чатов видна вне своего экрана');
+
+  await openAgent(doc);
+  assert.equal(doc.getElementById('list').hidden, true, 'список сессий остался рядом с чатами Джарвиса');
+  assert.equal(doc.getElementById('agChats').hidden, false, 'колонка чатов не показана');
+  // Колонка стоит в СЕТКЕ окна, а не внутри переписки: живя в правой колонке,
+  // она и добавляла третью полосу справа от списка сессий.
+  assert.equal(doc.getElementById('agChats').parentElement.id, 'panel', 'колонка чатов не в сетке окна');
+  assert.equal(doc.querySelectorAll('#content .agside').length, 0, 'колонка снова делит правую колонку с перепиской');
+  assert.equal(doc.getElementById('panel').dataset.agent, '1', 'сетка не узнала, что колонка теперь Джарвиса');
+});
+
+test('возврат к сессиям возвращает их список, а Джарвис уходит целиком', async () => {
+  const { doc, subs } = await winBoot({ agentChats: CHATS, state: [SESSION] });
+  subs.onState([SESSION]);
+  await openAgent(doc);
+  doc.getElementById('tabSessions').dispatchEvent(click(doc));
+  await settle();
+
+  assert.equal(doc.getElementById('list').hidden, false, 'список сессий не вернулся');
+  assert.equal(doc.getElementById('agChats').hidden, true, 'чаты Джарвиса остались на экране сессий');
+  assert.equal(doc.getElementById('agentPane').hidden, true, 'переписка с Джарвисом осталась на экране');
+  assert.equal(doc.getElementById('panel').dataset.agent, '0', 'сетка так и держит колонку за Джарвисом');
+  assert.match(doc.getElementById('list').textContent, /jarvis/, 'список вернулся пустым');
+});
+
+/* «Ровно две колонки при любой ширине» проверяется не замером (в тесте нет
+ * вёрстки), а тем, из-за чего третья колонка вообще появлялась: местом в сетке.
+ * Колонка Джарвиса занимает ТУ ЖЕ область, что список сессий, а ширина окна на
+ * число колонок не влияет — правил по ширине в раскладке нет вовсе. */
+test('колонок в окне ровно две при любой ширине', async () => {
+  const html = read('index.html');
+  const grid = html.match(/\[data-mode='window'\] \.panel \{([^}]*)\}/)[1];
+  assert.match(grid, /grid-template-columns: 264px minmax\(0, 1fr\)/, 'колонок в сетке окна не две');
+  const docked = html.match(/\.agside\.docked \{([^}]*)\}/)[1];
+  assert.match(docked, /grid-area: list/, 'колонка чатов встала мимо области списка сессий');
+  const byWidth = [...html.matchAll(/@media ([^{]+)\{/g)].map((m) => m[1]).filter((q) => /width/.test(q));
+  assert.deepEqual(byWidth, [], 'раскладка стала зависеть от ширины окна: ' + byWidth.join(' | '));
+
+  // и на живом DOM: в левой колонке всегда ровно один житель
+  const { doc } = await winBoot({ agentChats: CHATS, state: [SESSION] });
+  const left = () => ['list', 'agChats'].filter((id) => !doc.getElementById(id).hidden);
+  assert.deepEqual(left(), ['list']);
+  await openAgent(doc);
+  assert.deepEqual(left(), ['agChats']);
+});
+
+/* Накладной режим (⌘J, 820px) остаётся прежним: там левой колонки нет вовсе,
+ * список уходит сам, и Джарвис занимает панель целиком — вместе со своей
+ * колонкой внутри переписки. */
+test('в накладке Джарвис по-прежнему занимает панель целиком', async () => {
+  const { doc } = await boot({ agentChats: CHATS, state: [SESSION] });
+  await openAgent(doc);
+  assert.equal(doc.getElementById('list').hidden, true, 'список сессий не уступил панель');
+  assert.equal(doc.getElementById('agChats').parentElement.className, 'agwrap', 'колонка уехала из переписки');
+  assert.equal(doc.querySelectorAll('#content .agside').length, 1, 'колонка потерялась по дороге');
+});
+
+test('переключение туда-обратно не теряет чат, прокрутку и черновик', async () => {
+  const { doc } = await winBoot({ agentChats: CHATS });
+  await openAgent(doc);
+  rowBy(doc, /Выборы/).dispatchEvent(click(doc));
+  await settle();
+  const input = doc.getElementById('agInput');
+  const log = doc.getElementById('agLog');
+  input.value = 'недописанное Джарвису';
+  log.scrollTop = 120;
+
+  doc.getElementById('tabSessions').dispatchEvent(click(doc));
+  await settle();
+  // спрятанному узлу браузер обнуляет прокрутку сам — повторяем это руками
+  log.scrollTop = 0;
+
+  await openAgent(doc);
+  await settle();
+  assert.equal(input.value, 'недописанное Джарвису', 'черновик Джарвису пропал');
+  assert.equal(log.scrollTop, 120, 'лента вернулась не на то место');
+  const on = doc.querySelectorAll('#agChats .agchat.on');
+  assert.equal(on.length, 1, 'открытый чат не помечен');
+  assert.equal(on[0].querySelector('.agname').textContent, 'Выборы', 'вернулись не в тот чат');
+});
+
+test('ширину колонки тянут за границу сетки, и она помнится', async () => {
+  const { doc, window, calls } = await winBoot({ agentChats: CHATS, settings: { agentSideWidth: 300 } });
+  await openAgent(doc);
+  const panel = doc.getElementById('panel');
+  assert.equal(panel.style.getPropertyValue('--side-w'), '300px', 'запомненная ширина не доехала до сетки');
+
+  const drag = (type, x) => { const e = new window.Event(type, { bubbles: true }); e.clientX = x; return e; };
+  doc.querySelector('#agChats .aggrip').dispatchEvent(drag('mousedown', 300));
+  doc.dispatchEvent(drag('mousemove', 340));
+  doc.dispatchEvent(drag('mouseup', 340));
+
+  assert.equal(panel.style.getPropertyValue('--side-w'), '340px', 'граница колонки не поехала за мышью');
+  assert.equal(doc.getElementById('agChats').style.width, '', 'ширина ушла в сам элемент — колонке сетки от неё ни холодно ни жарко');
+  const saved = calls.filter((c) => c[0] === 'setSettings').map((c) => c[1]);
+  assert.ok(saved.some((p) => p && p.agentSideWidth === 340), 'ширину не запомнили: ' + JSON.stringify(saved));
+  // ...а свёрнутость встроенная колонка не выбирает и чужую не затирает
+  assert.deepEqual(saved.filter((p) => p && p.agentSideOff !== undefined), [], 'переписана свёрнутость окна из трея');
+
+  // Под вкладки колонку не утянуть: над списком чатов стоят поиск и вкладки
+  // окна, и на 180px читать их уже нечем.
+  doc.querySelector('#agChats .aggrip').dispatchEvent(drag('mousedown', 340));
+  doc.dispatchEvent(drag('mousemove', 40));
+  doc.dispatchEvent(drag('mouseup', 40));
+  assert.equal(panel.style.getPropertyValue('--side-w'), '240px', 'колонку утянули уже вкладок');
+});
+
+/* Свернуть встроенную колонку нечем — и это не пропажа: вместе с ней ушли бы
+ * вкладки, то есть дорога назад к сессиям. Внутри переписки (накладка, окно из
+ * трея) сворачивание остаётся: там колонка отнимает место у разговора. */
+test('свернуть предлагают только ту колонку, что стоит внутри переписки', async () => {
+  const { doc } = await winBoot({ agentChats: CHATS });
+  await openAgent(doc);
+  assert.equal(doc.querySelectorAll('#agChats .agfold').length, 0, 'сворачивание унесло бы вкладки вместе с колонкой');
+
+  const { doc: over } = await boot({ agentChats: CHATS });
+  await openAgent(over);
+  assert.equal(over.querySelectorAll('#agChats .agfold').length, 1, 'колонку внутри переписки стало нечем свернуть');
 });
 
 test('переключение чата — один клик по строке, и история спрошена про него', async () => {

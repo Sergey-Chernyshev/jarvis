@@ -124,7 +124,7 @@
 
   /** Смонтировать чат на разметку `els` поверх команд `api`. */
   function mount(els, api) {
-    const { msgs, input, sendBtn, sub, tag, newBtn, chatsRow } = els;
+    const { msgs, input, sendBtn, sub, tag, newBtn, chatsRow, extFind } = els;
     const hintTpl = msgs.querySelector('.hint').cloneNode(true);
 
     let chats = []; // история разговоров: чаты из настроек плюс найденные на диске
@@ -349,6 +349,9 @@
      * а ширина и свёрнутость лежат в settings.json рядом с темой — своего
      * механизма памяти тут не заводим. */
     const SIDE_MIN = 180;
+    /* Встроенная колонка несёт не только чаты: над ней стоят поиск и вкладки
+     * окна. На 180px вкладки 2×2 уже не читаются, а это дорога назад. */
+    const SIDE_MIN_DOCK = 240;
     const SIDE_MAX = 420;
     /* Ниже этого колонка не теснит переписку, а кроет её и уходит после выбора:
      * в окне из трея (~460px) 260 колонки и 200 переписки — две нечитаемые
@@ -360,11 +363,19 @@
     let menu = null; // меню строки: живёт ВНЕ списка, см. renderPop
     let shell = null; // собранная колонка: список, слой меню, рейка
 
+    /* Колонка может стоять не внутри переписки, а в ЛЕВОЙ колонке окна: во
+     * вкладке панели место списка сессий на время отдано чатам Джарвиса
+     * (renderer.js, setView) — иначе два списка встали бы рядом третьей
+     * колонкой. Встроенная колонка живёт по чужим правилам: ширину держит
+     * сетка, а сворачивать её нечем — вместе с ней ушли бы вкладки, то есть
+     * дорога назад. */
+    const docked = () => !!chatsRow && chatsRow.dataset.dock === '1';
     const num = (v) => (Number.isFinite(v) ? v : 0);
-    const clampW = (n) => Math.max(SIDE_MIN, Math.min(SIDE_MAX, Math.round(num(n))));
+    const clampW = (n) => Math.max(docked() ? SIDE_MIN_DOCK : SIDE_MIN, Math.min(SIDE_MAX, Math.round(num(n))));
     /* Ширину окна знает не всякая среда (скрытая вкладка, тест). «Не знаю»
      * значит «широко»: молча свернуть колонку хуже, чем показать её. */
     const narrow = () => {
+      if (docked()) return false; // колонка сетки переписку не кроет
       const host = chatsRow && chatsRow.parentElement;
       const w = num(host && host.clientWidth) || num(window.innerWidth);
       return w > 0 && w < SIDE_NARROW;
@@ -377,7 +388,11 @@
     const bag = () => window.jarvis || {};
     const saveSide = () => {
       if (narrow()) return;
-      try { bag().setSettings?.({ agentSideWidth: Math.round(sideW), agentSideOff: sideOff }); }
+      const patch = { agentSideWidth: Math.round(sideW) };
+      // Свёрнутость встроенной колонки никто не выбирал (сворачивать её нечем) —
+      // и затирать ею выбор, сделанный в окне из трея, не за что.
+      if (!docked()) patch.agentSideOff = sideOff;
+      try { bag().setSettings?.(patch); }
       catch { /* окно без моста — колонка доживёт до перезапуска */ }
     };
     function toggleSide() {
@@ -403,11 +418,19 @@
     // вместе с ним, а не остаться полосой на пол-экрана.
     window.addEventListener('resize', () => { shell = null; renderChats(); });
 
+    /* Ширину держит либо сама колонка, либо колонка сетки, в которую её
+     * встроили: у grid-элемента своя width границу колонки не двигает. */
+    function applyWidth() {
+      if (docked()) chatsRow.parentElement?.style.setProperty('--side-w', sideW + 'px');
+      else chatsRow.style.width = sideW + 'px';
+    }
+
     function renderChats() {
       if (!chatsRow) return;
-      if (!shell || shell.off !== sideOff) buildSide();
+      if (docked()) sideOff = false; // встроенная колонка не сворачивается
+      if (!shell || shell.off !== sideOff || shell.dock !== docked()) buildSide();
       if (sideOff) { renderRail(); return; }
-      chatsRow.style.width = sideW + 'px';
+      applyWidth();
       renderList();
       // Строка, на которую показывало меню, могла уйти из списка — тогда и
       // показывать его не на что.
@@ -419,14 +442,14 @@
       // после этого показывать уже не на что.
       menu = null;
       chatsRow.textContent = '';
-      chatsRow.className = 'agside' + (sideOff ? ' off' : '');
+      chatsRow.className = 'agside' + (docked() ? ' docked' : '') + (sideOff ? ' off' : '');
       chatsRow.style.width = '';
       const wrap = chatsRow.parentElement;
-      if (wrap) wrap.classList.toggle('narrow', narrow());
+      if (wrap && !docked()) wrap.classList.toggle('narrow', narrow());
       if (sideOff) {
         const rail = el('agrail');
         chatsRow.appendChild(rail);
-        shell = { off: true, rail };
+        shell = { off: true, dock: docked(), rail };
         return;
       }
       const top = el('agtop');
@@ -434,26 +457,33 @@
       add.title = 'Новый чат';
       add.addEventListener('click', () => createChat());
       top.appendChild(add);
-      const fold = el('agfold');
-      fold.title = 'Свернуть список чатов · ' + hotLabel();
-      fold.appendChild(chevron()); // тот же шеврон, что у свёрнутого Insight
-      fold.addEventListener('click', toggleSide);
-      top.appendChild(fold);
+      if (!docked()) {
+        const fold = el('agfold');
+        fold.title = 'Свернуть список чатов · ' + hotLabel();
+        fold.appendChild(chevron()); // тот же шеврон, что у свёрнутого Insight
+        fold.addEventListener('click', toggleSide);
+        top.appendChild(fold);
+      }
       chatsRow.appendChild(top);
 
       /* Поиск в шапке колонки, а не отдельным экраном: двадцать разговоров
        * листают глазами, а сотню — уже нет. Поле переживает перерисовку списка:
-       * оно вне .aglist, иначе набранное слово стирал бы чужой ответ. */
-      const find = document.createElement('input');
-      find.className = 'agfind';
-      find.placeholder = 'Поиск по чатам';
-      find.value = query;
-      find.addEventListener('input', () => { query = find.value; renderList(); });
-      find.addEventListener('keydown', (e) => {
-        e.stopPropagation(); // хоткеи панели не должны мешать печатать
-        if (e.key === 'Escape') { find.value = ''; query = ''; renderList(); }
-      });
-      chatsRow.appendChild(find);
+       * оно вне .aglist, иначе набранное слово стирал бы чужой ответ.
+       * Там, где у окна уже есть строка поиска (панель), своего поля не
+       * заводим: два одинаковых поля рядом не говорят, что где ищут. */
+      let find = null;
+      if (!extFind) {
+        find = document.createElement('input');
+        find.className = 'agfind';
+        find.placeholder = 'Поиск по чатам';
+        find.value = query;
+        find.addEventListener('input', () => { query = find.value; renderList(); });
+        find.addEventListener('keydown', (e) => {
+          e.stopPropagation(); // хоткеи панели не должны мешать печатать
+          if (e.key === 'Escape') { find.value = ''; query = ''; renderList(); }
+        });
+        chatsRow.appendChild(find);
+      }
 
       const list = el('aglist');
       chatsRow.appendChild(list);
@@ -464,7 +494,7 @@
       grip.title = 'Потянуть — ширина колонки';
       grip.addEventListener('mousedown', startDrag);
       chatsRow.appendChild(grip);
-      shell = { off: false, list, pop, find };
+      shell = { off: false, dock: docked(), list, pop, find };
     }
 
     /* Свёрнутая колонка — рейка с двумя знаками. В ноль не сворачиваем: вместе
@@ -689,7 +719,8 @@
       if (!chatsRow || chatsRow.closest('[hidden]')) return; // вкладка не на экране
       if (e.key === 'Escape' && menu) { closeMenu(); return; }
       // ⌘\ — тот же жест, что сворачивает боковую колонку в редакторах.
-      if (e.key === '\\' && (e.metaKey || e.ctrlKey) && !e.altKey) { e.preventDefault(); toggleSide(); }
+      // Встроенную в окно колонку он не трогает: сворачивать её нечем.
+      if (e.key === '\\' && (e.metaKey || e.ctrlKey) && !e.altKey && !docked()) { e.preventDefault(); toggleSide(); }
     });
 
     /* Граница колонки тянется мышью — этим и закрыт довод «список отнял треть
@@ -697,7 +728,7 @@
     function startDrag(e) {
       const x0 = num(e.clientX);
       const w0 = sideW;
-      const move = (ev) => { sideW = clampW(w0 + (num(ev.clientX) - x0)); chatsRow.style.width = sideW + 'px'; };
+      const move = (ev) => { sideW = clampW(w0 + (num(ev.clientX) - x0)); applyWidth(); };
       const up = () => {
         document.removeEventListener('mousemove', move);
         document.removeEventListener('mouseup', up);
@@ -866,10 +897,28 @@
      * каждом переключении вкладок. Идущему ответу это не мешает: он пишет в
      * ленту своего чата, а не в ту, что на экране. */
     async function refresh() {
+      unpark();
       const was = chatId;
       const cur = await listCmd('обновить список чатов', () => api.chats());
       if (cur && cur.id !== was) await loadHistory(cur.id);
     }
+
+    /* Уход со вкладки ленту не рушит — она остаётся в DOM вместе с набранным и
+     * неотправленным. А вот прокрутка display:none не переживает: браузер
+     * обнуляет scrollTop у спрятанного узла. Снимаем её на уходе и возвращаем
+     * на входе — иначе возврат к Джарвису каждый раз кидал бы в конец ленты. */
+    let parked = null;
+    const park = () => { parked = msgs.scrollTop; };
+    const unpark = () => { if (parked != null) { msgs.scrollTop = parked; parked = null; } };
+
+    /* Поиск по чатам приезжает извне, когда поле есть у самого окна (панель):
+     * колонка своего не рисует, а фильтрует тем, что набрали в общем поиске. */
+    const search = (q) => {
+      query = String(q == null ? '' : q);
+      // Искать в свёрнутой колонке некуда — раскрываем: об этом и просили.
+      if (query && sideOff) { sideOff = false; syncHead(); }
+      renderChats();
+    };
 
     async function newChat() {
       let res;
@@ -1109,7 +1158,7 @@
     });
 
     input.focus();
-    return { refresh };
+    return { refresh, park, search, redock: () => { shell = null; renderChats(); } };
   }
 
   /* Вкладка панели: разметка лежит в index.html, команды идут через мост.
@@ -1122,7 +1171,13 @@
       root.dataset.mounted = '1';
       const j = window.jarvis;
       tab = mount(
-        { msgs: q('agLog'), input: q('agInput'), sendBtn: q('agSend'), sub: q('agSub'), tag: q('agTag'), newBtn: q('agNew'), chatsRow: q('agChats') },
+        {
+          msgs: q('agLog'), input: q('agInput'), sendBtn: q('agSend'), sub: q('agSub'), tag: q('agTag'), newBtn: q('agNew'),
+          // Колонка чатов в оконном режиме переезжает в сетку окна (renderer.js,
+          // dockAgentSide) — под своим корнем её там уже не найти.
+          chatsRow: q('agChats') || document.getElementById('agChats'),
+          extFind: true, // по чатам ищет строка поиска панели, а не своё поле
+        },
         {
           state: () => j.agentChatState(),
           history: (chatId) => j.agentChatHistory(chatId),
@@ -1152,6 +1207,7 @@
       tab.refresh(); // чат могли переключить в окне из трея, пока вкладка ждала
     }
     q('agInput').focus();
+    return tab; // рукоятка вкладки: панель через неё паркует ленту и ищет по чатам
   };
 
   /* Отдельное окно из трея: общего моста в нём нет — зовём Tauri напрямую.

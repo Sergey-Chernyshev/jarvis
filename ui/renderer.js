@@ -61,6 +61,9 @@ const tabBundleEl = document.getElementById('tabBundle');
 const tabVoiceEl = document.getElementById('tabVoice');
 const agentPaneEl = document.getElementById('agentPane');
 const tabAgentEl = document.getElementById('tabAgent');
+// Колонка чатов Джарвиса и её домашнее место внутри переписки (см. dockAgentSide)
+const agChatsEl = document.getElementById('agChats');
+const agWrapEl = agentPaneEl.querySelector('.agwrap');
 
 const STATUS_LABEL = {
   working: 'работает',
@@ -166,6 +169,34 @@ const LIST_VIEWS = new Set(['list', 'chat', 'question']);
 /** Недописанные ответы по сессиям: id → текст поля. */
 const chatDrafts = new Map();
 
+/* Вкладка «Джарвис» — отдельный экран на всё окно, а не третья колонка внутри
+ * переписки. В оконном режиме его чаты занимают ЛЕВУЮ колонку окна вместо
+ * списка сессий: сетка кладёт в область `list` только своих детей, поэтому
+ * колонку и переселяем. В накладке и в окне из трея левой колонки нет — там она
+ * остаётся дома, внутри .agwrap. */
+let agentTab = null; // рукоятка смонтированной вкладки (agent-chat.js)
+function dockAgentSide(on) {
+  const host = on ? panelEl : agWrapEl;
+  if (agChatsEl.parentElement !== host) {
+    // в переписке колонка идёт ПЕРЕД лентой, в сетке порядок решают области
+    if (on) panelEl.insertBefore(agChatsEl, listEl.nextSibling);
+    else agWrapEl.insertBefore(agChatsEl, agWrapEl.firstChild);
+  }
+  const was = agChatsEl.dataset.dock;
+  agChatsEl.dataset.dock = on ? '1' : '0';
+  // Класс ставим здесь же, а не ждём первой отрисовки колонки: неразмеченный
+  // grid-элемент сетка разложила бы сама — куда попало.
+  agChatsEl.classList.toggle('docked', on);
+  if (was !== agChatsEl.dataset.dock && agentTab) agentTab.redock();
+}
+
+/* Поиск в шапке: в режиме Джарвиса он ищет по ЕГО чатам. Двух почти одинаковых
+ * полей рядом не бывает — сессий на экране нет, и искать общему полю нечего, а
+ * колонка своего поля больше не рисует (agent-chat.js, extFind). */
+const QUERY_PLACEHOLDER = queryEl.placeholder;
+let listQuery = ''; // поиск по сессиям — ждёт возврата таким, каким его оставили
+let agentQuery = ''; // ...и поиск по чатам Джарвиса тоже: это два разных поиска
+
 function setView(next) {
   const prev = view;
   if (view === 'chat' && next !== 'chat') {
@@ -185,13 +216,34 @@ function setView(next) {
   if (next === 'history' && view !== 'history') { histProject = null; histMachine = null; histNewOpen = false; }
   view = next;
   closeActions();
-  // Оконный режим (14h): список слева живёт всегда, поиск и вкладки — тоже.
+  // Оконный режим (14h): список слева живёт всегда — кроме экрана Джарвиса, где
+  // левая колонка отдана его чатам; поиск и вкладки на месте всегда.
   // В накладке остаётся прежний фокус-режим: чат и вопрос занимают панель целиком.
   const win = windowMode();
   const minimal = !win && (next === 'chat' || next === 'question');
   document.querySelector('.cmdrow').hidden = minimal;
   document.querySelector('.tabs').hidden = minimal;
-  listEl.hidden = win ? false : next !== 'list';
+  // Уходим от Джарвиса — снимаем прокрутку его ленты: спрятанному узлу браузер
+  // обнуляет scrollTop, и возврат кидал бы в конец переписки.
+  if (prev === 'agent' && next !== 'agent' && agentTab) agentTab.park();
+  // Поиск меняет адресата вместе с экраном (см. QUERY_PLACEHOLDER выше)
+  if (next === 'agent' && prev !== 'agent') {
+    listQuery = queryEl.value;
+    queryEl.value = agentQuery;
+    queryEl.placeholder = 'Найти чат Джарвиса…';
+  } else if (prev === 'agent' && next !== 'agent') {
+    agentQuery = queryEl.value;
+    queryEl.value = listQuery;
+    queryEl.placeholder = QUERY_PLACEHOLDER;
+  }
+  /* Где живёт колонка чатов Джарвиса, решает режим окна, а не вкладка: в сетке
+   * она просто ждёт своего экрана спрятанной. Зато КОЛОНКА СЕТКИ отдаётся ему
+   * только на его экране — по этой метке ширину тянут за границу сетки. */
+  dockAgentSide(win);
+  agChatsEl.hidden = win && next !== 'agent';
+  panelEl.dataset.agent = win && next === 'agent' ? '1' : '0';
+  // Оконный режим: слева либо сессии, либо чаты Джарвиса — но не оба сразу.
+  listEl.hidden = win ? next === 'agent' : next !== 'list';
   // правая колонка окна пустует, пока сессия не выбрана
   contentEl.hidden = win && next === 'list';
   detailEmptyEl.hidden = !(win && next === 'list');
@@ -275,7 +327,7 @@ function setView(next) {
   }
   // Разговор с главным агентом: разметка своя, вся логика — в agent-chat.js,
   // общем с окном из трея. Монтируется один раз, дальше только фокус.
-  if (next === 'agent') safely('agent', () => window.initAgentChat(agentPaneEl), agentPaneEl);
+  if (next === 'agent') safely('agent', () => { agentTab = window.initAgentChat(agentPaneEl); }, agentPaneEl);
   if (next === 'history') safely('history', renderHistory, historyEl);
   else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
   if (next === 'list') queryEl.focus();
@@ -370,9 +422,10 @@ function render() {
   // его на всё время чата: статусы не обновлялись, а открытый чат никак не
   // выделялся среди строк.
   if (listEl.hidden) return;
-  // …но в оконном режиме listEl.hidden всегда false, а список пересобирается
-  // целиком до восьми раз в секунду — включая время, когда человек в
-  // настройках или статистике и на список даже не смотрит. Разделы, при
+  // …но в оконном режиме список прячется только на экране Джарвиса, а при всех
+  // прочих разделах он виден — и пересобирается целиком до восьми раз в
+  // секунду, включая время, когда человек в настройках или статистике и на
+  // список даже не смотрит. Разделы, при
   // которых список неактуален, перерисовку не заказывают; вернётся человек —
   // setView позовёт render() сам.
   if (!LIST_VIEWS.has(view)) return;
@@ -2801,6 +2854,8 @@ window.jarvis.onShown(() => {
 });
 
 queryEl.addEventListener('input', () => {
+  // Экран Джарвиса: то же поле фильтрует его чаты — список сессий не показан
+  if (view === 'agent') { if (agentTab) agentTab.search(queryEl.value); return; }
   if (view === 'history') { renderHistory(); return; }
   sel = 0;
   cmdRootSel = 0;

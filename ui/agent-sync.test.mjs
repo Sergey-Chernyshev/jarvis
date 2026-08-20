@@ -85,6 +85,8 @@ async function bootWindow(bus) {
     did: (cmd) => calls.filter(([c]) => c === cmd).map(([, a]) => (a || {}).sessionId),
     msgs: document.getElementById('msgs'),
     chats: document.getElementById('chats'),
+    // в окне из трея своей строки поиска нет — поле живёт в шапке колонки
+    find: null,
   };
 }
 
@@ -119,6 +121,8 @@ async function bootTab(bus) {
     did: (cmd) => calls.filter(([c]) => c === cmd).map(([, a]) => a),
     msgs: document.getElementById('agLog'),
     chats: document.getElementById('agChats'),
+    // поиск по чатам во вкладке — общая строка поиска панели (renderer.js)
+    find: document.getElementById('query'),
   };
 }
 
@@ -148,8 +152,12 @@ test('колонка чатов одинакова во вкладке и в о�
     assert.deepEqual(names, ['Джарвис', 'Выборы']);
     assert.equal(s.chats.querySelectorAll('.agchat.on').length, 1, 'открытый чат не помечен');
     assert.equal(s.chats.querySelectorAll('.agnew').length, 1, 'завести чат нечем');
-    // поиск стоит в шапке колонки, а не в отдельном экране
-    assert.ok(s.chats.querySelector('.agfind'), 'искать по чатам нечем');
+    /* Искать по чатам можно у обоих входов, но полем — одним: в окне из трея
+     * своим, в шапке колонки; во вкладке — общей строкой поиска панели, куда
+     * её и переводит renderer.js. Двух похожих полей рядом не бывает: по виду
+     * не отличить, что где ищет. */
+    const fields = (s.chats.querySelector('.agfind') ? 1 : 0) + (s.find ? 1 : 0);
+    assert.equal(fields, 1, 'поиск по чатам либо потерян, либо задвоен');
     // и вход в действия строки один и тот же
     assert.equal(s.chats.querySelectorAll('.agdots').length, 3, 'действия строки негде найти');
   }

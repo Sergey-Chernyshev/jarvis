@@ -140,6 +140,19 @@
     transition: filter 120ms ease;
   }
   .cont:hover { filter: brightness(1.06); }
+  .cont:disabled { opacity: 0.55; }
+  /* причина, по которой ответ не уехал (пана мертва, сессия вне tmux).
+     Единственная поверхность ошибок в окне тостов — её тут не было вовсе. */
+  .derr {
+    margin: 9px 20px 2px;
+    padding: 8px 11px;
+    border-radius: var(--r-chip);
+    background: var(--danger-soft);
+    color: var(--danger);
+    font-size: 12.5px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
 
   /* варианты вопроса (AskUserQuestion): номерной чип + label + описание.
      Выбор — глобальным хоткеем «модификатор+Alt+1..9» (или кликом). */

@@ -41,7 +41,7 @@
     { style: 'prompt',    name: 'Промпт для агента',     hint: KEY('1') },
     { style: 'commit',    name: 'Коммит-сообщение',      hint: KEY('2') },
     { style: 'clean',     name: 'Чистовик · грамматика', hint: KEY('3') },
-    { style: 'translate', name: 'Перевод на English',    hint: KEY('4') },
+    { style: 'translate', name: 'Перевод на английский', hint: KEY('4') },
   ];
 
   // ── Встроенные преобразования для раздела «Преобразования» (как в макете) ─
@@ -55,7 +55,7 @@
     { id: 'clean',     icon: 'text', name: 'Чистовик',
       desc: 'Убирает оговорки и повторы, чинит пунктуацию.',
       trigger: 'личные сообщения и заметки', auto: true, enabled: true },
-    { id: 'translate', icon: 'lang', name: 'Перевод на English',
+    { id: 'translate', icon: 'lang', name: 'Перевод на английский',
       desc: 'Естественный перевод реплики на английский.',
       trigger: null, auto: false, enabled: false },
   ];
@@ -594,7 +594,8 @@
       if (state.items.length && state.query) {
         empty.textContent = 'Ничего не найдено.';
       } else {
-        empty.textContent = 'Пока пусто. Надиктуй что-нибудь через диктовку (Whisper · F8).';
+        // движок диктовки выбирается в настройках (Whisper или Qwen3) — не называем его здесь
+        empty.textContent = 'Пока пусто. Зажми клавишу диктовки и скажи что-нибудь — расшифровка появится тут.';
       }
       feed.appendChild(empty);
       return;

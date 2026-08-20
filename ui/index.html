@@ -82,13 +82,6 @@
     padding: 0;
   }
   .cmdrow input::placeholder { color: var(--ink-faint); }
-  .daemon-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--accent);
-    flex: none;
-  }
 
   /* ---------- вкладки: сегмент на тональной подложке ---------- */
   .tabs {
@@ -155,12 +148,17 @@
   .content::-webkit-scrollbar { width: 0; }
 
   /* ---------- список сессий (14h: строки 46px, засечка выбора краской) ---------- */
-  /* нижний отступ — чтобы последние строки не уезжали под нижнюю полоску */
+  /* Нижний отступ — чтобы последние строки не уезжали под нижнюю полоску; берём
+     его от высоты самой полоски, а не от зашитого числа: при плотной вёрстке
+     полоска 36px, и прежние 62px оставляли 26px мёртвой пустоты.
+     overflow-x гасим явно: при overflow-y:auto браузер считает «visible» по оси
+     X как «auto», и переполненная строка вылезала горизонтальной полосой (её
+     толщина — height, а не width, так что правило ниже её не убирало). */
   .list {
-    flex: 1; min-height: 0; overflow-y: auto;
-    padding: 6px 12px 62px; display: flex; flex-direction: column; gap: 1px;
+    flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
+    padding: 6px 12px calc(var(--h-strip) + 20px); display: flex; flex-direction: column; gap: 1px;
   }
-  .list::-webkit-scrollbar { width: 0; }
+  .list::-webkit-scrollbar { width: 0; height: 0; }
 
   .row {
     display: flex;
@@ -183,26 +181,41 @@
     box-sizing: border-box;
     background: var(--dot-sleep);
   }
-  /* работает — чернильная точка; закончила — только контур; ждёт — краска;
-     лимит — тусклая (ты не нужен, нужно время); спит — бледная. */
-  .row.working .dot { background: var(--ink); animation: jPulse 2.2s ease-in-out infinite; }
-  .row.waiting .dot { background: var(--accent); }
+  /* работает — чернильная точка; закончила — только контур; ждёт — краска в
+     гало; лимит — тусклая (ты не нужен, нужно время); спит — бледная.
+     Движение и объём достаются тому, кто ВСТАЛ: пульс на «работает» уводил
+     взгляд на спокойно работающего и молчал про того, кто ждёт. Гало — форма,
+     а не цвет: оно и различает «ждёт» от «работает» там, где краска у них одна
+     (уголь: --accent == --ink) и когда движение выключено системой. */
+  .row.working .dot { background: var(--ink); }
+  .row.waiting .dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-line); animation: jHalo 2.2s ease-in-out infinite; }
   .row.done    .dot { background: transparent; border: 1.5px solid var(--ink); }
   .row.limit   .dot { background: var(--ink-faint); }
+  /* упала — кольцо остаётся кольцом, меняется только обводка: «закончила» и
+     «умерла» больше не один и тот же знак */
+  .row.failed  .dot { background: transparent; border: 1.5px solid var(--danger); }
 
   @keyframes jPulse {
     0%, 100% { opacity: 1; transform: scale(1); }
     50%      { opacity: 0.4; transform: scale(0.8); }
   }
+  @keyframes jHalo {
+    0%, 100% { box-shadow: 0 0 0 1px var(--accent-line); }
+    50%      { box-shadow: 0 0 0 4px var(--accent-line); }
+  }
   @media (prefers-reduced-motion: reduce) {
-    .row.working .dot { animation: none; }
+    .row.waiting .dot { animation: none; }
   }
 
+  /* Имя проекта сжимается раньше саммари и раньше имени чата: у пяти сессий в
+     одном репозитории оно одинаковое, а различает их как раз то, что правее.
+     Обрезка безопасна — cwd и заголовок лежат в title строки. */
   .name {
     font-size: 14px;
     font-weight: 500;
     color: var(--ink);
-    flex: none;
+    flex: 0 4 auto;
+    min-width: 3.5em;
     max-width: 180px;
     white-space: nowrap;
     overflow: hidden;
@@ -210,6 +223,9 @@
   }
   .row.idle .name { color: var(--ink-mute); }
 
+  /* Потолок и обрезка — на базовом бейдже: текст в нём неконтролируемый
+     (сырой id модели, имя GUI-приложения, имя узла), и без потолка ровно эти
+     трое и распирали строку. */
   .badge {
     font-size: 10.5px;
     font-weight: 500;
@@ -218,10 +234,15 @@
     background: var(--surface);
     border-radius: var(--r-pill);
     padding: 2px 7px;
-    flex: none;
+    flex: 0 2 auto;
+    min-width: 0;
+    max-width: 140px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
-  .badge.host { color: var(--ink-faint); }
+  .badge.host { color: var(--ink-mute); }
   /* бейдж агента (codex и т.п.) — тональная краска, чтобы отличать бэкенды */
   .badge.agent { color: var(--accent-ink); background: var(--accent-soft); }
   /* бейдж удалённого узла: сессия идёт не на этой машине. Контур вместо
@@ -233,11 +254,15 @@
   }
 
   /* имя, данное человеком: чтение важнее автозаголовка, поэтому чернила
-     обычные, а не приглушённые. Кликом открывается правка */
+     обычные, а не приглушённые, кегль — как у поля правки того же имени, и
+     сжимается оно последним из бейджей. Именно оно различает пять строк
+     одного репозитория. Кликом открывается правка */
   .badge.chatname {
     color: var(--ink);
+    font-size: 12.5px;
     font-weight: 600;
     cursor: default;
+    flex: 0 1 auto;
     max-width: 200px;
     white-space: nowrap;
     overflow: hidden;
@@ -245,7 +270,9 @@
   }
   .badge.chatname:hover { background: var(--fill-2); }
 
-  /* поле правки имени: живёт вместо чипа прямо в строке */
+  /* поле правки имени: живёт вместо чипа прямо в строке. Кегль и потолок — те
+     же, что у чипа, и сжиматься оно тоже умеет: иначе клик по имени разъезжал
+     строку на полторы сотни пикселей */
   .row input.rename {
     font: inherit;
     font-size: 12.5px;
@@ -255,15 +282,20 @@
     box-shadow: inset 0 0 0 1px var(--accent);
     border-radius: var(--r-pill);
     padding: 2px 8px;
-    flex: none;
+    flex: 0 1 auto;
     width: 200px;
+    max-width: 200px;
+    min-width: 0;
     outline: none;
   }
 
+  /* ветка — рабочая информация, а не украшение: тон читаемый (--ink-faint даёт
+     2.5:1 при норме 4.5) */
   .gitbranch {
     font-size: 12px;
-    color: var(--ink-faint);
-    flex: none;
+    color: var(--ink-mute);
+    flex: 0 3 auto;
+    min-width: 0;
     max-width: 140px;
     white-space: nowrap;
     overflow: hidden;
@@ -291,7 +323,8 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    flex: 1;
+    flex: 1 1 auto;
+    min-width: 0;
   }
 
   .time {
@@ -302,16 +335,17 @@
   }
 
   /* ---------- пустые состояния ---------- */
+  /* единственный текст на пустой панели — читать его должно быть можно */
   .empty {
     padding: 56px 24px;
     text-align: center;
     font-size: 13px;
-    color: var(--ink-faint);
+    color: var(--ink-mute);
     line-height: 1.7;
   }
 
   /* ---------- история чатов ---------- */
-  .history { padding: 6px 12px 64px; overflow-y: auto; }
+  .history { padding: 6px 12px calc(var(--h-strip) + 20px); overflow-y: auto; }
   .history::-webkit-scrollbar { width: 0; }
   .hgroup {
     font-size: 12.5px; font-weight: 500;
@@ -373,7 +407,7 @@
   .hnewform input::placeholder { color: var(--ink-faint); }
 
   /* ---------- статистика usage ---------- */
-  .stats { padding: 20px 24px 64px; overflow-y: auto; }
+  .stats { padding: 20px 24px calc(var(--h-strip) + 20px); overflow-y: auto; }
   .stats::-webkit-scrollbar { width: 0; }
 
   .uctl { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
@@ -679,10 +713,16 @@
     box-sizing: border-box;
     background: var(--dot-sleep);
   }
-  .chatdot.working { background: var(--ink); animation: jPulse 2.2s ease-in-out infinite; }
-  .chatdot.waiting { background: var(--accent); }
+  /* та же азбука, что у точки в списке (см. .row .dot): гало и движение — у
+     «ждёт», кольцо — у «закончила», обводка краской беды — у упавшей */
+  .chatdot.working { background: var(--ink); }
+  .chatdot.waiting { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-line); animation: jHalo 2.2s ease-in-out infinite; }
   .chatdot.done { background: transparent; border: 1.5px solid var(--ink); }
   .chatdot.limit { background: var(--ink-faint); }
+  .chatdot.failed { background: transparent; border: 1.5px solid var(--danger); }
+  @media (prefers-reduced-motion: reduce) {
+    .chatdot.waiting { animation: none; }
+  }
 
   /* ---------- экран вопроса (14b): вопрос первым, варианты — кнопки ---------- */
   .qview { height: 100%; display: flex; flex-direction: column; }
@@ -883,15 +923,30 @@
     color: var(--ink-mute);
   }
 
-  /* маркдаун ассистента */
-  .bubble p { margin: 0 0 9px; }
-  .bubble p:last-child { margin-bottom: 0; }
-  .bubble .md-h { font-weight: 600; color: var(--ink); }
-  .bubble b, .bubble strong { font-weight: 600; color: var(--ink); }
-  .bubble ul { margin: 0 0 9px; padding-left: 18px; }
-  .bubble ul:last-child { margin-bottom: 0; }
-  .bubble li { margin: 3px 0; }
-  .bubble code {
+  /* Маркдаун ассистента. Карточка сводки (.turnsum) — вид по умолчанию, и в
+     неё кладут тот же маркдаун: без неё в списке селекторов абзацы слипались
+     под глобальным сбросом, маркеры уезжали за контент, а <pre> терял фон. */
+  .bubble p, .turnsum p { margin: 0 0 9px; }
+  .bubble p:last-child, .turnsum p:last-child { margin-bottom: 0; }
+  /* заголовок — размером и воздухом, а не одной жирностью: два экрана текста
+     иначе читаются серой плитой. Те же значения в agent-chat.html */
+  .bubble .md-h, .turnsum .md-h {
+    font-weight: 600;
+    font-size: 15.5px;
+    line-height: 1.35;
+    color: var(--ink);
+    margin: 16px 0 6px;
+  }
+  .bubble .md-h:first-child, .turnsum .md-h:first-child { margin-top: 0; }
+  .bubble b, .bubble strong, .turnsum b, .turnsum strong { font-weight: 600; color: var(--ink); }
+  .bubble ul, .turnsum ul { margin: 0 0 9px; padding-left: 18px; }
+  .bubble ol, .turnsum ol { margin: 0 0 9px; padding-left: 22px; } /* место под двузначный номер */
+  .bubble ul:last-child, .turnsum ul:last-child,
+  .bubble ol:last-child, .turnsum ol:last-child { margin-bottom: 0; }
+  .bubble li, .turnsum li { margin: 3px 0; }
+  /* вложенный список — продолжение своего пункта, а не новый блок */
+  .bubble li > ul, .bubble li > ol, .turnsum li > ul, .turnsum li > ol { margin: 3px 0 0; }
+  .bubble code, .turnsum code {
     font-family: var(--mono);
     font-size: 12.5px;
     background: var(--surface);
@@ -899,7 +954,10 @@
     padding: 1px 5px;
     color: var(--ink);
   }
-  .bubble pre {
+  /* перенос вместо скрытого горизонтального скролла: полосы в панели погашены,
+     и уехавшая вправо строка пропадала бесследно. Потолка высоты нет — блок
+     выше него превращался в ловушку скролла: трекпад крутил код, а не ленту */
+  .bubble pre, .turnsum pre {
     font-family: var(--mono);
     font-size: 12.5px;
     line-height: 1.5;
@@ -908,11 +966,11 @@
     border-radius: var(--r-chip);
     padding: 12px 14px;
     margin: 0 0 9px;
-    overflow: auto;
-    max-height: 220px;
-    white-space: pre;
+    overflow: hidden;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
-  .bubble pre:last-child { margin-bottom: 0; }
+  .bubble pre:last-child, .turnsum pre:last-child { margin-bottom: 0; }
 
   /* Insight — свёрнут в тихую строку, раскрывается кликом */
   .callout { margin: 2px 0; }
@@ -992,10 +1050,138 @@
   }
 
   /* ---------- вкладка «Джарвис»: чем она отличается от чата сессии ----------
-   * Реплики, тул-чипы и поле ответа берутся у чата сессии как есть. Своё тут
-   * только то, чего у сессии нет: сырой текст стрима (без маркдауна — переносы
-   * держит вёрстка), отказ, заметка и карточка подтверждения. */
-  .agentchat .msg.assistant .bubble { white-space: pre-wrap; }
+   * Реплики, тул-чипы, маркдаун ответа и поле ответа берутся у чата сессии как
+   * есть. Своё тут только то, чего у сессии нет: отказ, заметка и карточка
+   * подтверждения. */
+  /* История разговоров под шапкой: колонка строк, свёрнутая до одной.
+     Полоска чипов держала два-три безымянных чата, а заголовок, время и размер
+     в неё не влезали — по «Чат 5» и «Чат 6» разговор не узнать. Раскрытая
+     колонка живёт только пока выбирают, поэтому у переписки места не отнимает.
+     Язык строки тот же, что у списка сессий: имя, метаданные тише имени,
+     выбранное — тональной краской. */
+  .agchats {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    min-height: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .aghead {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
+    padding: 6px 20px 6px 12px;
+  }
+  .aghead .spacer { flex: 1; }
+  .agtoggle {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: none;
+    padding: 4px 10px;
+    border-radius: var(--r-pill);
+    background: var(--surface);
+    color: var(--ink-mute);
+    font: 500 12px/1.35 var(--font);
+    cursor: default;
+  }
+  .agtoggle:hover { background: var(--fill-2); }
+  .agtoggle.on { background: var(--accent-soft); color: var(--ink); }
+  .agchev { flex: none; color: var(--ink-faint); transition: transform 100ms ease; }
+  .agtoggle.on .agchev { transform: rotate(90deg); }
+  /* Открытый чат виден и со свёрнутой историей: иначе не понять, куда уйдёт
+     следующая реплика. Кегль и чернила — как у имени чата в строке сессии */
+  .agcur {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--ink);
+    min-width: 0;
+    max-width: 240px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Потолок высоты: двадцать разговоров не должны выдавить переписку с экрана */
+  .aglist {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 0 12px 8px;
+    max-height: 40vh;
+    overflow-y: auto;
+    scrollbar-width: none;
+  }
+  .aglist::-webkit-scrollbar { width: 0; }
+  .agchat {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
+    padding: 7px 10px;
+    border-radius: var(--r-row);
+    cursor: default;
+  }
+  .agchat:hover { background: var(--fill-1); }
+  .agchat.on { background: var(--accent-soft); }
+  .agmain { flex: 1; min-width: 0; }
+  .agline { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .agchat .agname {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .agchat.on .agname { font-weight: 600; }
+  /* Разговор, найденный на диске: чата за ним ещё нет. Отличаем формой —
+     контурный бейдж, как у удалённого узла в строке сессии, — а не новой краской */
+  .agdisk {
+    flex: none;
+    font-size: 10.5px;
+    color: var(--ink-mute);
+    border-radius: var(--r-pill);
+    padding: 1px 6px;
+    box-shadow: inset 0 0 0 1px var(--line-strong);
+  }
+  .agmeta { font-size: 11.5px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+  .agprev {
+    font-size: 12px;
+    color: var(--ink-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Правка и крестик тихие: их зовут раз в месяц, а заголовок читают каждый
+     раз. На открытой строке правка видна всегда — иначе её снова не найдут */
+  .agedit, .agchat .agx { flex: none; color: var(--ink-faint); opacity: 0; font-size: 13px; line-height: 1; }
+  .agchat:hover .agedit, .agchat:hover .agx, .agchat.on .agedit, .agchat.on .agx { opacity: 1; }
+  .agedit:hover { color: var(--ink); }
+  .agchat .agx:hover { color: var(--danger); }
+  .agempty { padding: 10px; font-size: 12.5px; color: var(--ink-faint); line-height: 1.5; }
+  /* «+» остаётся чипом в шапке истории: завести чат — не строка списка */
+  .agchat.add {
+    padding: 4px 9px;
+    border-radius: var(--r-pill);
+    background: var(--surface);
+    color: var(--ink-faint);
+    font: 500 13px/1.35 var(--font);
+  }
+  .agchat.add:hover { background: var(--fill-2); color: var(--ink-mute); }
+  /* Правка имени на месте строки — как input.rename в строке сессии */
+  .aglist input.agrename {
+    font: 500 13px/1.35 var(--font);
+    color: var(--ink);
+    background: var(--surface);
+    border: 0;
+    box-shadow: inset 0 0 0 1px var(--accent);
+    border-radius: var(--r-row);
+    padding: 7px 10px;
+    outline: none;
+  }
+
   .agentchat .msg.err .bubble { color: var(--danger); }
   .agentchat .msg.note .bubble { color: var(--ink-mute); font-size: 13px; }
   .agentchat .msg.confirm { align-self: stretch; max-width: 560px; }
@@ -1019,10 +1205,13 @@
     color: var(--ink-mute); cursor: default;
   }
   .sumtoggle.on { color: var(--ink); background: var(--accent-soft); font-weight: 600; }
+  /* длинный путь без пробелов ломать некому — команды в карточке приезжают
+     одной строкой до 200 символов и распирали бы ленту вправо */
   .turnsum {
     margin: 6px 0; padding: 12px 14px; border-radius: var(--r-chip);
     background: var(--surface); border: 0;
     font-size: 13px; line-height: 1.5;
+    word-break: break-word;
   }
   .turnsum .tsum-files { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
   .turnsum .fchip {
@@ -1045,6 +1234,8 @@
   #chatlog.sum .turn.done .turnraw { display: none; }
   #chatlog.sum .turn.done.expanded .turnraw { display: block; }
   #chatlog:not(.sum) .turnsum { display: none; }
+  /* лента показана хвостом: верхняя реплика — не начало разговора */
+  .chatcut { align-self: center; font-size: 12px; color: var(--ink-mute); padding: 4px 0 10px; }
   .chatempty {
     flex: 1;
     display: flex;
@@ -1148,17 +1339,23 @@
     border-radius: 50%;
     background: var(--ink);
     flex: none;
-    animation: jPulse 1.4s ease-in-out infinite;
   }
+  /* «ждёт тебя» — единственное состояние с движением и гало: живость
+     «работает» и так видна по бегущему многоточию, а пульс на нём переманивал
+     взгляд с того, кто встал. Гало держит различие и без движения */
   .chatstatus.waiting { color: var(--accent-text); }
-  .chatstatus.waiting::before { background: var(--accent); animation: none; }
+  .chatstatus.waiting::before { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-line); animation: jHalo 2.2s ease-in-out infinite; }
+  /* лимит — «ты не нужен, нужно время»: тон тусклый, как у той же строки в
+     списке. Акцентная полоса читалась ровно наоборот */
+  .chatstatus.limit { color: var(--ink-mute); }
+  .chatstatus.limit::before { background: var(--ink-faint); }
   .chatstatus .dots::after {
     content: "";
     animation: jDots 1.4s steps(4, end) infinite;
   }
   @keyframes jDots { 0% { content: ""; } 25% { content: "·"; } 50% { content: "··"; } 75% { content: "···"; } }
   @media (prefers-reduced-motion: reduce) {
-    .chatstatus::before { animation: none; }
+    .chatstatus.waiting::before { animation: none; }
     .chatstatus .dots::after { animation: none; content: "…"; }
   }
 
@@ -1341,7 +1538,6 @@
     border-bottom: 0;
   }
   [data-mode='window'] .cmdrow input { font-size: 13.5px; }
-  [data-mode='window'] .cmdrow .daemon-dot { display: none; }
 
   /* в 264px пять вкладок в строку не влезают — раскладываем 2×2,
      а шестерёнку уносим в титульную полосу (там её место в оконном приложении) */
@@ -1413,6 +1609,8 @@
   /* в окне назад некуда — список и так слева */
   [data-mode='window'] .chathead .back { display: none; }
   [data-mode='window'] .chathead { padding-left: 28px; }
+  /* история чатов стоит под шапкой — левый край у них общий */
+  [data-mode='window'] .aghead, [data-mode='window'] .aglist { padding-left: 28px; }
 
   /* вопрос в окне тоже держит меру — кнопки во всю ширину читаются как баннеры */
   [data-mode='window'] .qvhead > *,
@@ -1440,7 +1638,6 @@
     color: var(--ink-mute);
     z-index: 5;
   }
-  footer .daemon-dot { display: none; } /* вместо точки демона — волна «слушаю» */
   footer .spacer { flex: 1; }
   footer .flimit {
     display: inline-flex; align-items: center; gap: 8px; flex: none;
@@ -1698,18 +1895,22 @@
       <!-- lucide: search -->
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
       <input id="query" placeholder="Найти чат…" spellcheck="false" autocomplete="off" />
-      <span class="daemon-dot" title="демон активен"></span>
+      <!-- точки «демон активен» здесь больше нет: она была захардкожена и
+           уверяла, что всё хорошо, даже когда демон молчал. -->
     </div>
 
     <div class="tabs">
-      <div class="tab active" id="tabSessions">Чаты <span class="tabkey" data-key="1"></span></div>
-      <div class="tab" id="tabHistory">Проекты <span class="tabkey" data-key="2"></span></div>
-      <div class="tab" id="tabStats">Статистика <span class="tabkey" data-key="3"></span></div>
-      <div class="tab" id="tabVoice">Голос <span class="tabkey" data-key="4"></span></div>
-      <div class="tab" id="tabLoops">Циклы <span class="tabkey" data-key="5"></span></div>
-      <div class="tab" id="tabBundle">Связка <span class="tabkey" data-key="6"></span></div>
-      <!-- «Чаты» — это сессии-исполнители; здесь разговор с самим Джарвисом -->
-      <div class="tab" id="tabAgent">Джарвис <span class="tabkey" data-key="7"></span></div>
+      <!-- «Чаты» ниже — это сессии-исполнители; здесь разговор с самим
+           Джарвисом, и открывают его чаще всех: отсюда первое место и ⌘1.
+           Подсветка стартует на «Чатах»: панель по-прежнему открывается
+           списком сессий, порядок вкладок этого не меняет. -->
+      <div class="tab" id="tabAgent">Джарвис <span class="tabkey" data-key="1"></span></div>
+      <div class="tab active" id="tabSessions">Чаты <span class="tabkey" data-key="2"></span></div>
+      <div class="tab" id="tabHistory">Проекты <span class="tabkey" data-key="3"></span></div>
+      <div class="tab" id="tabStats">Статистика <span class="tabkey" data-key="4"></span></div>
+      <div class="tab" id="tabVoice">Голос <span class="tabkey" data-key="5"></span></div>
+      <div class="tab" id="tabLoops">Циклы <span class="tabkey" data-key="6"></span></div>
+      <div class="tab" id="tabBundle">Связка <span class="tabkey" data-key="7"></span></div>
       <span class="spacer"></span>
       <div class="tab icon" id="tabSettings" title="Настройки">
         <!-- lucide: sliders-horizontal -->
@@ -1905,10 +2106,17 @@
           <span class="badge" id="agTag" hidden>продолжение</span>
           <span class="spacer"></span>
           <span class="chatsub" id="agSub">готов</span>
-          <button class="sumtoggle" id="agNew" title="Забыть нить разговора">Новый чат</button>
+          <button class="sumtoggle" id="agNew" title="Забыть нить разговора">Начать заново</button>
         </div>
+        <!-- История разговоров: чаты из настроек плюс найденные на диске.
+             Свёрнута до одной строки и раскрывается кнопкой — постоянная
+             колонка отняла бы у переписки треть окна. -->
+        <div class="agchats" id="agChats"></div>
         <div class="chatlog" id="agLog">
-          <div class="hint chatempty">Спроси Джарвиса о сессиях, лимитах, метриках.<br/>Действия — ответ в сессию, смену настроек — он подтвердит карточкой.</div>
+          <!-- текст слово в слово как в agent-chat.html: одна вкладка, одно
+               окно — одна фраза. «подтвердит У ТЕБЯ» здесь несущее: спрашивает
+               Джарвис, решает человек -->
+          <div class="hint chatempty">Спроси Джарвиса о сессиях, лимитах, метриках.<br/>Действия — ответ в сессию, смену настроек — он спросит карточкой, решаешь ты.</div>
         </div>
         <div class="chatinput">
           <textarea id="agInput" rows="1" placeholder="Сообщение Джарвису…  (Enter — отправить)" spellcheck="false" autocomplete="off"></textarea>

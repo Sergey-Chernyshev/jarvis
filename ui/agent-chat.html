@@ -43,6 +43,76 @@
   }
   .ghost:hover{ filter: brightness(1.04) }
 
+  /* История разговоров: колонка строк, свёрнутая до одной. Та же раскладка,
+     что во вкладке панели: окно из трея и вкладка обязаны вести себя
+     одинаково, а не расходиться на первой же правке. */
+  .chats{ flex:0 0 auto; display:flex; flex-direction:column; min-height:0; border-bottom:1px solid var(--line) }
+  .aghead{ display:flex; align-items:center; gap:8px; flex:none; padding:6px 20px }
+  .aghead .spacer{ flex:1 }
+  .agtoggle{
+    display:flex; align-items:center; gap:5px; flex:none;
+    padding:4px 10px; border-radius: var(--r-pill);
+    background: var(--surface); color: var(--ink-mute);
+    font: 500 12px/1.35 var(--font); cursor:default;
+  }
+  .agtoggle:hover{ background: var(--fill-2) }
+  .agtoggle.on{ background: var(--accent-soft); color: var(--ink) }
+  .agchev{ flex:none; color: var(--ink-faint); transition: transform 100ms ease }
+  .agtoggle.on .agchev{ transform: rotate(90deg) }
+  /* Открытый чат виден и со свёрнутой историей: иначе не понять, куда уйдёт
+     следующая реплика */
+  .agcur{
+    font-size:12.5px; font-weight:600; color: var(--ink);
+    min-width:0; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  /* Потолок высоты: двадцать разговоров не должны выдавить переписку с экрана */
+  .aglist{
+    display:flex; flex-direction:column; gap:1px;
+    padding:0 12px 8px; max-height:40vh; overflow-y:auto; scrollbar-width:none;
+  }
+  .aglist::-webkit-scrollbar{ width:0 }
+  .agchat{
+    display:flex; align-items:center; gap:8px; flex:none;
+    padding:7px 10px; border-radius: var(--r-row); cursor:default;
+  }
+  .agchat:hover{ background: var(--fill-1) }
+  .agchat.on{ background: var(--accent-soft) }
+  .agmain{ flex:1; min-width:0 }
+  .agline{ display:flex; align-items:center; gap:6px; min-width:0 }
+  .agchat .agname{
+    font-size:13px; font-weight:500; color: var(--ink);
+    min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .agchat.on .agname{ font-weight:600 }
+  /* Разговор, найденный на диске: чата за ним ещё нет. Отличаем формой —
+     контурный бейдж, как у удалённого узла в строке сессии, — а не краской */
+  .agdisk{
+    flex:none; font-size:10.5px; color: var(--ink-mute);
+    border-radius: var(--r-pill); padding:1px 6px;
+    box-shadow: inset 0 0 0 1px var(--line-strong);
+  }
+  .agmeta{ font-size:11.5px; color: var(--ink-faint); font-variant-numeric: tabular-nums }
+  .agprev{ font-size:12px; color: var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  /* Правка и крестик тихие: их зовут раз в месяц, а заголовок читают каждый раз */
+  .agedit, .agchat .agx{ flex:none; color: var(--ink-faint); opacity:0; font-size:13px; line-height:1 }
+  .agchat:hover .agedit, .agchat:hover .agx, .agchat.on .agedit, .agchat.on .agx{ opacity:1 }
+  .agedit:hover{ color: var(--ink) }
+  .agchat .agx:hover{ color: var(--danger) }
+  .agempty{ padding:10px; font-size:12.5px; color: var(--ink-faint); line-height:1.5 }
+  /* «+» остаётся чипом в шапке истории: завести чат — не строка списка */
+  .agchat.add{
+    padding:4px 9px; border-radius: var(--r-pill);
+    background: var(--surface); color: var(--ink-faint); font: 500 13px/1.35 var(--font);
+  }
+  .agchat.add:hover{ background: var(--fill-2); color: var(--ink-mute) }
+  .aglist input.agrename{
+    font: 500 13px/1.35 var(--font); color: var(--ink);
+    background: var(--surface); border:0;
+    box-shadow: inset 0 0 0 1px var(--accent);
+    border-radius: var(--r-row); padding:7px 10px; outline:none;
+    -webkit-user-select:text; user-select:text;
+  }
+
   /* лента: подпись сверху, текст колонкой — без пузырей */
   #msgs{ flex:1 1 auto; overflow-y:auto; padding:22px 24px 8px; display:flex; flex-direction:column; gap:18px }
   #msgs::-webkit-scrollbar{ width:0 }
@@ -66,6 +136,60 @@
     font-size:12px; color: var(--ink-mute); padding:5px 10px; border-radius:8px;
     background: var(--surface); border:0; font-family: var(--mono);
   }
+
+  /* Маркдаун ответа (JarvisMarkdown.renderChat) — те же блоки и та же тихая
+     подача, что в чате сессии: окно и вкладка обязаны выглядеть одинаково.
+     У ответа переносы держит вёрстка блоков, а не pre-wrap. */
+  .msg.assistant .bubble{ white-space: normal }
+  .bubble p{ margin:0 0 9px }
+  .bubble p:last-child{ margin-bottom:0 }
+  /* Заголовок — размером и воздухом, а не одной жирностью: два экрана текста
+     иначе читаются серой плитой. Те же значения в index.html */
+  .bubble .md-h{
+    font-weight:600; color: var(--ink);
+    font-size:15.5px; line-height:1.35; margin:16px 0 6px;
+  }
+  .bubble .md-h:first-child{ margin-top:0 }
+  .bubble strong{ font-weight:600; color: var(--ink) }
+  .bubble ul{ margin:0 0 9px; padding-left:18px }
+  .bubble ol{ margin:0 0 9px; padding-left:22px } /* место под двузначный номер */
+  .bubble ul:last-child, .bubble ol:last-child{ margin-bottom:0 }
+  .bubble li{ margin:3px 0 }
+  /* вложенный список — продолжение своего пункта, а не новый блок */
+  .bubble li > ul, .bubble li > ol{ margin:3px 0 0 }
+  .bubble code{
+    font-family: var(--mono); font-size:12.5px; color: var(--ink);
+    background: var(--surface); border-radius:4px; padding:1px 5px;
+  }
+  /* Перенос вместо скрытого горизонтального скролла: полосы в проекте погашены,
+     и уехавшая вправо строка пропадала бесследно. Потолка высоты нет — блок
+     выше него был ловушкой скролла. Те же значения в index.html */
+  .bubble pre{
+    font-family: var(--mono); font-size:12.5px; line-height:1.5;
+    background: var(--surface); border:0; border-radius: var(--r-chip);
+    padding:12px 14px; margin:0 0 9px;
+    overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .bubble pre:last-child{ margin-bottom:0 }
+  .md-hr{ height:1px; background: var(--line); margin:12px 0 }
+
+  /* Insight свёрнут в тихую строку, раскрывается кликом */
+  .callout{ margin:2px 0 }
+  .callout-title{
+    display:inline-flex; align-items:center; gap:6px;
+    font-size:13px; color: var(--ink-mute); cursor:default; user-select:none;
+  }
+  .callout-title:hover{ color: var(--ink) }
+  .callout-title .istar{ flex:none; color: var(--accent-text) }
+  .callout-title .ichev{ flex:none; color: var(--ink-faint); transition: transform 100ms ease }
+  .callout.open .callout-title .ichev{ transform: rotate(90deg) }
+  .callout-body{
+    margin-top:8px; padding:12px 14px; border:0;
+    border-radius: var(--r-chip); background: var(--surface);
+  }
+  .callout:not(.open) .callout-body{ display:none }
+  .callout-body p, .callout-body li{ font-size:13.5px; line-height:1.6; color: var(--ink-2) }
+  .callout-body p:last-child, .callout-body ul:last-child, .callout-body ol:last-child{ margin-bottom:0 }
 
   /* карточка подтверждения — та же тональная плашка, что и вопрос в чате */
   .msg.confirm{ align-items:stretch }
@@ -118,15 +242,21 @@
     <span class="title">Jarvis · агент</span>
     <span class="tag" id="tag" hidden>продолжение</span>
     <span class="sub" id="sub">готов</span>
-    <button class="ghost" id="newChat">Новый чат</button>
+    <button class="ghost" id="newChat" title="Забыть нить разговора">Начать заново</button>
+    <!-- окно без декораций: без этой кнопки закрыть можно только ⌘W -->
+    <button class="ghost" id="winClose" title="Закрыть · ⌘W">✕</button>
   </header>
+  <!-- История разговоров. Полная, как во вкладке, — когда панель закрыта, это
+       окно единственный вход к остальным разговорам. -->
+  <div class="chats" id="chats"></div>
   <div id="msgs">
-    <div class="hint">Спроси агента о сессиях, лимитах, метриках.<br/>Действия (ответ в сессию, смена настроек) он подтвердит у тебя карточкой.</div>
+    <div class="hint">Спроси Джарвиса о сессиях, лимитах, метриках.<br/>Действия — ответ в сессию, смену настроек — он спросит карточкой, решаешь ты.</div>
   </div>
   <footer>
     <textarea id="input" rows="1" placeholder="Сообщение агенту…  (Enter — отправить)"></textarea>
     <button id="send">⏎</button>
   </footer>
+  <script src="./markdown.js"></script>
   <script src="agent-chat.js"></script>
 </body>
 </html>

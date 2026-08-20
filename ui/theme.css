@@ -449,9 +449,13 @@ body {
   flex: none; box-sizing: border-box;
   background: var(--dot-sleep);
 }
+/* Азбука одна на все точки панели (см. .row .dot в index.html): гало у «ждёт»
+   — оно, а не краска, различает «ждёт» и «работает» там, где акцент равен
+   чернилам, и переживает выключенное движение. */
 .j-dot.is-working { background: var(--ink); }
-.j-dot.is-waiting { background: var(--accent); }
+.j-dot.is-waiting { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-line); }
 .j-dot.is-done    { background: transparent; border: 1.5px solid var(--ink); }
+.j-dot.is-failed  { background: transparent; border: 1.5px solid var(--danger); }
 .j-dot.is-limit   { background: var(--ink-faint); }
 .j-dot.is-idle    { background: var(--dot-sleep); }
 

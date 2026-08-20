@@ -25,6 +25,8 @@
   // текст последней ошибки (показываем в строке + retry), вместо тихого сброса.
   let activeDownload = null;
   const dlState = {};
+  // Установка Codex-SDK идёт минутами и не привязана к id модели — своё поле.
+  const codexInstall = { busy: false, step: null };
   // Мультивыбор моделей для «Скачать выбранное» (чекбоксы в строках, id → выбран).
   const selectedModels = new Set();
 
@@ -358,6 +360,16 @@
         if (busy) { root.classList.add('busy'); root.classList.remove('open'); }
         else root.classList.remove('busy');
       },
+      // вернуть подпись к реально действующему значению: бэкенд может отказать
+      // (модель не скачана), и тогда выбранный пункт врёт
+      setValue(v) {
+        const o = options.find((x) => x.value === v);
+        if (!o) return;
+        valSpan.textContent = o.label;
+        for (const x of menu.querySelectorAll('.copt')) {
+          x.classList.toggle('selected', x.getAttribute('data-value') === String(o.value));
+        }
+      },
     };
   }
   // закрыть все открытые селекты, кроме keep
@@ -469,7 +481,7 @@
       fire(() => window.jarvis.hotkeysSuspend(true));
       cap.classList.add('recording');
       cap.classList.remove('none');
-      note(isSel ? 'Нажмите сочетание с цифрой…' : 'Нажмите сочетание…');
+      note(isSel ? 'Нажми сочетание с цифрой…' : 'Нажми сочетание…');
       recTimer = setTimeout(stopRec, 12000); // раньше авто-ресюма бэкенда (15 с)
       onKey = (e) => {
         e.preventDefault(); e.stopPropagation();
@@ -540,6 +552,21 @@
     return bar;
   }
 
+  /* ── Живая строка загрузки ───────────────────────────────────────────────
+   * Состояние загрузки держим в модуле, а не в замыкании кнопки: тяжёлые
+   * установки (Codex-SDK ~2.6 ГБ, PyTorch) идут минутами, а reRenderPane за это
+   * время рисует строку заново — и человек видел свежую «Установить» и жал её
+   * второй раз, пока поток в бэкенде продолжал качать. Отмены в IPC нет, поэтому
+   * говорим честно: закрывать можно, прервать — нет. */
+  function paintProgress(node, dl) {
+    node.textContent = '';
+    if (!dl || !dl.busy) return;
+    const step = dl.step || {};
+    node.appendChild(el('div.loadcap', { text: step.msg || 'качаю…' }));
+    if (typeof step.pct === 'number') node.appendChild(progressBar(step.pct));
+    node.appendChild(el('div.loadcap', { text: 'идёт в фоне · прервать нельзя' }));
+  }
+
   /* ── Кнопка удаления модели с двойным подтверждением «Точно?» ────────────*/
   function makeDeleteButton(id, after) {
     const del = el('button.btn.sm.danger');
@@ -593,6 +620,7 @@
 #settings2 .snav .item.sel { background: var(--accent-soft); color:var(--ink); font-weight:500; }
 #settings2 .snav .item .ic { width:22px; height:22px; border-radius:7px; display:grid; place-items:center; font-size:12px; flex:none; }
 #settings2 .snav .sep { height:1px; background:var(--line); margin:9px 9px; }
+#settings2 .snav-none { padding:10px; font-size:12.5px; color:var(--ink-faint); }
 #settings2 .snav .grp { font:500 12px/1 var(--s2-font); letter-spacing:0; text-transform:none; color:var(--ink-mute); padding:12px 10px 6px; }
 
 /* ── Детальная панель ────────────────────────────────────────────────── */
@@ -844,23 +872,34 @@
   /* ========================================================================
    * Список вкладок сайдбара.
    * ====================================================================== */
+  /* `find` — то, что лежит внутри раздела: половина названий («Под капотом»,
+   * «Бодрость») о содержимом не говорит ничего, и человек идёт в поиск именно
+   * поэтому. Список ключей короткий и держится рядом с разделом, чтобы не
+   * разъезжаться с ним. */
   const NAV = [
-    { pane: 'general', label: 'Основное', icon: 'settings', ic: 'gray' },
-    { pane: 'look', label: 'Вид', icon: 'palette', ic: 'green' },
-    { pane: 'remotes', label: 'Удалённые', icon: 'server', ic: 'teal' },
-    { pane: 'agents', label: 'Агенты', icon: 'terminal', ic: 'violet' },
-    { pane: 'stt', label: 'Голосовой ввод', icon: 'mic', ic: 'blue' },
-    { pane: 'voice', label: 'Голос', icon: 'volume-2', ic: 'green' },
-    { pane: 'wake', label: 'Пробуждение', icon: 'mic', ic: 'blue' },
-    { pane: 'notify', label: 'Уведомления', icon: 'bell', ic: 'amber' },
-    { pane: 'awake', label: 'Бодрость', icon: 'coffee', ic: 'orange' },
-    { pane: 'keys', label: 'Горячие клавиши', icon: 'keyboard', ic: 'violet' },
-    { pane: 'launch', label: 'Запуск', icon: 'terminal', ic: 'green' },
+    { pane: 'general', label: 'Основное', icon: 'settings', ic: 'gray', find: 'хоткей панель позиция автозапуск логи диагностика метрики' },
+    { pane: 'look', label: 'Вид', icon: 'palette', ic: 'green', find: 'тема тёмная светлая краска цвет акцент масштаб плотность скругление окно накладка' },
+    { pane: 'remotes', label: 'Удалённые', icon: 'server', ic: 'teal', find: 'узел vps ssh сервер удалённая машина' },
+    { pane: 'agents', label: 'Агенты', icon: 'terminal', ic: 'violet', find: 'claude codex kimi свой cli доверие подтверждение' },
+    { pane: 'stt', label: 'Голосовой ввод', icon: 'mic', ic: 'blue', find: 'диктовка распознавание whisper qwen движок микрофон шумодав vad модели' },
+    { pane: 'voice', label: 'Голос', icon: 'volume-2', ic: 'green', find: 'озвучка синтез silero диктор скорость без звука bluetooth' },
+    { pane: 'wake', label: 'Пробуждение', icon: 'mic', ic: 'blue', find: 'hey jarvis wake word активация по фразе порог openwakeword' },
+    { pane: 'notify', label: 'Уведомления', icon: 'bell', ic: 'amber', find: 'тосты карточки автоскрытие ветка модель усилие время' },
+    { pane: 'awake', label: 'Бодрость', icon: 'coffee', ic: 'orange', find: 'не спать сон крышка clamshell экран кофеин' },
+    { pane: 'keys', label: 'Горячие клавиши', icon: 'keyboard', ic: 'violet', find: 'хоткей сочетание шорткат клавиши диктовка' },
+    { pane: 'launch', label: 'Запуск', icon: 'terminal', ic: 'green', find: 'терминал iterm прокси команда опасный режим yolo' },
     { sep: true },
-    { pane: 'service', label: 'Под капотом', icon: 'cpu', ic: 'purple' },
-    { pane: 'integration', label: 'Интеграция', icon: 'cable', ic: 'teal' },
-    { pane: 'about', label: 'О программе', icon: 'info', ic: 'gray' },
+    { pane: 'service', label: 'Под капотом', icon: 'cpu', ic: 'purple', find: 'служебный llm бэкенд саммари egress прокси аккаунт claude подписка api-ключ модель codex sdk сайдкар' },
+    { pane: 'integration', label: 'Интеграция', icon: 'cable', ic: 'teal', find: 'хуки шим tmux path claude codex kimi тихий режим переустановить' },
+    { pane: 'about', label: 'О программе', icon: 'info', ic: 'gray', find: 'версия обновления лицензии' },
   ];
+
+  // Совпадение раздела с запросом: по названию и по тому, что внутри.
+  function navMatches(n, q) {
+    if (!q) return true;
+    const hay = (n.label + ' ' + (n.find || '')).toLowerCase();
+    return q.split(/\s+/).filter(Boolean).every((w) => hay.includes(w));
+  }
 
   /* ========================================================================
    * ОТРИСОВКА ОТДЕЛЬНЫХ ПАНЕЛЕЙ. Каждая async, грузит из IPC, заполняет
@@ -925,13 +964,23 @@
       v.engine,
       async (engine) => {
         sel.setBusy(true);
+        cap.classList.remove('err');
         cap.textContent = 'переключаю модель…';
         cap.style.display = '';
         const r = await safe(() => window.jarvis.sttSetEngine(engine), null);
         sel.setBusy(false);
+        if (!r || r.ok === false) {
+          // Бэкенд отвечает точной причиной («модель не скачана», «нужна
+          // нативная сборка») — раньше её выбрасывали, и селект молча
+          // возвращался к старому движку, будто человек промахнулся.
+          sel.setValue(v.engine);
+          cap.classList.add('err');
+          cap.textContent = (r && r.error) || 'не удалось переключить движок';
+          return;
+        }
         cap.style.display = 'none';
-        // r.restart === true → нужна перезагрузка; в текущем коде stt_set_engine
-        // делает горячую смену (restart:false), но ошибку (ok:false) показываем.
+        // restart:true — горячей смены не вышло, движок подхватится при старте
+        if (r.restart) { cap.style.display = ''; cap.textContent = 'сменится после перезапуска Jarvis'; return; }
         reRenderPane('stt');
       });
     const engCtl = el('div.dctl', { style: 'flex-direction:column;align-items:flex-end;gap:6px' }, [sel.node, cap]);
@@ -964,7 +1013,7 @@
 
     // шумодав (VAD-гейт): пропускать диктовку, если речи не слышно. АЛЬФА.
     group.appendChild(drow('Шумодав (VAD) · альфа',
-      'Пропускает диктовку, если речи не слышно (фон/тишина). Пока нестабилен и может портить распознавание — по умолчанию выключен. Включайте на свой риск.',
+      'Пропускает диктовку, если речи не слышно (фон/тишина). Пока нестабилен и может портить распознавание — по умолчанию выключен. Включай на свой риск.',
       toggle(!!v.noiseGate, (on) => fire(() => window.jarvis.sttSetNoiseGate(on)))));
 
     // тест микрофона
@@ -1029,6 +1078,7 @@
       const ids = idsInGroup.filter((id) => selectedModels.has(id));
       if (!ids.length) return;
       b.disabled = true; b.replaceChildren(document.createTextNode('Качаю…'));
+      for (const id of ids) dlState[id] = { busy: true }; // строки должны пережить перерисовку
       await safe(() => window.jarvis.modelsInstall(ids), null);
     });
     return b;
@@ -1080,11 +1130,14 @@
     if (action) {
       // не скачана: чекбокс (мультивыбор) + кнопка «Скачать»/«Повторить» + место прогресса
       const wrap = el('div.dctl', { style: 'flex-direction:column;align-items:flex-end;gap:6px' });
-      const retry = !!(dlState[m.id] && dlState[m.id].error);
-      const label = retry ? 'Повторить' : action.label;
-      const btn = el('button.btn.sm', null, [iconSpan(retry ? 'rotate-ccw' : 'download'), document.createTextNode(label)]);
+      const dl = dlState[m.id] || null;
+      const busy = !!(dl && dl.busy); // загрузка пережила перерисовку вкладки
+      const retry = !!(dl && dl.error);
+      const label = busy ? 'Качаю…' : (retry ? 'Повторить' : action.label);
+      const btn = el('button.btn.sm', null, [iconSpan(retry && !busy ? 'rotate-ccw' : 'download'), document.createTextNode(label)]);
+      btn.disabled = busy;
       btn.addEventListener('click', async () => {
-        delete dlState[m.id];             // сбросить прежнюю ошибку
+        dlState[m.id] = { busy: true };   // сбросить прежнюю ошибку и запомнить загрузку
         btn.disabled = true; btn.replaceChildren(document.createTextNode('Качаю…'));
         // единый путь: оркестратор шлёт прогресс/финал по id модели
         await safe(() => window.jarvis.modelsInstall([m.id]), null);
@@ -1096,16 +1149,25 @@
       });
       const btnRow = el('div', { style: 'display:flex;align-items:center' }, [cb, btn]);
       wrap.appendChild(btnRow);
-      wrap.appendChild(el('div', { 'data-model': m.id })); // плейсхолдер прогресса
+      const prog = el('div', { 'data-model': m.id }); // плейсхолдер прогресса
+      paintProgress(prog, dl);
+      wrap.appendChild(prog);
       return el('div.drow', null, [dot, grow, wrap]);
     }
 
     const ctl = el('div.dctl');
     if (m.kind === 'stt' && !m.active) {
+      let note = null; // причина отказа живёт одной строкой, а не копится списком
       ctl.appendChild(button('Сделать активной', async (b) => {
         b.disabled = true; b.textContent = 'Включаю…';
+        if (note) { note.remove(); note = null; }
         const res = await safe(() => window.jarvis.sttSetEngine(m.id), null);
-        if (res && res.ok === false) { b.disabled = false; b.textContent = 'Сделать активной'; return; }
+        if (!res || res.ok === false) {
+          b.disabled = false; b.textContent = 'Сделать активной';
+          note = dlErrorNote((res && res.error) || 'не удалось включить движок');
+          grow.appendChild(note);
+          return;
+        }
         reRenderPane('stt');
       }, 'sm'));
     }
@@ -1177,12 +1239,20 @@
       return;
     }
 
+    // Детектор может быть не вкомпилирован (нет фичи wakeword-ort): веса тогда
+    // качаются, строка зеленеет, тумблер доступен — а включение бэкенд молча
+    // отбивает, и человек решает, что сломан микрофон. Старый бэкенд поля не
+    // шлёт (undefined) — по догадке не отнимаем, как и с моделями сборки.
+    const noOrt = v.ort_built === false;
+
     // вкл/выкл активацию по фразе
     group.appendChild(drow('Активация по фразе',
-      v.model_present
-        ? 'Скажи «Hey Jarvis», чтобы разбудить ассистента. Работает офлайн.'
-        : 'Сначала скачайте модель openWakeWord ниже, чтобы включить.',
-      toggle(!!v.enabled, async (on) => { await safe(() => window.jarvis.wakeSetEnabled(on), null); reRenderPane('wake'); }, !v.model_present)));
+      noOrt
+        ? 'Детектор не вкомпилирован — «Hey Jarvis» недоступно в этой сборке даже со скачанными весами.'
+        : v.model_present
+          ? 'Скажи «Hey Jarvis», чтобы разбудить ассистента. Работает офлайн.'
+          : 'Сначала скачай модель openWakeWord ниже, чтобы включить.',
+      toggle(!!v.enabled && !noOrt, async (on) => { await safe(() => window.jarvis.wakeSetEnabled(on), null); reRenderPane('wake'); }, noOrt || !v.model_present)));
 
     // заглушить микрофон (mute у источника)
     group.appendChild(drow('Заглушить микрофон', 'Полностью отключить микрофон у источника.',
@@ -1194,20 +1264,33 @@
     range.value = String(v.threshold != null ? v.threshold : 0.5);
     range.addEventListener('input', () => { thVal.textContent = Number(range.value).toFixed(2); });
     range.addEventListener('change', () => fire(() => window.jarvis.wakeSetThreshold(Number(range.value))));
+    range.disabled = noOrt; // крутить порог мёртвого детектора незачем
     group.appendChild(drow('Порог срабатывания', 'Чувствительность детектора фразы.', [thVal, range]));
 
     // модели openWakeWord
-    if (v.model_present) {
+    if (noOrt) {
+      // веса тут ни при чём — качать их незачем, работать будет нечему
+      group.appendChild(drow('Модели openWakeWord',
+        'недоступно в этой сборке — нужен движок детектора (--features wakeword-ort)',
+        el('span.sval', { text: '—' }), { dot: '' }));
+    } else if (v.model_present) {
       group.appendChild(drow('Модели openWakeWord', 'ONNX-модели «Hey Jarvis» на месте.',
         el('span.sval.on', { text: 'на месте' }), { dot: 'done' }));
     } else {
-      const werr = dlState['hey_jarvis'] && dlState['hey_jarvis'].error;
+      const wdl = dlState['hey_jarvis'] || null;
+      const werr = wdl && wdl.error;
+      const wbusy = !!(wdl && wdl.busy);
       const wctl = el('div.dctl', { style: 'flex-direction:column;align-items:flex-end;gap:6px' });
-      wctl.appendChild(button(werr ? 'Повторить' : 'Скачать (~3.5 МБ)', async (b) => {
-        activeDownload = 'hey_jarvis'; delete dlState['hey_jarvis'];
+      const wbtn = button(wbusy ? 'Скачиваю…' : (werr ? 'Повторить' : 'Скачать (~3.5 МБ)'), async (b) => {
+        activeDownload = 'hey_jarvis'; dlState['hey_jarvis'] = { busy: true };
         b.disabled = true; b.textContent = 'Скачиваю…';
         await safe(() => window.jarvis.wakeInstallModels(), null);
-      }, 'sm'));
+      }, 'sm');
+      wbtn.disabled = wbusy;
+      wctl.appendChild(wbtn);
+      const wprog = el('div', { 'data-model': 'hey_jarvis' });
+      paintProgress(wprog, wdl);
+      wctl.appendChild(wprog);
       if (werr) wctl.appendChild(dlErrorNote(werr));
       group.appendChild(drow('Модели openWakeWord', 'Нужно скачать модели (~3.5 МБ), чтобы детектор заработал.',
         wctl, { dot: '' }));
@@ -1438,7 +1521,25 @@
       ? readiness.coreReady
       : (st.hooks && st.shim);
 
-    pane.appendChild(el('div.dsection', { text: 'Claude Code · ' + (integrated ? 'подключено' : 'не подключено') }));
+    // Бэкенд считает готовность КАЖДОГО CLI (claude, codex, kimi) со своей
+    // причиной. Раньше вкладка брала отсюда один глобальный coreReady и рисовала
+    // «Claude Code · не подключено» даже тогда, когда сломан был Kimi.
+    const agents = Array.isArray(readiness.agents) ? readiness.agents : [];
+    if (agents.length) {
+      pane.appendChild(el('div.dsection', { text: 'Агенты' }));
+      const ag = el('div.dgroup');
+      for (const a of agents) {
+        const ready = !!a.ready;
+        const found = a.available !== false;
+        const val = ready ? 'подключён' : (found ? 'нужна настройка' : 'CLI не найден');
+        const desc = [a.detail, ready ? null : a.action].filter(Boolean).join(' · ');
+        ag.appendChild(drow(a.label || a.id, desc,
+          el('span.sval' + (ready ? '.on' : ''), { text: val }), { dot: ready ? 'done' : '' }));
+      }
+      pane.appendChild(ag);
+    }
+
+    pane.appendChild(el('div.dsection', { text: 'Общий контур · ' + (integrated ? 'подключён' : 'не подключён') }));
     const statusGroup = el('div.dgroup');
     const rows = [
       ['Хуки событий', 'Уведомляют Jarvis о действиях агента.', st.hooks],
@@ -1452,8 +1553,17 @@
     }
     pane.appendChild(statusGroup);
 
+    // предупреждения бэкенда написаны словами — их незачем прятать в онбординге
+    const warnings = Array.isArray(readiness.warnings) ? readiness.warnings : [];
+    for (const w of warnings) {
+      pane.appendChild(el('div.s2err', { style: 'max-width:none;margin:-14px 2px 8px' }, [
+        el('span.s2err-ic', null, icon('alert-triangle')),
+        el('span.s2err-txt', { text: w }),
+      ]));
+    }
+
     if (info.foreign_hooks > 0) {
-      pane.appendChild(el('div.dd', { text: 'При удалении сохранятся ' + info.foreign_hooks + ' чужих хук(ов) — трогаем только свои.', style: 'margin:-12px 2px 18px' }));
+      pane.appendChild(el('div.dd', { text: 'При удалении сохранятся ' + info.foreign_hooks + ' ' + JarvisMarkdown.plural(info.foreign_hooks, 'чужой хук', 'чужих хука', 'чужих хуков') + ' — трогаем только свои.', style: 'margin:' + (warnings.length ? '6px' : '-12px') + ' 2px 18px' }));
     }
 
     // разработчик: тихий режим
@@ -1477,7 +1587,7 @@
         await safe(() => window.jarvis.integrationRemove(), null);
         reRenderPane('integration');
       });
-      manGroup.appendChild(drow('Удалить интеграцию', 'Отключить Jarvis от Claude Code (чужие хуки сохранятся).', rm));
+      manGroup.appendChild(drow('Удалить интеграцию', 'Отключить Jarvis от агентских CLI (чужие хуки сохранятся).', rm));
     }
     // модели голоса/диктовки на диске (из info.models — Artifact[]: {id,label,bytes})
     for (const m of (info.models || [])) {
@@ -1506,11 +1616,11 @@
       status.textContent = 'Проверяю…';
       const r = await safe(() => window.jarvis.updateCheckInstall(), { ok: false, error: 'нет связи с апдейтером' });
       if (r && r.ok && r.updated) {
-        status.textContent = 'Установлена v' + (r.version || '') + ' — перезапустите.';
+        status.textContent = 'Установлена v' + (r.version || '') + ' — перезапусти Jarvis.';
         ctl.textContent = '';
         ctl.appendChild(button('Перезапустить', () => window.jarvis.relaunch(), 'primary'));
       } else if (r && r.ok) {
-        status.textContent = 'У вас последняя версия.';
+        status.textContent = 'У тебя последняя версия.';
         checkBtn.disabled = false;
       } else {
         status.textContent = 'Ошибка: ' + ((r && r.error) || 'не удалось проверить');
@@ -1610,6 +1720,13 @@
 
   async function renderService(pane) {
     pane.appendChild(el('div.dtitle', { text: 'Под капотом' }));
+    // По названию раздела не угадывается ничего — говорим прямо, что внутри и
+    // чего тут НЕТ (иначе соседние настройки вынуждены объяснять это за него).
+    pane.appendChild(el('div.dd', {
+      style: 'margin:-12px 2px 18px;max-width:520px',
+      text: 'Всё, чем Jarvis пользуется сам: служебный LLM для саммари и заголовков, его сеть и аккаунты. '
+        + 'Сами сессии агентов и их запуск — в разделах «Агенты» и «Запуск».',
+    }));
     const _sk = skelGroup(3); pane.appendChild(_sk);
     const v = await safe(() => window.jarvis.serviceGet(), null);
     _sk.remove();
@@ -1739,19 +1856,26 @@
         el('span.sval.on', { text: 'на месте' })));
     } else {
       const wrap = el('div.dctl', { style: 'flex-direction:column;align-items:flex-end;gap:6px' });
-      const btn = el('button.btn.sm', null, [iconSpan('download'), document.createTextNode('Установить')]);
+      const btn = el('button.btn.sm', null, [
+        iconSpan('download'),
+        document.createTextNode(codexInstall.busy ? 'Ставлю…' : 'Установить'),
+      ]);
+      btn.disabled = codexInstall.busy; // установка пережила переключение вкладки
       btn.addEventListener('click', async () => {
+        codexInstall.busy = true; codexInstall.step = null;
         btn.disabled = true;
         btn.replaceChildren(document.createTextNode('Ставлю…'));
         await safe(() => window.jarvis.codexInstallSidecar(), null);
         // финал прилетит codex_install_done → перерисует панель
       });
       wrap.appendChild(btn);
-      wrap.appendChild(el('div', { id: 's2-codex-progress' })); // плейсхолдер прогресса
+      const prog = el('div', { id: 's2-codex-progress' }); // плейсхолдер прогресса
+      paintProgress(prog, codexInstall);
+      wrap.appendChild(prog);
       cg.appendChild(el('div.drow', null, [
         el('div.grow', null, [
           el('div.dt', { text: 'Codex-SDK сайдкар' }),
-          el('div.dd', { text: 'Нужен для бэкенда Codex: Python-venv + openai-codex (тянет codex-бинарь). Ставится один раз.' }),
+          el('div.dd', { text: 'Нужен для бэкенда Codex: Python-venv + openai-codex (тянет codex-бинарь, ~2.6 ГБ). Ставится один раз, минутами.' }),
         ]),
         wrap,
       ]));
@@ -1872,15 +1996,21 @@
     const cur = (window.jarvisTheme && window.jarvisTheme.get()) || { theme: 'light', paint: 'clover', mode: 'overlay' };
     const group = el('div.dgroup');
 
-    // режим окна: накладка ⌘J поверх всего или обычное окно со списком слева (14h)
+    // режим окна: накладка ⌘J поверх всего или обычное окно со списком слева (14h).
+    // Сегмент переключается мгновенно и выглядит применившимся — само окно
+    // создаётся на старте, поэтому отметку про перезапуск ставим рядом с
+    // контролом, а не прячем в хвосте трёхстрочного описания.
     group.appendChild(drow('Режим',
       `Накладка — панель поверх всего по ${window.jarvisKeys.k('J')}, прячется по клику мимо. `
-      + 'Окно — обычное окно: список слева, диалог справа, своё место в панели задач '
-      + '(появится со следующего запуска).',
-      segmented(
-        [{ value: 'overlay', label: 'накладка' }, { value: 'window', label: 'окно' }],
-        cur.mode || 'overlay',
-        (v) => { window.jarvisTheme && window.jarvisTheme.set({ mode: v }); })));
+      + 'Окно — обычное окно: список слева, диалог справа, своё место в панели задач.',
+      [
+        segmented(
+          [{ value: 'overlay', label: 'накладка' }, { value: 'window', label: 'окно' }],
+          cur.mode || 'overlay',
+          (v) => { window.jarvisTheme && window.jarvisTheme.set({ mode: v }); }),
+        el('span.loadcap', { text: 'применится после перезапуска Jarvis' }),
+      ],
+      { ctlStyle: 'flex-direction:column;align-items:flex-end;gap:6px' }));
 
     group.appendChild(drow('Тема', 'Светлая — как в макете; системная следует за настройкой macOS.',
       segmented(
@@ -2716,6 +2846,21 @@
     }
   }
 
+  /* Загрузка могла начаться до того, как открыли настройки (онбординг, прошлое
+   * окно панели): сам факт живёт в бэкенде (readiness.job), и без этого запроса
+   * настройки рисовали бы «Установить» поверх идущей закачки. */
+  function seedRunningDownloads() {
+    safe(() => window.jarvis.integrationGet(), null).then((info) => {
+      const job = info && info.readiness && info.readiness.job;
+      if (!job || job.state !== 'running' || job.kind !== 'models') return;
+      for (const id of (job.tasks || [])) if (!dlState[id]) dlState[id] = { busy: true };
+      for (const s of (job.steps || [])) {
+        if (s && s.scope && dlState[s.scope]) dlState[s.scope].step = s; // последний шаг задачи
+      }
+      reRenderPane(activePane);
+    });
+  }
+
   /* ========================================================================
    * Подписка на live-события (идемпотентно — модульный флаг subscribed).
    * ====================================================================== */
@@ -2725,13 +2870,12 @@
     // прогресс установки STT → ТОЛЬКО в строку качаемой модели (не во все сразу)
     try {
       window.jarvis.onSttInstallProgress((step) => {
-        if (!currentRoot || !activeDownload) return;
-        const pct = step && typeof step.pct === 'number' ? step.pct : null;
-        const h = currentRoot.querySelector('#s2-pane-stt [data-model="' + activeDownload + '"]');
-        if (!h) return;
-        h.textContent = '';
-        if (step && step.msg) h.appendChild(el('span.loadcap', { text: step.msg }));
-        if (pct != null) h.appendChild(progressBar(pct));
+        if (!activeDownload) return;
+        const dl = dlState[activeDownload] || (dlState[activeDownload] = {});
+        dl.busy = true; dl.step = step || null;
+        if (!currentRoot) return;
+        // одна модель может стоять сразу в двух вкладках (wake + список моделей)
+        for (const h of currentRoot.querySelectorAll('[data-model="' + activeDownload + '"]')) paintProgress(h, dl);
       });
     } catch (e) {}
     // финал установки STT → записать успех/ошибку и перерисовать stt-панель
@@ -2739,17 +2883,19 @@
     // прогресс установки Codex-SDK сайдкара → обновить плейсхолдер в панели service
     try {
       window.jarvis.onCodexInstallProgress((step) => {
+        codexInstall.busy = true; codexInstall.step = step || null;
         if (!currentRoot) return;
         const h = currentRoot.querySelector('#s2-codex-progress');
-        if (!h) return;
-        h.textContent = '';
-        if (step && step.msg) h.appendChild(el('span.loadcap', { text: step.msg }));
-        const pct = step && typeof step.pct === 'number' ? step.pct : null;
-        if (pct != null) h.appendChild(progressBar(pct));
+        if (h) paintProgress(h, codexInstall);
       });
     } catch (e) {}
-    // финал установки Codex-SDK → перерисовать service-панель
-    try { window.jarvis.onCodexInstallDone(() => { reRenderPane('service'); }); } catch (e) {}
+    // финал установки Codex-SDK → снять «идёт» и перерисовать service-панель
+    try {
+      window.jarvis.onCodexInstallDone(() => {
+        codexInstall.busy = false; codexInstall.step = null;
+        reRenderPane('service');
+      });
+    } catch (e) {}
     // финал установки wake-моделей → записать успех/ошибку, перерисовать wake + stt
     try { window.jarvis.onWakeInstallDone((res) => { finishDownload(res); reRenderPane('wake'); reRenderPane('stt'); }); } catch (e) {}
     // состояние аудио → обновить индикаторы wake-панели (если открыта)
@@ -2758,13 +2904,11 @@
     // ── Единые события мультизагрузки (models_install) — прогресс по id модели ──
     try {
       window.jarvis.onModelInstallProgress(({ id, step }) => {
-        if (!currentRoot || !id) return;
-        const h = currentRoot.querySelector('[data-model="' + id + '"]');
-        if (!h) return;
-        h.textContent = '';
-        if (step && step.msg) h.appendChild(el('span.loadcap', { text: step.msg }));
-        const pct = step && typeof step.pct === 'number' ? step.pct : null;
-        if (pct != null) h.appendChild(progressBar(pct));
+        if (!id) return;
+        const dl = dlState[id] || (dlState[id] = {});
+        dl.busy = true; dl.step = step || null; delete dl.error;
+        if (!currentRoot) return;
+        for (const h of currentRoot.querySelectorAll('[data-model="' + id + '"]')) paintProgress(h, dl);
       });
     } catch (e) {}
     try {
@@ -2826,9 +2970,13 @@
 
     // ── Сайдбар ──
     const sidebar = el('div.sidebar');
+    // Поиск фильтрует сайдбар: разделов 14, и по названию не всегда ясно, где
+    // что лежит. Enter — открыть первый оставшийся, Esc — сбросить.
+    const searchIn = el('input', { placeholder: 'Поиск настроек…', autocomplete: 'off', spellcheck: 'false' });
+    const noHits = el('div.snav-none', { text: 'Ничего не найдено' });
     sidebar.appendChild(el('div.ssearch', null, [
       el('span.si', null, icon('search')),
-      el('input', { placeholder: 'Поиск настроек…' }), // визуальный no-op (по спеке)
+      searchIn,
     ]));
     sidebar.appendChild(el('div.saccount', null, [
       el('span.ava', { text: 'J' }),
@@ -2841,8 +2989,9 @@
     });
     const snav = el('div.snav');
     const navItems = {};
+    const navSeps = [];
     for (const n of NAV) {
-      if (n.sep) { snav.appendChild(el('div.sep')); continue; }
+      if (n.sep) { const s = el('div.sep'); navSeps.push(s); snav.appendChild(s); continue; }
       const item = el('div.item' + (n.pane === activePane ? '.sel' : ''), { 'data-pane': n.pane }, [
         el('span.ic.' + n.ic, null, icon(n.icon)),
         document.createTextNode(n.label),
@@ -2851,8 +3000,33 @@
       navItems[n.pane] = item;
       snav.appendChild(item);
     }
+    snav.appendChild(noHits);
     sidebar.appendChild(snav);
     win.appendChild(sidebar);
+
+    // применить фильтр поиска к сайдбару; возвращает первый подошедший раздел
+    function applySearch() {
+      const q = (searchIn.value || '').trim().toLowerCase();
+      let first = null;
+      for (const n of NAV) {
+        if (n.sep) continue;
+        const hit = navMatches(n, q);
+        if (hit && !first) first = n.pane;
+        navItems[n.pane].style.display = hit ? '' : 'none';
+      }
+      // разделитель разделяет только то, что видно
+      for (const s of navSeps) s.style.display = q ? 'none' : '';
+      noHits.style.display = first ? 'none' : '';
+      return first;
+    }
+    searchIn.addEventListener('input', applySearch);
+    searchIn.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { searchIn.value = ''; applySearch(); return; }
+      if (e.key !== 'Enter') return;
+      const first = applySearch();
+      if (first) selectPane(first);
+    });
+    applySearch();
 
     // ── Детальная колонка ──
     const detail = el('div.detail');
@@ -2887,6 +3061,7 @@
     }
 
     subscribeOnce();
+    seedRunningDownloads();
 
     // отрисовать активную панель сразу (через сериализованный reRenderPane)
     reRenderPane(activePane);

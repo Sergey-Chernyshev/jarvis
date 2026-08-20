@@ -34,6 +34,72 @@ test('doc viewer surface exists on top of the summary cards', () => {
   assert.match(renderer, /JarvisMarkdown\.isDocPath\(/); // doc-чипы первыми + CTA
 });
 
+// Рендерер реплик один на всех: чат сессии, вкладка «Джарвис» и окно из трея
+// зовут markdown.js. Своя копия в renderer.js оставляла два языка разметки —
+// вкладке и окну она была недоступна, и ответы агента шли сырым текстом.
+test('assistant markdown lives in markdown.js only', () => {
+  const markdown = readFileSync(new URL('./markdown.js', import.meta.url), 'utf8');
+  assert.match(markdown, /function renderChat\(root, text\)/);
+  assert.match(renderer, /JarvisMarkdown\.renderChat\(/);
+  // признаки собственной копии: разбор Insight и склонение «N заметок»
+  assert.doesNotMatch(renderer, /callout-body/);
+  assert.doesNotMatch(renderer, /\bfunction notesWord\(/);
+});
+
+/* Рендерер один, а стили реплики лежат в двух файлах — и разъезжаются молча.
+ * Заголовок, неотличимый от жирного, и код без переноса — это про чтение: во
+ * вкладке и в окне из трея человек читает один и тот же ответ. */
+test('assistant markdown styles agree between panel and agent window', () => {
+  const win = readFileSync(new URL('./agent-chat.html', import.meta.url), 'utf8');
+  for (const [where, css] of [['index.html', html], ['agent-chat.html', win]]) {
+    const h = css.match(/\.bubble \.md-h[^{]*\{([^}]*)\}/);
+    assert.ok(h, where + ': заголовок ответа не стилизован вовсе');
+    assert.match(h[1], /font-size:\s*15\.5px/, where + ': заголовок неотличим от жирного текста');
+    assert.match(h[1], /margin:\s*16px 0 6px/, where + ': заголовку не дали воздуха сверху');
+
+    const pre = css.match(/\.bubble pre[^{]*\{([^}]*)\}/);
+    assert.ok(pre, where + ': блок кода не стилизован');
+    assert.match(pre[1], /white-space:\s*pre-wrap/, where + ': длинная строка кода уезжает вправо в никуда');
+    assert.doesNotMatch(pre[1], /max-height/, where + ': блок кода — ловушка скролла при погашенных полосах');
+  }
+});
+
+/* История разговоров живёт в двух документах, и стили у неё две копии — они
+ * разъезжаются молча. Строка с диска, отличимая только в одном из окон, — это
+ * снова недостижимый разговор, просто с другой стороны. */
+test('история разговоров одинаково размечена во вкладке и в окне', () => {
+  const win = readFileSync(new URL('./agent-chat.html', import.meta.url), 'utf8');
+  for (const [where, css] of [['index.html', html], ['agent-chat.html', win]]) {
+    for (const sel of ['.aghead', '.aglist', '.agchat.on', '.agdisk', '.agmeta', '.agedit', '.agempty']) {
+      assert.ok(css.includes(sel), where + ': ' + sel + ' не стилизован — история разъехалась');
+    }
+    // колонка не должна выдавливать переписку: потолок высоты со скроллом
+    const list = css.match(/\.aglist\s*\{([^}]*)\}/);
+    assert.match(list[1], /max-height/, where + ': у истории нет потолка — двадцать разговоров съедят экран');
+    assert.match(list[1], /overflow-y:\s*auto/, where + ': историю без потолка нельзя прокрутить');
+  }
+  // полоски чипов больше нет: у строки истории есть заголовок, время и размер
+  assert.doesNotMatch(html, /\.agchats\s*\{[^}]*overflow-x/, 'история снова свернулась в полоску чипов');
+});
+
+/* Мост зовёт демона по имени: разъехавшееся имя команды — тихий отказ, который
+ * видно только на живом маке. Особенно agent_chat_open — он раньше значил
+ * «открыть окно чата», а теперь «привязать разговор с диска». */
+test('каждая команда чата, которую зовёт UI, зарегистрирована у демона', () => {
+  const bridge = readFileSync(new URL('./bridge.js', import.meta.url), 'utf8');
+  const chat = readFileSync(new URL('./agent-chat.js', import.meta.url), 'utf8');
+  const main = readFileSync(new URL('../src-tauri/src/main.rs', import.meta.url), 'utf8');
+  const used = new Set(
+    [...(bridge + chat).matchAll(/invoke\('(agent_[a-z_]+)'/g)].map((m) => m[1]),
+  );
+  assert.ok(used.has('agent_chat_open'), 'разговор с диска открывать нечем');
+  for (const cmd of used) {
+    assert.match(main, new RegExp('ipc::' + cmd + '\\b'), `UI зовёт ${cmd}, а демон такой команды не знает`);
+  }
+  // старый смысл «открыть окно чата» переехал в agent_chat_window и в UI не зовётся
+  assert.ok(!used.has('agent_chat_window'), 'agent_chat_open перепутан с окном чата');
+});
+
 // Легаси-заготовка «саммари сессии» (chatModeSeg/chatSummaryEl/setChatMode)
 // не возвращается: v1 её заменил тумблером сводок, а не воскресил.
 test('legacy summary-mode stub stays absent', () => {

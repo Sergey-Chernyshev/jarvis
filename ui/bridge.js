@@ -113,9 +113,19 @@
     // главный агент: нить разговора, прошлая переписка, отправка и подтверждения.
     // События демон шлёт всем окнам — вкладка и окно из трея видят один поток.
     agentChatState: () => invoke('agent_chat_state'),
-    agentChatHistory: () => invoke('agent_chat_history'),
+    agentChatHistory: (chatId) => invoke('agent_chat_history', { chatId }),
     agentChatReset: () => invoke('agent_chat_reset'),
-    agentSend: (message, sessionId) => invoke('agent_send', { message, sessionId }),
+    // Список разговоров: по чату на проект. Каждая правка возвращает весь
+    // список с пометкой открытого — второй ход за списком не нужен.
+    agentChatsList: () => invoke('agent_chats_list'),
+    agentChatSwitch: (chatId) => invoke('agent_chat_switch', { chatId }),
+    agentChatCreate: (name) => invoke('agent_chat_create', { name }),
+    agentChatRename: (chatId, name) => invoke('agent_chat_rename', { chatId, name }),
+    agentChatDelete: (chatId) => invoke('agent_chat_delete', { chatId }),
+    // Привязать к чату разговор, найденный на диске, и открыть его. Не «открыть
+    // окно чата» — окно поднимает agent_chat_window.
+    agentChatOpen: (sessionId) => invoke('agent_chat_open', { sessionId }),
+    agentSend: (message, chatId, sessionId) => invoke('agent_send', { message, chatId, sessionId }),
     agentConfirm: (nonce, approved) => invoke('agent_confirm', { nonce, approved }),
     onAgentEvent: (cb) => on('agent:event', cb),
     onAgentConfirm: (cb) => on('agent:confirm', cb),

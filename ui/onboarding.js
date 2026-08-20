@@ -61,6 +61,14 @@
     return node;
   }
 
+  // склонение числительных (тот же приём, что в панели)
+  function plural(n, one, few, many) {
+    const d10 = n % 10, d100 = n % 100;
+    if (d10 === 1 && d100 !== 11) return one;
+    if (d10 >= 2 && d10 <= 4 && (d100 < 12 || d100 > 14)) return few;
+    return many;
+  }
+
   function findCapability(id) {
     return (snapshot.capabilities || []).find((item) => item.id === id) || null;
   }
@@ -112,10 +120,10 @@
     });
     proxyWrap.appendChild(proxyInput);
     return [
-      eyebrow('System readiness'),
+      eyebrow('Проверка системы'),
       h('div', { class: 'hero-mark', text: 'J', 'aria-hidden': 'true' }),
       ...heading('Один центр управления агентами', 'Jarvis соединит уже установленные Claude Code и Codex с уведомлениями, диктовкой и живыми сессиями. Сначала — только быстрое локальное ядро.'),
-      h('div', { class: 'system-note', text: 'Private · local · models on demand' }),
+      h('div', { class: 'system-note', text: 'Локально · без облака · модели скачиваются по требованию' }),
       proxyButton,
       proxyWrap,
     ];
@@ -123,9 +131,9 @@
 
   function renderChecking() {
     return [
-      eyebrow('Reading local signals'),
+      eyebrow('Читаю локальные признаки'),
       h('div', { class: 'hero-mark', text: 'J', 'aria-hidden': 'true' }),
-      ...heading('Собираю состояние системы', 'Проверяю CLI, hook-контракты, runtime socket, transport и локальные модели. Никаких сетевых запросов на этом шаге.'),
+      ...heading('Собираю состояние системы', 'Смотрю, какие агенты установлены, на месте ли хуки, отвечает ли демон и что из моделей уже скачано. В сеть на этом шаге не ходим.'),
       h('div', { class: 'progress-card', role: 'status', 'aria-live': 'polite' }, [
         h('div', { class: 'progress-head' }, [h('span', { class: 'spinner', 'aria-hidden': 'true' }), h('span', { text: 'Локальная диагностика' })]),
         h('div', { class: 'progress-line', text: 'Сверяю фактическое состояние, а не сохранённый флаг установки' }),
@@ -136,8 +144,8 @@
 
   function renderAgents() {
     const nodes = [
-      eyebrow(snapshot.coreReady ? 'Core online' : 'Connection check'),
-      ...heading('Подключим то, что уже есть', 'Jarvis регистрирует lifecycle hooks отдельно для каждого найденного агента. Чужие hooks сохраняются.'),
+      eyebrow(snapshot.coreReady ? 'Ядро на связи' : 'Проверка связи'),
+      ...heading('Подключим то, что уже есть', 'Jarvis подключает хуки отдельно к каждому найденному агенту. Чужие хуки остаются нетронутыми.'),
       h('div', { class: 'section-title', text: 'Агенты' }),
       h('div', { class: 'list' }, (snapshot.agents || []).map(readinessItem)),
       h('div', { class: 'section-title', text: 'Транспорт' }),
@@ -189,11 +197,11 @@
 
   function renderCapabilities() {
     return [
-      eyebrow('Optional · local first'),
+      eyebrow('По желанию · всё локально'),
       ...heading('Добавь только нужные возможности', 'Ничего не выбрано заранее. Любую модель можно установить или удалить позже в настройках.'),
       h('div', { class: 'section-title', text: 'Локальные модели' }),
       h('div', { class: 'list' }, modelMeta.map(capabilityRow)),
-      h('div', { class: 'notice', text: 'Silero v4_ru и bundled wake-word weights имеют ограничения non-commercial use. Для коммерческого распространения выбери совместимые модели и лицензии.' }),
+      h('div', { class: 'notice', text: 'У Silero v4_ru и весов wake-word лицензия только для некоммерческого использования. Для продажи или распространения нужны другие модели.' }),
     ];
   }
 
@@ -203,7 +211,7 @@
     const latest = steps[steps.length - 1];
     const pct = latest && typeof latest.pct === 'number' ? latest.pct : null;
     return [
-      eyebrow(job.kind === 'models' ? 'Capability install' : 'Core install'),
+      eyebrow(job.kind === 'models' ? 'Ставлю модели' : 'Ставлю ядро'),
       ...heading(job.kind === 'models' ? 'Готовим выбранные модели' : 'Соединяем контур', 'Окно можно закрыть: установка продолжится, а прогресс восстановится при следующем открытии.'),
       h('div', { class: 'progress-card', role: 'status', 'aria-live': 'polite' }, [
         h('div', { class: 'progress-head' }, [h('span', { class: 'spinner', 'aria-hidden': 'true' }), h('span', { text: latest ? latest.phase : 'Запускаю…' })]),
@@ -218,44 +226,56 @@
     ];
   }
 
+  /* Это первое, что человек читает, когда что-то не пошло. Значит: чем не
+   * получилось, что сделать прямо сейчас и что жать — без внутренних слов
+   * («идемпотентен», «runtime», «контур hooks»), которых он не знает. */
   function renderDegraded() {
     const failures = (snapshot.job && snapshot.job.failures) || [];
     const kind = State.derive(snapshot).failureKind;
+    const KIND_RU = { network: 'сеть', disk: 'место на диске', permission: 'доступ', hooks: 'хуки', unknown: 'причина неясна' };
     const recovery = {
-      network: ['Канал загрузки недоступен', 'Проверю proxy/DNS и продолжу с последнего безопасного шага. Уже установленные части не скачиваются повторно.'],
-      disk: ['Недостаточно места на диске', 'Освободи место и повтори. Частичный файл не считается готовой моделью и не повредит runtime.'],
-      permission: ['Нужно подтверждение доступа', 'Claude/Codex могут ждать trust для hooks, а macOS — Accessibility или Microphone. Jarvis не обходит эти разрешения скрыто.'],
-      hooks: ['Контур hooks повреждён', 'Jarvis перепишет только собственные регистрации; сторонние hooks останутся нетронутыми.'],
-      unknown: ['Модуль ответил неожиданно', 'Рабочая часть системы сохранена. Повтор идемпотентен, точная причина остаётся ниже.'],
+      network: ['Не получилось скачать', 'Проверь интернет — и, если сидишь за корпоративным прокси, впиши его на первом шаге. Уже скачанное не пропало: нажми «Повторить», продолжим с того же места.'],
+      disk: ['На диске мало места', 'Освободи место и нажми «Повторить». Недокачанный файл ничего не сломал — Jarvis начнёт закачку заново.'],
+      permission: ['Нужно разрешить доступ', 'Claude или Codex может спросить в терминале, доверяешь ли ты хукам — ответь «да». macOS отдельно спрашивает про микрофон и управление компьютером: «Системные настройки» → «Конфиденциальность и безопасность». Потом нажми «Повторить».'],
+      hooks: ['Настройки агентов сбились', 'Jarvis перепишет только свои строки — чужие хуки останутся как были. Нажми «Повторить».'],
+      unknown: ['Что-то пошло не так', 'То, что уже работало, работает по-прежнему. Повторить можно безопасно: ничего не задвоится. Точная причина — ниже.'],
     }[kind || 'unknown'];
     return [
-      eyebrow(`Recovery · ${kind || 'unknown'}`),
+      eyebrow(`Восстановление · ${KIND_RU[kind] || KIND_RU.unknown}`),
       h('div', { class: 'hero-mark', text: '!', 'aria-hidden': 'true' }),
       ...heading(recovery[0], recovery[1]),
       warningList(failures.length ? failures : snapshot.warnings),
-      h('div', { class: 'notice', text: 'Проверь сеть, PATH и доступность Claude/Codex. Секреты прокси и токены в этот экран и operational logs не выводятся.' }),
+      h('div', { class: 'notice', text: 'Если не помогло — открой настройки (кнопка слева) и посмотри вкладку «Интеграция»: там видно, какой именно агент не подключён. Пароли от прокси и токены в этот экран и в логи не попадают.' }),
     ];
   }
 
   function renderReady() {
     const readyCount = (snapshot.capabilities || []).filter((item) => item.ready).length;
+    const agentCount = (snapshot.agents || []).filter((item) => item.ready).length;
     const runtimeState = State.derive(snapshot).runtimeState;
     const online = runtimeState === 'online';
     return [
-      eyebrow(online ? 'Jarvis online' : 'Runtime warming'),
+      eyebrow(online ? 'Jarvis на связи' : 'Ядро прогревается'),
       h('div', { class: 'ready-orbit', text: '✓', 'aria-hidden': 'true' }),
       ...heading(
-        online ? 'Система готова к работе' : 'Контур подключён',
+        online ? 'Система готова к работе' : 'Связь настроена',
         online
-          ? 'Hooks подключены, события приходят в локальный runtime. Опциональные возможности не блокируют работу.'
-          : 'Hooks готовы. Runtime socket поднимается в фоне; панель можно открыть уже сейчас.',
+          ? 'Хуки на месте, события от агентов приходят в Jarvis. Модели можно доставить когда угодно — без них всё работает.'
+          : 'Хуки на месте. Связь с демоном поднимается в фоне; панель можно открыть уже сейчас.',
       ),
       h('div', {
         class: 'system-note',
-        text: `${(snapshot.agents || []).filter((item) => item.ready).length} agents · ${readyCount} local modules · ${online ? 'online' : 'warming'}`,
+        text: `${agentCount} ${plural(agentCount, 'агент', 'агента', 'агентов')} · `
+          + `${readyCount} ${plural(readyCount, 'локальная модель', 'локальные модели', 'локальных моделей')} · `
+          + (online ? 'на связи' : 'прогревается'),
       }),
       h('div', { class: 'shortcut' }, [h('kbd', { text: window.jarvisKeys ? window.jarvisKeys.k('J') : 'Ctrl+J' }), h('span', { text: 'открыть панель' })]),
-      online ? null : h('div', { class: 'notice', text: 'Если socket не станет online после запуска панели, открой диагностику: hook registration останется целым.' }),
+      // Главная ловушка первого запуска: человек идёт в УЖЕ открытый терминал,
+      // где claude уже работает, и не видит ничего. Хуки снимаются снапшотом на
+      // старте сессии, а PATH-блок не виден текущему шеллу — CLI об этом печатает,
+      // а тот, кто ставил из DMG, никакого CLI и README не видел.
+      h('div', { class: 'notice', text: 'Уже открытые сессии Claude Code, Codex и Kimi перезапусти: хуки читаются один раз, при старте сессии. В том же терминале выполни exec zsh (или открой новую вкладку) — иначе он не увидит команды Jarvis.' }),
+      online ? null : h('div', { class: 'notice', text: 'Если панель откроется, а сессии в ней не появятся — загляни в настройки, вкладка «Интеграция»: там видно, какой агент не подключён. Хуки при этом остаются на месте.' }),
     ];
   }
 

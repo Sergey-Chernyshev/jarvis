@@ -53,6 +53,15 @@
 
   const byId = (id) => state.loops.find((l) => l.id === id);
 
+  /* Склонение числительных — как в панели: «1 итерация», «2 итерации»,
+   * «5 итераций». Числа тут человеческие, а не отладочные. */
+  const plural = (n, one, few, many) => {
+    const d10 = n % 10, d100 = n % 100;
+    if (d10 === 1 && d100 !== 11) return one;
+    if (d10 >= 2 && d10 <= 4 && (d100 < 12 || d100 > 14)) return few;
+    return many;
+  };
+
   const fmtTokens = (n) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n || 0));
   const fmtMoney = (n) => `$${(n || 0).toFixed(2)}`;
   const fmtTime = (ms) => (ms ? new Date(ms).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' }) : '—');
@@ -132,7 +141,7 @@
     if (open && open.id === l.id) row.classList.add('active');
     if (state5 === 'running') row.classList.add('running');
     if (state5 === 'asking' || l.pendingReview > 0) row.classList.add('needs-you');
-    if (l.pendingReview > 0) row.appendChild(el('span.lp-dot', { title: `${l.pendingReview} ждёт взгляда` }));
+    if (l.pendingReview > 0) row.appendChild(el('span.lp-dot', { title: `${l.pendingReview} ${plural(l.pendingReview, 'итерация ждёт', 'итерации ждут', 'итераций ждут')} твоего взгляда` }));
     return row;
   }
 
@@ -335,11 +344,7 @@
 
   /* ---------- «как это будет работать» ---------- */
 
-  const razWord = (n) => {
-    const d10 = n % 10, d100 = n % 100;
-    if (d10 >= 2 && d10 <= 4 && (d100 < 12 || d100 > 14)) return 'раза';
-    return 'раз';
-  };
+  const razWord = (n) => plural(n, 'раз', 'раза', 'раз');
 
   /**
    * Вся конфигурация — одним человеческим абзацем.
@@ -376,7 +381,7 @@
     const streak = Math.max(1, Number(d.exit.streak) || 1);
     const walls = [
       d.limits.tokens ? `${fmtTokens(d.limits.tokens)} токенов` : null,
-      d.limits.iterations ? `${d.limits.iterations} итераций` : null,
+      d.limits.iterations ? `${d.limits.iterations} ${plural(d.limits.iterations, 'итерацию', 'итерации', 'итераций')}` : null,
       d.limits.minutes ? `${Math.round(d.limits.minutes / 60 * 10) / 10} ч` : null,
     ].filter(Boolean).join(' · ');
     const sample = d.sampling.every
@@ -738,7 +743,7 @@
         metric(fmtTokens(run.tokens), 'токены за запуск', fmtMoney(run.costUsd)),
         metric(String(run.iterations.length), 'итераций', `выход: ${l.exit.streak} подряд`),
         metric(String(run.iterations.filter((i) => i.verdict === 'returned').length), 'возвраты критика'),
-        metric(String(l.pendingReview), 'ждут твоего взгляда', l.sampling.every ? `выборка: каждая ${l.sampling.every}-я` : 'выборка выключена'),
+        metric(String(l.pendingReview), plural(l.pendingReview, 'ждёт твоего взгляда', 'ждут твоего взгляда', 'ждут твоего взгляда'), l.sampling.every ? `выборка: каждая ${l.sampling.every}-я` : 'выборка выключена'),
         metric(fmtWhen(l.nextWake), 'следующее пробуждение', l.wakeLabel),
       ),
       run.state === 'stopped' && run.stop && run.stop !== 'stopped' ? stopped(l, run) : null,
@@ -876,7 +881,7 @@
         metric(String(passed), 'итераций прошло'),
         metric(String(returned), 'возвратов критика'),
         metric(fmtMoney(run.costUsd), 'расход', fmtTokens(run.tokens)),
-        metric(String(l.pendingReview), 'ждут твоего взгляда'),
+        metric(String(l.pendingReview), plural(l.pendingReview, 'ждёт твоего взгляда', 'ждут твоего взгляда', 'ждут твоего взгляда')),
       ),
       journal(l, run),
       el('div.lp-actions',

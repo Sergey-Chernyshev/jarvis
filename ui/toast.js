@@ -54,6 +54,53 @@ function armTimer(id) {
   c.timer = setTimeout(() => removeCard(id), c.ttl);
 }
 
+/* ── доставка ответа: отказ виден человеку ────────────────────────────────
+ * Ответ на вопрос и «Продолжить» уходят в пану tmux, а она к этому моменту
+ * часто мертва (ноут проснулся, терминал закрыли) — ровно ради этого случая
+ * кнопка и существует. Раньше карточка исчезала одинаково при успехе и при
+ * {ok:false}, и человек был уверен, что ответил. Теперь отказ остаётся на
+ * экране причиной, а карточка становится липкой — уйдёт только по ✕. */
+function sendFailText(res) {
+  if (!res) return 'Не удалось отправить — Jarvis не ответил';
+  if (res.error) return String(res.error);
+  if (res.needsTmux) {
+    return 'Сессия вне tmux — ответь в терминале' + (res.resumeCmd ? `: ${res.resumeCmd}` : '');
+  }
+  return 'Не удалось отправить';
+}
+
+function showSendError(id, text) {
+  const c = cards.get(id);
+  if (!c) return;
+  clearTimeout(c.timer);
+  c.sticky = true; // причину нельзя прятать по таймеру: её ещё не прочитали
+  c.el.classList.add('sticky');
+  let err = c.el.querySelector('.derr');
+  if (!err) {
+    err = document.createElement('div');
+    err.className = 'derr';
+    c.el.appendChild(err);
+  }
+  err.textContent = text;
+  reportHeight();
+}
+
+// общий путь «кликнул вариант / Продолжить»: снимаем карточку только на успехе
+function sendThen(p, id, opts) {
+  const o = opts || {};
+  Promise.resolve(p).then((res) => {
+    if (res && res.ok === false) {
+      showSendError(id, sendFailText(res));
+      if (o.onFail) o.onFail();
+      return;
+    }
+    if (!o.keep) removeCard(id);
+  }).catch((e) => {
+    showSendError(id, sendFailText({ error: (e && e.message) || String(e) }));
+    if (o.onFail) o.onFail();
+  });
+}
+
 // карточка под курсором по y (DOM-координата из нативного поллинга) → .hot
 function markHot(y) {
   for (const [, c] of cards) {
@@ -223,8 +270,10 @@ window.toast.onAdd((d) => {
         opt.append(num, otext);
         opt.addEventListener('click', (e) => {
           e.stopPropagation();
-          window.toast.answerQuestion(d.sessionId, { answers: [[i + 1]] });
-          if (!qq.multiSelect) removeCard(d.id);
+          // мультивыбор набирается несколькими кликами — карточка остаётся,
+          // но отказ доставки показываем в обоих случаях
+          sendThen(window.toast.answerQuestion(d.sessionId, { answers: [[i + 1]] }),
+            d.id, { keep: !!qq.multiSelect });
         });
         list.appendChild(opt);
       });
@@ -240,8 +289,11 @@ window.toast.onAdd((d) => {
       cont.textContent = 'Продолжить';
       cont.addEventListener('click', (e) => {
         e.stopPropagation();
-        window.toast.continueSession(d.sessionId);
-        removeCard(d.id);
+        cont.disabled = true;
+        cont.textContent = 'Отправляю…';
+        sendThen(window.toast.continueSession(d.sessionId), d.id, {
+          onFail: () => { cont.disabled = false; cont.textContent = 'Повторить'; },
+        });
       });
       card.appendChild(cont);
     }

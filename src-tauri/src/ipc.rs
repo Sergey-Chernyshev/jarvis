@@ -2600,7 +2600,11 @@ pub async fn agent_send(app: AppHandle, message: String, session_id: Option<Stri
         .map(|m| format!("mcp__jarvis__{}", m.id.replace('.', "_")))
         .collect();
 
-    let resume = session_id.clone();
+    // Подстановка сохранённого id — здесь, а не в окне: окно живёт до закрытия,
+    // а нить разговора должна его переживать. Так продолжение работает и для
+    // окна, которое ещё не успело спросить состояние, и для чата из трея.
+    let saved = crate::agent::saved_chat_session(&Daemon::get(&app).settings.load());
+    let resume = crate::agent::resume_for(session_id.as_deref(), saved.as_deref());
 
     // Выбор хоста по доступности («auto»): Claude (жёсткий INV-TOOLS на init) если
     // есть, иначе Codex (чистый CODEX_HOME + обязательный per-item kill).
@@ -2645,6 +2649,22 @@ pub(crate) fn read_mcp_bin_token(mcp_config: &str) -> Option<(String, String)> {
 #[tauri::command]
 pub fn agent_chat_open(app: AppHandle) {
     let _ = windows::create_agent_chat(&app);
+}
+
+/// Состояние чата для открывшегося окна: id разговора, который продолжится
+/// (null — начнём новый). Окно рисует по нему пометку о продолжении.
+#[tauri::command]
+pub fn agent_chat_state(app: AppHandle) -> Value {
+    let saved = crate::agent::saved_chat_session(&Daemon::get(&app).settings.load());
+    json!({ "sessionId": saved })
+}
+
+/// «Новый чат»: забыть id. Прошлый разговор остаётся на диске — теряется только
+/// ниточка к нему, и вернуть её можно, вписав id обратно в настройки.
+#[tauri::command]
+pub fn agent_chat_reset(app: AppHandle) -> Value {
+    crate::agent::forget_chat_session(&app);
+    json!({ "ok": true })
 }
 
 /* ================= STT — панель настроек (инкремент 9, фаза 9) ================= */

@@ -26,6 +26,9 @@ pub enum AgentEvent {
     ToolUse { name: String, input: Value },
     /// Финальный результат сессии.
     Done { result: String, session_id: String },
+    /// Агент не ответил: `--resume` в никуда, обрыв процесса, нарушенный инвариант.
+    /// `lost_session` — прошлого разговора больше нет, сохранённый id пора забыть.
+    Failed { message: String, lost_session: bool },
     /// Неизвестный / неинтересный тип события — игнорируется.
     Other,
 }
@@ -115,6 +118,15 @@ pub fn parse_stream_line(line: &str) -> Vec<AgentEvent> {
         }
 
         "result" => {
+            // is_error — отказ CLI (например, `--resume` на пропавший транскрипт).
+            // Раньше он приезжал как Done с пустым result: окно снимало «думает…»
+            // и молча делало вид, что агент ответил пустотой.
+            if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+                return vec![AgentEvent::Failed {
+                    message: result_error_message(&v),
+                    lost_session: false, // знает только хост: он один в курсе про --resume
+                }];
+            }
             let result = v
                 .get("result")
                 .and_then(Value::as_str)
@@ -204,6 +216,72 @@ pub fn inv_tools_ok(init_tools: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+// ── Сохранённый чат: id переживает закрытие окна ──────────────────────────
+
+/// Блок настроек и ключ, где лежит id текущего разговора с агентом.
+pub const CHAT_BLOCK: &str = "agentChat";
+pub const CHAT_KEY: &str = "sessionId";
+
+/// Сохранённый id разговора из среза настроек. Пусто/не строка → None.
+pub fn saved_chat_session(settings: &Value) -> Option<String> {
+    settings
+        .pointer(&format!("/{CHAT_BLOCK}/{CHAT_KEY}"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Что уйдёт в `--resume`. Явный id окна важнее сохранённого: окно знает про
+/// «Новый чат» и про свежий id раньше, чем они доедут до настроек.
+pub fn resume_for(explicit: Option<&str>, saved: Option<&str>) -> Option<String> {
+    let pick = |s: Option<&str>| s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    pick(explicit).or_else(|| pick(saved))
+}
+
+/// Писать ли новый id на диск. Init и Done приносят один и тот же id каждый
+/// ход — без этой проверки настройки переписывались бы дважды за реплику.
+pub fn session_id_to_persist(saved: Option<&str>, incoming: &str) -> Option<String> {
+    let incoming = incoming.trim();
+    if incoming.is_empty() || saved.map(str::trim) == Some(incoming) {
+        return None;
+    }
+    Some(incoming.to_string())
+}
+
+/// id сессии, который принесло событие (Init/Done). Пусто → None.
+pub fn event_session_id(ev: &AgentEvent) -> Option<&str> {
+    match ev {
+        AgentEvent::Init { session_id, .. } | AgentEvent::Done { session_id, .. } => {
+            Some(session_id.trim()).filter(|s| !s.is_empty())
+        }
+        _ => None,
+    }
+}
+
+/// Причина отказа из `result`-события: errors[] → result → subtype.
+pub fn result_error_message(v: &Value) -> String {
+    let pick = |s: Option<&str>| s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    pick(
+        v.get("errors")
+            .and_then(Value::as_array)
+            .and_then(|a| a.iter().find_map(Value::as_str)),
+    )
+    .or_else(|| pick(v.get("result").and_then(Value::as_str)))
+    .or_else(|| pick(v.get("subtype").and_then(Value::as_str)))
+    .unwrap_or_else(|| "агент завершился с ошибкой".to_string())
+}
+
+/// Отказ означает «прошлого разговора больше нет» (а не «сеть моргнула»)?
+/// Только в первом случае честно забыть id: во втором это стоило бы человеку
+/// всей нити разговора из-за одной неудачной попытки.
+pub fn is_lost_session(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("no conversation found")
+        || m.contains("no such session")
+        || (m.contains("session") && m.contains("not found"))
+}
+
 // ── Тестируемый драйвер потока (без живого процесса) ──────────────────────
 
 /// Результат обработки одной строки (для `drive_stream`).
@@ -271,6 +349,8 @@ impl ClaudeCliHost {
 
         let Some(bin) = crate::claude_bin::resolve_claude_bin() else {
             crate::log::line("[agent] claude не найден");
+            // Молча выйти нельзя: окно осталось бы в «думает…» навсегда.
+            emit_event(&self.app, &failure("claude не найден — агент не запустился", false));
             return;
         };
 
@@ -293,6 +373,7 @@ impl ClaudeCliHost {
             Ok(c) => c,
             Err(e) => {
                 crate::log::line(&format!("[agent] spawn claude: {e}"));
+                emit_event(&self.app, &failure(&format!("claude не запустился: {e}"), false));
                 return;
             }
         };
@@ -301,12 +382,16 @@ impl ClaudeCliHost {
             Some(s) => s,
             None => {
                 crate::log::line("[agent] нет stdout от claude");
+                emit_event(&self.app, &failure("агент не отдал вывод", false));
                 return;
             }
         };
 
         let mut reader = BufReader::new(stdout).lines();
         let app = self.app.clone();
+        // Помним последний записанный id, чтобы не писать настройки на каждое событие.
+        let mut saved = saved_chat_session(&crate::daemon::Daemon::get(&app).settings.load());
+        let mut finished = false; // дошло ли до Done/Failed
 
         while let Ok(Some(line)) = reader.next_line().await {
             let parsed = parse_stream_line(&line);
@@ -317,13 +402,64 @@ impl ClaudeCliHost {
                         crate::log::line(&format!("[agent] {msg}"));
                         // Убиваем процесс (kill_on_drop = true; явный kill для надёжности)
                         let _ = child.kill().await;
+                        emit_event(&app, &failure(&msg, false));
                         return;
                     }
                 }
+                // Отказ на --resume лечится только забыванием id: иначе следующее
+                // сообщение уедет в тот же пропавший транскрипт.
+                let ev = match ev {
+                    AgentEvent::Failed { message, .. } => AgentEvent::Failed {
+                        lost_session: resume.is_some() && is_lost_session(&message),
+                        message,
+                    },
+                    other => other,
+                };
+                if matches!(ev, AgentEvent::Failed { lost_session: true, .. }) {
+                    forget_chat_session(&app);
+                    saved = None;
+                }
+                if let Some(id) = event_session_id(&ev) {
+                    if let Some(fresh) = session_id_to_persist(saved.as_deref(), id) {
+                        remember_chat_session(&app, &fresh);
+                        saved = Some(fresh);
+                    }
+                }
+                finished |= matches!(ev, AgentEvent::Done { .. } | AgentEvent::Failed { .. });
                 emit_event(&app, &ev);
             }
         }
+
+        // Поток кончился, а итога не было — процесс умер по дороге. Об этом надо
+        // сказать: тишина здесь читается как «агент задумался навсегда».
+        if !finished {
+            let code = match child.wait().await {
+                Ok(st) => st.code().map(|c| c.to_string()).unwrap_or_else(|| "сигнал".into()),
+                Err(_) => "?".into(),
+            };
+            emit_event(&app, &failure(&format!("агент оборвался без ответа (код {code})"), false));
+        }
     }
+}
+
+/// Событие отказа — единая точка, чтобы «тихих» веток выхода не заводилось.
+fn failure(message: &str, lost_session: bool) -> AgentEvent {
+    AgentEvent::Failed { message: message.to_string(), lost_session }
+}
+
+/// Запомнить id разговора в настройках.
+fn remember_chat_session(app: &tauri::AppHandle, id: &str) {
+    let mut patch = serde_json::Map::new();
+    patch.insert(CHAT_KEY.to_string(), Value::String(id.to_string()));
+    crate::daemon::Daemon::get(app).settings.set_block(CHAT_BLOCK, patch);
+}
+
+/// Забыть id разговора («Новый чат» либо пропавший транскрипт). Сам транскрипт
+/// остаётся на диске — мы теряем только ниточку к нему.
+pub fn forget_chat_session(app: &tauri::AppHandle) {
+    let mut patch = serde_json::Map::new();
+    patch.insert(CHAT_KEY.to_string(), Value::String(String::new()));
+    crate::daemon::Daemon::get(app).settings.set_block(CHAT_BLOCK, patch);
 }
 
 /// Отправить событие в главное окно Tauri.
@@ -518,6 +654,94 @@ mod tests {
         let tools = vec!["mcp__jarvis__x".to_string(), "Write".to_string()];
         let err = inv_tools_ok(&tools).unwrap_err();
         assert!(err.contains("Write"));
+    }
+
+    // ── сохранённый чат ───────────────────────────────────────────────────
+
+    #[test]
+    fn saved_chat_session_reads_block() {
+        let s = json!({ "agentChat": { "sessionId": "s-42" } });
+        assert_eq!(saved_chat_session(&s).as_deref(), Some("s-42"));
+    }
+
+    #[test]
+    fn saved_chat_session_empty_is_none() {
+        // Сброс пишет пустую строку — она не должна читаться как живой id.
+        assert_eq!(saved_chat_session(&json!({ "agentChat": { "sessionId": "" } })), None);
+        assert_eq!(saved_chat_session(&json!({ "agentChat": { "sessionId": "  " } })), None);
+        assert_eq!(saved_chat_session(&json!({ "agentChat": {} })), None);
+        assert_eq!(saved_chat_session(&json!({})), None);
+    }
+
+    #[test]
+    fn resume_for_falls_back_to_saved() {
+        // Окно после перезапуска не знает id — подставляем сохранённый.
+        assert_eq!(resume_for(None, Some("s-42")).as_deref(), Some("s-42"));
+        assert_eq!(resume_for(Some(""), Some("s-42")).as_deref(), Some("s-42"));
+    }
+
+    #[test]
+    fn resume_for_prefers_explicit() {
+        assert_eq!(resume_for(Some("s-new"), Some("s-old")).as_deref(), Some("s-new"));
+    }
+
+    #[test]
+    fn resume_for_after_reset_starts_new() {
+        // «Новый чат» стёр сохранённый id → resume пуст, claude заводит сессию.
+        assert_eq!(resume_for(None, None), None);
+        assert_eq!(resume_for(None, saved_chat_session(&json!({ "agentChat": { "sessionId": "" } })).as_deref()), None);
+    }
+
+    #[test]
+    fn session_id_to_persist_skips_noise() {
+        assert_eq!(session_id_to_persist(None, ""), None);
+        assert_eq!(session_id_to_persist(Some("s1"), "s1"), None); // Init и Done несут один id
+        assert_eq!(session_id_to_persist(Some("s1"), "s2").as_deref(), Some("s2"));
+        assert_eq!(session_id_to_persist(None, "s1").as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn event_session_id_only_from_id_carrying_events() {
+        let init = AgentEvent::Init { tools: vec![], model: String::new(), session_id: "s1".into() };
+        assert_eq!(event_session_id(&init), Some("s1"));
+        let done = AgentEvent::Done { result: "ok".into(), session_id: "s2".into() };
+        assert_eq!(event_session_id(&done), Some("s2"));
+        assert_eq!(event_session_id(&AgentEvent::Delta { text: "x".into() }), None);
+        assert_eq!(
+            event_session_id(&AgentEvent::Done { result: String::new(), session_id: String::new() }),
+            None
+        );
+    }
+
+    // ── честный фолбэк ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_failed_resume_result_is_not_done() {
+        // Живой ответ claude на `--resume <несуществующий>` (exit 1).
+        let line = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"00000000-0000-0000-0000-000000000000","result":"","errors":["No conversation found with session ID: 00000000-0000-0000-0000-000000000000"]}"#;
+        let events = parse_stream_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            AgentEvent::Failed { message, .. } => assert!(message.contains("No conversation found")),
+            other => panic!("отказ обязан быть Failed, а не {:?}", other),
+        }
+    }
+
+    #[test]
+    fn result_error_message_prefers_errors_then_result_then_subtype() {
+        assert_eq!(result_error_message(&json!({"errors":["boom"],"result":"r","subtype":"s"})), "boom");
+        assert_eq!(result_error_message(&json!({"errors":[],"result":"r","subtype":"s"})), "r");
+        assert_eq!(result_error_message(&json!({"subtype":"error_during_execution"})), "error_during_execution");
+        assert_eq!(result_error_message(&json!({})), "агент завершился с ошибкой");
+    }
+
+    #[test]
+    fn is_lost_session_only_for_missing_transcript() {
+        assert!(is_lost_session("No conversation found with session ID: abc"));
+        assert!(is_lost_session("session abc not found"));
+        // Сеть моргнула — id не трогаем, иначе разговор терялся бы от одной осечки.
+        assert!(!is_lost_session("API Error: 529 overloaded"));
+        assert!(!is_lost_session("Credit balance is too low"));
     }
 
     // ── drive_stream ─────────────────────────────────────────────────────

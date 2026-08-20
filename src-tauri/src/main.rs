@@ -249,6 +249,8 @@ fn main() {
             ipc::voice_confirm_resolve,
             ipc::voice_abort,
             ipc::agent_chat_open,
+            ipc::agent_chat_state,
+            ipc::agent_chat_reset,
             ipc::terminal_focus,
             ipc::session_launch,
             ipc::remotes_list,

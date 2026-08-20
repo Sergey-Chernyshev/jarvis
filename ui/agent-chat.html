@@ -33,6 +33,15 @@
   .dot{ width:7px; height:7px; border-radius:50%; background: var(--accent); flex: none; }
   .title{ font-size:15px; font-weight:600; letter-spacing:-0.01em; }
   .sub{ color: var(--ink-mute); font-size:12.5px; margin-left:auto; font-variant-numeric: tabular-nums; }
+  /* метка продолжения: висит, пока диалог тянется из прошлого запуска окна */
+  .tag{ font-size:11.5px; color: var(--ink-mute); background: var(--surface); border-radius: var(--r-chip); padding:3px 8px; }
+  .tag[hidden]{ display:none }
+  .ghost{
+    -webkit-app-region: no-drag; margin-left:10px; flex:none;
+    height:26px; padding:0 10px; border:0; border-radius: var(--r-chip);
+    background: var(--accent-soft); color: var(--ink); font: 600 12px/1 var(--font); cursor:default;
+  }
+  .ghost:hover{ filter: brightness(1.04) }
 
   /* лента: подпись сверху, текст колонкой — без пузырей */
   #msgs{ flex:1 1 auto; overflow-y:auto; padding:22px 24px 8px; display:flex; flex-direction:column; gap:18px }
@@ -51,6 +60,8 @@
     -webkit-user-select: text; user-select: text;
   }
   .msg.err .bubble{ color: var(--danger); }
+  .msg.note::before{ content:"jarvis · заметка"; }
+  .msg.note .bubble{ color: var(--ink-mute); font-size:13px }
   .chip{
     font-size:12px; color: var(--ink-mute); padding:5px 10px; border-radius:8px;
     background: var(--surface); border:0; font-family: var(--mono);
@@ -105,7 +116,9 @@
   <header data-tauri-drag-region>
     <span class="dot"></span>
     <span class="title">Jarvis · агент</span>
+    <span class="tag" id="tag" hidden>продолжение</span>
     <span class="sub" id="sub">готов</span>
+    <button class="ghost" id="newChat">Новый чат</button>
   </header>
   <div id="msgs">
     <div class="hint">Спроси агента о сессиях, лимитах, метриках.<br/>Действия (ответ в сессию, смена настроек) он подтвердит у тебя карточкой.</div>

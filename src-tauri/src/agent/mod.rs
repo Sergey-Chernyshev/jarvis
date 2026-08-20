@@ -521,6 +521,28 @@ impl ChatBook {
         Ok(())
     }
 
+    /// Переставить чат на позицию `to`. Порядок списка задаёт человек и меняет
+    /// только руками: список — полка, где он помнит места, а не лента новостей.
+    ///
+    /// `current` — индекс, поэтому после перестановки его надо навести на ТОТ ЖЕ
+    /// чат, а не на ту же позицию: иначе перетаскивание молча открывало бы
+    /// соседний разговор.
+    pub fn reorder(&mut self, id: &str, to: usize) -> Result<(), String> {
+        let from = self
+            .index_of(id)
+            .ok_or_else(|| format!("чата «{}» нет в списке — переставлять нечего", id.trim()))?;
+        let last = self.chats.len() - 1;
+        let to = to.min(last);
+        if to == from {
+            return Ok(());
+        }
+        let open = self.chats[self.current].id.clone();
+        let chat = self.chats.remove(from);
+        self.chats.insert(to, chat);
+        self.current = self.index_of(&open).unwrap_or(0);
+        Ok(())
+    }
+
     /// Режим авто-цепочки чата. Чата нет — «спросить меня»: выдумывать за
     /// исчезнувший разговор «продолжай сам» точно не надо.
     pub fn mode_of(&self, chat_id: &str) -> chain::Mode {
@@ -1325,6 +1347,51 @@ mod tests {
         assert_eq!(book.to_patch()[CHAT_KEY], json!("s-2"));
         book.create(None).unwrap();
         assert_eq!(book.to_patch()[CHAT_KEY], json!(""), "у нового чата нити ещё нет");
+    }
+
+    #[test]
+    fn reorder_moves_the_row_and_keeps_the_open_chat_open() {
+        let mut book = read_chats(&json!({ "agentChat": {
+            "chats": [{ "id": "c1", "name": "A" }, { "id": "c2", "name": "B" },
+                      { "id": "c3", "name": "C" }],
+            "current": "c2",
+        }}));
+        let ids = |b: &ChatBook| b.chats.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+
+        book.reorder("c3", 0).unwrap();
+        assert_eq!(ids(&book), ["c3", "c1", "c2"], "строка встала на заданное место");
+        assert_eq!(book.current().id, "c2", "открытым остался тот же чат, а не та же позиция");
+
+        // за край не выпадаем — кладём последним
+        book.reorder("c3", 99).unwrap();
+        assert_eq!(ids(&book), ["c1", "c2", "c3"]);
+        assert_eq!(book.current().id, "c2");
+
+        // на своё же место — тишина, а не перестановка
+        book.reorder("c1", 0).unwrap();
+        assert_eq!(ids(&book), ["c1", "c2", "c3"]);
+
+        let e = book.reorder("c9", 0).unwrap_err();
+        assert!(e.contains("c9"), "отказ обязан назвать чат: {e}");
+
+        // порядок переживает круг через настройки — он и есть порядок массива
+        book.reorder("c2", 0).unwrap();
+        let back = read_chats(&json!({ "agentChat": book.to_patch() }));
+        assert_eq!(ids(&back), ["c2", "c1", "c3"], "порядок сохранился");
+        assert_eq!(back.current().id, "c2");
+    }
+
+    #[test]
+    fn a_new_chat_goes_to_the_end_not_to_the_top() {
+        // Полка, а не лента: свежий чат встаёт последним, чтобы у прежних не
+        // менялись места и ⌘-сочетания под ними.
+        let mut book = read_chats(&json!({ "agentChat": {
+            "chats": [{ "id": "c1", "name": "A" }, { "id": "c2", "name": "B" }],
+            "current": "c1",
+        }}));
+        let id = book.create(Some("Новый")).unwrap();
+        assert_eq!(book.chats.last().unwrap().id, id, "новый чат — последний");
+        assert_eq!(book.chats[0].id, "c1", "прежние места не съехали");
     }
 
     #[test]

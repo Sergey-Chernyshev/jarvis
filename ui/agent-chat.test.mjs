@@ -741,37 +741,72 @@ test('порядок строк статичный: активность во в
   assert.deepEqual(names(), ['Первый', 'Второй', 'Третий'], 'завершение не двигает строку');
 });
 
-test('перетаскивание — единственный способ переставить, и оно зовёт демона', async () => {
-  const list = {
+test('перетаскивание мышью реально меняет порядок и пишет его демону', async () => {
+  /* Заглушка ведёт себя как ядро: переставляет СВОЙ массив и отдаёт новый
+   * порядок. Иначе тест проверял бы «функция вызвана», а человек жаловался не
+   * на вызов, а на то, что строки не двигаются. */
+  const order = ['c1', 'c2', 'c3'];
+  const named = { c1: 'Первый', c2: 'Второй', c3: 'Третий' };
+  const list = () => ({
     ok: true, current: 'c1', hidden: 0,
-    chats: [
-      { id: 'c1', name: 'Первый', sessionId: 's1', current: true, turns: 1, at: 1000 },
-      { id: 'c2', name: 'Второй', sessionId: 's2', current: false, turns: 1, at: 2000 },
-      { id: 'c3', name: 'Третий', sessionId: 's3', current: false, turns: 1, at: 3000 },
-    ],
-  };
-  const { window, doc, calls } = await boot({ sessionId: null }, {
-    agent_chats_list: () => list,
-    agent_chat_reorder: () => list,
-    agent_chat_history: () => ({ ok: true, items: [], total: 0 }),
+    chats: order.map((id, i) => ({
+      id, name: named[id], sessionId: 's' + id, current: id === 'c1',
+      turns: 1, at: 1000 * (i + 1),
+    })),
   });
-  const rows = [...doc.querySelectorAll('.agchat')];
-  const grips = [...doc.querySelectorAll('.aggrab')];
-  assert.equal(grips.length, 3, 'у каждого своего чата — своя зона захвата');
+  const { window, doc, calls } = await boot({ sessionId: null }, {
+    agent_chats_list: () => list(),
+    agent_chat_history: () => ({ ok: true, items: [], total: 0 }),
+    agent_chat_reorder: ({ chatId, toIndex }) => {
+      order.splice(order.indexOf(chatId), 1);
+      order.splice(toIndex, 0, chatId);
+      return list();
+    },
+  });
+  const names = () => [...doc.querySelectorAll('.agchat .agname')].map((n) => n.textContent);
+  assert.deepEqual(names(), ['Первый', 'Второй', 'Третий']);
 
-  // тащим третий на место первого
-  const dt = { effectAllowed: '', dropEffect: '', setData() {}, getData: () => 'c3' };
-  const drag = (el, type) => {
-    const e = new window.Event(type, { bubbles: true });
-    e.dataTransfer = dt;
-    e.preventDefault = () => {};
-    el.dispatchEvent(e);
-  };
-  drag(grips[2], 'dragstart');
-  drag(rows[0], 'dragover');
-  drag(rows[0], 'drop');
-  await tick();
+  const fire = (el, type) => el.dispatchEvent(new window.Event(type, { bubbles: true }));
+  const rows = () => [...doc.querySelectorAll('.agchat')];
+  const grips = () => [...doc.querySelectorAll('.aggrab')];
+  assert.equal(grips().length, 3, 'у каждого своего чата — своя зона захвата');
 
-  const moved = calls.filter(([c]) => c === 'agent_chat_reorder').map(([, a]) => a);
-  assert.deepEqual(moved, [{ chatId: 'c3', toIndex: 0 }], 'порядок записывает демон, а не только экран');
+  // тащим второй на место первого
+  fire(grips()[1], 'mousedown');
+  fire(rows()[0], 'mousemove');
+  fire(rows()[0], 'mouseup');
+  await tick(); await tick();
+
+  assert.deepEqual(names(), ['Второй', 'Первый', 'Третий'], 'строки не переставились');
+  assert.deepEqual(order, ['c2', 'c1', 'c3'], 'новый порядок не записан — после перезапуска вернётся старый');
+  assert.deepEqual(
+    calls.filter(([c]) => c === 'agent_chat_reorder').map(([, a]) => a),
+    [{ chatId: 'c2', toIndex: 0 }],
+  );
+});
+
+test('перетаскивание не открывает чат, на который бросили', async () => {
+  const order = ['c1', 'c2'];
+  const list = () => ({
+    ok: true, current: 'c1', hidden: 0,
+    chats: order.map((id) => ({ id, name: id, sessionId: 's' + id, current: id === 'c1', turns: 1, at: 1 })),
+  });
+  const { window, doc, calls } = await boot({ sessionId: null }, {
+    agent_chats_list: () => list(),
+    agent_chat_history: () => ({ ok: true, items: [], total: 0 }),
+    agent_chat_reorder: ({ chatId, toIndex }) => {
+      order.splice(order.indexOf(chatId), 1);
+      order.splice(toIndex, 0, chatId);
+      return list();
+    },
+  });
+  const fire = (el, type) => el.dispatchEvent(new window.Event(type, { bubbles: true }));
+  const rows = () => [...doc.querySelectorAll('.agchat')];
+  fire([...doc.querySelectorAll('.aggrab')][1], 'mousedown');
+  fire(rows()[0], 'mousemove');
+  fire(rows()[0], 'mouseup');
+  fire(rows()[0], 'click'); // клик прилетает следом за отпусканием
+  await tick(); await tick();
+  assert.equal(calls.filter(([c]) => c === 'agent_chat_switch').length, 0,
+    'перестановка заодно открыла чат, на который бросили');
 });

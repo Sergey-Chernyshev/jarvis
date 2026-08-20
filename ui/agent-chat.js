@@ -362,6 +362,8 @@
     let query = ''; // поиск в шапке колонки
     let menu = null; // меню строки: живёт ВНЕ списка, см. renderPop
     let dragId = null; // чат, который тащат прямо сейчас
+    let dragOver = null; // строка под курсором во время жеста
+    let dropped = false; // жест закончился перестановкой — клик после него глушим
     /* Группа истории открыта по умолчанию: свернуть её человек может сам, а вот
      * пропавший с глаз разговор он уже однажды искал. Прячем по желанию, не молча. */
     let diskOpen = true;
@@ -542,6 +544,13 @@
 
     function renderList() {
       const list = shell.list;
+      /* Отпустили над пустотой списка — жест отменяем, а не роняем «никуда».
+       * Вешаем один раз: renderList зовётся на каждое событие потока. */
+      if (!list.dataset.dragBound) {
+        list.dataset.dragBound = '1';
+        list.addEventListener('mouseup', () => chatDragCancel());
+        list.addEventListener('mouseleave', () => chatDragCancel());
+      }
       list.textContent = '';
       const rows = visible();
       for (const c of mine()) list.appendChild(chatRow(c));
@@ -605,7 +614,12 @@
       row.title = disk
         ? 'Разговор с диска — открыть и завести под него чат'
         : (work ? 'Отвечает прямо сейчас · ' : '') + (open ? 'Открыт' : 'Открыть «' + c.name + '»');
-      row.addEventListener('click', () => (disk ? openThread(c) : open ? afterPick() : switchTo(c.id)));
+      row.addEventListener('click', () => {
+        // Клик прилетает следом за отпусканием — без этого перестановка
+        // заодно открывала бы чат, на который бросили.
+        if (dropped) { dropped = false; return; }
+        return disk ? openThread(c) : open ? afterPick() : switchTo(c.id);
+      });
       // Правый клик — там же, где он и ожидается; «…» — для тех, кто мышью не
       // правой. Оба ведут в одно меню: два разных набора действий разъехались бы.
       row.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); openMenu(c, row); });
@@ -613,39 +627,66 @@
       dots.title = 'Переименовать, скрыть, забыть';
       dots.addEventListener('click', (e) => { e.stopPropagation(); openMenu(c, row); });
       row.appendChild(dots);
-      /* Тянуть — только за свою зону. Если сделать перетаскиваемой всю строку,
-       * список начинает ездить от любого движения мышью с зажатой кнопкой, и
-       * обычный клик «открыть чат» становится лотереей. У разговора с диска
-       * ручки нет: его место человек не задавал. */
+      /* Тянуть — только за свою зону. Если тащить можно всю строку, список
+       * начинает ездить от любого движения мышью с зажатой кнопкой, и обычный
+       * клик «открыть чат» становится лотереей. У разговора с диска ручки нет:
+       * его место человек не задавал.
+       *
+       * Мышь, а не HTML5 drag&drop: у Tauri на macOS включён свой перехватчик
+       * перетаскивания на уровне вебвью (он ловит файлы, брошенные в окно), и
+       * события dragstart/drop до страницы не доходят вовсе — код был рабочим,
+       * а платформа его глушила. Обычные mousedown/mousemove/mouseup от этого
+       * не зависят и проверяются синтетическими событиями. */
       if (!disk) {
         const grip = el('aggrab');
         grip.textContent = '⠿';
         grip.title = 'Перетащить — порядок задаёшь ты';
-        grip.draggable = true;
         grip.addEventListener('click', (e) => e.stopPropagation());
-        grip.addEventListener('dragstart', (e) => {
-          dragId = c.id;
-          if (e.dataTransfer) { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', c.id); }
-          row.classList.add('drag');
+        grip.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          chatDragStart(c.id, row);
         });
-        grip.addEventListener('dragend', () => { dragId = null; row.classList.remove('drag'); renderList(); });
         row.insertBefore(grip, main);
-        row.addEventListener('dragover', (e) => {
-          if (!dragId || dragId === c.id) return;
-          e.preventDefault();
-          if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-          row.classList.add('over');
-        });
-        row.addEventListener('dragleave', () => row.classList.remove('over'));
-        row.addEventListener('drop', (e) => {
-          e.preventDefault();
-          row.classList.remove('over');
-          const moved = dragId;
-          dragId = null;
-          if (moved && moved !== c.id) dropOn(moved, c.id);
-        });
+        // Наведение считаем строкой, а не координатами: elementFromPoint в
+        // тестовом DOM недоступен, а поведение должно быть одно и то же.
+        row.addEventListener('mousemove', () => chatDragOver(c.id, row));
+        row.addEventListener('mouseup', () => chatDragEnd(c.id));
       }
       return row;
+    }
+
+    /* Перетаскивание на обычных событиях мыши. Держим только id: строки
+     * перерисовываются, и ссылка на узел протухла бы посреди жеста. */
+    function chatDragStart(id, row) {
+      dragId = id;
+      dragOver = null;
+      dropped = false;
+      if (row) row.classList.add('drag');
+    }
+    function chatDragOver(id, row) {
+      if (!dragId || id === dragId) return;
+      dragOver = id;
+      const list = shell && shell.list;
+      if (list) for (const r of list.querySelectorAll('.agchat.over')) r.classList.remove('over');
+      if (row) row.classList.add('over');
+    }
+    function chatDragEnd(id) {
+      if (!dragId) return;
+      const moved = dragId;
+      const target = id && id !== moved ? id : dragOver;
+      dragId = null;
+      dragOver = null;
+      if (!target || target === moved) { renderList(); return; }
+      dropped = true; // подавляем клик, который прилетит следом за отпусканием
+      dropOn(moved, target);
+    }
+    /* Отпустили мимо строк — жест отменён, а не «упало никуда». */
+    function chatDragCancel() {
+      if (!dragId) return;
+      dragId = null;
+      dragOver = null;
+      renderList();
     }
 
     /* Куда упало — туда и встало: позиция цели в СПИСКЕ ЧЕЛОВЕКА (не в общем,

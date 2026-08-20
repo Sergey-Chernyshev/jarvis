@@ -1,4 +1,9 @@
-//! Настройки Jarvis: ~/.jarvis/settings.json. Битый файл → дефолты, молча.
+//! Настройки Jarvis: ~/.jarvis/settings.json.
+//!
+//! Битый файл → дефолты, но ГРОМКО: строка в лог и копия рядом
+//! (`settings.broken.json`) до первой перезаписи. Молчание здесь читается как
+//! «приложение свежее» — без узлов, хоткеев и грантов, — а первый же тумблер
+//! дописывал бы дефолты поверх единственного экземпляра оригинала.
 //!
 //! Загрузка мержит дефолты ⊕ диск, поэтому ДОБАВЛЕНИЕ полей безопасно (старый
 //! файл без поля читается). Ломающие изменения схемы (переименование/смена
@@ -26,8 +31,17 @@ pub struct Store {
     /// `jarvis-setup remote add` дописывает узел, и человек редактирует файл
     /// руками. Без сверки приложение записало бы поверх свой устаревший
     /// снимок — то есть молча стёрло бы чужую правку.
-    cache: Mutex<Option<(Value, Stamp)>>,
+    cache: Mutex<Option<Cached>>,
     path: PathBuf,
+}
+
+/// Снимок настроек в памяти. `broken` — файл на диске есть, но не разбирается:
+/// значит `value` это чистые дефолты, и писать их поверх оригинала без копии
+/// нельзя.
+struct Cached {
+    value: Value,
+    stamp: Stamp,
+    broken: bool,
 }
 
 /// Отпечаток файла: время правки и размер. Не содержимое — читать файл ради
@@ -113,17 +127,55 @@ fn file() -> std::path::PathBuf {
     jarvis_dir().join("settings.json")
 }
 
-fn read_merged(path: &Path) -> Value {
+/// Дефолты ⊕ диск + признак «файл есть, но не разбирается». Нет файла — не
+/// беда (первый запуск), а вот битый файл обязан быть слышен: дефолты вместо
+/// настроек выглядят как чистая установка, и человек ищет причину не там.
+fn read_merged(path: &Path) -> (Value, bool) {
     let mut merged = defaults();
-    if let Ok(raw) = fs::read_to_string(path) {
-        if let Ok(Value::Object(disk)) = serde_json::from_str::<Value>(&raw) {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return (merged, false);
+    };
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::Object(disk)) => {
             let m = merged.as_object_mut().unwrap();
             for (k, v) in disk {
                 m.insert(k, v);
             }
+            (merged, false)
+        }
+        other => {
+            let why = match other {
+                Err(e) => e.to_string(),
+                _ => "в корне не объект".to_string(),
+            };
+            let msg = format!(
+                "[settings] {} не разбирается ({why}) — работаю на дефолтах; \
+                 оригинал не трону без копии",
+                path.display()
+            );
+            crate::log::line(&msg);
+            eprintln!("[jarvis] {msg}");
+            (merged, true)
         }
     }
-    merged
+}
+
+/// Отложить копию непарсящегося файла рядом (`settings.broken.json`).
+/// `false` — копия не сделалась, значит перезапись уничтожит единственный
+/// экземпляр настроек и делать её нельзя.
+fn backup_broken(path: &Path) -> bool {
+    let to = path.with_file_name("settings.broken.json");
+    match fs::copy(path, &to) {
+        Ok(_) => {
+            let _ = fs::set_permissions(&to, fs::Permissions::from_mode(0o600));
+            crate::log::line(&format!("[settings] битый файл сохранён как {}", to.display()));
+            true
+        }
+        Err(e) => {
+            eprintln!("[jarvis] не смог сохранить копию битых настроек: {e}");
+            false
+        }
+    }
 }
 
 /// Persist a complete settings snapshot without ever exposing a partially
@@ -201,26 +253,37 @@ impl Store {
         }
     }
 
-    fn current_locked(&self, cache: &mut Option<(Value, Stamp)>) -> Value {
+    fn current_locked(&self, cache: &mut Option<Cached>) -> Value {
         let stamp = stamp_of(&self.path);
-        if let Some((value, at)) = cache.as_ref() {
-            if *at == stamp {
-                return value.clone();
+        if let Some(c) = cache.as_ref() {
+            if c.stamp == stamp {
+                return c.value.clone();
             }
             // Файл сменился под нами — перечитываем. Иначе следующая же запись
             // (любой тумблер в панели) вернула бы файл к нашему снимку.
             crate::log::line("[settings] файл изменился снаружи — перечитываю");
         }
-        let value = read_merged(&self.path);
-        *cache = Some((value.clone(), stamp));
+        let (value, broken) = read_merged(&self.path);
+        *cache = Some(Cached { value: value.clone(), stamp, broken });
         value
     }
 
     /// Execute one read-modify-write transaction while holding the cache
     /// mutex. Cache advances only after the atomic rename has succeeded.
-    fn update(&self, mutate: impl FnOnce(&mut Map<String, Value>)) -> Value {
+    /// `Err` — на диск НЕ легло: тот, кто отвечает человеку «сохранено»,
+    /// обязан это увидеть.
+    fn update(&self, mutate: impl FnOnce(&mut Map<String, Value>)) -> Result<Value, String> {
         let mut cache = self.cache.lock().unwrap();
         let current = self.current_locked(&mut cache);
+        // Файл на диске не разбирается: `current` — это дефолты, и запись
+        // затрёт оригинал (узлы, хоткеи, гранты). Нет копии — нет и записи.
+        if cache.as_ref().is_some_and(|c| c.broken) && !backup_broken(&self.path) {
+            return Err(format!(
+                "{} не разбирается, а копию сделать не вышло — правка не записана, \
+                 почини или убери файл",
+                self.path.display()
+            ));
+        }
         let mut next = current.clone();
         mutate(next.as_object_mut().unwrap());
 
@@ -228,14 +291,27 @@ impl Store {
             Ok(()) => {
                 // Отпечаток снимаем ПОСЛЕ записи — с того файла, что теперь на
                 // диске, иначе следующее чтение сочло бы свою же запись чужой.
-                *cache = Some((next.clone(), stamp_of(&self.path)));
-                next
+                *cache = Some(Cached {
+                    value: next.clone(),
+                    stamp: stamp_of(&self.path),
+                    broken: false,
+                });
+                Ok(next)
             }
             Err(err) => {
-                eprintln!("[jarvis] не смог записать настройки: {err}");
-                current
+                let msg = format!("не смог записать {}: {err}", self.path.display());
+                crate::log::line(&format!("[settings] {msg}"));
+                eprintln!("[jarvis] {msg}");
+                Err(msg)
             }
         }
+    }
+
+    /// Молчаливая правка: значение после (или прежнее, если запись не удалась).
+    /// Только для мест, где отказ ловится иначе (чтение-после-записи) — всё
+    /// остальное зовёт `try_*`.
+    fn update_quiet(&self, mutate: impl FnOnce(&mut Map<String, Value>)) -> Value {
+        self.update(mutate).unwrap_or_else(|_| self.load())
     }
 
     /// Однократная миграция файла на старте: если версия на диске устарела —
@@ -245,9 +321,28 @@ impl Store {
         let mut cache = self.cache.lock().unwrap();
         let path = &self.path;
         let Ok(raw) = fs::read_to_string(path) else { return }; // нет файла → дефолты
-        let Ok(Value::Object(disk)) = serde_json::from_str::<Value>(&raw) else { return }; // битый → не трогаем
+        let Ok(Value::Object(disk)) = serde_json::from_str::<Value>(&raw) else {
+            // Битый файл не мигрируем, но копию делаем ЗДЕСЬ — до того, как
+            // первый же тумблер допишет дефолты поверх оригинала.
+            backup_broken(path);
+            return;
+        };
         let from = disk.get("schemaVersion").and_then(Value::as_u64).unwrap_or(0);
-        if from >= SCHEMA_VERSION {
+        if from > SCHEMA_VERSION {
+            // Файл от более новой сборки. Читаем как есть (мерж сохраняет
+            // незнакомые ключи), но говорим вслух и кладём снимок: даунгрейд
+            // трактует поля по-своему, и без копии откат необратим.
+            crate::log::line(&format!(
+                "[settings] файл новее сборки (схема {from} > {SCHEMA_VERSION}) — \
+                 работаю как есть, снимок в settings.bak.json"
+            ));
+            let backup = path.with_file_name("settings.bak.json");
+            if fs::copy(path, &backup).is_ok() {
+                let _ = fs::set_permissions(&backup, fs::Permissions::from_mode(0o600));
+            }
+            return;
+        }
+        if from == SCHEMA_VERSION {
             return; // уже актуально
         }
         let backup = path.with_file_name("settings.bak.json");
@@ -269,11 +364,34 @@ impl Store {
     }
 
     pub fn save(&self, patch: Map<String, Value>) -> Value {
-        self.update(|m| {
+        self.update_quiet(move |m| {
             for (k, v) in patch {
                 m.insert(k, v);
             }
         })
+    }
+
+    /// То же, что `save`, но с исходом записи наружу. Зовёт всё, что отвечает
+    /// человеку «сохранено»: настройка, живущая только в памяти, исчезнет на
+    /// следующем старте, и об этом надо сказать сразу, а не через перезапуск.
+    pub fn try_save(&self, patch: Map<String, Value>) -> Result<Value, String> {
+        self.update(move |m| {
+            for (k, v) in patch {
+                m.insert(k, v);
+            }
+        })
+    }
+
+    /// `set_block` с исходом записи наружу (см. `try_save`).
+    pub fn try_set_block(&self, block: &str, patch: Map<String, Value>) -> Result<(), String> {
+        self.update(|root| {
+            let block = root.entry(block).or_insert_with(|| json!({}));
+            let Some(obj) = block.as_object_mut() else { return };
+            for (k, v) in patch {
+                obj.insert(k, v);
+            }
+        })
+        .map(|_| ())
     }
 
     /* -------- типизированные шорткаты для частых полей -------- */
@@ -323,7 +441,7 @@ impl Store {
     /// убирает легаси `proxy`, иначе пустой `service.proxy` провалится в него
     /// и очищенный пользователем прокси «воскреснет».
     pub fn remove_top(&self, key: &str) {
-        self.update(|m| {
+        self.update_quiet(|m| {
             m.remove(key);
         });
     }
@@ -337,7 +455,7 @@ impl Store {
 
     /// Deep-set полей в объект "voice" (не затирая остальные voice-ключи).
     pub fn set_voice(&self, patch: Map<String, Value>) {
-        self.update(|root| {
+        self.update_quiet(|root| {
             let voice = root.entry("voice").or_insert_with(|| json!({}));
             let Some(obj) = voice.as_object_mut() else { return };
             for (k, v) in patch {
@@ -348,7 +466,7 @@ impl Store {
 
     /// Deep-set полей в объект "stt" (не затирая остальные stt-ключи).
     pub fn set_stt(&self, patch: Map<String, Value>) {
-        self.update(|root| {
+        self.update_quiet(|root| {
             let stt = root.entry("stt").or_insert_with(|| json!({}));
             let Some(obj) = stt.as_object_mut() else { return };
             for (k, v) in patch {
@@ -360,7 +478,7 @@ impl Store {
     /// Deep-set полей в произвольный объект-блок верхнего уровня (инкр. 10:
     /// "wake"/"verification"), не затирая остальные ключи блока.
     pub fn set_block(&self, block: &str, patch: Map<String, Value>) {
-        self.update(|root| {
+        self.update_quiet(|root| {
             let block = root.entry(block).or_insert_with(|| json!({}));
             let Some(obj) = block.as_object_mut() else { return };
             for (k, v) in patch {
@@ -370,7 +488,7 @@ impl Store {
     }
 
     pub fn set_plugin(&self, id: &str, patch: Map<String, Value>) {
-        self.update(|root| {
+        self.update_quiet(|root| {
             let plugins = root.entry("plugins").or_insert_with(|| json!({}));
             let Some(plugins) = plugins.as_object_mut() else { return };
             let plugin = plugins.entry(id.to_string()).or_insert_with(|| json!({}));
@@ -420,7 +538,7 @@ mod proxy_tests {
     fn store_with(v: Value) -> Store {
         let s = Store::new();
         let stamp = stamp_of(&s.path);
-        *s.cache.lock().unwrap() = Some((v, stamp));
+        *s.cache.lock().unwrap() = Some(Cached { value: v, stamp, broken: false });
         s
     }
 
@@ -613,6 +731,104 @@ mod persistence_tests {
                 .count(),
             0
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Главное про запись: провал ВИДЕН вызывающему. Молчаливый `save` вернул
+    /// бы прежнее значение, и панель ответила бы человеку «сохранено» — хоткей
+    /// работал бы до перезапуска и исчез бы без объяснений.
+    #[test]
+    fn failed_persist_is_reported_to_the_caller() {
+        let dir = temp_dir("try-save");
+        let path = dir.join("settings.json");
+        fs::create_dir(&path).unwrap(); // переименовать поверх каталога нельзя
+        let store = Store::with_path(path);
+
+        let mut patch = Map::new();
+        patch.insert("hotkey".into(), Value::from("Command+K"));
+        let e = store.try_save(patch).expect_err("запись провалилась — обязан быть Err");
+        assert!(e.contains("не смог записать"), "причина в тексте: {e}");
+
+        let mut block = Map::new();
+        block.insert("enabled".into(), Value::from(true));
+        assert!(store.try_set_block("wake", block).is_err(), "и для блока тоже");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Битый settings.json: дефолты в памяти — вынужденно, но ОРИГИНАЛ обязан
+    /// пережить первую же правку. Иначе один тумблер стирает удалённые узлы,
+    /// хоткеи и гранты навсегда — бэкапа на этом пути раньше не было.
+    #[test]
+    fn a_broken_file_is_copied_aside_before_the_first_write() {
+        let dir = temp_dir("broken");
+        let path = dir.join("settings.json");
+        let garbage = "{ \"remotes\": [{\"name\":\"vps\"}], \"hotkey\": ";
+        fs::write(&path, garbage).unwrap();
+        let store = Store::with_path(path.clone());
+
+        // читается как дефолты (иначе приложение вообще не поднимется)…
+        assert_eq!(store.load()["remotes"], json!([]));
+        // …но правка не уносит оригинал с собой
+        store.set_top("theme", Value::from("dark"));
+        let copy = dir.join("settings.broken.json");
+        assert_eq!(
+            fs::read_to_string(&copy).unwrap(),
+            garbage,
+            "оригинал сохранён байт в байт"
+        );
+        assert_eq!(fs::metadata(&copy).unwrap().permissions().mode() & 0o777, 0o600);
+        // сама правка при этом легла
+        let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["theme"], Value::from("dark"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Копию сделать не вышло — значит запись уничтожила бы единственный
+    /// экземпляр настроек. Тогда не пишем вовсе и говорим почему.
+    #[test]
+    fn without_a_copy_a_broken_file_is_not_overwritten() {
+        let dir = temp_dir("broken-nocopy");
+        let path = dir.join("settings.json");
+        fs::write(&path, "не json").unwrap();
+        // место под копию занято каталогом — fs::copy обязан провалиться
+        fs::create_dir(dir.join("settings.broken.json")).unwrap();
+        let store = Store::with_path(path.clone());
+
+        let e = store
+            .try_save(Map::from_iter([("theme".to_string(), Value::from("dark"))]))
+            .expect_err("без копии писать нельзя");
+        assert!(e.contains("не разбирается"), "{e}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "не json", "файл цел");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Битый файл на старте: миграция его не трогает — но копию кладёт сразу,
+    /// не дожидаясь первой правки.
+    #[test]
+    fn startup_backs_up_a_broken_file() {
+        let dir = temp_dir("broken-startup");
+        let path = dir.join("settings.json");
+        fs::write(&path, "{ битьё").unwrap();
+        Store::with_path(path.clone()).migrate_on_startup();
+        assert_eq!(fs::read_to_string(dir.join("settings.broken.json")).unwrap(), "{ битьё");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{ битьё", "оригинал не тронут");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Файл из будущей версии: не мигрируем (вперёд-только), но снимок кладём —
+    /// даунгрейд трактует поля по-своему, и без копии откат необратим.
+    #[test]
+    fn a_file_from_the_future_is_kept_and_snapshotted() {
+        let dir = temp_dir("future");
+        let path = dir.join("settings.json");
+        let raw = format!(
+            "{{\"schemaVersion\":{},\"hotkey\":\"Command+K\"}}",
+            SCHEMA_VERSION + 5
+        );
+        fs::write(&path, &raw).unwrap();
+        Store::with_path(path.clone()).migrate_on_startup();
+        assert_eq!(fs::read_to_string(&path).unwrap(), raw, "файл не переписан");
+        assert_eq!(fs::read_to_string(dir.join("settings.bak.json")).unwrap(), raw);
         let _ = fs::remove_dir_all(dir);
     }
 }

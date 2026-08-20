@@ -25,6 +25,35 @@ const WINDOW_MS: i64 = 5 * 60 * 60 * 1000; // 5ч-окно подписочны�
 const STATE_V: i64 = 2; // v2: биллинг = 'api:<host>' вместо плоского 'api'
 const DAY_MS: i64 = 86_400_000;
 
+/// Горизонт хранения агрегатов. `hours`/`sessions` не чистились никогда и росли
+/// линейно временем — за 94 дня 1378 часовых записей. Читают их максимум на
+/// неделю назад («сегодня»/«неделя»), 400 дней — с запасом на «а год назад» и
+/// потолок файла примерно на нынешнем размере.
+///
+/// `offsets` НЕ чистим намеренно: смещение — единственная защита от двойного
+/// счёта у Codex и Kimi (дедупа по id сообщения там нет, в отличие от Claude).
+/// Забыть смещение живого файла значит посчитать его расход заново; пара
+/// десятков килобайт этого не стоят.
+const RETAIN_DAYS: i64 = 400;
+
+/// Выбросить агрегаты старше горизонта. `true` — что-то удалили (значит файл
+/// пора переписать).
+fn prune(state: &mut State, now: i64) -> bool {
+    let cutoff = now - RETAIN_DAYS * DAY_MS;
+    // Час из ключа "YYYY-MM-DDTHH|модель|проект|биллинг" — тем же разбором, что
+    // и в `range_hours`: ключ, который там не читается, тут не хранится.
+    let hour_ts = |key: &str| {
+        let hour = key.split('|').next().unwrap_or("");
+        chrono::DateTime::parse_from_rfc3339(&format!("{hour}:00:00Z"))
+            .ok()
+            .map(|d| d.timestamp_millis())
+    };
+    let before = state.hours.len() + state.sessions.len();
+    state.hours.retain(|key, _| hour_ts(key).is_some_and(|ts| ts >= cutoff));
+    state.sessions.retain(|_, s| s.last >= cutoff);
+    before != state.hours.len() + state.sessions.len()
+}
+
 /// $/1M токенов; кэш: запись ×1.25 input, чтение ×0.1 input (подход ccusage).
 fn price(model: &str) -> (f64, f64) {
     match model {
@@ -492,42 +521,53 @@ impl Usage {
     }
 
     /// backfill + инкрементальные сканы — одним и тем же путём (offsets решают).
+    ///
+    /// Пишем файл ТОЛЬКО когда что-то изменилось. Скан идёт раз в 30 с круглые
+    /// сутки, а usage.json — это сотни килобайт: безусловная запись давала
+    /// ~900 МБ на SSD в день у приложения, которое просто висит в менюбаре.
+    /// Признак изменения тут же под рукой — сдвинулось смещение файла.
     pub fn scan(self: &Arc<Self>) {
         if self.scanning.swap(true, Ordering::SeqCst) {
             return;
         }
-        for file in Self::list_transcripts() {
-            let prev = self.state.lock().unwrap().offsets.get(&file).copied().unwrap_or(0);
-            let next = self.parse_file_part(&file, prev);
-            if next != prev {
-                self.state.lock().unwrap().offsets.insert(file, next);
-            }
-        }
+        // Все три источника проходим всегда (`|=`, не `||`): скан на то и скан.
+        let mut changed = self.scan_files(Self::list_transcripts(), Self::parse_file_part);
         // Codex rollouts: token_count.last_token_usage (per-turn) → та же агрегация.
-        for file in Self::list_codex_rollouts() {
-            let prev = self.state.lock().unwrap().offsets.get(&file).copied().unwrap_or(0);
-            let next = self.parse_codex_file_part(&file, prev);
-            if next != prev {
-                self.state.lock().unwrap().offsets.insert(file, next);
-            }
-        }
+        changed |= self.scan_files(Self::list_codex_rollouts(), Self::parse_codex_file_part);
         // Kimi wire.jsonl: usage.record всех агентов сессии → та же агрегация.
-        for file in Self::list_kimi_wires() {
-            let prev = self.state.lock().unwrap().offsets.get(&file).copied().unwrap_or(0);
-            let next = self.parse_kimi_file_part(&file, prev);
-            if next != prev {
-                self.state.lock().unwrap().offsets.insert(file, next);
-            }
-        }
+        changed |= self.scan_files(Self::list_kimi_wires(), Self::parse_kimi_file_part);
         {
             let mut seen = self.msg_seen.lock().unwrap();
             if seen.len() > 6000 {
                 seen.trim_to(3000);
             }
         }
-        self.state.lock().unwrap().backfilled = true;
-        self.persist();
+        {
+            let mut state = self.state.lock().unwrap();
+            changed |= !state.backfilled; // первый скан обязан лечь на диск
+            state.backfilled = true;
+            changed |= prune(&mut state, now_ms());
+        }
+        if changed {
+            self.persist();
+        }
         self.scanning.store(false, Ordering::SeqCst);
+    }
+
+    /// Разобрать список файлов своим парсером, подвинув смещения.
+    /// `true` — хоть одно смещение сдвинулось, то есть состояние изменилось и
+    /// файл придётся переписать.
+    fn scan_files(&self, files: Vec<String>, parse: fn(&Self, &str, u64) -> u64) -> bool {
+        let mut changed = false;
+        for file in files {
+            let prev = self.state.lock().unwrap().offsets.get(&file).copied().unwrap_or(0);
+            let next = parse(self, &file, prev);
+            if next != prev {
+                self.state.lock().unwrap().offsets.insert(file, next);
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Все rollout-файлы Codex: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl.
@@ -1459,6 +1499,52 @@ Current week (Sonnet only): 30% used\n";
         assert_eq!(st.sessions["session_TEST"].tok.total(), 55.0, "битая строка не роняет и не искажает");
         drop(st);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// usage.json — сотни килобайт, а скан идёт раз в 30 с круглые сутки:
+    /// безусловная запись давала ~900 МБ на SSD в день у приложения, которое
+    /// просто висит в менюбаре. Признак «писать» ровно один — сдвинулось
+    /// смещение; на неизменившихся файлах его быть не должно.
+    #[test]
+    fn an_unchanged_scan_asks_for_no_write() {
+        let (root, files) = kimi_tree(
+            "nowrite",
+            KIMI_STATE_V2,
+            &[("main", kimi_pair(100, 10, 0, 0, 1787091343079))],
+        );
+        let u = fresh_usage();
+        assert!(
+            u.scan_files(files.clone(), Usage::parse_kimi_file_part),
+            "первый проход разобрал новый файл"
+        );
+        assert!(
+            !u.scan_files(files.clone(), Usage::parse_kimi_file_part),
+            "файлы не менялись — писать нечего"
+        );
+        // дописали ход — снова есть что сохранить
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().append(true).open(&files[0]).unwrap();
+        f.write_all(kimi_pair(5, 1, 0, 0, 1787091350000).as_bytes()).unwrap();
+        drop(f);
+        assert!(u.scan_files(files, Usage::parse_kimi_file_part), "файл вырос");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Ретеншен: карты агрегатов не росли бы вечно, но и лишнего не теряют.
+    #[test]
+    fn prune_drops_only_what_is_past_the_horizon() {
+        let now = 1787091343079;
+        let t = Tok { input: 10.0, ..Default::default() };
+        let mut st = State::default();
+        Usage::add_record(&mut st, now, "Sonnet", "p", "plan", "свежая", t);
+        Usage::add_record(&mut st, now - (RETAIN_DAYS + 5) * DAY_MS, "Sonnet", "p", "plan", "древняя", t);
+        assert_eq!(st.hours.len(), 2);
+
+        assert!(prune(&mut st, now), "что-то удалили — файл пора переписать");
+        assert_eq!(st.hours.len(), 1, "старый час ушёл");
+        assert!(st.sessions.contains_key("свежая"));
+        assert!(!st.sessions.contains_key("древняя"));
+        assert!(!prune(&mut st, now), "второй раз удалять нечего — и записи не будет");
     }
 
     #[test]

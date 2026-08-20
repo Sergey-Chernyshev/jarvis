@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod assistant;
+pub mod history;
 
 // ── Структуры событий ──────────────────────────────────────────────────────
 
@@ -216,13 +217,70 @@ pub fn inv_tools_ok(init_tools: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-// ── Сохранённый чат: id переживает закрытие окна ──────────────────────────
+// ── Разговоры: список чатов, а не один вечный ─────────────────────────────
+//
+// Один бесконечный чат упирается в компакцию и начинает путать проекты. Чатов
+// теперь несколько, но ПРАВА у них общие: инструменты агента к проекту не
+// привязаны, `sessions.list` остаётся глобальным. Делится только контекст
+// разговора — сквозной взгляд на флот в этом и есть ценность главного агента.
 
-/// Блок настроек и ключ, где лежит id текущего разговора с агентом.
+/// Блок настроек, где живут чаты главного агента.
 pub const CHAT_BLOCK: &str = "agentChat";
+/// Легаси-ключ: единственный разговор старых сборок. Остаётся зеркалом текущего
+/// чата — по нему подхватывается прежняя переписка и переживает откат сборки.
 pub const CHAT_KEY: &str = "sessionId";
+const CHATS_KEY: &str = "chats";
+const CURRENT_KEY: &str = "current";
 
-/// Сохранённый id разговора из среза настроек. Пусто/не строка → None.
+/// Один разговор с главным агентом.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Chat {
+    /// Наш локальный id, не id сессии: чат существует и до первой реплики, и
+    /// после потери транскрипта — имя и место в списке переживают обе беды.
+    pub id: String,
+    /// Имя, заданное человеком. ПУСТО, пока он его не задал: заголовок тогда
+    /// берётся из первой реплики разговора (`history::display_name`).
+    #[serde(default)]
+    pub name: String,
+    /// Нить разговора (`--resume`). Пусто у нового чата и у потерявшего транскрипт.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// Список чатов и тот, что сейчас открыт. Инвариант: список непуст, `current` —
+/// всегда валидный индекс. Он и снимает половину «тихих отказов»: некуда писать
+/// и не на что переключаться просто не бывает.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatBook {
+    pub chats: Vec<Chat>,
+    current: usize,
+}
+
+/// Номер в id и имени — один и тот же. Выводится из уже занятых, а не из часов:
+/// список воспроизводим в тестах, id не зависит от машины.
+fn ordinal_of(id: &str) -> Option<usize> {
+    id.strip_prefix('c')?.parse().ok()
+}
+
+/// «Чат 5» — заглушка прежних сборок, а не имя. По списку из таких заглушек
+/// нельзя понять, где какой разговор, поэтому считаем их безымянными: заголовок
+/// подставится из первой реплики. Человеческое «Чат недели» под шаблон не
+/// попадает — после «Чат » обязаны идти только цифры.
+fn is_auto_name(n: &str) -> bool {
+    n.strip_prefix("Чат ")
+        .is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()))
+}
+
+impl Chat {
+    /// Имя, заданное человеком, — или `None`, если имени нет.
+    pub fn human_name(&self) -> Option<&str> {
+        let n = self.name.trim();
+        (!n.is_empty() && !is_auto_name(n)).then_some(n)
+    }
+}
+
+/// Сохранённый id разговора старой сборки. Пусто/не строка → None.
 pub fn saved_chat_session(settings: &Value) -> Option<String> {
     settings
         .pointer(&format!("/{CHAT_BLOCK}/{CHAT_KEY}"))
@@ -232,11 +290,212 @@ pub fn saved_chat_session(settings: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Что уйдёт в `--resume`. Явный id окна важнее сохранённого: окно знает про
-/// «Новый чат» и про свежий id раньше, чем они доедут до настроек.
-pub fn resume_for(explicit: Option<&str>, saved: Option<&str>) -> Option<String> {
-    let pick = |s: Option<&str>| s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
-    pick(explicit).or_else(|| pick(saved))
+fn trimmed(s: Option<String>) -> Option<String> {
+    s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Список чатов из среза настроек — с усыновлением одиночного разговора.
+///
+/// На `agentChat.sessionId` у человека висит вся прошлая переписка. Начать с
+/// чистого листа значит молча её потерять, поэтому старый id становится первым
+/// чатом списка. Миграция ленивая (при чтении), а не шагом схемы: добавление
+/// полей в настройках безопасно по построению, версию поднимать не за что.
+pub fn read_chats(settings: &Value) -> ChatBook {
+    let block = settings.get(CHAT_BLOCK);
+    let mut chats: Vec<Chat> = block
+        .and_then(|b| b.get(CHATS_KEY))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| serde_json::from_value::<Chat>(v.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    chats.retain(|c| !c.id.trim().is_empty());
+    for c in chats.iter_mut() {
+        c.session_id = trimmed(c.session_id.take());
+    }
+    if chats.is_empty() {
+        chats.push(Chat {
+            id: "c1".to_string(),
+            name: String::new(),
+            session_id: saved_chat_session(settings),
+        });
+    }
+    let current = block
+        .and_then(|b| b.get(CURRENT_KEY))
+        .and_then(Value::as_str)
+        .and_then(|id| chats.iter().position(|c| c.id == id))
+        .unwrap_or(0);
+    ChatBook { chats, current }
+}
+
+impl ChatBook {
+    /// Открытый сейчас чат. Не `Option`: пустого списка не бывает по инварианту.
+    pub fn current(&self) -> &Chat {
+        &self.chats[self.current]
+    }
+
+    /// Позиция открытого чата — списку истории она нужна, чтобы поставить
+    /// пометку, не сверяя id.
+    pub(crate) fn current_index(&self) -> usize {
+        self.current
+    }
+
+    fn index_of(&self, id: &str) -> Option<usize> {
+        let id = id.trim();
+        self.chats.iter().position(|c| c.id == id)
+    }
+
+    /// Нить конкретного чата (хост спрашивает про свой, а не про открытый).
+    pub fn session_of(&self, chat_id: &str) -> Option<String> {
+        self.index_of(chat_id)
+            .and_then(|i| self.chats[i].session_id.clone())
+    }
+
+    pub fn switch(&mut self, id: &str) -> Result<(), String> {
+        self.current = self
+            .index_of(id)
+            .ok_or_else(|| format!("чата «{}» нет в списке — обнови список", id.trim()))?;
+        Ok(())
+    }
+
+    /// Завести чат и сразу его открыть: создать и не открыть — движение,
+    /// которого человек не просил.
+    pub fn create(&mut self, name: Option<&str>) -> Result<String, String> {
+        let n = self
+            .chats
+            .iter()
+            .filter_map(|c| ordinal_of(&c.id))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        // Без имени чат остаётся безымянным, а не «Чатом N»: заголовок ему даст
+        // первая реплика — по ней разговор в списке и узнаётся.
+        let name = match name.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(raw) => chat_name_decision(raw)?,
+            None => String::new(),
+        };
+        let id = format!("c{n}");
+        self.chats.push(Chat { id: id.clone(), name, session_id: None });
+        self.current = self.chats.len() - 1;
+        Ok(id)
+    }
+
+    /// Привязать разговор с диска к новому чату и открыть его.
+    ///
+    /// Уже привязанный — просто открываем: второй чат на ту же нить развёл бы
+    /// два имени на один разговор, и человек снова не понял бы, где какой.
+    pub fn adopt(&mut self, sid: &str) -> Result<(), String> {
+        let sid = sid.trim();
+        if sid.is_empty() {
+            return Err("пустой id разговора — привязывать нечего".into());
+        }
+        if let Some(i) = self
+            .chats
+            .iter()
+            .position(|c| c.session_id.as_deref() == Some(sid))
+        {
+            self.current = i;
+            return Ok(());
+        }
+        let id = self.create(None)?;
+        self.set_session(&id, Some(sid))
+    }
+
+    pub fn rename(&mut self, id: &str, raw: &str) -> Result<String, String> {
+        let i = self
+            .index_of(id)
+            .ok_or_else(|| format!("чата «{}» нет в списке — переименовывать нечего", id.trim()))?;
+        let name = chat_name_decision(raw)?;
+        self.chats[i].name = name.clone();
+        Ok(name)
+    }
+
+    /// Убрать чат из списка. Сам транскрипт на диске остаётся — теряется только
+    /// ниточка к нему.
+    pub fn delete(&mut self, id: &str) -> Result<(), String> {
+        let i = self
+            .index_of(id)
+            .ok_or_else(|| format!("чата «{}» нет в списке — удалять нечего", id.trim()))?;
+        if self.chats.len() == 1 {
+            // Пустой список сломал бы инвариант «есть куда писать»; человеку
+            // нужен не «ноль чатов», а «чистый чат» — это кнопка «Новый чат».
+            return Err("это последний чат — его нельзя удалить, можно только очистить".into());
+        }
+        self.chats.remove(i);
+        self.current = self.current.min(self.chats.len() - 1);
+        Ok(())
+    }
+
+    /// Записать (или забыть) нить конкретного чата.
+    pub fn set_session(&mut self, chat_id: &str, sid: Option<&str>) -> Result<(), String> {
+        let i = self
+            .index_of(chat_id)
+            .ok_or_else(|| format!("чата «{}» уже нет — id разговора некуда записать", chat_id.trim()))?;
+        self.chats[i].session_id = trimmed(sid.map(str::to_string));
+        Ok(())
+    }
+
+    /// Патч блока настроек. Легаси-ключ пишем зеркалом текущего чата — по нему
+    /// прежняя сборка (и откат) продолжит тот же разговор.
+    pub fn to_patch(&self) -> serde_json::Map<String, Value> {
+        serde_json::Map::from_iter([
+            (
+                CHATS_KEY.to_string(),
+                serde_json::to_value(&self.chats).unwrap_or_else(|_| Value::Array(vec![])),
+            ),
+            (CURRENT_KEY.to_string(), Value::String(self.current().id.clone())),
+            (
+                CHAT_KEY.to_string(),
+                Value::String(self.current().session_id.clone().unwrap_or_default()),
+            ),
+        ])
+    }
+}
+
+/// Имя чата: те же правила, что у `sessions.rename` (потолок длины, чистка
+/// управляющих) — два списка имён в одном приложении не должны жить по разным
+/// законам. Отличие одно: пустое имя тут отказ, а не «снять имя», — у чата нет
+/// автозаголовка, снятие оставило бы безымянную строку.
+pub fn chat_name_decision(raw: &str) -> Result<String, String> {
+    match crate::daemon::rename_decision(raw, true, true)? {
+        Some(name) => Ok(name),
+        None => Err("пустое имя — у чата должно быть название".into()),
+    }
+}
+
+/// Куда уйдёт сообщение. Адресат — не «текущий на момент отправки», а тот чат,
+/// который открыт в этом окне: окно, открытое на чате A, обязано слать в A, даже
+/// если в соседнем окне человек уже переключился на B.
+///
+/// Спрашиваем id ЧАТА, а не разговора: у свежего чата разговора ещё нет, и по
+/// пустой нити окно неотличимо от «не знаю» — первая реплика уезжала в чужой чат.
+/// Id разговора остался запасным ходом для окон, переживших обновление.
+/// Чужой id — отказ вслух: молча увести реплику в другой разговор хуже, чем не
+/// отправить.
+pub fn chat_for_send<'a>(
+    book: &'a ChatBook,
+    chat_id: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<&'a Chat, String> {
+    fn clean(v: Option<&str>) -> Option<&str> {
+        v.map(str::trim).filter(|s| !s.is_empty())
+    }
+    if let Some(cid) = clean(chat_id) {
+        return book
+            .chats
+            .iter()
+            .find(|c| c.id == cid)
+            .ok_or_else(|| format!("чата «{cid}» больше нет — обнови список"));
+    }
+    let Some(sid) = clean(session_id) else {
+        return Ok(book.current()); // окно после перезапуска не знает ни того, ни другого
+    };
+    book.chats
+        .iter()
+        .find(|c| c.session_id.as_deref() == Some(sid))
+        .ok_or_else(|| format!("разговор {sid} не привязан ни к одному чату — открой чат заново"))
 }
 
 /// Писать ли новый id на диск. Init и Done приносят один и тот же id каждый
@@ -324,6 +583,10 @@ pub struct ClaudeCliHost {
     pub app: tauri::AppHandle,
     /// Путь к ~/.jarvis/jarvis-mcp.json
     pub mcp_config: String,
+    /// Чат, в контексте которого идёт этот ход. Выбран один раз при отправке:
+    /// ход длится минуты, и человек за это время успевает уйти в другой проект —
+    /// «текущий на момент ответа» записал бы нить не туда.
+    pub chat_id: String,
 }
 
 /// Промпт, который агент получает вместе с каждым сообщением.
@@ -390,7 +653,7 @@ impl ClaudeCliHost {
         let mut reader = BufReader::new(stdout).lines();
         let app = self.app.clone();
         // Помним последний записанный id, чтобы не писать настройки на каждое событие.
-        let mut saved = saved_chat_session(&crate::daemon::Daemon::get(&app).settings.load());
+        let mut saved = chat_book(&app).session_of(&self.chat_id);
         let mut finished = false; // дошло ли до Done/Failed
 
         while let Ok(Some(line)) = reader.next_line().await {
@@ -416,12 +679,13 @@ impl ClaudeCliHost {
                     other => other,
                 };
                 if matches!(ev, AgentEvent::Failed { lost_session: true, .. }) {
-                    forget_chat_session(&app);
+                    // Забываем нить ИМЕННО этого чата: остальные разговоры живы.
+                    forget_chat_session(&app, &self.chat_id);
                     saved = None;
                 }
                 if let Some(id) = event_session_id(&ev) {
                     if let Some(fresh) = session_id_to_persist(saved.as_deref(), id) {
-                        remember_chat_session(&app, &fresh);
+                        remember_chat_session(&app, &self.chat_id, &fresh);
                         saved = Some(fresh);
                     }
                 }
@@ -447,19 +711,42 @@ fn failure(message: &str, lost_session: bool) -> AgentEvent {
     AgentEvent::Failed { message: message.to_string(), lost_session }
 }
 
-/// Запомнить id разговора в настройках.
-pub(crate) fn remember_chat_session(app: &tauri::AppHandle, id: &str) {
-    let mut patch = serde_json::Map::new();
-    patch.insert(CHAT_KEY.to_string(), Value::String(id.to_string()));
-    crate::daemon::Daemon::get(app).settings.set_block(CHAT_BLOCK, patch);
+/// Список чатов из живых настроек.
+pub fn chat_book(app: &tauri::AppHandle) -> ChatBook {
+    read_chats(&crate::daemon::Daemon::get(app).settings.load())
+}
+
+/// Записать список и убедиться, что он лёг на диск. `set_block` при отказе
+/// записи молчит — разойтись с диском тут значит потерять чат на следующем старте.
+pub fn save_chat_book(app: &tauri::AppHandle, book: &ChatBook) -> Result<(), String> {
+    let d = crate::daemon::Daemon::get(app);
+    d.settings.set_block(CHAT_BLOCK, book.to_patch());
+    if read_chats(&d.settings.load()) != *book {
+        return Err("список чатов не сохранился в настройках — подробности в логе".into());
+    }
+    Ok(())
+}
+
+/// Запомнить id разговора в НУЖНОМ чате (не в «текущем»: см. `ClaudeCliHost::chat_id`).
+pub(crate) fn remember_chat_session(app: &tauri::AppHandle, chat_id: &str, id: &str) {
+    set_chat_session(app, chat_id, Some(id));
 }
 
 /// Забыть id разговора («Новый чат» либо пропавший транскрипт). Сам транскрипт
 /// остаётся на диске — мы теряем только ниточку к нему.
-pub fn forget_chat_session(app: &tauri::AppHandle) {
-    let mut patch = serde_json::Map::new();
-    patch.insert(CHAT_KEY.to_string(), Value::String(String::new()));
-    crate::daemon::Daemon::get(app).settings.set_block(CHAT_BLOCK, patch);
+pub fn forget_chat_session(app: &tauri::AppHandle, chat_id: &str) {
+    set_chat_session(app, chat_id, None);
+}
+
+fn set_chat_session(app: &tauri::AppHandle, chat_id: &str, id: Option<&str>) {
+    let mut book = chat_book(app);
+    // Чат могли удалить, пока ход шёл: воскрешать его записью нельзя.
+    let done = book
+        .set_session(chat_id, id)
+        .and_then(|()| save_chat_book(app, &book));
+    if let Err(e) = done {
+        crate::log::line(&format!("[agent] нить чата {chat_id} не записана: {e}"));
+    }
 }
 
 /// Отправить событие в главное окно Tauri.
@@ -673,23 +960,233 @@ mod tests {
         assert_eq!(saved_chat_session(&json!({})), None);
     }
 
+    // ── список чатов ──────────────────────────────────────────────────────
+
+    /// Главное про совместимость: на `agentChat.sessionId` висит живая переписка
+    /// в полторы сотни реплик. Она обязана стать первым чатом, а не пропасть.
     #[test]
-    fn resume_for_falls_back_to_saved() {
-        // Окно после перезапуска не знает id — подставляем сохранённый.
-        assert_eq!(resume_for(None, Some("s-42")).as_deref(), Some("s-42"));
-        assert_eq!(resume_for(Some(""), Some("s-42")).as_deref(), Some("s-42"));
+    fn legacy_single_session_becomes_the_first_chat() {
+        let book = read_chats(&json!({ "agentChat": { "sessionId": "s-149" } }));
+        assert_eq!(book.chats.len(), 1);
+        assert_eq!(book.current().session_id.as_deref(), Some("s-149"));
+        assert_eq!(book.current().human_name(), None, "имени человек не давал");
+        assert_eq!(book.current().id, "c1");
+
+        // и переживает круг «прочитали → записали → прочитали»
+        let again = read_chats(&json!({ "agentChat": Value::Object(book.to_patch()) }));
+        assert_eq!(again, book, "круг через настройки не должен терять нить");
     }
 
     #[test]
-    fn resume_for_prefers_explicit() {
-        assert_eq!(resume_for(Some("s-new"), Some("s-old")).as_deref(), Some("s-new"));
+    fn empty_settings_still_give_one_chat() {
+        // Инвариант «есть куда писать»: пустого списка не бывает.
+        for s in [json!({}), json!({ "agentChat": {} }), json!({ "agentChat": { "sessionId": "  " } })] {
+            let book = read_chats(&s);
+            assert_eq!(book.chats.len(), 1);
+            assert_eq!(book.current().session_id, None);
+        }
+        // мусор в списке не роняет чтение
+        let book = read_chats(&json!({ "agentChat": { "chats": "не список", "sessionId": "s1" } }));
+        assert_eq!(book.current().session_id.as_deref(), Some("s1"));
+        let book = read_chats(&json!({ "agentChat": { "chats": [{ "id": "" }, 7] } }));
+        assert_eq!(book.chats.len(), 1, "безымянный мусор выброшен, чат подставлен");
     }
 
     #[test]
-    fn resume_for_after_reset_starts_new() {
-        // «Новый чат» стёр сохранённый id → resume пуст, claude заводит сессию.
-        assert_eq!(resume_for(None, None), None);
-        assert_eq!(resume_for(None, saved_chat_session(&json!({ "agentChat": { "sessionId": "" } })).as_deref()), None);
+    fn legacy_key_is_ignored_once_the_list_exists() {
+        // Зеркало легаси-ключа отстало от списка — верим списку.
+        let book = read_chats(&json!({ "agentChat": {
+            "sessionId": "s-old",
+            "chats": [{ "id": "c1", "name": "ГД-2026", "sessionId": "s-1" },
+                      { "id": "c2", "name": "Грант", "sessionId": "s-2" }],
+            "current": "c2",
+        }}));
+        assert_eq!(book.chats.len(), 2);
+        assert_eq!(book.current().id, "c2");
+        assert_eq!(book.current().session_id.as_deref(), Some("s-2"));
+    }
+
+    #[test]
+    fn unknown_current_falls_back_to_the_first_chat() {
+        // Текущий чат удалили в другом окне — открываем первый, а не падаем.
+        let book = read_chats(&json!({ "agentChat": {
+            "chats": [{ "id": "c1", "name": "A" }], "current": "c9",
+        }}));
+        assert_eq!(book.current().id, "c1");
+    }
+
+    #[test]
+    fn create_opens_the_new_chat_and_numbers_it() {
+        let mut book = read_chats(&json!({}));
+        let id = book.create(None).unwrap();
+        assert_eq!(id, "c2");
+        assert_eq!(book.current().id, "c2", "создать и не открыть — движение, о котором не просили");
+        assert_eq!(book.current().human_name(), None, "«Чат 2» ничего не говорит — имя даст первая реплика");
+        assert_eq!(book.chats.len(), 2);
+
+        // имя можно задать сразу; правила те же, что у переименования
+        let id = book.create(Some("  Грант ФСИ  ")).unwrap();
+        assert_eq!(id, "c3");
+        assert_eq!(book.current().human_name(), Some("Грант ФСИ"));
+        assert!(book.create(Some(&"я".repeat(61))).is_err(), "длинное имя — отказ вслух");
+    }
+
+    #[test]
+    fn switch_to_a_missing_chat_refuses_out_loud() {
+        let mut book = read_chats(&json!({}));
+        book.create(None).unwrap();
+        let e = book.switch("c9").unwrap_err();
+        assert!(e.contains("c9"), "отказ обязан назвать чат: {e}");
+        assert_eq!(book.current().id, "c2", "неудачное переключение ничего не двигает");
+        book.switch("c1").unwrap();
+        assert_eq!(book.current().id, "c1");
+    }
+
+    #[test]
+    fn rename_refuses_empty_and_too_long() {
+        let mut book = read_chats(&json!({}));
+        assert_eq!(book.rename("c1", " ГД-2026 ").unwrap(), "ГД-2026");
+        assert_eq!(book.current().name, "ГД-2026");
+        // пустое имя — отказ, а не «снять имя»: автозаголовка у чата нет
+        assert!(book.rename("c1", "   ").is_err());
+        assert!(book.rename("c1", &"я".repeat(61)).is_err());
+        assert!(book.rename("c9", "Новое").unwrap_err().contains("c9"));
+        assert_eq!(book.current().name, "ГД-2026", "после отказов имя цело");
+        // перенос строки склеил бы слова — чистим, как в sessions.rename
+        assert_eq!(book.rename("c1", "ГД\n2026").unwrap(), "ГД 2026");
+    }
+
+    #[test]
+    fn deleting_the_last_chat_refuses() {
+        let mut book = read_chats(&json!({ "agentChat": { "sessionId": "s-149" } }));
+        let e = book.delete("c1").unwrap_err();
+        assert!(e.contains("последний"), "причина должна быть внятной: {e}");
+        assert_eq!(book.chats.len(), 1);
+        assert!(book.delete("c9").unwrap_err().contains("c9"));
+    }
+
+    #[test]
+    fn deleting_the_open_chat_opens_a_neighbour() {
+        let mut book = read_chats(&json!({}));
+        book.create(None).unwrap();
+        book.create(None).unwrap(); // c1, c2, c3; открыт c3
+        book.delete("c3").unwrap();
+        assert_eq!(book.current().id, "c2", "открытый чат удалён — открываем соседа");
+        book.delete("c1").unwrap();
+        assert_eq!(book.current().id, "c2", "удаление чужого чата не двигает открытый");
+    }
+
+    /// Хост пишет нить в СВОЙ чат: пока шёл ход, человек мог уйти в другой проект.
+    #[test]
+    fn session_lands_in_the_named_chat_not_the_open_one() {
+        let mut book = read_chats(&json!({ "agentChat": {
+            "chats": [{ "id": "c1", "name": "A", "sessionId": "s-1" },
+                      { "id": "c2", "name": "B", "sessionId": "s-2" }],
+            "current": "c2",
+        }}));
+        book.set_session("c1", Some("s-1-new")).unwrap();
+        assert_eq!(book.chats[0].session_id.as_deref(), Some("s-1-new"));
+        assert_eq!(book.chats[1].session_id.as_deref(), Some("s-2"), "чужой чат не тронут");
+        assert_eq!(book.current().id, "c2", "запись нити не переключает чат");
+
+        // потеря транскрипта забывает нить только своего чата
+        book.set_session("c1", None).unwrap();
+        assert_eq!(book.chats[0].session_id, None);
+        assert_eq!(book.chats[1].session_id.as_deref(), Some("s-2"));
+
+        // чат удалили, пока шёл ход — воскрешать его записью нельзя
+        assert!(book.set_session("c9", Some("s-9")).is_err());
+        assert_eq!(book.chats.len(), 2);
+    }
+
+    #[test]
+    fn mirror_key_follows_the_open_chat() {
+        // Легаси-ключ читают прежние сборки: он обязан указывать на открытый чат.
+        let mut book = read_chats(&json!({ "agentChat": {
+            "chats": [{ "id": "c1", "name": "A", "sessionId": "s-1" },
+                      { "id": "c2", "name": "B", "sessionId": "s-2" }],
+            "current": "c1",
+        }}));
+        assert_eq!(book.to_patch()[CHAT_KEY], json!("s-1"));
+        book.switch("c2").unwrap();
+        assert_eq!(book.to_patch()[CHAT_KEY], json!("s-2"));
+        book.create(None).unwrap();
+        assert_eq!(book.to_patch()[CHAT_KEY], json!(""), "у нового чата нити ещё нет");
+    }
+
+    #[test]
+    fn chat_for_send_picks_the_open_chat_or_the_owner_of_the_id() {
+        let book = read_chats(&json!({ "agentChat": {
+            "chats": [{ "id": "c1", "name": "A", "sessionId": "s-1" },
+                      { "id": "c2", "name": "B", "sessionId": "s-2" }],
+            "current": "c2",
+        }}));
+        // окно после перезапуска не знает ни того, ни другого
+        assert_eq!(chat_for_send(&book, None, None).unwrap().id, "c2");
+        assert_eq!(chat_for_send(&book, Some("  "), Some("  ")).unwrap().id, "c2");
+        // окно, открытое на другом чате, шлёт в него, а не в «текущий»
+        assert_eq!(chat_for_send(&book, Some("c1"), None).unwrap().id, "c1");
+        // id разговора — запасной ход для окон, переживших обновление
+        assert_eq!(chat_for_send(&book, None, Some("s-1")).unwrap().id, "c1");
+        // id чата важнее: он есть и тогда, когда нити ещё нет
+        assert_eq!(chat_for_send(&book, Some("c1"), Some("s-2")).unwrap().id, "c1");
+        // чужой id — отказ вслух, а не тихий увод реплики в другой разговор
+        let e = chat_for_send(&book, None, Some("s-ghost")).unwrap_err();
+        assert!(e.contains("s-ghost"), "отказ обязан назвать разговор: {e}");
+        let e = chat_for_send(&book, Some("c9"), None).unwrap_err();
+        assert!(e.contains("c9"), "отказ обязан назвать чат: {e}");
+    }
+
+    #[test]
+    fn first_reply_of_a_fresh_chat_stays_in_it() {
+        // Баг: у нового чата нити ещё нет, поэтому по пустому session_id окно было
+        // неотличимо от «не знаю» — и первая реплика уезжала в чат, который в этот
+        // момент оказался текущим (например, переключённый в соседнем окне).
+        let mut book = read_chats(&json!({ "agentChat": {
+            "chats": [{ "id": "c1", "name": "A", "sessionId": "s-1" }],
+            "current": "c1",
+        }}));
+        book.create(Some("Новый")).unwrap();
+        let fresh = book.current().id.clone();
+        assert!(book.current().session_id.is_none(), "у нового чата нити нет");
+
+        book.switch("c1").unwrap(); // соседнее окно увело current, пока набирали
+        assert_eq!(
+            chat_for_send(&book, Some(&fresh), None).unwrap().id,
+            fresh,
+            "реплика обязана уйти в чат, открытый в этом окне"
+        );
+    }
+
+    /// Разговор с диска въезжает в НОВЫЙ чат и открывается; повторная привязка
+    /// того же разговора не плодит второй чат на ту же нить.
+    #[test]
+    fn adopting_a_thread_from_disk_opens_a_fresh_chat() {
+        let mut book = read_chats(&json!({ "agentChat": { "sessionId": "s-1" } }));
+        book.adopt("  s-249  ").unwrap();
+        assert_eq!(book.chats.len(), 2);
+        assert_eq!(book.current().id, "c2");
+        assert_eq!(book.current().session_id.as_deref(), Some("s-249"));
+
+        book.switch("c1").unwrap();
+        book.adopt("s-249").unwrap();
+        assert_eq!(book.chats.len(), 2, "второй чат на ту же нить не заводим");
+        assert_eq!(book.current().id, "c2", "уже привязанный разговор просто открывается");
+        assert!(book.adopt("  ").is_err());
+    }
+
+    /// Имена прежних сборок («Чат 5») именами не считаются: список из них
+    /// нечитаем, и заголовок полезнее взять из первой реплики.
+    #[test]
+    fn placeholder_names_are_not_human_names() {
+        let book = read_chats(&json!({ "agentChat": { "chats": [
+            { "id": "c1", "name": "Чат 5" }, { "id": "c2", "name": "" },
+            { "id": "c3", "name": "Чат недели" }, { "id": "c4", "name": "Чат " },
+        ]}}));
+        assert_eq!(book.chats[0].human_name(), None);
+        assert_eq!(book.chats[1].human_name(), None);
+        assert_eq!(book.chats[2].human_name(), Some("Чат недели"));
+        assert_eq!(book.chats[3].human_name(), Some("Чат"));
     }
 
     #[test]

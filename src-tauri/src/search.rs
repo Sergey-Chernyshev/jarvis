@@ -91,13 +91,34 @@ pub async fn search(host: &Host, cwd: &str, query: &str) -> Result<Vec<Hit>, Str
     let in_repo = crate::bundle::git::is_repo(host, cwd).await;
     // stdout — находки, stderr — чужое ворчание (удалённый шелл про локаль,
     // grep про недоступные каталоги). Код возврата не смотрим: у grep «ничего
-    // не нашлось» — это 1, и отличить его от настоящей беды всё равно нечем.
-    // Пустой список честнее ошибки.
-    let out = host
+    // не нашлось» — это 1, и пустой список тут честнее ошибки.
+    //
+    // А вот отказ САМОГО вызова — отвалившийся ssh, таймаут в 30 с — это не
+    // «ничего не найдено»: показать пустоту значит соврать, что искали. Разница
+    // видна прямо здесь: у «нет совпадений» диагностики нет, у транспортного
+    // отказа она есть.
+    match host
         .sh_data(cwd, &grep_cmd(query, in_repo), std::time::Duration::from_secs(30))
         .await
-        .unwrap_or_default();
-    Ok(parse_hits(&out))
+    {
+        Ok(out) => Ok(parse_hits(&out)),
+        Err(why) => Err(search_error(&why)),
+    }
+}
+
+/// Причина отказа поиска человеческим текстом. Таймаут называем таймаутом и
+/// говорим, что делать: «ничего не найдено» на нём — самый вредный ответ,
+/// человек начнёт искать ошибку в запросе.
+pub fn search_error(why: &str) -> String {
+    let why = crate::util::one_line(why);
+    let why = why.trim();
+    if why.contains("не уложилось") {
+        return "Поиск не уложился в 30 с — сузь запрос или ищи в подкаталоге".into();
+    }
+    if why.is_empty() {
+        return "Поиск не выполнился — проверь связь с машиной задачи".into();
+    }
+    format!("Поиск не выполнился: {}", crate::util::ellipsize(why, 200))
 }
 
 #[cfg(test)]
@@ -159,6 +180,37 @@ mod tests {
         assert!(cmd.contains("'rm -rf / ; echo'"), "{cmd}");
         assert!(cmd.starts_with("git grep"));
         assert!(grep_cmd("x", false).starts_with("grep -rnI"));
+    }
+
+    /// Таймаут и отвалившийся ssh обязаны отличаться от «ничего не найдено»:
+    /// пустой список на них — ложь про то, что искали.
+    #[test]
+    fn a_timeout_is_not_an_empty_result() {
+        let t = search_error("не уложилось в 30 с");
+        assert!(t.contains("30 с"), "{t}");
+        assert!(t.contains("сузь"), "подсказан следующий шаг: {t}");
+        let ssh = search_error("ssh: connect to host vps port 22: Operation timed out");
+        assert!(ssh.starts_with("Поиск не выполнился"), "{ssh}");
+        assert!(ssh.contains("ssh"), "причина не потеряна: {ssh}");
+        assert!(!search_error("").is_empty(), "пустая диагностика — всё равно ошибка");
+    }
+
+    /// …а настоящее «ничего не нашлось» (grep вернул 1, stdout пуст, но код
+    /// пайплайна нулевой) остаётся пустым списком, а не ошибкой.
+    #[tokio::test]
+    async fn no_matches_is_an_empty_list_not_an_error() {
+        let dir = std::env::temp_dir()
+            .join(format!("jarvis-search-none-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(std::path::Path::new(&dir).join("a.txt"), "ничего такого\n").unwrap();
+        let hits = search(&Host::Local, &dir, "такогонетнигде")
+            .await
+            .expect("«не нашлось» — это не отказ поиска");
+        assert!(hits.is_empty(), "{hits:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /* Живой поиск в НАСТОЯЩЕМ репозитории: обещание «ищет там, где надо, и не

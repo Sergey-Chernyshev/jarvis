@@ -79,6 +79,21 @@ mod tests {
     }
 
     #[test]
+    fn outcome_covers_every_exit() {
+        use super::Outcome::*;
+        assert_eq!(Outcome::decide(None, false), Expired, "отправителя не стало — решения не было");
+        assert_eq!(Outcome::decide(None, true), Expired, "цель цела, но решения всё равно нет");
+        assert_eq!(Outcome::decide(Some(false), true), Rejected);
+        assert_eq!(Outcome::decide(Some(true), false), Stale, "разрешили, но цель уехала");
+        assert_eq!(Outcome::decide(Some(true), true), Approved);
+        // исполняет ровно один исход — остальные три обязаны быть отказом
+        for o in [Expired, Rejected, Stale] {
+            assert!(!o.allows(), "{} не должен исполняться", o.as_str());
+        }
+        assert!(Approved.allows());
+    }
+
+    #[test]
     fn nonce_is_unique_and_hex() {
         let a = gen_nonce();
         let b = gen_nonce();
@@ -100,6 +115,46 @@ use super::confirm::Confirmer;
 use super::contract::CapabilityMeta;
 use crate::daemon::Daemon;
 
+/// Чем кончилось ожидание карточки. Нужен наружу: UI обязан снять кнопки в ЛЮБОМ
+/// исходе, а не только когда человек нажал. Молчание на таймауте оставляло карточку
+/// висеть с обещанием выбора, которого уже нет.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Outcome {
+    /// Решения не было: таймаут гейта, дроп будущего, снятый nonce.
+    Expired,
+    Rejected,
+    /// Разрешено, но цель уехала за время ожидания (INV-CONFIRM-BIND) — НЕ исполнено.
+    Stale,
+    Approved,
+}
+
+impl Outcome {
+    /// Чистое ядро решения: что пришло из реестра + совпал ли отпечаток цели.
+    /// `recv: None` — отправителя не стало, то есть решения не было.
+    pub fn decide(recv: Option<bool>, same_target: bool) -> Self {
+        match recv {
+            None => Outcome::Expired,
+            Some(false) => Outcome::Rejected,
+            Some(true) if same_target => Outcome::Approved,
+            Some(true) => Outcome::Stale,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Expired => "expired",
+            Outcome::Rejected => "rejected",
+            Outcome::Stale => "stale",
+            Outcome::Approved => "approved",
+        }
+    }
+
+    /// Исполнять ли вызов. Всё, кроме `Approved`, — нет.
+    pub fn allows(self) -> bool {
+        self == Outcome::Approved
+    }
+}
+
 /// Боевой confirmer: рисует карточку в панели и ждёт `agent_confirm` из UI.
 pub struct PanelConfirmer {
     pub app: AppHandle,
@@ -119,12 +174,32 @@ impl Confirmer for PanelConfirmer {
             let before = target_fingerprint(&self.daemon, meta.id, args);
             let card = resolve_target(&self.daemon, meta.id, args);
 
-            // гарантированная очистка записи на любом выходе (вкл. дроп по таймауту гейта)
-            struct Guard<'g> { pending: &'g PendingConfirms, nonce: String }
-            impl Drop for Guard<'_> {
-                fn drop(&mut self) { self.pending.cancel(&self.nonce); }
+            // Гарантированная очистка записи на любом выходе (вкл. дроп по таймауту
+            // гейта) — и там же единственная точка, где UI узнаёт, что вопрос закрыт.
+            // Именно в Drop, а не после await: дроп будущего — это как раз исход,
+            // о котором иначе никто не сказал бы.
+            struct Guard<'g> {
+                pending: &'g PendingConfirms,
+                app: &'g AppHandle,
+                nonce: String,
+                outcome: std::cell::Cell<Outcome>,
             }
-            let _guard = Guard { pending: &self.pending, nonce: nonce.clone() };
+            impl Drop for Guard<'_> {
+                fn drop(&mut self) {
+                    self.pending.cancel(&self.nonce);
+                    let o = self.outcome.get();
+                    let _ = self.app.emit(
+                        "agent:confirm-done",
+                        json!({ "nonce": self.nonce, "approved": o.allows(), "outcome": o.as_str() }),
+                    );
+                }
+            }
+            let guard = Guard {
+                pending: &self.pending,
+                app: &self.app,
+                nonce: nonce.clone(),
+                outcome: std::cell::Cell::new(Outcome::Expired),
+            };
 
             let rx = self.pending.register(nonce.clone());
             // глобально — карточку ловит окно чата агента (agent-chat), а не только панель
@@ -139,12 +214,13 @@ impl Confirmer for PanelConfirmer {
                 }),
             );
 
-            let approved = rx.await.unwrap_or(false);
-            if !approved {
-                return false;
-            }
+            let recv = rx.await.ok();
             // перепроверка цели: если сменилась, пока ждали — НЕ исполняем
-            target_fingerprint(&self.daemon, meta.id, args) == before
+            let same = recv == Some(true)
+                && target_fingerprint(&self.daemon, meta.id, args) == before;
+            let outcome = Outcome::decide(recv, same);
+            guard.outcome.set(outcome);
+            outcome.allows()
         })
     }
 }

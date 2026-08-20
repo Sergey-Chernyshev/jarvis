@@ -136,7 +136,13 @@ pub async fn invoke<C>(
             Err(GateError::Failed("timeout".into()))
         }
         Ok(Ok(value)) => {
-            audit.record(&entry_for("ok".into(), t0.elapsed().as_millis()));
+            // Хендлер вернул Ok — но это лишь «дошли до конца», а не «сделали».
+            // Мягкий отказ ({ok:false}: мёртвая пана, сессия не найдена) обязан
+            // лечь в аудит отказом: журнал существует ровно ради вопроса «ты
+            // правда отправил?», и «ok» за непроизошедшее — та самая ложь,
+            // которую он должен исключать. Значение отдаём нетронутым — форма
+            // {needsTmux, resumeCmd} нужна панели.
+            audit.record(&entry_for(outcome_of(&value), t0.elapsed().as_millis()));
             Ok(CallOutput { value, provenance: meta.provenance })
         }
         Ok(Err(e)) => {
@@ -144,6 +150,29 @@ pub async fn invoke<C>(
             Err(GateError::Failed(e))
         }
     }
+}
+
+/// Исход по значению капабилити. `{ok:false,…}` — мягкий отказ бизнес-логики
+/// (панельная форма ответа, см. `ipc::reply_core`), всё прочее — успех.
+/// Причину берём из `error`, а для формы `{needsTmux}` называем её сами:
+/// строка в журнале должна говорить, почему не сделано.
+fn outcome_of(value: &Value) -> String {
+    if value.get("ok").and_then(Value::as_bool) != Some(false) {
+        return "ok".into();
+    }
+    let why = value
+        .get("error")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            value
+                .get("needsTmux")
+                .and_then(Value::as_bool)
+                .filter(|v| *v)
+                .map(|_| "сессия вне tmux".to_string())
+        })
+        .unwrap_or_else(|| "не выполнено".to_string());
+    format!("failed:{why}")
 }
 
 /// Первый ключ patch (или корня), удовлетворяющий предикату. Принимаем обе формы:
@@ -194,6 +223,80 @@ mod tests {
         .unwrap();
         assert_eq!(out.value["_consumer"], "plugin:test");
         assert_eq!(out.value["x"], 1, "остальные args не тронуты");
+    }
+
+    /// Реестр с капабилити, которая «дошла до конца», но ничего не сделала —
+    /// ровно как `sessions.reply` в мёртвую пану.
+    fn soft_failure_registry(value: Value) -> Registry<()> {
+        let mut reg = Registry::new();
+        reg.register(
+            CapabilityMeta {
+                id: "sessions.reply",
+                class: RiskClass::Read, // класс тут ни при чём — проверяем аудит
+                provenance: Provenance::Trusted,
+                description: "мягкий отказ (тест)",
+                input_schema: json!({ "type": "object" }),
+            },
+            make_handler(move |_: (), _args| {
+                let value = value.clone();
+                async move { Ok(value) }
+            }),
+        );
+        reg
+    }
+
+    /// Позже человек спросит «ты правда отправил?» — и единственный артефакт,
+    /// существующий ради этого вопроса, обязан ответить честно.
+    #[tokio::test]
+    async fn a_soft_failure_is_audited_as_a_failure() {
+        let reg = soft_failure_registry(json!({ "ok": false, "error": "Сессия не найдена" }));
+        let audit = MemAudit::new();
+        let c = Consumer::custom("agent", &[RiskClass::Read], ConfirmPolicy::Never);
+        let out = invoke(
+            &reg, (), &c, "sessions.reply", json!({ "session_id": "s1" }),
+            &AutoApprove, &audit, GateConfig::default(),
+        )
+        .await
+        .expect("мягкий отказ — не ошибка гейта: форма ответа нужна панели");
+        assert_eq!(out.value["ok"], false, "значение отдано как есть");
+        assert_eq!(audit.last().unwrap().outcome, "failed:Сессия не найдена");
+    }
+
+    /// Форма {ok:false, needsTmux} причины в себе не несёт — называем её сами.
+    #[tokio::test]
+    async fn needs_tmux_is_audited_with_a_reason() {
+        let reg = soft_failure_registry(json!({ "ok": false, "needsTmux": true, "resumeCmd": "claude --resume x" }));
+        let audit = MemAudit::new();
+        let c = Consumer::custom("agent", &[RiskClass::Read], ConfirmPolicy::Never);
+        invoke(
+            &reg, (), &c, "sessions.reply", json!({ "session_id": "s1" }),
+            &AutoApprove, &audit, GateConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(audit.last().unwrap().outcome, "failed:сессия вне tmux");
+    }
+
+    /// А успех остаётся успехом — в том числе у капабилити без поля `ok`.
+    #[tokio::test]
+    async fn a_plain_value_is_still_ok() {
+        let audit = MemAudit::new();
+        let c = Consumer::custom("plugin:test", &[RiskClass::Read], ConfirmPolicy::Never);
+        invoke(
+            &echo_registry(), (), &c, "test.echo", json!({ "x": 1 }),
+            &AutoApprove, &audit, GateConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(audit.last().unwrap().outcome, "ok");
+        let reg = soft_failure_registry(json!({ "ok": true, "channel": "tmux" }));
+        invoke(
+            &reg, (), &c, "sessions.reply", json!({}),
+            &AutoApprove, &audit, GateConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(audit.last().unwrap().outcome, "ok");
     }
 
     #[tokio::test]

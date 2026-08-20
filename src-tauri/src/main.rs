@@ -64,6 +64,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Manager;
+use tauri_plugin_autostart::ManagerExt; // autolaunch().is_enabled() — старт по логину или рукой
 
 use daemon::Daemon;
 
@@ -156,7 +157,7 @@ fn main() {
                     } else if let Some(n) = ipc::is_select_hotkey(&d, shortcut) {
                         d.answer_question_hotkey(n);
                     } else {
-                        windows::toggle_hotkey_panel(&d);
+                        windows::toggle_panel(&d);
                     }
                 })
                 .build(),
@@ -249,10 +250,16 @@ fn main() {
             ipc::voice_audio_state,
             ipc::voice_confirm_resolve,
             ipc::voice_abort,
+            ipc::agent_chat_window,
             ipc::agent_chat_open,
             ipc::agent_chat_state,
             ipc::agent_chat_history,
             ipc::agent_chat_reset,
+            ipc::agent_chats_list,
+            ipc::agent_chat_switch,
+            ipc::agent_chat_create,
+            ipc::agent_chat_rename,
+            ipc::agent_chat_delete,
             ipc::terminal_focus,
             ipc::session_launch,
             ipc::remotes_list,
@@ -336,8 +343,9 @@ fn main() {
 
             // Накладка ⌘J — чистое меню-бар приложение без иконки в доке.
             // Оконный режим (макет 14h) — обычное приложение: док, ⌘Tab, меню.
-            // Политика ставится один раз на старте; смена режима на лету
-            // перестраивает окно сразу, а иконку в доке — со следующего запуска.
+            // Стартуем всегда как Accessory (LSUIElement в Info.plist), поэтому
+            // здесь бывает только повышение до Regular; смена режима на лету
+            // делает то же самое сама (windows::apply_mode).
             // Понятие политики активации есть только у AppKit: на Linux место
             // приложения в панели задач решает сам оконный менеджер по
             // skip_taskbar, который выставляется при создании окна.
@@ -361,11 +369,15 @@ fn main() {
             windows::create_toast(app.handle())?;
             tray::init(&d)?;
 
-            // первый запуск без интеграции — онбординг; иначе показываем панель,
-            // чтобы запуск приложения был видимым (а не «ничего не открылось»).
+            // Первый запуск без интеграции — онбординг. Иначе показываем панель,
+            // чтобы запуск был видимым (а не «ничего не открылось»), — но только
+            // когда приложение запустил человек. При включённом автозапуске старт
+            // случается на КАЖДОМ логине, и панель поверх всего в момент, когда
+            // человек уже что-то печатает, — не приветствие, а помеха; признак
+            // жизни там — иконка в меню-баре.
             if !install::integration_health().ok() {
                 let _ = windows::create_onboarding(app.handle());
-            } else {
+            } else if !d.app.autolaunch().is_enabled().unwrap_or(false) {
                 windows::show_panel(&d);
             }
 
@@ -442,13 +454,16 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if window.label() != "main" {
+            // окно чата с агентом переживает закрытие так же, как панель: иначе
+            // ⌘W уничтожал его вместе с растянутым размером и нитью разговора
+            if !matches!(window.label(), "main" | "agent-chat") {
                 return;
             }
             match event {
                 // ⌘W и крестик — просто прячем, демон живёт
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
+                    windows::remember_geometry(&Daemon::get(window.app_handle()), window.label());
                     let _ = window.hide();
                 }
                 // клик вне панели — спрятать. Но с задержкой и перепроверкой:
@@ -457,8 +472,9 @@ fn main() {
                 // один кадр. Гасим только если фокус реально ушёл из приложения и
                 // не вернулся за 120 мс — иначе панель моргала бы на каждой стрелке.
                 tauri::WindowEvent::Focused(false) => {
-                    // обычное окно не исчезает от клика мимо — это поведение накладки
-                    if windows::is_window_mode(window.app_handle()) {
+                    // обычное окно не исчезает от клика мимо — это поведение
+                    // накладки; чат с агентом — тоже обычное окно
+                    if window.label() != "main" || windows::is_window_mode(window.app_handle()) {
                         return;
                     }
                     let w = window.clone();
@@ -474,17 +490,13 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("jarvis: не удалось собрать приложение")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(|app, event| match event {
+            tauri::RunEvent::Exit => {
                 let d = Daemon::get(app);
                 d.write_state_now(); // реестр переживает перезапуск
-                // размер окна тоже: снимаем один раз здесь, а не на каждом кадре ресайза
-                if let Some(w) = app.get_webview_window("main") {
-                    if let (Ok(sz), Ok(sf)) = (w.inner_size(), w.scale_factor()) {
-                        let l = sz.to_logical::<f64>(sf);
-                        windows::remember_window_size(&d, l.width, l.height);
-                    }
-                }
+                // геометрия окон тоже: снимаем один раз здесь, а не на каждом кадре ресайза
+                windows::remember_geometry(&d, "main");
+                windows::remember_geometry(&d, "agent-chat");
                 // ssh-дети не должны пережить приложение: без этого туннели
                 // висят до конца сессии терминала и держат порты
                 d.remotes.stop_all_now();
@@ -495,6 +507,13 @@ fn main() {
                 d.audio.dispose(); // остановить общий аудио-захват (drop cpal Stream)
                 let _ = std::fs::remove_file(util::sock_path());
             }
+            // Клик по иконке в доке (applicationShouldHandleReopen). В оконном
+            // режиме красная кнопка прячет окно, а не закрывает, — и без этой
+            // ветки вернуть его из дока было нечем: окно выглядело пропавшим
+            // навсегда, хотя приложение работало.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => windows::show_panel(&Daemon::get(app)),
+            _ => {}
         });
 }
 

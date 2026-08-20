@@ -315,17 +315,55 @@ fn register_action_accel(
 }
 
 /// Сохранить сырое значение акселератора действия (HK_NONE = «не назначен»).
-async fn persist_accel(d: &Arc<Daemon>, a: HkAction, raw: &str) {
+/// `Err` — на диск не легло: сочетание работает до перезапуска и об этом
+/// обязан узнать человек, а не следующий запуск.
+async fn persist_accel(d: &Arc<Daemon>, a: HkAction, raw: &str) -> Result<(), String> {
     match a.settings_key() {
-        Some(key) => {
-            let _ = via_gate_panel(d, "settings.set", json!({ "patch": { key: raw } })).await;
-        }
+        Some(key) => save_via_gate(d, one_key(key, Value::String(raw.to_string()))).await,
         None => {
             // диктовка: settings.stt.hotkey
             let mut patch = serde_json::Map::new();
             patch.insert("hotkey".into(), Value::String(raw.to_string()));
-            d.settings.set_stt(patch);
+            d.settings.try_set_block("stt", patch)
         }
+    }
+}
+
+/// Патч из одного ключа — самая частая форма правки настроек.
+fn one_key(key: &str, value: Value) -> serde_json::Map<String, Value> {
+    serde_json::Map::from_iter([(key.to_string(), value)])
+}
+
+/// Ответ панели по итогу записи настроек: «сохранено» — только если правда
+/// легло на диск. Настройка, живущая до перезапуска, — та же тихая потеря.
+fn saved(res: Result<(), String>) -> Value {
+    match res {
+        Ok(()) => ok(),
+        Err(e) => err(format!(
+            "Настройка работает, но не сохранилась: {e}. После перезапуска вернётся прежняя"
+        )),
+    }
+}
+
+/// Записать настройки через гейт и убедиться, что патч ПРАВДА лёг в файл.
+///
+/// Гейт отдаёт настройки как есть даже когда `Store` не смог их записать (диск
+/// полон, права слетели после запуска под sudo) — а панель по такому ответу
+/// говорит человеку «сохранено». Читаем после записи, как `save_chat_book`:
+/// иначе отказ всплывает только следующим запуском, когда объяснять уже нечем.
+async fn save_via_gate(d: &Arc<Daemon>, patch: serde_json::Map<String, Value>) -> Result<(), String> {
+    let out = via_gate_panel(d, "settings.set", json!({ "patch": Value::Object(patch.clone()) })).await;
+    if out.get("ok").and_then(Value::as_bool) == Some(false) {
+        return Err(out
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("настройки не записаны")
+            .to_string());
+    }
+    let disk = d.settings.load();
+    match patch.iter().find(|(k, v)| disk.get(k.as_str()) != Some(v)) {
+        Some((key, _)) => Err(format!("«{key}» не сохранился на диск — подробности в логе")),
+        None => Ok(()),
     }
 }
 
@@ -393,7 +431,12 @@ pub async fn hotkey_assign(
             return json!({ "ok": false, "conflict": { "action": other.id(), "label": other.label() } });
         }
         unregister_action(&d, other);
-        persist_accel(&d, other, HK_NONE).await;
+        if let Err(e) = persist_accel(&d, other, HK_NONE).await {
+            return err(format!(
+                "«{}» освобождено только в этом запуске — настройки не записались: {e}",
+                other.label()
+            ));
+        }
         crate::log::line(&format!(
             "[hotkeys] перехват: «{}» остался без сочетания",
             other.label()
@@ -417,7 +460,11 @@ pub async fn hotkey_assign(
         }
         return err(format!("Сочетание {accel} занято системой"));
     }
-    persist_accel(&d, a, &accel).await;
+    if let Err(e) = persist_accel(&d, a, &accel).await {
+        return err(format!(
+            "Сочетание работает, но не сохранилось: {e}. После перезапуска вернётся прежнее"
+        ));
+    }
     json!({ "ok": true, "accel": accel })
 }
 
@@ -739,7 +786,11 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
             if let Err(e) = register_hotkey(&d, hk) {
                 return err(e);
             }
-            let _ = via_gate_panel(&d, "settings.set", json!({ "patch": { "hotkey": hk } })).await;
+            if let Err(e) = save_via_gate(&d, one_key("hotkey", Value::from(hk))).await {
+                return err(format!(
+                    "Сочетание работает, но не сохранилось: {e}. После перезапуска вернётся прежнее"
+                ));
+            }
         }
     }
 
@@ -768,7 +819,11 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
                 return err(format!("Сочетание {hk} занято системой"));
             }
         }
-        let _ = via_gate_panel(&d, "settings.set", json!({ "patch": { key: hk } })).await;
+        if let Err(e) = save_via_gate(&d, one_key(key, Value::from(hk.as_str()))).await {
+            return err(format!(
+                "Сочетание работает, но не сохранилось: {e}. После перезапуска вернётся прежнее"
+            ));
+        }
     }
 
     // шаблон хоткеев выбора варианта (⌘⌥1-9 по умолчанию): валидация + если
@@ -787,14 +842,15 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
             if active && tpl != old {
                 set_select_hotkeys_tpl(&d, false, &old);
             }
-            let _ = via_gate_panel(
-                &d,
-                "settings.set",
-                json!({ "patch": { "selectHotkeyTemplate": tpl } }),
-            )
-            .await;
+            let saved =
+                save_via_gate(&d, one_key("selectHotkeyTemplate", Value::from(tpl.as_str()))).await;
             if active && tpl != old {
                 set_select_hotkeys_tpl(&d, true, &tpl);
+            }
+            if let Err(e) = saved {
+                return err(format!(
+                    "Шаблон работает, но не сохранился: {e}. После перезапуска вернётся прежний"
+                ));
             }
         }
     }
@@ -804,9 +860,9 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
     // пользователя в настройках. Форму нормализуем, чтобы и через UI нельзя было
     // записать ничего, кроме поимённого авто-одобрения.
     if let Some(g) = rest.remove("grants") {
-        let mut patch = serde_json::Map::new();
-        patch.insert("grants".into(), normalize_grants(&g));
-        d.settings.save(patch);
+        if let Err(e) = d.settings.try_save(one_key("grants", normalize_grants(&g))) {
+            return err(format!("Права не сохранены: {e}"));
+        }
     }
 
     const APPEARANCE_KEYS: [&str; 7] =
@@ -814,9 +870,14 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
     let appearance_changed = APPEARANCE_KEYS.iter().any(|k| rest.contains_key(*k));
     let mode_changed = rest.contains_key("mode");
     let remotes_changed = rest.contains_key("remotes");
-    if !rest.is_empty() {
-        let _ = via_gate_panel(&d, "settings.set", json!({ "patch": Value::Object(rest) })).await;
-    }
+    // Отказ записи не отменяет применённого: тема уже перекрашена, узлы уже
+    // подняты. Применяем, но в конце говорим правду — «сохранено» про то, чего
+    // не будет после перезапуска, хуже любой ошибки.
+    let saved = if rest.is_empty() {
+        Ok(())
+    } else {
+        save_via_gate(&d, rest).await
+    };
     // внешность сменили в одном окне — перекрашиваем все сразу (дизайн 14f «вид»)
     if appearance_changed {
         windows::broadcast_appearance(&d);
@@ -836,7 +897,12 @@ pub async fn settings_set(app: AppHandle, patch: Value) -> Value {
     if windows::panel_visible(&d) {
         windows::position_panel(&d); // позиция могла смениться
     }
-    ok()
+    match saved {
+        Ok(()) => ok(),
+        Err(e) => err(format!(
+            "Изменения работают, но не сохранились: {e}. После перезапуска вернутся прежние"
+        )),
+    }
 }
 
 /// Свести патч грантов к единственной поддерживаемой форме:
@@ -1353,9 +1419,15 @@ pub async fn update_check_install(app: AppHandle) -> Value {
 }
 
 /// Перезапустить приложение (после установки обновления).
+///
+/// Именно `request_restart`: синхронный `restart()`, вызванный с главного
+/// потока (а команда без async идёт ровно там), делает `cleanup_before_exit` +
+/// `process::restart` БЕЗ `RunEvent::Exit`. А в этом событии у нас снимок
+/// реестра, остановка ssh-туннелей, гашение сайдкаров и удаление run.sock —
+/// без него перезапуск теряет состояние и оставляет висеть чужие процессы.
 #[tauri::command]
 pub fn app_relaunch(app: AppHandle) {
-    app.restart();
+    app.request_restart();
 }
 
 /* ================= плагины, usage, история ================= */
@@ -1680,19 +1752,25 @@ pub(crate) async fn kill_core(d: &Arc<Daemon>, session_id: &str) -> Value {
     let mut killed = false;
     let mut note = String::new();
     if let Some(pane) = s.tmux_pane.clone() {
+        // «Не смогли спросить» — не «пана мертва». Туннель моргнул, tmux не
+        // отозвался: агент на той стороне жив, работает и жжёт токены. Строку
+        // убираем (за этим и звали), но говорим вслух — вернётся он сам, первым
+        // же своим событием.
         match d.pane_target(&s) {
-            Ok(target) => {
-                if target.pane_alive(&pane).await {
+            Ok(target) => match target.pane_state(&pane).await {
+                Ok(true) => {
                     if let Err(e) = target.kill(&pane).await {
-                        return err(format!("не закрылась пана: {}", ellipsize(&one_line(&e), 120)));
+                        return err(format!(
+                            "Не удалось закрыть терминал сессии: {}",
+                            ellipsize(&one_line(&e), 120)
+                        ));
                     }
                     killed = true;
                 }
-            }
-            // Узел недоступен — спросить про пану некого. Сессию всё равно
-            // забываем (за этим и звали), но говорим вслух: там мог остаться
-            // живой агент, и вернётся он сам — первым же своим событием.
-            Err(e) => note = format!("{e}: пана могла остаться"),
+                Ok(false) => {}
+                Err(e) => note = format!("{e} — агент мог остаться работать"),
+            },
+            Err(e) => note = format!("{e} — агент мог остаться работать"),
         }
     } else if s.remote.is_none() {
         // Сессия не в tmux (терминал IDE): закрывать нечего, но агент жив и
@@ -1730,8 +1808,12 @@ pub(crate) async fn set_via_slash(
     let Some(pane) = s.tmux_pane.clone() else {
         return tmux_needed(&s);
     };
-    if !target.pane_alive(&pane).await {
-        return tmux_needed(&s);
+    match target.pane_state(&pane).await {
+        Ok(true) => {}
+        Ok(false) => return tmux_needed(&s),
+        // Спросить не вышло — не выдаём это за «сессия вне tmux»: подсказка
+        // «подними её заново» увела бы человека чинить не то.
+        Err(e) => return err(e),
     }
     match target.paste_slash(&pane, &slash).await {
         Ok(()) => {
@@ -1824,7 +1906,7 @@ pub async fn terminal_ping(app: AppHandle, session_id: String) -> Value {
         return err(format!("Сессия идёт на узле «{name}» — показывать оверлей некому"));
     }
     let Some(pane) = s.tmux_pane else {
-        return err("Сессия не в tmux — пингануть нечем");
+        return err("Сессия не в tmux — показать её терминал нечем");
     };
     match tmux::ping(&pane).await {
         Ok(()) => ok(),
@@ -1898,8 +1980,10 @@ pub async fn question_answer(app: AppHandle, session_id: String, choice: Value) 
         Ok(t) => t,
         Err(e) => return err(e),
     };
-    if !target.pane_alive(&pane).await {
-        return err("Пана сессии не отвечает");
+    match target.pane_state(&pane).await {
+        Ok(true) => {}
+        Ok(false) => return err("Терминал сессии закрыт — ответить некуда"),
+        Err(e) => return err(e),
     }
 
     let (answers, texts) = parse_question_choice(&choice);
@@ -1961,7 +2045,7 @@ pub fn task_action(app: AppHandle, session_id: String, task_ref: i64, action: St
         .map(|t| t.text);
     match crate::daemon::task_action_text(&action, task_ref, title.as_deref()) {
         Some(text) => json!({ "ok": true, "text": text }),
-        None => err("неизвестное действие"),
+        None => err("Неизвестное действие"),
     }
 }
 
@@ -2166,7 +2250,15 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
     };
 
     if let Some(pane) = s.tmux_pane {
-        if target.pane_alive(&pane).await {
+        // «Не смог спросить» и «паны нет» — разные вещи. Если tmux вообще не
+        // запускается или узел не отвечает, опрос живости провалится на ЛЮБОЙ
+        // пане, и стереть её — значит своей же ошибкой сделать живую сессию
+        // неуправляемой навсегда (до перезапуска агента). Лучше честная ошибка.
+        let alive = match target.pane_state(&pane).await {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        if alive {
             // Занята ли сессия в момент отправки. Если да — Claude Code положит
             // наш ввод в СВОЮ очередь, а prompt-хук придёт лишь когда он до него
             // дойдёт (после текущего ответа). Быстрый ack тогда невозможен — это
@@ -2245,13 +2337,6 @@ pub(crate) async fn reply_core(d: &Arc<Daemon>, session_id: String, text: String
                 return json!({ "ok": true, "channel": "tmux", "attempts": 2 });
             }
             return err("Агент не подтвердил получение — проверь терминал");
-        }
-        // «Не смог спросить» и «паны нет» — разные вещи. Если tmux вообще не
-        // запускается, опрос живости провалится на ЛЮБОЙ пане, и стереть её —
-        // значит своей же ошибкой сделать живую сессию неуправляемой навсегда
-        // (до перезапуска агента). Лучше честная ошибка.
-        if !crate::tmux::reachable().await {
-            return err("tmux не найден — ответ в сессию недоступен (brew install tmux)");
         }
         d.with_session(&session_id, |s| s.tmux_pane = None); // пана умерла
         d.push();
@@ -2637,7 +2722,12 @@ pub fn reconcile_limit(d: &Arc<Daemon>) {
 /// Потоковые события поступают через канал `agent:event` (тип `AgentEvent`).
 /// `session_id` — необязателен; при наличии используется для возобновления (--resume).
 #[tauri::command]
-pub async fn agent_send(app: AppHandle, message: String, session_id: Option<String>) -> Value {
+pub async fn agent_send(
+    app: AppHandle,
+    message: String,
+    chat_id: Option<String>,
+    session_id: Option<String>,
+) -> Value {
     use crate::agent::ClaudeCliHost;
     use crate::capability::{build_registry, grant::Consumer};
     use crate::util::jarvis_dir;
@@ -2659,11 +2749,16 @@ pub async fn agent_send(app: AppHandle, message: String, session_id: Option<Stri
         .map(|m| format!("mcp__jarvis__{}", m.id.replace('.', "_")))
         .collect();
 
-    // Подстановка сохранённого id — здесь, а не в окне: окно живёт до закрытия,
-    // а нить разговора должна его переживать. Так продолжение работает и для
-    // окна, которое ещё не успело спросить состояние, и для чата из трея.
-    let saved = crate::agent::saved_chat_session(&Daemon::get(&app).settings.load());
-    let resume = crate::agent::resume_for(session_id.as_deref(), saved.as_deref());
+    // Чат выбираем ЗДЕСЬ и один раз: ход длится минуты, за это время человек
+    // уходит в другой проект — «текущий на момент ответа» записал бы нить не туда.
+    // Нить берём из чата, а не из окна: окно живёт до закрытия, разговор дольше.
+    let book = crate::agent::chat_book(&app);
+    let chat = match crate::agent::chat_for_send(&book, chat_id.as_deref(), session_id.as_deref()) {
+        Ok(c) => c,
+        Err(e) => return err(e),
+    };
+    let chat_id = chat.id.clone();
+    let resume = chat.session_id.clone();
 
     // Выбор хоста по доступности («auto»): Claude (жёсткий INV-TOOLS на init) если
     // есть, иначе Codex (чистый CODEX_HOME + обязательный per-item kill).
@@ -2671,24 +2766,29 @@ pub async fn agent_send(app: AppHandle, message: String, session_id: Option<Stri
         let host = ClaudeCliHost {
             app: app.clone(),
             mcp_config,
+            chat_id,
         };
         tauri::async_runtime::spawn(async move {
             host.run(&message, &tools, resume.as_deref()).await;
         });
     } else if crate::backend::codex::resolve_codex_bin().is_some() {
         let Some((mcp_bin, token)) = read_mcp_bin_token(&mcp_config) else {
-            return err("jarvis-mcp.json не прочитан — Codex-агент недоступен");
+            return err(
+                "Не прочитал ~/.jarvis/jarvis-mcp.json — Codex-агенту нечем говорить \
+                 с Jarvis. Нажми «Переустановить» в настройках, карточка «Интеграция»",
+            );
         };
         let host = crate::backend::codex_agent::CodexCliHost {
             app: app.clone(),
             mcp_bin,
             token,
+            chat_id,
         };
         tauri::async_runtime::spawn(async move {
             host.run(&message, &tools, resume.as_deref()).await;
         });
     } else {
-        return err("Нет ни claude, ни codex — агент недоступен");
+        return err("Не нашёл ни claude, ни codex — поставь один из них, и агент заработает");
     }
 
     json!({ "ok": true })
@@ -2706,16 +2806,117 @@ pub(crate) fn read_mcp_bin_token(mcp_config: &str) -> Option<(String, String)> {
 
 /// Открыть (или сфокусировать) окно чата с агентом (фаза 7).
 #[tauri::command]
-pub fn agent_chat_open(app: AppHandle) {
+pub fn agent_chat_window(app: AppHandle) {
     let _ = windows::create_agent_chat(&app);
 }
 
-/// Состояние чата для открывшегося окна: id разговора, который продолжится
-/// (null — начнём новый). Окно рисует по нему пометку о продолжении.
+/// Каталог транскриптов главного агента.
+///
+/// Хост работает из временной папки (`agent/mod.rs`, `current_dir(temp_dir())`),
+/// поэтому каталог проекта считаем от неё — тем же механизмом, что у обычных
+/// сессий. Своего резолва пути не городим: `project_dir_for` уже разбирается с
+/// симлинком `/var/folders` → `/private/var/folders`.
+fn agent_transcript_dir() -> Option<std::path::PathBuf> {
+    let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+    crate::backend::backend(crate::backend::Agent::Claude).transcript_dir_for(&cwd)
+}
+
+/// Разговоры, найденные на диске. Их отсутствие — не ошибка: каталога может не
+/// быть вовсе (агента ещё ни разу не запускали).
+fn agent_threads() -> Vec<crate::agent::history::Thread> {
+    agent_transcript_dir()
+        .map(|d| crate::agent::history::scan(&d))
+        .unwrap_or_default()
+}
+
+/// Состояние открытого чата: id разговора, который продолжится (null — начнём
+/// новый), плюс сам чат. Окно рисует по нему пометку о продолжении.
 #[tauri::command]
 pub fn agent_chat_state(app: AppHandle) -> Value {
-    let saved = crate::agent::saved_chat_session(&Daemon::get(&app).settings.load());
-    json!({ "sessionId": saved })
+    let book = crate::agent::chat_book(&app);
+    let c = book.current();
+    // Имя — то же, что в списке: чип и строка списка не должны звать один чат
+    // по-разному. Безымянному подставится первая реплика разговора.
+    let preview = c
+        .session_id
+        .as_deref()
+        .and_then(|sid| agent_threads().into_iter().find(|t| t.session_id == sid))
+        .map(|t| t.preview)
+        .unwrap_or_default();
+    json!({
+        "sessionId": c.session_id,
+        "chatId": c.id,
+        "name": crate::agent::history::display_name(c.human_name(), &preview),
+        "named": c.human_name().is_some(),
+    })
+}
+
+/* ----- список разговоров: по чату на проект ----- */
+
+/// Ответ всех команд списка: сразу весь список с пометкой открытого. Отдавать
+/// «ok» и ждать, что окно само сходит за списком, — лишний круг и рассинхрон.
+///
+/// Список сшивается с диском: настройки знают имена и порядок, а какие разговоры
+/// вообще были — знают только транскрипты.
+fn chat_book_json(book: &crate::agent::ChatBook) -> Value {
+    let chats = crate::agent::history::chats_json(book, &agent_threads());
+    json!({ "ok": true, "current": book.current().id, "chats": chats })
+}
+
+/// Изменить список и сохранить. Отказ на любом шаге — с причиной наружу.
+fn edit_chat_book(
+    app: &AppHandle,
+    edit: impl FnOnce(&mut crate::agent::ChatBook) -> Result<(), String>,
+) -> Value {
+    let mut book = crate::agent::chat_book(app);
+    match edit(&mut book).and_then(|()| crate::agent::save_chat_book(app, &book)) {
+        Ok(()) => chat_book_json(&book),
+        Err(e) => err(e),
+    }
+}
+
+#[tauri::command]
+pub fn agent_chats_list(app: AppHandle) -> Value {
+    chat_book_json(&crate::agent::chat_book(&app))
+}
+
+#[tauri::command]
+pub fn agent_chat_switch(app: AppHandle, chat_id: String) -> Value {
+    edit_chat_book(&app, |b| b.switch(&chat_id))
+}
+
+/// Новый чат под новый проект. Имя необязательно — будет порядковый номер.
+#[tauri::command]
+pub fn agent_chat_create(app: AppHandle, name: Option<String>) -> Value {
+    edit_chat_book(&app, |b| b.create(name.as_deref()).map(|_| ()))
+}
+
+#[tauri::command]
+pub fn agent_chat_rename(app: AppHandle, chat_id: String, name: String) -> Value {
+    edit_chat_book(&app, |b| b.rename(&chat_id, &name).map(|_| ()))
+}
+
+/// Убрать чат из списка. Сам разговор остаётся на диске И в истории: список
+/// сшивается с транскриптами, поэтому удаление теряет имя и место, а не беседу.
+#[tauri::command]
+pub fn agent_chat_delete(app: AppHandle, chat_id: String) -> Value {
+    edit_chat_book(&app, |b| b.delete(&chat_id))
+}
+
+/// Открыть разговор, найденный на диске: привязать его к новому чату и сделать
+/// текущим. Отказ, если такого транскрипта нет, — молча завести пустой чат
+/// значит повторить ровно тот тихий отказ, из-за которого разговор и терялся.
+#[tauri::command]
+pub fn agent_chat_open(app: AppHandle, session_id: String) -> Value {
+    let sid = session_id.trim().to_string();
+    let Some(dir) = agent_transcript_dir() else {
+        return err("не нашёл каталог транскриптов агента — открывать нечего");
+    };
+    // id уходит в имя файла: пускаем только то, из чего пути не собрать.
+    match crate::agent::history::transcript_path(&dir, &sid) {
+        Some(p) if p.is_file() => edit_chat_book(&app, |b| b.adopt(&sid)),
+        _ => err(format!("разговора {sid} нет на диске — открыть его не получится")),
+    }
 }
 
 /// Прошлая переписка главного агента — чтобы окно рисовало ленту, а не пустоту.
@@ -2731,19 +2932,27 @@ pub fn agent_chat_state(app: AppHandle) -> Value {
 /// подчищен системой. Отвечаем пустой лентой и говорим об этом честно, чтобы
 /// окно не молчало о причине.
 #[tauri::command]
-pub fn agent_chat_history(app: AppHandle) -> Value {
-    let d = Daemon::get(&app);
-    let Some(sid) = crate::agent::saved_chat_session(&d.settings.load()) else {
+pub fn agent_chat_history(app: AppHandle, chat_id: Option<String>) -> Value {
+    let book = crate::agent::chat_book(&app);
+    // Явный чат — чтобы окно рисовало ленту сразу после переключения, не гадая,
+    // доехало ли переключение до настроек.
+    let sid = match chat_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => match book.chats.iter().find(|c| c.id == id) {
+            Some(c) => c.session_id.clone(),
+            None => return err(format!("чата «{id}» нет в списке — обнови список")),
+        },
+        None => book.current().session_id.clone(),
+    };
+    let Some(sid) = sid else {
         return json!({ "ok": true, "items": [], "reason": "нет сохранённого разговора" });
     };
-    let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-    let path = crate::transcript::project_dir_for(&cwd).join(format!("{sid}.jsonl"));
-    if !path.exists() {
+    let path = agent_transcript_dir().and_then(|d| crate::agent::history::transcript_path(&d, &sid));
+    let Some(path) = path.filter(|p| p.exists()) else {
         return json!({
             "ok": true, "items": [], "sessionId": sid,
             "reason": "транскрипт не найден — история недоступна, контекст у агента остался",
         });
-    }
+    };
     let be = crate::backend::backend(crate::backend::Agent::Claude);
     let entries = be.read_entries(&path, 512 * 1024);
     let items: Vec<Value> = entries
@@ -2756,12 +2965,13 @@ pub fn agent_chat_history(app: AppHandle) -> Value {
     json!({ "ok": true, "sessionId": sid, "items": &items[start..], "total": items.len() })
 }
 
-/// «Новый чат»: забыть id. Прошлый разговор остаётся на диске — теряется только
-/// ниточка к нему, и вернуть её можно, вписав id обратно в настройки.
+/// «Начать заново»: забыть нить ОТКРЫТОГО чата, оставив его имя и место в
+/// списке. Прошлый разговор остаётся на диске — теряется только ниточка к нему,
+/// и вернуть её можно, вписав id обратно в настройки.
 #[tauri::command]
 pub fn agent_chat_reset(app: AppHandle) -> Value {
-    crate::agent::forget_chat_session(&app);
-    json!({ "ok": true })
+    let id = crate::agent::chat_book(&app).current().id.clone();
+    edit_chat_book(&app, |b| b.set_session(&id, None))
 }
 
 /* ================= STT — панель настроек (инкремент 9, фаза 9) ================= */
@@ -2881,12 +3091,12 @@ pub fn prompts_get() -> Value {
 pub async fn transcript_enhance(text: String, style: String) -> Value {
     let t = text.trim();
     if t.is_empty() {
-        return err("пустой текст");
+        return err("Пустой текст — надиктуй или напиши что-нибудь");
     }
     let prompt = crate::stt::enhance::enhance_prompt(&style, t);
     match crate::claude_bin::run_haiku(&prompt, std::time::Duration::from_secs(45)).await {
         Some(s) => json!({ "ok": true, "result": s.trim() }),
-        None => err("ишка не ответила (таймаут или claude недоступен)"),
+        None => err("Быстрая модель не ответила — таймаут или claude недоступен; попробуй ещё раз"),
     }
 }
 
@@ -3089,9 +3299,9 @@ pub fn service_set_backend(app: AppHandle, backend: String) -> Value {
     let d = Daemon::get(&app);
     let mut p = serde_json::Map::new();
     p.insert("backend".into(), Value::String(backend));
-    d.settings.set_block("service", p);
+    let written = d.settings.try_set_block("service", p);
     apply_service_config(&d);
-    ok()
+    saved(written)
 }
 
 #[tauri::command]
@@ -3099,9 +3309,9 @@ pub fn service_set_model(app: AppHandle, model: String) -> Value {
     let d = Daemon::get(&app);
     let mut p = serde_json::Map::new();
     p.insert("codexModel".into(), Value::String(model));
-    d.settings.set_block("service", p);
+    let written = d.settings.try_set_block("service", p);
     apply_service_config(&d);
-    ok()
+    saved(written)
 }
 
 #[tauri::command]
@@ -3112,9 +3322,9 @@ pub fn service_set_effort(app: AppHandle, effort: String) -> Value {
     let d = Daemon::get(&app);
     let mut p = serde_json::Map::new();
     p.insert("codexEffort".into(), Value::String(effort));
-    d.settings.set_block("service", p);
+    let written = d.settings.try_set_block("service", p);
     apply_service_config(&d);
-    ok()
+    saved(written)
 }
 
 /// Задать egress-прокси служебных вызовов (Codex по HTTPS требует HTTPS_PROXY —
@@ -3128,14 +3338,14 @@ pub fn service_set_proxy(app: AppHandle, proxy: String) -> Value {
         && !proxy.starts_with("https://")
         && !proxy.starts_with("socks5://")
     {
-        return err("прокси должен начинаться с http://, https:// или socks5://");
+        return err("Прокси должен начинаться с http://, https:// или socks5://");
     }
     let d = Daemon::get(&app);
     let mut p = serde_json::Map::new();
     p.insert("proxy".into(), Value::String(proxy));
-    d.settings.set_block("service", p);
+    let written = d.settings.try_set_block("service", p);
     apply_service_config(&d);
-    ok()
+    saved(written)
 }
 
 /// Проверка служебного LLM: короткий запрос через ВЫБРАННЫЙ бэкенд (run_service_llm),
@@ -3152,7 +3362,7 @@ pub async fn service_test() -> Value {
             "result": crate::util::one_line(s.trim()),
             "ms": started.elapsed().as_millis() as u64,
         }),
-        None => err("нет ответа / таймаут"),
+        None => err("Модель не ответила за 25 с — проверь ключ и прокси в «Под капотом»"),
     }
 }
 
@@ -3205,9 +3415,9 @@ pub async fn claude_auth_connect(app: AppHandle, mode: String, value: String) ->
     let mut p = serde_json::Map::new();
     p.insert("claudeAuthMode".into(), Value::String(mode));
     p.insert("claudeSecret".into(), Value::String(value));
-    d.settings.set_block("service", p);
+    let written = d.settings.try_set_block("service", p);
     apply_service_config(&d);
-    ok()
+    saved(written)
 }
 
 /// Отключить аккаунт Claude — снова используется собственный логин `claude` CLI.
@@ -3217,9 +3427,9 @@ pub fn claude_auth_disconnect(app: AppHandle) -> Value {
     let mut p = serde_json::Map::new();
     p.insert("claudeAuthMode".into(), Value::String(String::new()));
     p.insert("claudeSecret".into(), Value::String(String::new()));
-    d.settings.set_block("service", p);
+    let written = d.settings.try_set_block("service", p);
     apply_service_config(&d);
-    ok()
+    saved(written)
 }
 
 /// Тест диктовки: ~4 с захвата с микрофона → транскрипция активным движком.
@@ -3276,15 +3486,18 @@ pub fn wake_set_enabled(app: AppHandle, on: bool) -> Value {
     // не даём включить, пока модель не установлена в разделе «Модели».
     let st = crate::install::status();
     if on && !st.wakeword_ort_built {
-        return err("Wake-word недоступен в этой сборке (нужна --features wakeword-ort)");
+        return err("«Привет, Джарвис» в этой сборке не работает — нужна сборка с поддержкой wake-word");
     }
     if on && !st.wakeword_models {
-        return err("Сначала скачайте модели wake-word в разделе «Модели»");
+        return err("Сначала скачай модели wake-word в разделе «Модели»");
     }
     let mut patch = serde_json::Map::new();
     patch.insert("enabled".into(), json!(on));
-    d.settings.set_block("wake", patch);
+    let written = d.settings.try_set_block("wake", patch);
     d.wake.set_enabled(on);
+    if let Err(e) = written {
+        return err(format!("Детектор включён, но настройка не сохранилась: {e}"));
+    }
     json!({ "ok": true, "status": d.wake.status() })
 }
 
@@ -3294,11 +3507,14 @@ pub fn wake_set_threshold(app: AppHandle, threshold: f64) -> Value {
     let d = Daemon::get(&app);
     let mut patch = serde_json::Map::new();
     patch.insert("threshold".into(), json!(threshold.clamp(0.0, 1.0)));
-    d.settings.set_block("wake", patch);
+    let written = d.settings.try_set_block("wake", patch);
     let root = d.settings.load();
     let wcfg = crate::wakeword::config::WakeConfig::from_settings(&root);
     let vcfg = crate::wakeword::config::VerifyConfig::from_settings(&root);
     d.wake.reconfigure(wcfg, vcfg);
+    if let Err(e) = written {
+        return err(format!("Порог применён, но не сохранился: {e}"));
+    }
     json!({ "ok": true, "status": d.wake.status() })
 }
 

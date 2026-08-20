@@ -112,6 +112,8 @@ pub struct CodexCliHost {
     pub mcp_bin: String,
     /// Агент-токен (предъявляется демону мостом).
     pub token: String,
+    /// Чат этого хода — выбран при отправке (см. `ClaudeCliHost::chat_id`).
+    pub chat_id: String,
 }
 
 impl CodexCliHost {
@@ -121,11 +123,17 @@ impl CodexCliHost {
 
         let Some(bin) = crate::backend::codex::resolve_codex_bin() else {
             crate::log::line("[codex-agent] codex не найден");
+            // Молча выйти нельзя: окно осталось бы в «думает…» навсегда.
+            fail(&self.app, "codex не найден — агент не запустился");
             return;
         };
-        let Ok(home) = ensure_codex_agent_home() else {
-            crate::log::line("[codex-agent] не смог подготовить CODEX_HOME");
-            return;
+        let home = match ensure_codex_agent_home() {
+            Ok(h) => h,
+            Err(e) => {
+                crate::log::line(&format!("[codex-agent] CODEX_HOME: {e}"));
+                fail(&self.app, &format!("не смог подготовить окружение codex: {e}"));
+                return;
+            }
         };
 
         // codex exec [resume <id>] --json -s read-only -c mcp... "<msg>"
@@ -161,23 +169,34 @@ impl CodexCliHost {
             Ok(c) => c,
             Err(e) => {
                 crate::log::line(&format!("[codex-agent] spawn: {e}"));
+                fail(&self.app, &format!("codex не запустился: {e}"));
                 return;
             }
         };
-        let Some(stdout) = child.stdout.take() else { return };
+        let Some(stdout) = child.stdout.take() else {
+            crate::log::line("[codex-agent] нет stdout от codex");
+            fail(&self.app, "агент не отдал вывод");
+            return;
+        };
         let mut reader = BufReader::new(stdout).lines();
-        let mut saved = crate::agent::saved_chat_session(
-            &crate::daemon::Daemon::get(&self.app).settings.load(),
-        );
+        let mut saved = crate::agent::chat_book(&self.app).session_of(&self.chat_id);
+        let mut finished = false; // дошло ли до Done/Failed
         while let Ok(Some(line)) = reader.next_line().await {
             match classify_codex_line(&line) {
                 CodexLine::Kill(msg) => {
                     crate::log::line(&format!("[codex-agent] {msg}"));
                     let _ = child.kill().await;
+                    // Нарушение изоляции — тоже итог хода, и человек должен его
+                    // увидеть: без события окно ждёт ответа, которого не будет.
+                    fail(&self.app, &msg);
                     return;
                 }
                 CodexLine::Events(evs) => {
                     for ev in evs {
+                        finished |= matches!(
+                            ev,
+                            AgentEvent::Done { .. } | AgentEvent::Failed { .. }
+                        );
                         // Как и claude-хост, запоминаем нить чата: без этого чат
                         // на чистом Codex остаётся одноразовым — окно закрыли,
                         // и вернуться к разговору неоткуда.
@@ -185,7 +204,11 @@ impl CodexCliHost {
                             if let Some(fresh) =
                                 crate::agent::session_id_to_persist(saved.as_deref(), id)
                             {
-                                crate::agent::remember_chat_session(&self.app, &fresh);
+                                crate::agent::remember_chat_session(
+                                    &self.app,
+                                    &self.chat_id,
+                                    &fresh,
+                                );
                                 saved = Some(fresh);
                             }
                         }
@@ -194,7 +217,26 @@ impl CodexCliHost {
                 }
             }
         }
+
+        // Поток кончился, а итога не было — процесс умер по дороге. Об этом надо
+        // сказать: тишина здесь читается как «агент задумался навсегда».
+        if !finished {
+            let code = match child.wait().await {
+                Ok(st) => st.code().map(|c| c.to_string()).unwrap_or_else(|| "сигнал".into()),
+                Err(_) => "?".into(),
+            };
+            fail(&self.app, &format!("агент оборвался без ответа (код {code})"));
+        }
     }
+}
+
+/// Отказ наружу событием — единая точка, чтобы «тихих» веток выхода не
+/// заводилось (как `failure` у claude-хоста).
+fn fail(app: &tauri::AppHandle, message: &str) {
+    emit_event(
+        app,
+        &AgentEvent::Failed { message: message.to_string(), lost_session: false },
+    );
 }
 
 fn emit_event(app: &tauri::AppHandle, ev: &AgentEvent) {

@@ -139,20 +139,33 @@ pub enum Target {
 }
 
 impl Target {
-    pub async fn pane_alive(&self, pane: &str) -> bool {
+    /// Жива ли пана: `Ok(true)` — жива, `Ok(false)` — её нет, `Err` — спросить
+    /// не вышло (tmux не запускается, туннель моргнул).
+    ///
+    /// Третье значение обязательно. Своя транспортная ошибка, выданная за «паны
+    /// нет», стоит дорого: «Завершить» пропускает kill, стирает строку из списка
+    /// — и агент остаётся работать на VPS, жечь токены и быть неуправляемым.
+    pub async fn pane_state(&self, pane: &str) -> Result<bool, String> {
         match self {
-            Target::Local => pane_alive(pane).await,
+            Target::Local => pane_state(pane).await,
             // Отдельного «жива ли пана» у узла нет: список пан всё равно нужен
             // поллеру живости, а лишний эндпоинт — лишний контракт.
-            Target::Remote(n) => match n.client() {
-                Ok(c) => c
-                    .panes()
-                    .await
-                    .map(|r| r.panes.iter().any(|p| p.pane == pane))
-                    .unwrap_or(false),
-                Err(_) => false,
-            },
+            Target::Remote(n) => {
+                let name = &n.cfg.name;
+                let ask = || async {
+                    let panes = n.client()?.panes().await?;
+                    Ok::<bool, String>(panes.panes.iter().any(|p| p.pane == pane))
+                };
+                ask().await.map_err(|e| format!("Узел «{name}» не ответил: {e}"))
+            }
         }
+    }
+
+    /// «Жива ли пана» одним битом — для мест, где «не смогли спросить» и так
+    /// значит «ничего не делаем» (авто-продолжение после лимита). Всё, что
+    /// принимает по этому ответу необратимые решения, зовёт `pane_state`.
+    pub async fn pane_alive(&self, pane: &str) -> bool {
+        self.pane_state(pane).await.unwrap_or(false)
     }
 
     pub async fn reply(&self, pane: &str, prompt: &str) -> Result<(), String> {
@@ -207,9 +220,31 @@ pub async fn kill_pane(pane: &str) -> Result<(), String> {
 }
 
 pub async fn pane_alive(pane: &str) -> bool {
-    tmux_j(&["display-message", "-p", "-t", pane, "ok"])
-        .await
-        .is_ok()
+    pane_state(pane).await.unwrap_or(false)
+}
+
+/// Жива ли местная пана: `Err` — не смогли спросить (см. `Target::pane_state`).
+///
+/// Спрашиваем ИМЕННО `#{pane_id}`, а не печатаем «ok»: `display-message` с
+/// несуществующей целью (tmux 3.7, проверено) не падает — он печатает сообщение
+/// по текущей пане и выходит нулём. Проверка «команда удалась» на нём отвечает
+/// «жива» про любую пану, в том числе давно закрытую. Пустой `#{pane_id}` —
+/// это «цель не нашлась», непустой — настоящий id живой паны.
+///
+/// Отдельно: опрос падает и когда сервера `-L jarvis` нет (все его паны и правда
+/// мертвы), и когда tmux не запускается вовсе (урезанный PATH из Finder —
+/// частый случай). Различаем проверкой самого tmux.
+pub async fn pane_state(pane: &str) -> Result<bool, String> {
+    match tmux_j(&["display-message", "-p", "-t", pane, "#{pane_id}"]).await {
+        Ok(out) => Ok(!out.trim().is_empty()),
+        Err(why) => {
+            if !reachable().await {
+                return Err("tmux не запускается — сессией не поуправлять (brew install tmux)".into());
+            }
+            crate::log::line(&format!("[tmux] пана {pane} не отвечает: {why}"));
+            Ok(false)
+        }
+    }
 }
 
 pub async fn capture_pane(pane: &str) -> Option<String> {
@@ -217,12 +252,19 @@ pub async fn capture_pane(pane: &str) -> Option<String> {
 }
 
 /// Человекочитаемое имя tmux-сессии паны — для бейджа в панели.
+///
+/// `#{pane_id}` спрашиваем не зря: с чужой целью `display-message` отвечает про
+/// ТЕКУЩУЮ пану (см. `pane_state`), и бейдж показал бы имя чужой сессии как своё.
+/// Пустой id — цель не нашлась, имени у нас нет.
 pub async fn session_name(pane: &str) -> Option<String> {
-    tmux_j(&["display-message", "-p", "-t", pane, "#{session_name}"])
+    let out = tmux_j(&["display-message", "-p", "-t", pane, "#{pane_id}\t#{session_name}"])
         .await
-        .ok()
-        .map(|s| crate::util::one_line(&s))
-        .filter(|s| !s.is_empty())
+        .ok()?;
+    let (id, name) = out.split_once('\t')?;
+    if id.trim().is_empty() {
+        return None;
+    }
+    Some(crate::util::one_line(name)).filter(|s| !s.is_empty())
 }
 
 /// Вставка промпта в пану. C-u срезает недописанный черновик в строке ввода —
@@ -893,5 +935,23 @@ mod transport_tests {
     #[test]
     fn tmux_bin_is_stable() {
         assert_eq!(tmux_bin(), tmux_bin());
+    }
+
+    /// Три значения, а не два: «мертва» говорим только когда сам tmux ответил.
+    /// Иначе «Завершить» пропустит kill, стерев строку из списка при живом
+    /// агенте на той стороне.
+    ///
+    /// И обратная сторона: несуществующая пана не должна отвечать «жива».
+    /// Прежний опрос («удалась ли команда») именно это и делал — `display-message`
+    /// с чужой целью в tmux 3.7 печатает по текущей пане и выходит нулём.
+    #[tokio::test]
+    async fn a_missing_pane_is_dead_only_if_tmux_answered() {
+        let state = pane_state("%9999999").await; // такой паны нет нигде
+        assert_ne!(state, Ok(true), "несуществующая пана не бывает живой");
+        if reachable().await {
+            assert_eq!(state, Ok(false), "tmux отозвался — ответ про пану настоящий");
+        } else {
+            assert!(state.is_err(), "спросить было некого — это не «пана мертва»");
+        }
     }
 }

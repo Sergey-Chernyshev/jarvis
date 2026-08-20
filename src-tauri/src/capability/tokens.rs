@@ -108,10 +108,13 @@ fn parse_classes(v: Option<&Value>) -> Vec<RiskClass> {
 
 /// 32 байта из /dev/urandom → hex (64 симв.). Без новых зависимостей.
 fn gen_token() -> String {
+    // Fail-closed (как gen_nonce в confirm_panel): недоступный/нечитаемый
+    // /dev/urandom оставил бы буфер нулями, и в tokens.json легли бы 64 нуля —
+    // предсказуемый пароль, по которому любой предъявитель получает права
+    // агента. Лучше не запуститься, чем выдать такой.
     let mut buf = [0u8; 32];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut buf);
-    }
+    let mut f = std::fs::File::open("/dev/urandom").expect("/dev/urandom недоступен");
+    f.read_exact(&mut buf).expect("/dev/urandom не читается");
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -133,6 +136,10 @@ mod tests {
         let t2 = s.ensure_agent_token();
         assert_eq!(t1, t2, "токен идемпотентен");
         assert_eq!(t1.len(), 64, "32 байта hex");
+        // Нули — признак того, что /dev/urandom не прочитался: такой «токен»
+        // угадывается с первой попытки и даёт права агента кому угодно.
+        assert_ne!(t1, "0".repeat(64), "предсказуемый токен недопустим");
+        assert_ne!(gen_token(), gen_token(), "каждый токен свой");
         let c = s.resolve(&t1).expect("агентский токен резолвится");
         assert_eq!(c.id, "agent");
     }

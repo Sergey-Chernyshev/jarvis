@@ -277,12 +277,27 @@ pub fn final_reply_from(chain: Vec<Value>) -> Option<String> {
 }
 
 /// Claude Code кодирует cwd в имя каталога проекта, заменяя / и . на -
+///
+/// Кодирует он РАЗРЕШЁННЫЙ путь. Для чата с агентом это решает всё: хост
+/// работает из `std::env::temp_dir()`, а это `/var/folders/…` — симлинк на
+/// `/private/var/folders/…`. Без резолва мы искали каталог, которого нет, и
+/// говорили «транскрипт не найден» при живом файле на диске.
 pub fn project_dir_for(cwd: &str) -> PathBuf {
-    let encoded: String = cwd
-        .chars()
-        .map(|c| if c == '/' || c == '.' { '-' } else { c })
-        .collect();
-    home_dir().join(".claude").join("projects").join(encoded)
+    let root = home_dir().join(".claude").join("projects");
+    let encode = |p: &str| -> String {
+        p.chars().map(|c| if c == '/' || c == '.' { '-' } else { c }).collect()
+    };
+    // Резолв — только подсказка: у несуществующего пути её нет, и тогда
+    // кодируем как дали (поведение для обычных сессий не меняется).
+    if let Some(real) = std::fs::canonicalize(cwd).ok().and_then(|p| p.to_str().map(String::from)) {
+        if real != cwd {
+            let dir = root.join(encode(&real));
+            if dir.is_dir() {
+                return dir;
+            }
+        }
+    }
+    root.join(encode(cwd))
 }
 
 /// transcript_path из хука бывает форкнут (диалог уезжает в новый файл) —
@@ -371,5 +386,34 @@ mod tests {
     fn project_dir_encodes_cwd() {
         let p = project_dir_for("/Users/x/my.app");
         assert!(p.to_string_lossy().ends_with("/.claude/projects/-Users-x-my-app"));
+    }
+
+    #[test]
+    fn project_dir_follows_symlink_when_claude_named_it_by_real_path() {
+        // Ровно случай чата с агентом: хост работает из temp_dir(), а это симлинк.
+        // Claude назвал каталог по разрешённому пути — искать надо там.
+        let base = std::env::temp_dir().join("jarvis-projdir-test");
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let enc = |p: &std::path::Path| -> String {
+            p.to_string_lossy().chars().map(|c| if c == '/' || c == '.' { '-' } else { c }).collect()
+        };
+        let projects = crate::util::home_dir().join(".claude").join("projects");
+        let canon = std::fs::canonicalize(&real).unwrap();
+        let named = projects.join(enc(&canon));
+        let existed = named.is_dir();
+        std::fs::create_dir_all(&named).unwrap();
+
+        let got = project_dir_for(link.to_str().unwrap());
+        assert_eq!(got, named, "нашли каталог по разрешённому пути, а не по симлинку");
+
+        if !existed {
+            let _ = std::fs::remove_dir(&named);
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

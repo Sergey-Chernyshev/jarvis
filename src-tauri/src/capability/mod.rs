@@ -322,21 +322,6 @@ mod tests {
         assert!(names.contains(&"sessions.list"));
     }
 
-    // sessions.wait — наблюдение (Read, агент зовёт сам), но с собственным
-    // дедлайном: общих 30с ждущей капабилити мало, а метрикам он не меняется.
-    #[test]
-    fn sessions_wait_is_read_with_own_deadline() {
-        let reg = super::build_registry();
-        let wait = reg.get("sessions.wait").expect("sessions.wait должна быть в реестре");
-        assert_eq!(wait.meta.class, RiskClass::Read);
-        assert_eq!(wait.timeout, Some(std::time::Duration::from_secs(300)));
-        assert_eq!(reg.get("metrics.query").unwrap().timeout, None, "у мгновенных — общий дедлайн");
-        let tools = reg.tools_json(&Consumer::agent().grant);
-        let names: Vec<&str> =
-            tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"sessions.wait"));
-    }
-
     // приёмочный 2/3: control/settings-капабилити имеют правильный класс, значит
     // гейт ВСЕГДА потребует подтверждения у агента (доказано generic-тестами выше).
     #[test]

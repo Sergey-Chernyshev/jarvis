@@ -6,7 +6,7 @@
 //! → запрет самоэскалации (класс Settings: security-ключи всем + allowlist для
 //! agent/plugin) → подтверждение side-effect, кроме поимённо авто-одобренных
 //! пользователем капабилити (дедлайн 60с) → исполнение
-//! (дедлайн 30с или собственный дедлайн капабилити) → аудит каждого исхода.
+//! (дедлайн 30с) → аудит каждого исхода.
 
 use std::time::Duration;
 use std::time::Instant;
@@ -18,10 +18,6 @@ use super::confirm::Confirmer;
 use super::contract::{CallOutput, GateError, RiskClass};
 use super::grant::{Consumer, SettingsWrite, SECURITY_KEYS, SETTINGS_ALLOWLIST};
 use super::registry::Registry;
-
-/// Жёсткий потолок для покапабилитного дедлайна (R3). Своё значение капабилити
-/// назначить может, безлимитность — нет: висящий вызов держит гейт и потребителя.
-pub const MAX_HANDLER_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Дедлайны гейта (R3). Default — боевые; тесты подставляют короткие.
 #[derive(Clone, Copy, Debug)]
@@ -134,9 +130,7 @@ pub async fn invoke<C>(
     }
 
     // 4. Исполнение — с дедлайном (R3, fail-safe liveness; эффект at-least-once).
-    //    Дедлайн покапабилитный: у ждущих (sessions.wait) свой, у остальных общий.
-    let deadline = entry.timeout.unwrap_or(cfg.handler_timeout);
-    match tokio::time::timeout(deadline, (entry.handler)(ctx, args.clone())).await {
+    match tokio::time::timeout(cfg.handler_timeout, (entry.handler)(ctx, args.clone())).await {
         Err(_) => {
             audit.record(&entry_for("failed:timeout".into(), t0.elapsed().as_millis()));
             Err(GateError::Failed("timeout".into()))
@@ -200,66 +194,6 @@ mod tests {
         .unwrap();
         assert_eq!(out.value["_consumer"], "plugin:test");
         assert_eq!(out.value["x"], 1, "остальные args не тронуты");
-    }
-
-    /// Реестр с одной «долгой» капабилити: спит 200мс, дедлайн у неё свой.
-    fn slow_registry(own: Duration) -> Registry<()> {
-        let mut reg = Registry::new();
-        reg.register_with_timeout(
-            CapabilityMeta {
-                id: "test.wait",
-                class: RiskClass::Read,
-                provenance: Provenance::Trusted,
-                description: "ждёт дольше общего дедлайна (тест)",
-                input_schema: json!({ "type": "object" }),
-            },
-            make_handler(|_: (), _args| async move {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                Ok(json!({ "waited": true }))
-            }),
-            own,
-        );
-        reg
-    }
-
-    // Покапабилитный дедлайн: общий (30мс) капабилити не убивает — у неё свой.
-    #[tokio::test]
-    async fn own_timeout_beats_shared_deadline() {
-        let reg = slow_registry(Duration::from_secs(5));
-        let cfg = GateConfig { handler_timeout: Duration::from_millis(30), ..GateConfig::default() };
-        let out = invoke(
-            &reg, (), &Consumer::agent(), "test.wait", json!({}),
-            &AutoApprove, &MemAudit::new(), cfg,
-        )
-        .await
-        .expect("своя капабилити ждёт по своему дедлайну");
-        assert_eq!(out.value["waited"], true);
-    }
-
-    // …но свой дедлайн — не безлимит: истёк — тот же честный failed:timeout.
-    #[tokio::test]
-    async fn own_timeout_still_kills_hung_handler() {
-        let reg = slow_registry(Duration::from_millis(20));
-        let audit = MemAudit::new();
-        let err = invoke(
-            &reg, (), &Consumer::agent(), "test.wait", json!({}),
-            &AutoApprove, &audit, GateConfig::default(),
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(err, GateError::Failed(_)));
-        assert_eq!(audit.last().unwrap().outcome, "failed:timeout");
-    }
-
-    // Потолок режется на регистрации, а не «когда-нибудь на вызове».
-    #[test]
-    fn own_timeout_capped_and_others_keep_shared_default() {
-        let reg = slow_registry(Duration::from_secs(3600));
-        assert_eq!(reg.get("test.wait").unwrap().timeout, Some(MAX_HANDLER_TIMEOUT));
-        assert_eq!(MAX_HANDLER_TIMEOUT, Duration::from_secs(300));
-        // обычная регистрация дедлайна не назначает — работает общий, 30с
-        assert_eq!(echo_registry().get("test.echo").unwrap().timeout, None);
-        assert_eq!(GateConfig::default().handler_timeout, Duration::from_secs(30));
     }
 
     #[tokio::test]

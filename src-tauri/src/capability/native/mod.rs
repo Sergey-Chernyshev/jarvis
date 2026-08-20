@@ -13,6 +13,7 @@ mod metrics;
 mod notifications;
 mod sessions;
 mod settings_cap;
+pub mod spawn;
 mod stt_cap;
 mod tasks;
 mod wakeword_cap;
@@ -30,8 +31,9 @@ pub fn register_all(reg: &mut DaemonRegistry) {
     entities_cap::register(reg); // реестр сущностей плагинов (plugin-system, инкр. 1)
     // фаза 3 — control/settings
     control::register(reg); // sessions.reply, sessions.control
+    spawn::register(reg); // sessions.spawn, sessions.close
     // settings.set регистрируется в settings_cap::register выше.
-    // sessions.queue/launch/interrupt — отдельная инфраструктура (см. план, отложено).
+    // sessions.queue/interrupt — отдельная инфраструктура (см. план, отложено).
     // фаза 7 (инкр. 9) — STT: доступ к микрофону через гейт (denied для агента по умолчанию).
     stt_cap::register(reg);
     // инкр. 10 — wake-word: только статус (Read).

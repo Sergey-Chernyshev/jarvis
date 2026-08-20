@@ -112,6 +112,22 @@ pub struct TaskBoard {
     pub stopped: bool,
 }
 
+/// Кто поднял сессию через `sessions.spawn`: кто именно, откуда, зачем и когда.
+/// Есть только у дочерних сессий — человек должен видеть дерево, а не россыпь
+/// окон. Ручной запуск из панели/терминала этого поля не имеет.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SpawnOrigin {
+    /// Потребитель гейта: `agent`, `plugin:x`.
+    pub by: String,
+    /// Чат/сессия, из которой поднимали.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Зачем подняли — первый промпт, урезанный до строки.
+    pub task: String,
+    pub at: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Session {
@@ -213,6 +229,10 @@ pub struct Session {
     pub last_cmd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub touched: Option<Vec<String>>,
+
+    /// Родитель: кто поднял эту сессию, откуда и зачем (см. [`SpawnOrigin`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawned_by: Option<SpawnOrigin>,
 
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,

@@ -385,6 +385,80 @@ mod tests {
         assert!(matches!(denied, Err(GateError::Rejected)), "переименование прошло без спроса");
     }
 
+    /// Запуск сессии тратит деньги и плодит процессы — по умолчанию карточка.
+    /// Класс Settings взять нельзя по той же причине, что и у sessions.rename:
+    /// гейт прочитал бы 'agent'/'cwd' как патч конфига и отклонил по allowlist.
+    #[test]
+    fn spawn_is_a_confirmed_capability_the_agent_can_see() {
+        let reg = super::build_registry();
+        let cap = reg.get("sessions.spawn").expect("sessions.spawn должна быть в реестре");
+        assert_eq!(cap.meta.class, RiskClass::Control, "запуск — side-effect, но не патч настроек");
+        assert!(Consumer::agent().grant.needs_confirm("sessions.spawn", cap.meta.class),
+            "по умолчанию запуск обязан спрашивать");
+        // агент обязан понять из описания, что имя обязательно и id придёт сразу
+        assert!(cap.meta.description.contains("ОБЯЗАТЕЛЬНО"));
+        assert!(cap.meta.description.contains("СРАЗУ"));
+        assert_eq!(cap.meta.input_schema["required"], json!(["agent", "name", "cwd", "task"]));
+        let tools = reg.tools_json(&Consumer::agent().grant);
+        let names: Vec<&str> =
+            tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"sessions.spawn"), "агенту инструмент не виден");
+        assert!(names.contains(&"sessions.close"));
+        // read-only плагин запускать сессии не может — это Control
+        let reader = Consumer::plugin("reader", &[RiskClass::Read]);
+        assert!(!reader.grant.allows_id("sessions.spawn", RiskClass::Control));
+    }
+
+    /// Грант на авто-запуск выдаёт ЧЕЛОВЕК настройкой, а не константа в коде:
+    /// без `grants.agent.autoApprove` карточка на месте, с ним — нет.
+    #[tokio::test]
+    async fn auto_launch_is_granted_by_settings_not_by_code() {
+        let meta = super::build_registry().get("sessions.spawn").unwrap().meta.clone();
+        let mut reg: Registry<()> = Registry::new();
+        reg.register(meta, make_handler(|_ctx: (), args| async move { Ok(json!({ "did": args })) }));
+        let args = json!({ "agent": "claude", "name": "Сайдбар·JRV·O5", "cwd": "/p", "task": "работай" });
+
+        // молчаливый отказ пользователя = отказ вызова
+        let denied = super::invoke(&reg, (), &Consumer::agent(), "sessions.spawn", args.clone(),
+            &AutoDeny, &MemAudit::new(), GateConfig::default()).await;
+        assert!(matches!(denied, Err(GateError::Rejected)), "запуск прошёл без спроса");
+
+        // …а с грантом из настроек — идёт молча
+        let granted = Consumer::agent().with_auto_approve(
+            super::grant::auto_approve_from_settings(
+                &json!({"grants":{"agent":{"autoApprove":["sessions.spawn"]}}}), "agent"),
+        );
+        let out = super::invoke(&reg, (), &granted, "sessions.spawn", args,
+            &AutoDeny, &MemAudit::new(), GateConfig::default())
+            .await
+            .expect("грант человека снимает карточку");
+        assert_eq!(out.value["did"]["name"], "Сайдбар·JRV·O5");
+        // соседи по классу остаются со спросом — это не «выключить гейт»
+        assert!(granted.grant.needs_confirm("sessions.reply", RiskClass::Control));
+    }
+
+    /// Закрытие СВОЕЙ дочерней карточки не просит (эффект ограничен тем, что
+    /// потребитель сам и создал), но остаётся Control: read-only плагину не дано.
+    #[tokio::test]
+    async fn closing_your_own_child_needs_no_card() {
+        let reg = super::build_registry();
+        let cap = reg.get("sessions.close").expect("sessions.close должна быть в реестре");
+        assert_eq!(cap.meta.class, RiskClass::Control);
+        assert!(!Consumer::agent().grant.needs_confirm("sessions.close", cap.meta.class));
+        assert!(!Consumer::panel().grant.needs_confirm("sessions.close", cap.meta.class));
+        assert!(!Consumer::plugin("x", &[RiskClass::Read]).grant.allows_id("sessions.close", RiskClass::Control));
+
+        // и вызов доходит до хендлера при confirmer'е, отвечающем «нет»
+        let meta = cap.meta.clone();
+        let mut r: Registry<()> = Registry::new();
+        r.register(meta, make_handler(|_ctx: (), args| async move { Ok(json!({ "did": args })) }));
+        let out = super::invoke(&r, (), &Consumer::agent(), "sessions.close",
+            json!({ "id": "spawn-abc" }), &AutoDeny, &MemAudit::new(), GateConfig::default())
+            .await
+            .expect("закрытие своей дочерней не спрашивает");
+        assert_eq!(out.value["did"]["id"], "spawn-abc");
+    }
+
     // R4/least-priv: агент НЕ видит audit.query в tools/list (denied_ids).
     #[test]
     fn agent_tools_exclude_audit_query() {

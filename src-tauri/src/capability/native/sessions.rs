@@ -32,17 +32,26 @@ pub fn register(reg: &mut DaemonRegistry) {
             id: "sessions.get",
             class: RiskClass::Read,
             provenance: Provenance::Trusted,
-            description: "Состояние одной сессии по её id.",
+            description: "Состояние одной сессии по её id. Принимает и талон запуска ('spawn-…', см. sessions.spawn): \
+пока сессия поднимается, вернётся её состояние 'launching', а как только CLI пришлёт первый хук — сама сессия.",
             input_schema: json!({
                 "type": "object",
-                "properties": { "session_id": { "type": "string", "description": "id сессии" } },
+                "properties": { "session_id": { "type": "string", "description": "id сессии или талон 'spawn-…'" } },
                 "required": ["session_id"]
             }),
         },
         make_handler(|d: Arc<Daemon>, args: Value| async move {
             let sid = arg_str(&args, "session_id")?;
-            match d.session(&sid) {
-                Some(s) => serde_json::to_value(s).map_err(|e| e.to_string()),
+            if let Some(s) = d.session(&sid) {
+                return serde_json::to_value(s).map_err(|e| e.to_string());
+            }
+            // Талон: `spawn` отдаёт его сразу, до появления сессии, — иначе
+            // вернувшийся id было бы нечем спросить первые секунды.
+            match d.spawns.find(&sid) {
+                Some(rec) => match rec.session_id.as_deref().and_then(|s| d.session(s)) {
+                    Some(s) => serde_json::to_value(s).map_err(|e| e.to_string()),
+                    None => Ok(super::spawn::pending_json(&rec)),
+                },
                 None => Err(format!("сессия не найдена: {sid}")),
             }
         }),

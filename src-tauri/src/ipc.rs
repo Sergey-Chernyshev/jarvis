@@ -2407,6 +2407,7 @@ pub async fn terminal_focus(app: AppHandle, session_id: String) -> Value {
 /// «поставить задачу» — это два шага (подними, потом найди чат и напиши), и
 /// именно на втором работа откладывается «на потом».
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn session_launch(
     app: AppHandle,
     cwd: Option<String>,
@@ -2419,6 +2420,35 @@ pub async fn session_launch(
     container: Option<bool>,
 ) -> Value {
     let d = Daemon::get(&app);
+    launch_core(
+        &d,
+        LaunchReq { cwd, agent, session_id, machine, isolate, mode, task, container, bind: None },
+    )
+    .await
+}
+
+/// Что просят поднять. Одна структура на оба пути запуска — панель
+/// (`session_launch`) и капабилити `sessions.spawn`: второй реализации запуска
+/// в проекте нет, различие ровно одно — `bind`.
+#[derive(Default)]
+pub(crate) struct LaunchReq {
+    pub cwd: Option<String>,
+    pub agent: String,
+    pub session_id: Option<String>,
+    pub machine: Option<String>,
+    pub isolate: Option<bool>,
+    pub mode: Option<String>,
+    pub task: Option<String>,
+    pub container: Option<bool>,
+    /// Учёт родителя (`sessions.spawn`): имя, модель, кто поднял и зачем.
+    /// `None` — ручной запуск человеком, учитывать нечего.
+    pub bind: Option<crate::capability::native::spawn::Bind>,
+}
+
+/// Общее ядро запуска. Возвращает управление, как только терминал открыт: имя,
+/// модель и первый промпт доезжают фоном, когда сессия появится в реестре.
+pub(crate) async fn launch_core(d: &Arc<Daemon>, req: LaunchReq) -> Value {
+    let LaunchReq { cwd, agent, session_id, machine, isolate, mode, task, container, bind } = req;
     // cwd бывает null: история группирует сессии без директории в «другое».
     // Resume без cwd допустим (как прежнее «скопировать команду» без cd),
     // а вот новая сессия без директории бессмысленна.
@@ -2450,9 +2480,9 @@ pub async fn session_launch(
         cwd
     };
     if !machine.is_empty() && machine != "local" {
-        let res = launch_on_node(&d, &machine, &cwd, &agent, session_id.as_deref(), mode).await;
+        let res = launch_on_node(d, &machine, &cwd, &agent, session_id.as_deref(), mode).await;
         if res.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-            deliver_task(&d, &machine, &cwd, task);
+            deliver_task(d, &machine, &cwd, task, bind);
         }
         return res;
     }
@@ -2511,7 +2541,7 @@ pub async fn session_launch(
     let inner = crate::launch::inner_command(&cwd, &proxy, &agent_cmd, &path_dirs);
     match crate::launch::spawn(&terminal, &custom, &inner).await {
         Ok(()) => {
-            deliver_task(&d, "", &cwd, task);
+            deliver_task(d, "", &cwd, task, bind);
             ok()
         }
         Err(e) => err(e),
@@ -2527,10 +2557,21 @@ pub async fn session_launch(
 /// Ждём ограниченно и молча сдаёмся: не встал за полторы минуты — значит
 /// что-то не так, и текст, вылетевший в неизвестно чей чат через пять минут,
 /// был бы хуже ненаписанного.
-fn deliver_task(d: &Arc<Daemon>, machine: &str, cwd: &str, task: Option<String>) {
-    let Some(text) = task.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) else {
+///
+/// Этот же сторож доделывает `sessions.spawn` (`bind`): имя, модель и запись
+/// родителя ложатся на сессию тут, до первого промпта. Второго ожидателя не
+/// заводим — сессия появляется один раз, и сторожить её дважды незачем.
+fn deliver_task(
+    d: &Arc<Daemon>,
+    machine: &str,
+    cwd: &str,
+    task: Option<String>,
+    bind: Option<crate::capability::native::spawn::Bind>,
+) {
+    let text = task.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    if text.is_none() && bind.is_none() {
         return;
-    };
+    }
     let (d, machine, cwd) = (d.clone(), machine.to_string(), cwd.trim_end_matches('/').to_string());
     let since = crate::util::now_ms();
     tauri::async_runtime::spawn(async move {
@@ -2557,11 +2598,17 @@ fn deliver_task(d: &Arc<Daemon>, machine: &str, cwd: &str, task: Option<String>)
                     .and_then(|s| s.tmux_pane.clone().map(|p| (s.id.clone(), p)))
             };
             let Some((id, pane)) = found else { continue };
+            // Сперва идентичность (имя, родитель, модель), потом промпт: имя
+            // должно быть в списке к моменту, когда сессия начнёт работать.
+            if let Some(b) = &bind {
+                crate::capability::native::spawn::on_bound(&d, b, &id).await;
+            }
+            let Some(text) = &text else { return };
             let sent = if machine.is_empty() || machine == "local" {
-                crate::tmux::reply(&pane, &text).await
+                crate::tmux::reply(&pane, text).await
             } else {
                 match d.remotes.node(&machine).and_then(|n| n.client().ok()) {
-                    Some(c) => c.reply(&pane, &text).await,
+                    Some(c) => c.reply(&pane, text).await,
                     None => Err("узел пропал из настроек".into()),
                 }
             };
@@ -2572,6 +2619,10 @@ fn deliver_task(d: &Arc<Daemon>, machine: &str, cwd: &str, task: Option<String>)
             return;
         }
         crate::log::line("launch: агент не встал за 90 с — задачу не отдал");
+        // Талон, не дождавшийся сессии, не должен держать слот под потолком.
+        if let Some(b) = &bind {
+            d.spawns.give_up(&b.ticket);
+        }
     });
 }
 

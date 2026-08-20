@@ -240,6 +240,19 @@ pub fn resolve_target(d: &Arc<Daemon>, id: &str, args: &Value) -> Value {
                 "effort": args.get("effort"),
             })
         }
+        // Запуск подтверждают не по сырым аргументам: человек решает по тому,
+        // что именно поднимут, где и под какую работу.
+        "sessions.spawn" => json!({
+            "kind": "spawn",
+            "agent": args.get("agent"),
+            "label": args.get("name"),
+            "cwd": args.get("cwd").and_then(|v| v.as_str()).map(crate::util::short_home),
+            "text": args.get("task").and_then(|v| v.as_str())
+                .map(|t| crate::util::ellipsize(t, 160)),
+            "model": args.get("model"),
+            "parent": args.get("parent"),
+            "isolate": args.get("isolate"),
+        }),
         "settings.set" => json!({ "kind": "settings", "diff": settings_diff(d, args) }),
         _ => json!({ "kind": "other", "args": args }),
     }

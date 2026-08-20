@@ -242,6 +242,10 @@ pub struct Daemon {
     pub tokens: crate::capability::tokens::TokenStore,
     /// Реестр ожидающих подтверждений агента (R4) — вне локов Daemon.
     pub pending: std::sync::Arc<crate::capability::confirm_panel::PendingConfirms>,
+    /// Учёт сессий, поднятых через `sessions.spawn`: кто поднял, зачем, когда.
+    /// Отдельно от реестра сессий: сессия уходит по session-end, а родитель и
+    /// потолок одновременных должны это пережить.
+    pub spawns: std::sync::Arc<crate::capability::native::spawn::Spawns>,
     /// STT-сервис (инкремент 9): распознавание речи. Fail-safe.
     pub stt: std::sync::Arc<crate::stt::SttService>,
     /// PTT-диктовка (инкремент 9): потребитель SttService + хоткей.
@@ -421,6 +425,7 @@ impl Daemon {
             entities: crate::entities::EntityStore::new(),
             tokens: crate::capability::tokens::TokenStore::new(),
             pending: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
+            spawns: std::sync::Arc::new(crate::capability::native::spawn::Spawns::new()),
             stt,
             dictation,
             audio,

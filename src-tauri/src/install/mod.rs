@@ -581,20 +581,32 @@ fn kimi_config_path() -> PathBuf {
     kimi_home().join("config.toml")
 }
 
-/// Установлен ли `kimi` в PATH (минуя наш шим). Штатная установка кладёт бинарь
-/// в `<дом>/bin`, который может быть ещё не в PATH — проверяем и его.
-fn kimi_found() -> bool {
+/// Путь к бинарю `kimi` (минуя наш шим). Штатная установка кладёт бинарь в
+/// `<дом>/bin`, который может быть ещё не в PATH, — проверяем сначала его.
+///
+/// Резолвим ОДИН раз и отдаём путь: всякий, кто хочет позвать `kimi`, обязан
+/// звать этот бинарь, а не имя через `sh`. Иначе «нашли» и «смогли запустить»
+/// расходятся, и запуск через PATH возвращает 127 там, где бинарь есть.
+fn kimi_bin() -> Option<PathBuf> {
     let bin = kimi_home().join("bin/kimi");
     if fs::metadata(&bin).map(|m| m.is_file()).unwrap_or(false) {
-        return true;
+        return Some(bin);
     }
-    Command::new("/bin/sh")
+    let out = Command::new("/bin/sh")
         .args(["-c", "command -v kimi"])
         .env("PATH", augmented_path())
-        .stdout(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// Установлен ли `kimi` (PATH или `<дом>/bin`).
+fn kimi_found() -> bool {
+    kimi_bin().is_some()
 }
 
 /// Установлен ли `codex` в PATH (минуя наш шим).
@@ -1583,15 +1595,32 @@ fn kimi_hooks_present(content: &str, hook_bin: &str) -> bool {
 ///
 /// Отличие от JSON-пути (Claude/Codex): конфиг Kimi — это ОБЩИЙ файл пользователя
 /// с его провайдерами, моделями и правилами прав, а не выделенный файл хуков.
-/// Поэтому: (1) правим managed-блоком, не переписывая остальное; (2) после записи
-/// прогоняем `kimi doctor` и при невалидности ОТКАТЫВАЕМСЯ на бэкап. Цена ошибки
-/// здесь — не «хуки не работают», а «Kimi не запускается вообще».
+/// Поэтому: (1) правим managed-блоком, не переписывая остальное; (2) прогоняем
+/// `kimi doctor` ДО и ПОСЛЕ записи и откатываемся на бэкап, только если конфиг
+/// испортили именно мы. Цена ошибки здесь — не «хуки не работают», а «Kimi не
+/// запускается вообще»; цена ложного отката — вечный онбординг (health битый).
 fn install_kimi_hooks(progress: &Progress) {
-    let path = kimi_config_path();
-    let hook_bin = hook_dst().display().to_string();
+    install_kimi_hooks_at(
+        &kimi_config_path(),
+        &hook_dst().display().to_string(),
+        &backup,
+        &kimi_config_valid,
+        progress,
+    );
+}
+
+/// Тело `install_kimi_hooks` с вынесенными наружу файлом, бэкапом и doctor —
+/// ровно тем, что в тестах нельзя трогать по-настоящему.
+fn install_kimi_hooks_at(
+    path: &Path,
+    hook_bin: &str,
+    backup_fn: &dyn Fn(&Path) -> Option<PathBuf>,
+    doctor: &dyn Fn() -> Option<bool>,
+    progress: &Progress,
+) {
     let existed = path.exists();
     let content = if existed {
-        match fs::read_to_string(&path) {
+        match fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
                 progress(Step::warn("Хуки", format!("{e} — пропускаю хуки kimi")));
@@ -1602,55 +1631,107 @@ fn install_kimi_hooks(progress: &Progress) {
         String::new()
     };
 
-    if kimi_hooks_present(&content, &hook_bin) {
+    if kimi_hooks_present(&content, hook_bin) {
         progress(Step::done("Хуки", "kimi: уже установлены"));
         return;
     }
 
-    let merged = merge_marked_block(&content, &kimi_hooks_block(&hook_bin));
-    let saved = if existed { backup(&path) } else { None };
-    atomic_write(&path, &merged);
+    // Вердикт ДО правки — точка отсчёта. Без неё «doctor ругается» невозможно
+    // отличить от «doctor ругается на нас»: у свежего Kimi без логина он не
+    // доволен всегда, и откатывать по этому поводу чужой конфиг незачем.
+    let before = doctor();
 
-    match kimi_config_valid() {
-        Some(false) => {
-            // Откат: конфиг важнее наших хуков.
-            match &saved {
-                Some(b) => {
-                    let _ = fs::copy(b, &path);
-                    progress(Step::warn(
-                        "Хуки",
-                        "kimi: конфиг не прошёл проверку — вернул как было",
-                    ));
-                }
-                None => {
-                    let _ = fs::remove_file(&path);
-                    progress(Step::warn("Хуки", "kimi: конфиг не прошёл проверку — убрал"));
-                }
+    // Бэкап обязателен: без него мы не сможем откатиться, а конфиг Kimi —
+    // общий файл пользователя (провайдеры, модели, права). Нет бэкапа —
+    // не трогаем файл вовсе.
+    let saved = if existed {
+        match backup_fn(path) {
+            Some(b) => Some(b),
+            None => {
+                progress(Step::warn(
+                    "Хуки",
+                    "kimi: не смог сделать бэкап config.toml — не трогаю конфиг",
+                ));
+                return;
             }
         }
-        Some(true) => progress(Step::done(
+    } else {
+        None
+    };
+    atomic_write(path, &merge_marked_block(&content, &kimi_hooks_block(hook_bin)));
+
+    let after = doctor();
+    if !kimi_rollback_needed(before, after) {
+        let note = match after {
+            Some(true) => "",
+            // Хуки записаны, но doctor недоволен по своей причине (нет логина,
+            // нет провайдера) — это не про нас, и врать «проверено» нельзя.
+            Some(false) => " (doctor ругается и без наших правок)",
+            None => " (без проверки: doctor не ответил)",
+        };
+        progress(Step::done(
             "Хуки",
-            format!("kimi: {} событий", KIMI_EVENTS.len()),
-        )),
-        // `kimi doctor` не запустился — записали, но поручиться не можем.
-        None => progress(Step::done(
-            "Хуки",
-            format!("kimi: {} событий (без проверки)", KIMI_EVENTS.len()),
-        )),
+            format!("kimi: {} событий{note}", KIMI_EVENTS.len()),
+        ));
+        return;
+    }
+    // Откат: конфиг важнее наших хуков.
+    match &saved {
+        Some(b) => match fs::copy(b, path) {
+            Ok(_) => progress(Step::warn(
+                "Хуки",
+                "kimi: конфиг не прошёл проверку — вернул как было",
+            )),
+            Err(e) => progress(Step::warn(
+                "Хуки",
+                format!(
+                    "kimi: конфиг не прошёл проверку, и ОТКАТ НЕ УДАЛСЯ ({e}) — \
+                     верните вручную из {}",
+                    b.display()
+                ),
+            )),
+        },
+        // Бэкапа нет только когда файла не было: удаляем ровно то, что создали сами.
+        None => {
+            let _ = fs::remove_file(path);
+            progress(Step::warn("Хуки", "kimi: конфиг не прошёл проверку — убрал"));
+        }
     }
 }
 
+/// Откатывать ли нашу правку по вердиктам `kimi doctor` до и после записи.
+///
+/// Откат — только если ДО было хорошо, а ПОСЛЕ стало плохо: только тогда виноват
+/// наш блок. «Не смогли спросить» (`None`) поводом считать конфиг битым не
+/// является, а «doctor и так ругался» — не наш повод стирать хуки.
+fn kimi_rollback_needed(before: Option<bool>, after: Option<bool>) -> bool {
+    after == Some(false) && before != Some(false)
+}
+
 /// `kimi doctor`: `Some(true)` — конфиг валиден, `Some(false)` — нет,
-/// `None` — не смогли спросить (бинарь не найден/не запустился).
+/// `None` — спросить не удалось (бинаря нет, не запустился, 127 от шелла).
 fn kimi_config_valid() -> Option<bool> {
-    Command::new("/bin/sh")
-        .args(["-c", "kimi doctor"])
+    let bin = kimi_bin()?;
+    let code = Command::new(&bin)
+        .arg("doctor")
         .env("PATH", augmented_path())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .ok()
-        .map(|s| s.success())
+        .ok()?
+        .code();
+    doctor_verdict(code)
+}
+
+/// Трактовка кода возврата `kimi doctor`. 127/126 — это ответ шелла «не нашёл /
+/// не смог запустить», а не приговор конфигу: спросить не удалось (`None`).
+fn doctor_verdict(code: Option<i32>) -> Option<bool> {
+    match code {
+        Some(0) => Some(true),
+        Some(126) | Some(127) => None,
+        Some(_) => Some(false),
+        None => None, // убит сигналом — тоже «не спросили»
+    }
 }
 
 /// Снять наши хуки из конфига Kimi, не тронув остальное.
@@ -1827,6 +1908,15 @@ fn atomic_write(file: &Path, content: &str) {
     atomic_write_mode(file, content, mode).expect("атомарная запись файла");
 }
 
+/// Сколько копий `<файл>.bak-*` держим. Пять — это несколько шагов назад по
+/// истории правок (обычно их одна-две за релиз) и при этом фиксированный
+/// потолок: `reconcile_hooks` крутится на каждом старте демона, и без потолка
+/// каталог зарастает бэкапами навсегда.
+const BACKUPS_KEEP: usize = 5;
+
+/// Копия рядом: `<файл>.bak-<UTC>`. `None` — файла не было ИЛИ скопировать не
+/// удалось; вызывающий обязан различать эти два случая сам (по `exists()` до
+/// вызова), потому что во втором трогать оригинал уже нельзя.
 fn backup(file: &Path) -> Option<PathBuf> {
     if !file.exists() {
         return None;
@@ -1834,7 +1924,30 @@ fn backup(file: &Path) -> Option<PathBuf> {
     let stamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S-%3fZ");
     let dst = PathBuf::from(format!("{}.bak-{stamp}", file.display()));
     fs::copy(file, &dst).ok()?;
+    prune_backups(file, BACKUPS_KEEP);
     Some(dst)
+}
+
+/// Оставить только `keep` последних бэкапов файла. Метка времени в имени — ISO,
+/// поэтому лексикографический порядок совпадает с хронологическим.
+fn prune_backups(file: &Path, keep: usize) {
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
+        return;
+    };
+    let prefix = format!("{}.bak-", name.to_string_lossy());
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let mut olds: Vec<String> = rd
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&prefix))
+        .collect();
+    if olds.len() <= keep {
+        return;
+    }
+    olds.sort();
+    for name in &olds[..olds.len() - keep] {
+        let _ = fs::remove_file(dir.join(name));
+    }
 }
 
 fn is_ours(hook: &Value) -> bool {
@@ -1966,6 +2079,7 @@ pub fn integration_health() -> IntegrationHealth {
 /// верно, файлы не переписываются. Лечит главный баг: stale prod-путь/метка после
 /// смены dev↔prod профиля, из-за которого codex дёргал несуществующий бинарь.
 pub fn reconcile_hooks(progress: &Progress) {
+    sync_hook_files(progress);
     install_hooks_into(&settings_path(), "claude", &EVENTS, progress);
     if codex_found() {
         install_hooks_into(&codex_hooks_path(), "codex", &CODEX_EVENTS, progress);
@@ -2061,6 +2175,62 @@ fn write_executable(dst: &Path, content: &str) {
     fs::set_permissions(dst, fs::Permissions::from_mode(0o755)).expect("chmod");
 }
 
+/// Записать скрипт, только если на диске лежит не он. Возвращает «переписали».
+///
+/// Содержимое хука и шимов зашито в бинарь (`include_str!`), а на диске живёт
+/// копия от той версии, что ставила интеграцию. После автообновления копия
+/// устаревает молча — существование файла об этом не говорит ничего. Сверяем
+/// именно содержимое.
+fn write_if_changed(dst: &Path, content: &str) -> bool {
+    if fs::read_to_string(dst).ok().as_deref() == Some(content) {
+        return false;
+    }
+    write_executable(dst, content);
+    true
+}
+
+/// Тело transport-шима с запечённым текущим JARVIS_DIR — один источник и для
+/// установки, и для сверки содержимого на старте.
+fn shim_body() -> String {
+    // В рантайме (обычный терминал) env JARVIS_DIR не выставлен, а dev-сборка
+    // живёт в ~/.jarvis-dev. Без подмены дефолта шим искал бы tmux.conf в
+    // ~/.jarvis и падал (No such file).
+    SHIM_SRC.replacen(
+        "JARVIS_DIR=\"${JARVIS_DIR:-$HOME/.jarvis}\"",
+        &format!("JARVIS_DIR=\"${{JARVIS_DIR:-{}}}\"", jarvis_dir().display()),
+        1,
+    )
+}
+
+/// Привести хук-скрипт и уже установленные шимы к содержимому текущей сборки.
+///
+/// Зовётся из `reconcile_hooks` (каждый старт демона): регистрации в конфигах
+/// без актуального скрипта на диске бесполезны — при смене контракта события
+/// ломаются тихо. Новые шимы здесь не создаём: это дело `install_core`,
+/// который знает про tmux и про то, какие агенты вообще есть.
+fn sync_hook_files(progress: &Progress) {
+    let mut fixed = Vec::new();
+    if write_if_changed(&hook_dst(), HOOK_SRC) {
+        fixed.push("jarvis-hook");
+    }
+    let shim = shim_body();
+    for (name, dst) in [
+        ("шим claude", shim_dst()),
+        ("шим codex", codex_shim_dst()),
+        ("шим kimi", kimi_shim_dst()),
+    ] {
+        if dst.exists() && write_if_changed(&dst, &shim) {
+            fixed.push(name);
+        }
+    }
+    if !fixed.is_empty() {
+        progress(Step::done(
+            "Хуки",
+            format!("обновлены до версии сборки: {}", fixed.join(", ")),
+        ));
+    }
+}
+
 /// Метка, по которой свои шимы отличаются от всех прочих файлов.
 ///
 /// Чистка по метке, а не по списку: агент, удалённый из настроек, должен унести
@@ -2088,10 +2258,7 @@ fn sync_custom_shims_at(dir: &Path, agents: &[(String, String)]) {
                 &format!("JARVIS_DIR=\"${{JARVIS_DIR:-{}}}\"", jarvis_dir().display()),
                 1,
             );
-        let dst = dir.join(id);
-        if fs::read_to_string(&dst).ok().as_deref() != Some(&shim) {
-            write_executable(&dst, &shim);
-        }
+        write_if_changed(&dir.join(id), &shim);
     }
     // Осиротевшие: наш маркер есть, а агента в настройках больше нет.
     let keep: std::collections::HashSet<&str> = agents.iter().map(|(id, _)| id.as_str()).collect();
@@ -2290,6 +2457,31 @@ pub fn status_report() -> String {
             codex_shim_dst().display()
         );
     }
+    // Kimi наравне с остальными: его хуки живут в общем config.toml и ломаются
+    // чаще прочих, а status — единственный текстовый диагностический инструмент.
+    match kimi_bin() {
+        Some(bin) => {
+            out += &format!("Kimi:     ✓ {}\n", bin.display());
+            let path = kimi_config_path();
+            match fs::read_to_string(&path) {
+                Ok(c) => {
+                    let hb = hook_dst().display().to_string();
+                    out += &format!(
+                        "  {} блок [[hooks]] актуален ({})\n",
+                        mark(kimi_hooks_present(&c, &hb)),
+                        path.display()
+                    );
+                }
+                Err(e) => out += &format!("  ⚠ {} — {e}\n", path.display()),
+            }
+            out += &format!(
+                "  {} шим kimi ({})\n",
+                mark(kimi_shim_dst().exists()),
+                kimi_shim_dst().display()
+            );
+        }
+        None => out += "Kimi:     ✗ не найден\n",
+    }
     out
 }
 
@@ -2305,13 +2497,27 @@ pub fn install_core(progress: &Progress) -> IntegrationHealth {
     // R5: мост агента (jarvis-mcp) + токен + MCP-конфиг. Fail-safe: сбой не валит
     // установку интеграции — просто агент будет недоступен. jarvis-mcp — это
     // компилируемый бинарь-сиблинг текущего exe (в dev и в бандле .app).
+    //
+    // ВНИМАНИЕ: в бандл из DMG он сейчас НЕ попадает — tauri.conf.json его не
+    // кладёт. `externalBin` тут не годится: tauri-build копирует внешние бинари
+    // из build.rs, то есть ДО того, как cargo соберёт jarvis-mcp (цель того же
+    // Cargo.toml), и обычный `cargo build`/`cargo test` на чистом дереве упал бы.
+    // Нужен шаг в CI/npm-скрипте: собрать jarvis-mcp и положить его как
+    // `src-tauri/binaries/jarvis-mcp-<triple>` ДО основной сборки. До тех пор
+    // единственное, что мы можем, — сказать вслух, что моста нет.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let src = dir.join("jarvis-mcp");
             if src.exists() {
                 let _ = fs::create_dir_all(mcp_dst().parent().unwrap());
-                if fs::copy(&src, mcp_dst()).is_ok() {
-                    let _ = fs::set_permissions(mcp_dst(), fs::Permissions::from_mode(0o755));
+                match fs::copy(&src, mcp_dst()) {
+                    Ok(_) => {
+                        let _ = fs::set_permissions(mcp_dst(), fs::Permissions::from_mode(0o755));
+                    }
+                    Err(e) => progress(Step::warn(
+                        "Хуки",
+                        format!("jarvis-mcp не скопирован ({e}) — MCP-агент будет недоступен"),
+                    )),
                 }
                 let token = ensure_agent_token();
                 let cfg = build_mcp_config(&mcp_dst().to_string_lossy(), &token);
@@ -2320,9 +2526,16 @@ pub fn install_core(progress: &Progress) -> IntegrationHealth {
                     progress(Step::warn("Хуки", format!("MCP-конфиг не записан: {err}")));
                 }
             } else {
-                eprintln!(
-                    "[jarvis:install] jarvis-mcp рядом с exe не найден — агент будет недоступен"
-                );
+                // Не eprintln: stderr бандла никто не читает, а последствие
+                // видимое — «агент не отвечает». В бандл бинарь кладёт
+                // externalBin (tauri.conf.json).
+                progress(Step::warn(
+                    "Хуки",
+                    format!(
+                        "jarvis-mcp не найден рядом с exe ({}) — MCP-агент будет недоступен",
+                        src.display()
+                    ),
+                ));
             }
         }
     }
@@ -2408,14 +2621,7 @@ fn install_tmux_transport(progress: &Progress) {
         ));
         return;
     }
-    // Запекаем актуальный JARVIS_DIR в шим: в рантайме (обычный терминал) env
-    // JARVIS_DIR не выставлен, а dev-сборка живёт в ~/.jarvis-dev. Без подмены
-    // дефолта шим искал бы tmux.conf в ~/.jarvis и падал (No such file).
-    let shim = SHIM_SRC.replacen(
-        "JARVIS_DIR=\"${JARVIS_DIR:-$HOME/.jarvis}\"",
-        &format!("JARVIS_DIR=\"${{JARVIS_DIR:-{}}}\"", jarvis_dir().display()),
-        1,
-    );
+    let shim = shim_body();
     write_executable(&shim_dst(), &shim); // ~/.jarvis/shims/claude
     if codex_found() {
         // тот же скрипт под именем codex — поведение выбирается по basename "$0".
@@ -2940,6 +3146,142 @@ mod tests {
         let old = merge_marked_block("", &kimi_hooks_block("/old/bin/jarvis-hook"));
         assert!(!kimi_hooks_present(&old, "/new/bin/jarvis-hook"), "старый путь = не актуально");
         assert!(kimi_hooks_present(&merge_marked_block("", &cur), "/new/bin/jarvis-hook"));
+    }
+
+    // 127 — это «команда не найдена», ответ шелла, а не приговор конфигу.
+    // Спутать одно с другим — значит откатить хуки у всех, у кого kimi стоит
+    // штатно в ~/.kimi-code/bin (каталог ещё не в PATH).
+    #[test]
+    fn doctor_127_is_not_an_invalid_config() {
+        assert_eq!(doctor_verdict(Some(127)), None, "не нашли — значит не спросили");
+        assert_eq!(doctor_verdict(Some(126)), None);
+        assert_eq!(doctor_verdict(None), None);
+        assert_eq!(doctor_verdict(Some(0)), Some(true));
+        assert_eq!(doctor_verdict(Some(1)), Some(false));
+    }
+
+    #[test]
+    fn kimi_rollback_only_when_we_broke_it() {
+        assert!(kimi_rollback_needed(Some(true), Some(false)), "сломали мы — откат");
+        assert!(
+            !kimi_rollback_needed(Some(false), Some(false)),
+            "doctor ругался и до нас (нет логина) — хуки не при чём"
+        );
+        assert!(!kimi_rollback_needed(Some(true), None), "не спросили — не откатываем");
+        assert!(!kimi_rollback_needed(Some(true), Some(true)));
+    }
+
+    fn kimi_tmp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("jarvis-kimi-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const KIMI_USER_CFG: &str = "default_model = \"kimi-code/k3\"\n";
+
+    // Провал бэкапа и «файла не было» — разные исходы. Спутать их значит стереть
+    // общий конфиг пользователя (провайдеры, модели, права) без единой копии.
+    #[test]
+    fn kimi_failed_backup_never_deletes_config() {
+        let dir = kimi_tmp("nobackup");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, KIMI_USER_CFG).unwrap();
+        install_kimi_hooks_at(
+            &path,
+            "/hook",
+            &|_| None,                // бэкап не удался
+            &|| Some(false),          // doctor бы забраковал — до него дойти не должно
+            &|_: Step| {},
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), KIMI_USER_CFG, "конфиг не тронут");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kimi_hooks_survive_unaskable_doctor() {
+        let dir = kimi_tmp("nodoctor");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, KIMI_USER_CFG).unwrap();
+        install_kimi_hooks_at(&path, "/hook", &backup, &|| None, &|_: Step| {});
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert!(kimi_hooks_present(&got, "/hook"), "127 не должен стирать хуки");
+        assert!(got.contains("kimi-code/k3"), "чужие строки на месте");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kimi_rollback_restores_user_config() {
+        let dir = kimi_tmp("rollback");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, KIMI_USER_CFG).unwrap();
+        let calls = std::cell::Cell::new(0);
+        install_kimi_hooks_at(
+            &path,
+            "/hook",
+            &backup,
+            &|| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 { Some(true) } else { Some(false) }
+            },
+            &|_: Step| {},
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), KIMI_USER_CFG, "вернули как было");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kimi_keeps_hooks_when_doctor_was_already_unhappy() {
+        let dir = kimi_tmp("unhappy");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, KIMI_USER_CFG).unwrap();
+        install_kimi_hooks_at(&path, "/hook", &backup, &|| Some(false), &|_: Step| {});
+        assert!(
+            kimi_hooks_present(&std::fs::read_to_string(&path).unwrap(), "/hook"),
+            "свежий Kimi без логина — не повод откатывать наши хуки"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // После автообновления на диске лежит хук от старой версии: существование
+    // файла об этом молчит, поэтому сверяем содержимое.
+    #[test]
+    fn stale_hook_content_is_rewritten() {
+        let dir = kimi_tmp("stale-hook");
+        let dst = dir.join("jarvis-hook");
+        std::fs::write(&dst, "#!/bin/sh\n# старая версия\n").unwrap();
+        assert!(write_if_changed(&dst, HOOK_SRC), "расхождение → перезапись");
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), HOOK_SRC);
+        assert_eq!(
+            std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "перезаписанный хук обязан остаться исполняемым"
+        );
+        assert!(!write_if_changed(&dst, HOOK_SRC), "совпало → не трогаем");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backups_are_pruned_to_the_last_few() {
+        let dir = kimi_tmp("prune");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, KIMI_USER_CFG).unwrap();
+        for i in 0..9 {
+            std::fs::write(dir.join(format!("config.toml.bak-2026-01-0{i}")), "x").unwrap();
+        }
+        std::fs::write(dir.join("config.toml.bak"), "чужой").unwrap();
+        prune_backups(&path, 3);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("config.toml.bak-"))
+            .collect();
+        left.sort();
+        assert_eq!(left, ["config.toml.bak-2026-01-06", "config.toml.bak-2026-01-07", "config.toml.bak-2026-01-08"]);
+        assert!(dir.join("config.toml.bak").exists(), "не наш шаблон имени — не трогаем");
+        assert!(path.exists(), "оригинал не бэкап");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -135,6 +135,17 @@
      хотя одна из них необратима; редкие действия ушли под один знак */
   .agdots{ flex:none; width:18px; text-align:center; color: var(--ink-faint); opacity:0; font-size:13px; line-height:1 }
   .agchat:hover .agdots, .agchat.on .agdots{ opacity:1 }
+  /* ручка перетаскивания: тянуть можно только за неё — иначе обычный клик
+     «открыть чат» превращается в лотерею */
+  .aggrab{ flex:none; width:14px; text-align:center; color: var(--ink-faint); opacity:0; cursor:grab; font-size:11px; line-height:1; user-select:none }
+  .agchat:hover .aggrab, .agchat.on .aggrab{ opacity:1 }
+  .agchat.drag{ opacity:.5 }
+  .agchat.over{ box-shadow: inset 0 2px 0 var(--accent-line) }
+  /* история с диска — своя группа: её порядок задаёт время, а не человек */
+  .aggroup{ display:flex; align-items:center; gap:6px; padding:7px 10px; cursor:pointer; color: var(--ink-mute); font-size:11.5px }
+  .aggroup svg{ transition: transform var(--dur) ease }
+  .aggroup.on svg{ transform: rotate(90deg) }
+  .aggroupname{ letter-spacing:.02em }
   .agdots:hover{ color: var(--ink) }
   /* Меню строки, правка имени и вопрос про удаление — слой ПОВЕРХ колонки.
      Внутри строки они жили ровно до первого события соседнего чата: список

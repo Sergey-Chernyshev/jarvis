@@ -122,6 +122,7 @@
     agentChatCreate: (name) => invoke('agent_chat_create', { name }),
     agentChatRename: (chatId, name) => invoke('agent_chat_rename', { chatId, name }),
     agentChatDelete: (chatId) => invoke('agent_chat_delete', { chatId }),
+    agentChatReorder: (chatId, toIndex) => invoke('agent_chat_reorder', { chatId, toIndex }),
     // Привязать к чату разговор, найденный на диске, и открыть его. Не «открыть
     // окно чата» — окно поднимает agent_chat_window.
     agentChatOpen: (sessionId) => invoke('agent_chat_open', { sessionId }),

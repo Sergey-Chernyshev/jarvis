@@ -361,6 +361,10 @@
     let sideOff = false; // колонка свёрнута до рейки
     let query = ''; // поиск в шапке колонки
     let menu = null; // меню строки: живёт ВНЕ списка, см. renderPop
+    let dragId = null; // чат, который тащат прямо сейчас
+    /* Группа истории открыта по умолчанию: свернуть её человек может сам, а вот
+     * пропавший с глаз разговор он уже однажды искал. Прячем по желанию, не молча. */
+    let diskOpen = true;
     let shell = null; // собранная колонка: список, слой меню, рейка
 
     /* Колонка может стоять не внутри переписки, а в ЛЕВОЙ колонке окна: во
@@ -521,23 +525,39 @@
       }
     }
 
-    /* Порядок — по последней активности: разговор, в котором только что
-     * говорили, обязан быть сверху. Отметки нет у нового чата — он и есть самый
-     * свежий, внизу списка его пришлось бы искать сразу после создания. */
-    const stamp = (c) => (c.at ? Number(c.at) : Infinity);
-    const byWhen = (a, b) => (stamp(a) === stamp(b) ? 0 : stamp(b) - stamp(a));
+    /* Порядок статичный — его задаёт человек и меняет только перетаскиванием.
+     * Раньше строки стояли по последней активности, и отвечающий чат уползал
+     * наверх: место переставало быть местом, а список — полкой, где помнишь,
+     * где что лежит. Демон отдаёт чаты в порядке массива настроек; мы его НЕ
+     * трогаем. Разговоры с диска (id: null) человек не расставлял — они идут
+     * отдельной группой ниже, там сортировка по времени осмысленна. */
     const match = (c) => {
       const q = query.trim().toLowerCase();
       if (!q) return true;
       return ((c.name || '') + ' ' + (c.preview || '')).toLowerCase().includes(q);
     };
-    const visible = () => chats.filter(match).sort(byWhen);
+    const visible = () => chats.filter(match);
+    const mine = () => visible().filter((c) => c.id);
+    const fromDisk = () => visible().filter((c) => !c.id);
 
     function renderList() {
       const list = shell.list;
       list.textContent = '';
       const rows = visible();
-      for (const c of rows) list.appendChild(chatRow(c));
+      for (const c of mine()) list.appendChild(chatRow(c));
+      /* История с диска — отдельной сворачиваемой группой ниже. В общем списке
+       * она забивала бы сетку, где человек помнит места: разговоров с диска
+       * много, и порядок в них он не задавал. */
+      const disk = fromDisk();
+      if (disk.length) {
+        const head = el('aggroup' + (diskOpen ? ' on' : ''));
+        head.appendChild(chevron());
+        head.appendChild(el('aggroupname', 'История с диска · ' + disk.length));
+        head.title = diskOpen ? 'Свернуть историю' : 'Показать разговоры, найденные на диске';
+        head.addEventListener('click', () => { diskOpen = !diskOpen; renderList(); });
+        list.appendChild(head);
+        if (diskOpen) for (const c of disk) list.appendChild(chatRow(c));
+      }
       // Пустой список без слов — не «чисто», а непонятно: ищущему скажем, что
       // не нашлось, новому — с чего начать.
       if (!rows.length && (query.trim() || !hidden)) {
@@ -593,7 +613,49 @@
       dots.title = 'Переименовать, скрыть, забыть';
       dots.addEventListener('click', (e) => { e.stopPropagation(); openMenu(c, row); });
       row.appendChild(dots);
+      /* Тянуть — только за свою зону. Если сделать перетаскиваемой всю строку,
+       * список начинает ездить от любого движения мышью с зажатой кнопкой, и
+       * обычный клик «открыть чат» становится лотереей. У разговора с диска
+       * ручки нет: его место человек не задавал. */
+      if (!disk) {
+        const grip = el('aggrab');
+        grip.textContent = '⠿';
+        grip.title = 'Перетащить — порядок задаёшь ты';
+        grip.draggable = true;
+        grip.addEventListener('click', (e) => e.stopPropagation());
+        grip.addEventListener('dragstart', (e) => {
+          dragId = c.id;
+          if (e.dataTransfer) { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', c.id); }
+          row.classList.add('drag');
+        });
+        grip.addEventListener('dragend', () => { dragId = null; row.classList.remove('drag'); renderList(); });
+        row.insertBefore(grip, main);
+        row.addEventListener('dragover', (e) => {
+          if (!dragId || dragId === c.id) return;
+          e.preventDefault();
+          if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+          row.classList.add('over');
+        });
+        row.addEventListener('dragleave', () => row.classList.remove('over'));
+        row.addEventListener('drop', (e) => {
+          e.preventDefault();
+          row.classList.remove('over');
+          const moved = dragId;
+          dragId = null;
+          if (moved && moved !== c.id) dropOn(moved, c.id);
+        });
+      }
       return row;
+    }
+
+    /* Куда упало — туда и встало: позиция цели в СПИСКЕ ЧЕЛОВЕКА (не в общем,
+     * где ниже идут разговоры с диска). Порядок пишет демон в agentChat.chats,
+     * поэтому он переживает перезапуск. */
+    async function dropOn(movedId, targetId) {
+      const order = mine().map((c) => c.id);
+      const to = order.indexOf(targetId);
+      if (to < 0) return;
+      await listCmd('переставить чат', () => api.reorder(movedId, to));
     }
 
     /* ---------- меню строки: слой поверх колонки ----------
@@ -1187,6 +1249,7 @@
           create: (name) => j.agentChatCreate(name),
           rename: (chatId, name) => j.agentChatRename(chatId, name),
           remove: (chatId) => j.agentChatDelete(chatId),
+          reorder: (chatId, toIndex) => j.agentChatReorder(chatId, toIndex),
           // привязать разговор, найденный на диске (не «открыть окно чата»:
           // окно поднимает agent_chat_window)
           open: (sessionId) => j.agentChatOpen(sessionId),
@@ -1238,6 +1301,7 @@
         create: (name) => invoke('agent_chat_create', { name }),
         rename: (chatId, name) => invoke('agent_chat_rename', { chatId, name }),
         remove: (chatId) => invoke('agent_chat_delete', { chatId }),
+        reorder: (chatId, toIndex) => invoke('agent_chat_reorder', { chatId, toIndex }),
         open: (sessionId) => invoke('agent_chat_open', { sessionId }),
         hide: (sessionId) => invoke('agent_history_hide', { sessionId }),
         unhideAll: () => invoke('agent_history_unhide_all'),

@@ -706,3 +706,72 @@ test('свежий id из потока перекрывает восстано�
   await say('второе');
   assert.equal(sent()[1].sessionId, 's-new');
 });
+
+/* Жалоба повторялась трижды: «активный чат уползает наверх». Тест обязан
+ * краснеть на прежнем поведении — сортировке списка по последней активности. */
+test('порядок строк статичный: активность во втором чате не двигает его с места', async () => {
+  const chats = (cur) => ({
+    ok: true,
+    current: cur,
+    hidden: 0,
+    chats: [
+      { id: 'c1', name: 'Первый', sessionId: 's1', current: cur === 'c1', turns: 3, at: 1000, preview: 'раз' },
+      { id: 'c2', name: 'Второй', sessionId: 's2', current: cur === 'c2', turns: 3, at: 2000, preview: 'два' },
+      { id: 'c3', name: 'Третий', sessionId: 's3', current: cur === 'c3', turns: 3, at: 3000, preview: 'три' },
+    ],
+  });
+  // Демон отдаёт чаты в порядке массива настроек — он и есть порядок полки.
+  const { doc, hit, fire } = await boot({ sessionId: null }, {
+    agent_chats_list: () => chats('c1'),
+    agent_chat_switch: ({ chatId }) => chats(chatId),
+    agent_chat_history: () => ({ ok: true, items: [], total: 0 }),
+  });
+  const names = () => [...doc.querySelectorAll('.agchat .agname')].map((n) => n.textContent);
+  assert.deepEqual(names(), ['Первый', 'Второй', 'Третий'], 'исходный порядок — как у демона');
+
+  // открыли средний
+  const rows = [...doc.querySelectorAll('.agchat')];
+  await hit(rows[1]);
+  assert.deepEqual(names(), ['Первый', 'Второй', 'Третий'], 'открытие не двигает строку');
+
+  // в нём пошёл ответ и завершился — самая свежая активность из всех
+  await fire('agent:event', { type: 'delta', text: 'пишу', chatId: 'c2' });
+  assert.deepEqual(names(), ['Первый', 'Второй', 'Третий'], 'ответ не двигает строку');
+  await fire('agent:event', { type: 'done', result: 'готово', session_id: 's2', chatId: 'c2' });
+  assert.deepEqual(names(), ['Первый', 'Второй', 'Третий'], 'завершение не двигает строку');
+});
+
+test('перетаскивание — единственный способ переставить, и оно зовёт демона', async () => {
+  const list = {
+    ok: true, current: 'c1', hidden: 0,
+    chats: [
+      { id: 'c1', name: 'Первый', sessionId: 's1', current: true, turns: 1, at: 1000 },
+      { id: 'c2', name: 'Второй', sessionId: 's2', current: false, turns: 1, at: 2000 },
+      { id: 'c3', name: 'Третий', sessionId: 's3', current: false, turns: 1, at: 3000 },
+    ],
+  };
+  const { window, doc, calls } = await boot({ sessionId: null }, {
+    agent_chats_list: () => list,
+    agent_chat_reorder: () => list,
+    agent_chat_history: () => ({ ok: true, items: [], total: 0 }),
+  });
+  const rows = [...doc.querySelectorAll('.agchat')];
+  const grips = [...doc.querySelectorAll('.aggrab')];
+  assert.equal(grips.length, 3, 'у каждого своего чата — своя зона захвата');
+
+  // тащим третий на место первого
+  const dt = { effectAllowed: '', dropEffect: '', setData() {}, getData: () => 'c3' };
+  const drag = (el, type) => {
+    const e = new window.Event(type, { bubbles: true });
+    e.dataTransfer = dt;
+    e.preventDefault = () => {};
+    el.dispatchEvent(e);
+  };
+  drag(grips[2], 'dragstart');
+  drag(rows[0], 'dragover');
+  drag(rows[0], 'drop');
+  await tick();
+
+  const moved = calls.filter(([c]) => c === 'agent_chat_reorder').map(([, a]) => a);
+  assert.deepEqual(moved, [{ chatId: 'c3', toIndex: 0 }], 'порядок записывает демон, а не только экран');
+});

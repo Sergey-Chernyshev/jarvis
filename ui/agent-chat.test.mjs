@@ -17,10 +17,14 @@ const read = (name) => readFileSync(new URL(name, HERE), 'utf8');
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 /* Окно живёт вне общего моста и зовёт Tauri напрямую — подменяем invoke/listen. */
-async function boot(state = { sessionId: null }, replies = {}) {
+async function boot(state = { sessionId: null }, replies = {}, width = 0) {
   const { window, document } = parseHTML(read('agent-chat.html'));
   const calls = [];
   const handlers = {};
+  /* Ширину окна linkedom не знает; тест называет её сам — от неё зависит,
+   * теснит колонка переписку или кроет её. Ставим ВСЕГДА: окна linkedom делят
+   * это поле, и 460 от соседнего теста утекли бы в следующий. */
+  window.innerWidth = width || 0;
   window.__TAURI__ = {
     core: {
       invoke: async (cmd, args) => {
@@ -196,17 +200,23 @@ const BOOK = (current = 'c1') => ({
   ],
 });
 
-const rowsOf = (doc) => [...doc.querySelectorAll('#chats .agchat:not(.add)')];
-// история свёрнута — раскрываем её так же, как человек
-const openHist = (doc, window) =>
-  doc.querySelector('#chats .agtoggle').dispatchEvent(new window.Event('click', { bubbles: true }));
+const rowsOf = (doc) => [...doc.querySelectorAll('#chats .agchat')];
+/* Редкие действия строки лежат под «…» — там же, куда ведёт и правый клик.
+ * Три иконки в ряд обещали три равные кнопки, хотя одна из них необратима. */
+const menuOf = async (s, row) => {
+  row.querySelector('.agdots').dispatchEvent(new s.window.Event('click', { bubbles: true }));
+  await tick();
+  return [...s.doc.querySelectorAll('#chats .agmi')];
+};
+const pick = (items, re) => items.find((i) => re.test(i.textContent));
 
 test('окно из трея показывает всю историю и переключает разговор', async () => {
-  const { window, doc, calls, hit, say, sent } = await boot({ sessionId: 's-1' }, {
+  const s = await boot({ sessionId: 's-1' }, {
     agent_chats_list: () => BOOK(),
     agent_chat_switch: () => BOOK('c2'),
   });
-  openHist(doc, window);
+  const { doc, calls, hit, say, sent } = s;
+  // колонка видна сразу: раскрывать нечего, в этом вся затея
   assert.deepEqual(rowsOf(doc).map((c) => c.querySelector('.agname').textContent), ['Джарвис', 'Выборы']);
 
   await hit(rowsOf(doc).find((c) => /Выборы/.test(c.textContent)));
@@ -218,13 +228,13 @@ test('окно из трея показывает всю историю и пе�
   assert.equal(sent()[0].sessionId, 's-2', 'сообщение уехало в соседний разговор');
 });
 
-test('окно не предлагает удалить последний чат', async () => {
-  const { window, doc } = await boot({ sessionId: null }, {
+test('окно не предлагает убрать последний чат', async () => {
+  const s = await boot({ sessionId: null }, {
     agent_chats_list: () => ({ ok: true, current: 'c1', chats: [{ id: 'c1', name: 'Джарвис', sessionId: null, current: true }] }),
   });
-  openHist(doc, window);
-  assert.equal(doc.querySelectorAll('#chats .agx').length, 0, 'крестик обещает то, что демон запретил');
-  assert.equal(doc.querySelectorAll('#chats .agchat.add').length, 1, 'завести чат нечем');
+  const items = await menuOf(s, rowsOf(s.doc)[0]);
+  assert.equal(items.filter((i) => /Скрыть/.test(i.textContent)).length, 0, 'меню обещает то, что демон запретил');
+  assert.equal(s.doc.querySelectorAll('#chats .agnew').length, 1, 'завести чат нечем');
 });
 
 test('отказ на создание чата виден и в окне из трея', async () => {
@@ -232,7 +242,7 @@ test('отказ на создание чата виден и в окне из �
     agent_chats_list: () => BOOK(),
     agent_chat_create: () => ({ ok: false, error: 'пустое имя — у чата должно быть название' }),
   });
-  await hit(doc.querySelector('#chats .agchat.add'));
+  await hit(doc.querySelector('#chats .agnew'));
   assert.match(text(doc), /должно быть название/, 'отказ съеден молча: ' + text(doc));
 });
 
@@ -249,11 +259,10 @@ const DISK_BOOK = {
 };
 
 test('отказ на открытие разговора с диска виден и в окне из трея', async () => {
-  const { window, doc, hit } = await boot({ sessionId: 's-1' }, {
+  const { doc, hit } = await boot({ sessionId: 's-1' }, {
     agent_chats_list: () => DISK_BOOK,
     agent_chat_open: () => ({ ok: false, error: 'разговора s-249 нет на диске — открыть его не получится' }),
   });
-  openHist(doc, window);
   const disk = doc.querySelector('#chats .agchat.disk');
   assert.ok(disk, 'разговора с диска нет в истории окна');
   await hit(disk);
@@ -264,14 +273,14 @@ test('отказ на открытие разговора с диска виде
 // разница — в `hidden`. Файл цел ровно тогда, когда его есть куда вернуть.
 const ONLY_CHAT = (hidden) => ({ ok: true, current: 'c1', hidden, chats: [DISK_BOOK.chats[0]] });
 
-test('крестик у разговора с диска прячет его, а транскрипт не трогает', async () => {
-  const { window, doc, calls, hit } = await boot({ sessionId: 's-1' }, {
+test('«Скрыть» у разговора с диска прячет его, а транскрипт не трогает', async () => {
+  const s = await boot({ sessionId: 's-1' }, {
     agent_chats_list: () => DISK_BOOK,
     agent_history_hide: () => ONLY_CHAT(1),
   });
-  openHist(doc, window);
-  const hide = doc.querySelector('#chats .agchat.disk .aghide');
-  assert.ok(hide, 'строку с диска нечем убрать: ' + doc.querySelector('#chats .agchat.disk').innerHTML);
+  const { doc, calls, hit } = s;
+  const hide = pick(await menuOf(s, doc.querySelector('#chats .agchat.disk')), /Скрыть/);
+  assert.ok(hide, 'строку с диска нечем убрать: ' + doc.getElementById('chats').textContent);
   await hit(hide);
 
   assert.deepEqual(calls.filter(([c]) => c === 'agent_history_hide').map(([, a]) => a), [{ sessionId: 's-249' }]);
@@ -284,13 +293,16 @@ test('крестик у разговора с диска прячет его, а
  * кнопкой: невидимую комбинацию нельзя обнаружить, а стереть 249 реплик по
  * незнанию можно ровно один раз. */
 test('перед забвением окно спрашивает и называет, что исчезнет', async () => {
-  const { window, doc, calls, hit } = await boot({ sessionId: 's-1' }, {
+  const s = await boot({ sessionId: 's-1' }, {
     agent_chats_list: () => DISK_BOOK,
     agent_history_forget: () => ONLY_CHAT(0),
   });
-  openHist(doc, window);
-  const f = doc.querySelector('#chats .agchat.disk .agforget');
-  assert.ok(f, 'удалить разговор с диска нечем: ' + doc.querySelector('#chats .agchat.disk').innerHTML);
+  const { doc, calls, hit } = s;
+  const items = await menuOf(s, doc.querySelector('#chats .agchat.disk'));
+  // три действия строки — и необратимое среди них названо словом, а не знаком
+  assert.deepEqual(items.map((i) => i.textContent), ['Открыть', 'Скрыть', 'Забыть насовсем']);
+  const f = pick(items, /Забыть насовсем/);
+  assert.ok(f.classList.contains('danger'), 'необратимое неотличимо от обратимых соседей');
   await hit(f);
 
   const ask = doc.querySelector('#chats .agask');
@@ -306,26 +318,26 @@ test('перед забвением окно спрашивает и назыв�
 });
 
 test('отказ на забвение виден в окне из трея, а строка остаётся на месте', async () => {
-  const { window, doc, hit } = await boot({ sessionId: 's-1' }, {
+  const s = await boot({ sessionId: 's-1' }, {
     agent_chats_list: () => DISK_BOOK,
     agent_history_forget: () => ({ ok: false, error: 'по разговору s-249 прямо сейчас идёт ход — дождись ответа агента' }),
   });
-  openHist(doc, window);
-  await hit(doc.querySelector('#chats .agchat.disk .agforget'));
+  const { doc, hit } = s;
+  await hit(pick(await menuOf(s, doc.querySelector('#chats .agchat.disk')), /Забыть/));
   await hit(doc.querySelector('#chats .agask .agbtn.danger'));
 
   assert.match(text(doc), /дождись ответа агента/, 'отказ съеден молча: ' + text(doc));
   assert.ok(doc.querySelector('#chats .agchat.disk'), 'разговор цел, а строка пропала');
 });
 
-test('переименование в окне из трея находится кнопкой и уезжает демону', async () => {
-  const { window, doc, calls, hit } = await boot({ sessionId: 's-1' }, {
+test('переименование в окне из трея находится в меню строки и уезжает демону', async () => {
+  const s = await boot({ sessionId: 's-1' }, {
     agent_chats_list: () => DISK_BOOK,
     agent_chat_rename: () => ({ ok: true, current: 'c1', chats: [{ ...DISK_BOOK.chats[0], name: 'Главный', named: true }] }),
   });
-  openHist(doc, window);
-  const ed = rowsOf(doc)[0].querySelector('.agedit');
-  assert.ok(ed, 'переименование негде найти: ' + rowsOf(doc)[0].innerHTML);
+  const { window, doc, calls, hit } = s;
+  const ed = pick(await menuOf(s, rowsOf(doc)[0]), /Переименовать/);
+  assert.ok(ed, 'переименование негде найти: ' + doc.getElementById('chats').textContent);
   await hit(ed);
   const inp = doc.querySelector('#chats input.agrename');
   assert.ok(inp, 'правка имени не открылась');
@@ -336,7 +348,57 @@ test('переименование в окне из трея находится 
   await tick();
   const asked = calls.filter(([c]) => c === 'agent_chat_rename').map(([, a]) => a);
   assert.deepEqual(asked, [{ chatId: 'c1', name: 'Главный' }], 'имя не уехало демону');
-  assert.equal(doc.querySelector('#chats .agcur').textContent, 'Главный');
+  assert.equal(rowsOf(doc)[0].querySelector('.agname').textContent, 'Главный');
+});
+
+/* Узкое окно — это как раз окно из трея (~460px). Постоянная колонка тут не
+ * влезает: 260 на список и 200 на переписку — две нечитаемые полосы вместо
+ * разговора. Поэтому колонка здесь выдвижная: свёрнута до рейки, разворачивается
+ * поверх переписки и уходит сразу после выбора. */
+test('в узком окне колонка свёрнута и кроет переписку, а не теснит её', async () => {
+  const s = await boot({ sessionId: 's-1' }, {
+    agent_chats_list: () => BOOK(),
+    agent_chat_switch: () => BOOK('c2'),
+  }, 460);
+  const { doc, hit } = s;
+  const side = doc.getElementById('chats');
+  assert.ok(side.classList.contains('off'), 'в узком окне колонка заняла треть экрана');
+  assert.equal(rowsOf(doc).length, 0, 'свёрнутая колонка всё ещё показывает список');
+  // но дорога к чатам осталась, и открытый чат назван в шапке
+  assert.ok(side.querySelector('.agfold'), 'развернуть колонку нечем');
+  assert.match(doc.getElementById('sub').textContent, /Джарвис/, 'непонятно, куда уйдёт следующая реплика');
+
+  await hit(side.querySelector('.agfold'));
+  assert.deepEqual(rowsOf(doc).map((c) => c.querySelector('.agname').textContent), ['Джарвис', 'Выборы']);
+  assert.ok(side.parentElement.classList.contains('narrow'), 'колонка делит окно пополам вместо того, чтобы крыть его');
+
+  // выбрали разговор — колонка своё отработала и не заслоняет переписку
+  await hit(rowsOf(doc).find((c) => /Выборы/.test(c.textContent)));
+  assert.equal(rowsOf(doc).length, 0, 'выдвижная колонка осталась поверх переписки');
+  // и тесноту в настройки не записываем: это не выбор человека
+  assert.equal(s.calls.filter(([c]) => c === 'settings_set').length, 0, 'ширину узкого окна записали как решение');
+});
+
+/* ⌘\ — тот же жест, что сворачивает боковую колонку в редакторах. */
+test('колонка сворачивается с клавиатуры и запоминается', async () => {
+  const s = await boot({ sessionId: 's-1' }, { agent_chats_list: () => BOOK() });
+  const { window, doc, calls } = s;
+  const fold = () => {
+    const e = new window.Event('keydown', { bubbles: true });
+    e.key = '\\';
+    e.metaKey = true;
+    e.preventDefault = () => {};
+    doc.dispatchEvent(e);
+  };
+  fold();
+  await tick();
+  assert.equal(rowsOf(doc).length, 0, '⌘\\ не свернул колонку');
+  const saved = calls.filter(([c]) => c === 'settings_set').map(([, a]) => a.patch);
+  assert.ok(saved.some((p) => p.agentSideOff === true), 'свёрнутость не уехала в настройки: ' + JSON.stringify(saved));
+
+  fold();
+  await tick();
+  assert.equal(rowsOf(doc).length, 2, '⌘\\ не вернул колонку');
 });
 
 /* Карточка подтверждения — про права: человек решает, случится ли побочный
@@ -533,7 +595,6 @@ test('переключиться можно, пока агент отвечае�
   await say('посмотри округ');
   assert.equal(doc.getElementById('send').disabled, true, 'ожидание ответа не показано');
 
-  openHist(doc, window);
   await goTo(s, /Выборы/);
   const msgs = doc.getElementById('msgs');
   assert.doesNotMatch(msgs.textContent, /чат переключится/, 'переключение во время ответа всё ещё запрещено');
@@ -549,13 +610,11 @@ test('ответ доезжает и в закрытый чат: вернулс�
   const s = await bootTwo();
   const { doc, window, say, emit } = s;
   await say('посмотри округ');
-  openHist(doc, window);
   await goTo(s, /Выборы/);
 
   await emit({ type: 'delta', text: 'по округу тихо', chatId: 'c1' });
   await emit({ type: 'done', result: '', session_id: 's-1', chatId: 'c1' });
 
-  openHist(doc, window);
   await goTo(s, /Джарвис/);
   const msgs = doc.getElementById('msgs');
   assert.match(msgs.textContent, /по округу тихо/, 'ответ закрытого чата потерян — вернулись к пустоте');
@@ -567,7 +626,6 @@ test('два ответа в полёте не смешиваются даже �
   const s = await bootTwo();
   const { doc, window, say, emit } = s;
   await say('первый вопрос');
-  openHist(doc, window);
   await goTo(s, /Выборы/);
   await say('второй вопрос');
 
@@ -577,27 +635,24 @@ test('два ответа в полёте не смешиваются даже �
   const bubbles = () => [...doc.querySelectorAll('#msgs .msg.assistant .bubble')].map((b) => b.textContent);
   assert.deepEqual(bubbles(), ['два-два'], 'в ленте второго чата чужие куски');
 
-  openHist(doc, window);
   await goTo(s, /Джарвис/);
   assert.deepEqual(bubbles(), ['один-один'], 'ответ первого чата собрался не из своих дельт');
 });
 
-test('занятость видна по чату: и в строке истории, и в свёрнутой шапке', async () => {
+test('занятость видна в строке чата, из которой уже ушли', async () => {
   const s = await bootTwo();
-  const { doc, window, say, emit } = s;
+  const { doc, say, emit } = s;
   await say('посмотри округ');
-  openHist(doc, window);
   const busy = () => [...doc.querySelectorAll('#chats .agchat.busy .agname')].map((n) => n.textContent);
-  assert.deepEqual(busy(), ['Джарвис'], 'занятость чата не читается в истории');
+  assert.deepEqual(busy(), ['Джарвис'], 'занятость чата не читается в списке');
 
-  // ушли во второй — про первый напоминает шапка: история-то свёрнута
+  // ушли во второй — а первый всё ещё помечен: колонка на виду, и терять его
+  // из виду больше не за что
   await goTo(s, /Выборы/);
-  assert.match(doc.querySelector('#chats .agbusy').textContent, /Джарвис/, 'про отвечающий чат забыли, едва ушли из него');
+  assert.deepEqual(busy(), ['Джарвис'], 'про отвечающий чат забыли, едва ушли из него');
   assert.equal(doc.getElementById('sub').textContent, 'готов', '«думает…» осталось от соседнего разговора');
 
   await emit({ type: 'done', result: 'готово', session_id: 's-1', chatId: 'c1' });
-  assert.equal(doc.querySelectorAll('#chats .agbusy').length, 0, 'чат закончил, а помечен занятым');
-  openHist(doc, window);
   assert.deepEqual(busy(), [], 'занятость висит на закончившем разговоре');
 });
 
@@ -605,7 +660,6 @@ test('пока один чат отвечает, во второй можно п
   const s = await bootTwo();
   const { doc, window, say, sent } = s;
   await say('посмотри округ');
-  openHist(doc, window);
   await goTo(s, /Выборы/);
   assert.equal(doc.getElementById('send').disabled, false, 'свободный чат заперт занятостью соседа');
 
@@ -636,10 +690,10 @@ test('чат, названный ядром в ответе на отправк�
  * ним уже не будет. Уйти из него при этом можно — это разные вещи. */
 test('убрать отвечающий чат не дают, и говорят почему', async () => {
   const s = await bootTwo();
-  const { doc, window, say, calls } = s;
+  const { doc, say, calls } = s;
   await say('посмотри округ');
-  openHist(doc, window);
-  await s.hit(rowsOf(doc).find((c) => /Джарвис/.test(c.textContent)).querySelector('.agx'));
+  const row = rowsOf(doc).find((c) => /Джарвис/.test(c.textContent));
+  await s.hit(pick(await menuOf(s, row), /Скрыть/));
   assert.equal(calls.filter(([c]) => c === 'agent_chat_delete').length, 0, 'чат унесли из-под живого ответа');
   assert.match(text(doc), /когда закончит/, 'отказ съеден молча: ' + text(doc));
 });

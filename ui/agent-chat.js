@@ -113,14 +113,13 @@
     return svg;
   };
 
-  /* Насколько разговор большой и когда он был — одной строкой. «Пока ни одной
-   * реплики» честнее прочерка: у свежего чата нити ещё нет, и это не поломка. */
-  const metaOf = (c) => {
+  /* Насколько разговор большой. «Пока ни одной реплики» честнее прочерка: у
+   * свежего чата нити ещё нет, и это не поломка. Время стоит отдельно — у имени,
+   * как в любом списке чатов. */
+  const sizeOf = (c) => {
     const n = Number(c.turns) || 0;
     if (!n) return 'пока ни одной реплики';
-    const size = n + ' ' + window.JarvisMarkdown.plural(n, 'реплика', 'реплики', 'реплик');
-    const when = whenLabel(c.at);
-    return when ? when + ' · ' + size : size;
+    return n + ' ' + window.JarvisMarkdown.plural(n, 'реплика', 'реплики', 'реплик');
   };
 
   /** Смонтировать чат на разметку `els` поверх команд `api`. */
@@ -131,7 +130,6 @@
     let chats = []; // история разговоров: чаты из настроек плюс найденные на диске
     let hidden = 0; // спрятанных разговоров, чьи файлы ещё на диске
     let chatId = null; // открытый здесь чат — он же адресат следующей реплики
-    let histOpen = false; // история свёрнута: место у переписки дороже места у списка
 
     /* Разговор целиком: его лента, нить, занятость и стриминговый пузырь. Всё
      * это раньше было по одной переменной на окно — отсюда и запрет уходить из
@@ -290,7 +288,11 @@
       const t = here();
       sendBtn.disabled = t.busy;
       sendBtn.textContent = t.busy ? '…' : '⏎';
-      sub.textContent = t.busy ? 'думает…' : 'готов';
+      /* Со свёрнутой колонкой имя открытого чата больше негде прочесть, а знать,
+       * куда уйдёт следующая реплика, обязательно. Развёрнутая колонка говорит
+       * это подсветкой строки — тогда в шапке остаётся только состояние. */
+      const cur = sideOff && chats.find((c) => c.id && c.id === chatId);
+      sub.textContent = (cur ? cut(cur.name, 22) + ' · ' : '') + (t.busy ? 'думает…' : 'готов');
     }
     function setBusy(t, v) {
       t.busy = v;
@@ -339,72 +341,195 @@
       return chats.find((c) => c.id === chatId) || null;
     }
 
-    /* История, а не полоска ярлыков. Полоска чипов держала два-три безымянных
-     * чата, но по «Чат 5» и «Чат 6» разговор на 249 реплик не найти: у строки
-     * обязаны быть заголовок, время и размер. Колонку при этом не держим
-     * раскрытой — вкладку открывают ради переписки, и четыре строки (а их
-     * станет больше) отняли бы у неё треть окна. Отсюда раскрытие кнопкой и
-     * сворачивание сразу после выбора. */
-    const closeHist = () => { histOpen = false; renderChats(); };
+    /* Колонка, а не выпадающая шапка. «История · N» была меню: чтобы попасть в
+     * соседний разговор, его надо было сперва вспомнить, а потом раскрыть. Так
+     * не устроен ни один мессенджер, и правильно — чаты видны всегда, переход в
+     * один клик. Прежний довод («треть окна отнята у переписки») закрыт не
+     * выпадашкой, а границей: колонку тянут за край и сворачивают целиком (⌘\),
+     * а ширина и свёрнутость лежат в settings.json рядом с темой — своего
+     * механизма памяти тут не заводим. */
+    const SIDE_MIN = 180;
+    const SIDE_MAX = 420;
+    /* Ниже этого колонка не теснит переписку, а кроет её и уходит после выбора:
+     * в окне из трея (~460px) 260 колонки и 200 переписки — две нечитаемые
+     * полосы вместо одного разговора. */
+    const SIDE_NARROW = 560;
+    let sideW = 260; // ширина колонки
+    let sideOff = false; // колонка свёрнута до рейки
+    let query = ''; // поиск в шапке колонки
+    let menu = null; // меню строки: живёт ВНЕ списка, см. renderPop
+    let shell = null; // собранная колонка: список, слой меню, рейка
+
+    const num = (v) => (Number.isFinite(v) ? v : 0);
+    const clampW = (n) => Math.max(SIDE_MIN, Math.min(SIDE_MAX, Math.round(num(n))));
+    /* Ширину окна знает не всякая среда (скрытая вкладка, тест). «Не знаю»
+     * значит «широко»: молча свернуть колонку хуже, чем показать её. */
+    const narrow = () => {
+      const host = chatsRow && chatsRow.parentElement;
+      const w = num(host && host.clientWidth) || num(window.innerWidth);
+      return w > 0 && w < SIDE_NARROW;
+    };
+    const hotLabel = () => (window.jarvisKeys ? window.jarvisKeys.k('\\') : '⌘\\');
+
+    /* Ширину и свёрнутость помнит settings.json — тем же путём, что тему (см.
+     * theme.js). В узком окне колонка выдвижная, и её состояние не выбор
+     * человека, а теснота: такое не сохраняем. */
+    const bag = () => window.jarvis || {};
+    const saveSide = () => {
+      if (narrow()) return;
+      try { bag().setSettings?.({ agentSideWidth: Math.round(sideW), agentSideOff: sideOff }); }
+      catch { /* окно без моста — колонка доживёт до перезапуска */ }
+    };
+    function toggleSide() {
+      sideOff = !sideOff;
+      saveSide();
+      renderChats();
+      syncHead(); // со свёрнутой колонкой имя открытого чата уходит в шапку
+    }
+    // Выбрали чат — выдвижная колонка своё отработала и не заслоняет переписку.
+    const afterPick = () => { if (narrow() && !sideOff) { sideOff = true; renderChats(); syncHead(); } };
+
+    (async () => {
+      let s = null;
+      try { s = await bag().getSettings?.(); } catch { /* настроек нет — заводские */ }
+      if (s && Number(s.agentSideWidth)) sideW = clampW(s.agentSideWidth);
+      if (s && s.agentSideOff != null) sideOff = !!s.agentSideOff;
+      if (narrow()) sideOff = true;
+      shell = null; // числа приехали после первой отрисовки — пересобираем колонку
+      renderChats();
+      syncHead();
+    })();
+    // Окно тянут мышью, и «узко» меняется на лету: колонка обязана переехать
+    // вместе с ним, а не остаться полосой на пол-экрана.
+    window.addEventListener('resize', () => { shell = null; renderChats(); });
 
     function renderChats() {
       if (!chatsRow) return;
+      if (!shell || shell.off !== sideOff) buildSide();
+      if (sideOff) { renderRail(); return; }
+      chatsRow.style.width = sideW + 'px';
+      renderList();
+      // Строка, на которую показывало меню, могла уйти из списка — тогда и
+      // показывать его не на что.
+      if (menu && !chats.some((c) => keyOf(c) === menu.key)) closeMenu();
+    }
+
+    function buildSide() {
+      // Колонку пересобирают редко (свернули, окно поехало) — и открытое меню
+      // после этого показывать уже не на что.
+      menu = null;
       chatsRow.textContent = '';
-      const head = el('aghead');
-      const toggle = el('agtoggle' + (histOpen ? ' on' : ''));
-      // Скрытое называем и в свёрнутой шапке: колонку раскрывают не каждый день,
-      // а прятать в тишину — тот же способ потерять разговор, только своими руками.
-      const label = chats.length ? 'История · ' + chats.length : 'История пуста';
-      toggle.appendChild(el('agtlabel', hidden ? label + ' · скрыто ' + hidden : label));
-      toggle.appendChild(chevron()); // тот же шеврон, что у свёрнутого Insight
-      toggle.title = histOpen ? 'Свернуть историю' : 'Все разговоры: открыть, переименовать, убрать';
-      toggle.addEventListener('click', () => { histOpen = !histOpen; renderChats(); });
-      head.appendChild(toggle);
-      // Открытый чат виден и со свёрнутой историей: без него не понять, куда
-      // уйдёт следующая реплика.
-      const cur = chats.find((c) => c.id && c.id === chatId);
-      if (cur) {
-        const n = el('agcur' + (busyOf(cur.id) ? ' busy' : ''), cur.name);
-        n.title = 'Открыт: ' + cur.name;
-        head.appendChild(n);
+      chatsRow.className = 'agside' + (sideOff ? ' off' : '');
+      chatsRow.style.width = '';
+      const wrap = chatsRow.parentElement;
+      if (wrap) wrap.classList.toggle('narrow', narrow());
+      if (sideOff) {
+        const rail = el('agrail');
+        chatsRow.appendChild(rail);
+        shell = { off: true, rail };
+        return;
       }
-      /* Ушёл в соседний разговор — и потерял из виду, что первый ещё пишет.
-       * История свёрнута, поэтому занятых соседей называем прямо в шапке. */
-      const work = chats.filter((c) => c.id && c.id !== chatId && busyOf(c.id));
-      if (work.length) {
-        const b = el('agbusy', work.length === 1 ? '«' + cut(work[0].name, 22) + '» отвечает' : 'ещё ' + work.length + ' отвечают');
-        b.title = 'Отвечают прямо сейчас: ' + work.map((c) => c.name).join(', ');
-        head.appendChild(b);
-      }
-      head.appendChild(el('spacer'));
-      const add = el('agchat add', '+');
+      const top = el('agtop');
+      const add = el('agnew', '+  Новый чат');
       add.title = 'Новый чат';
       add.addEventListener('click', () => createChat());
-      head.appendChild(add);
-      chatsRow.appendChild(head);
+      top.appendChild(add);
+      const fold = el('agfold');
+      fold.title = 'Свернуть список чатов · ' + hotLabel();
+      fold.appendChild(chevron()); // тот же шеврон, что у свёрнутого Insight
+      fold.addEventListener('click', toggleSide);
+      top.appendChild(fold);
+      chatsRow.appendChild(top);
 
-      if (!histOpen) return;
+      /* Поиск в шапке колонки, а не отдельным экраном: двадцать разговоров
+       * листают глазами, а сотню — уже нет. Поле переживает перерисовку списка:
+       * оно вне .aglist, иначе набранное слово стирал бы чужой ответ. */
+      const find = document.createElement('input');
+      find.className = 'agfind';
+      find.placeholder = 'Поиск по чатам';
+      find.value = query;
+      find.addEventListener('input', () => { query = find.value; renderList(); });
+      find.addEventListener('keydown', (e) => {
+        e.stopPropagation(); // хоткеи панели не должны мешать печатать
+        if (e.key === 'Escape') { find.value = ''; query = ''; renderList(); }
+      });
+      chatsRow.appendChild(find);
+
       const list = el('aglist');
-      for (const c of chats) list.appendChild(chatRow(c));
-      // Ни одного разговора — приглашение, а не пустая полоска.
-      if (!chats.length && !hidden) list.appendChild(el('agempty', 'Разговоров пока нет — напиши первую реплику, и чат появится здесь.'));
+      chatsRow.appendChild(list);
+      const pop = el('agpop');
+      pop.hidden = true;
+      chatsRow.appendChild(pop);
+      const grip = el('aggrip');
+      grip.title = 'Потянуть — ширина колонки';
+      grip.addEventListener('mousedown', startDrag);
+      chatsRow.appendChild(grip);
+      shell = { off: false, list, pop, find };
+    }
+
+    /* Свёрнутая колонка — рейка с двумя знаками. В ноль не сворачиваем: вместе
+     * со списком исчезла бы и дорога обратно, а искать её человеку негде. */
+    function renderRail() {
+      const rail = shell.rail;
+      rail.textContent = '';
+      const open = el('agfold');
+      open.title = 'Показать чаты · ' + hotLabel();
+      open.appendChild(chevron());
+      open.addEventListener('click', toggleSide);
+      rail.appendChild(open);
+      const add = el('agnew rail', '+');
+      add.title = 'Новый чат';
+      add.addEventListener('click', () => createChat());
+      rail.appendChild(add);
+      /* Занятость соседа видна и со свёрнутой колонкой: иначе, уйдя во второй
+       * разговор, о первом забывают ровно до того, как он допишет. */
+      const work = chats.filter((c) => c.id && c.id !== chatId && busyOf(c.id));
+      if (work.length) {
+        const b = el('agbusy');
+        b.title = 'Отвечают прямо сейчас: ' + work.map((c) => c.name).join(', ');
+        rail.appendChild(b);
+      }
+    }
+
+    /* Порядок — по последней активности: разговор, в котором только что
+     * говорили, обязан быть сверху. Отметки нет у нового чата — он и есть самый
+     * свежий, внизу списка его пришлось бы искать сразу после создания. */
+    const stamp = (c) => (c.at ? Number(c.at) : Infinity);
+    const byWhen = (a, b) => (stamp(a) === stamp(b) ? 0 : stamp(b) - stamp(a));
+    const match = (c) => {
+      const q = query.trim().toLowerCase();
+      if (!q) return true;
+      return ((c.name || '') + ' ' + (c.preview || '')).toLowerCase().includes(q);
+    };
+    const visible = () => chats.filter(match).sort(byWhen);
+
+    function renderList() {
+      const list = shell.list;
+      list.textContent = '';
+      const rows = visible();
+      for (const c of rows) list.appendChild(chatRow(c));
+      // Пустой список без слов — не «чисто», а непонятно: ищущему скажем, что
+      // не нашлось, новому — с чего начать.
+      if (!rows.length && (query.trim() || !hidden)) {
+        list.appendChild(el('agempty', query.trim()
+          ? 'Ничего не нашлось. Попробуй другое слово или очисти поиск.'
+          : 'Разговоров пока нет — напиши первую реплику, и чат появится здесь.'));
+      }
       /* Скрытие обратимо только пока о нём помнят: без этой строки спрятанный
        * разговор ничем не отличается от потерянного, а искать его негде. */
-      if (hidden) {
+      if (hidden && !query.trim()) {
         const back = el('aghidden', 'Скрыто ' + hidden + ' · вернуть');
         back.title = 'Вернуть скрытые разговоры в список — файлы всё это время на диске';
         back.addEventListener('click', unhideAll);
         list.appendChild(back);
       }
-      chatsRow.appendChild(list);
     }
 
-    /* Строка истории: заголовок от демона (своего фолбэка не заводим — имя
-     * человека, первую реплику и «Новый чат» он уже сложил), время и размер.
-     * Разговор с диска отличаем формой — бейджем, а не второй краской: чата за
-     * ним ещё нет, переименовывать нечего, а клик его ПРИВЯЗЫВАЕТ
-     * (agent_chat_open), а не переключает. Кнопки у него свои: чат убирают
-     * крестиком, а строку с диска — прячут, и это разные вещи. */
+    /* Строка списка: имя, время, превью последней реплики и размер. Заголовок
+     * берём у демона (имя человека, первую реплику и «Новый чат» он уже сложил).
+     * Разговор с диска — та же строка с бейджем, а не отдельный раздел: чата за
+     * ним ещё нет, поэтому клик его ПРИВЯЗЫВАЕТ (agent_chat_open), а не
+     * переключает. Редкие действия — под «…», а не тремя иконками в ряд. */
     function chatRow(c) {
       const disk = !c.id;
       const open = !!c.id && c.id === chatId;
@@ -416,60 +541,95 @@
       const line = el('agline');
       line.appendChild(el('agname', c.name));
       if (disk) line.appendChild(el('agdisk', 'с диска'));
+      line.appendChild(el('spacer'));
+      const when = whenLabel(c.at);
+      if (when) line.appendChild(el('agtime', when));
       main.appendChild(line);
-      const metaLine = el('agsub');
-      metaLine.appendChild(el('agmeta', metaOf(c)));
-      main.appendChild(metaLine);
+      const under = el('agsub');
       // Превью — только когда оно добавляет: у безымянного чата заголовок и есть
       // первая реплика, и вторая её копия под ней — просто шум.
-      if (c.preview && c.preview !== c.name) main.appendChild(el('agprev', c.preview));
+      under.appendChild(el('agprev', c.preview && c.preview !== c.name ? c.preview : ''));
+      under.appendChild(el('agmeta', sizeOf(c)));
+      main.appendChild(under);
       row.appendChild(main);
       row.title = disk
         ? 'Разговор с диска — открыть и завести под него чат'
         : (work ? 'Отвечает прямо сейчас · ' : '') + (open ? 'Открыт' : 'Открыть «' + c.name + '»');
-      row.addEventListener('click', () => (disk ? openThread(c) : open ? closeHist() : switchTo(c.id)));
-      if (disk) {
-        /* Пока у строки с диска не было кнопок вовсе, убрать её было нечем —
-         * ровно с этого вопрос и начался. Крестик здесь ПРЯЧЕТ: файл остаётся,
-         * возврат — одним нажатием. У чата тот же знак значит «удалить чат»,
-         * поэтому подписи разные, а класс не общий: перепутать нечем. */
-        const h = el('aghide', '×');
-        h.title = 'Убрать из списка — разговор останется на диске';
-        h.addEventListener('click', (e) => { e.stopPropagation(); hideThread(c); });
-        /* Забвение необратимо, поэтому оно и не стоит рядом с крестиком: слово в
-         * строке слева, крестик — у правого края. Промахнуться из одного в
-         * другое нечем, а название действия читается, не наведя мышь: скрытым
-         * его знал бы только тот, кто это писал. */
-        const f = el('agforget', 'забыть насовсем');
-        f.title = 'Удалить транскрипт с диска — спросим перед удалением';
-        f.addEventListener('click', (e) => { e.stopPropagation(); askForget(c, row); });
-        metaLine.appendChild(f);
-        row.appendChild(h);
-        return row;
-      }
-
-      // Переименование обязано НАХОДИТЬСЯ: клик по открытому чипу знал только
-      // тот, кто это писал. Кнопка рядом с именем — на виду.
-      const ed = el('agedit', '✎');
-      ed.title = 'Переименовать';
-      ed.addEventListener('click', (e) => { e.stopPropagation(); startRename(c, row); });
-      row.appendChild(ed);
-      // Крестик только когда есть куда уйти: последний чат демон удалить не
-      // даст, и кнопка обещала бы действие, которое заведомо откажут.
-      if (chats.filter((x) => x.id).length > 1) {
-        const x = el('agx', '×');
-        x.title = 'Убрать чат из списка — разговор останется в истории';
-        x.addEventListener('click', (e) => { e.stopPropagation(); removeChat(c); });
-        row.appendChild(x);
-      }
+      row.addEventListener('click', () => (disk ? openThread(c) : open ? afterPick() : switchTo(c.id)));
+      // Правый клик — там же, где он и ожидается; «…» — для тех, кто мышью не
+      // правой. Оба ведут в одно меню: два разных набора действий разъехались бы.
+      row.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); openMenu(c, row); });
+      const dots = el('agdots', '···');
+      dots.title = 'Переименовать, скрыть, забыть';
+      dots.addEventListener('click', (e) => { e.stopPropagation(); openMenu(c, row); });
+      row.appendChild(dots);
       return row;
     }
 
-    /* Правка имени на месте строки — так же, как имя чата в списке сессий.
-     * Отдельного диалога тут не нужно: имя короткое, а место у него одно. */
-    function startRename(c, row) {
-      const box = row.parentElement;
-      if (!box) return;
+    /* ---------- меню строки: слой поверх колонки ----------
+     *
+     * Меню, правка имени и вопрос про удаление живут НЕ в строке. Список
+     * перерисовывается на каждом событии потока — и открытый вопрос про
+     * необратимое удаление сносило ответом соседнего чата прямо из-под руки.
+     * Свой слой перерисовку списка переживает: renderList его не трогает. */
+    const keyOf = (c) => (c.id ? 'c:' + c.id : 's:' + c.sessionId);
+    const anchorTop = (row) => {
+      const list = shell && shell.list;
+      if (!row || !list) return 0;
+      return Math.max(0, num(list.offsetTop) + num(row.offsetTop) - num(list.scrollTop));
+    };
+    function openMenu(c, row) {
+      menu = { key: keyOf(c), c, mode: 'menu', top: anchorTop(row), sent: false };
+      renderPop();
+    }
+    const closeMenu = () => { menu = null; renderPop(); };
+    function renderPop() {
+      const pop = shell && shell.pop;
+      if (!pop) return;
+      pop.textContent = '';
+      pop.hidden = !menu;
+      if (!menu) return;
+      pop.style.top = menu.top + 'px';
+      pop.appendChild(menu.mode === 'ask' ? askBox(menu.c) : menu.mode === 'rename' ? renameBox(menu.c) : menuBox(menu.c));
+      const inp = pop.querySelector('input');
+      if (inp) { inp.focus?.(); inp.select?.(); }
+    }
+
+    function menuBox(c) {
+      const box = el('agmenu');
+      const item = (label, title, run, cls) => {
+        const it = el('agmi' + (cls ? ' ' + cls : ''), label);
+        it.title = title;
+        it.addEventListener('click', (e) => { e.stopPropagation(); run(); });
+        box.appendChild(it);
+      };
+      // Последний чат демон не отдаст — ни убрать, ни стереть за ним файл: оба
+      // пункта обещали бы заведомый отказ.
+      const spare = chats.filter((x) => x.id).length > 1;
+      if (c.id) {
+        item('Переименовать', 'Дать чату своё имя', () => { menu.mode = 'rename'; renderPop(); });
+        if (spare) {
+          item('Скрыть', 'Убрать чат из списка — разговор останется на диске и вернётся строкой «с диска»',
+            () => { closeMenu(); removeChat(c); });
+        }
+      } else {
+        item('Открыть', 'Завести чат под этот разговор с диска', () => { closeMenu(); openThread(c); });
+        item('Скрыть', 'Убрать из списка — разговор останется на диске', () => { closeMenu(); hideThread(c); });
+      }
+      /* Забвение необратимо — и отличается ровно этим: своей краской и отбивкой,
+       * а не третьей кнопкой в ряду. Серым по серому, как метаданные, оно и не
+       * читалось действием. Спрашиваем отдельно, следующим шагом. */
+      if (c.sessionId && (spare || !c.id)) {
+        item('Забыть насовсем', 'Стереть транскрипт с диска — спросим перед удалением',
+          () => { menu.mode = 'ask'; renderPop(); }, 'danger');
+      }
+      return box;
+    }
+
+    /* Правка имени на месте — так же коротко, как имя чата в списке сессий:
+     * имя короткое, отдельного диалога ему не нужно. */
+    function renameBox(c) {
+      const box = el('agmenu');
       const inp = document.createElement('input');
       inp.className = 'agrename';
       // Автозаголовок — не имя, а первая реплика: править её в поле бессмысленно
@@ -482,13 +642,70 @@
       const stop = () => { if (done) return true; done = true; return false; };
       inp.addEventListener('keydown', (e) => {
         e.stopPropagation(); // хоткеи панели не должны мешать печатать
-        if (e.key === 'Enter') { e.preventDefault(); if (!stop()) commitRename(c.id, inp.value); }
-        else if (e.key === 'Escape') { e.preventDefault(); if (!stop()) renderChats(); }
+        if (e.key === 'Enter') { e.preventDefault(); if (!stop()) { closeMenu(); commitRename(c.id, inp.value); } }
+        else if (e.key === 'Escape') { e.preventDefault(); if (!stop()) closeMenu(); }
       });
-      inp.addEventListener('blur', () => { if (!stop()) renderChats(); });
-      box.replaceChild(inp, row);
-      inp.focus();
-      inp.select?.();
+      inp.addEventListener('blur', () => { if (!stop()) closeMenu(); });
+      box.appendChild(inp);
+      return box;
+    }
+
+    /* Единственное необратимое действие окна — и потому единственное, которое
+     * спрашивает. Спрашивает вслух, кнопкой: невидимый модификатор (alt-клик)
+     * нельзя обнаружить, а необратимое не должно зависеть от того, знал ли
+     * человек про комбинацию. Вопрос называет, ЧТО исчезнет: заголовок и размер
+     * разговора — по ним его и узнают в списке. */
+    function askBox(c) {
+      const n = Number(c.turns) || 0;
+      const size = n
+        ? ' В нём ' + n + ' ' + window.JarvisMarkdown.plural(n, 'реплика', 'реплики', 'реплик') + ', и вернуть их будет нечем.'
+        : ' Вернуть его будет нечем.';
+      const ask = el('agask');
+      ask.appendChild(el('agasktext',
+        'Удалить разговор «' + cut(c.name, 60) + '» с диска?' + size + (c.id ? ' Чат исчезнет вместе с ним.' : '')));
+      const btns = el('agaskbtns');
+      const yes = el('agbtn danger', 'Удалить');
+      const no = el('agbtn', 'Отмена');
+      // Второе нажатие по уже отвеченному вопросу вернулось бы отказом «нет на
+      // диске» — отказом за то, что человек всё сделал правильно.
+      yes.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!menu || menu.sent) return;
+        menu.sent = true;
+        const target = menu.c;
+        closeMenu();
+        forgetThread(target);
+      });
+      no.addEventListener('click', (e) => { e.stopPropagation(); closeMenu(); });
+      btns.append(yes, no);
+      ask.appendChild(btns);
+      return ask;
+    }
+
+    // Клик мимо и Escape закрывают меню: открытый слой поверх списка не должен
+    // переживать то, ради чего в список и пришли.
+    document.addEventListener('click', () => { if (menu) closeMenu(); });
+    document.addEventListener('keydown', (e) => {
+      if (!chatsRow || chatsRow.closest('[hidden]')) return; // вкладка не на экране
+      if (e.key === 'Escape' && menu) { closeMenu(); return; }
+      // ⌘\ — тот же жест, что сворачивает боковую колонку в редакторах.
+      if (e.key === '\\' && (e.metaKey || e.ctrlKey) && !e.altKey) { e.preventDefault(); toggleSide(); }
+    });
+
+    /* Граница колонки тянется мышью — этим и закрыт довод «список отнял треть
+     * окна»: место делит человек, а не автор. */
+    function startDrag(e) {
+      const x0 = num(e.clientX);
+      const w0 = sideW;
+      const move = (ev) => { sideW = clampW(w0 + (num(ev.clientX) - x0)); chatsRow.style.width = sideW + 'px'; };
+      const up = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        saveSide();
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+      e.preventDefault?.();
     }
 
     const commitRename = (id, name) =>
@@ -497,7 +714,7 @@
     async function createChat(name) {
       const cur = await listCmd('создать чат', () => api.create(name));
       if (!cur) return;
-      closeHist();
+      afterPick();
       await loadHistory(cur.id); // новый чат пуст — но пустоту тоже надо показать
       input.focus();
     }
@@ -519,7 +736,7 @@
     async function switchTo(id) {
       const cur = await listCmd('переключить чат', () => api.switch(id));
       if (!cur) return;
-      closeHist();
+      afterPick();
       await loadHistory(cur.id);
       input.focus();
     }
@@ -536,49 +753,31 @@
       }
       const cur = await listCmd('открыть разговор', () => api.open(c.sessionId));
       if (!cur) return;
-      closeHist();
+      afterPick();
       await loadHistory(cur.id);
       input.focus();
     }
 
-    /* Спрятать и вернуть — обратимая пара, файл диска обе не трогают. Историю
-     * не сворачиваем: прячут обычно подряд несколько строк, и уезжающая из-под
-     * рук колонка тут только мешала бы. */
+    /* Спрятать и вернуть — обратимая пара, файл диска обе не трогают. */
     const hideThread = (c) => listCmd('убрать разговор из истории', () => api.hide(c.sessionId));
     const unhideAll = () => listCmd('вернуть скрытые разговоры', () => api.unhideAll());
 
-    /* Единственное необратимое действие окна — и потому единственное, которое
-     * спрашивает. Спрашивает вслух, кнопкой: невидимый модификатор (alt-клик)
-     * нельзя обнаружить, а необратимое не должно зависеть от того, знал ли
-     * человек про комбинацию. Вопрос называет, ЧТО исчезнет: заголовок и размер
-     * разговора — по ним его и узнают в списке. */
-    function askForget(c, row) {
-      const box = row.parentElement;
-      if (!box) return;
-      const n = Number(c.turns) || 0;
-      const size = n
-        ? ' В нём ' + n + ' ' + window.JarvisMarkdown.plural(n, 'реплика', 'реплики', 'реплик') + ', и вернуть их будет нечем.'
-        : ' Вернуть его будет нечем.';
-      const ask = el('agask');
-      ask.appendChild(el('agasktext', 'Удалить разговор «' + cut(c.name, 60) + '» с диска?' + size));
-      const btns = el('agaskbtns');
-      const yes = el('agbtn danger', 'Удалить');
-      const no = el('agbtn', 'Отмена');
-      // Второе нажатие по уже отвеченному вопросу вернулось бы отказом «нет на
-      // диске» — отказом за то, что человек всё сделал правильно.
-      let sent = false;
-      yes.addEventListener('click', (e) => { e.stopPropagation(); if (!sent) { sent = true; forgetThread(c); } });
-      no.addEventListener('click', (e) => { e.stopPropagation(); renderChats(); });
-      btns.append(yes, no);
-      ask.appendChild(btns);
-      box.replaceChild(ask, row);
-    }
-
     /* Отказы ядра тут не ошибки, а объяснение порядка: «привязан к чату» и «идёт
-     * ход» говорят, что сделать сначала. Их печатает listCmd; строку возвращаем
-     * на место — файл цел, и вопрос ещё может повториться. */
+     * ход» говорят, что сделать сначала. Их печатает listCmd; список рисуем
+     * заново — файл цел, и строка обязана вернуться на место.
+     *
+     * За чатом файл не стереть: ядро сперва требует убрать сам чат. Оба шага
+     * делаем сами — согласились именно на это, и вопрос так и был задан. */
     async function forgetThread(c) {
+      if (c.id) {
+        if (busyOf(c.id)) {
+          addNote(here(), '«' + c.name + '» сейчас отвечает — удалить его выйдет, когда закончит.');
+          return;
+        }
+        if (!(await listCmd('убрать чат', () => api.remove(c.id)))) { renderChats(); return; }
+      }
       if (!(await listCmd('удалить разговор', () => api.forget(c.sessionId)))) renderChats();
+      else if (c.id) await loadHistory(chatId);
     }
 
     /* Лента конкретного чата: историю просим по id, а не «текущую». Иначе после

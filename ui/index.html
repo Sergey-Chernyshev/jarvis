@@ -1053,79 +1053,111 @@
    * Реплики, тул-чипы, маркдаун ответа и поле ответа берутся у чата сессии как
    * есть. Своё тут только то, чего у сессии нет: отказ, заметка и карточка
    * подтверждения. */
-  /* История разговоров под шапкой: колонка строк, свёрнутая до одной.
-     Полоска чипов держала два-три безымянных чата, а заголовок, время и размер
-     в неё не влезали — по «Чат 5» и «Чат 6» разговор не узнать. Раскрытая
-     колонка живёт только пока выбирают, поэтому у переписки места не отнимает.
-     Язык строки тот же, что у списка сессий: имя, метаданные тише имени,
-     выбранное — тональной краской. */
-  .agchats {
+  /* Колонка разговоров слева, переписка справа. Выпадающая шапка «История · N»
+     была меню: чтобы попасть в соседний разговор, его надо было сперва
+     вспомнить, а потом раскрыть. Теперь чаты видны всегда и переключаются в
+     один клик, а место у переписки колонка не отнимает молча — её тянут за
+     край и сворачивают целиком. Мера у списка своя (260–420px против 560px у
+     текста ответа) и это честно: колонка и колонка текста стоят рядом, а не
+     растянуты на одну и ту же ширину окна. */
+  .agwrap { flex: 1; display: flex; min-height: 0; position: relative; }
+  .agpane { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .agside {
+    flex: none;
+    width: 260px;
+    min-width: 0;
+    position: relative;
     display: flex;
     flex-direction: column;
-    flex: none;
-    min-height: 0;
-    border-bottom: 1px solid var(--line);
+    border-right: 1px solid var(--line);
+    background: var(--paper);
   }
-  .aghead {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: none;
-    padding: 6px 20px 6px 12px;
+  /* Свёрнута — до рейки, а не в ноль: вместе со списком исчезла бы дорога назад */
+  .agside.off { width: 40px; }
+  /* Узкое окно (панель в накладном режиме, окно из трея ~460px): колонка кроет
+     переписку, а не теснит её, и уходит сразу после выбора — 260 колонки и 200
+     переписки это две нечитаемые полосы вместо одного разговора */
+  .agwrap.narrow .agside:not(.off) {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 4;
+    box-shadow: var(--shadow-pop);
   }
-  .aghead .spacer { flex: 1; }
-  .agtoggle {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    flex: none;
-    padding: 4px 10px;
-    border-radius: var(--r-pill);
-    background: var(--surface);
-    color: var(--ink-mute);
-    font: 500 12px/1.35 var(--font);
-    cursor: default;
-  }
-  .agtoggle:hover { background: var(--fill-2); }
-  .agtoggle.on { background: var(--accent-soft); color: var(--ink); }
-  .agchev { flex: none; color: var(--ink-faint); transition: transform 100ms ease; }
-  .agtoggle.on .agchev { transform: rotate(90deg); }
-  /* Открытый чат виден и со свёрнутой историей: иначе не понять, куда уйдёт
-     следующая реплика. Кегль и чернила — как у имени чата в строке сессии */
-  .agcur {
-    font-size: 12.5px;
-    font-weight: 600;
-    color: var(--ink);
+  .agrail { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 0; }
+  .agtop { display: flex; align-items: center; gap: 6px; padding: 8px 8px 6px; }
+  /* «Новый чат» сверху и всегда на виду: его ищут чаще, чем всё остальное */
+  .agnew {
+    flex: 1;
     min-width: 0;
-    max-width: 240px;
+    padding: 7px 10px;
+    border-radius: var(--r-chip);
+    background: var(--accent-soft);
+    color: var(--ink);
+    cursor: default;
+    font: 600 12.5px/1.35 var(--font);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  /* Потолок высоты: двадцать разговоров не должны выдавить переписку с экрана */
+  .agnew:hover { filter: brightness(0.97); }
+  .agnew.rail { flex: none; width: 26px; padding: 4px 0; text-align: center; background: var(--surface); }
+  .agfold {
+    flex: none;
+    width: 26px;
+    height: 26px;
+    border-radius: var(--r-pill);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ink-faint);
+    cursor: default;
+  }
+  .agfold:hover { background: var(--fill-1); color: var(--ink); }
+  .agchev { flex: none; transition: transform 100ms ease; }
+  .agside:not(.off) .agfold .agchev { transform: rotate(180deg); }
+  /* Поиск в шапке колонки: двадцать разговоров листают глазами, сотню — уже нет */
+  .agfind {
+    margin: 0 8px 6px;
+    padding: 6px 10px;
+    border: 0;
+    outline: none;
+    border-radius: var(--r-pill);
+    background: var(--surface);
+    color: var(--ink);
+    font: 400 12.5px/1.35 var(--font);
+  }
+  .agfind::placeholder { color: var(--ink-faint); }
+  .agfind:focus { box-shadow: inset 0 0 0 1px var(--accent); }
   .aglist {
+    flex: 1;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     gap: 1px;
-    padding: 0 12px 8px;
-    max-height: 40vh;
+    padding: 0 8px 8px;
     overflow-y: auto;
     scrollbar-width: none;
   }
   .aglist::-webkit-scrollbar { width: 0; }
+  /* Границу тянут мышью — полоса захвата шире линии, иначе в неё не попасть */
+  .aggrip { position: absolute; top: 0; bottom: 0; right: -3px; width: 7px; cursor: col-resize; z-index: 5; }
+  .aggrip:hover { background: var(--accent-line); }
   .agchat {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     flex: none;
-    padding: 7px 10px;
+    padding: 7px 8px;
     border-radius: var(--r-row);
     cursor: default;
   }
   .agchat:hover { background: var(--fill-1); }
   .agchat.on { background: var(--accent-soft); }
   .agmain { flex: 1; min-width: 0; }
-  .agline { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .agline { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+  .agline .spacer { flex: 1; }
   .agchat .agname {
     font-size: 13px;
     font-weight: 500;
@@ -1140,7 +1172,7 @@
      идущего цикла (theme.css, .lp-row.running): краска одна на всё, занятость
      читается формой. Без этого уходишь в соседний чат и теряешь первый из виду */
   .agchat.busy .agname { font-weight: 600; }
-  .agchat.busy .agname::before, .agcur.busy::before {
+  .agchat.busy .agname::before, .agrail .agbusy {
     content: '';
     display: inline-block;
     width: 6px;
@@ -1150,9 +1182,8 @@
     background: var(--accent);
     animation: agPulse 1.6s ease-in-out infinite;
   }
+  .agrail .agbusy { margin: 2px 0 0; }
   @keyframes agPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-  /* Сколько соседей пишет — в шапке: история свёрнута, и в ней их не видно */
-  .agbusy { flex: none; font-size: 11.5px; color: var(--ink-mute); white-space: nowrap; }
   /* Разговор, найденный на диске: чата за ним ещё нет. Отличаем формой —
      контурный бейдж, как у удалённого узла в строке сессии, — а не новой краской */
   .agdisk {
@@ -1163,36 +1194,51 @@
     padding: 1px 6px;
     box-shadow: inset 0 0 0 1px var(--line-strong);
   }
-  .agsub { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-  .agmeta { font-size: 11.5px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+  .agtime { flex: none; font-size: 11px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+  .agsub { display: flex; align-items: baseline; gap: 8px; min-width: 0; margin-top: 2px; }
   .agprev {
+    flex: 1;
+    min-width: 0;
     font-size: 12px;
     color: var(--ink-2);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  /* Правка и крестики тихие: их зовут раз в месяц, а заголовок читают каждый
-     раз. На открытой строке правка видна всегда — иначе её снова не найдут.
-     Крестик строки с диска прячет и обратим, поэтому темнеет как правка */
-  .agedit, .agchat .agx, .aghide { flex: none; color: var(--ink-faint); opacity: 0; font-size: 13px; line-height: 1; }
-  .agchat:hover .agedit, .agchat:hover .agx, .agchat:hover .aghide, .agchat.on .agedit, .agchat.on .agx { opacity: 1; }
-  .agedit:hover, .aghide:hover { color: var(--ink); }
-  .agchat .agx:hover { color: var(--danger); }
-  /* Забвение необратимо и потому названо словом, а не знаком: его видно без
-     наведения, но стоит оно у метаданных, а не рядом с крестиком */
-  .agforget { flex: none; font-size: 11.5px; color: var(--ink-faint); line-height: 1.4; }
-  .agforget:hover { color: var(--danger); }
-  /* Вопрос встаёт на место самой строки: решают там же, где нажали, и промах в
-     соседний разговор исключён. Тональная плашка — как у .lp-note.bad */
+  .agmeta { flex: none; font-size: 11px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+  /* «…» — вход в меню строки. Три иконки в ряд читались как три равные кнопки,
+     хотя одна из них необратима; редкие действия ушли под один знак */
+  .agdots { flex: none; width: 18px; text-align: center; color: var(--ink-faint); opacity: 0; font-size: 13px; line-height: 1; }
+  .agchat:hover .agdots, .agchat.on .agdots { opacity: 1; }
+  .agdots:hover { color: var(--ink); }
+  /* Меню строки, правка имени и вопрос про удаление — слой ПОВЕРХ колонки.
+     Внутри строки они жили ровно до первого события соседнего чата: список
+     перерисовывается, и открытый вопрос исчезал из-под руки */
+  .agpop { position: absolute; left: 8px; right: 12px; z-index: 6; }
+  .agpop[hidden] { display: none; }
+  .agmenu {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 5px;
+    border-radius: var(--r-card);
+    background: var(--paper);
+    box-shadow: var(--shadow-pop);
+  }
+  .agmi { padding: 7px 10px; border-radius: var(--r-pill); font-size: 12.5px; color: var(--ink); cursor: default; }
+  .agmi:hover { background: var(--fill-1); }
+  /* Необратимое отличимо словом, весом и краской беды — но без крика: это пункт
+     меню за отбивкой, а не красная кнопка в ряду обратимых */
+  .agmi.danger { margin-top: 4px; padding-top: 10px; box-shadow: inset 0 1px 0 var(--line); color: var(--danger); }
+  .agmi.danger:hover { background: var(--danger-soft); }
   .agask {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    flex: none;
-    padding: 9px 10px;
-    border-radius: var(--r-row);
-    background: var(--danger-soft);
+    padding: 10px;
+    border-radius: var(--r-card);
+    background: var(--paper);
+    box-shadow: var(--shadow-pop);
   }
   .agasktext { font-size: 12.5px; line-height: 1.45; color: var(--ink); }
   .agaskbtns { display: flex; gap: 6px; }
@@ -1201,7 +1247,7 @@
     border-radius: var(--r-chip);
     border: 0;
     cursor: default;
-    background: var(--paper);
+    background: var(--surface);
     color: var(--ink);
     font: 600 12.5px/1.35 var(--font);
   }
@@ -1219,17 +1265,8 @@
   }
   .aghidden:hover { background: var(--fill-1); color: var(--ink); }
   .agempty { padding: 10px; font-size: 12.5px; color: var(--ink-faint); line-height: 1.5; }
-  /* «+» остаётся чипом в шапке истории: завести чат — не строка списка */
-  .agchat.add {
-    padding: 4px 9px;
-    border-radius: var(--r-pill);
-    background: var(--surface);
-    color: var(--ink-faint);
-    font: 500 13px/1.35 var(--font);
-  }
-  .agchat.add:hover { background: var(--fill-2); color: var(--ink-mute); }
-  /* Правка имени на месте строки — как input.rename в строке сессии */
-  .aglist input.agrename {
+  /* Правка имени на месте — как input.rename в строке сессии */
+  .agside input.agrename {
     font: 500 13px/1.35 var(--font);
     color: var(--ink);
     background: var(--surface);
@@ -1667,8 +1704,9 @@
   /* в окне назад некуда — список и так слева */
   [data-mode='window'] .chathead .back { display: none; }
   [data-mode='window'] .chathead { padding-left: 28px; }
-  /* история чатов стоит под шапкой — левый край у них общий */
-  [data-mode='window'] .aghead, [data-mode='window'] .aglist { padding-left: 28px; }
+  /* Колонка чатов стоит слева от шапки, а не под ней: отступ шапки к ней уже не
+     относится, а сама колонка держит собственный край. */
+  [data-mode='window'] .agpane .chathead { padding-left: 20px; }
 
   /* вопрос в окне тоже держит меру — кнопки во всю ширину читаются как баннеры */
   [data-mode='window'] .qvhead > *,
@@ -2159,26 +2197,30 @@
       <!-- Разговор с главным агентом: тот же, что в окне из трея. Класс .chat —
            не декорация: лента, шапка и поле ответа берут вёрстку чата сессии. -->
       <div class="chat agentchat" id="agentPane" hidden>
-        <div class="chathead">
-          <span class="chattitle">Джарвис</span>
-          <span class="badge" id="agTag" hidden>продолжение</span>
-          <span class="spacer"></span>
-          <span class="chatsub" id="agSub">готов</span>
-          <button class="sumtoggle" id="agNew" title="Забыть нить разговора">Начать заново</button>
-        </div>
-        <!-- История разговоров: чаты из настроек плюс найденные на диске.
-             Свёрнута до одной строки и раскрывается кнопкой — постоянная
-             колонка отняла бы у переписки треть окна. -->
-        <div class="agchats" id="agChats"></div>
-        <div class="chatlog" id="agLog">
-          <!-- текст слово в слово как в agent-chat.html: одна вкладка, одно
-               окно — одна фраза. «подтвердит У ТЕБЯ» здесь несущее: спрашивает
-               Джарвис, решает человек -->
-          <div class="hint chatempty">Спроси Джарвиса о сессиях, лимитах, метриках.<br/>Действия — ответ в сессию, смену настроек — он спросит карточкой, решаешь ты.</div>
-        </div>
-        <div class="chatinput">
-          <textarea id="agInput" rows="1" placeholder="Сообщение Джарвису…  (Enter — отправить)" spellcheck="false" autocomplete="off"></textarea>
-          <button class="sumtoggle" id="agSend">⏎</button>
+        <!-- Колонка чатов слева на всю высоту, переписка справа: чаты из
+             настроек и найденные на диске одним списком. Ширину тянут за край,
+             колонка сворачивается целиком (⌘\) — место делит человек. -->
+        <div class="agwrap">
+          <div class="agside" id="agChats"></div>
+          <div class="agpane">
+            <div class="chathead">
+              <span class="chattitle">Джарвис</span>
+              <span class="badge" id="agTag" hidden>продолжение</span>
+              <span class="spacer"></span>
+              <span class="chatsub" id="agSub">готов</span>
+              <button class="sumtoggle" id="agNew" title="Забыть нить разговора">Начать заново</button>
+            </div>
+            <div class="chatlog" id="agLog">
+              <!-- текст слово в слово как в agent-chat.html: одна вкладка, одно
+                   окно — одна фраза. «подтвердит У ТЕБЯ» здесь несущее:
+                   спрашивает Джарвис, решает человек -->
+              <div class="hint chatempty">Спроси Джарвиса о сессиях, лимитах, метриках.<br/>Действия — ответ в сессию, смену настроек — он спросит карточкой, решаешь ты.</div>
+            </div>
+            <div class="chatinput">
+              <textarea id="agInput" rows="1" placeholder="Сообщение Джарвису…  (Enter — отправить)" spellcheck="false" autocomplete="off"></textarea>
+              <button class="sumtoggle" id="agSend">⏎</button>
+            </div>
+          </div>
         </div>
       </div>
       <div class="settings" id="settings" hidden>

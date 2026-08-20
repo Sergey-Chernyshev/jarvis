@@ -128,72 +128,70 @@ const CARD = { nonce: 'n-1', id: 'sessions.reply', class: 'effect', card: { kind
  * текущий»: когда панель закрыта, окно из трея — единственная дорога к
  * остальным проектам. Расхождение здесь тихое: увидишь его, только когда
  * понадобится другой чат. */
-const openHist = (s) => {
-  const t = s.chats.querySelector('.agtoggle');
-  t.dispatchEvent(new s.window.Event('click', { bubbles: true }));
+const click = (s) => new s.window.Event('click', { bubbles: true });
+const rowsOf = (s) => [...s.chats.querySelectorAll('.agchat')];
+const rowBy = (s, re) => rowsOf(s).find((r) => re.test(r.textContent));
+/* Редкие действия строки — под «…»: раньше их было три иконки в ряд, и
+ * необратимое стояло вровень с обратимыми. */
+const menuOf = async (s, row) => {
+  row.querySelector('.agdots').dispatchEvent(click(s));
+  await tick();
+  return [...s.chats.querySelectorAll('.agmi')];
 };
+const pick = (items, re) => items.find((i) => re.test(i.textContent));
 
-test('история разговоров одинакова во вкладке и в окне', async () => {
+test('колонка чатов одинакова во вкладке и в окне', async () => {
   const bus = makeBus();
   for (const s of [await bootTab(bus), await bootWindow(bus)]) {
-    // свёрнута в обоих местах: место у переписки дороже места у списка
-    assert.equal(s.chats.querySelectorAll('.agchat:not(.add)').length, 0, 'история раскрыта без спроса');
-    assert.equal(s.chats.querySelector('.agcur').textContent, 'Джарвис', 'открытый чат не назван');
-
-    openHist(s);
-    const names = [...s.chats.querySelectorAll('.agchat:not(.add):not(.disk) .agname')].map((n) => n.textContent);
+    // видна сразу и в обоих местах: раскрывать нечего, в этом вся затея
+    const names = [...s.chats.querySelectorAll('.agchat:not(.disk) .agname')].map((n) => n.textContent);
     assert.deepEqual(names, ['Джарвис', 'Выборы']);
     assert.equal(s.chats.querySelectorAll('.agchat.on').length, 1, 'открытый чат не помечен');
-    assert.equal(s.chats.querySelectorAll('.agchat.add').length, 1, 'завести чат нечем');
-    // чатов больше одного — крестик у каждого; последний удалять не дадут
-    assert.equal(s.chats.querySelectorAll('.agx').length, 2);
-    // и переименование в обоих местах на виду, а не спрятано в клике по строке
-    assert.equal(s.chats.querySelectorAll('.agedit').length, 2, 'переименование негде найти');
+    assert.equal(s.chats.querySelectorAll('.agnew').length, 1, 'завести чат нечем');
+    // поиск стоит в шапке колонки, а не в отдельном экране
+    assert.ok(s.chats.querySelector('.agfind'), 'искать по чатам нечем');
+    // и вход в действия строки один и тот же
+    assert.equal(s.chats.querySelectorAll('.agdots').length, 3, 'действия строки негде найти');
   }
 });
 
 /* Разговор, найденный на диске, — та самая потеря: чата за ним нет, и без этой
- * строки он недостижим. Обе поверхности обязаны и показать его, и открыть
- * одной и той же командой. */
-test('разговор с диска виден и открывается одинаково во вкладке и в окне', async () => {
+ * строки он недостижим. Отдельного раздела ему не заводим: та же строка в том
+ * же списке, отличается бейджем. */
+test('разговор с диска — строка того же списка и открывается одинаково', async () => {
   const bus = makeBus();
   for (const s of [await bootTab(bus), await bootWindow(bus)]) {
-    openHist(s);
     const disk = s.chats.querySelectorAll('.agchat.disk');
     assert.equal(disk.length, 1, 'разговор с диска потерян в списке');
     assert.equal(disk[0].querySelector('.agname').textContent, 'Изучите текущие сессии');
-    assert.equal(disk[0].querySelectorAll('.agedit').length, 0, 'переименование обещано там, где чата ещё нет');
-    // крестик у него свой — «спрятать»; чатовый «удалить чат» сюда не подсовывают
-    assert.equal(disk[0].querySelectorAll('.agx').length, 0, 'крестик чата обещан там, где чата нет');
-    assert.equal(disk[0].querySelectorAll('.aghide').length, 1, 'строку с диска снова нечем убрать');
+    assert.match(disk[0].textContent, /с диска/, 'строку с диска не отличить от чата');
+    // переименовывать нечего: чата за ней ещё нет
+    const items = await menuOf(s, disk[0]);
+    assert.deepEqual(items.map((i) => i.textContent), ['Открыть', 'Скрыть', 'Забыть насовсем']);
 
-    disk[0].dispatchEvent(new s.window.Event('click', { bubbles: true }));
+    disk[0].dispatchEvent(click(s));
     await tick();
     await tick();
     assert.deepEqual(s.did('agent_chat_open'), ['a25d01f8'], 'разговор с диска не привязан');
   }
 });
 
-/* Два крестика в одном списке значат разное: у чата — «удалить чат», у строки с
- * диска — «спрятать». Разъедется здесь, и человек сотрёт чат, думая, что убирает
- * найденную на диске строку (или наоборот). Обе поверхности обязаны звать разные
- * команды и говорить о них разными словами. */
-test('крестик чата и крестик строки с диска не путаются ни во вкладке, ни в окне', async () => {
+/* «Скрыть» у чата и у строки с диска значат разное: у чата это agent_chat_delete
+ * (разговор вернётся строкой с диска), у строки — agent_history_hide. Разъедется
+ * здесь, и человек уберёт не то, что думал. */
+test('«Скрыть» зовёт своё в обоих входах и говорит, что останется', async () => {
   const bus = makeBus();
   for (const s of [await bootTab(bus), await bootWindow(bus)]) {
-    openHist(s);
-    const disk = s.chats.querySelector('.agchat.disk');
-    const chat = s.chats.querySelector('.agchat:not(.add):not(.disk)');
-    const hide = disk.querySelector('.aghide');
-    const x = chat.querySelector('.agx');
-    assert.notEqual(hide.title, x.title, 'два крестика обещают одно и то же');
-    assert.match(hide.title, /останется на диске/, 'скрытие не сказало, что файл цел: ' + hide.title);
-    assert.match(x.title, /чат/, 'крестик чата молчит про чат: ' + x.title);
+    const chatHide = pick(await menuOf(s, rowBy(s, /Джарвис/)), /Скрыть/);
+    const diskHide = pick(await menuOf(s, s.chats.querySelector('.agchat.disk')), /Скрыть/);
+    assert.notEqual(chatHide.title, diskHide.title, 'два «Скрыть» обещают одно и то же');
+    assert.match(chatHide.title, /чат/, '«Скрыть» у чата молчит про чат: ' + chatHide.title);
+    assert.match(diskHide.title, /останется на диске/, 'скрытие не сказало, что файл цел: ' + diskHide.title);
 
-    hide.dispatchEvent(new s.window.Event('click', { bubbles: true }));
+    diskHide.dispatchEvent(click(s));
     await tick();
     await tick();
-    assert.deepEqual(s.did('agent_history_hide'), ['a25d01f8'], 'крестик строки с диска ничего не спрятал');
+    assert.deepEqual(s.did('agent_history_hide'), ['a25d01f8'], '«Скрыть» ничего не спрятало');
     assert.deepEqual(s.did('agent_history_forget'), [], 'скрытие обернулось удалением файла');
     assert.equal(s.chats.querySelectorAll('.agchat.disk').length, 0, 'спрятанная строка осталась в списке');
   }
@@ -204,19 +202,17 @@ test('крестик чата и крестик строки с диска не 
 test('«скрыто N · вернуть» видно и возвращает и во вкладке, и в окне', async () => {
   const bus = makeBus();
   for (const s of [await bootTab(bus), await bootWindow(bus)]) {
-    openHist(s);
     assert.equal(s.chats.querySelectorAll('.aghidden').length, 0, 'скрытых нет, а строка про них есть');
-    s.chats.querySelector('.agchat.disk .aghide').dispatchEvent(new s.window.Event('click', { bubbles: true }));
+    const hide = pick(await menuOf(s, s.chats.querySelector('.agchat.disk')), /Скрыть/);
+    hide.dispatchEvent(click(s));
     await tick();
     await tick();
 
     const back = s.chats.querySelector('.aghidden');
     assert.ok(back, 'разговор спрятан бесследно: ' + s.chats.textContent);
     assert.match(back.textContent, /Скрыто 1/);
-    // и в свёрнутой шапке тоже: колонку раскрывают не каждый день
-    assert.match(s.chats.querySelector('.agtoggle').textContent, /скрыто 1/);
 
-    back.dispatchEvent(new s.window.Event('click', { bubbles: true }));
+    back.dispatchEvent(click(s));
     await tick();
     await tick();
     assert.deepEqual(s.did('agent_history_unhide_all'), [undefined], 'возврат не уехал демону');
@@ -262,16 +258,12 @@ test('занятый разговор помечен и во вкладке, и 
   await bus.emit('agent:event', { type: 'delta', text: 'думаю', chatId: 'c2' });
 
   for (const s of surfaces) {
-    // свёрнутая история всё равно называет отвечающего соседа
-    assert.match(s.chats.querySelector('.agbusy').textContent, /Выборы/, 'занятый сосед не назван в шапке');
-    openHist(s);
     const names = [...s.chats.querySelectorAll('.agchat.busy .agname')].map((n) => n.textContent);
-    assert.deepEqual(names, ['Выборы'], 'занятость чата не читается в истории');
+    assert.deepEqual(names, ['Выборы'], 'занятость чата не читается в колонке');
   }
 
   await bus.emit('agent:event', { type: 'done', result: 'готово', chatId: 'c2' });
   for (const s of surfaces) {
-    assert.equal(s.chats.querySelectorAll('.agbusy').length, 0, 'чат закончил, а в шапке всё ещё отвечает');
     assert.equal(s.chats.querySelectorAll('.agchat.busy').length, 0, 'занятость висит на закончившем разговоре');
   }
 });

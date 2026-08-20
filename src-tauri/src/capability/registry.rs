@@ -5,10 +5,12 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use super::contract::CapabilityMeta;
+use super::gate::MAX_HANDLER_TIMEOUT;
 use super::grant::Grant;
 
 pub type HandlerFut = Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>;
@@ -17,6 +19,10 @@ pub type Handler<C> = Box<dyn Fn(C, Value) -> HandlerFut + Send + Sync>;
 pub struct Entry<C> {
     pub meta: CapabilityMeta,
     pub handler: Handler<C>,
+    /// Собственный дедлайн исполнения. None — общий из `GateConfig` (30с).
+    /// Нужен потому, что природа капабилити разная: `metrics.query` обязана
+    /// отвечать мгновенно, а «дождись ответа сессии» по смыслу висит минутами.
+    pub timeout: Option<Duration>,
 }
 
 pub struct Registry<C> {
@@ -36,7 +42,21 @@ impl<C> Registry<C> {
 
     pub fn register(&mut self, meta: CapabilityMeta, handler: Handler<C>) {
         debug_assert!(!self.entries.contains_key(meta.id), "дубликат капабилити: {}", meta.id);
-        self.entries.insert(meta.id, Entry { meta, handler });
+        self.entries.insert(meta.id, Entry { meta, handler, timeout: None });
+    }
+
+    /// Регистрация «долгой» капабилити со своим дедлайном. Потолок жёсткий
+    /// (`MAX_HANDLER_TIMEOUT`) и режется здесь, а не на вызове: даже ждущая
+    /// капабилити не вправе держать демон вечно.
+    pub fn register_with_timeout(
+        &mut self,
+        meta: CapabilityMeta,
+        handler: Handler<C>,
+        timeout: Duration,
+    ) {
+        debug_assert!(!self.entries.contains_key(meta.id), "дубликат капабилити: {}", meta.id);
+        let timeout = Some(timeout.min(MAX_HANDLER_TIMEOUT));
+        self.entries.insert(meta.id, Entry { meta, handler, timeout });
     }
 
     pub fn get(&self, id: &str) -> Option<&Entry<C>> {

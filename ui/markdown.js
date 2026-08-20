@@ -331,7 +331,9 @@
       code.length = 0;
     };
 
-    for (const raw of String(text).split('\n')) {
+    const src = String(text).split('\n');
+    for (let li = 0; li < src.length; li++) {
+      const raw = src[li];
       const line = raw.trimEnd();
       // фенс — только строка, начинающаяся с ``` (упоминание ``` в тексте — не фенс)
       if (FENCE_RE.test(line)) {
@@ -341,6 +343,44 @@
         continue;
       }
       if (inCode) { code.push(raw); continue; }
+
+      /* Таблица GFM. Узнаём по разделителю на СЛЕДУЮЩЕЙ строке — одна шапка без
+       * него остаётся текстом, поэтому в стриме «половина таблицы» не мигает
+       * таблицей: пока разделителя нет, это абзац. Дорисовывать построчно
+       * безопасно — chatSplit режет ленту только по пустой строке, а таблица
+       * пустых строк внутри не имеет и целиком живёт в хвосте. */
+      if (line.includes('|') && li + 1 < src.length && TABLE_SEP_RE.test(src[li + 1])) {
+        flushPara();
+        closeLists();
+        const wrap = document.createElement('div');
+        wrap.className = 'tablewrap'; // узкое окно: прокрутка внутри, а не разъезд вёрстки
+        const tbl = document.createElement('table');
+        const head = document.createElement('tr');
+        for (const c of tableCells(line)) {
+          const th = document.createElement('th');
+          inlineInto(th, c);
+          head.appendChild(th);
+        }
+        const thead = document.createElement('thead');
+        thead.appendChild(head);
+        tbl.appendChild(thead);
+        const tbody = document.createElement('tbody');
+        li += 2; // мимо шапки и разделителя
+        for (; li < src.length && src[li].trim() && src[li].includes('|'); li++) {
+          const tr = document.createElement('tr');
+          for (const c of tableCells(src[li])) {
+            const td = document.createElement('td');
+            inlineInto(td, c);
+            tr.appendChild(td);
+          }
+          tbody.appendChild(tr);
+        }
+        li--;
+        tbl.appendChild(tbody);
+        wrap.appendChild(tbl);
+        target().appendChild(wrap);
+        continue;
+      }
 
       // `★ Insight ───` → свёрнутая Insight-строка (раскрывается кликом)
       const co = line.match(CALLOUT_RE);

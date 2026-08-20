@@ -277,3 +277,42 @@ test('plural — общая на файл, как и склонение заме
   const f = (n) => MD.plural(n, 'реплика', 'реплики', 'реплик');
   assert.deepEqual([1, 2, 5, 11, 21, 104].map(f), ['реплика', 'реплики', 'реплик', 'реплик', 'реплика', 'реплики']);
 });
+
+/* Образец с экрана владельца — байт в байт, включая пробел в конце последней
+ * строки и разную ширину колонок в разделителе. Таблицы в чате были только у
+ * документного рендерера; в ленте лежал сырой текст с палками. */
+test('renderChat рисует таблицу, а не палки', () => {
+  const sample = [
+    '| Задача | Кому | Пишет код? |',
+    '|---|---|---|',
+    '| Ревалидация: 69 коллизий canonical_url, падает каждый прогон с 26.07 | claude, отдельный worktree | да |',
+    '| wantapply (60% текущих потерь) + adndx.ru → на готовый HH API-парсер | claude, отдельный worktree | да |',
+    '| Проверить, что на проде реально крутится — снапшот или заморозка сессии | kimi | нет, только чтение | ',
+  ].join('\n');
+  const root = chat(sample);
+
+  const tbl = root.querySelector('table');
+  assert.ok(tbl, 'таблицы нет вовсе: ' + root.textContent.slice(0, 80));
+  assert.equal(root.querySelectorAll('thead th').length, 3, 'колонок не три');
+  assert.equal(root.querySelectorAll('tbody tr').length, 3, 'строк не три');
+  assert.equal(root.querySelectorAll('tbody tr:last-child td').length, 3,
+    'хвостовой пробел съел колонку');
+  assert.match(root.querySelector('tbody tr:last-child td:last-child').textContent,
+    /нет, только чтение/);
+  // палок в тексте больше нет — иначе это по-прежнему сырой markdown
+  assert.doesNotMatch(root.textContent, /\|---/, 'разделитель остался текстом');
+  assert.ok(root.querySelector('.tablewrap'), 'нет обёртки — узкое окно разъедет вёрстку');
+});
+
+test('разделитель другой ширины и выравнивание таблицу не роняют', () => {
+  const root = chat(['| a | b |', '| :--- | ----------: |', '| 1 | 2 |'].join('\n'));
+  assert.equal(root.querySelectorAll('thead th').length, 2);
+  assert.equal(root.querySelectorAll('tbody td').length, 2);
+});
+
+test('шапка без разделителя остаётся текстом — в стриме таблица не мигает', () => {
+  const root = chat('| Задача | Кому |');
+  assert.equal(root.querySelectorAll('table').length, 0,
+    'одна строка стала таблицей — при стриме это мигало бы на каждой дельте');
+  assert.match(root.textContent, /\| Задача \| Кому \|/);
+});

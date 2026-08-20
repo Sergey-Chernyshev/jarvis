@@ -963,6 +963,27 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* ---------- вкладка «Джарвис»: чем она отличается от чата сессии ----------
+   * Реплики, тул-чипы и поле ответа берутся у чата сессии как есть. Своё тут
+   * только то, чего у сессии нет: сырой текст стрима (без маркдауна — переносы
+   * держит вёрстка), отказ, заметка и карточка подтверждения. */
+  .agentchat .msg.assistant .bubble { white-space: pre-wrap; }
+  .agentchat .msg.err .bubble { color: var(--danger); }
+  .agentchat .msg.note .bubble { color: var(--ink-mute); font-size: 13px; }
+  .agentchat .msg.confirm { align-self: stretch; max-width: 560px; }
+  .agentchat .cbox { padding: 14px 16px; border-radius: var(--r-card); background: var(--surface); }
+  .agentchat .ctitle { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .agentchat .cdesc { color: var(--ink-mute); font-size: 13px; margin-bottom: 8px; word-break: break-word; }
+  .agentchat .cwarn { color: var(--warn); font-size: 12.5px; margin-bottom: 8px; }
+  .agentchat .cbtns { display: flex; gap: 8px; }
+  .agentchat .cbtn {
+    flex: 1; height: 34px; border: 0; border-radius: var(--r-chip);
+    font: 600 13px/1 var(--font); cursor: default;
+  }
+  .agentchat .cbtn.yes { background: var(--accent); color: var(--on-accent); }
+  .agentchat .cbtn.no { background: var(--accent-soft); color: var(--ink); }
+  .agentchat .cresult { margin-top: 8px; font-size: 12.5px; color: var(--ink-mute); }
+
   /* --- сводки ходов --- */
   .sumtoggle {
     margin-left: 6px; padding: 4px 10px; font: 500 12px/1 var(--font); border-radius: var(--r-pill);
@@ -1656,6 +1677,8 @@
       <div class="tab" id="tabVoice">Голос <span class="tabkey" data-key="4"></span></div>
       <div class="tab" id="tabLoops">Циклы <span class="tabkey" data-key="5"></span></div>
       <div class="tab" id="tabBundle">Связка <span class="tabkey" data-key="6"></span></div>
+      <!-- «Чаты» — это сессии-исполнители; здесь разговор с самим Джарвисом -->
+      <div class="tab" id="tabAgent">Джарвис <span class="tabkey" data-key="7"></span></div>
       <span class="spacer"></span>
       <div class="tab icon" id="tabSettings" title="Настройки">
         <!-- lucide: sliders-horizontal -->
@@ -1843,6 +1866,24 @@
       <div class="loops" id="loops" hidden></div>
       <div class="bundle" id="bundlePane" hidden></div>
       <div class="history" id="history" hidden></div>
+      <!-- Разговор с главным агентом: тот же, что в окне из трея. Класс .chat —
+           не декорация: лента, шапка и поле ответа берут вёрстку чата сессии. -->
+      <div class="chat agentchat" id="agentPane" hidden>
+        <div class="chathead">
+          <span class="chattitle">Джарвис</span>
+          <span class="badge" id="agTag" hidden>продолжение</span>
+          <span class="spacer"></span>
+          <span class="chatsub" id="agSub">готов</span>
+          <button class="sumtoggle" id="agNew" title="Забыть нить разговора">Новый чат</button>
+        </div>
+        <div class="chatlog" id="agLog">
+          <div class="hint chatempty">Спроси Джарвиса о сессиях, лимитах, метриках.<br/>Действия — ответ в сессию, смену настроек — он подтвердит карточкой.</div>
+        </div>
+        <div class="chatinput">
+          <textarea id="agInput" rows="1" placeholder="Сообщение Джарвису…  (Enter — отправить)" spellcheck="false" autocomplete="off"></textarea>
+          <button class="sumtoggle" id="agSend">⏎</button>
+        </div>
+      </div>
       <div class="settings" id="settings" hidden>
         <div class="stitle">Основное</div>
         <div class="scard">
@@ -1966,6 +2007,7 @@
   <script src="./bundle.js"></script>
   <script src="./changes.js"></script>
   <script src="./search.js"></script>
+  <script src="./agent-chat.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

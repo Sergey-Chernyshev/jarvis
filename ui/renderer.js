@@ -44,6 +44,8 @@ const tabLoopsEl = document.getElementById('tabLoops');
 const bundlePaneEl = document.getElementById('bundlePane');
 const tabBundleEl = document.getElementById('tabBundle');
 const tabVoiceEl = document.getElementById('tabVoice');
+const agentPaneEl = document.getElementById('agentPane');
+const tabAgentEl = document.getElementById('tabAgent');
 
 const STATUS_LABEL = {
   working: 'работает',
@@ -159,6 +161,7 @@ function setView(next) {
   voicehistEl.hidden = next !== 'voicehist';
   loopsEl.hidden = next !== 'loops';
   bundlePaneEl.hidden = next !== 'bundle';
+  agentPaneEl.hidden = next !== 'agent';
   historyEl.hidden = next !== 'history';
   // чат и вопрос несут собственные нижние бары — парящий футер только тут.
   // В окне полоска не парит, а стоит в сетке под обеими колонками — она нужна всегда.
@@ -173,6 +176,7 @@ function setView(next) {
   tabVoiceEl.classList.toggle('active', next === 'voicehist');
   tabLoopsEl.classList.toggle('active', next === 'loops');
   tabBundleEl.classList.toggle('active', next === 'bundle');
+  tabAgentEl.classList.toggle('active', next === 'agent');
   tabSessionsEl.classList.toggle('active', next === 'list' || next === 'chat');
   // Каждый раздел поднимается в своей обёртке: исключение в одном не должно
   // оставлять панель с белым экраном — раньше первая же ошибка обрывала
@@ -228,6 +232,9 @@ function setView(next) {
   if (next === 'bundle') {
     safely('bundle', () => window.initBundle(bundlePaneEl), bundlePaneEl);
   }
+  // Разговор с главным агентом: разметка своя, вся логика — в agent-chat.js,
+  // общем с окном из трея. Монтируется один раз, дальше только фокус.
+  if (next === 'agent') safely('agent', () => window.initAgentChat(agentPaneEl), agentPaneEl);
   if (next === 'history') safely('history', renderHistory, historyEl);
   else if (recording) { recording = false; recordingBtn.classList.remove('recording'); }
   if (next === 'list') queryEl.focus();
@@ -3696,6 +3703,7 @@ tabStatsEl.addEventListener('click', () => setView('stats'));
 tabVoiceEl.addEventListener('click', () => setView('voicehist'));
 tabLoopsEl.addEventListener('click', () => setView('loops'));
 tabBundleEl.addEventListener('click', () => setView('bundle'));
+tabAgentEl.addEventListener('click', () => setView('agent'));
 
 const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(n || 0));
 
@@ -4847,6 +4855,11 @@ window.addEventListener('keydown', async (e) => {
   if (e.metaKey && e.key === '6') { // ⌘6 — Связка
     e.preventDefault();
     setView('bundle');
+    return;
+  }
+  if (isMod(e) && e.key === '7') { // ⌘7 — Джарвис
+    e.preventDefault();
+    setView('agent');
     return;
   }
 

@@ -128,6 +128,30 @@ test('обычный отказ агента не стирает нить раз
   assert.equal(sent()[1].sessionId, 's-42');
 });
 
+/* История: окно и вкладка панели поднимаются одним mount(), поэтому лента
+ * прошлых реплик обязана появиться и здесь — иначе «продолжение» снова
+ * выглядит как потерянный разговор. */
+test('окно рисует прошлую переписку, а не только метку продолжения', async () => {
+  const { doc } = await boot({ sessionId: 's-42' }, {
+    agent_chat_history: () => ({
+      ok: true,
+      sessionId: 's-42',
+      total: 200,
+      items: [
+        { role: 'user', kind: 'text', text: 'что с лимитом', ts: 1 },
+        { role: 'assistant', kind: 'tool', text: 'limit_get', ts: 2 },
+        { role: 'assistant', kind: 'text', text: 'осталось 40%', ts: 3 },
+      ],
+    }),
+  });
+  const msgs = doc.getElementById('msgs');
+  assert.match(msgs.textContent, /что с лимитом/);
+  assert.match(msgs.textContent, /осталось 40%/);
+  assert.ok(msgs.querySelector('.msg.tools .chip'), 'тул-вызов нарисован обычным текстом');
+  // хвост отдан не целиком — об этом надо сказать, а не делать вид, что всё
+  assert.match(msgs.textContent, /Показаны последние 3 реплик из 200/);
+});
+
 test('свежий id из потока перекрывает восстановленный', async () => {
   const { emit, say, sent } = await boot({ sessionId: null });
   await say('привет');

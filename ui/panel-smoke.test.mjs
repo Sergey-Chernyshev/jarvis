@@ -36,6 +36,8 @@ const SCRIPTS = [
   'bundle.js',
   'changes.js',
   'search.js',
+  // чат с главным агентом: вкладка «Джарвис» зовёт его initAgentChat
+  'agent-chat.js',
   'renderer.js',
 ];
 
@@ -67,6 +69,9 @@ function makeBridge(calls, data = {}) {
     historyGet: async () => ({ ok: true, items: [] }),
     loopsGet: async () => ({ ok: true, loops: [] }),
     bundleGet: async () => ({ ok: true, bundles: [] }),
+    // главный агент: нить разговора и прошлая переписка
+    agentChatState: async () => ({ sessionId: data.agentSession || null }),
+    agentChatHistory: async () => data.agentHistory || { ok: true, items: [] },
   };
   return new Proxy(target, {
     get(obj, prop) {
@@ -266,6 +271,117 @@ test('Esc закрывает открытый экран, а не выкидыв
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(doc.getElementById('chgWrap').hidden, true, 'Esc не закрыл панель изменений');
   assert.equal(doc.getElementById('chat').hidden, false, 'Esc заодно выкинул из чата');
+});
+
+/* ---------- вкладка «Джарвис»: разговор с главным агентом ----------
+ *
+ * Ради этого вкладка и заведена: раньше агент жил отдельным окном, и открывалось
+ * оно с пустой лентой — даже когда разговор продолжался. Пустота молча и есть
+ * то, что ловят эти тесты. */
+
+// открыть вкладку так же, как человек: кликом по ней
+async function openAgent(doc) {
+  doc.getElementById('tabAgent').dispatchEvent(click(doc));
+  await new Promise((r) => setTimeout(r, 0));
+  return doc.getElementById('agLog');
+}
+
+test('вкладка «Джарвис» есть в панели и переключает на неё', async () => {
+  const { doc } = await boot();
+  const tab = doc.getElementById('tabAgent');
+  assert.ok(tab, 'вкладки нет в разметке');
+  assert.equal(doc.getElementById('agentPane').hidden, true, 'пане показан до клика');
+
+  await openAgent(doc);
+  assert.equal(doc.getElementById('agentPane').hidden, false, 'вкладка не открылась');
+  assert.ok(tab.classList.contains('active'), 'вкладка не подсвечена');
+  assert.equal(doc.getElementById('list').hidden, true, 'список сессий не уступил место');
+  // соседние вкладки цифры не потеряли
+  const keys = [...doc.querySelectorAll('.tabs .tabkey')].map((k) => k.getAttribute('data-key'));
+  assert.deepEqual(keys, ['1', '2', '3', '4', '5', '6', '7'], 'номера вкладок разъехались: ' + keys.join(','));
+});
+
+test('цифра вкладки не декорация: ⌘7 открывает Джарвиса', async () => {
+  const { doc } = await boot();
+  const e = key(doc, '7');
+  e.metaKey = true;
+  e.ctrlKey = true; // isMod смотрит на ⌘ или Ctrl — зависит от ОС
+  doc.defaultView.dispatchEvent(e);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(doc.getElementById('agentPane').hidden, false, 'хоткей вкладки ничего не открыл');
+});
+
+test('прошлая переписка рисуется в ленте, а не остаётся у агента в памяти', async () => {
+  const { doc } = await boot({
+    agentSession: 's-42',
+    agentHistory: {
+      ok: true,
+      sessionId: 's-42',
+      total: 3,
+      items: [
+        { role: 'user', kind: 'text', text: 'сколько сессий висит', ts: 1 },
+        { role: 'assistant', kind: 'tool', text: 'state_get', ts: 2 },
+        { role: 'assistant', kind: 'text', text: 'три, одна ждёт ответа', ts: 3 },
+      ],
+    },
+  });
+  const log = await openAgent(doc);
+
+  assert.match(log.textContent, /сколько сессий висит/, 'реплики человека нет в ленте');
+  assert.match(log.textContent, /три, одна ждёт ответа/, 'ответа агента нет в ленте');
+  assert.ok(log.querySelector('.msg.user .bubble'), 'реплика человека не отличима от ответа');
+  assert.ok(log.querySelector('.msg.assistant .bubble'), 'ответ агента нарисован не как реплика');
+  // тул-вызов — чипом чата сессии, а не обычным текстом
+  const chip = log.querySelector('.msg.tools .chip .tverb');
+  assert.ok(chip, 'вызов инструмента нарисован текстом: ' + log.innerHTML);
+  assert.equal(chip.textContent, 'state_get');
+  assert.equal(doc.getElementById('agTag').hidden, false, 'нет метки продолжения при живом разговоре');
+});
+
+test('причина пустой ленты названа словами, а не показана пустотой', async () => {
+  const { doc } = await boot({
+    agentSession: 's-42',
+    agentHistory: { ok: true, sessionId: 's-42', items: [], reason: 'транскрипт не найден — история недоступна' },
+  });
+  const log = await openAgent(doc);
+  assert.match(log.textContent, /транскрипт не найден/, 'причина проглочена: ' + log.textContent);
+});
+
+test('разговора ещё не было — приглашение, а не вид поломки', async () => {
+  const { doc } = await boot({ agentHistory: { ok: true, items: [], reason: 'нет сохранённого разговора' } });
+  const log = await openAgent(doc);
+  assert.equal(doc.getElementById('agTag').hidden, true, 'метка продолжения врёт про пустую нить');
+  // «нет сохранённого разговора» — не беда, а нормальное первое открытие
+  assert.doesNotMatch(log.textContent, /нет сохранённого разговора/);
+  assert.match(log.textContent, /Спроси Джарвиса/, 'приглашения писать нет: ' + log.textContent);
+});
+
+test('поток ответа во вкладке — тот же, что в отдельном окне', async () => {
+  const { doc, subs } = await boot();
+  const log = await openAgent(doc);
+  assert.ok(subs.onAgentEvent, 'вкладка не подписалась на поток агента');
+
+  subs.onAgentEvent({ type: 'delta', text: 'ду' });
+  subs.onAgentEvent({ type: 'delta', text: 'маю' });
+  subs.onAgentEvent({ type: 'tool_use', name: 'state_get' });
+  subs.onAgentEvent({ type: 'done', session_id: 's-new' });
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.match(log.textContent, /думаю/, 'дельты не собрались в один пузырь');
+  assert.ok(log.querySelector('.msg.tools .chip'), 'тул-вызов из потока не показан чипом');
+  assert.equal(doc.getElementById('agSend').disabled, false, 'вкладка осталась в «думает…»');
+});
+
+test('сообщение из вкладки уходит в ту же нить разговора', async () => {
+  const { doc, calls } = await boot({ agentSession: 's-42' });
+  await openAgent(doc);
+  doc.getElementById('agInput').value = 'привет';
+  doc.getElementById('agSend').dispatchEvent(click(doc));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(
+    calls.some((c) => c[0] === 'agentSend' && c[1] === 'привет' && c[2] === 's-42'),
+    'реплика ушла мимо продолжаемого разговора: ' + JSON.stringify(calls.filter((c) => c[0] === 'agentSend')),
+  );
 });
 
 test('сессия завершается вторым нажатием, а не первым', async () => {

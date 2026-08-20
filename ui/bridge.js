@@ -110,6 +110,16 @@
     loopsDiff: (id) => invoke('loops_diff', { id }),
     onLoopsState: (cb) => on('loops-state', cb),
 
+    // главный агент: нить разговора, прошлая переписка, отправка и подтверждения.
+    // События демон шлёт всем окнам — вкладка и окно из трея видят один поток.
+    agentChatState: () => invoke('agent_chat_state'),
+    agentChatHistory: () => invoke('agent_chat_history'),
+    agentChatReset: () => invoke('agent_chat_reset'),
+    agentSend: (message, sessionId) => invoke('agent_send', { message, sessionId }),
+    agentConfirm: (nonce, approved) => invoke('agent_confirm', { nonce, approved }),
+    onAgentEvent: (cb) => on('agent:event', cb),
+    onAgentConfirm: (cb) => on('agent:confirm', cb),
+
     // тема/краска сменились в другом окне (демон рассылает всем)
     onAppearance: (cb) => on('appearance', cb),
     reportError: report,

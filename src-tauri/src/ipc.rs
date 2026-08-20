@@ -2659,6 +2659,44 @@ pub fn agent_chat_state(app: AppHandle) -> Value {
     json!({ "sessionId": saved })
 }
 
+/// Прошлая переписка главного агента — чтобы окно рисовало ленту, а не пустоту.
+///
+/// Контекст агент помнит и без этого (`--resume`), но человеку нужно ВИДЕТЬ, о
+/// чём шла речь: пустое окно с пометкой «продолжение» выглядит как потеря.
+///
+/// Транскрипт лежит там же, где у обычных сессий, только рабочая папка агента —
+/// временная (`agent/mod.rs`, `current_dir(temp_dir())`), поэтому и каталог
+/// проекта считаем от неё.
+///
+/// Отсутствие файла — не ошибка: разговора могло не быть, или транскрипт
+/// подчищен системой. Отвечаем пустой лентой и говорим об этом честно, чтобы
+/// окно не молчало о причине.
+#[tauri::command]
+pub fn agent_chat_history(app: AppHandle) -> Value {
+    let d = Daemon::get(&app);
+    let Some(sid) = crate::agent::saved_chat_session(&d.settings.load()) else {
+        return json!({ "ok": true, "items": [], "reason": "нет сохранённого разговора" });
+    };
+    let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+    let path = crate::transcript::project_dir_for(&cwd).join(format!("{sid}.jsonl"));
+    if !path.exists() {
+        return json!({
+            "ok": true, "items": [], "sessionId": sid,
+            "reason": "транскрипт не найден — история недоступна, контекст у агента остался",
+        });
+    }
+    let be = crate::backend::backend(crate::backend::Agent::Claude);
+    let entries = be.read_entries(&path, 512 * 1024);
+    let items: Vec<Value> = entries
+        .iter()
+        .flat_map(|e| be.to_chat_items(e))
+        .map(|i| json!({ "role": i.role, "kind": i.kind, "text": i.text, "ts": i.ts }))
+        .collect();
+    // хвост: длинную переписку целиком в окно не тащим
+    let start = items.len().saturating_sub(120);
+    json!({ "ok": true, "sessionId": sid, "items": &items[start..], "total": items.len() })
+}
+
 /// «Новый чат»: забыть id. Прошлый разговор остаётся на диске — теряется только
 /// ниточка к нему, и вернуть её можно, вписав id обратно в настройки.
 #[tauri::command]

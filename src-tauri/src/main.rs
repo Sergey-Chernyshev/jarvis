@@ -250,6 +250,7 @@ fn main() {
             ipc::voice_abort,
             ipc::agent_chat_open,
             ipc::agent_chat_state,
+            ipc::agent_chat_history,
             ipc::agent_chat_reset,
             ipc::terminal_focus,
             ipc::session_launch,

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
-use super::ChatBook;
+use super::{chain, ChatBook};
 use crate::util::{ellipsize, one_line};
 
 /// Сколько головы читать ради первой реплики и сколько хвоста — ради времени.
@@ -229,6 +229,17 @@ pub fn display_name(human: Option<&str>, preview: &str) -> String {
 /// Скрытые разговоры (`ChatBook::hidden`) из хвоста выпадают: файл на месте,
 /// строки нет. Сколько их — говорит `hidden_count`.
 pub fn chats_json(book: &ChatBook, threads: &[Thread]) -> Value {
+    chats_json_at(book, threads, chain::visits(), crate::util::now_ms())
+}
+
+/// То же с явным журналом заходов и часами: тесты гоняют список без процессного
+/// реестра, иначе соседний тест дописывал бы им расход.
+pub fn chats_json_at(
+    book: &ChatBook,
+    threads: &[Thread],
+    visits: &chain::Visits,
+    now: i64,
+) -> Value {
     let thread_of = |sid: Option<&str>| sid.and_then(|s| threads.iter().find(|t| t.session_id == s));
 
     let mut out: Vec<Value> = book
@@ -236,19 +247,24 @@ pub fn chats_json(book: &ChatBook, threads: &[Thread]) -> Value {
         .iter()
         .enumerate()
         .map(|(i, c)| {
+            // Расход считаем только автономному: у остальных за него отвечает
+            // человек, и строка с деньгами в каждом чате была бы шумом.
+            let auto = c.chain == chain::Mode::Auto;
             entry(
                 Some(&c.id),
                 c.human_name(),
                 c.session_id.as_deref(),
                 i == book.current_index(),
                 thread_of(c.session_id.as_deref()),
+                auto,
+                auto.then(|| visits.spend(&c.id, now)),
             )
         })
         .collect();
     out.extend(
         unbound(book, threads)
             .filter(|t| !book.is_hidden(&t.session_id))
-            .map(|t| entry(None, None, Some(&t.session_id), false, Some(t))),
+            .map(|t| entry(None, None, Some(&t.session_id), false, Some(t), false, None)),
     );
     add_context(book, &mut out);
     Value::Array(out)
@@ -348,6 +364,8 @@ fn entry(
     sid: Option<&str>,
     current: bool,
     t: Option<&Thread>,
+    auto: bool,
+    spend: Option<chain::Spend>,
 ) -> Value {
     let preview = t.map(|t| t.preview.as_str()).unwrap_or("");
     json!({
@@ -359,6 +377,12 @@ fn entry(
         "turns": t.map(|t| t.turns).unwrap_or(0),
         "at": t.and_then(|t| t.at),
         "preview": preview,
+        // Автономия обязана читаться СО СТРОКИ: пять чатов на «спроси» и один,
+        // который работает сам, различаются мгновенно, а не через настройки.
+        "auto": auto,
+        // И там же его расход: иначе «дорого» остаётся ощущением, а решать,
+        // оставлять ли режим, будет не на чем.
+        "spend": spend,
     })
 }
 
@@ -527,6 +551,46 @@ mod tests {
         assert_eq!(arr[1]["name"], json!("Второй разговор"));
         assert_eq!(arr[2]["id"], Value::Null, "непривязанным остался один");
         assert_eq!(arr[2]["sessionId"], json!("s-1"));
+    }
+
+    /// Пять чатов на «спроси» и один, который работает сам, обязаны различаться
+    /// СО СТРОКИ списка — вместе с тем, во сколько эта самостоятельность обходится.
+    #[test]
+    fn an_autonomous_chat_is_visible_in_the_row_with_its_spend() {
+        let now = 1_000_000_000;
+        let book = read_chats(&json!({ "agentChat": {
+            "chats": [{ "id": "c1", "name": "Джарвис" },
+                      { "id": "c2", "name": "Выборы", "chain": "auto" }],
+            "current": "c1",
+        }}));
+        let v = chain::Visits::new();
+        v.note(chain::Visit {
+            at: now - 3_600_000,
+            chat_id: "c2".into(),
+            session_id: "s-1".into(),
+            step: 1,
+            kind: "sent".into(),
+            decided: "почини красные тесты".into(),
+            ran: vec![],
+            changed: "тронул src/a.rs; тесты КРАСНЫЕ".into(),
+            night: true,
+            usd: Some(1.25),
+        });
+
+        let list = chats_json_at(&book, &[], &v, now);
+        assert_eq!(list[0]["auto"], json!(false), "спокойный чат помечен автономным");
+        assert_eq!(list[0]["spend"], Value::Null, "расход считаем не всем подряд");
+        assert_eq!(list[1]["auto"], json!(true), "автономный чат в списке неотличим");
+        assert_eq!(list[1]["spend"]["known"], json!(true));
+        assert_eq!(list[1]["spend"]["night"], json!(1.25), "сколько потратил за ночь");
+        assert_eq!(list[1]["spend"]["day"], json!(1.25));
+        assert_eq!(list[1]["spend"]["nightCap"], json!(chain::CHAT_NIGHT_USD));
+        assert_eq!(list[1]["spend"]["allNightCap"], json!(chain::ALL_NIGHT_USD));
+
+        // чисел нет — так и говорим: «0.00$» соврало бы точностью
+        let list = chats_json_at(&book, &[], &chain::Visits::new(), now);
+        assert_eq!(list[1]["auto"], json!(true), "значок автономии зависит от режима, а не от расхода");
+        assert_eq!(list[1]["spend"]["known"], json!(false));
     }
 
     // ── скрыть и забыть ───────────────────────────────────────────────────

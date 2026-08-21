@@ -134,6 +134,9 @@
   };
   const spaced = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
   const pct = (f) => Math.round(f * 100) + '%';
+  /* Деньги автономного чата — до цента и всегда со знаком валюты: «1.2» рядом с
+   * токенами читается как что угодно. Не число — прочерк, а не ноль. */
+  const usd = (n) => (Number.isFinite(n) ? (Math.round(n * 100) / 100).toFixed(2) + '$' : '—');
 
   /* Порог предупреждения — тот же, что у ядра (agent/context.rs, NEAR): человек
    * должен узнать про исход контекста заранее, а не по внезапно поглупевшему
@@ -495,12 +498,112 @@
       /* Рядом — счётчик контекста. Класс вешаем кодом: разметки у вкладки и окна
        * две, и общий контейнер иначе пришлось бы править в обоих файлах. */
       sub.classList.add('ctxhost');
+      const st = t.chain;
+      const sw = chainNode(st);
+      if (sw) sub.appendChild(sw);
+      const money = spendNode(st);
+      if (money) sub.appendChild(money);
       const g = gauge(t.ctx);
-      if (!g) return;
-      const node = sub.appendChild(ctxNode(g));
+      const node = g ? sub.appendChild(ctxNode(g)) : null;
       // Раскрытые подробности пересобираем вместе со счётчиком: числа в них
       // стареют за ход, а застывшая карточка врёт ровно тем, против чего заведена.
-      if (pop) { popOff(); ctxPop(node, g); }
+      if (popKind === 'ctx' && node) { popOff(); ctxPop(node, g); }
+      else if (popKind === 'chain' && money) { popOff(); chainPop(money, st); }
+    }
+
+    /* ---------- автономия чата: режим, расход, журнал заходов ---------- */
+
+    /* Срез цепочки один на шапку и на строку списка: два источника про один чат
+     * разъехались бы на первом же заходе. Приезжает командой (открыли чат) и
+     * своим событием (заход ушёл, цепочка встала) — опрашивать это на каждый ход
+     * значило бы узнавать про ночную работу с опозданием. */
+    function applyChain(id, st) {
+      if (!id || !st) return;
+      thread(id).chain = st;
+      const row = chats.find((c) => c.id === id);
+      if (row) { row.auto = st.mode === 'auto'; if (st.spend) row.spend = st.spend; }
+      if (id === chatId) syncHead();
+      renderChats();
+    }
+
+    async function chainSync(id) {
+      if (!id || !api.chainState) return; // сборка без цепочек — показывать нечего
+      let res;
+      try { res = await api.chainState(id); } catch { return; }
+      if (res && res.ok !== false) applyChain(id, res.state);
+    }
+
+    /* Переключатель автономии — в ШАПКЕ, а не только в файле настроек: сегодня
+     * сам работает один чат, завтра другой, и ради этого не открывают json. С
+     * «стоп» он не путается: та кнопка стоит у поля ввода и живёт ровно столько,
+     * сколько идёт ход, — а тумблер про режим, который переживает и ход, и
+     * перезапуск. И он про СВОЙ чат: соседний остаётся на «спроси». */
+    function chainNode(st) {
+      // Пока ядро не назвало режим, тумблера нет: «спроси» по умолчанию — наша
+      // догадка, а тумблер с догадкой переключают вслепую.
+      if (!st || !api.chainMode) return null;
+      const auto = st.mode === 'auto';
+      const box = el('chainsw' + (auto ? ' on' : ''), auto ? '⟳ сам' : '⏸ спроси');
+      box.title = auto
+        ? 'Этот чат продолжает работу сам. Нажми — снова будет спрашивать'
+        : 'Этот чат спрашивает перед каждым заходом. Нажми — будет работать сам';
+      box.addEventListener('click', async () => {
+        const id = chatId;
+        let r;
+        try { r = await api.chainMode(id, !auto); }
+        catch (e) { addErr(here(), 'Не удалось сменить режим: ' + errText(e)); return; }
+        if (r && r.ok === false) { addErr(here(), 'Не удалось сменить режим: ' + why(r)); return; }
+        applyChain(id, r && r.state);
+      });
+      return box;
+    }
+
+    /* Свой счётчик расхода у автономного чата — за ночь и за сутки. Без него
+     * «дорого» остаётся ощущением, а решать, оставлять ли режим, будет не на
+     * чем. Чисел нет — так и говорим: «0.00$» соврало бы точностью. */
+    function spendNode(st) {
+      const s = st && st.mode === 'auto' && st.spend;
+      if (!s) return null;
+      const box = el('chainspend', s.known
+        ? usd(s.night) + ' за ночь · ' + usd(s.day) + ' за сутки'
+        : 'расход не посчитан');
+      box.title = (s.known
+        ? 'Потолки этого чата: ' + usd(s.nightCap) + ' за ночь, ' + usd(s.dayCap) + ' за сутки. '
+          + 'У всех автономных вместе ' + usd(s.allNight) + ' из ' + usd(s.allNightCap) + ' за ночь.'
+        : 'Токены считает usage, и сравнить пока не с чем.') + ' Журнал заходов — по клику';
+      box.addEventListener('click', () => chainPop(box, st));
+      return box;
+    }
+
+    /* Журнал заходов: что решил, что запустил, что изменилось. «Уехал не туда»
+     * лечится следом, а не запретом, — и след обязан быть достижим оттуда же,
+     * откуда видно расход. Слой тот же, что у подробностей контекста: двух
+     * карточек поверх одной шапки быть не должно. */
+    function chainPop(anchor, st) {
+      if (pop) { popOff(); return; }
+      pop = el('ctxpop');
+      popKind = 'chain';
+      const line = (s) => pop.appendChild(el('ctxline', s));
+      const s = (st && st.spend) || {};
+      line(s.known
+        ? 'Потрачено ' + usd(s.night) + ' за ночь из ' + usd(s.nightCap)
+          + ' и ' + usd(s.day) + ' за сутки из ' + usd(s.dayCap) + '. Заходов за сутки: ' + s.visits + '.'
+        : 'Расход по этому чату не посчитан: токены считает usage, а сравнить пока не с чем. Числа появятся со вторым заходом.');
+      if (s.known) {
+        line('У всех автономных чатов вместе: ' + usd(s.allNight) + ' из ' + usd(s.allNightCap)
+          + ' за ночь. Общий потолок останавливает цепочку даже там, где этот чат в своих рамках.');
+      }
+      pop.appendChild(el('ctxsep'));
+      const log = ((st && st.visits) || []).slice(-6).reverse();
+      if (!log.length) line('Заходов ещё не было — журнал пуст.');
+      for (const v of log) {
+        line('Заход ' + v.step + ' (' + v.kind + (v.night ? ', ночью' : '')
+          + (v.usd == null ? '' : ', ' + usd(v.usd)) + '): ' + v.decided);
+        line('— ' + v.changed + (v.ran && v.ran.length ? ' · запускал: ' + v.ran.join(', ') : ''));
+      }
+      const r = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : null;
+      if (r) { pop.style.top = Math.round(r.bottom + 6) + 'px'; pop.style.right = '12px'; }
+      document.body.appendChild(pop);
     }
 
     /* ---------- счётчик контекста в шапке ---------- */
@@ -530,12 +633,14 @@
     }
 
     let pop = null; // подробности счётчика: слой поверх шапки
-    const popOff = () => { if (pop) { pop.remove(); pop = null; } };
+    // Чья карточка раскрыта: пересобирая шапку, надо вернуть ту же, а не соседнюю.
+    let popKind = '';
+    const popOff = () => { if (pop) { pop.remove(); pop = null; popKind = ''; } };
     /* Клик мимо — закрыть. Свой клик узнаём по цели, а не глушим всплытие:
      * глушение стоило бы закрытия там, где до document слушает кто-то ещё. */
     document.addEventListener('click', (e) => {
       const el0 = e && e.target;
-      if (el0 && el0.closest && (el0.closest('.ctx') || el0.closest('.ctxpop'))) return;
+      if (el0 && el0.closest && (el0.closest('.ctx') || el0.closest('.ctxpop') || el0.closest('.chainspend'))) return;
       popOff();
     });
 
@@ -545,6 +650,7 @@
     function ctxPop(anchor, g) {
       if (pop) { popOff(); return; }
       pop = el('ctxpop');
+      popKind = 'ctx';
       const line = (s) => pop.appendChild(el('ctxline', s));
       line('Контекст разговора: занято ' + spaced(g.used) + ' токенов'
         + (g.frac == null ? '' : ' из ' + spaced(g.window) + ' — это ' + pct(g.frac)));
@@ -650,6 +756,9 @@
       renderChats();
       syncHead();
       syncTag();
+      // Список приехал — режим и расход открытого чата обязаны совпасть с ним:
+      // тумблер, показывающий вчерашнее, хуже отсутствующего.
+      chainSync(chatId);
       // Открыли чат, у которого контекст уже на исходе, — сказать надо сразу, а
       // не ждать следующего хода: латч в разговоре не даст повториться.
       ctxWatch(here());
@@ -915,6 +1024,13 @@
       const main = el('agmain');
       const line = el('agline');
       line.appendChild(el('agname', c.name));
+      /* Автономия читается СО СТРОКИ: пять чатов на «спроси» и один, который
+       * работает сам, должны различаться мгновенно, а не выясняться в настройках. */
+      if (c.auto) {
+        const a = el('agauto', '⟳');
+        a.title = 'Работает сам: продолжает заходы без твоей кнопки';
+        line.appendChild(a);
+      }
       if (disk) line.appendChild(el('agdisk', 'с диска'));
       line.appendChild(el('spacer'));
       const when = whenLabel(c.at);
@@ -931,6 +1047,14 @@
       // первая реплика, и вторая её копия под ней — просто шум.
       else under.appendChild(el('agprev', c.preview && c.preview !== c.name ? c.preview : ''));
       under.appendChild(el('agmeta', sizeOf(c)));
+      // Расход автономного — там же, где он сам: иначе «дорого» так и останется
+      // ощущением. Чисел нет — строки нет: прочерк тут ничего не добавляет.
+      if (c.auto && c.spend && c.spend.known) {
+        const sp = el('agspend', usd(c.spend.night) + ' за ночь');
+        sp.title = 'За сутки ' + usd(c.spend.day) + ' из ' + usd(c.spend.dayCap)
+          + '; ночной потолок ' + usd(c.spend.nightCap);
+        under.appendChild(sp);
+      }
       main.appendChild(under);
       row.appendChild(main);
       row.title = disk
@@ -1656,6 +1780,11 @@
      * и решает, чья это лента, — потому и можно уйти во второй разговор, пока
      * первый пишет. Пометки нет — так шлёт только старый демон, у которого
      * поток и был один: отдаём открытому. */
+    /* Свой канал цепочки: заход ушёл, режим сменили в соседнем окне, цепочка
+     * встала о потолок. Срез приезжает целиком — шапке и строке списка остаётся
+     * его показать. */
+    if (api.onChain) api.onChain((ev) => applyChain(ev && ev.chatId, ev && ev.state));
+
     const END = { done: 1, failed: 1, stopped: 1 }; // события конца хода
     api.onEvent((ev0) => {
       const ev = ev0 || {};
@@ -1888,6 +2017,9 @@
           stop: (chatId) => j.agentStop(chatId),
           chainState: (chatId) => j.agentChainState(chatId),
           chainMode: (chatId, auto) => j.agentChainMode(chatId, auto),
+          // Канала цепочки может не быть (старый мост) — тогда шапка живёт на
+          // одних ответах команд, а не падает вместе со вкладкой.
+          onChain: (cb) => j.onAgentChain && j.onAgentChain(cb),
           // закрыть дочернюю сессию — той же командой, что и список сессий
           kill: (sessionId) => j.killSession(sessionId),
           confirm: (nonce, approved) => j.agentConfirm(nonce, approved),
@@ -1944,6 +2076,7 @@
         stop: (chatId) => invoke('agent_stop', { chatId }),
         chainState: (chatId) => invoke('agent_chain_state', { chatId }),
         chainMode: (chatId, auto) => invoke('agent_chain_mode', { chatId, auto }),
+        onChain: (cb) => listen('agent:chain', (e) => cb(e.payload)),
         kill: (sessionId) => invoke('session_kill', { sessionId }),
         confirm: (nonce, approved) => invoke('agent_confirm', { nonce, approved }),
         confirmDone,

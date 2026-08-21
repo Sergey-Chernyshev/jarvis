@@ -935,3 +935,113 @@ test('чат, открытый уже у границы, предупрежда�
   assert.deepEqual(kinds, ['msg user', 'msg note']);
   assert.match(doc.querySelector('.ctx').className, /near/, 'счётчик у границы не помечен');
 });
+
+/* ---------- точечная автономия: свой режим, свой расход, свой след ----------
+ *
+ * Владелец не включает «продолжай сам» всем разом: дорого, и уехать не туда
+ * может тот чат, за которым он в эту ночь не смотрит. Значит режим переключают
+ * по чату из шапки, автономный видно в списке с первого взгляда, а во сколько
+ * он обошёлся — числом, а не ощущением. */
+
+const SPEND = (known) => ({
+  night: known ? 1.25 : 0, day: known ? 3.4 : 0, visits: known ? 4 : 0, known,
+  nightCap: 3, dayCap: 10, allNight: known ? 5.9 : 0, allNightCap: 6, allDay: 0, allDayCap: 20,
+});
+const CHAIN = (mode, spend = SPEND(false), visits = []) => ({
+  ok: true,
+  state: {
+    chatId: 'c1', active: false, mode, sessionId: null, step: 0, maxSteps: 10,
+    phase: 'stopped', note: '', proposal: null, waiting: [], visits, spend,
+  },
+});
+const PAIR = (auto) => ({
+  ok: true,
+  current: 'c1',
+  hidden: 0,
+  chats: [
+    { id: 'c1', name: 'Джарвис', sessionId: 's-1', current: true, turns: 4, at: 1, auto: false, spend: null },
+    { id: 'c2', name: 'Ночной', sessionId: 's-2', current: false, turns: 9, at: 2, auto, spend: auto ? SPEND(true) : null },
+  ],
+});
+
+test('режим переключают в шапке — и только у своего чата', async () => {
+  const { doc, calls, hit } = await boot({ sessionId: 's-1' }, {
+    agent_chats_list: () => PAIR(false),
+    agent_chat_history: EMPTY_LOG,
+    agent_chain_state: () => CHAIN('ask'),
+    agent_chain_mode: (a) => CHAIN(a.auto ? 'auto' : 'ask'),
+  });
+  const sw = doc.querySelector('.chainsw');
+  assert.ok(sw, 'режим чата виден только в файле настроек: ' + doc.getElementById('sub').textContent);
+  assert.match(sw.textContent, /спроси/, 'шапка не говорит, кто пишет следующий заход');
+  // «Стоп» — про идущий ход и живёт у поля ввода; в шапке его нет и не будет
+  assert.equal(doc.querySelectorAll('#sub .agstop').length, 0, 'тумблер режима спутан с кнопкой «стоп»');
+
+  await hit(sw);
+  assert.deepEqual(
+    calls.filter(([c]) => c === 'agent_chain_mode').map(([, a]) => a),
+    [{ chatId: 'c1', auto: true }],
+    'переключатель ушёл не в свой чат либо не дошёл вовсе',
+  );
+  assert.match(doc.querySelector('.chainsw').textContent, /сам/, 'тумблер остался в прежнем состоянии');
+  assert.equal(doc.querySelector('.chainsw').classList.contains('on'), true);
+  // соседний чат об этом не узнал: автономия точечная, а не общая
+  const badges = rowsOf(doc).map((r) => !!r.querySelector('.agauto'));
+  assert.deepEqual(badges, [true, false], 'значок автономии разъехался со строками');
+});
+
+test('автономный чат виден в строке списка вместе с расходом', async () => {
+  const { doc } = await boot({ sessionId: 's-1' }, {
+    agent_chats_list: () => PAIR(true),
+    agent_chat_history: EMPTY_LOG,
+    agent_chain_state: () => CHAIN('ask'),
+  });
+  const rows = rowsOf(doc);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].querySelectorAll('.agauto').length, 0, 'спокойный чат помечен автономным');
+  assert.ok(rows[1].querySelector('.agauto'), 'чат, который работает сам, в списке неотличим');
+  const money = rows[1].querySelector('.agspend');
+  assert.ok(money, 'сколько стоила ночь — не выяснить: ' + rows[1].textContent);
+  assert.match(money.textContent, /1\.25\$ за ночь/, money.textContent);
+  assert.match(money.title, /3\.40\$ из 10\.00\$/, 'сутки и норма спрятаны: ' + money.title);
+  assert.equal(rows[0].querySelectorAll('.agspend').length, 0, 'расход считаем не всем подряд');
+});
+
+test('журнал заходов открывается со счётчика расхода и говорит, куда чат ушёл', async () => {
+  const log = [
+    { at: 1, chatId: 'c1', sessionId: 's-1', step: 1, kind: 'sent', night: true, usd: 0.4,
+      decided: 'почини красные тесты', ran: ['cargo test'], changed: 'тронул src/a.rs; тесты КРАСНЫЕ' },
+    { at: 2, chatId: 'c1', sessionId: 's-1', step: 2, kind: 'sent', night: true, usd: 0.85,
+      decided: 'прогони проверку целиком', ran: [], changed: 'тронул src/a.rs, src/b.rs; тесты зелёные' },
+  ];
+  const { doc, hit } = await boot({ sessionId: 's-1' }, {
+    agent_chats_list: () => PAIR(false),
+    agent_chat_history: EMPTY_LOG,
+    agent_chain_state: () => CHAIN('auto', SPEND(true), log),
+  });
+  const money = doc.querySelector('.chainspend');
+  assert.ok(money, 'у автономного чата нет своего счётчика расхода');
+  assert.match(money.textContent, /1\.25\$ за ночь · 3\.40\$ за сутки/, money.textContent);
+  assert.equal(doc.querySelectorAll('.ctxpop').length, 0, 'журнал лезет в глаза без спроса');
+
+  await hit(money);
+  const pop = doc.querySelector('.ctxpop');
+  assert.ok(pop, 'журнала заходов по клику нет');
+  assert.match(pop.textContent, /1\.25\$ за ночь из 3\.00\$/, 'свой потолок не назван: ' + pop.textContent);
+  assert.match(pop.textContent, /5\.90\$ из 6\.00\$/, 'общего потолка в журнале нет');
+  assert.match(pop.textContent, /в своих рамках/, 'не сказано, что общий потолок рвёт и своего');
+  // что решил, что запустил, что изменилось — свежие сверху
+  assert.match(pop.textContent, /Заход 2 \(sent, ночью, 0\.85\$\): прогони проверку целиком/, pop.textContent);
+  assert.match(pop.textContent, /запускал: cargo test/, 'что запускал — потеряно');
+  assert.ok(pop.textContent.indexOf('Заход 2') < pop.textContent.indexOf('Заход 1'), 'журнал вверх ногами');
+});
+
+test('без чисел счётчик расхода честно молчит, а не рисует ноль', async () => {
+  const { doc } = await boot({ sessionId: 's-1' }, {
+    agent_chats_list: () => PAIR(false),
+    agent_chat_history: EMPTY_LOG,
+    agent_chain_state: () => CHAIN('auto'),
+  });
+  assert.match(doc.querySelector('.chainspend').textContent, /расход не посчитан/);
+  assert.doesNotMatch(doc.querySelector('.chainspend').textContent, /0\.00\$/, 'ноль вместо «не знаю»');
+});

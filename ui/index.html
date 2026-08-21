@@ -1225,6 +1225,11 @@
     white-space: nowrap;
   }
   .agmeta { flex: none; font-size: 11px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+  /* Чат, который работает сам, — значком в строке: краска та же единственная,
+     что у занятости, потому что это про «здесь идёт работа без тебя» */
+  .agauto { flex: none; font-size: 11px; line-height: 1; color: var(--accent); }
+  /* И его расход рядом: «дорого» обязано быть числом, а не ощущением */
+  .agspend { flex: none; font-size: 11px; color: var(--ink-mute); font-variant-numeric: tabular-nums; }
   /* «…» — вход в меню строки. Три иконки в ряд читались как три равные кнопки,
      хотя одна из них необратима; редкие действия ушли под один знак */
   .agdots { flex: none; width: 18px; text-align: center; color: var(--ink-faint); opacity: 0; font-size: 13px; line-height: 1; }

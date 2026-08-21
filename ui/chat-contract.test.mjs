@@ -78,7 +78,9 @@ test('колонка разговоров одинаково размечена 
     // Строка: имя, время, превью, размер, бейдж «с диска» и вход в действия
     // .agdraft — пометка «Черновик: …»: без неё неотправленный текст в соседнем
     // чате не виден вовсе, и его пишут заново либо шлют не туда
-    for (const sel of ['.aglist', '.agchat.on', '.agdisk', '.agtime', '.agprev', '.agdraft', '.agmeta', '.agdots', '.agempty']) {
+    // .agauto/.agspend — автономный чат и его расход: пропадут в одном из окон,
+    // и «кто работает сам» снова придётся выяснять в файле настроек
+    for (const sel of ['.aglist', '.agchat.on', '.agdisk', '.agtime', '.agprev', '.agdraft', '.agmeta', '.agdots', '.agempty', '.agauto', '.agspend']) {
       assert.ok(css.includes(sel), where + ': ' + sel + ' не стилизован — строка чата разъехалась');
     }
     /* Меню строки и вопрос про удаление — слой ПОВЕРХ колонки: внутри строки их
@@ -163,4 +165,30 @@ test('user and agent messages are visually distinct voices', () => {
   assert.match(html, /\.msg\.user \{[^}]*align-self: flex-end/s);
   // у агента подложки нет — его голос остаётся текстом на бумаге
   assert.doesNotMatch(html, /\.msg\.assistant \.bubble \{[^}]*background: var\(--accent/s);
+});
+
+/* Переключатель автономии и счётчик расхода стоят в шапке чата — рядом со
+ * счётчиком контекста и по тем же правилам. Стили у них ОДНИ на два документа
+ * (theme.css), потому что второй копии тут заводить незачем: разъедется —
+ * человек в одном из окон не увидит, что чат работает сам и во сколько это
+ * обходится. Кнопка «стоп» остаётся у поля ввода: она про идущий ход. */
+test('автономия чата видна в шапке и не путается с кнопкой «стоп»', () => {
+  const theme = readFileSync(new URL('./theme.css', import.meta.url), 'utf8');
+  const chat = readFileSync(new URL('./agent-chat.js', import.meta.url), 'utf8');
+  for (const sel of ['.chainsw', '.chainsw.on', '.chainspend']) {
+    assert.ok(theme.includes(sel), sel + ' не стилизован — переключать режим нечем');
+  }
+  // Своей копии в документах быть не должно: у шапки один язык на оба окна.
+  const win = readFileSync(new URL('./agent-chat.html', import.meta.url), 'utf8');
+  for (const [where, css] of [['index.html', html], ['agent-chat.html', win]]) {
+    assert.ok(!css.includes('.chainsw'), where + ': вторая копия стилей шапки — она и разъедется');
+  }
+  // Включённая автономия — той же единственной краской, что и занятость
+  assert.match(theme.match(/\.chainsw\.on\s*\{([^}]*)\}/)[1], /var\(--accent\)/, 'работающий сам чат ничем не выделен');
+  // Переключатель зовёт команду режима, а не общий тумблер настроек
+  assert.match(chat, /function chainNode\(/);
+  assert.match(chat, /api\.chainMode\(id, !auto\)/);
+  // Журнал заходов и расход достижимы оттуда же
+  assert.match(chat, /function chainPop\(/);
+  assert.match(chat, /function spendNode\(/);
 });

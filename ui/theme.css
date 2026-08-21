@@ -1014,3 +1014,18 @@ textarea.lp-ask-text { width: 100%; min-height: 66px; }
 .ctxline { margin-bottom: 5px; font: 400 12.5px/1.5 var(--font); color: var(--ink-2); }
 .ctxline:last-child { margin-bottom: 0; }
 .ctxsep { height: 1px; margin: 9px 0; background: var(--line); }
+
+/* Переключатель автономии и расход автономного чата — соседи счётчика контекста
+   и живут по тем же правилам: вкладка панели и окно из трея показывают их
+   одинаково. С кнопкой «стоп» тумблер не путается — та стоит у поля ввода.
+   Включённая автономия — единственная краска, которой это можно сказать: чат,
+   который работает сам, обязан отличаться от соседей и в шапке, и в списке. */
+.chainsw { flex: none; padding: 1px 7px; border-radius: var(--r-chip); cursor: pointer;
+  font: 500 11.5px/1.6 var(--font); color: var(--ink-faint); background: var(--fill-1);
+  white-space: nowrap; -webkit-app-region: no-drag; }
+.chainsw:hover { color: var(--ink-mute); }
+.chainsw.on { color: var(--accent); background: var(--accent-soft); }
+.chainspend { flex: none; cursor: pointer; font: 400 11.5px/1.6 var(--font);
+  color: var(--ink-faint); white-space: nowrap; font-variant-numeric: tabular-nums;
+  -webkit-app-region: no-drag; }
+.chainspend:hover { color: var(--ink-mute); }

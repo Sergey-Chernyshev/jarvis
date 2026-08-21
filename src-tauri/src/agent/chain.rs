@@ -110,6 +110,10 @@ pub struct ChainState {
     /// Отложенное до утра по этому чату. Состояние, а не строка в логе: «ждёт
     /// тебя» кто-то обязан показать, и шапка — первое место, куда человек смотрит.
     pub waiting: Vec<Waiting>,
+    /// Журнал заходов этого чата — след, по которому видно, куда он ушёл.
+    pub visits: Vec<Visit>,
+    /// Расход именно этого чата: за ночь, за сутки, со своими и общими потолками.
+    pub spend: Spend,
 }
 
 impl ChainState {
@@ -126,6 +130,8 @@ impl ChainState {
             note: String::new(),
             proposal: None,
             waiting: Vec::new(),
+            visits: Vec::new(),
+            spend: Spend::default(),
         }
     }
 
@@ -133,6 +139,14 @@ impl ChainState {
     /// цепочек про ночной журнал не знает и знать не должен.
     fn with_waiting(mut self, waiting: Vec<Waiting>) -> Self {
         self.waiting = waiting;
+        self
+    }
+
+    /// То же для журнала заходов и расхода: они переживают саму цепочку —
+    /// оборванная ночью карусель обязана остаться видимой утром.
+    fn with_log(mut self, visits: Vec<Visit>, spend: Spend) -> Self {
+        self.visits = visits;
+        self.spend = spend;
         self
     }
 }
@@ -404,6 +418,8 @@ fn state_of(chat_id: &str, c: Option<&Chain>) -> ChainState {
             note: c.note.clone(),
             proposal: c.proposal.clone(),
             waiting: Vec::new(),
+            visits: Vec::new(),
+            spend: Spend::default(),
         },
         None => ChainState::idle(chat_id, Mode::Ask),
     }
@@ -550,6 +566,231 @@ pub fn night_log() -> &'static NightLog {
     N.get_or_init(NightLog::new)
 }
 
+// ── Журнал заходов и расход по чату ───────────────────────────────────────
+//
+// «Уехать не туда» лечится не запретом, а СЛЕДОМ: у автономного чата обязан
+// быть журнал заходов — что решил, что запустил, что изменилось и во сколько
+// обошлось. Без него «дорого» остаётся ощущением, а утро начинается с вопроса
+// «куда он ушёл, пока я спал», на который ответить нечем.
+
+/// Сутки — окно счётчика расхода. Ровно те же сутки, что у человека: «за ночь»
+/// и «за сутки» — это про одно засыпание, а не про календарь.
+const DAY_MS: i64 = 86_400_000;
+
+/// Сколько заходов помним по чату. Ночь автономного чата — это десятки заходов,
+/// а не сотни: потолок глубины рвёт цепочку на десятом. Двести хватает на ночь
+/// с перезапусками, а хвост старше суток из счёта выпадает и так.
+const MAX_VISITS: usize = 200;
+
+/// Ночной потолок ОДНОГО автономного чата, доллары. Заход стоит порядка
+/// четверти доллара, потолок глубины — десять заходов: три доллара это полная
+/// цепочка с запасом, то есть ровно та работа, которую отдают на ночь.
+pub const CHAT_NIGHT_USD: f64 = 3.0;
+
+/// Дневная норма одного автономного чата. Днём человек рядом и видит, куда
+/// уходит время, — норма втрое шире ночной и служит стопом от карусели, а не
+/// рамкой работы.
+pub const CHAT_DAY_USD: f64 = 10.0;
+
+/// Общий ночной потолок ВСЕХ автономных чатов. Свой потолок держит один чат в
+/// рамках, но трое таких, каждый «в своих рамках», съедают втрое больше — и
+/// именно это владелец назвал недельным бюджетом. Две полные цепочки за ночь на
+/// всех: третья встаёт и говорит об этом словами.
+pub const ALL_NIGHT_USD: f64 = 6.0;
+
+/// То же на сутки.
+pub const ALL_DAY_USD: f64 = 20.0;
+
+/// Один заход в журнале: не строка в логе, а структура — её показывают.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Visit {
+    pub at: i64,
+    pub chat_id: String,
+    pub session_id: String,
+    pub step: u32,
+    /// Чем кончился заход: `sent`, `deferred`, `stopped`.
+    pub kind: String,
+    /// Что решил — заход одной строкой.
+    pub decided: String,
+    /// Что запустил — команды хода, по которому заход и построен.
+    pub ran: Vec<String>,
+    /// Что изменилось — файлы и вердикт проверки.
+    pub changed: String,
+    /// Заход был ночным. Границы ночи спрашиваются у бюджета, здесь только след.
+    pub night: bool,
+    /// Прирост расхода сессии с прошлого замера, доллары. `None` — сравнивать
+    /// не с чем или `usage` промолчал; ноль вместо этого был бы ложью.
+    pub usd: Option<f64>,
+}
+
+/// Расход чата с потолками — то, что видит человек.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Spend {
+    pub night: f64,
+    pub day: f64,
+    /// Заходов за сутки — расход без их числа ни о чём не говорит.
+    pub visits: u32,
+    /// Считали ли вообще. `false` — чисел нет, и «0.00$» соврало бы точностью.
+    pub known: bool,
+    pub night_cap: f64,
+    pub day_cap: f64,
+    /// Он же по всем автономным чатам разом — второй, независимый ограничитель.
+    pub all_night: f64,
+    pub all_night_cap: f64,
+    pub all_day: f64,
+    pub all_day_cap: f64,
+}
+
+/// Сумма расхода за окно. Второй ответ — считали ли вообще: ноль из нулей и
+/// ноль из пустоты значат разное, и путать их нельзя.
+fn sum_usd(list: &[Visit], now: i64, night_only: bool) -> (f64, bool) {
+    let mut usd = 0.0;
+    let mut known = false;
+    for v in list
+        .iter()
+        .filter(|v| now - v.at <= DAY_MS && (!night_only || v.night))
+    {
+        if let Some(x) = v.usd {
+            usd += x;
+            known = true;
+        }
+    }
+    (usd, known)
+}
+
+/// Журнал заходов. Отдельный тип (как `Chains` и `NightLog`) — чтобы тесты
+/// гоняли его без живого приложения и не дрались за процессный экземпляр.
+#[derive(Default)]
+pub struct Visits {
+    log: Mutex<HashMap<String, Vec<Visit>>>,
+    /// Сессия → её стоимость на прошлом замере.
+    marks: Mutex<HashMap<String, f64>>,
+}
+
+impl Visits {
+    pub fn new() -> Self {
+        Visits::default()
+    }
+
+    /// Во сколько обошёлся заход. Своих чисел у цепочки нет и быть не должно:
+    /// токены считает `usage`, и берём мы у него ПРИРОСТ стоимости сессии с
+    /// прошлого замера. Первый замер сравнивать не с чем — он только ставит
+    /// отметку (тот же приём, что у `note_progress`): сессия могла работать и до
+    /// цепочки, и записать её прошлое на эту ночь значит соврать числом.
+    pub fn delta(&self, session_id: &str, total: Option<f64>) -> Option<f64> {
+        let total = total?;
+        let prev = self
+            .marks
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), total);
+        prev.map(|p| (total - p).max(0.0))
+    }
+
+    /// Записать заход. Хвост старше суток в счёт не идёт, но из журнала не
+    /// выпадает: утром человек читает ночь целиком.
+    pub fn note(&self, v: Visit) {
+        let mut log = self.log.lock().unwrap();
+        let list = log.entry(v.chat_id.clone()).or_default();
+        list.push(v);
+        if list.len() > MAX_VISITS {
+            list.remove(0);
+        }
+    }
+
+    /// Журнал чата, свежие в конце.
+    pub fn for_chat(&self, chat_id: &str) -> Vec<Visit> {
+        self.log.lock().unwrap().get(chat_id).cloned().unwrap_or_default()
+    }
+
+    /// Ночные заходы всех чатов за последние сутки, в порядке времени, — из них
+    /// и складывается утренний ответ «куда он ушёл, пока я спал».
+    pub fn night_visits(&self, now: i64) -> Vec<Visit> {
+        let log = self.log.lock().unwrap();
+        let mut out: Vec<Visit> = log
+            .values()
+            .flatten()
+            .filter(|v| v.night && now - v.at <= DAY_MS)
+            .cloned()
+            .collect();
+        out.sort_by_key(|v| v.at);
+        out
+    }
+
+    /// Расход чата — свой и общий разом: одно без другого не решает ничего.
+    pub fn spend(&self, chat_id: &str, now: i64) -> Spend {
+        let log = self.log.lock().unwrap();
+        let mine: &[Visit] = log.get(chat_id).map(Vec::as_slice).unwrap_or_default();
+        let (night, kn) = sum_usd(mine, now, true);
+        let (day, kd) = sum_usd(mine, now, false);
+        let mut all_night = 0.0;
+        let mut all_day = 0.0;
+        for l in log.values() {
+            all_night += sum_usd(l, now, true).0;
+            all_day += sum_usd(l, now, false).0;
+        }
+        Spend {
+            night,
+            day,
+            visits: mine.iter().filter(|v| now - v.at <= DAY_MS).count() as u32,
+            known: kn || kd,
+            night_cap: CHAT_NIGHT_USD,
+            day_cap: CHAT_DAY_USD,
+            all_night,
+            all_night_cap: ALL_NIGHT_USD,
+            all_day,
+            all_day_cap: ALL_DAY_USD,
+        }
+    }
+
+    /// Упёрлись ли в потолок — и в какой. СВОЙ и ОБЩИЙ проверяются оба: свой
+    /// держит один чат в рамках, общий — всех разом, и три автономных чата, у
+    /// каждого из которых всё в порядке, вместе съедают втрое больше.
+    ///
+    /// Это не замена ступеням бюджета (`budget.rs`): там недельная шкала
+    /// провайдера и ночной потолок в процентах на всё приложение, здесь — деньги
+    /// конкретных чатов. Оба спрашиваются, и любой из них может сказать «стоп».
+    ///
+    /// Чисел нет — запрета нет: врать потолком, которого не посчитали, хуже, чем
+    /// пропустить заход; про молчание счётчика человек узнаёт из шапки.
+    pub fn cap_refusal(&self, chat_id: &str, night: bool, now: i64) -> Option<String> {
+        let s = self.spend(chat_id, now);
+        if !s.known {
+            return None;
+        }
+        let own = |what: &str, spent: f64, cap: f64| {
+            format!("{what} потолок этого чата — {cap:.2}$, потрачено {spent:.2}$. Цепочку останавливаю")
+        };
+        let all = |what: &str, spent: f64, cap: f64, mine: f64| {
+            format!(
+                "{what} потолок ВСЕХ автономных чатов — {cap:.2}$, вместе они потратили {spent:.2}$. \
+                 Этот чат в своих рамках ({mine:.2}$), но общий бюджет кончился — цепочку останавливаю"
+            )
+        };
+        if night && s.night >= s.night_cap {
+            return Some(own("Ночной", s.night, s.night_cap));
+        }
+        if night && s.all_night >= s.all_night_cap {
+            return Some(all("Общий ночной", s.all_night, s.all_night_cap, s.night));
+        }
+        if s.day >= s.day_cap {
+            return Some(own("Дневной", s.day, s.day_cap));
+        }
+        if s.all_day >= s.all_day_cap {
+            return Some(all("Общий дневной", s.all_day, s.all_day_cap, s.day));
+        }
+        None
+    }
+}
+
+/// Процессный журнал заходов — один на приложение.
+pub fn visits() -> &'static Visits {
+    static V: std::sync::OnceLock<Visits> = std::sync::OnceLock::new();
+    V.get_or_init(Visits::new)
+}
+
 /// Ночь ли сейчас.
 ///
 /// Предикат — ЗА БЮДЖЕТОМ: границы ночи там же, где ночной потолок расхода, и
@@ -671,9 +912,44 @@ pub fn progress_mark(o: &Outcome) -> String {
     format!("{}\u{1}{tests}", files.join(","))
 }
 
+/// «Куда он ушёл, пока я спал» — за десять секунд чтения.
+///
+/// По СТРОКЕ на чат, а не по строке на заход: список из сорока заходов
+/// отвечает на этот вопрос ровно так же плохо, как молчание. В строке — сколько
+/// заходов, во сколько обошлись, что тронуто и чем кончился последний. Подробный
+/// журнал никуда не девается и лежит в шапке чата.
+fn where_it_went(visits: &[Visit]) -> Vec<String> {
+    let mut order: Vec<&str> = Vec::new();
+    for v in visits {
+        if !order.contains(&v.chat_id.as_str()) {
+            order.push(&v.chat_id);
+        }
+    }
+    order
+        .iter()
+        .filter_map(|chat| {
+            let mine: Vec<&Visit> = visits.iter().filter(|v| v.chat_id == **chat).collect();
+            let last = mine.last()?;
+            let usd: f64 = mine.iter().filter_map(|v| v.usd).sum();
+            let money = match mine.iter().any(|v| v.usd.is_some()) {
+                true => format!("{usd:.2}$"),
+                false => "расход не посчитан".into(),
+            };
+            Some(format!(
+                "• {chat} — заходов {}, {money}; последний ({}): {} → {}",
+                mine.len(),
+                last.kind,
+                last.decided,
+                last.changed
+            ))
+        })
+        .collect()
+}
+
 /// Утренняя сводка. Четыре вопроса и ни одним меньше: без ответа на них
-/// автономия превращается в «проснулся, а тут что-то произошло».
-pub fn morning_digest(st: &NightState, spent: Option<&str>) -> String {
+/// автономия превращается в «проснулся, а тут что-то произошло». Пятый — куда
+/// он ушёл: заходы автономных чатов человек не видел вовсе.
+pub fn morning_digest(st: &NightState, spent: Option<&str>, visits: &[Visit]) -> String {
     let pick = |kinds: &[&str]| -> Vec<&Notice> {
         st.notices
             .iter()
@@ -708,6 +984,11 @@ pub fn morning_digest(st: &NightState, spent: Option<&str>) -> String {
     p.push_str(&format!(
         "СКОЛЬКО ПОТРАЧЕНО: {}\n",
         spent.unwrap_or("бюджет расход за ночь не назвал")
+    ));
+    p.push_str(&list(
+        "КУДА ОН УШЁЛ, ПОКА ТЫ СПАЛ",
+        "автономные чаты за ночь никуда не ходили",
+        where_it_went(visits),
     ));
     p.push_str(&list(
         "ЧТО ВСТАЛО И ПОЧЕМУ",
@@ -788,7 +1069,11 @@ pub fn morning_check(app: &AppHandle) {
         return;
     }
     let Some(st) = night_log().drain() else { return };
-    let text = morning_digest(&st, night_spent(app).as_deref());
+    let text = morning_digest(
+        &st,
+        night_spent(app).as_deref(),
+        &visits().night_visits(now_ms()),
+    );
     // Якорь — чат последнего ночного уведомления: сводка одна на всю ночь, а
     // лечь она обязана туда, где ночью шла работа. Остальные чаты названы внутри.
     let Some(chat_id) = st
@@ -981,11 +1266,13 @@ pub fn mode_of(app: &AppHandle, chat_id: &str) -> Mode {
 }
 
 /// Срез цепочки для шапки (режим — из настроек, остальное — из реестра, а
-/// «ждёт тебя» — из ночного журнала: отложенное переживает саму цепочку).
+/// «ждёт тебя» и журнал заходов — из своих журналов: оба переживают саму цепочку).
 pub fn state(app: &AppHandle, chat_id: &str) -> ChainState {
+    let now = now_ms();
     chains()
         .state(chat_id, mode_of(app, chat_id))
         .with_waiting(night_log().for_chat(chat_id))
+        .with_log(visits().for_chat(chat_id), visits().spend(chat_id, now))
 }
 
 /// Событие цепочки наружу. Канал свой (`agent:chain`), но правило то же, что у
@@ -1176,6 +1463,15 @@ async fn run_step(d: &Arc<Daemon>, chat_id: &str, sid: &str, decision: Decision)
                 );
                 return;
             }
+            // Свой потолок чата — ДО общего бюджета: он про деньги именно этого
+            // разговора, считается на месте и останавливает раньше, чем ступень
+            // провайдера успеет заметить трёх автономных сразу.
+            if let Some(text) = visits().cap_refusal(chat_id, night, now_ms()) {
+                note_visit(d, chat_id, sid, step, "stopped", &text, &outcome, night);
+                chains().stop(chat_id);
+                emit(&app, chat_id, "stopped", json!({ "reason": "cap", "text": text }));
+                return;
+            }
             // Перед заходом спрашиваем бюджет свежими числами: цепочка — это
             // фон, и её очередь наступает раньше человеческой. Ночной потолок
             // сидит в той же ступени и скажет «стоп» раньше дневной нормы.
@@ -1194,14 +1490,74 @@ async fn run_step(d: &Arc<Daemon>, chat_id: &str, sid: &str, decision: Decision)
             // самое, что «можно»: заход целиком ложится в «ждёт тебя».
             if night {
                 if let Some(kind) = irreversible(&prompt) {
+                    note_visit(d, chat_id, sid, step, "deferred", &prompt, &outcome, night);
                     defer(&app, chat_id, sid, kind, &prompt);
                     return;
                 }
             }
-            let _ = deliver(d, chat_id, sid, &prompt, step).await; // отказ уже сказан словами
+            // Заход ушёл — значит он и есть строка журнала: что решил, что
+            // запустил, что изменилось. Отказ уже сказан словами, и следа не
+            // оставляет: заход, которого не было, в журнале заходов лишний.
+            if deliver(d, chat_id, sid, &prompt, step).await.is_ok() {
+                note_visit(d, chat_id, sid, step, "sent", &prompt, &outcome, night);
+                // Карточка «заход ушёл» легла ДО записи в журнал — досылаем срез,
+                // иначе шапка показывает журнал без только что сделанного захода.
+                push_state(&app, chat_id);
+            }
         }
         Decision::Skip | Decision::Depth => {}
     }
+}
+
+/// Что изменилось в мире прошлым ходом — одной строкой: файлы и вердикт
+/// проверки. Ровно то, по чему цепочка судит о продвижении (`progress_mark`), и
+/// ровно то, что человек утром хочет прочитать про чужую ночную работу.
+fn changed_text(o: &Outcome) -> String {
+    let files: Vec<&str> = o.files.iter().take(6).map(|f| f.path.as_str()).collect();
+    let head = match files.is_empty() {
+        true => "файлов не тронул".to_string(),
+        false => format!("тронул {}", files.join(", ")),
+    };
+    match &o.tests {
+        Some(t) if t.ok => format!("{head}; тесты зелёные"),
+        Some(_) => format!("{head}; тесты КРАСНЫЕ"),
+        None => format!("{head}; проверку не гонял"),
+    }
+}
+
+/// Записать заход в журнал. Расход спрашиваем у `usage` — единственного, кто
+/// считает токены; своих чисел у цепочки нет, и придумывать их она не станет.
+fn note_visit(
+    d: &Arc<Daemon>,
+    chat_id: &str,
+    sid: &str,
+    step: u32,
+    kind: &str,
+    decided: &str,
+    o: &Outcome,
+    night: bool,
+) {
+    let total = d
+        .usage
+        .for_session(sid)
+        .and_then(|v| v.get("cost").and_then(Value::as_f64));
+    visits().note(Visit {
+        at: now_ms(),
+        chat_id: chat_id.to_string(),
+        session_id: sid.to_string(),
+        step,
+        kind: kind.to_string(),
+        decided: ellipsize(&one_line(decided), 160),
+        ran: o
+            .commands
+            .iter()
+            .take(5)
+            .map(|c| ellipsize(&one_line(c), 80))
+            .collect(),
+        changed: changed_text(o),
+        night,
+        usd: visits().delta(sid, total),
+    });
 }
 
 /// Отложить необратимое до утра. Цепочка на этом встаёт: следующий её шаг — то
@@ -1729,7 +2085,7 @@ mod tests {
             "«ждёт тебя» переживает сводку — его снимает решение человека, а не рассказ о нём"
         );
 
-        let d = morning_digest(&st, Some("за ночь 1.20$ из дневного бюджета"));
+        let d = morning_digest(&st, Some("за ночь 1.20$ из дневного бюджета"), &[]);
         for head in ["ЧТО СДЕЛАНО", "СКОЛЬКО ПОТРАЧЕНО", "ЧТО ВСТАЛО И ПОЧЕМУ", "ЧТО ЖДЁТ ТЕБЯ"] {
             assert!(d.contains(head), "в сводке нет ответа на «{head}»:\n{d}");
         }
@@ -1742,7 +2098,7 @@ mod tests {
         assert!(d.contains("запушь в main"), "заход виден целиком — утром его отправлять:\n{d}");
 
         // бюджет промолчал — сводка всё равно отвечает на все четыре вопроса
-        let d = morning_digest(&NightState::default(), None);
+        let d = morning_digest(&NightState::default(), None, &[]);
         for head in ["ЧТО СДЕЛАНО", "СКОЛЬКО ПОТРАЧЕНО", "ЧТО ВСТАЛО И ПОЧЕМУ", "ЧТО ЖДЁТ ТЕБЯ"] {
             assert!(d.contains(head), "пустая ночь не повод молчать про «{head}»:\n{d}");
         }
@@ -1755,7 +2111,7 @@ mod tests {
         }
         let st = log.drain().expect("накопилось");
         assert_eq!((st.notices.len(), st.dropped), (MAX_NOTICES, 3));
-        assert!(morning_digest(&st, None).contains("вытеснено потолком журнала"));
+        assert!(morning_digest(&st, None, &[]).contains("вытеснено потолком журнала"));
     }
 
     /// Ночная тишина устроена ровно так: копим и метим `quiet`, но карточку в
@@ -1817,5 +2173,172 @@ mod tests {
         assert!(t.contains("заход 3") && t.contains("почини тесты"), "{t}");
         assert!(t.contains("sess-123"), "у уведомления должна быть сессия: {t}");
         assert_eq!(notice_text("stopped", &json!({ "text": "цепочка встала" })), "цепочка встала");
+    }
+
+    // ── точечная автономия: свой режим, свой расход, свои потолки ──────────
+
+    /// Владелец включает «сам» ТОЧЕЧНО: сегодня один чат, завтра другой. Две
+    /// цепочки на одной сессии — и режим у каждой свой; иначе переключатель в
+    /// шапке заражал бы соседний разговор, который об этом не просил.
+    #[test]
+    fn the_switch_moves_only_its_own_chat() {
+        let c = Chains::new();
+        c.watch("c1", "s1", Mode::Auto);
+        c.watch("c2", "s1", Mode::Ask);
+        assert_eq!(
+            c.on_done("s1", 100),
+            vec![("c1".into(), Decision::Send(1)), ("c2".into(), Decision::Propose)],
+            "один чат идёт сам, соседний ждёт кнопки"
+        );
+        // передумали по одному — второй не шелохнулся
+        c.set_mode("c2", Mode::Auto);
+        c.set_mode("c1", Mode::Ask);
+        assert_eq!(
+            c.on_done("s1", 101),
+            vec![("c1".into(), Decision::Propose), ("c2".into(), Decision::Send(1))]
+        );
+    }
+
+    fn visit(chat: &str, at: i64, night: bool, usd: Option<f64>) -> Visit {
+        Visit {
+            at,
+            chat_id: chat.into(),
+            session_id: "s1".into(),
+            step: 1,
+            kind: "sent".into(),
+            decided: "почини красные тесты".into(),
+            ran: vec!["cargo test".into()],
+            changed: "тронул src/a.rs; тесты КРАСНЫЕ".into(),
+            night,
+            usd,
+        }
+    }
+
+    /// Расход по чату — не выдумка цепочки, а прирост стоимости сессии у
+    /// `usage`. Первый замер сравнивать не с чем, и это ЧЕСТНОЕ «не знаю», а не
+    /// ноль: сессия могла работать и до цепочки.
+    #[test]
+    fn chat_spend_is_a_delta_of_usage_or_an_honest_nothing() {
+        let v = Visits::new();
+        assert_eq!(v.delta("s1", Some(4.0)), None, "первый замер только ставит отметку");
+        assert_eq!(v.delta("s1", Some(4.5)), Some(0.5), "заход стоил прирост, а не всю сессию");
+        assert_eq!(v.delta("s1", None), None, "usage промолчал — числа нет");
+        // счётчик сессии сбросили (пересборка агрегатов) — отрицательного расхода не бывает
+        assert_eq!(v.delta("s1", Some(0.1)), Some(0.0));
+        // у каждой сессии своя отметка
+        assert_eq!(v.delta("s2", Some(9.0)), None);
+        assert_eq!(v.delta("s2", Some(9.25)), Some(0.25));
+
+        let now = 1_000_000_000;
+        let v = Visits::new();
+        v.note(visit("c1", now - 3_600_000, true, Some(0.4))); // ночью
+        v.note(visit("c1", now - 600_000, false, Some(0.6))); // утром
+        v.note(visit("c1", now - 2 * DAY_MS, true, Some(50.0))); // позавчера — не в счёт
+        let s = v.spend("c1", now);
+        assert!(s.known, "числа есть, а счётчик молчит");
+        assert!((s.night - 0.4).abs() < 1e-9, "за ночь: {}", s.night);
+        assert!((s.day - 1.0).abs() < 1e-9, "за сутки: {}", s.day);
+        assert_eq!(s.visits, 2, "заходы старше суток в счёт не идут");
+
+        // расход не посчитан — так и говорим, а не рисуем 0.00$
+        let v = Visits::new();
+        v.note(visit("c1", now, true, None));
+        let s = v.spend("c1", now);
+        assert!(!s.known, "нулём подменили отсутствие числа");
+        assert_eq!(s.night, 0.0);
+        assert!(v.cap_refusal("c1", true, now).is_none(), "потолок без чисел запрещать не вправе");
+    }
+
+    /// Ровно то, чего боится владелец: три автономных чата, каждый в своих
+    /// рамках, втроём съедают недельный бюджет. Свой потолок их не остановит —
+    /// останавливает ОБЩИЙ, и он обязан сказать, что чат тут ни при чём.
+    #[test]
+    fn the_shared_ceiling_stops_the_third_while_each_stays_within_its_own() {
+        let now = 1_000_000_000;
+        let v = Visits::new();
+        for chat in ["c1", "c2"] {
+            v.note(visit(chat, now - 3_600_000, true, Some(2.5))); // по 2.5$ — меньше своих 3$
+        }
+        v.note(visit("c3", now - 60_000, true, Some(0.9)));
+        for chat in ["c1", "c2", "c3"] {
+            let s = v.spend(chat, now);
+            assert!(s.night < s.night_cap, "{chat} вышел за свой потолок: {}", s.night);
+        }
+        assert!((v.spend("c3", now).all_night - 5.9).abs() < 1e-9);
+
+        // ещё доллар третьему — общий потолок исчерпан
+        v.note(visit("c3", now, true, Some(0.2)));
+        assert!(v.spend("c3", now).night < CHAT_NIGHT_USD, "третий всё ещё в своих рамках");
+        let text = v.cap_refusal("c3", true, now).expect("общий потолок промолчал");
+        assert!(text.contains("ВСЕХ автономных"), "не сказано, чей потолок кончился: {text}");
+        assert!(text.contains("в своих рамках"), "человек решит, что виноват этот чат: {text}");
+        assert!(text.contains("6.00$"), "потолок без числа ничего не решает: {text}");
+        // и своим двоим тоже стоп — бюджет общий
+        assert!(v.cap_refusal("c1", true, now).is_some());
+
+        // свой потолок работает отдельно и срабатывает первым
+        let v = Visits::new();
+        v.note(visit("c1", now, true, Some(3.2)));
+        let text = v.cap_refusal("c1", true, now).expect("свой потолок промолчал");
+        assert!(text.contains("этого чата"), "{text}");
+        assert!(!text.contains("ВСЕХ автономных"), "свой потолок назвался общим: {text}");
+        // днём ночной потолок не считается, а дневная норма шире
+        assert!(v.cap_refusal("c1", false, now).is_none(), "ночной потолок сработал днём");
+    }
+
+    /// Журнал заходов — структура, которую показывают, и утренняя сводка обязана
+    /// отвечать по ней на «куда он ушёл, пока я спал» за десять секунд чтения:
+    /// по строке на чат, а не по строке на заход.
+    #[test]
+    fn the_visit_journal_answers_where_it_went_at_night() {
+        let now = 1_000_000_000;
+        let v = Visits::new();
+        v.note(visit("c1", now - 7_200_000, true, Some(0.4)));
+        let mut last = visit("c1", now - 3_600_000, true, Some(0.8));
+        last.step = 2;
+        last.decided = "прогони проверку и почини оставшееся".into();
+        last.changed = "тронул src/a.rs, src/b.rs; тесты зелёные".into();
+        v.note(last);
+        v.note(visit("c2", now - 1_800_000, true, None)); // расход не посчитан
+        v.note(visit("c3", now - 60_000, false, Some(9.9))); // дневной — не ночь
+
+        let night = v.night_visits(now);
+        assert_eq!(night.len(), 3, "ночной срез забрал дневное или потерял ночное");
+        assert!(night.windows(2).all(|w| w[0].at <= w[1].at), "журнал не по времени");
+
+        let st = NightState::default();
+        let d = morning_digest(&st, Some("claude 4.0% из 15%"), &night);
+        assert!(d.contains("КУДА ОН УШЁЛ"), "на главный ночной вопрос ответа нет:\n{d}");
+        assert!(d.contains("• c1 — заходов 2, 1.20$"), "заходы и деньги по чату:\n{d}");
+        assert!(d.contains("прогони проверку"), "что решил последним заходом:\n{d}");
+        assert!(d.contains("тесты зелёные"), "что изменилось:\n{d}");
+        assert!(d.contains("• c2 — заходов 1, расход не посчитан"), "молчание счётчика — тоже ответ:\n{d}");
+        assert!(!d.contains("c3"), "дневной чат попал в ночную сводку:\n{d}");
+        // десять секунд чтения: по строке на чат, а не по строке на заход
+        let block = d.split("КУДА ОН УШЁЛ").nth(1).unwrap().split("\nЧТО ВСТАЛО").next().unwrap();
+        assert_eq!(block.lines().filter(|l| l.starts_with('•')).count(), 2);
+
+        // журнал чата отдаётся наружу целиком — шапке есть что показать
+        assert_eq!(v.for_chat("c1").len(), 2);
+        assert!(v.for_chat("c9").is_empty(), "чужой журнал не выдумываем");
+    }
+
+    /// Потолки автономного чата вшиты в путь отправки — иначе они украшение:
+    /// заход спрашивает СВОЙ потолок и отдельно общий бюджет провайдера.
+    #[test]
+    fn a_pass_asks_its_own_ceiling_and_the_shared_budget_both() {
+        let src = include_str!("chain.rs");
+        let body = src
+            .split("Decision::Send(step) => {")
+            .nth(1)
+            .and_then(|t| t.split("deliver(").next())
+            .expect("ветка отправки на месте");
+        assert!(body.contains("cap_refusal("), "свой потолок чата не спрашивается");
+        assert!(body.contains("budget_gate("), "общий бюджет провайдера подменили своим потолком");
+        assert!(
+            body.find("cap_refusal(").unwrap() < body.find("budget_gate(").unwrap(),
+            "свой потолок считается на месте — спрашивать его после сети незачем"
+        );
+        assert!(body.contains("note_visit("), "заход не оставляет следа в журнале");
     }
 }

@@ -148,6 +148,9 @@
     // только срез (была ли она жива) и дорога назад.
     agentChainState: (chatId) => invoke('agent_chain_state', { chatId }),
     agentChainMode: (chatId, auto) => invoke('agent_chain_mode', { chatId, auto }),
+    // Свой канал цепочки: режим, заходы, расход и «ждёт тебя». Опрашивать это
+    // командой на каждый ход значило бы узнавать про ночную работу с опозданием.
+    onAgentChain: (cb) => on('agent:chain', cb),
     agentConfirm: (nonce, approved) => invoke('agent_confirm', { nonce, approved }),
     onAgentEvent: (cb) => on('agent:event', cb),
     onAgentConfirm: (cb) => on('agent:confirm', cb),

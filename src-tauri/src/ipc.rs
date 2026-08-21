@@ -3065,6 +3065,27 @@ pub fn agent_chat_open(app: AppHandle, session_id: String) -> Value {
     }
 }
 
+/* ----- недописанные реплики: у каждого чата свой черновик ----- */
+
+/// Все черновики разом. Окно рисует по ним пометки в списке и подставляет текст
+/// в поле — обе задачи нужны сразу, а данных тут на десяток килобайт.
+#[tauri::command]
+pub fn agent_drafts_get() -> Value {
+    crate::agent::drafts::to_json(&crate::agent::drafts::all())
+}
+
+/// Сохранить черновик чата — или стереть его пустым текстом.
+///
+/// Хранилище своё (`agent/drafts.rs`), не settings.json: сюда пишут через
+/// полсекунды после каждой клавиши, а настройки переписываются целиком.
+#[tauri::command]
+pub fn agent_draft_set(chat_id: String, text: String, caret: Option<usize>) -> Value {
+    match crate::agent::drafts::set(&chat_id, &text, caret.unwrap_or(0)) {
+        Ok(()) => json!({ "ok": true }),
+        Err(e) => err(e),
+    }
+}
+
 /// Убрать разговор из списка, оставив файл на диске: обратимое «с глаз долой».
 /// Прятать можно только НЕпривязанный разговор — за привязанным стоит чат, и
 /// убирается он через `agent_chat_delete`.

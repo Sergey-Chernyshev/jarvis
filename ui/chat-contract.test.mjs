@@ -76,7 +76,9 @@ test('колонка разговоров одинаково размечена 
       assert.ok(css.includes(sel), where + ': ' + sel + ' не стилизован — раскладка колонки разъехалась');
     }
     // Строка: имя, время, превью, размер, бейдж «с диска» и вход в действия
-    for (const sel of ['.aglist', '.agchat.on', '.agdisk', '.agtime', '.agprev', '.agmeta', '.agdots', '.agempty']) {
+    // .agdraft — пометка «Черновик: …»: без неё неотправленный текст в соседнем
+    // чате не виден вовсе, и его пишут заново либо шлют не туда
+    for (const sel of ['.aglist', '.agchat.on', '.agdisk', '.agtime', '.agprev', '.agdraft', '.agmeta', '.agdots', '.agempty']) {
       assert.ok(css.includes(sel), where + ': ' + sel + ' не стилизован — строка чата разъехалась');
     }
     /* Меню строки и вопрос про удаление — слой ПОВЕРХ колонки: внутри строки их

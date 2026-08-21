@@ -1212,6 +1212,18 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Недописанная реплика вытесняет превью: строка отвечает на «где я
+     остановился». Краска — та же единственная, что у занятости: незакрытое дело
+     в этом чате, а не второй цвет в списке */
+  .agdraft {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--accent);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .agmeta { flex: none; font-size: 11px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
   /* «…» — вход в меню строки. Три иконки в ряд читались как три равные кнопки,
      хотя одна из них необратима; редкие действия ушли под один знак */

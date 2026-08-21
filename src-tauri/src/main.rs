@@ -262,6 +262,8 @@ fn main() {
             ipc::agent_chat_rename,
             ipc::agent_chat_delete,
             ipc::agent_chat_reorder,
+            ipc::agent_drafts_get,
+            ipc::agent_draft_set,
             ipc::agent_history_hide,
             ipc::agent_history_unhide_all,
             ipc::agent_history_forget,

@@ -212,6 +212,149 @@
       if (chatId === was) chatId = id;
     }
 
+    /* ---------- недописанные реплики ----------
+     *
+     * Поле ввода было одно на все чаты: текст, написанный одному Джарвису,
+     * оставался в поле и уезжал в тот, который открыли следующим. Здесь чаты
+     * раздают промпты в сессии с доступом к файлам, поэтому промах адресатом —
+     * не «неловко», а «ушло не туда и там исполнилось».
+     *
+     * Черновик принадлежит ЧАТУ, а не окну: свой — на месте, чужой не
+     * приезжает. На диске он лежит своим файлом (agent/drafts.rs): в
+     * settings.json, который переписывается целиком на любой тумблер, потоку
+     * записей «через полсекунды после клавиши» делать нечего.
+     *
+     * Курсор храним вместе с текстом — иначе, вернувшись, человек дописывает в
+     * конец, а не туда, куда смотрел. */
+    const drafts = new Map(); // chatId → { text, caret }
+    const DRAFT_MS = 500; // тишина после последней клавиши, после которой пишем
+    let draftTimer = null;
+    let draftFor = null; // чат, чей черновик ещё не лёг на диск
+    /* Здесь в поле НАБИРАЛИ. Два окна смотрят в одну книжку, и окно, которое
+     * чужой черновик только показало, писать его обратно не должно: иначе оно
+     * вернуло бы на диск устаревшую копию поверх свежей, набранной в соседнем. */
+    let dirty = false;
+    let mark = ''; // пометка открытого чата в списке — чтобы не пересобирать его на каждый символ
+
+    const one = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+    const draftOf = (id) => (id ? drafts.get(id) || null : null);
+    /* Начало черновика для строки списка. Режем ДО схлопывания пробелов: текст
+     * бывает на десятки килобайт, а перебирать его целиком приходится на каждое
+     * событие потока — список перерисовывается вместе с занятостью соседей. */
+    const markOf = (id) => { const d = draftOf(id); return d ? cut(one(d.text.slice(0, 200)), 40) : ''; };
+    const caretAt = () => {
+      const n = Number(input.selectionStart);
+      return Number.isFinite(n) ? n : input.value.length;
+    };
+    const setCaret = (n) => {
+      const at = Math.max(0, Math.min(Number(n) || 0, input.value.length));
+      try { input.selectionStart = at; input.selectionEnd = at; } catch { /* поле без выделения */ }
+    };
+    /* Поле растёт под текст — и при подстановке черновика тоже, иначе
+     * восстановленные три абзаца показались бы одной строкой. */
+    const fitInput = () => {
+      input.style.height = 'auto';
+      const h = Number(input.scrollHeight);
+      if (h) input.style.height = Math.min(120, h) + 'px';
+    };
+
+    /* Унести набранное из поля в черновик чата. */
+    const takeDraft = (id) => {
+      if (!id) return;
+      const text = input.value;
+      if (text.trim()) drafts.set(id, { text, caret: caretAt() });
+      else drafts.delete(id);
+    };
+    /* Положить черновик чата в поле — вместе с курсором. */
+    const putDraft = (id) => {
+      const d = draftOf(id);
+      input.value = d ? d.text : '';
+      fitInput();
+      setCaret(d ? d.caret : 0);
+      dirty = false;
+    };
+
+    /* На диск — с задержкой: писать файл на каждый символ незачем, а полсекунды
+     * тишины человек уже не наберёт заново. Всё, что могло не дожить до неё,
+     * добивает saveNow (уход фокуса, скрытие окна, выход, смена чата). */
+    function saveSoon(id) {
+      draftFor = id;
+      if (draftTimer) clearTimeout(draftTimer);
+      draftTimer = setTimeout(() => { draftTimer = null; saveNow(); }, DRAFT_MS);
+    }
+    function saveNow() {
+      if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
+      const id = draftFor;
+      draftFor = null;
+      if (!id || !api.draftSet) return;
+      const d = draftOf(id);
+      try {
+        const p = api.draftSet(id, d ? d.text : '', d ? d.caret : 0);
+        if (p && p.catch) p.catch(() => { /* не легло — черновик жив хотя бы в памяти */ });
+      } catch { /* демон постарше: черновики доживут до закрытия окна */ }
+    }
+    /* Уходя, чат уносит недописанное с собой — и сразу на диск: переключение как
+     * раз тот миг, когда ждать полсекунды нечего. */
+    const stashDraft = (id) => {
+      if (!id || !dirty) return;
+      takeDraft(id);
+      draftFor = id;
+      saveNow();
+      dirty = false; // на диске теперь ровно то, что в поле, — расходиться нечему
+    };
+    /* Единственное, что стирает черновик, кроме самого человека, — удавшаяся
+     * отправка (и удаление чата насовсем). */
+    const dropDraft = (id) => {
+      if (!id) return;
+      drafts.delete(id);
+      draftFor = id;
+      saveNow();
+    };
+    /* Принудительный сброс: полсекунды не переживут ни ухода фокуса, ни закрытия
+     * окна — а теряют черновики именно там. */
+    const flushDraft = () => { stashDraft(chatId); saveNow(); };
+
+    /* Черновики с диска. null — прочитать не вышло (старый демон, отказ): тогда
+     * они живут только в памяти этого окна, и врать про «переживёт» не надо. */
+    async function readDrafts() {
+      if (!api.drafts) return null;
+      let res;
+      try { res = await api.drafts(); } catch { return null; }
+      const raw = res && res.drafts;
+      if (!raw || typeof raw !== 'object') return null;
+      const out = new Map();
+      for (const id of Object.keys(raw)) {
+        const d = raw[id] || {};
+        const text = typeof d.text === 'string' ? d.text : '';
+        if (text.trim()) out.set(id, { text, caret: Math.max(0, Number(d.caret) || 0) });
+      }
+      return out;
+    }
+    /* Тот же чат бывает открыт в двух окнах сразу (вкладка и трей), а книжка
+     * одна. Возвращаясь, перечитываем её — иначе список помечал бы черновиками
+     * то, что уже отправлено из соседнего окна. Поле подменяем ТОЛЬКО когда
+     * здесь ничего не набирали: свои клавиши чужой копией не затирают. Если
+     * набирают в обоих окнах разом, побеждает тот, кто печатал последним, — но
+     * адресатом при этом не промахнуться, а ценой вопроса было именно это. */
+    async function syncDrafts() {
+      if (dirty) return;
+      const got = await readDrafts();
+      if (!got || dirty) return; // пока книжка ехала, здесь начали печатать — не мешаем
+      drafts.clear();
+      for (const [id, d] of got) drafts.set(id, d);
+      putDraft(chatId);
+      renderChats();
+    }
+    /* Смена открытого чата — единственное место, где поле подменяется. Возврат
+     * говорит, что чат правда сменился: ленту тоже перерисовывают только тогда. */
+    function goTo(id) {
+      if (chatId === id) return false;
+      stashDraft(chatId);
+      chatId = id;
+      putDraft(id);
+      return true;
+    }
+
     const el = (cls, text) => {
       const d = document.createElement('div');
       d.className = cls;
@@ -488,8 +631,9 @@
       if (!res || !Array.isArray(res.chats)) return null;
       chats = res.chats;
       hidden = Number(res.hidden) || 0; // скрытых в chats нет — их считает ядро
-      const was = chatId;
-      chatId = res.current || (chats.find((c) => c.current) || {}).id || null;
+      // Открытый чат меняет ядро, а не окно, — и поле обязано смениться вместе
+      // с ним: черновик покидаемого унесёт goTo, чужой сюда не приедет.
+      const moved = goTo(res.current || (chats.find((c) => c.current) || {}).id || null);
       /* Нить у каждого разговора своя. У занятого верим потоку, а не книжке:
        * свежий id приехал в init, а демон запишет его только под конец. */
       for (const c of chats) {
@@ -502,7 +646,7 @@
         if (!t.busy && c.ctx) t.ctx = { used: c.ctx.used, window: c.ctx.window, exact: !!c.ctx.exact };
         if (Array.isArray(c.squeezes)) t.marks = c.squeezes;
       }
-      if (chatId !== was) draw(here()); // лента обязана совпасть с открытым сразу
+      if (moved) draw(here()); // лента обязана совпасть с открытым сразу
       renderChats();
       syncHead();
       syncTag();
@@ -604,6 +748,7 @@
 
     function renderChats() {
       if (!chatsRow) return;
+      mark = markOf(chatId); // список нарисован — значит пометка в нём уже верна
       if (docked()) sideOff = false; // встроенная колонка не сворачивается
       if (!shell || shell.off !== sideOff || shell.dock !== docked()) buildSide();
       if (sideOff) { renderRail(); return; }
@@ -776,9 +921,15 @@
       if (when) line.appendChild(el('agtime', when));
       main.appendChild(line);
       const under = el('agsub');
+      /* Недописанное вытесняет превью: строка отвечает на вопрос «где я
+       * остановился», а не «чем кончилось». Без пометки человек не знает, что в
+       * соседнем чате его ждёт неотправленный текст, — и пишет то же самое заново
+       * либо, хуже, отправляет не туда. */
+      const d = markOf(c.id);
+      if (d) under.appendChild(el('agdraft', 'Черновик: ' + d));
       // Превью — только когда оно добавляет: у безымянного чата заголовок и есть
       // первая реплика, и вторая её копия под ней — просто шум.
-      under.appendChild(el('agprev', c.preview && c.preview !== c.name ? c.preview : ''));
+      else under.appendChild(el('agprev', c.preview && c.preview !== c.name ? c.preview : ''));
       under.appendChild(el('agmeta', sizeOf(c)));
       main.appendChild(under);
       row.appendChild(main);
@@ -1095,8 +1246,14 @@
         }
         if (!(await listCmd('убрать чат', () => api.remove(c.id)))) { renderChats(); return; }
       }
-      if (!(await listCmd('удалить разговор', () => api.forget(c.sessionId)))) renderChats();
-      else if (c.id) await loadHistory(chatId);
+      if (!(await listCmd('удалить разговор', () => api.forget(c.sessionId)))) { renderChats(); return; }
+      /* Забвение необратимо — и черновик уходит вместе с разговором: он был
+       * репликой ИМЕННО в него. «Скрыть» так не делает (removeChat, hideThread):
+       * скрытие обратимо, и потерять на нём набранное значило бы обещать
+       * обратимость, которой нет. */
+      dropDraft(c.id);
+      if (c.id) await loadHistory(chatId);
+      renderChats();
     }
 
     /* Лента конкретного чата: историю просим по id, а не «текущую». Иначе после
@@ -1105,7 +1262,7 @@
      * перечитываем: в ней уже лежит и живой поток, которого у демона ещё нет —
      * транскрипт он допишет только под конец ответа. */
     async function loadHistory(id) {
-      chatId = id;
+      goTo(id); // чаще всего чат уже сменил listCmd — тогда это ничего не делает
       const t = thread(id);
       draw(t);
       syncHead();
@@ -1173,13 +1330,17 @@
     // демона, а не в этом окне. Без ленты «продолжение» выглядело потерей
     // переписки. Список — надёжнее state(): он же говорит, какой чат открыт.
     (async () => {
+      // Черновики читаем ДО первой ленты: иначе первый же кадр показал бы пустое
+      // поле, и человек решил бы, что набранное пропало вместе с окном.
+      const got = await readDrafts();
+      if (got) for (const [id, d] of got) drafts.set(id, d);
       const cur = await listCmd('прочитать список чатов', () => api.chats());
       if (!cur) {
         // Списка нет (старый демон или отказ) — нить всё равно нужна, иначе
         // окно тихо начнёт новый диалог вместо прошлого.
         try {
           const st = await api.state();
-          if (st && st.chatId) chatId = st.chatId;
+          if (st && st.chatId) goTo(st.chatId);
           if (st && st.sessionId) here().session = st.sessionId;
         } catch (e) {
           addErr(here(), 'Не удалось узнать про прошлый разговор: ' + errText(e));
@@ -1198,6 +1359,7 @@
       const was = chatId;
       const cur = await listCmd('обновить список чатов', () => api.chats());
       if (cur && cur.id !== was) await loadHistory(cur.id);
+      await syncDrafts(); // черновики тоже могли поехать в соседнем окне
     }
 
     /* Уход со вкладки ленту не рушит — она остаётся в DOM вместе с набранным и
@@ -1205,7 +1367,9 @@
      * обнуляет scrollTop у спрятанного узла. Снимаем её на уходе и возвращаем
      * на входе — иначе возврат к Джарвису каждый раз кидал бы в конец ленты. */
     let parked = null;
-    const park = () => { parked = msgs.scrollTop; };
+    // Уходя со вкладки, недописанное дожимаем на диск: ждать полсекунды тут уже
+    // некому, а вкладку закрывают вместе с окном.
+    const park = () => { parked = msgs.scrollTop; flushDraft(); };
     const unpark = () => { if (parked != null) { msgs.scrollTop = parked; parked = null; } };
 
     /* Поиск по чатам приезжает извне, когда поле есть у самого окна (панель):
@@ -1234,7 +1398,7 @@
       if (res && Array.isArray(res.chats)) {
         chats = res.chats;
         hidden = Number(res.hidden) || 0;
-        chatId = res.current || chatId;
+        goTo(res.current || chatId); // reset чат не меняет, но ядру виднее
       }
       const t = here();
       t.session = null;
@@ -1255,12 +1419,32 @@
       const t = here(); // занят конкретный разговор, а не окно
       const text = input.value.trim();
       if (!text || t.busy) return;
+      const from = t.id; // черновик у чата, а имя чату может сменить ядро
+      const back = input.value; // ровно то, что было в поле, если отправка не состоится
+      const caret = caretAt();
       input.value = '';
-      input.style.height = 'auto';
+      dirty = false;
+      fitInput();
       addUser(t, text);
       scroll(); // своя реплика — единственное, за чем ленту доводим всегда
       setBusy(t, true);
       t.bubble = null;
+      /* Черновик доживает до ответа ядра: «отправлено» — это когда сообщение
+       * взяли, а не когда мы очистили поле. Прервали, не дошло, отказали —
+       * набранное обязано остаться, переписывать его заново человек не нанимался. */
+      const keep = () => {
+        if (from) drafts.set(from, { text: back, caret });
+        // ...а поле возвращаем, только если человек всё ещё здесь и не начал
+        // писать новое: затирать набранное своей копией — та же потеря.
+        if (chatId === from && !input.value.trim()) {
+          input.value = back;
+          fitInput();
+          setCaret(caret);
+          dirty = !!from;
+        }
+        if (from) { draftFor = from; saveNow(); }
+        renderChats();
+      };
       let res;
       try {
         // Адресуем чатом, а не нитью: у свежего чата нити ещё нет, и по пустой
@@ -1273,6 +1457,7 @@
       } catch (e) {
         addErr(t, 'Ошибка запуска агента: ' + errText(e));
         setBusy(t, false);
+        keep();
         return;
       }
       /* Отказ приезжает РАЗРЕШЁННЫМ промисом: нет ни claude, ни codex, не
@@ -1282,18 +1467,44 @@
       if (res && res.ok === false) {
         addErr(t, 'Агент не взял сообщение: ' + why(res));
         setBusy(t, false);
+        keep();
+        return;
       }
+      // Взяли — только теперь черновик исчезает. Имя чата ядро могло сменить
+      // прямо в этом ходе (relabel), поэтому стираем оба.
+      dropDraft(from);
+      if (t.id !== from) dropDraft(t.id);
+      renderChats();
     }
 
     sendBtn.addEventListener('click', send);
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
     });
-    // авто-рост поля ввода
+    // авто-рост поля ввода — и черновик открытого чата вместе с ним
     input.addEventListener('input', () => {
-      input.style.height = 'auto';
-      input.style.height = Math.min(120, input.scrollHeight) + 'px';
+      fitInput();
+      if (!chatId) return;
+      dirty = true;
+      takeDraft(chatId);
+      saveSoon(chatId);
+      // Список пересобираем, только когда пометка чата правда сменилась: на
+      // каждый символ перебирать двадцать строк незачем.
+      if (markOf(chatId) !== mark) renderChats();
     });
+
+    /* Дожать на диск раньше срока: уход фокуса, скрытие окна, выход. Именно там
+     * черновик и теряют — полсекунды тишины до них не доживают. */
+    input.addEventListener('blur', flushDraft);
+    window.addEventListener('blur', flushDraft);
+    window.addEventListener('pagehide', flushDraft);
+    window.addEventListener('beforeunload', flushDraft);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flushDraft();
+    });
+    // Вернулись в окно — сверяемся с книжкой: в соседнем окне мог быть открыт
+    // тот же чат.
+    window.addEventListener('focus', () => { syncDrafts(); });
 
     /* ---------- остановка хода ----------
      *
@@ -1664,6 +1875,9 @@
           // привязать разговор, найденный на диске (не «открыть окно чата»:
           // окно поднимает agent_chat_window)
           open: (sessionId) => j.agentChatOpen(sessionId),
+          // недописанное: своё у каждого чата, своим же файлом на диске
+          drafts: () => j.agentDraftsGet(),
+          draftSet: (chatId, text, caret) => j.agentDraftSet(chatId, text, caret),
           // спрятать строку с диска (файл цел), вернуть все спрятанные и —
           // с подтверждением выше — удалить транскрипт насовсем
           hide: (sessionId) => j.agentHistoryHide(sessionId),
@@ -1721,6 +1935,8 @@
         remove: (chatId) => invoke('agent_chat_delete', { chatId }),
         reorder: (chatId, toIndex) => invoke('agent_chat_reorder', { chatId, toIndex }),
         open: (sessionId) => invoke('agent_chat_open', { sessionId }),
+        drafts: () => invoke('agent_drafts_get'),
+        draftSet: (chatId, text, caret) => invoke('agent_draft_set', { chatId, text, caret }),
         hide: (sessionId) => invoke('agent_history_hide', { sessionId }),
         unhideAll: () => invoke('agent_history_unhide_all'),
         forget: (sessionId) => invoke('agent_history_forget', { sessionId }),

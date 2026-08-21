@@ -13,6 +13,7 @@ use serde_json::Value;
 pub mod assistant;
 pub mod chain;
 pub mod context;
+pub mod drafts;
 pub mod history;
 pub mod stop;
 

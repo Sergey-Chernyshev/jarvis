@@ -33,6 +33,8 @@
   .dot{ width:7px; height:7px; border-radius:50%; background: var(--accent); flex: none; }
   .title{ font-size:15px; font-weight:600; letter-spacing:-0.01em; }
   .sub{ color: var(--ink-mute); font-size:12.5px; margin-left:auto; font-variant-numeric: tabular-nums; }
+  /* Счётчик контекста живёт в theme.css: вкладка панели и это окно рисуют его
+     одинаково, а вторая копия правил разъехалась бы на первой же правке. */
   /* метка продолжения: висит, пока диалог тянется из прошлого запуска окна */
   .tag{ font-size:11.5px; color: var(--ink-mute); background: var(--surface); border-radius: var(--r-chip); padding:3px 8px; }
   .tag[hidden]{ display:none }
@@ -208,6 +210,10 @@
   .msg.err .bubble{ color: var(--danger); }
   .msg.note::before{ content:"jarvis · заметка"; }
   .msg.note .bubble{ color: var(--ink-mute); font-size:13px }
+  /* Момент сжатия контекста — своя строка ленты: без неё разрыв в памяти агента
+     читается как его ошибка. Тише реплики, но не невидимо */
+  .msg.squeeze::before{ content:"контекст"; }
+  .msg.squeeze .bubble{ color: var(--ink-faint); font-size:12.5px }
   .chip{
     font-size:12px; color: var(--ink-mute); padding:5px 10px; border-radius:8px;
     background: var(--surface); border:0; font-family: var(--mono);

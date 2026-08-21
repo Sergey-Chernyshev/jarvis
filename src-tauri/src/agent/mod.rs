@@ -12,6 +12,7 @@ use serde_json::Value;
 
 pub mod assistant;
 pub mod chain;
+pub mod context;
 pub mod history;
 pub mod stop;
 
@@ -29,6 +30,19 @@ pub enum AgentEvent {
     ToolUse { name: String, input: Value },
     /// Финальный результат сессии.
     Done { result: String, session_id: String },
+    /// Сколько контекста занято и каков потолок. Части приезжают из РАЗНЫХ
+    /// событий: занятое — с каждой репликой ассистента (`message.usage`), потолок
+    /// — один раз с `result` (`modelUsage.contextWindow`). Окно рисует счётчик по
+    /// последнему известному, поэтому оба поля необязательны.
+    Context {
+        used: Option<u64>,
+        window: Option<u64>,
+        /// Потолок назвал сам CLI. Из потока он всегда факт — но окну об этом
+        /// надо сказать явно: снимок с диска умеет и оценку.
+        window_exact: bool,
+    },
+    /// Контекст сжали: часть разговора агент дальше помнит только в пересказе.
+    Squeezed { pre: Option<u64>, post: Option<u64>, trigger: String },
     /// Агент не ответил: `--resume` в никуда, обрыв процесса, нарушенный инвариант.
     /// `lost_session` — прошлого разговора больше нет, сохранённый id пора забыть.
     Failed { message: String, lost_session: bool },
@@ -80,6 +94,15 @@ pub fn parse_stream_line(line: &str) -> Vec<AgentEvent> {
         "system" => {
             // subtype == "init"
             let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or("");
+            // Сжатие контекста — тоже system-событие. Молчать о нём нельзя:
+            // разрыв в памяти агента человек читает как его ошибку.
+            if subtype == "compact_boundary" {
+                return context::squeeze_of(&v)
+                    .map(|s| {
+                        vec![AgentEvent::Squeezed { pre: s.pre, post: s.post, trigger: s.trigger }]
+                    })
+                    .unwrap_or_default();
+            }
             if subtype != "init" {
                 return vec![];
             }
@@ -106,12 +129,14 @@ pub fn parse_stream_line(line: &str) -> Vec<AgentEvent> {
         }
 
         "assistant" => {
-            // Один assistant-event может содержать несколько content-блоков
+            // Один assistant-event может содержать несколько content-блоков.
+            // Пустой content — не повод выходить: usage лежит рядом с ним, и
+            // ранний выход терял бы занятый контекст на ровном месте.
             let blocks = v
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(Value::as_array);
-            let Some(blocks) = blocks else { return vec![] };
+                .pointer("/message/content")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
 
             let mut events = Vec::new();
             for block in blocks {
@@ -139,6 +164,15 @@ pub fn parse_stream_line(line: &str) -> Vec<AgentEvent> {
                     _ => {}
                 }
             }
+            // Занятый контекст — факт провайдера: сумма трёх входных полей и
+            // есть промпт, ушедший модели. Своей оценки тут не бывает.
+            if let Some(used) = v.pointer("/message/usage").and_then(context::used_tokens) {
+                events.push(AgentEvent::Context {
+                    used: Some(used),
+                    window: None,
+                    window_exact: false,
+                });
+            }
             events
         }
 
@@ -162,7 +196,19 @@ pub fn parse_stream_line(line: &str) -> Vec<AgentEvent> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            vec![AgentEvent::Done { result, session_id }]
+            // Потолок окна CLI называет ровно здесь и нигде больше. Верхнего
+            // `usage` в этом же событии не касаемся: он суммирует ход целиком по
+            // всем моделям, а контекст — это ОДИН последний запрос.
+            let mut out = Vec::new();
+            if let Some(window) = context::window_from_result(&v) {
+                out.push(AgentEvent::Context {
+                    used: None,
+                    window: Some(window),
+                    window_exact: true,
+                });
+            }
+            out.push(AgentEvent::Done { result, session_id });
+            out
         }
 
         _ => vec![],
@@ -278,6 +324,12 @@ pub struct Chat {
     /// поля не знают — `default` читается как «спросить меня».
     #[serde(default)]
     pub chain: chain::Mode,
+    /// Потолок контекста, который назвал сам CLI прошлым ходом. Держим его тут,
+    /// потому что в транскрипте окна нет вовсе: `claude-opus-5` там стоит и при
+    /// миллионе, и при двухстах тысячах. Пусто — потолок придётся оценивать по
+    /// модели, и об этом счётчик обязан сказать вслух.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx_window: Option<u64>,
 }
 
 /// Список чатов и тот, что сейчас открыт. Инвариант: список непуст, `current` —
@@ -356,6 +408,7 @@ pub fn read_chats(settings: &Value) -> ChatBook {
             name: String::new(),
             session_id: saved_chat_session(settings),
             chain: chain::Mode::default(),
+            ctx_window: None,
         });
     }
     let current = block
@@ -429,7 +482,13 @@ impl ChatBook {
         };
         let id = format!("c{n}");
         self.chats
-            .push(Chat { id: id.clone(), name, session_id: None, chain: chain::Mode::default() });
+            .push(Chat {
+                id: id.clone(),
+                name,
+                session_id: None,
+                chain: chain::Mode::default(),
+                ctx_window: None,
+            });
         self.current = self.chats.len() - 1;
         Ok(id)
     }
@@ -564,6 +623,20 @@ impl ChatBook {
         Ok(())
     }
 
+    /// Потолок окна, услышанный от CLI. Чата нет — и потолка нет: выдумывать
+    /// окно за исчезнувший разговор не за что.
+    pub fn window_of(&self, chat_id: &str) -> Option<u64> {
+        self.index_of(chat_id).and_then(|i| self.chats[i].ctx_window)
+    }
+
+    pub fn set_window(&mut self, chat_id: &str, window: u64) -> Result<(), String> {
+        let i = self.index_of(chat_id).ok_or_else(|| {
+            format!("чата «{}» нет в списке — потолок некуда записать", chat_id.trim())
+        })?;
+        self.chats[i].ctx_window = Some(window);
+        Ok(())
+    }
+
     /// Записать (или забыть) нить конкретного чата.
     pub fn set_session(&mut self, chat_id: &str, sid: Option<&str>) -> Result<(), String> {
         let i = self
@@ -646,6 +719,13 @@ pub fn session_id_to_persist(saved: Option<&str>, incoming: &str) -> Option<Stri
         return None;
     }
     Some(incoming.to_string())
+}
+
+/// Писать ли новый потолок окна на диск. Тот же приём, что у нити: CLI называет
+/// окно каждым ходом, а меняется оно раз в жизни — без проверки настройки
+/// переписывались бы на каждую реплику.
+pub fn window_to_persist(saved: Option<u64>, incoming: u64) -> Option<u64> {
+    (incoming > 0 && saved != Some(incoming)).then_some(incoming)
 }
 
 /// id сессии, который принесло событие (Init/Done). Пусто → None.
@@ -847,6 +927,17 @@ const AGENT_SYSTEM_PROMPT: &str =
      описывают прошлое. Выполняй только то, что человек написал тебе в текущем \
      разговоре.\n\
      \n\
+     Бюджет. Перед подъёмом крупной или фоновой задачи спроси limits.get: он \
+     отдаёт по каждому провайдеру долю недельного лимита, долю пятичасового \
+     окна, время сброса и запас хода в днях. ok — выбирай как обычно; routine — \
+     рутину поднимай на kimi, даже если claude удобнее, живые claude-сессии не \
+     переводи; queue — фоновое не поднимай, скажи человеку, что оно ждёт \
+     сброса, интерактив веди как обычно; stop — на этом провайдере не поднимай \
+     ничего и назови числа и время сброса. Пятичасовое окно — это скорость, а \
+     не запас: окно кончилось, а работа срочная — меняй исполнителя, а не жди. \
+     Молча упереться в потолок нельзя: отказал из-за бюджета — скажи, сколько \
+     осталось, когда сброс и что можно сделать.\n\
+     \n\
      Планка. Работай без костылей, архитектурно корректно. По мелочам не \
      согласовывай — решай сам. Необратимое (удаление данных, публикация наружу, \
      слияние веток) делай только спросив человека. Отчёт о работе: что сделано \
@@ -938,6 +1029,9 @@ impl ClaudeCliHost {
         let app = self.app.clone();
         // Помним последний записанный id, чтобы не писать настройки на каждое событие.
         let mut saved = chat_book(&app).session_of(&self.chat_id);
+        // И потолок окна: услышать его можно только здесь, в живом потоке, —
+        // в транскрипте от него не остаётся следа.
+        let mut saved_window = chat_book(&app).window_of(&self.chat_id);
         // Пока ход идёт, транскрипт нельзя удалять из-под хоста: он в него пишет.
         let mut mark = TurnMark::new(resume);
         // Ручка остановки: без неё Esc снаружи до этого процесса не дотянется.
@@ -984,6 +1078,12 @@ impl ClaudeCliHost {
                     // Забываем нить ИМЕННО этого чата: остальные разговоры живы.
                     forget_chat_session(&app, &self.chat_id);
                     saved = None;
+                }
+                if let AgentEvent::Context { window: Some(w), .. } = ev {
+                    if let Some(fresh) = window_to_persist(saved_window, w) {
+                        remember_chat_window(&app, &self.chat_id, fresh);
+                        saved_window = Some(fresh);
+                    }
                 }
                 if let Some(id) = event_session_id(&ev) {
                     mark.track(id); // у свежего чата нить появляется только сейчас
@@ -1035,6 +1135,18 @@ pub fn save_chat_book(app: &tauri::AppHandle, book: &ChatBook) -> Result<(), Str
 /// Запомнить id разговора в НУЖНОМ чате (не в «текущем»: см. `ClaudeCliHost::chat_id`).
 pub(crate) fn remember_chat_session(app: &tauri::AppHandle, chat_id: &str, id: &str) {
     set_chat_session(app, chat_id, Some(id));
+}
+
+/// Запомнить потолок окна, названный самим CLI, — чтобы после перезапуска
+/// счётчик говорил число, а не оценку.
+pub(crate) fn remember_chat_window(app: &tauri::AppHandle, chat_id: &str, window: u64) {
+    let mut book = chat_book(app);
+    let done = book
+        .set_window(chat_id, window)
+        .and_then(|()| save_chat_book(app, &book));
+    if let Err(e) = done {
+        crate::log::line(&format!("[agent] потолок чата {chat_id} не записан: {e}"));
+    }
 }
 
 /// Забыть id разговора («Новый чат» либо пропавший транскрипт). Сам транскрипт
@@ -1173,6 +1285,28 @@ mod tests {
         assert!(AGENT_SYSTEM_PROMPT.contains("chats.read"), "нет инструмента освоения");
     }
 
+    /// Абзац про бюджет: без него агент упирается в потолок молча. Ступени
+    /// названы теми же словами, что в `budget::Rung`, — иначе преамбула учит
+    /// одному, а код отвечает другим.
+    #[test]
+    fn preamble_covers_the_budget_ladder() {
+        assert!(AGENT_SYSTEM_PROMPT.contains("limits.get"), "нет инструмента бюджета");
+        for rung in ["ok", "routine", "queue", "stop"] {
+            assert!(
+                AGENT_SYSTEM_PROMPT.contains(&format!("{rung} —")),
+                "ступень «{rung}» не описана"
+            );
+        }
+        assert!(
+            AGENT_SYSTEM_PROMPT.contains("Пятичасовое окно — это скорость, а не запас"),
+            "потеряна разница между скоростью и запасом"
+        );
+        assert!(
+            AGENT_SYSTEM_PROMPT.contains("Молча упереться в потолок нельзя"),
+            "потеряно требование говорить числа при отказе"
+        );
+    }
+
     /// Дописка человека (пункт 4): склеивается с базой и тоже доезжает до argv.
     #[test]
     fn user_extra_is_appended_and_reaches_argv() {
@@ -1250,6 +1384,92 @@ mod tests {
             }
             other => panic!("ожидали Done, получили {:?}", other),
         }
+    }
+
+    // ── счётчик контекста ─────────────────────────────────────────────────
+
+    /// Занятый контекст ловим прямо из потока: сумма трёх ВХОДНЫХ полей
+    /// `message.usage` и есть промпт, ушедший модели. Числа — с живой записи
+    /// владельца: 2 + 843 + 299382.
+    #[test]
+    fn assistant_event_carries_the_used_context() {
+        let line = r#"{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"text","text":"привет"}],
+            "usage":{"input_tokens":2,"cache_creation_input_tokens":843,"cache_read_input_tokens":299382,"output_tokens":266}}}"#;
+        let events = parse_stream_line(line);
+        assert_eq!(events.len(), 2, "реплика и счётчик: {events:?}");
+        assert_eq!(events[0], AgentEvent::Delta { text: "привет".into() });
+        assert_eq!(
+            events[1],
+            AgentEvent::Context { used: Some(300_227), window: None, window_exact: false }
+        );
+
+        // Пустой content раньше уносил usage вместе с собой — а он лежит рядом.
+        let line = r#"{"type":"assistant","message":{"content":[],"usage":{"input_tokens":7}}}"#;
+        assert_eq!(
+            parse_stream_line(line),
+            vec![AgentEvent::Context { used: Some(7), window: None, window_exact: false }]
+        );
+
+        // Без usage счётчику взяться неоткуда — и он молчит, а не показывает ноль.
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"а"}]}}"#;
+        assert_eq!(parse_stream_line(line), vec![AgentEvent::Delta { text: "а".into() }]);
+    }
+
+    /// Потолок окна CLI называет один раз — в `result`. Верхний `usage` того же
+    /// события трогать нельзя: он суммирует ход целиком по всем моделям.
+    #[test]
+    fn result_event_carries_the_real_window() {
+        let line = r#"{"type":"result","subtype":"success","result":"Готово","session_id":"s2",
+            "usage":{"input_tokens":900000},
+            "modelUsage":{"claude-opus-5":{"inputTokens":12,"contextWindow":1000000},
+                          "claude-haiku-4-5":{"inputTokens":3,"contextWindow":200000}}}"#;
+        let events = parse_stream_line(line);
+        assert_eq!(
+            events[0],
+            AgentEvent::Context { used: None, window: Some(1_000_000), window_exact: true },
+            "окно из потока — факт, а не оценка"
+        );
+        assert!(matches!(&events[1], AgentEvent::Done { session_id, .. } if session_id == "s2"));
+        assert_eq!(events.len(), 2, "суммарный usage хода в счётчик не идёт: {events:?}");
+    }
+
+    /// Момент сжатия — отдельное событие: без него разрыв в памяти агента
+    /// выглядит как его ошибка.
+    #[test]
+    fn compaction_becomes_its_own_event() {
+        let line = r#"{"type":"system","subtype":"compact_boundary","session_id":"s1",
+            "compact_metadata":{"trigger":"auto","pre_tokens":780000,"post_tokens":42000}}"#;
+        assert_eq!(
+            parse_stream_line(line),
+            vec![AgentEvent::Squeezed {
+                pre: Some(780_000),
+                post: Some(42_000),
+                trigger: "auto".into()
+            }]
+        );
+    }
+
+    /// Потолок пишем на диск только когда он ИЗМЕНИЛСЯ: CLI называет его каждым
+    /// ходом, а меняется он раз в жизни.
+    #[test]
+    fn window_is_written_only_when_it_changes() {
+        assert_eq!(window_to_persist(None, 1_000_000), Some(1_000_000));
+        assert_eq!(window_to_persist(Some(1_000_000), 1_000_000), None);
+        assert_eq!(window_to_persist(Some(200_000), 1_000_000), Some(1_000_000));
+        assert_eq!(window_to_persist(None, 0), None, "нулевой потолок — не потолок");
+    }
+
+    /// Потолок переживает перезапуск: услышать его можно только в живом потоке,
+    /// а в транскрипте от него не остаётся следа.
+    #[test]
+    fn window_survives_in_the_chat_book() {
+        let mut book = read_chats(&json!({}));
+        assert_eq!(book.window_of("c1"), None, "свежий чат окна ещё не знает");
+        book.set_window("c1", 1_000_000).unwrap();
+        assert_eq!(book.window_of("c1"), Some(1_000_000));
+        let back = read_chats(&json!({ "agentChat": book.to_patch() }));
+        assert_eq!(back.window_of("c1"), Some(1_000_000), "потолок не долетел через настройки");
+        assert!(book.set_window("c9", 1).is_err(), "чата нет — отказ вслух");
     }
 
     #[test]

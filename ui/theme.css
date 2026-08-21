@@ -988,3 +988,29 @@ textarea.lp-ask-text { width: 100%; min-height: 66px; }
 .pl-add, .pl-presets { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .pl-start { position: absolute; top: -8px; left: 10px; padding: 1px 7px; border-radius: var(--r-chip);
   background: var(--accent); color: var(--on-accent, #fff); font: 600 10.5px/1.5 var(--font); }
+
+/* Счётчик контекста чата с Джарвисом (agent-chat.js): сколько разговор уже
+   занял и сколько осталось до потолка. Правила общие: вкладка панели и окно из
+   трея обязаны показывать это одинаково, а не расходиться на первой правке.
+   Мелким и тихим в шапке — подробности по клику. */
+.ctxhost { display: flex; align-items: center; gap: 8px; max-width: none; }
+.ctx { display: flex; align-items: center; gap: 6px; flex: none; cursor: default;
+  -webkit-app-region: no-drag; }
+.ctxbar { flex: none; width: 42px; height: 4px; border-radius: 2px;
+  background: var(--fill-1); overflow: hidden; }
+.ctxfill { height: 100%; width: 0; background: var(--accent-line); }
+.ctxnum { font-size: 11.5px; color: var(--ink-faint); white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
+.ctx:hover .ctxnum { color: var(--ink-mute); }
+/* У границы — краска предупреждения: дальше часть разговора уедет или сожмётся. */
+.ctx.near .ctxfill { background: var(--warn); }
+.ctx.near .ctxnum { color: var(--warn); }
+/* Подробности — слоем поверх: в строке шапки точным числам места нет. */
+.ctxpop {
+  position: fixed; z-index: 9; max-width: 320px; padding: 12px 14px;
+  border-radius: var(--r-card); background: var(--paper); box-shadow: var(--shadow-pop);
+  -webkit-app-region: no-drag; -webkit-user-select: text; user-select: text;
+}
+.ctxline { margin-bottom: 5px; font: 400 12.5px/1.5 var(--font); color: var(--ink-2); }
+.ctxline:last-child { margin-bottom: 0; }
+.ctxsep { height: 1px; margin: 9px 0; background: var(--line); }

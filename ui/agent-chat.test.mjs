@@ -810,3 +810,128 @@ test('перетаскивание не открывает чат, на кото
   assert.equal(calls.filter(([c]) => c === 'agent_chat_switch').length, 0,
     'перестановка заодно открыла чат, на который бросили');
 });
+
+/* ── счётчик контекста ──────────────────────────────────────────────────────
+ *
+ * «В чате с Джарвисом должно быть видно, сколько осталось контекста». Числа —
+ * по ЭТОМУ разговору: у каждого чата своя лента, и общая цифра по приложению
+ * тут ничего не значит. Занятое всегда факт провайдера, а вот потолок бывает и
+ * оценкой — и тогда об этом обязана сказать сама шапка. */
+const CTX_BOOK = (ctx, squeezes) => ({
+  ok: true,
+  current: 'c1',
+  hidden: 0,
+  chats: [{
+    id: 'c1', name: 'Джарвис', sessionId: 's-1', current: true, turns: 4, at: 1,
+    ctx: ctx || null, squeezes: squeezes || [],
+  }],
+});
+const EMPTY_LOG = () => ({ ok: true, items: [], total: 0 });
+/* Тот же счётчик, что считает ядро: 300227 занятого при миллионе окна. */
+const FACT = { used: 300227, window: 1000000, exact: true, frac: 0.300227, left: 699773, near: false };
+const ctxOf = (doc) => doc.getElementById('sub').textContent;
+
+test('шапка называет занятый контекст и остаток — по этому чату', async () => {
+  const { doc } = await boot({ sessionId: 's-1' }, {
+    agent_chats_list: () => CTX_BOOK(FACT),
+    agent_chat_history: EMPTY_LOG,
+  });
+  assert.match(ctxOf(doc), /30%/, 'доли занятого не видно: ' + ctxOf(doc));
+  assert.match(ctxOf(doc), /300k \/ 1M/, 'нет ни занятого, ни потолка: ' + ctxOf(doc));
+  assert.doesNotMatch(ctxOf(doc), /≈/, 'факт провайдера помечен оценкой');
+  assert.match(doc.querySelector('.ctxfill').getAttribute('style') || '', /30%/, 'полоска не заполнена');
+});
+
+test('оценённый потолок помечен, а неизвестный назван вслух', async () => {
+  const est = { used: 100000, window: 200000, exact: false, frac: 0.5, left: 100000, near: false };
+  let s = await boot({ sessionId: 's-1' }, { agent_chats_list: () => CTX_BOOK(est), agent_chat_history: EMPTY_LOG });
+  assert.match(ctxOf(s.doc), /≈/, 'оценка выдана за точное число: ' + ctxOf(s.doc));
+
+  // Окна не знаем вовсе — доли нет, и врать процентом нельзя.
+  const blind = { used: 300227, window: null, exact: false, frac: null, left: null, near: false };
+  s = await boot({ sessionId: 's-1' }, { agent_chats_list: () => CTX_BOOK(blind), agent_chat_history: EMPTY_LOG });
+  assert.match(ctxOf(s.doc), /окно неизвестно/, ctxOf(s.doc));
+  assert.doesNotMatch(ctxOf(s.doc), /%/, 'доля без знаменателя — выдуманное число');
+});
+
+test('поток обновляет счётчик: занятое с реплики, потолок с итога', async () => {
+  const { doc, emit } = await boot({ sessionId: 's-1' }, {
+    agent_chats_list: () => CTX_BOOK(null),
+    agent_chat_history: EMPTY_LOG,
+  });
+  assert.doesNotMatch(ctxOf(doc), /\//, 'счётчик появился до первых чисел: ' + ctxOf(doc));
+
+  await emit({ chatId: 'c1', type: 'context', used: 300227, window: null, window_exact: false });
+  await emit({ chatId: 'c1', type: 'context', used: null, window: 1000000, window_exact: true });
+  assert.match(ctxOf(doc), /30% · 300k \/ 1M/, 'части из разных событий не сложились: ' + ctxOf(doc));
+  assert.doesNotMatch(ctxOf(doc), /≈/, 'потолок из потока — факт');
+});
+
+test('о подходе к границе контекста человек узнаёт заранее и один раз', async () => {
+  const { doc, emit } = await boot({ sessionId: 's-1' }, {
+    agent_chats_list: () => CTX_BOOK(null),
+    agent_chat_history: EMPTY_LOG,
+  });
+  await emit({ chatId: 'c1', type: 'context', used: 700000, window: 1000000, window_exact: true });
+  assert.doesNotMatch(text(doc), /Контекст на исходе/, 'предупредили раньше времени');
+
+  await emit({ chatId: 'c1', type: 'context', used: 900000, window: null, window_exact: false });
+  assert.match(text(doc), /Контекст на исходе/, 'о границе не сказали: ' + text(doc));
+  assert.match(text(doc), /900 000 из 1 000 000/, 'предупреждение без чисел');
+
+  await emit({ chatId: 'c1', type: 'context', used: 910000, window: null, window_exact: false });
+  assert.equal(text(doc).match(/Контекст на исходе/g).length, 1, 'предупреждение повторяется на каждый ход');
+});
+
+test('момент сжатия отмечен в ленте — и в потоке, и в прошлой переписке', async () => {
+  const { doc, emit } = await boot({ sessionId: 's-1' }, {
+    agent_chats_list: () => CTX_BOOK(FACT, [{ at: 150, pre: 780000, post: 42000, trigger: 'auto' }]),
+    agent_chat_history: () => ({
+      ok: true,
+      total: 2,
+      items: [
+        { role: 'user', kind: 'text', text: 'первая реплика', ts: 100 },
+        { role: 'assistant', kind: 'text', text: 'вторая реплика', ts: 200 },
+      ],
+    }),
+  });
+  const kinds = [...doc.querySelectorAll('#msgs .msg')].map((m) => m.className);
+  assert.deepEqual(kinds, ['msg user', 'msg squeeze', 'msg assistant'], 'отметка сжатия встала не по времени');
+  assert.match(text(doc), /контекст был сжат/, 'разрыв памяти выглядит как ошибка агента: ' + text(doc));
+
+  await emit({ chatId: 'c1', type: 'squeezed', pre: 700000, post: 40000, trigger: 'manual' });
+  assert.equal(text(doc).match(/контекст был сжат/g).length, 2, 'сжатие в потоке прошло молча');
+  assert.match(text(doc), /по просьбе человека/);
+});
+
+test('подробности счётчика — по клику, и лимит в них стоит отдельно', async () => {
+  const { doc, hit } = await boot({ sessionId: 's-1' }, {
+    agent_chats_list: () => CTX_BOOK(FACT),
+    agent_chat_history: EMPTY_LOG,
+    limit_get: () => ({ providers: { claude: { runwayDays: 3.2, weekLeftPct: 41 } } }),
+  });
+  assert.equal(doc.querySelector('.ctxpop'), null, 'подробности лезут в глаза без спроса');
+
+  await hit(doc.querySelector('.ctx'));
+  const pop = doc.querySelector('.ctxpop');
+  assert.ok(pop, 'подробностей по клику нет');
+  assert.match(pop.textContent, /300 227/, 'точного занятого нет: ' + pop.textContent);
+  assert.match(pop.textContent, /699 773/, 'остатка в токенах нет');
+  assert.match(pop.textContent, /факт, а не наш подсчёт/, 'источник числа не назван');
+  // Контекст и лимит — про разное, и слить их в одно число нельзя.
+  assert.match(pop.textContent, /Лимит провайдера — это другое/);
+  assert.match(pop.textContent, /запас хода 3\.2 дн/, 'остатка лимита в днях нет: ' + pop.textContent);
+});
+
+test('чат, открытый уже у границы, предупреждает сразу, а не со следующего хода', async () => {
+  const near = { used: 900000, window: 1000000, exact: true, frac: 0.9, left: 100000, near: true };
+  const { doc } = await boot({ sessionId: 's-1' }, {
+    agent_chats_list: () => CTX_BOOK(near),
+    agent_chat_history: () => ({ ok: true, total: 1, items: [{ role: 'user', kind: 'text', text: 'привет', ts: 100 }] }),
+  });
+  assert.match(text(doc), /Контекст на исходе/, 'о границе молчат до первого хода: ' + text(doc));
+  // Предупреждение стоит ПОСЛЕ прошлой переписки, а не перед ней.
+  const kinds = [...doc.querySelectorAll('#msgs .msg')].map((m) => m.className);
+  assert.deepEqual(kinds, ['msg user', 'msg note']);
+  assert.match(doc.querySelector('.ctx').className, /near/, 'счётчик у границы не помечен');
+});

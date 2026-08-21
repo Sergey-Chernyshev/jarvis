@@ -122,6 +122,40 @@
     return n + ' ' + window.JarvisMarkdown.plural(n, 'реплика', 'реплики', 'реплик');
   };
 
+  /* ---------- сколько контекста занял разговор ---------- */
+
+  /* Токены человеку: 300227 → «300k», 1000000 → «1M». Точное число живёт в
+   * подробностях — в шапке от него остаётся только порядок величины. */
+  const short = (n) => {
+    if (!Number.isFinite(n)) return '—';
+    if (n >= 1e6) return String(Math.round(n / 1e5) / 10).replace(/\.0$/, '') + 'M';
+    if (n >= 1000) return Math.round(n / 1000) + 'k';
+    return String(Math.round(n));
+  };
+  const spaced = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  const pct = (f) => Math.round(f * 100) + '%';
+
+  /* Порог предупреждения — тот же, что у ядра (agent/context.rs, NEAR): человек
+   * должен узнать про исход контекста заранее, а не по внезапно поглупевшему
+   * собеседнику. */
+  const NEAR = 0.85;
+
+  /* Свести известное в счётчик. Занятое — всегда факт провайдера; потолок бывает
+   * и оценкой, и тогда доля помечается. Оценка НИЖЕ уже занятого — не оценка, а
+   * опровергнутая догадка: «занято 150%» не значит ничего, честнее сказать, что
+   * окна не знаем. */
+  const gauge = (c) => {
+    if (!c || !Number.isFinite(c.used)) return null;
+    let w = Number.isFinite(c.window) && c.window > 0 ? c.window : null;
+    if (w && !c.exact && c.used > w) w = null;
+    const frac = w ? c.used / w : null;
+    return {
+      used: c.used, window: w, exact: !!(c.exact && w), frac,
+      left: w ? Math.max(0, w - c.used) : null,
+      near: frac != null && frac >= NEAR,
+    };
+  };
+
   /** Смонтировать чат на разметку `els` поверх команд `api`. */
   function mount(els, api) {
     const { msgs, input, sendBtn, sub, tag, newBtn, chatsRow, extFind } = els;
@@ -156,6 +190,9 @@
         t = {
           id, rows: [], busy: false, session: null, bubble: null, raw: '', tools: null,
           gen: 0, loaded: false, stopping: false, stopMark: false,
+          // ctx — занятый контекст ЭТОГО разговора (у каждого своя лента, значит
+          // и свой счёт); ctxNear — про исход контекста уже сказано.
+          ctx: null, ctxNear: false,
         };
         threads.set(id, t);
       }
@@ -312,6 +349,112 @@
        * это подсветкой строки — тогда в шапке остаётся только состояние. */
       const cur = sideOff && chats.find((c) => c.id && c.id === chatId);
       sub.textContent = (cur ? cut(cur.name, 22) + ' · ' : '') + (t.busy ? 'думает…' : 'готов');
+      /* Рядом — счётчик контекста. Класс вешаем кодом: разметки у вкладки и окна
+       * две, и общий контейнер иначе пришлось бы править в обоих файлах. */
+      sub.classList.add('ctxhost');
+      const g = gauge(t.ctx);
+      if (!g) return;
+      const node = sub.appendChild(ctxNode(g));
+      // Раскрытые подробности пересобираем вместе со счётчиком: числа в них
+      // стареют за ход, а застывшая карточка врёт ровно тем, против чего заведена.
+      if (pop) { popOff(); ctxPop(node, g); }
+    }
+
+    /* ---------- счётчик контекста в шапке ---------- */
+
+    /* Мелким и тихим: полоска, доля и «занято / потолок». Точные числа и то,
+     * факт это или оценка, — по клику: в шапке им места нет, а врать
+     * сокращением «300k» без пометки нельзя. */
+    function ctxNode(g) {
+      const box = el('ctx' + (g.near ? ' near' : ''));
+      const bar = el('ctxbar');
+      const fill = el('ctxfill');
+      if (g.frac != null) fill.style.width = Math.min(100, Math.round(g.frac * 100)) + '%';
+      bar.appendChild(fill);
+      box.appendChild(bar);
+      // «≈» — потолок оценён нами, а не назван провайдером. Врать точностью нельзя.
+      const num = g.frac == null
+        ? short(g.used) + ' · окно неизвестно'
+        : pct(g.frac) + ' · ' + short(g.used) + ' / ' + short(g.window) + (g.exact ? '' : ' ≈');
+      box.appendChild(el('ctxnum', num));
+      // Точные токены — под курсором и по клику: в шапке им места нет, а
+      // «300k» без них было бы сокращением без права на проверку.
+      box.title = 'Контекст разговора: занято ' + spaced(g.used)
+        + (g.left == null ? ', потолок неизвестен' : ', осталось ' + spaced(g.left) + ' из ' + spaced(g.window))
+        + ' · подробности по клику';
+      box.addEventListener('click', () => ctxPop(box, g));
+      return box;
+    }
+
+    let pop = null; // подробности счётчика: слой поверх шапки
+    const popOff = () => { if (pop) { pop.remove(); pop = null; } };
+    /* Клик мимо — закрыть. Свой клик узнаём по цели, а не глушим всплытие:
+     * глушение стоило бы закрытия там, где до document слушает кто-то ещё. */
+    document.addEventListener('click', (e) => {
+      const el0 = e && e.target;
+      if (el0 && el0.closest && (el0.closest('.ctx') || el0.closest('.ctxpop'))) return;
+      popOff();
+    });
+
+    /* Подробности. Лимит стоит РЯДОМ, но отдельной строкой за отбивкой: слить
+     * его со счётчиком в одно число нельзя — контекст про то, сколько помнит
+     * разговор, а лимит про то, что мы можем себе позволить до сброса. */
+    function ctxPop(anchor, g) {
+      if (pop) { popOff(); return; }
+      pop = el('ctxpop');
+      const line = (s) => pop.appendChild(el('ctxline', s));
+      line('Контекст разговора: занято ' + spaced(g.used) + ' токенов'
+        + (g.frac == null ? '' : ' из ' + spaced(g.window) + ' — это ' + pct(g.frac)));
+      if (g.left != null) line('Осталось ' + spaced(g.left) + ' токенов.');
+      line(g.window == null
+        ? 'Потолок окна неизвестен: модель его не назвала, а гадать числом нельзя. Доля появится после первого ответа агента.'
+        : g.exact
+          ? 'Потолок назвал сам CLI — это факт, а не наш подсчёт.'
+          : 'Потолок ОЦЕНЁН по модели: в транскрипте пометки про размер окна нет. Точное число придёт с ответом агента.');
+      if (g.near) line('Контекст на исходе: скоро часть разговора уедет или будет сжата.');
+      pop.appendChild(el('ctxsep'));
+      line('Лимит провайдера — это другое: контекст про память разговора, лимит про то, сколько мы можем себе позволить до сброса.');
+      limitLine(pop);
+      // Позиция от счётчика: шапка узкая, а подробностям нужна ширина.
+      const r = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : null;
+      if (r) { pop.style.top = Math.round(r.bottom + 6) + 'px'; pop.style.right = '12px'; }
+      document.body.appendChild(pop);
+    }
+
+    /* Остаток лимита в днях — если демон умеет его назвать. Не умеет (старая
+     * сборка, чисел ещё нет) — молчим: выдуманный запас хода хуже пустоты. */
+    async function limitLine(box) {
+      if (!api.limit) return;
+      let res;
+      try { res = await api.limit(); } catch { return; }
+      const p = (res && res.providers && res.providers.claude) || null;
+      if (!p || !Number.isFinite(p.runwayDays)) return;
+      if (box.isConnected === false) return;
+      const days = Math.round(p.runwayDays * 10) / 10;
+      box.appendChild(el('ctxline', 'Лимит claude: запас хода ' + days + ' дн'
+        + (Number.isFinite(p.weekLeftPct) ? ', недели осталось ' + Math.round(p.weekLeftPct) + '%' : '') + '.'));
+    }
+
+    /* Предупреждение о границе — строкой в ленте, один раз на подход: человек
+     * должен узнать заранее, а не по внезапно поглупевшему собеседнику. */
+    function ctxWatch(t) {
+      const g = gauge(t.ctx);
+      if (!g || !g.window) return;
+      if (!g.near) { t.ctxNear = false; return; }
+      if (t.ctxNear) return;
+      t.ctxNear = true;
+      addNote(t, 'Контекст на исходе: занято ' + pct(g.frac) + ' (' + spaced(g.used)
+        + ' из ' + spaced(g.window) + ' токенов). Скоро часть разговора уедет или будет сжата —'
+        + ' важное лучше повторить, а длинную тему увести в новый чат.');
+    }
+
+    /* Момент сжатия — отдельной строкой. Без неё разрыв в памяти агента человек
+     * читает как его ошибку. */
+    function addSqueeze(t, m) {
+      let s = 'здесь контекст был сжат';
+      if (m && Number.isFinite(m.pre) && Number.isFinite(m.post)) s += ': ' + short(m.pre) + ' → ' + short(m.post);
+      if (m && m.trigger === 'manual') s += ' (по просьбе человека)';
+      return addRow(t, 'squeeze', el('bubble', s + ' — сказанное выше агент помнит только в пересказе.'));
     }
     function setBusy(t, v) {
       t.busy = v;
@@ -353,11 +496,19 @@
         if (!c.id) continue;
         const t = thread(c.id);
         if (!t.busy) t.session = c.sessionId || null;
+        /* Счётчик контекста едет вместе со списком — у открытого чата. Идущий
+         * ход знает про контекст больше диска (транскрипт демон допишет только
+         * под конец), поэтому его чисел не трогаем. */
+        if (!t.busy && c.ctx) t.ctx = { used: c.ctx.used, window: c.ctx.window, exact: !!c.ctx.exact };
+        if (Array.isArray(c.squeezes)) t.marks = c.squeezes;
       }
       if (chatId !== was) draw(here()); // лента обязана совпасть с открытым сразу
       renderChats();
       syncHead();
       syncTag();
+      // Открыли чат, у которого контекст уже на исходе, — сказать надо сразу, а
+      // не ждать следующего хода: латч в разговоре не даст повториться.
+      ctxWatch(here());
       return chats.find((c) => c.id === chatId) || null;
     }
 
@@ -984,11 +1135,20 @@
        * оказался бы выше собственного вопроса. */
       const h = { id: HIST, rows: [], bubble: null, tools: null };
       const items = (res && res.items) || [];
+      /* Отметки сжатия ставим ПО ВРЕМЕНИ, между репликами: сваленные в конец,
+       * они говорили бы, что память оборвалась только что. */
+      const marks = (t.marks || []).slice().sort((a, b) => (a.at || 0) - (b.at || 0));
+      let mi = 0;
+      const marksUpto = (ts) => {
+        while (mi < marks.length && marks[mi].at && ts && marks[mi].at <= ts) addSqueeze(h, marks[mi++]);
+      };
       for (const it of items) {
+        marksUpto(it.ts);
         if (it.kind === 'tool') addTool(h, it.text);
         else if (it.role === 'user') addUser(h, it.text);
         else paint(addRow(h, 'assistant', el('bubble', '')), it.text);
       }
+      while (mi < marks.length) addSqueeze(h, marks[mi++]);
       const total = (res && res.total) || items.length;
       if (items.length) {
         const n = items.length;
@@ -1309,6 +1469,20 @@
         case 'tool_use':
           addTool(t, ev.name || '?');
           break;
+        /* Счётчик контекста. Части приезжают из разных событий — занятое с
+         * каждой репликой, потолок один раз с итогом, — поэтому копим, а не
+         * перезаписываем: иначе итог обнулял бы занятое. */
+        case 'context': {
+          const c = t.ctx || (t.ctx = { used: null, window: null, exact: false });
+          if (Number.isFinite(ev.used)) c.used = ev.used;
+          if (Number.isFinite(ev.window)) { c.window = ev.window; c.exact = !!ev.window_exact; }
+          if (shown(t)) syncHead();
+          ctxWatch(t);
+          break;
+        }
+        case 'squeezed':
+          addSqueeze(t, ev);
+          break;
         /* Ход остановлен — в том числе из соседнего окна или кнопкой: лента
          * обязана сказать это сама, а не ждать, пока человек догадается по
          * замолчавшему пузырю. */
@@ -1477,6 +1651,9 @@
         {
           state: () => j.agentChatState(),
           history: (chatId) => j.agentChatHistory(chatId),
+          // остаток лимита провайдера — число ДРУГОЕ, чем счётчик контекста, и
+          // приезжает своей командой: сложить их в одно нельзя
+          limit: () => j.getLimit(),
           reset: () => j.agentChatReset(),
           chats: () => j.agentChatsList(),
           switch: (chatId) => j.agentChatSwitch(chatId),
@@ -1533,6 +1710,7 @@
       {
         state: () => invoke('agent_chat_state'),
         history: (chatId) => invoke('agent_chat_history', { chatId }),
+        limit: () => invoke('limit_get'),
         reset: () => invoke('agent_chat_reset'),
         // Полный список и здесь: окно из трея — единственный вход, когда панель
         // закрыта, и «только текущий чат» отрезал бы от остальных проектов.

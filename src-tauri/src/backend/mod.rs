@@ -169,6 +169,15 @@ pub trait Backend: Send + Sync {
     // — usage —
     /// $/1M токенов (input, output). Оценка/конфиг.
     fn price(&self, model: &str) -> (f64, f64);
+
+    /// Размер окна контекста модели, в токенах. ОЦЕНКА по имени — потому и
+    /// живёт у бэкенда, а не константой в счётчике: у K3 миллион, у K3-256k
+    /// четверть, у claude зависит от строки запуска. Настоящее число приносит
+    /// сам CLI (`modelUsage.contextWindow`) и всегда важнее этой таблицы.
+    /// `None` — модель незнакомая: соврать числом хуже, чем сказать «не знаю».
+    fn context_window(&self, _model: &str) -> Option<u64> {
+        None
+    }
 }
 
 /// Claude-бэкенд: делегирует в существующий код (поведение неизменно).
@@ -258,6 +267,20 @@ impl Backend for ClaudeBackend {
             "Haiku" => (1.0, 5.0),
             _ => (3.0, 15.0),
         }
+    }
+    /// У Claude окно задаёт СТРОКА ЗАПУСКА (`opus[1m]` в настройках), а в
+    /// транскрипте от неё не остаётся и следа: там стоит голый `claude-opus-5`
+    /// и при миллионе, и при двухстах тысячах. Отсюда 200 000 — только догадка
+    /// по умолчанию, и опровергнуть её может само занятое (см. `context::gauge`).
+    fn context_window(&self, model: &str) -> Option<u64> {
+        let m = model.to_lowercase();
+        if m.contains("1m") {
+            return Some(1_000_000);
+        }
+        ["opus", "sonnet", "haiku", "fable"]
+            .iter()
+            .any(|k| m.contains(k))
+            .then_some(200_000)
     }
 }
 
@@ -401,6 +424,27 @@ mod tests {
             assert_eq!(backend(*a).agent(), *a, "диспетчер обязан вернуть тот же агент");
             assert_eq!(Agent::from_label(a.label()), *a, "метка обязана читаться обратно");
         }
+    }
+
+    /// Потолок контекста берётся ИЗ МОДЕЛИ, а не из общей константы: у K3
+    /// миллион, у K3-256k четверть, у claude — двести тысяч по умолчанию и
+    /// миллион с пометкой `1m`. Незнакомая модель — `None`, а не чужое число.
+    #[test]
+    fn context_window_comes_from_the_model() {
+        let c = backend(Agent::Claude);
+        assert_eq!(c.context_window("claude-opus-5"), Some(200_000));
+        assert_eq!(c.context_window("opus[1m]"), Some(1_000_000), "пометка про миллион");
+        assert_eq!(c.context_window("claude-sonnet-4-5-1m"), Some(1_000_000));
+        assert_eq!(c.context_window("gpt-5"), None, "чужая модель — не наше дело");
+
+        let k = backend(Agent::Kimi);
+        assert_eq!(k.context_window("kimi-code/k3"), Some(1_000_000));
+        assert_eq!(k.context_window("k3"), Some(1_000_000), "короткое имя — та же модель");
+        assert_eq!(k.context_window("kimi-code/k3-256k"), Some(256_000));
+        assert_eq!(k.context_window("что-то новое"), None);
+
+        assert_eq!(backend(Agent::Codex).context_window("gpt-5-codex"), Some(400_000));
+        assert_eq!(backend(Agent::Codex).context_window("k3"), None);
     }
 
     #[test]

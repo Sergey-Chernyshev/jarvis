@@ -182,6 +182,12 @@ impl Backend for CodexBackend {
         // ОЦЕНКА (OpenAI прайс дрейфует) — gpt-5-класс, $/1M (in, out).
         (1.25, 10.0)
     }
+    /// ОЦЕНКА: у gpt-5-класса окно 400k. Незнакомая модель — `None`: набор
+    /// моделей Codex дрейфует между релизами, и подставлять чужое число нельзя.
+    fn context_window(&self, model: &str) -> Option<u64> {
+        let m = model.to_lowercase();
+        (m.contains("gpt-5") || m.contains("gpt5") || m.contains("codex")).then_some(400_000)
+    }
 }
 
 #[cfg(test)]

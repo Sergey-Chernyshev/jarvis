@@ -59,6 +59,16 @@ fn cache() -> &'static Mutex<HashMap<PathBuf, Cached>> {
     C.get_or_init(Default::default)
 }
 
+/// Каталог транскриптов главного агента.
+///
+/// Хост работает из временной папки (`agent/mod.rs`, `current_dir(temp_dir())`),
+/// поэтому каталог проекта считаем от неё — тем же механизмом, что у обычных
+/// сессий: он уже разбирается с симлинком `/var/folders` → `/private/var/folders`.
+pub fn agent_dir() -> Option<PathBuf> {
+    let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+    crate::backend::backend(crate::backend::Agent::Claude).transcript_dir_for(&cwd)
+}
+
 /// id разговора уходит в имя файла — пускаем только то, из чего пути не собрать.
 pub fn is_session_id(s: &str) -> bool {
     !s.is_empty()
@@ -240,7 +250,29 @@ pub fn chats_json(book: &ChatBook, threads: &[Thread]) -> Value {
             .filter(|t| !book.is_hidden(&t.session_id))
             .map(|t| entry(None, None, Some(&t.session_id), false, Some(t))),
     );
+    add_context(book, &mut out);
     Value::Array(out)
+}
+
+/// Приписать открытому чату счётчик контекста: занято, потолок, отметки сжатия.
+///
+/// Только ОТКРЫТОМУ: у остальных это стоило бы по чтению транскрипта на каждое
+/// открытие окна, а смотрят всё равно на один — тот, что на экране.
+fn add_context(book: &ChatBook, out: &mut [Value]) {
+    let cur = book.current();
+    let (Some(sid), Some(dir)) = (cur.session_id.as_deref(), agent_dir()) else {
+        return; // разговора ещё не было — считать нечего, и это не поломка
+    };
+    let ctx = crate::agent::context::for_chat(&dir, sid, cur.ctx_window);
+    let (Some(row), Some(add)) = (
+        out.get_mut(book.current_index()).and_then(Value::as_object_mut),
+        ctx.as_object(),
+    ) else {
+        return;
+    };
+    for (k, v) in add {
+        row.insert(k.clone(), v.clone());
+    }
 }
 
 /// Разговоры с диска, за которыми не стоит чата, — тот самый хвост списка.

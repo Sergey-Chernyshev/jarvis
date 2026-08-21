@@ -176,6 +176,19 @@ impl Backend for KimiBackend {
         // ОЦЕНКА: официальных цен в конфиге Kimi нет, $/1M (in, out).
         (0.6, 2.5)
     }
+    /// У K3 миллион — он же стоит в его собственной панели («/ 1M»); у
+    /// K3-256k ровно четверть от него, и это тот самый случай, ради которого
+    /// потолок берётся из модели, а не из общей константы.
+    fn context_window(&self, model: &str) -> Option<u64> {
+        let v = model.rsplit('/').next().unwrap_or(model).to_lowercase();
+        if v.contains("256k") {
+            return Some(256_000);
+        }
+        if v.starts_with("k3") {
+            return Some(1_000_000);
+        }
+        v.contains("kimi-for-coding").then_some(256_000)
+    }
 }
 
 #[cfg(test)]

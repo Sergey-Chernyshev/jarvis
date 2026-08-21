@@ -491,6 +491,28 @@ fn mcp_config_dst() -> PathBuf {
     jarvis_dir().join("jarvis-mcp.json")
 }
 
+/// Имя моста — одно и то же в трёх местах: `[[bin]]` в Cargo.toml, файл рядом с
+/// exe и копия в `~/.jarvis/bin/`. Держим строку одной, чтобы связь была видна.
+const MCP_BIN: &str = "jarvis-mcp";
+
+/// Откуда взять `jarvis-mcp`, чтобы положить его в `~/.jarvis/bin/`: он всегда
+/// СИБЛИНГ текущего exe — и в дереве разработчика, и в установке из образа.
+///
+/// Это не совпадение и не «пока везёт». Бандлер tauri копирует в пакет КАЖДЫЙ
+/// `[[bin]]` манифеста, рядом с главным бинарём: на macOS в
+/// `Jarvis.app/Contents/MacOS/`, в deb/rpm/AppImage — в `usr/bin/`
+/// (`tauri-bundler`: `macos/app.rs::copy_binaries_to_bundle`,
+/// `linux/debian.rs::generate_data`, `linux/rpm.rs`). Проверено на released
+/// артефакте: `Jarvis_aarch64.app.tar.gz` содержит `Contents/MacOS/jarvis-mcp`.
+///
+/// Поэтому ни `externalBin`, ни `resources` мосту не нужны — см. build.rs, где
+/// расписано, почему `externalBin` вдобавок ломает сборку. Сторож на то, что
+/// `[[bin]]` никуда не делся, — в тестах ниже (`mcp_bridge_is_a_bundled_bin`).
+fn mcp_src(exe: &Path) -> Option<PathBuf> {
+    let candidate = exe.parent()?.join(MCP_BIN);
+    candidate.is_file().then_some(candidate)
+}
+
 /// Выдать/прочитать токен агента в ~/.jarvis/tokens.json (0600). Самодостаточно:
 /// install/mod.rs компилируется и в jarvis-setup (без `crate::capability`), поэтому
 /// логику токена дублируем минимально. Формат совпадает с `capability::tokens::TokenStore`
@@ -2499,20 +2521,11 @@ pub fn install_core(progress: &Progress) -> IntegrationHealth {
     write_executable(&hook_dst(), HOOK_SRC);
 
     // R5: мост агента (jarvis-mcp) + токен + MCP-конфиг. Fail-safe: сбой не валит
-    // установку интеграции — просто агент будет недоступен. jarvis-mcp — это
-    // компилируемый бинарь-сиблинг текущего exe (в dev и в бандле .app).
-    //
-    // ВНИМАНИЕ: в бандл из DMG он сейчас НЕ попадает — tauri.conf.json его не
-    // кладёт. `externalBin` тут не годится: tauri-build копирует внешние бинари
-    // из build.rs, то есть ДО того, как cargo соберёт jarvis-mcp (цель того же
-    // Cargo.toml), и обычный `cargo build`/`cargo test` на чистом дереве упал бы.
-    // Нужен шаг в CI/npm-скрипте: собрать jarvis-mcp и положить его как
-    // `src-tauri/binaries/jarvis-mcp-<triple>` ДО основной сборки. До тех пор
-    // единственное, что мы можем, — сказать вслух, что моста нет.
+    // установку интеграции — просто агент будет недоступен. Где лежит мост и
+    // почему он есть и в бандле тоже — см. `mcp_src`.
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let src = dir.join("jarvis-mcp");
-            if src.exists() {
+        match mcp_src(&exe) {
+            Some(src) => {
                 let _ = fs::create_dir_all(mcp_dst().parent().unwrap());
                 match fs::copy(&src, mcp_dst()) {
                     Ok(_) => {
@@ -2529,15 +2542,16 @@ pub fn install_core(progress: &Progress) -> IntegrationHealth {
                 if let Err(err) = atomic_write_mode(&mcp_config_dst(), &body, 0o600) {
                     progress(Step::warn("Хуки", format!("MCP-конфиг не записан: {err}")));
                 }
-            } else {
+            }
+            None => {
                 // Не eprintln: stderr бандла никто не читает, а последствие
-                // видимое — «агент не отвечает». В бандл бинарь кладёт
-                // externalBin (tauri.conf.json).
+                // видимое — «агент не отвечает». Печатаем путь: без него
+                // диагноз «мост пропал» занимает вечер.
                 progress(Step::warn(
                     "Хуки",
                     format!(
                         "jarvis-mcp не найден рядом с exe ({}) — MCP-агент будет недоступен",
-                        src.display()
+                        exe.parent().unwrap_or(&exe).join(MCP_BIN).display()
                     ),
                 ));
             }
@@ -3393,6 +3407,73 @@ mod tests {
     fn download_channels_direct_then_proxy() {
         assert_eq!(super::download_channels(true), vec![true, false]);
         assert_eq!(super::download_channels(false), vec![true]);
+    }
+
+    /// Сторож упаковки: мост обязан ехать в бандле.
+    ///
+    /// Сам бандл в тесте не собрать, но механизм, который кладёт туда
+    /// `jarvis-mcp`, ровно один и он декларативный: бандлер tauri копирует в
+    /// пакет каждый `[[bin]]` манифеста рядом с главным бинарём. Значит,
+    /// достаточно стеречь объявление `[[bin]]` — и отдельно стеречь, чтобы
+    /// никто не «починил» несуществующую проблему через `externalBin`, который
+    /// роняет build.rs (подробности там же).
+    ///
+    /// Прецедент, ради которого сторож и заведён: узел `node/` из этого же
+    /// репозитория вынесли ОТДЕЛЬНЫМ крейтом — именно чтобы он в бандл не
+    /// попадал. Такой же «вынесем мост из манифеста» молча оставит агента без
+    /// единого инструмента у всех, кто ставит из образа, и ни один тест сегодня
+    /// этого не заметит.
+    #[test]
+    fn mcp_bridge_is_a_bundled_bin() {
+        let cargo_toml = include_str!("../../Cargo.toml");
+        // Грубый разбор без зависимости на toml-парсер: ищем секцию [[bin]] с
+        // нужным именем. Достаточно точно — имя в манифесте пишется одной
+        // строкой и уникально.
+        let declared = cargo_toml
+            .split("[[bin]]")
+            .skip(1)
+            .any(|sec| sec.lines().any(|l| l.trim() == format!("name = \"{MCP_BIN}\"")));
+        assert!(
+            declared,
+            "{MCP_BIN} обязан оставаться [[bin]] в src-tauri/Cargo.toml: только так \
+             бандлер кладёт его рядом с jarvis (Contents/MacOS, usr/bin), и только \
+             оттуда install_core его берёт"
+        );
+
+        let conf: Value = serde_json::from_str(include_str!("../../tauri.conf.json"))
+            .expect("tauri.conf.json — валидный JSON");
+        assert!(
+            conf["bundle"]["externalBin"].is_null(),
+            "externalBin мосту не нужен (он и так в бандле) и ломает build.rs: \
+             tauri-build копирует внешние бинари ДО того, как cargo соберёт цель \
+             того же манифеста"
+        );
+    }
+
+    /// Мост берётся сиблингом exe — тем самым путём, который даёт и дерево
+    /// разработчика, и `Jarvis.app/Contents/MacOS`, и `/usr/bin` в deb/rpm.
+    #[test]
+    fn mcp_is_taken_from_next_to_the_executable() {
+        let dir = std::env::temp_dir().join(format!("jarvis-mcp-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Jarvis.app/Contents/MacOS")).unwrap();
+        let macos = dir.join("Jarvis.app/Contents/MacOS");
+        let exe = macos.join("jarvis");
+        std::fs::write(&exe, "").unwrap();
+
+        assert!(
+            super::mcp_src(&exe).is_none(),
+            "без моста рядом ничего не выдумываем — иначе установка молча \
+             пропишет в MCP-конфиг несуществующий путь"
+        );
+
+        std::fs::write(macos.join(MCP_BIN), "").unwrap();
+        assert_eq!(
+            super::mcp_src(&exe),
+            Some(macos.join(MCP_BIN)),
+            "мост лежит рядом с exe — так его кладёт бандлер в .app и в deb/rpm"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

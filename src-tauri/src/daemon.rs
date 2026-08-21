@@ -244,7 +244,7 @@ pub struct Daemon {
     pub pending: std::sync::Arc<crate::capability::confirm_panel::PendingConfirms>,
     /// Учёт сессий, поднятых через `sessions.spawn`: кто поднял, зачем, когда.
     /// Отдельно от реестра сессий: сессия уходит по session-end, а родитель и
-    /// потолок одновременных должны это пережить.
+    /// «чья она» должны это пережить.
     pub spawns: std::sync::Arc<crate::capability::native::spawn::Spawns>,
     /// STT-сервис (инкремент 9): распознавание речи. Fail-safe.
     pub stt: std::sync::Arc<crate::stt::SttService>,

@@ -28,17 +28,6 @@ use crate::util::{now_ms, one_line};
 
 use super::arg_str;
 
-/// Сколько сессий агенту позволено держать одновременно, если в настройках
-/// ничего не сказано. Бесконечности быть не должно: каждая сессия — деньги.
-pub const DEFAULT_MAX: usize = 4;
-/// Ключ настроек с потолком. В `SETTINGS_ALLOWLIST` его НЕТ намеренно: агент,
-/// который вправе поднять себе потолок, потолка не имеет.
-pub const MAX_KEY: &str = "sessionsSpawnMax";
-
-/// Сколько талон ждёт свою сессию. Больше, чем ожидатель запуска (90 с): талон
-/// обязан пережить его, иначе слот освободится раньше, чем станет ясен исход.
-const TICKET_TTL_MS: i64 = 3 * 60 * 1000;
-
 /* ================= учёт: кто поднял, зачем, когда ================= */
 
 /// Запись о запуске. `session_id` пуст, пока CLI не прислал первый хук, — и это
@@ -66,12 +55,13 @@ pub struct Spawn {
 pub enum Target {
     /// Сессия в реестре — гасим её по-настоящему.
     Session(String),
-    /// Хук ещё не пришёл: гасить нечего, снимаем талон (и освобождаем слот).
+    /// Хук ещё не пришёл: гасить нечего, снимаем талон.
     Pending,
 }
 
 /// Реестр запусков. Отдельная структура, а не поле в сессии: сессия исчезает
-/// по session-end, а «кто её поднял» переживает её и нужен для потолка.
+/// по session-end, а «кто её поднял» переживает её — по нему решается, чью
+/// сессию агент вправе гасить, и кого перечислить в «продолжают работу».
 #[derive(Default)]
 pub struct Spawns {
     list: Mutex<Vec<Spawn>>,
@@ -113,7 +103,8 @@ impl Spawns {
         }
     }
 
-    /// Агент так и не встал — талон снимаем, слот освобождаем.
+    /// Агент так и не встал — талон снимаем: иначе он навсегда останется
+    /// «поднимающейся» сессией и в `sessions.get`, и в списке дочерних.
     pub fn give_up(&self, ticket: &str) {
         self.list.lock().unwrap().retain(|s| s.ticket != ticket);
     }
@@ -167,24 +158,6 @@ impl Spawns {
     pub fn snapshot(&self) -> Vec<Spawn> {
         self.list.lock().unwrap().clone()
     }
-
-    /// Сколько сессий этот потребитель держит прямо сейчас. Живость сессии знает
-    /// только реестр демона, поэтому спрашиваем его через `alive`.
-    pub fn live(&self, by: &str, now: i64, alive: impl Fn(&str) -> bool) -> usize {
-        self.list
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|s| s.by == by && !s.closed)
-            .filter(|s| match &s.session_id {
-                Some(sid) => alive(sid),
-                // талон без сессии считаем занятым слотом, но не вечно: агент
-                // мог не встать вовсе, и тогда слот держать не за что.
-                None => now - s.at < TICKET_TTL_MS,
-            })
-            .count()
-    }
-
 }
 
 /* ================= проверки до запуска ================= */
@@ -205,9 +178,6 @@ pub struct Facts {
     pub cli_found: bool,
     pub tmux_ok: bool,
     pub dir_exists: bool,
-    /// Сколько сессий уже поднято этим потребителем и сколько ему позволено.
-    pub live: usize,
-    pub max: usize,
 }
 
 /// Проверенный запуск: дальше идёт уже без «а вдруг».
@@ -296,13 +266,9 @@ pub fn preflight(w: &Wanted, f: &Facts) -> Result<Plan, String> {
         );
     }
 
-    if f.live >= f.max {
-        return Err(format!(
-            "поднято {} из {} — закрой лишние через sessions.close или подними потолок «{MAX_KEY}» в настройках",
-            f.live, f.max
-        ));
-    }
-
+    // Потолка на ЧИСЛО одновременных сессий здесь нет и не будет: сколько нужно
+    // задаче, столько и поднимается. Ограничитель один — расход, и он стоит
+    // ниже, в `spawn_handler` (`budget_gate` перед самым подъёмом).
     Ok(Plan {
         agent,
         name,
@@ -310,16 +276,6 @@ pub fn preflight(w: &Wanted, f: &Facts) -> Result<Plan, String> {
         cwd,
         model: w.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).map(str::to_string),
     })
-}
-
-/// Потолок из настроек. Мусор и ноль — дефолт: «ноль сессий» никто не имеет в
-/// виду, а тихо запретить запуск целиком хуже, чем взять разумное значение.
-pub fn max_from_settings(root: &Value) -> usize {
-    root.get(MAX_KEY)
-        .and_then(Value::as_u64)
-        .filter(|n| *n > 0)
-        .map(|n| n as usize)
-        .unwrap_or(DEFAULT_MAX)
 }
 
 /* ================= капабилити ================= */
@@ -368,7 +324,7 @@ sessions.get и sessions.close, а настоящий id сессии появи
             provenance: Provenance::Trusted,
             description: "Погасить сессию, которую ты сам поднял через sessions.spawn (по талону 'spawn-…' или по id сессии). \
 Чужую сессию и сессию человека закрыть нельзя — придёт отказ. Зови, когда дочерняя работа закончена: \
-живая сессия жжёт деньги и занимает место под потолком одновременных.",
+живая сессия жжёт деньги из общего недельного лимита.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -407,20 +363,18 @@ async fn spawn_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
         .map(str::to_string);
 
     let now = now_ms();
-    let max = max_from_settings(&d.settings.load());
     let facts = Facts {
         cli_found: crate::backend::backend(Agent::from_label(w.agent.trim()))
             .cli_found(),
         tmux_ok: crate::tmux::reachable().await,
         dir_exists: std::path::Path::new(w.cwd.trim()).is_dir(),
-        live: d.spawns.live(&by, now, |sid| d.session(sid).is_some()),
-        max,
     };
     let plan = preflight(&w, &facts)?;
 
     // Дорогая работа: параллельная сессия — это новый расход, и числа перед ней
-    // обязаны быть свежими, а не пятиминутными из кэша. Ступень «стоп» (в том
-    // числе от ночного потолка) отказывает здесь же, рядом с потолком сессий.
+    // обязаны быть свежими, а не пятиминутными из кэша. Сессий может быть
+    // сколько угодно — единственная стена здесь эта, и она про деньги: ступень
+    // «стоп» (в том числе от ночного потолка расхода) отказывает вот тут.
     crate::ipc::budget_gate(&d, plan.agent.label(), false, "запуск сессии sessions.spawn").await?;
 
     // Талон заводим ДО запуска: он и есть тот id, который вернётся вызывающему.
@@ -450,7 +404,7 @@ async fn spawn_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
     .await;
 
     if res.get("ok").and_then(Value::as_bool) != Some(true) {
-        // Терминал не открылся — талон не должен занимать слот до истечения TTL.
+        // Терминал не открылся — талона не за что держать: сессии не будет.
         d.spawns.give_up(&ticket);
         return Ok(res);
     }
@@ -468,7 +422,6 @@ async fn spawn_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
         "agent": plan.agent.label(),
         "cwd": plan.cwd,
         "parent": parent,
-        "limit": { "live": facts.live + 1, "max": max },
         "note": "id выдан сразу; сессия появится через несколько секунд — спрашивай sessions.get(id)"
     }))
 }
@@ -562,7 +515,7 @@ mod tests {
     use super::*;
 
     fn facts() -> Facts {
-        Facts { cli_found: true, tmux_ok: true, dir_exists: true, live: 0, max: 4 }
+        Facts { cli_found: true, tmux_ok: true, dir_exists: true }
     }
 
     fn wanted() -> Wanted {
@@ -594,18 +547,6 @@ mod tests {
         let w = Wanted { name: "и".repeat(MAX_CHAT_NAME + 1), ..wanted() };
         let e = preflight(&w, &facts()).unwrap_err();
         assert!(e.contains(&format!("{MAX_CHAT_NAME}")) && e.contains("61"), "{e}");
-    }
-
-    /// Потолок называет числа: «поднято N из N», а не молчит.
-    #[test]
-    fn the_ceiling_refuses_with_numbers() {
-        let f = Facts { live: 3, max: 3, ..facts() };
-        let e = preflight(&wanted(), &f).unwrap_err();
-        assert!(e.contains("поднято 3 из 3"), "{e}");
-        assert!(e.contains("sessions.close"), "отказ обязан сказать, что делать: {e}");
-        assert!(e.contains(MAX_KEY), "и где поднять потолок: {e}");
-        // на единицу ниже потолка запуск ещё проходит
-        assert!(preflight(&wanted(), &Facts { live: 2, max: 3, ..facts() }).is_ok());
     }
 
     /// Отсутствие CLI названо словами — с именем агента и что делать.
@@ -704,29 +645,6 @@ mod tests {
         assert_eq!(s.find("sid-1").unwrap().parent.as_deref(), Some("Джарвис·чат-7"));
     }
 
-    /// Учёт потолка: мёртвые сессии слот не держат, протухший талон — тоже.
-    #[test]
-    fn the_ceiling_counts_only_living_children() {
-        let s = Spawns::new();
-        let a = s.open("agent", None, &plan(), 0);
-        s.bind(&a, "sid-a");
-        let b = s.open("agent", None, &plan(), 0);
-        s.bind(&b, "sid-b");
-        assert_eq!(s.live("agent", 0, |_| true), 2);
-        assert_eq!(s.live("agent", 0, |sid| sid == "sid-a"), 1, "мёртвая слот не держит");
-        s.mark_closed(&a);
-        assert_eq!(s.live("agent", 0, |_| true), 1);
-        // чужие запуски в наш потолок не входят
-        let c = s.open("plugin:x", None, &plan(), 0);
-        s.bind(&c, "sid-c");
-        assert_eq!(s.live("agent", 0, |_| true), 1);
-        // талон без сессии занимает слот, но не дольше TTL
-        let d = s.open("agent", None, &plan(), 0);
-        assert_eq!(s.live("agent", 0, |_| true), 2);
-        assert_eq!(s.live("agent", TICKET_TTL_MS + 1, |_| true), 1);
-        let _ = d;
-    }
-
     /// Талон выдаётся ДО того, как появилась сессия, и мгновенно: `spawn` не
     /// имеет права ждать ни хука, ни первого ответа. Ровно за блокирующее
     /// ожидание откатывали `sessions.wait`: пока оно не вернулось, ход агента не
@@ -776,12 +694,32 @@ mod tests {
         );
     }
 
+    /// Потолка на ЧИСЛО одновременных сессий нет ни в одной форме — ни ключом
+    /// настроек, ни константой, ни счётом «сколько уже поднято». Решение
+    /// владельца: сессий столько, сколько нужно задаче, а сдерживает их расход.
+    /// Сторож грепом, потому что потолок легко вернуть «на минуточку» — и он
+    /// молча переживёт ревью, спрятавшись за разумно звучащим дефолтом.
     #[test]
-    fn the_ceiling_comes_from_settings_with_a_sane_default() {
-        assert_eq!(max_from_settings(&json!({})), DEFAULT_MAX);
-        assert_eq!(max_from_settings(&json!({ MAX_KEY: 7 })), 7);
-        // ноль и мусор — не «запретить всё молча»
-        assert_eq!(max_from_settings(&json!({ MAX_KEY: 0 })), DEFAULT_MAX);
-        assert_eq!(max_from_settings(&json!({ MAX_KEY: "много" })), DEFAULT_MAX);
+    fn no_ceiling_on_the_number_of_sessions_survives_anywhere() {
+        // сам сторож называет запретные слова, поэтому себя не читает
+        let me = include_str!("spawn.rs");
+        let spawn = &me[..me.find("#[cfg(test)]").expect("тесты на месте")];
+        // у соседа тоже режем тесты: там запретное слово стоит в утверждении,
+        // которое его и запрещает — сторож ловил бы сам себя
+        let am = include_str!("../../agent/mod.rs");
+        let prompt = &am[..am.find("#[cfg(test)]").expect("тесты агента на месте")];
+        // Преамбула агента — тоже источник потолка: фраза про лимит заставила бы
+        // Джарвиса отказывать себе самому, ссылаясь на то, чего нет.
+        for (what, src) in [
+            ("spawn", spawn),
+            ("settings", include_str!("../../settings.rs")),
+            ("prompt", prompt),
+        ] {
+            for word in ["sessionsSpawnMax", "DEFAULT_MAX", "max_from_settings", "fn live("] {
+                assert!(!src.contains(word), "{what}: потолок сессий вернулся — «{word}»");
+            }
+        }
+        // и отказа «поднято N из M» тоже нет: счёт был нужен только под него
+        assert!(!spawn.contains("поднято {} из"), "отказ по числу сессий вернулся");
     }
 }

@@ -92,6 +92,52 @@ pub fn agent_command_mode(agent: &str, session_id: Option<&str>, mode: Mode) -> 
     }
 }
 
+/// Убрать с дороги то, на чём агент встанет колом ещё до первого хука.
+///
+/// Пока такой камень один: Kimi Code в незнакомом каталоге спрашивает «Trust
+/// this folder?» и ждёт клавишу. У панели человек нажал бы сам, а
+/// `sessions.spawn` поднимает сессию без зрителей — вопрос висит, хук старта не
+/// приходит, талон снимается по таймауту, первый промпт уезжает в никуда.
+///
+/// Зовётся ПОСЛЕ того, как рабочий каталог окончательно известен (worktree
+/// песочницы создаётся по дороге) и до открытия терминала. Только для локальных
+/// запусков: у удалённого узла свой дом Kimi, наша отметка туда не относится.
+/// Не смогли — не отказываем в запуске, а говорим вслух: сессия ещё может
+/// подняться, если каталог уже доверен.
+pub fn prepare_workspace(agent: &str, cwd: &str) {
+    let cwd = cwd.trim();
+    if cwd.is_empty() {
+        return;
+    }
+    let res = match agent {
+        "kimi" => crate::backend::kimi::ensure_workspace_trust(std::path::Path::new(cwd)),
+        // У claude ровно тот же камень, проверено вживую: в незнакомом каталоге
+        // он спрашивает «Is this a project you trust?» и ждёт клавишу. Флаг
+        // пропуска разрешений его НЕ снимает. Бьёт по isolate: worktree — всегда
+        // новый каталог, то есть по самому частому случаю подъёма агентом.
+        "claude" => crate::claude_bin::ensure_workspace_trust(std::path::Path::new(cwd)),
+        _ => return, // codex на этой машине не установлен — не гадаем
+    };
+    if let Err(e) = res {
+        crate::log::line(&format!("launch: не пометил {cwd} доверенным для {agent}: {e}"));
+    }
+}
+
+/// Почему сессия могла не появиться за отведённое время. `None` — причин не
+/// знаем; тогда молчим о причине, как раньше.
+///
+/// Единственная известная — незакрытый вопрос о доверии: `prepare_workspace`
+/// не смог записать отметку (нет прав, чужой `KIMI_CODE_HOME`), и kimi встал на
+/// вопросе. Человеку это чинится одним нажатием, но только если он знает.
+pub fn stall_hint(agent: &str, cwd: &str) -> Option<String> {
+    let cwd = cwd.trim();
+    if agent != "kimi" || cwd.is_empty() {
+        return None;
+    }
+    (!crate::backend::kimi::workspace_trusted(std::path::Path::new(cwd)))
+        .then(|| format!("kimi ждёт подтверждения доверия к каталогу {cwd} — открой окно и подтверди"))
+}
+
 /// Каталоги, которые надо явно добавить в PATH запускаемой команды.
 ///
 /// Терминал выполняет нашу строку в НЕинтерактивном шелле, а PATH-блок Jarvis
@@ -530,6 +576,20 @@ mod tests {
         }
     }
 
+    /// Подготовка и подсказка — только про kimi и только при известном каталоге:
+    /// у claude и codex своя механика доверия, чужой отметки мы им не ставим.
+    #[test]
+    fn workspace_prep_and_hint_are_kimi_only() {
+        for agent in ["claude", "codex"] {
+            assert_eq!(stall_hint(agent, "/tmp/nowhere-at-all"), None, "{agent}");
+            prepare_workspace(agent, "/tmp/nowhere-at-all"); // ничего не пишет и не паникует
+        }
+        assert_eq!(stall_hint("kimi", "   "), None, "без каталога причины не выдумываем");
+        // недоверенный каталог у kimi — причина названа вслух, а не «просто не встал»
+        let hint = stall_hint("kimi", "/tmp/jarvis-kimi-never-trusted").unwrap_or_default();
+        assert!(hint.contains("доверия"), "{hint}");
+    }
+
     #[test]
     fn inner_command_with_and_without_proxy() {
         assert_eq!(inner_command("/tmp/p", "", "claude", &[]), "cd '/tmp/p' && claude");
@@ -568,6 +628,19 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    #[test]
+    fn trust_is_prepared_for_both_cli_and_is_actually_called() {
+        // Оба CLI в незнакомом каталоге ждут клавишу — и оба били по isolate,
+        // где worktree всегда новый. Проверено вживую на kimi 0.38 и claude 2.1.233.
+        let me = include_str!("launch.rs");
+        let src = &me[..me.find("#[cfg(test)]").expect("тесты на месте")];
+        assert!(src.contains("\"kimi\" =>"), "ветка kimi ушла из подготовки каталога");
+        assert!(src.contains("\"claude\" =>"), "ветка claude ушла из подготовки каталога");
+        // и её кто-то зовёт: молчаливое зависание возвращается ровно так
+        assert!(include_str!("ipc.rs").contains("launch::prepare_workspace("),
+            "подготовку каталога перестали звать перед запуском");
+    }
+
     #[test]
     fn applescript_escape_quotes_backslash_and_newlines() {
         assert_eq!(imp::applescript_escape(r#"a"b\c"#), r#"a\"b\\c"#);

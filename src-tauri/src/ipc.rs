@@ -2615,6 +2615,10 @@ pub(crate) async fn launch_core(d: &Arc<Daemon>, req: LaunchReq) -> Value {
     } else {
         agent_cmd
     };
+    // Kimi и claude в незнакомом каталоге спрашивают про доверие и ЖДУТ клавишу —
+    // сессия, поднятая агентом, вставала на этом молча. Каталог тут уже
+    // окончательный: worktree песочницы создан выше.
+    crate::launch::prepare_workspace(&agent, &cwd);
     let inner = crate::launch::inner_command(&cwd, &proxy, &agent_cmd, &path_dirs);
     match crate::launch::spawn(&terminal, &custom, &inner).await {
         Ok(()) => {
@@ -2695,7 +2699,16 @@ fn deliver_task(
             }
             return;
         }
-        crate::log::line("launch: агент не встал за 90 с — задачу не отдал");
+        // Причина, если знаем: «не встал» человек починить не может, а «ждёт
+        // подтверждения доверия к каталогу» — может, одним нажатием.
+        let why = bind
+            .as_ref()
+            .and_then(|b| d.spawns.find(&b.ticket))
+            .and_then(|s| crate::launch::stall_hint(&s.agent, &s.cwd));
+        crate::log::line(&match &why {
+            Some(w) => format!("launch: агент не встал за 90 с — {w}"),
+            None => "launch: агент не встал за 90 с — задачу не отдал".to_string(),
+        });
         // Талон, не дождавшийся сессии, снимаем: иначе он навсегда останется в
         // «сессии продолжают работу» после стопа — про сессию, которой нет.
         if let Some(b) = &bind {

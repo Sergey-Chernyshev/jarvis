@@ -1156,7 +1156,10 @@
     }
 
     const ctl = el('div.dctl');
-    if (m.kind === 'stt' && !m.active) {
+    // Движка нет в сборке — «Сделать активной» заведомо отобьётся бэкендом, а
+    // кнопка обещает обратное. Как и у wake-word: сказали про сборку — и не
+    // предлагаем включить.
+    if (m.kind === 'stt' && !m.active && m.usable !== false) {
       let note = null; // причина отказа живёт одной строкой, а не копится списком
       ctl.appendChild(button('Сделать активной', async (b) => {
         b.disabled = true; b.textContent = 'Включаю…';

@@ -12,6 +12,48 @@ function reportHeight() {
   window.toast.resize(Math.min(480, stackEl.scrollHeight + 4));
 }
 
+/* ── тело карточки: хвост не теряется молча ───────────────────────────────
+ * `.body` в toast.html обрезан клампом на шести строках, и длинный ответ
+ * заканчивался ничем — как обрезанный транскрипт, только без предупреждения.
+ * Ширина окна тостов фиксирована (440px), так что верхнюю границу знаков в
+ * строке назвать можно; берём её с запасом, чтобы пометка означала «хвост
+ * точно не влез», а не «наверное». */
+const BODY_LINES = 6;
+const BODY_COLS = 60;
+const MORE_NOTE = 'показан не весь текст — нажми, чтобы дочитать';
+
+function bodyClipped(text) {
+  let lines = 0;
+  for (const src of String(text || '').split('\n')) {
+    lines += Math.max(1, Math.ceil(src.length / BODY_COLS));
+    if (lines > BODY_LINES) return true;
+  }
+  return false;
+}
+
+// Проставить текст тела и пометку про обрезанный хвост (создав узлы, если надо).
+function setBody(card, text) {
+  let body = card.querySelector('.body');
+  if (!body) {
+    body = document.createElement('div');
+    body.className = 'body';
+    card.appendChild(body);
+  }
+  body.textContent = text || '';
+  const more = card.querySelector('.bmore');
+  if (!bodyClipped(text)) {
+    if (more) more.remove();
+    return;
+  }
+  if (more) return;
+  const note = document.createElement('div');
+  note.className = 'bmore';
+  note.textContent = MORE_NOTE;
+  // сразу под телом; при первой сборке карточки тело ещё последнее — в конец
+  if (body.parentNode && body.nextSibling) body.parentNode.insertBefore(note, body.nextSibling);
+  else card.appendChild(note);
+}
+
 function removeCard(id, instant) {
   const c = cards.get(id);
   if (!c) return;
@@ -136,8 +178,7 @@ window.toast.onAdd((d) => {
   if (existing) {
     const t = existing.el.querySelector('.title');
     if (t) t.textContent = d.title || '';
-    const b = existing.el.querySelector('.body');
-    if (b) b.textContent = d.body || '';
+    if (existing.el.querySelector('.body')) setBody(existing.el, d.body);
     armTimer(d.id); // таймер заново — карточка «обновилась»
     reportHeight();
     return;
@@ -218,12 +259,7 @@ window.toast.onAdd((d) => {
       card.appendChild(meta);
     }
 
-    if (d.body) {
-      const body = document.createElement('div');
-      body.className = 'body';
-      body.textContent = d.body;
-      card.appendChild(body);
-    }
+    if (d.body) setBody(card, d.body);
 
     // варианты вопроса (AskUserQuestion). Payload плоский: первый вопрос +
     // count. Инлайн-чипы — только для одиночного вопроса; мульти-вопрос
@@ -344,8 +380,7 @@ window.toast.onExtend((d) => {
 window.toast.onUpdate((d) => {
   const c = cards.get(d.id);
   if (!c) return;
-  const body = c.el.querySelector('.body');
-  if (body) body.textContent = d.body || '';
+  if (c.el.querySelector('.body')) setBody(c.el, d.body);
   armTimer(d.id);
   reportHeight();
 });
@@ -439,12 +474,7 @@ function renderVoiceHud(p) {
   crow.append(dot, title, voiceClose(p));
   card.appendChild(crow);
 
-  if (p.body) {
-    const body = document.createElement('div');
-    body.className = 'body';
-    body.textContent = p.body;
-    card.appendChild(body);
-  }
+  if (p.body) setBody(card, p.body);
 
   if (p.phase === 'staged') {
     const cancel = document.createElement('button');

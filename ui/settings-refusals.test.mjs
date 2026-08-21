@@ -103,6 +103,32 @@ test('отказ «Сделать активной» называет причи
   assert.equal(pane.querySelectorAll('.s2err').length, 1, 'плашки ошибок копятся');
 });
 
+/* Веса скачаны, а движка в сборке нет: кнопка обещала переключение, которого
+ * бэкенд не сделает. Как у wake-word — сказали про сборку и не предлагаем. */
+test('движок без сборки не предлагают «сделать активной»', async () => {
+  const { doc, calls } = await boot({
+    ...STT,
+    sttGet: { engine: 'qwen3-1.7b', engines: ['whisper-turbo', 'qwen3-1.7b'] },
+    modelsGet: {
+      models: [
+        { id: 'whisper-turbo', kind: 'stt', label: 'Whisper', present: true, active: false, usable: false, bytes: 6e8 },
+        { id: 'qwen3-0.6b', kind: 'stt', label: 'Qwen 0.6B', present: true, active: false, usable: true, bytes: 1e9 },
+      ],
+    },
+  });
+  const pane = await openPane(doc, 'stt');
+
+  const offer = [...pane.querySelectorAll('button')].filter((b) => b.textContent === 'Сделать активной');
+  assert.equal(offer.length, 1, 'кнопку предложили и недоступному движку');
+  assert.ok(pane.textContent.includes('недоступно в этой сборке'), 'про сборку не сказано');
+  // отняли ровно у недоступного: уцелевшая кнопка — в строке рабочего движка
+  const rows = [...pane.querySelectorAll('.drow')].filter((r) => r.textContent.includes('Qwen 0.6B'));
+  assert.equal(rows.length, 1, 'строки рабочего движка нет');
+  assert.equal([...rows[0].querySelectorAll('button')].filter((b) => b.textContent === 'Сделать активной').length, 1,
+    'у рабочего движка кнопку тоже сняли');
+  assert.equal(calls.filter(([m]) => m === 'sttSetEngine').length, 0);
+});
+
 test('wake-word без движка в сборке не предлагают включить и не зовут качать веса', async () => {
   const { doc, calls } = await boot({
     wakeGet: { enabled: false, model_present: true, threshold: 0.5, muted: false, ort_built: false },

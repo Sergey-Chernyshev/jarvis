@@ -96,6 +96,26 @@ test('«Продолжить» на сессии вне tmux: причина, к
   assert.equal(cont.disabled, false);
 });
 
+/* Тело карточки обрезано клампом на шести строках — молча. Человек дочитывал
+ * до края и считал, что это весь ответ. */
+test('длинный текст уведомления не теряется молча', async () => {
+  const long = 'Собрал и разложил по полкам: '.repeat(30); // заведомо длиннее шести строк
+  const { doc, handlers } = boot({});
+  handlers.add({ id: 'done-s3', sessionId: 's3', kind: 'done', title: 'jarvis', body: long });
+  await settle();
+
+  // полный текст остаётся в узле — обрезки в JS не заводим
+  assert.equal(doc.querySelector('.body').textContent.length, long.length);
+  assert.equal(doc.querySelectorAll('.bmore').length, 1, 'про обрезанный хвост не сказано ни слова');
+  const more = doc.querySelector('.bmore').textContent;
+  assert.ok(more.includes('не весь текст'), 'пометка не про обрезку: ' + more);
+
+  // короткий ответ влезает целиком — пометка была бы враньём
+  handlers.add({ id: 'done-s4', sessionId: 's4', kind: 'done', title: 'jarvis', body: 'Готово.' });
+  await settle();
+  assert.equal(doc.querySelectorAll('.bmore').length, 1, 'пометку повесили на короткий текст');
+});
+
 /* Мост отвечает отказом промиса (окно тостов пережило перезапуск демона). */
 test('упавший вызов моста тоже виден, а не съеден', async () => {
   const { doc, handlers } = boot({ continueSession: () => Promise.reject(new Error('канал закрыт')) });

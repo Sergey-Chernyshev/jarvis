@@ -129,13 +129,15 @@
     border-radius: var(--r-pill); padding:1px 6px;
     box-shadow: inset 0 0 0 1px var(--line-strong);
   }
-  .agtime{ flex:none; font-size:11px; color: var(--ink-faint); font-variant-numeric: tabular-nums }
+  /* время и счётчик реплик — то, по чему строку в списке и выбирают; блёклый
+     тон (--ink-faint, 2.5:1) читается хуже нормы, а это не декор */
+  .agtime{ flex:none; font-size:11px; color: var(--ink-mute); font-variant-numeric: tabular-nums }
   .agsub{ display:flex; align-items:baseline; gap:8px; min-width:0; margin-top:2px }
   .agprev{ flex:1; min-width:0; font-size:12px; color: var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
   /* Недописанная реплика вытесняет превью: строка отвечает на «где я
      остановился». Краска — та же единственная, что у занятости */
   .agdraft{ flex:1; min-width:0; font-size:12px; color: var(--accent); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-  .agmeta{ flex:none; font-size:11px; color: var(--ink-faint); font-variant-numeric: tabular-nums }
+  .agmeta{ flex:none; font-size:11px; color: var(--ink-mute); font-variant-numeric: tabular-nums }
   /* Чат, который работает сам, — значком в строке: краска та же единственная,
      что у занятости, потому что это про «здесь идёт работа без тебя» */
   .agauto{ flex:none; font-size:11px; line-height:1; color: var(--accent) }
@@ -190,7 +192,8 @@
     font-size:12px; color: var(--ink-mute); cursor:default;
   }
   .aghidden:hover{ background: var(--fill-1); color: var(--ink) }
-  .agempty{ padding:10px; font-size:12.5px; color: var(--ink-faint); line-height:1.5 }
+  /* пустое состояние — единственный текст на экране: его читают, а не скользят мимо */
+  .agempty{ padding:10px; font-size:12.5px; color: var(--ink-mute); line-height:1.5 }
   .agside input.agrename{
     font: 500 13px/1.35 var(--font); color: var(--ink);
     background: var(--surface); border:0;
@@ -221,7 +224,7 @@
   /* Момент сжатия контекста — своя строка ленты: без неё разрыв в памяти агента
      читается как его ошибка. Тише реплики, но не невидимо */
   .msg.squeeze::before{ content:"контекст"; }
-  .msg.squeeze .bubble{ color: var(--ink-faint); font-size:12.5px }
+  .msg.squeeze .bubble{ color: var(--ink-mute); font-size:12.5px }
   .chip{
     font-size:12px; color: var(--ink-mute); padding:5px 10px; border-radius:8px;
     background: var(--surface); border:0; font-family: var(--mono);
@@ -314,7 +317,7 @@
   .stopmark{ font-size:11.5px; color: var(--danger) }
   .stoprow{ display:flex; align-items:center; gap:8px; margin-top:6px }
   .stopname{ flex:1; min-width:0; font-size:13px; color: var(--ink-mute); overflow-wrap:anywhere }
-  .hint{ color: var(--ink-faint); text-align:center; font-size:13px; margin:auto; line-height:1.7; max-width:340px }
+  .hint{ color: var(--ink-mute); text-align:center; font-size:13px; margin:auto; line-height:1.7; max-width:340px }
 
   /* поле ответа — нижняя полоска панели */
   footer{

@@ -5,7 +5,7 @@
 //! Порядок проверок: реестр (notfound) → грант по классу (+ поимённый denylist)
 //! → запрет самоэскалации (класс Settings: security-ключи всем + allowlist для
 //! agent/plugin) → подтверждение side-effect, кроме поимённо авто-одобренных
-//! пользователем капабилити (дедлайн 60с) → исполнение
+//! пользователем капабилити (без дедлайна: ждём человека) → исполнение
 //! (дедлайн 30с) → аудит каждого исхода.
 
 use std::time::Duration;
@@ -20,16 +20,17 @@ use super::grant::{Consumer, SettingsWrite, SECURITY_KEYS, SETTINGS_ALLOWLIST};
 use super::registry::Registry;
 
 /// Дедлайны гейта (R3). Default — боевые; тесты подставляют короткие.
+/// Дедлайн тут ровно один — на ИСПОЛНЕНИЕ. Ожидание человека дедлайна не имеет
+/// и настройкой не задаётся: поле, которое можно выставить, рано или поздно
+/// выставят, а истёкшая карточка — худший из исходов (см. шаг 3).
 #[derive(Clone, Copy, Debug)]
 pub struct GateConfig {
-    pub confirm_timeout: Duration,
     pub handler_timeout: Duration,
 }
 
 impl Default for GateConfig {
     fn default() -> Self {
         GateConfig {
-            confirm_timeout: Duration::from_secs(60),
             handler_timeout: Duration::from_secs(30),
         }
     }
@@ -112,20 +113,17 @@ pub async fn invoke<C>(
         m.insert("_consumer".into(), Value::String(consumer.id.clone()));
     }
 
-    // 3. Подтверждение side-effect — с дедлайном (R3): нет ответа → Rejected.
-    //    Молча пропускаем только то, что пользователь сам внёс в авто-одобрение
-    //    гранта (grants.<consumer>.autoApprove) — поимённо, см. Grant::needs_confirm.
+    // 3. Подтверждение side-effect — БЕЗ дедлайна: ждём человека столько, сколько
+    //    он идёт к экрану. Дедлайн здесь давал худший из исходов — работа не
+    //    сделана, агент получил невнятный отказ, человек не узнал, что спрашивали.
+    //    Кто и когда закроет вопрос — забота confirmer'а (он же и отвечает Expired,
+    //    если ответа не будет никогда). Молча пропускаем только то, что пользователь
+    //    сам внёс в авто-одобрение гранта — поимённо, см. Grant::needs_confirm.
     if consumer.grant.needs_confirm(meta.id, meta.class) {
-        let approved = match tokio::time::timeout(cfg.confirm_timeout, confirmer.confirm(meta, &args)).await {
-            Ok(a) => a,
-            Err(_) => {
-                audit.record(&entry_for("rejected:timeout".into(), t0.elapsed().as_millis()));
-                return Err(GateError::Rejected);
-            }
-        };
-        if !approved {
-            audit.record(&entry_for("rejected".into(), t0.elapsed().as_millis()));
-            return Err(GateError::Rejected);
+        let outcome = confirmer.confirm(meta, &args).await;
+        if !outcome.allows() {
+            audit.record(&entry_for(outcome.as_str().into(), t0.elapsed().as_millis()));
+            return Err(outcome.gate_error());
         }
     }
 

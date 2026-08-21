@@ -1002,6 +1002,12 @@ impl ClaudeCliHost {
             // jarvis-mcp (его спавнит claude) наследует сокет НАШЕГО демона —
             // иначе в dev-сборке агент бил бы в прод-сокет (JARVIS_SOCK→JARVIS_DIR).
             .env("JARVIS_SOCK", crate::util::sock_path())
+            // Карточка подтверждения ждёт человека сколько угодно — значит ждать
+            // должен и вызов инструмента. Мешал не MCP_TOOL_TIMEOUT (там почти
+            // сутки), а таймаут ПРОСТОЯ: claude рубит stdio-вызов без активности
+            // через 30 минут, и «человек отошёл» становилось «инструмент не ответил».
+            .env("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "0")
+            .env("MCP_TOOL_TIMEOUT", "86400000")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -2100,6 +2106,22 @@ mod tests {
     /// крейте ровно один — и claude-хост, и codex-хост (включая ветки отказов)
     /// ходят через него. Тест сторожит именно это: новый прямой `app.emit` мимо
     /// метки не заведётся молча — иначе вернётся тот же баг, только тише.
+    #[test]
+    fn both_hosts_let_the_card_wait_for_the_human() {
+        // Карточка ждёт человека сколько угодно — но вызов инструмента рубит не наш
+        // код, а сам CLI. У claude мешает таймаут ПРОСТОЯ (30 мин), у codex — жёсткие
+        // 60 с из конфига. Без этих строк «человек отошёл» снова станет «инструмент
+        // не ответил», и починка карточек окажется наполовину бесполезной.
+        let host = include_str!("mod.rs");
+        let host = &host[..host.find("#[cfg(test)]").expect("тесты на месте")];
+        assert!(host.contains("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"),
+            "claude снова оборвёт вызов по простою через 30 минут");
+
+        let codex = include_str!("../backend/codex_agent.rs");
+        assert!(codex.contains("tool_timeout_sec"),
+            "codex снова оборвёт вызов через 60 секунд");
+    }
+
     #[test]
     fn agent_event_is_emitted_from_the_single_tagged_place() {
         // Иглу склеиваем: иначе тест нашёл бы сам себя.

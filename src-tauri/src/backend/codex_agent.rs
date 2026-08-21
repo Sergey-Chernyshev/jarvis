@@ -151,6 +151,10 @@ impl CodexCliHost {
             format!("mcp_servers.jarvis.command=\"{}\"", self.mcp_bin),
             "-c".into(),
             format!("mcp_servers.jarvis.env.JARVIS_TOKEN=\"{}\"", self.token),
+            // У codex дефолт жёсткий — 60 с, и переменной окружения нет, только
+            // конфиг: без этого карточка подтверждения не доживала бы до ответа.
+            "-c".into(),
+            "mcp_servers.jarvis.tool_timeout_sec=86400".into(),
             message.to_string(),
         ]);
 

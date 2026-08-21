@@ -484,10 +484,7 @@ mod tests {
     }
 
     fn fast_cfg() -> super::gate::GateConfig {
-        super::gate::GateConfig {
-            confirm_timeout: std::time::Duration::from_millis(80),
-            handler_timeout: std::time::Duration::from_millis(80),
-        }
+        super::gate::GateConfig { handler_timeout: std::time::Duration::from_millis(80) }
     }
 
     // R3: хендлер дольше дедлайна → Failed(timeout), аудит failed:timeout.
@@ -502,29 +499,56 @@ mod tests {
         assert_eq!(audit.last().unwrap().outcome, "failed:timeout");
     }
 
-    // R3: подтверждение дольше дедлайна → Rejected, аудит rejected:timeout.
+    /// Человек может отойти. Долгое раздумье — не отказ: гейт ждёт и исполняет,
+    /// хотя ответ пришёл много позже любого дедлайна исполнения.
     #[tokio::test]
-    async fn confirm_timeout_rejects() {
+    async fn a_slow_human_is_still_answered() {
         struct SlowConfirm;
         impl super::confirm::Confirmer for SlowConfirm {
             fn confirm<'a>(
                 &'a self,
                 _m: &'a CapabilityMeta,
                 _a: &'a serde_json::Value,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = super::confirm::Outcome> + Send + 'a>>
+            {
                 Box::pin(async {
                     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                    true
+                    super::confirm::Outcome::Approved
                 })
             }
         }
         let reg = test_registry();
         let audit = MemAudit::new();
-        let err = super::invoke(&reg, (), &Consumer::agent(), "echo.control", json!({}), &SlowConfirm, &audit, fast_cfg())
+        let out = super::invoke(&reg, (), &Consumer::agent(), "echo.control", json!({}), &SlowConfirm, &audit, fast_cfg())
+            .await
+            .expect("ответ через 400мс при дедлайне исполнения 80мс — всё ещё ответ");
+        assert_eq!(out.value["did"]["_consumer"], "agent");
+        assert_eq!(audit.last().unwrap().outcome, "ok");
+    }
+
+    /// Ответа не было вовсе (окно закрыли, демон умер) — это НЕ «отказал».
+    /// Агент обязан увидеть разницу, иначе задача пропадает тихо.
+    #[tokio::test]
+    async fn no_answer_is_not_a_refusal() {
+        struct NoAnswer;
+        impl super::confirm::Confirmer for NoAnswer {
+            fn confirm<'a>(
+                &'a self,
+                _m: &'a CapabilityMeta,
+                _a: &'a serde_json::Value,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = super::confirm::Outcome> + Send + 'a>>
+            {
+                Box::pin(async { super::confirm::Outcome::Expired })
+            }
+        }
+        let reg = test_registry();
+        let audit = MemAudit::new();
+        let err = super::invoke(&reg, (), &Consumer::agent(), "echo.control", json!({}), &NoAnswer, &audit, GateConfig::default())
             .await
             .unwrap_err();
-        assert_eq!(err, GateError::Rejected);
-        assert_eq!(audit.last().unwrap().outcome, "rejected:timeout");
+        assert_eq!(err, GateError::Expired);
+        assert_ne!(err.to_string(), GateError::Rejected.to_string(), "агенту два исхода — два текста");
+        assert_eq!(audit.last().unwrap().outcome, "expired", "в журнале тоже не «отказал»");
     }
 
     // R7: агент пишет ключ ВНЕ allowlist → отказ (даже не security-ключ).

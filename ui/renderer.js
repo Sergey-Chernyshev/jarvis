@@ -2308,8 +2308,10 @@ function paintLimitBanner() {
   limitBannerEl.hidden = false;
 }
 
+/* limit_get отдаёт баннер И бюджет одним ответом; событие limit-state — только
+ * баннер, поэтому бюджет берём именно отсюда и не даём событию его затереть. */
 window.jarvis.onLimitState((l) => { limitInfo = l; paintLimitBanner(); });
-window.jarvis.getLimit().then((l) => { limitInfo = l; paintLimitBanner(); }).catch(() => {});
+window.jarvis.getLimit().then((l) => { limitInfo = l; paintLimitBanner(); takeBudget(l); }).catch(() => {});
 setInterval(paintLimitBanner, 30000); // тикаем обратный отсчёт
 
 /* ---------- плагины: Не спать (☕) и Крышка (⌒) ---------- */
@@ -2438,6 +2440,79 @@ function refreshFooterUsage() {
     .catch(() => {});
 }
 
+/* ---------- бюджет подписок в футере ----------
+ * Процент отвечает на «сколько осталось», а человеку нужно «до когда хватит»:
+ * 44% при спокойном темпе — это запас, при рывке — завтрашняя стена. Поэтому
+ * словами идёт ЗАПАС ХОДА, а процент стоит рядом мелким.
+ *
+ * Провайдеров два, и складывать их нельзя: две подписки, две шкалы, у каждой
+ * свой день сброса (kimi — вторник, claude — среда). Отсюда две отдельные
+ * строки, а не одна общая цифра. */
+
+const WEEKDAY = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+const BUDGET_DAY_MS = 86400000;
+
+const footerBudgetEl = document.getElementById('footerBudget');
+let budgetInfo = null;
+
+/** Одна шкала словами: `{ name, text, pct, rung, title }`. */
+function budgetLine(name, p, now) {
+  const day = (ms) => WEEKDAY[new Date(ms).getDay()];
+  const pct = typeof p?.weekLeftPct === 'number' ? Math.round(p.weekLeftPct) : null;
+  // Чисел нет — говорим это словами бюджета, а не прячем строку: молчание
+  // добытчика неотличимо от «всё хорошо».
+  if (!p || p.rung === 'unknown' || pct === null) {
+    return { name, text: 'чисел нет', pct: null, rung: 'unknown',
+             title: p?.reason || 'опросчик ещё не ходил за числами' };
+  }
+  const title = [p.reason, p.staleNote, p.normNote].filter(Boolean).join(' · ');
+  const reset = p.weekResetAt > now ? day(p.weekResetAt) : null;
+  const runway = typeof p.runwayDays === 'number' ? p.runwayDays : null;
+  if (runway === null) {
+    // Прогноза нет (мёртвая зона, мало точек) — обещать день нельзя.
+    return { name, text: reset ? `темпа пока нет, сброс ${reset}` : 'темпа пока нет',
+             pct, rung: p.rung, title };
+  }
+  const enough = runway >= (p.daysToReset || 0);
+  const until = day(now + runway * BUDGET_DAY_MS);
+  const text = `хватит до ${until}, до сброса${reset ? ` (${reset})` : ''} ${enough ? 'дотянет' : 'не дотянет'}`;
+  return { name, text, pct, rung: p.rung, title };
+}
+
+function takeBudget(l) {
+  budgetInfo = l;
+  paintFooterBudget();
+}
+
+function paintFooterBudget() {
+  if (!footerBudgetEl) return;
+  const provs = budgetInfo?.providers;
+  // В режиме «расход» футер занят деньгами — двум шкалам там места нет.
+  if (!provs || footerBottom !== 'limit') { footerBudgetEl.hidden = true; return; }
+  const now = Date.now();
+  const lines = ['claude', 'kimi'].filter((n) => provs[n]).map((n) => budgetLine(n, provs[n], now));
+  footerBudgetEl.textContent = '';
+  for (const l of lines) {
+    const span = document.createElement('span');
+    span.className = 'fbud';
+    if (l.rung === 'stop' || l.rung === 'queue') span.classList.add('is-crit');
+    else if (l.rung === 'routine' || l.rung === 'warn') span.classList.add('is-warn');
+    span.title = l.title ? `${l.name}: ${l.title}` : '';
+    span.append(`${l.name} ${l.text}`);
+    if (l.pct !== null) {
+      const small = document.createElement('small');
+      small.textContent = `${l.pct}%`;
+      span.append(' ', small);
+    }
+    footerBudgetEl.append(span);
+  }
+  footerBudgetEl.hidden = lines.length === 0;
+}
+
+function refreshBudget() {
+  window.jarvis.getLimit().then(takeBudget).catch(() => {});
+}
+
 window.jarvis.wakeGet?.().then((w) => { wakeStatus = w; paintFooterWave(); footerLeftEl.textContent = footerText(); }).catch(() => {});
 window.jarvis.onWake?.((p) => {
   if (!p) return;
@@ -2450,15 +2525,20 @@ window.jarvis.onAudioState?.((s) => {
 });
 refreshFooterUsage();
 setInterval(refreshFooterUsage, 60000);
+// Бюджет ходит в сеть по своему расписанию (budget.rs) — панель только читает
+// готовый кэш, поэтому минуты хватает.
+setInterval(refreshBudget, 60000);
 
 window.jarvis.getSettings().then((s) => {
   footerBottom = s?.footerBottom === 'spend' ? 'spend' : 'limit';
   paintFooterLimit();
+  paintFooterBudget();
 }).catch(() => {});
 // «Внизу панели» переключили в настройках — полоска меняется без перезапуска
 window.addEventListener('jarvis:footer-bottom', (e) => {
   footerBottom = e.detail === 'spend' ? 'spend' : 'limit';
   paintFooterLimit();
+  paintFooterBudget();
 });
 
 /* ---------- титульная полоса оконного режима (14h) ---------- */

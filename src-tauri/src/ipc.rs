@@ -1451,9 +1451,86 @@ pub fn usage_summary(app: AppHandle, period: Option<String>) -> Value {
         .stats(period.as_deref().unwrap_or("today"))
 }
 
+/// Панель получает РОВНО то же, что агент в `limits.get`: пока сюда ехало одно
+/// состояние баннера, человек в интерфейсе бюджета не видел вовсе.
 #[tauri::command]
 pub fn limit_get(app: AppHandle) -> Value {
-    serde_json::to_value(Daemon::get(&app).limits.state()).unwrap_or(Value::Null)
+    limits::state_json(&Daemon::get(&app))
+}
+
+/* ================= бюджет перед дорогой работой ================= */
+
+/// Насколько свежими обязаны быть числа перед дорогой работой. Минута — это
+/// «только что»: длинный ход и лишняя сессия стоят дороже одного GET.
+pub const BUDGET_FRESH_MS: i64 = 60_000;
+
+/// Провайдер бюджета за ярлыком агента. У codex подписки в бюджете нет — про
+/// него гейт молчит, а не отказывает наугад по чужим числам.
+pub fn budget_provider(agent: &str) -> Option<&'static str> {
+    match agent.trim().to_lowercase().as_str() {
+        "claude" => Some(crate::budget::CLAUDE),
+        "kimi" => Some(crate::budget::KIMI),
+        _ => None,
+    }
+}
+
+/// Отказ по ступени бюджета — числами и временем сброса, а не «сейчас нельзя».
+///
+/// `bg` — работа фоновая (заход авто-цепочки): для неё отказ начинается уже с
+/// `queue`, потому что фон и есть то, что откладывают первым. На глазах у
+/// человека «фон в очередь» ещё не стена — там отказ только на `stop`.
+///
+/// `unknown` отказом НЕ считается: молчание добытчика неотличимо от «всё
+/// хорошо» только на словах, а вставать по нему нельзя — `stop` и так стоит по
+/// факту расхода, а не по прогнозу.
+pub fn budget_refusal(provider: &str, rep: &Value, bg: bool) -> Option<String> {
+    let p = rep.pointer(&format!("/providers/{provider}"))?;
+    let rung = p.get("rung").and_then(Value::as_str)?;
+    if !(rung == "stop" || (bg && rung == "queue")) {
+        return None;
+    }
+    let num = |k: &str| p.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+    let reset = p.get("weekResetAt").and_then(Value::as_i64).unwrap_or(0);
+    let mut out = format!(
+        "бюджет {provider}: {}. Осталось {:.1}% недели при резерве {:.1}%, сброс через {} — {}",
+        p.get("reason").and_then(Value::as_str).unwrap_or("ступень без причины"),
+        num("weekLeftPct"),
+        num("reservePct"),
+        if reset > 0 { fmt_reset_in(reset) } else { "неизвестно сколько".into() },
+        if bg {
+            "фоновый заход в очередь: дождись сброса или веди эту работу руками"
+        } else {
+            "дождись сброса, возьми другого агента или закрой лишние через sessions.close"
+        }
+    );
+    // Ночью буфер не спасает: он тратится только по явному разрешению человека,
+    // а ночью человека нет. Это надо сказать, иначе отказ выглядит запасом.
+    if rep.pointer("/night/active").and_then(Value::as_bool) == Some(true)
+        && p.get("bufferAvailable").and_then(Value::as_bool) != Some(true)
+    {
+        out.push_str(&format!(
+            ". Ночью буфер {:.0}% недоступен: {}",
+            num("bufferPct"),
+            p.get("bufferReason")
+                .and_then(Value::as_str)
+                .unwrap_or(crate::budget::BUFFER_REASON)
+        ));
+    }
+    Some(out)
+}
+
+/// Обязательный свежий запрос перед дорогой работой — и отказ словами, если
+/// ступень говорит «стоп». Молча упереться в бюджет нельзя: числа и время
+/// сброса обязаны дойти и до агента, и до человека.
+pub async fn budget_gate(d: &Arc<Daemon>, agent: &str, bg: bool, why: &str) -> Result<(), String> {
+    let Some(provider) = budget_provider(agent) else {
+        return Ok(());
+    };
+    crate::budget::ensure_fresh(d, BUDGET_FRESH_MS, why).await;
+    match budget_refusal(provider, &crate::budget::report(d), bg) {
+        Some(text) => Err(text),
+        None => Ok(()),
+    }
 }
 
 /// Машины, на которых можно работать: эта плюс настроенные узлы.
@@ -4902,5 +4979,82 @@ mod turn_ipc_tests {
         assert!(force_reveal(Path::new("/tmp/x/run.scpt")));
         assert!(!force_reveal(Path::new("a.rs")), "обычный файл открываем");
         assert!(!force_reveal(Path::new("Makefile")), "без расширения — не блок");
+    }
+
+    /* --- бюджет перед дорогой работой --- */
+
+    /// Отчёт бюджета той же формы, что отдаёт `budget::report`.
+    fn budget_rep(rung: &str, reason: &str, left: f64, night: bool) -> Value {
+        json!({
+            "providers": {
+                "claude": {
+                    "rung": rung,
+                    "reason": reason,
+                    "weekLeftPct": left,
+                    "reservePct": 14.2,
+                    "weekResetAt": now_ms() + 2 * 3_600_000 + 40 * 60_000,
+                    "bufferPct": 5.0,
+                    "bufferAvailable": false,
+                    "bufferReason": crate::budget::BUFFER_REASON,
+                },
+            },
+            "night": { "active": night },
+        })
+    }
+
+    /// Запуск сессии на ступени «стоп» отказывает ЧИСЛАМИ и временем сброса —
+    /// в тоне соседнего отказа про потолок сессий, а не «сейчас нельзя».
+    #[test]
+    fn a_spawn_on_the_stop_rung_is_refused_with_numbers() {
+        let rep = budget_rep(
+            "stop",
+            "резерв начал расходоваться: осталось 12.5% при резерве 14.2%",
+            12.5,
+            false,
+        );
+        let e = budget_refusal("claude", &rep, false).expect("стоп обязан отказать");
+        assert!(e.contains("12.5") && e.contains("14.2"), "отказ без чисел: {e}");
+        assert!(e.contains("сброс через 2ч 40м"), "отказ без времени сброса: {e}");
+        assert!(e.contains("sessions.close"), "отказ обязан сказать, что делать: {e}");
+        assert!(e.contains("резерв начал расходоваться"), "причину переписали: {e}");
+    }
+
+    /// Фон отказывают раньше: `queue` — это и есть «отложить фоновое». На глазах
+    /// у человека та же ступень запуску не мешает.
+    #[test]
+    fn a_background_pass_is_refused_one_rung_earlier() {
+        let rep = budget_rep("queue", "запаса хода 30 ч против 107 ч до сброса", 40.0, false);
+        let e = budget_refusal("claude", &rep, true).expect("фон на queue не идёт");
+        assert!(e.contains("40.0") && e.contains("сброс через"), "{e}");
+        assert!(e.contains("в очередь"), "фону надо сказать, что он отложен: {e}");
+        assert!(budget_refusal("claude", &rep, false).is_none(), "человеку queue не стена");
+
+        // спокойная ступень не мешает никому
+        let ok = budget_rep("ok", "темп 3.0%/сут при норме 8.8%/сут", 60.0, false);
+        assert!(budget_refusal("claude", &ok, true).is_none());
+        assert!(budget_refusal("claude", &ok, false).is_none());
+    }
+
+    /// Ночной потолок — независимый ограничитель: он говорит «стоп» при живом
+    /// дневном запасе, и отказ обязан назвать и потолок, и недоступный буфер.
+    #[test]
+    fn the_night_cap_stops_earlier_than_the_daily_norm() {
+        let rep = budget_rep("stop", "ночной потолок 15% недели исчерпан (20.0%) — до утра стоп", 70.0, true);
+        let e = budget_refusal("claude", &rep, false).expect("ночью потолок стоит раньше нормы");
+        assert!(e.contains("ночной потолок"), "{e}");
+        assert!(e.contains("70.0"), "70% остатка — а всё равно стоп: {e}");
+        assert!(e.contains(crate::budget::BUFFER_REASON), "буфер ночью недоступен: {e}");
+    }
+
+    /// Молчание добытчика — не стена: `unknown` работу не рвёт, а у codex своей
+    /// подписки в бюджете нет вовсе.
+    #[test]
+    fn silence_of_the_fetcher_is_not_a_wall() {
+        let rep = budget_rep("unknown", "опросчик ещё не ходил за числами", 0.0, false);
+        assert!(budget_refusal("claude", &rep, true).is_none());
+        assert!(budget_refusal("kimi", &rep, true).is_none(), "чужого провайдера в отчёте нет");
+        assert_eq!(budget_provider("claude"), Some("claude"));
+        assert_eq!(budget_provider(" Kimi "), Some("kimi"));
+        assert_eq!(budget_provider("codex"), None, "codex судить не по чему");
     }
 }

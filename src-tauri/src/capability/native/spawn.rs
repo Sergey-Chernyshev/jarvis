@@ -418,6 +418,11 @@ async fn spawn_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
     };
     let plan = preflight(&w, &facts)?;
 
+    // Дорогая работа: параллельная сессия — это новый расход, и числа перед ней
+    // обязаны быть свежими, а не пятиминутными из кэша. Ступень «стоп» (в том
+    // числе от ночного потолка) отказывает здесь же, рядом с потолком сессий.
+    crate::ipc::budget_gate(&d, plan.agent.label(), false, "запуск сессии sessions.spawn").await?;
+
     // Талон заводим ДО запуска: он и есть тот id, который вернётся вызывающему.
     let ticket = d.spawns.open(&by, parent.clone(), &plan, now);
     let bind = Bind {
@@ -751,6 +756,24 @@ mod tests {
         assert_eq!(pending["name"], "Сайдбар·JRV·O5");
         assert_eq!(pending["parent"], "chat-1");
         assert_ne!(ticket, s.open("agent", None, &plan(), 0), "талоны разные");
+    }
+
+    /// Бюджет спрашивается ДО подъёма сессии, а не после: узнать про стену,
+    /// когда терминал уже открыт и деньги потрачены, — то же самое, что не
+    /// узнать вовсе. Числа отказа проверяются там, где он собирается (`ipc`).
+    #[test]
+    fn the_budget_is_asked_before_the_session_goes_up() {
+        let src = include_str!("spawn.rs");
+        let body = src
+            .split("async fn spawn_handler")
+            .nth(1)
+            .and_then(|t| t.split("launch_core").next())
+            .expect("хендлер запуска на месте");
+        assert!(body.contains("budget_gate("), "перед запуском бюджет не спрашивается");
+        assert!(
+            body.find("budget_gate(").unwrap() > body.find("preflight(").unwrap(),
+            "гейт бюджета обязан идти после проверок: агента ещё не знают"
+        );
     }
 
     #[test]

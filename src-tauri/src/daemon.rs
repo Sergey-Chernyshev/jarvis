@@ -2222,6 +2222,13 @@ impl Daemon {
      * working-сессии без событий 15 минут считаем потерянными. */
 
     pub async fn reconcile_sessions(self: &std::sync::Arc<Self>) {
+        // Утренняя сводка ждёт ВРЕМЕНИ, а не события: если ночью что-то
+        // накопилось, а утром человек не написал и ни одна сессия не закончила
+        // ход, по событиям она не выйдет никогда. Тик демона — тот будильник,
+        // которого ей не хватало; проверка дешёвая (пустой журнал отваливается
+        // первой же строкой), поэтому отдельного расписания не заводим.
+        crate::agent::chain::morning_check(&self.app);
+
         // Сверка с живым tmux: удаляем сессии, чья пана умерла (жёстко убитый
         // терминал не шлёт SessionEnd); working без событий 15 минут — потеряна.
         // Сессии заводятся ТОЛЬКО из хуков — здесь ничего не подхватываем.
@@ -3336,5 +3343,22 @@ mod tests {
         let content = serde_json::json!({ "branch": true, "model": true, "effort": true });
         let meta = build_meta(&content, &s, 0);
         assert!(meta.is_empty(), "нет полей → нет сегментов");
+    }
+
+    /// Утренняя сводка висит на ТИКЕ, а не только на событиях. Ночь тем и
+    /// отличается, что событий утром может не случиться вовсе: человек не
+    /// написал, ход никто не закончил — и сводка не вышла бы никогда.
+    #[test]
+    fn the_morning_digest_hangs_on_the_tick_not_only_on_events() {
+        let src = include_str!("daemon.rs");
+        let body = src
+            .split("pub async fn reconcile_sessions")
+            .nth(1)
+            .and_then(|t| t.split("let alive:").next())
+            .expect("такт демона на месте");
+        assert!(
+            body.contains("chain::morning_check(&self.app)"),
+            "сводка снова ждёт события, а не времени"
+        );
     }
 }

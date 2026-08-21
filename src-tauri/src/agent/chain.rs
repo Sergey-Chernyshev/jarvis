@@ -1176,6 +1176,19 @@ async fn run_step(d: &Arc<Daemon>, chat_id: &str, sid: &str, decision: Decision)
                 );
                 return;
             }
+            // Перед заходом спрашиваем бюджет свежими числами: цепочка — это
+            // фон, и её очередь наступает раньше человеческой. Ночной потолок
+            // сидит в той же ступени и скажет «стоп» раньше дневной нормы.
+            // Чей расход — знает сессия: шкалы провайдеров не складываются, а
+            // безымянного судим по claude, самому дорогому.
+            let agent = d
+                .session(sid)
+                .and_then(|s| s.agent.clone())
+                .unwrap_or_else(|| crate::budget::CLAUDE.to_string());
+            if let Err(text) = crate::ipc::budget_gate(d, &agent, true, "заход авто-цепочки").await {
+                refuse(&app, chat_id, "budget", &text);
+                return;
+            }
             let prompt = formulate(&outcome, step).await;
             // Необратимое ночью не делается ВОВСЕ. «Спросить некого» — не то же
             // самое, что «можно»: заход целиком ложится в «ждёт тебя».
@@ -1764,6 +1777,27 @@ mod tests {
             let lit = format!("{h}{colon}00");
             assert!(!src.contains(&lit), "в цепочке зашит час ночи: {lit}");
         }
+    }
+
+    /// Цепочка — фон, и перед каждым заходом она спрашивает бюджет свежими
+    /// числами: на ступени `queue` фоновый заход не уходит вовсе. Отказ идёт
+    /// через ту же `refuse` — значит доходит словами и считается неудачей
+    /// (ночью первой же и рвёт цепочку).
+    #[test]
+    fn a_background_pass_asks_the_budget_before_it_goes() {
+        let src = include_str!("chain.rs");
+        let body = src
+            .split("Decision::Send(step) => {")
+            .nth(1)
+            .and_then(|t| t.split("deliver(").next())
+            .expect("ветка отправки на месте");
+        assert!(body.contains("budget_gate("), "заход уходит, не спросив бюджет");
+        assert!(body.contains("budget_gate(d, &agent, true,"), "заход не назвался фоном: {body}");
+        assert!(
+            body.find("budget_gate(").unwrap() < body.find("formulate(").unwrap(),
+            "бюджет спрашивают после формулировки — служебный ход уже сожжён"
+        );
+        assert!(body.contains("refuse(&app, chat_id, \"budget\""), "отказ бюджета молчит");
     }
 
     #[test]

@@ -1738,6 +1738,8 @@
   }
   /* лимит уже стоит в титульной полосе — внизу он был бы дублем */
   [data-mode='window'] footer .flimit { display: none; }
+  /* в окне места на две шкалы нет: бюджет остаётся в панели */
+  [data-mode='window'] footer .fbudget { display: none; }
 
   /* правая колонка, пока сессия не выбрана */
   .detailempty {
@@ -1787,6 +1789,15 @@
     display: inline-flex; align-items: center; gap: 8px; flex: none;
     font-variant-numeric: tabular-nums; color: var(--ink-mute);
   }
+  /* запас хода: словами, процент рядом и мелким */
+  footer .fbudget {
+    display: inline-flex; align-items: center; gap: 12px; flex: none;
+    margin-left: 12px; color: var(--ink-mute);
+  }
+  footer .fbudget .fbud { display: inline-flex; align-items: baseline; gap: 5px; }
+  footer .fbudget .fbud small { font-size: 10.5px; opacity: .65; font-variant-numeric: tabular-nums; }
+  footer .fbudget .fbud.is-warn { color: var(--warn); }
+  footer .fbudget .fbud.is-crit { color: var(--danger); }
 
   .factions { display: flex; align-items: center; gap: 2px; height: 100%; padding: 6px 0; }
   .fdivider { width: 1px; align-self: stretch; margin: 12px 6px; background: var(--line); }
@@ -2373,6 +2384,9 @@
         <span class="j-meter" id="footerMeter"><i></i></span>
         <span id="footerLimitText"></span>
       </span>
+      <!-- бюджет: запас хода словами по каждой подписке отдельно. Две шкалы —
+           у claude и kimi разные дни сброса, складывать их нельзя -->
+      <span class="fbudget" id="footerBudget" hidden></span>
       <div class="factions">
         <div class="hint primary" id="primaryHint">
           <span id="primaryLabel">Открыть чат</span><span class="keycap" id="primaryKey" data-keyname="enter"></span>

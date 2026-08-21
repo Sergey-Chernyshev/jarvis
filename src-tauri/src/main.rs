@@ -10,6 +10,7 @@ mod agent;
 mod agents; // реестр внешних агентов: qwen/opencode/свои — шимы и жизненный цикл
 #[allow(dead_code)] // Codex-методы наполняются по инкрементам (codex CLI support)
 mod backend;
+mod budget; // бюджет лимитов: живые проценты подписок, резерв, темп, лестница
 mod bundle; // режим «Связка»: несколько агентов в worktree над одним проектом + очередь слияний
 #[allow(dead_code)] // проекции/фасады подключаются по фазам (инкр. 8)
 mod capability;
@@ -688,15 +689,10 @@ fn spawn_timers(d: &Arc<Daemon>) {
         }
     });
 
-    // официальные лимиты подписки — через 5с и далее раз в 5 минут
-    let dd = d.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        loop {
-            dd.usage.fetch_official(&dd).await;
-            tokio::time::sleep(Duration::from_secs(5 * 60)).await;
-        }
-    });
+    // Бюджет лимитов: ОДИН опросчик на всё приложение, частота по надобности
+    // (см. budget.rs). Прежний безусловный опрос раз в 5 минут через мёртвый
+    // скрейпинг `claude -p /usage` заменён им целиком.
+    budget::spawn_poller(d);
 
     // история чатов по проектам — через 1.2с и далее раз в минуту
     let dd = d.clone();

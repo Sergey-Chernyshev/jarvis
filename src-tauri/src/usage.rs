@@ -239,7 +239,6 @@ pub struct Usage {
     /// неотличимо от «всё хорошо», и его пришлось запретить.
     official_err: Mutex<Option<String>>,
     scanning: AtomicBool,
-    official_busy: AtomicBool,
     persist_pending: AtomicBool,
 }
 
@@ -257,6 +256,19 @@ fn codex_sessions_dir() -> PathBuf {
 
 fn kimi_sessions_dir() -> PathBuf {
     crate::backend::kimi::kimi_home().join("sessions")
+}
+
+/// Все *.jsonl под каталогом, на любой глубине.
+fn walk_jsonl(dir: &Path, out: &mut Vec<String>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if p.is_dir() {
+            walk_jsonl(&p, out);
+        } else if p.extension().is_some_and(|x| x == "jsonl") {
+            out.push(p.to_string_lossy().into_owned());
+        }
+    }
 }
 
 /// cwd + session_id из ПЕРВОЙ строки rollout (session_meta). Нужно при
@@ -322,7 +334,6 @@ impl Usage {
             official_source: Mutex::new(String::new()),
             official_err: Mutex::new(None),
             scanning: AtomicBool::new(false),
-            official_busy: AtomicBool::new(false),
             persist_pending: AtomicBool::new(false),
         }
     }
@@ -502,21 +513,17 @@ impl Usage {
         from_offset + consumed
     }
 
+    /// Все транскрипты Claude Code — обходом В ГЛУБИНУ, а не на два уровня.
+    ///
+    /// Хранилище стало вложенным: субагенты пишут в
+    /// `projects/<проект>/<uuid сессии>/subagents/agent-*.jsonl`. Плоский обход
+    /// видел 78 файлов из 1467 — то есть четверть запросов и половину токенов,
+    /// и метрики недосчитывали ровно на сабагентах, которые жгут больше всех.
+    /// Двойного счёта не будет: inline-формат `"isSidechain":true` в родительском
+    /// транскрипте больше не пишется, а дедуп по `message.id` остаётся.
     fn list_transcripts() -> Vec<String> {
         let mut out = Vec::new();
-        let Ok(dirs) = fs::read_dir(projects_dir()) else { return out };
-        for d in dirs.filter_map(|e| e.ok()) {
-            if !d.path().is_dir() {
-                continue;
-            }
-            let Ok(files) = fs::read_dir(d.path()) else { continue };
-            for f in files.filter_map(|e| e.ok()) {
-                let p = f.path();
-                if p.extension().is_some_and(|x| x == "jsonl") {
-                    out.push(p.to_string_lossy().into_owned());
-                }
-            }
-        }
+        walk_jsonl(&projects_dir(), &mut out);
         out
     }
 
@@ -572,19 +579,8 @@ impl Usage {
 
     /// Все rollout-файлы Codex: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl.
     fn list_codex_rollouts() -> Vec<String> {
-        fn walk(dir: &Path, out: &mut Vec<String>) {
-            let Ok(rd) = fs::read_dir(dir) else { return };
-            for e in rd.filter_map(|e| e.ok()) {
-                let p = e.path();
-                if p.is_dir() {
-                    walk(&p, out);
-                } else if p.extension().is_some_and(|x| x == "jsonl") {
-                    out.push(p.to_string_lossy().into_owned());
-                }
-            }
-        }
         let mut out = Vec::new();
-        walk(&codex_sessions_dir(), &mut out);
+        walk_jsonl(&codex_sessions_dir(), &mut out);
         out
     }
 
@@ -940,8 +936,8 @@ impl Usage {
     }
 
     /* ---------- официальные лимиты подписки ---------- */
-    /* Источник правды — headless `claude -p "/usage"`: проценты и времена сброса
-     * сессии/недели. Тариф и аккаунт — из ~/.claude.json (oauthAccount). */
+    /* Источник правды — живой API подписки (`budget.rs`): проценты и времена
+     * сброса окна/недели. Тариф и аккаунт — из ~/.claude.json (oauthAccount). */
 
     pub fn official_info(&self) -> Option<OfficialInfo> {
         let o = self.official.lock().unwrap().clone()?;
@@ -955,78 +951,33 @@ impl Usage {
         })
     }
 
-    /// Свежий /usage как можно скорее (после подтверждённого лимита).
+    /// Свежий опрос как можно скорее (после подтверждённого лимита).
     pub fn refresh_official_soon(self: &Arc<Self>, d: &Arc<Daemon>) {
-        let u = self.clone();
         let d = d.clone();
         tauri::async_runtime::spawn(async move {
-            u.fetch_official(&d).await;
+            crate::budget::ensure_fresh(&d, 0, "подтверждённый лимит").await;
         });
     }
 
-    /// Достать текст `/usage`: сначала локально, затем с узлов по порядку.
-    ///
-    /// Человек, работающий на узле, может быть не авторизован локально вовсе —
-    /// тогда правда о лимитах живёт только там. Ошибки всех источников
-    /// собираются в одну строку: чинить будут по ней.
-    async fn obtain_official(self: &Arc<Self>, d: &Arc<Daemon>) -> Result<(String, String), String> {
-        let mut errs: Vec<String> = Vec::new();
-        if crate::claude_bin::resolve_claude_bin().is_none() {
-            errs.push("локально: claude не найден".into());
-        } else {
-            match crate::claude_bin::run_claude(
-                &["-p", "--no-session-persistence", "/usage"],
-                Duration::from_secs(90),
-            )
-            .await
-            {
-                Some(text) => return Ok((text, "local".into())),
-                None => errs.push("локально: /usage не ответил — не авторизован или нет сети".into()),
-            }
-        }
-        for node in d.remotes.all() {
-            let name = node.cfg.name.clone();
-            match node.client() {
-                Ok(client) => match client.usage_text(false).await {
-                    Ok(text) => return Ok((text, name)),
-                    Err(e) => errs.push(format!("{name}: {e}")),
-                },
-                Err(e) => errs.push(format!("{name}: {e}")),
-            }
-        }
-        Err(if errs.is_empty() { "источников лимитов нет".into() } else { errs.join(" · ") })
+    /// Почему официальных чисел нет — наружу одной строкой.
+    pub fn set_official_err(&self, why: &str) {
+        *self.official_err.lock().unwrap_or_else(|p| p.into_inner()) = Some(why.to_string());
     }
 
-    pub async fn fetch_official(self: &Arc<Self>, d: &Arc<Daemon>) {
-        if self.official_busy.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let got = self.obtain_official(d).await;
-        self.official_busy.store(false, Ordering::SeqCst);
-        let (text, source) = match got {
-            Ok(x) => x,
-            Err(why) => {
-                // Провал добытчика обязан быть виден: раньше он молчал, и
-                // человек смотрел на пустую полоску, гадая, где сломано.
-                let changed = {
-                    let mut e = self.official_err.lock().unwrap_or_else(|p| p.into_inner());
-                    let same = e.as_deref() == Some(why.as_str());
-                    *e = Some(why.clone());
-                    !same
-                };
-                if changed {
-                    crate::log::line(&format!("[usage] лимиты недоступны: {why}"));
-                }
-                return;
-            }
-        };
-        let Some((session, week, week_model)) = parse_official(&text) else {
-            let head = crate::util::ellipsize(&crate::util::one_line(&text), 120);
-            *self.official_err.lock().unwrap_or_else(|p| p.into_inner()) =
-                Some(format!("{source}: формат /usage не разобрался — {head}"));
-            crate::log::line(&format!("[usage] формат /usage ({source}) не разобрался: {head}"));
-            return; // формат уехал — не перетираем
-        };
+    /// Официальные проценты из живого API (см. `budget.rs`).
+    ///
+    /// Прежний источник — скрейпинг `claude -p "/usage"` — мёртв: headless-режим
+    /// больше не печатает проценты вовсе, они остались только в интерактивной
+    /// панели. Разбор текста и его регэкспы отсюда убраны вместе с ним.
+    pub fn set_official(
+        &self,
+        d: &Arc<Daemon>,
+        session: Option<PctReset>,
+        week: Option<PctReset>,
+        week_model: Option<ModelWeek>,
+        source: &str,
+    ) {
+        let source = source.to_string();
         *self.official_err.lock().unwrap_or_else(|p| p.into_inner()) = None;
         {
             let mut src = self.official_source.lock().unwrap_or_else(|p| p.into_inner());
@@ -1176,180 +1127,9 @@ fn read_account() -> Account {
     parse().unwrap_or(Account { plan: None, email: String::new(), name: String::new() })
 }
 
-/// "Jun 11 at 9:30pm (Europe/Moscow)" → мс эпохи (МСК = UTC+3 круглый год).
-/// Разбор официального `/usage`: сессия, неделя и недельное окно модели.
-///
-/// Чистая функция ради тестов на живом выводе: формат внутренний и дрейфует,
-/// и каждый дрейф до сих пор замечал пользователь, а не тест.
-fn parse_official(text: &str) -> Option<(Option<PctReset>, Option<PctReset>, Option<ModelWeek>)> {
-    let grab = |p: &str| -> Option<PctReset> {
-        let re = regex::RegexBuilder::new(p).case_insensitive(true).build().unwrap();
-        let c = re.captures(text)?;
-        Some(PctReset {
-            pct: c[1].parse().unwrap_or(0),
-            reset_at: parse_reset_date(c.get(2).map(|m| m.as_str()).unwrap_or("")),
-        })
-    };
-    // Хвост строки берём целиком, со скобками: в них теперь живёт «(UTC)», и
-    // без него время сброса трактовалось бы в неведомо чьём поясе.
-    let session = grab(r"Current session:\s*(\d+)%\s*used\s*·\s*resets\s+([^\n]+)");
-    let week = grab(r"Current week \(all models\):\s*(\d+)%\s*used\s*·\s*resets\s+([^\n]+)");
-    // Модель в скобках — любая: Fable, Opus, Sonnet only… Жёсткое имя молча
-    // протухает при каждой смене модельного ряда.
-    let model_re = regex::RegexBuilder::new(
-        r"Current week \(([^)]+)\):\s*(\d+)%\s*used(?:\s*·\s*resets\s+([^\n]+))?",
-    )
-    .case_insensitive(true)
-    .build()
-    .unwrap();
-    let week_model = model_re
-        .captures_iter(text)
-        .find(|c| !c[1].eq_ignore_ascii_case("all models"))
-        .map(|c| ModelWeek {
-            model: c[1].trim().to_string(),
-            pct: c[2].parse().unwrap_or(0),
-            reset_at: parse_reset_date(c.get(3).map(|m| m.as_str()).unwrap_or("")),
-        });
-    if session.is_none() && week.is_none() {
-        return None;
-    }
-    Some((session, week, week_model))
-}
-
-/// «Aug 10, 6:59pm (UTC)» → миллисекунды эпохи.
-///
-/// Терпимо к дрейфу: запятая или «at» после числа, минуты необязательны,
-/// месяц полным словом или тремя буквами. Пояс — по хвосту строки: «(UTC)»
-/// значит UTC, иначе местное время машины. Прежний разбор требовал «at»
-/// (формат уже ушёл на запятую — и «до …» исчезло из панели), а пояс был
-/// зашит числом +3 — то есть время врало всем, кто не в Москве.
-fn parse_reset_date(s: &str) -> i64 {
-    let re = regex::RegexBuilder::new(
-        r"([A-Z][a-z]{2})[a-z]*\s+(\d{1,2})(?:,|\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
-    )
-    .case_insensitive(true)
-    .build()
-    .unwrap();
-    let Some(c) = re.captures(s) else { return 0 };
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    let Some(month) = MONTHS.iter().position(|m| m.eq_ignore_ascii_case(&c[1])) else { return 0 };
-    let day: u32 = c[2].parse().unwrap_or(1);
-    let mut hh: u32 = c[3].parse::<u32>().unwrap_or(0);
-    let ampm = c.get(5).map(|m| m.as_str().to_ascii_lowercase());
-    match ampm.as_deref() {
-        Some("pm") if hh < 12 => hh += 12,
-        Some("am") if hh == 12 => hh = 0,
-        _ => {} // без am/pm — 24-часовой формат как есть
-    }
-    let min: u32 = c.get(4).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(0);
-    // Пояс — из хвоста строки. Живьём видели два: «(UTC)» у нынешнего формата
-    // и «(Europe/Moscow)» у прежнего (Claude пишет время в поясе аккаунта;
-    // Москва без переводов с 2014-го, смещение константно). Незнакомое имя —
-    // это почти наверняка пояс самой машины: разбираем как местное время, что
-    // строго честнее прежнего зашитого +3 для всех подряд.
-    let tail_up = s.to_ascii_uppercase();
-    let fixed_offset_ms: Option<i64> = if tail_up.contains("UTC") {
-        Some(0)
-    } else if tail_up.contains("EUROPE/MOSCOW") {
-        Some(3 * 3_600_000)
-    } else {
-        None
-    };
-    let now = now_ms();
-    let year = chrono::DateTime::from_timestamp_millis(now)
-        .map(|d| chrono::Datelike::year(&d))
-        .unwrap_or(2026);
-    let make = |y: i32| -> i64 {
-        let Some(naive) = chrono::NaiveDate::from_ymd_opt(y, month as u32 + 1, day)
-            .and_then(|d| d.and_hms_opt(hh, min, 0))
-        else {
-            return 0;
-        };
-        match fixed_offset_ms {
-            Some(off) => naive.and_utc().timestamp_millis() - off,
-            None => {
-                use chrono::TimeZone;
-                chrono::Local
-                    .from_local_datetime(&naive)
-                    .single()
-                    .map(|dt| dt.timestamp_millis())
-                    .unwrap_or(0)
-            }
-        }
-    };
-    let mut ts = make(year);
-    // Сброс всегда в будущем; «Jan 1» в конце декабря — это уже следующий год.
-    if ts != 0 && ts < now - 12 * 3_600_000 {
-        ts = make(year + 1);
-    }
-    ts
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Живой вывод `claude /usage` от 2026-08-10 — дословно. Каждый дрейф
-    /// формата до этого замечал пользователь, а не тест; теперь наоборот.
-    const REAL_USAGE: &str = "You are currently using your subscription to power your Claude Code usage\n\n\
-Current session: 62% used · resets Aug 10, 6:59pm (UTC)\n\
-Current week (all models): 94% used · resets Aug 10, 10:59pm (UTC)\n\
-Current week (Fable): 54% used · resets Aug 10, 11pm (UTC)\n";
-
-    #[test]
-    fn official_parses_the_real_output() {
-        let (session, week, model) = parse_official(REAL_USAGE).expect("живой формат обязан разбираться");
-        let s = session.expect("сессия");
-        assert_eq!(s.pct, 62);
-        assert!(s.reset_at > 0, "время сброса сессии не разобралось");
-        let w = week.expect("неделя");
-        assert_eq!(w.pct, 94);
-        assert!(w.reset_at > 0, "время сброса недели не разобралось");
-        let m = model.expect("модельная неделя — та самая строка про Fable");
-        assert_eq!(m.model, "Fable");
-        assert_eq!(m.pct, 54);
-        assert!(m.reset_at > 0, "«11pm» без минут обязан разбираться");
-    }
-
-    #[test]
-    fn old_sonnet_format_still_parses() {
-        let text = "Current session: 10% used · resets Aug 10 at 6:59pm\n\
-Current week (all models): 20% used · resets Aug 12 at 7am\n\
-Current week (Sonnet only): 30% used\n";
-        let (_, _, model) = parse_official(text).unwrap();
-        let m = model.unwrap();
-        assert_eq!(m.model, "Sonnet only");
-        assert_eq!(m.pct, 30);
-    }
-
-    #[test]
-    fn reset_date_honors_utc_marker() {
-        use chrono::{Datelike, TimeZone};
-        let ts = parse_reset_date("Aug 10, 6:59pm (UTC)");
-        assert!(ts > 0);
-        let dt = chrono::Utc.timestamp_millis_opt(ts).single().unwrap();
-        assert_eq!((dt.month(), dt.day()), (8, 10));
-        assert_eq!((chrono::Timelike::hour(&dt), chrono::Timelike::minute(&dt)), (18, 59));
-
-        // Без пометки — местное время машины, а не зашитый чей-то пояс.
-        let local = parse_reset_date("Aug 10, 6:59pm");
-        let ldt = chrono::Local.timestamp_millis_opt(local).single().unwrap();
-        assert_eq!((chrono::Timelike::hour(&ldt), chrono::Timelike::minute(&ldt)), (18, 59));
-    }
-
-    #[test]
-    fn reset_date_edge_forms() {
-        assert!(parse_reset_date("Aug 10, 11pm (UTC)") > 0, "без минут");
-        assert!(parse_reset_date("Aug 10 at 6:59pm") > 0, "старый формат с at");
-        assert!(parse_reset_date("August 10, 6:59pm (UTC)") > 0, "полное имя месяца");
-        assert_eq!(parse_reset_date("совсем не дата"), 0);
-        assert_eq!(parse_reset_date(""), 0);
-        // 12am — полночь, не полдень.
-        use chrono::Timelike;
-        let ts = parse_reset_date("Aug 10, 12am (UTC)");
-        let dt = chrono::DateTime::from_timestamp_millis(ts).unwrap();
-        assert_eq!(dt.hour(), 0);
-    }
 
     #[test]
     fn billing_host_extraction() {
@@ -1358,13 +1138,51 @@ Current week (Sonnet only): 30% used\n";
         assert_eq!(url_host("мусор"), None);
     }
 
+    /// Обход транскриптов Claude Code — В ГЛУБИНУ: субагенты живут в
+    /// `<проект>/<uuid сессии>/subagents/agent-*.jsonl`, и плоский обход на два
+    /// уровня видел четверть запросов. Дедуп по `message.id` при этом остаётся:
+    /// один и тот же ход, попавший в два файла, считается один раз.
     #[test]
-    fn reset_date_is_msk() {
-        // 9:30pm МСК = 18:30 UTC того же дня
-        let ts = parse_reset_date("Jun 11 at 9:30pm (Europe/Moscow)");
-        assert!(ts > 0);
-        let d = chrono::DateTime::from_timestamp_millis(ts).unwrap();
-        assert_eq!(d.format("%m-%d %H:%M").to_string(), "06-11 18:30");
+    fn deep_walk_finds_subagents_and_does_not_double_count() {
+        let root = std::env::temp_dir().join("jarvis-usage-deep");
+        let _ = fs::remove_dir_all(&root);
+        let proj = root.join("-Users-me-proj");
+        let subs = proj.join("2bd7188f-7b81-455c-a711-1dc664dc2462/subagents");
+        fs::create_dir_all(&subs).unwrap();
+        let turn = |id: &str, tok: i64| {
+            format!(
+                "{{\"type\":\"assistant\",\"cwd\":\"/Users/me/proj\",\"sessionId\":\"S1\",\
+                  \"timestamp\":\"2026-08-20T10:00:00.000Z\",\"message\":{{\"id\":\"{id}\",\
+                  \"model\":\"claude-sonnet-4-6\",\"usage\":{{\"input_tokens\":{tok},\"output_tokens\":0,\
+                  \"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}}}}}\n"
+            )
+        };
+        fs::write(proj.join("main.jsonl"), turn("msg_main", 100)).unwrap();
+        // сабагент на глубине 3 + повтор родительского хода (страховка дедупа)
+        fs::write(
+            subs.join("agent-ace037da304d4799.jsonl"),
+            turn("msg_sub", 20) + &turn("msg_main", 100),
+        )
+        .unwrap();
+
+        let mut files = Vec::new();
+        walk_jsonl(&root, &mut files);
+        files.sort();
+        assert_eq!(files.len(), 2, "глубокий обход видит и сабагентов: {files:?}");
+        assert!(files.iter().any(|f| f.contains("subagents")));
+
+        let u = fresh_usage();
+        for f in &files {
+            u.parse_file_part(f, 0);
+        }
+        let st = u.state.lock().unwrap();
+        assert_eq!(
+            st.sessions["S1"].tok.total(),
+            120.0,
+            "родитель + сабагент, повтор по message.id не удвоился"
+        );
+        drop(st);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

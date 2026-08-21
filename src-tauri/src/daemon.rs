@@ -1452,6 +1452,16 @@ impl Daemon {
                     effects.push(Effect::ChainDone { sid: sid.clone(), at: now });
                 }
 
+                // Ход прерван человеком (у Kimi Stop при этом НЕ приходит).
+                // Ход закончился — значит статус меняем; но цепочку НЕ будим:
+                // человек оборвал работу руками, и авто-продолжение затеяло бы
+                // ровно то, что он только что остановил.
+                "interrupt" => {
+                    s.status = Status::Idle;
+                    s.detail = "Прервано".into();
+                    effects.push(Effect::RefreshMeta { sid: sid.clone() });
+                }
+
                 "stop-failure" => {
                     effects.push(Effect::StopFailure {
                         sid: sid.clone(),

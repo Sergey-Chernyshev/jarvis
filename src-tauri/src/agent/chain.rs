@@ -34,6 +34,18 @@ pub const MAX_STEPS: u32 = 10;
 /// третья попытка ничего не добавит, кроме сожжённого хода.
 pub const MAX_SAME_FAILS: u32 = 2;
 
+/// То же НОЧЬЮ — с первой. Некому посмотреть и поправить, а вторая попытка
+/// вслепую стоит ровно столько же, сколько первая.
+pub const MAX_SAME_FAILS_NIGHT: u32 = 1;
+
+/// Сколько заходов подряд БЕЗ ПРОДВИЖЕНИЯ рвут цепочку днём. Один ход без следа
+/// бывает законным (агент читал и разбирался), два — уже подозрительно, три —
+/// карусель, и четвёртый её заход ничем не будет отличаться от третьего.
+pub const MAX_STALE: u32 = 3;
+
+/// То же ночью: круг стоит столько же, а заметить его некому.
+pub const MAX_STALE_NIGHT: u32 = 2;
+
 /// Режим чата: кто пишет следующий заход.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -74,6 +86,9 @@ struct Chain {
     /// Причина последней неудачи и сколько раз подряд она повторилась.
     fail_code: String,
     fail_count: u32,
+    /// Отпечаток прошлого хода и сколько заходов подряд он не менялся.
+    mark: String,
+    stale: u32,
     /// Предложенный текст (режим «спросить меня»).
     proposal: Option<String>,
     note: String,
@@ -92,6 +107,9 @@ pub struct ChainState {
     pub phase: Phase,
     pub note: String,
     pub proposal: Option<String>,
+    /// Отложенное до утра по этому чату. Состояние, а не строка в логе: «ждёт
+    /// тебя» кто-то обязан показать, и шапка — первое место, куда человек смотрит.
+    pub waiting: Vec<Waiting>,
 }
 
 impl ChainState {
@@ -107,7 +125,15 @@ impl ChainState {
             phase: Phase::Stopped,
             note: String::new(),
             proposal: None,
+            waiting: Vec::new(),
         }
+    }
+
+    /// Приклеить отложенное. Отдельным шагом, на границе с приложением: реестр
+    /// цепочек про ночной журнал не знает и знать не должен.
+    fn with_waiting(mut self, waiting: Vec<Waiting>) -> Self {
+        self.waiting = waiting;
+        self
     }
 }
 
@@ -129,8 +155,19 @@ pub enum Decision {
 pub enum FailAction {
     /// Сказать словами, цепочка жива.
     Note,
-    /// Оборвать цепочку: то же самое второй раз подряд.
+    /// Оборвать цепочку: то же самое второй раз подряд (ночью — первый).
     Stop,
+}
+
+/// Сдвинулась ли работа с прошлого захода.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Progress {
+    /// Мир изменился — цепочка идёт дальше.
+    Moved,
+    /// Тот же ход повторился, но запас ещё есть (сколько раз подряд).
+    Stale(u32),
+    /// Карусель: столько заходов подряд без единого следа — стоп.
+    Stuck(u32),
 }
 
 /// Реестр цепочек. Отдельный тип (а не поле Daemon) — чтобы тесты гоняли его
@@ -156,17 +193,21 @@ impl Chains {
             last_done: None,
             fail_code: String::new(),
             fail_count: 0,
+            mark: String::new(),
+            stale: 0,
             proposal: None,
             note: String::new(),
         });
         // Сессия сменилась — это новая цепочка: и счётчик заходов, и серия
-        // неудач, и ключ идемпотентности принадлежали прошлой.
+        // неудач, и ключ идемпотентности, и след продвижения принадлежали прошлой.
         if c.session_id != session_id {
             c.session_id = session_id.to_string();
             c.step = 0;
             c.last_done = None;
             c.fail_code.clear();
             c.fail_count = 0;
+            c.mark.clear();
+            c.stale = 0;
             c.proposal = None;
         }
         c.mode = mode;
@@ -299,8 +340,8 @@ impl Chains {
     }
 
     /// Неудача по цепочке. Две подряд по ОДНОЙ причине — стоп: запись
-    /// удаляется, дальше нужна рука человека.
-    pub fn on_fail(&self, chat_id: &str, code: &str) -> FailAction {
+    /// удаляется, дальше нужна рука человека. Ночью хватает первой.
+    pub fn on_fail(&self, chat_id: &str, code: &str, night: bool) -> FailAction {
         let mut m = self.map.lock().unwrap();
         let Some(c) = m.get_mut(chat_id) else {
             return FailAction::Note;
@@ -311,13 +352,42 @@ impl Chains {
             c.fail_code = code.to_string();
             c.fail_count = 1;
         }
-        if c.fail_count >= MAX_SAME_FAILS {
+        let limit = if night { MAX_SAME_FAILS_NIGHT } else { MAX_SAME_FAILS };
+        if c.fail_count >= limit {
             m.remove(chat_id);
             return FailAction::Stop;
         }
         c.phase = Phase::Watching;
         c.note = "заход не удался".into();
         FailAction::Note
+    }
+
+    /// Сдвинулось ли что-нибудь с прошлого захода. `mark` — отпечаток хода
+    /// (`progress_mark`); совпал с прошлым — заход прошёл впустую.
+    ///
+    /// Потолок глубины ловит долгую работу, этот счётчик — БЕСПЛОДНУЮ: десять
+    /// одинаковых заходов упрутся в глубину только через час, а стоят как час.
+    pub fn note_progress(&self, chat_id: &str, mark: &str, night: bool) -> Progress {
+        let mut m = self.map.lock().unwrap();
+        let Some(c) = m.get_mut(chat_id) else {
+            return Progress::Moved;
+        };
+        // Первый заход сравнивать не с чем — это ещё не топтание на месте.
+        if c.mark.is_empty() || c.mark != mark {
+            c.mark = mark.to_string();
+            c.stale = 0;
+            return Progress::Moved;
+        }
+        c.stale += 1;
+        let limit = if night { MAX_STALE_NIGHT } else { MAX_STALE };
+        if c.stale >= limit {
+            let n = c.stale;
+            m.remove(chat_id);
+            return Progress::Stuck(n);
+        }
+        c.phase = Phase::Watching;
+        c.note = format!("заход {} ничего не изменил", c.step);
+        Progress::Stale(c.stale)
     }
 }
 
@@ -333,6 +403,7 @@ fn state_of(chat_id: &str, c: Option<&Chain>) -> ChainState {
             phase: c.phase,
             note: c.note.clone(),
             proposal: c.proposal.clone(),
+            waiting: Vec::new(),
         },
         None => ChainState::idle(chat_id, Mode::Ask),
     }
@@ -342,6 +413,416 @@ fn state_of(chat_id: &str, c: Option<&Chain>) -> ChainState {
 pub fn chains() -> &'static Chains {
     static C: std::sync::OnceLock<Chains> = std::sync::OnceLock::new();
     C.get_or_init(Chains::new)
+}
+
+// ── Ночь ──────────────────────────────────────────────────────────────────
+//
+// Ночью Джарвис РАБОТАЕТ, а не копит до утра: цепочка идёт сама. Меняются три
+// вещи. Ограничители строже — поправить некому. Необратимое не делается вовсе —
+// оно откладывается в «ждёт тебя», а не проскакивает по принципу «спросить
+// некого, значит можно». И тихо: карточки в чат ложатся, но будить звуком
+// некого, поэтому уведомления копятся и выходят утром одной сводкой.
+
+/// Сколько ночных уведомлений держим. Больше двух сотен за ночь — это уже не
+/// сводка, а лента; храним хвост и ЧЕСТНО говорим, сколько отброшено: тишина не
+/// имеет права съедать сигнал молча.
+const MAX_NOTICES: usize = 200;
+
+/// Отложенное до утра: необратимое, которое ночью не делается вовсе.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Waiting {
+    pub chat_id: String,
+    pub session_id: String,
+    pub at: i64,
+    /// Что именно необратимо — словами («пуш в main», «слияние веток»).
+    pub kind: String,
+    /// Заход целиком: утром человек отправляет его кнопкой, ничего не переписывая.
+    pub prompt: String,
+}
+
+/// Уведомление, которое ночью не показали.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Notice {
+    pub at: i64,
+    pub chat_id: String,
+    pub kind: String,
+    pub text: String,
+}
+
+/// Ночь целиком: что не показали, что ждёт человека, сколько потеряли по потолку.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NightState {
+    pub notices: Vec<Notice>,
+    pub waiting: Vec<Waiting>,
+    pub dropped: u32,
+}
+
+/// Ночной журнал. Отдельный тип (как `Chains`) — чтобы тесты гоняли его без
+/// живого приложения и не дрались за один процессный экземпляр.
+#[derive(Default)]
+pub struct NightLog {
+    inner: Mutex<NightState>,
+}
+
+impl NightLog {
+    pub fn new() -> Self {
+        NightLog::default()
+    }
+
+    /// Не показать сейчас — показать утром. Ровно та строка, которую человек
+    /// прочитал бы на карточке: пересказ по памяти утром уже не восстановить.
+    pub fn hush(&self, chat_id: &str, kind: &str, text: &str) {
+        let mut st = self.inner.lock().unwrap();
+        st.notices.push(Notice {
+            at: now_ms(),
+            chat_id: chat_id.to_string(),
+            kind: kind.to_string(),
+            text: text.to_string(),
+        });
+        if st.notices.len() > MAX_NOTICES {
+            st.notices.remove(0);
+            st.dropped += 1;
+        }
+    }
+
+    /// Отложить необратимое. Повтор того же захода по тому же чату не плодит
+    /// вторую строчку: человеку решать один раз.
+    pub fn defer(&self, w: Waiting) {
+        let mut st = self.inner.lock().unwrap();
+        if st
+            .waiting
+            .iter()
+            .any(|x| x.chat_id == w.chat_id && x.prompt == w.prompt)
+        {
+            return;
+        }
+        st.waiting.push(w);
+    }
+
+    /// Что ждёт решения по этому чату.
+    pub fn for_chat(&self, chat_id: &str) -> Vec<Waiting> {
+        let st = self.inner.lock().unwrap();
+        st.waiting
+            .iter()
+            .filter(|w| w.chat_id == chat_id)
+            .cloned()
+            .collect()
+    }
+
+    /// Человек разобрался (отправил заход или оборвал цепочку) — снять «ждёт тебя».
+    pub fn resolve(&self, chat_id: &str) -> usize {
+        let mut st = self.inner.lock().unwrap();
+        let before = st.waiting.len();
+        st.waiting.retain(|w| w.chat_id != chat_id);
+        before - st.waiting.len()
+    }
+
+    /// Копилось ли вообще что-нибудь. Самая дешёвая проверка журнала — её и
+    /// зовут на горячем пути, до всяких вопросов «а ночь ли сейчас».
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().unwrap().notices.is_empty()
+    }
+
+    /// Забрать накопленное для утренней сводки.
+    ///
+    /// Уведомления ЗАБИРАЕМ (сводка одна, второй такой же быть не должно), а
+    /// «ждёт тебя» ОСТАВЛЯЕМ: оно снимается решением человека, а не рассказом о
+    /// нём. Пустой журнал даёт None — утром без ночи сводке взяться неоткуда.
+    pub fn drain(&self) -> Option<NightState> {
+        let mut st = self.inner.lock().unwrap();
+        if st.notices.is_empty() {
+            return None;
+        }
+        Some(NightState {
+            notices: std::mem::take(&mut st.notices),
+            waiting: st.waiting.clone(),
+            dropped: std::mem::take(&mut st.dropped),
+        })
+    }
+}
+
+/// Процессный ночной журнал — один на приложение.
+pub fn night_log() -> &'static NightLog {
+    static N: std::sync::OnceLock<NightLog> = std::sync::OnceLock::new();
+    N.get_or_init(NightLog::new)
+}
+
+/// Ночь ли сейчас.
+///
+/// Предикат — ЗА БЮДЖЕТОМ: границы ночи там же, где ночной потолок расхода, и
+/// второй копии этого решения быть не должно (тем более часов в коде). ЖДЁМ:
+/// `crate::budget::is_night(&Arc<Daemon>) -> bool`. Здесь — только переходник:
+/// цепочка везде держит в руках `AppHandle`, а не демона.
+///
+/// Без демона (тесты, ранний старт) ночи не бывает. Ошибиться в сторону дневных
+/// правил безопаснее: ночные запреты остановили бы работу, которую человек и так
+/// видит своими глазами.
+pub fn is_night(app: &AppHandle) -> bool {
+    let Some(d) = tauri::Manager::try_state::<Arc<Daemon>>(app) else {
+        return false; // без демона правил ночи не спросить — считаем днём
+    };
+    crate::budget::is_night(&d)
+}
+
+/// Сколько стоила ночь — числа тоже за бюджетом: у цепочки своих нет.
+/// ЖДЁМ оттуда же `report(&Arc<Daemon>)` с `providers.*.nightSpentPct` и
+/// `night.capPct` — из них и складывается строка для сводки.
+fn night_spent(app: &AppHandle) -> Option<String> {
+    let d = tauri::Manager::try_state::<Arc<Daemon>>(app)?;
+    let r = crate::budget::report(&d);
+    let cap = r.get("night").and_then(|n| n.get("capPct")).and_then(serde_json::Value::as_f64);
+    // По каждому провайдеру, у кого есть число: «claude 12.4% из 15%».
+    let mut parts = Vec::new();
+    if let Some(ps) = r.get("providers").and_then(serde_json::Value::as_object) {
+        for (name, v) in ps {
+            let Some(spent) = v.get("nightSpentPct").and_then(serde_json::Value::as_f64) else {
+                continue;
+            };
+            parts.push(match cap {
+                Some(c) => format!("{name} {spent:.1}% из {c:.0}%"),
+                None => format!("{name} {spent:.1}%"),
+            });
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// Слово целиком, а не подстрока: «maintainer» не должен читаться как «main».
+fn word(s: &str, w: &str) -> bool {
+    s.match_indices(w).any(|(i, _)| {
+        let edge = |c: Option<char>| !matches!(c, Some(c) if c.is_alphanumeric() || c == '_');
+        edge(s[..i].chars().next_back()) && edge(s[i + w.len()..].chars().next())
+    })
+}
+
+/// Необратимое, которое ночью не делается вовсе, — словами человека.
+///
+/// Список ЗАКРЫТЫЙ: то, что назвал владелец (пуш в main, слияние веток,
+/// удаление, публикация наружу, установка сборки человеку), и то, что проект уже
+/// пометил необратимым сам, — забвение транскрипта. Шире не берём: лишний запрет
+/// ночью стоит ровно столько же, сколько пропущенная работа, а «удали лишний
+/// импорт» откатывается одной командой и необратимым не является.
+pub fn irreversible(text: &str) -> Option<&'static str> {
+    let s = one_line(text).to_lowercase();
+    let any = |pats: &[&str]| pats.iter().any(|p| s.contains(p));
+    let main = word(&s, "main") || word(&s, "master") || s.contains(" в мейн");
+    if any(&["push --force", "push -f", "force-push", "форс-пуш"])
+        || (any(&["git push", "запушь", "запушить", "пуш "]) && main)
+    {
+        return Some("пуш в main");
+    }
+    if any(&["git merge", "gh pr merge", "смерджи", "смержи", "вмерджи", "влей ветку", "слияние вет", "слей ветк"])
+    {
+        return Some("слияние веток");
+    }
+    if any(&[
+        "rm -rf", "rm -r ", "git branch -d", "push --delete", "drop table", "drop database",
+        "удали файл", "удалить файл", "удали ветк", "удалить ветк", "удали данные",
+        "удали транскрипт", "забудь насовсем", "снеси ",
+    ]) {
+        return Some("удаление");
+    }
+    if any(&[
+        "npm publish", "cargo publish", "gh release", "опубликуй", "публикация наружу",
+        "выложи наружу", "выложи в прод", "задеплой", "деплой", "выкати релиз", "релиз наружу",
+    ]) {
+        return Some("публикация наружу");
+    }
+    if any(&["установи сборку", "поставь сборку", "накати сборку", "обнови приложение"]) {
+        return Some("установка сборки");
+    }
+    None
+}
+
+/// Отпечаток продвижения: то, чем этот ход отличается от прошлого.
+///
+/// Продвижение — это изменение МИРА, а мир хода проект уже читает фактами
+/// (`turns.rs`): что тронуто и что показала проверка. Берём ровно эти две вещи.
+///
+/// Почему не одни файлы: агент правит один и тот же файл кругами, список путей
+/// при этом не меняется — а красное, ставшее зелёным, это продвижение, и его
+/// видно только по вердикту. Почему не одни тесты: их гоняют не в каждом ходе.
+/// Почему НЕ текст итога и ответа: модель перефразирует одно и то же бесконечно,
+/// и «текст стал другим» — самый ненадёжный признак из возможных; на нём
+/// проверка не срабатывала бы никогда. По той же причине от вердикта берём
+/// СЧЁТЧИКИ, а не строку целиком (тот же принцип, что у `tests_verdict`):
+/// формулировку модель меняет, цифры — нет. Пустой отпечаток (ни файлов, ни
+/// проверки) — это тоже ответ: ход не оставил следа.
+pub fn progress_mark(o: &Outcome) -> String {
+    let mut files: Vec<String> = o
+        .files
+        .iter()
+        .map(|f| format!("{}:{}", f.kind, f.path))
+        .collect();
+    files.sort();
+    files.dedup();
+    let tests = match &o.tests {
+        Some(t) => {
+            let s = t.line.to_lowercase();
+            let failed = count_before(&s, " failed").or_else(|| count_before(&s, " failures"));
+            let passed = count_before(&s, " passed").or_else(|| count_before(&s, " ok"));
+            format!("{}|{failed:?}|{passed:?}", t.ok)
+        }
+        None => "-".into(),
+    };
+    format!("{}\u{1}{tests}", files.join(","))
+}
+
+/// Утренняя сводка. Четыре вопроса и ни одним меньше: без ответа на них
+/// автономия превращается в «проснулся, а тут что-то произошло».
+pub fn morning_digest(st: &NightState, spent: Option<&str>) -> String {
+    let pick = |kinds: &[&str]| -> Vec<&Notice> {
+        st.notices
+            .iter()
+            .filter(|n| kinds.contains(&n.kind.as_str()))
+            .collect()
+    };
+    let list = |head: &str, empty: &str, items: Vec<String>| {
+        if items.is_empty() {
+            format!("{head}: {empty}\n")
+        } else {
+            format!("{head}:\n{}\n", items.join("\n"))
+        }
+    };
+
+    let done = pick(&["sent"]);
+    let stuck = pick(&["failed", "stopped"]);
+    // Всё, что не легло в разделы, идёт хвостом. Хвост нужен именно затем, чтобы
+    // тишина не съедала сигнал: новый вид карточки не должен пропасть молча.
+    let known = ["sent", "failed", "stopped"];
+    let rest = st
+        .notices
+        .iter()
+        .filter(|n| !known.contains(&n.kind.as_str()))
+        .collect::<Vec<_>>();
+
+    let mut p = String::from("Ночная сводка Джарвиса — работа шла, показывать было некому.\n\n");
+    p.push_str(&list(
+        &format!("ЧТО СДЕЛАНО (заходов за ночь: {})", done.len()),
+        "заходов не было",
+        done.iter().map(|n| format!("• {} — {}", n.chat_id, n.text)).collect(),
+    ));
+    p.push_str(&format!(
+        "СКОЛЬКО ПОТРАЧЕНО: {}\n",
+        spent.unwrap_or("бюджет расход за ночь не назвал")
+    ));
+    p.push_str(&list(
+        "ЧТО ВСТАЛО И ПОЧЕМУ",
+        "ничего не вставало",
+        stuck.iter().map(|n| format!("• {} — {}", n.chat_id, n.text)).collect(),
+    ));
+    p.push_str(&list(
+        "ЧТО ЖДЁТ ТЕБЯ",
+        "решений от тебя не ждёт ничего",
+        st.waiting
+            .iter()
+            .map(|w| {
+                format!(
+                    "• {} — отложено до утра ({}, сессия {}): {}",
+                    w.kind,
+                    w.chat_id,
+                    ellipsize(&w.session_id, 8),
+                    ellipsize(&one_line(&w.prompt), 160)
+                )
+            })
+            .collect(),
+    ));
+    if !rest.is_empty() {
+        p.push_str(&list(
+            "ЕЩЁ ЗА НОЧЬ",
+            "",
+            rest.iter().map(|n| format!("• {} — {}", n.chat_id, n.text)).collect(),
+        ));
+    }
+    p.push_str(&format!(
+        "\nНочью не показал уведомлений: {}",
+        st.notices.len()
+    ));
+    if st.dropped > 0 {
+        p.push_str(&format!("; ещё {} вытеснено потолком журнала", st.dropped));
+    }
+    p
+}
+
+/// Строка ночного уведомления — ровно то, что человек прочитал бы на карточке.
+fn notice_text(kind: &str, extra: &Value) -> String {
+    let get = |k: &str| {
+        extra
+            .get(k)
+            .and_then(Value::as_str)
+            .map(one_line)
+            .unwrap_or_default()
+    };
+    let sid = get("sessionId");
+    let with_sid = |t: String| {
+        if sid.is_empty() {
+            t
+        } else {
+            format!("{t} (сессия {})", ellipsize(&sid, 8))
+        }
+    };
+    match kind {
+        "sent" => with_sid(format!(
+            "заход {}: {}",
+            extra.get("step").and_then(Value::as_u64).unwrap_or(0),
+            ellipsize(&get("prompt"), 140)
+        )),
+        "proposed" => with_sid(format!("предложен заход: {}", ellipsize(&get("prompt"), 140))),
+        _ => with_sid(get("text")),
+    }
+}
+
+/// Утро: ночь кончилась — выкатить ОДНУ сводку за всё, что копилось.
+///
+/// Отдельного будильника у цепочки нет и заводить его тут неправильно: сводку
+/// тянут живые точки самой цепочки (пришло «закончил», человек написал агенту) —
+/// к утру хоть одна случается первой же командой человека. Журнал осушается ДО
+/// эмита, поэтому второй заход сюда сводку не повторит.
+pub fn morning_check(app: &AppHandle) {
+    // Дешёвое первым: пустой журнал — обычное дело, и спрашивать бюджет про
+    // ночь (а это чтение настроек) на каждое событие агента незачем.
+    if night_log().is_empty() || is_night(app) {
+        return;
+    }
+    let Some(st) = night_log().drain() else { return };
+    let text = morning_digest(&st, night_spent(app).as_deref());
+    // Якорь — чат последнего ночного уведомления: сводка одна на всю ночь, а
+    // лечь она обязана туда, где ночью шла работа. Остальные чаты названы внутри.
+    let Some(chat_id) = st
+        .notices
+        .last()
+        .map(|n| n.chat_id.clone())
+        .or_else(|| st.waiting.last().map(|w| w.chat_id.clone()))
+    else {
+        return;
+    };
+    crate::log::line(&format!(
+        "[chain] утренняя сводка: {} уведомлений, ждёт решения {}",
+        st.notices.len(),
+        st.waiting.len()
+    ));
+    emit(
+        app,
+        &chat_id,
+        "morning",
+        json!({ "digest": text, "night": st }),
+    );
+    // Единственное место, где цепочка будит человека, — и оно наступает утром.
+    if let Some(d) = tauri::Manager::try_state::<Arc<Daemon>>(app) {
+        d.notify(
+            "Ночная сводка",
+            &format!(
+                "за ночь {} событий, ждёт решения {}",
+                st.notices.len(),
+                st.waiting.len()
+            ),
+            None,
+            "done",
+        );
+    }
 }
 
 // ── Итог хода ─────────────────────────────────────────────────────────────
@@ -499,19 +980,30 @@ pub fn mode_of(app: &AppHandle, chat_id: &str) -> Mode {
     super::chat_book(app).mode_of(chat_id)
 }
 
-/// Срез цепочки для шапки (режим — из настроек, остальное — из реестра).
+/// Срез цепочки для шапки (режим — из настроек, остальное — из реестра, а
+/// «ждёт тебя» — из ночного журнала: отложенное переживает саму цепочку).
 pub fn state(app: &AppHandle, chat_id: &str) -> ChainState {
-    chains().state(chat_id, mode_of(app, chat_id))
+    chains()
+        .state(chat_id, mode_of(app, chat_id))
+        .with_waiting(night_log().for_chat(chat_id))
 }
 
 /// Событие цепочки наружу. Канал свой (`agent:chain`), но правило то же, что у
 /// `agent:event`: метка чата обязательна — без неё карточка легла бы в чужой
 /// разговор, стоит человеку уйти в соседний проект.
 fn emit(app: &AppHandle, chat_id: &str, kind: &str, extra: Value) {
+    // Тишина. Ночью карточка в чат ложится (работа идёт и должна быть видна), но
+    // будить звуком и всплывашкой некого: уведомление копится до утра. Копим
+    // только то, что человеку адресовано, — служебные срезы шапки в сводке лишние.
+    let night = is_night(app);
+    if night && ["sent", "proposed", "failed", "stopped", "deferred"].contains(&kind) {
+        night_log().hush(chat_id, kind, &notice_text(kind, &extra));
+    }
     let mut payload = json!({
         "chatId": chat_id,
         "kind": kind,
         "at": now_ms(),
+        "quiet": night,
         "state": state(app, chat_id),
     });
     if let (Some(obj), Some(add)) = (payload.as_object_mut(), extra.as_object()) {
@@ -532,20 +1024,26 @@ pub fn push_state(app: &AppHandle, chat_id: &str) {
 
 /// Текст отказа. Причину НЕ переписываем своими словами: что сказал гейт, tmux
 /// или хост — то человек и должен прочитать; от нас только вывод про цепочку.
-pub fn fail_text(text: &str, stopped: bool) -> String {
+pub fn fail_text(text: &str, stopped: bool, night: bool) -> String {
     let text = one_line(text);
-    if stopped {
-        format!("{text}. Это вторая неудача подряд по одной причине — цепочку останавливаю")
-    } else {
-        text
+    match (stopped, night) {
+        (false, _) => text,
+        (true, true) => format!(
+            "{text}. Ночью цепочку рвёт первая же неудача — посмотреть и поправить некому, \
+             а вторая попытка вслепую стоит столько же"
+        ),
+        (true, false) => {
+            format!("{text}. Это вторая неудача подряд по одной причине — цепочку останавливаю")
+        }
     }
 }
 
 /// Отказ наружу словами — единая точка, чтобы «тихих» веток не заводилось.
 fn refuse(app: &AppHandle, chat_id: &str, code: &str, text: &str) {
     crate::log::line(&format!("[chain] {chat_id}: {code} — {text}"));
-    let stopped = chains().on_fail(chat_id, code) == FailAction::Stop;
-    let text = fail_text(text, stopped);
+    let night = is_night(app);
+    let stopped = chains().on_fail(chat_id, code, night) == FailAction::Stop;
+    let text = fail_text(text, stopped, night);
     emit(
         app,
         chat_id,
@@ -558,6 +1056,9 @@ fn refuse(app: &AppHandle, chat_id: &str, code: &str, text: &str) {
 /// через который проходят оба хоста (claude и codex). Отсюда цепочка узнаёт две
 /// вещи: на какую сессию смотреть и что хост упал.
 pub(crate) fn observe(app: &AppHandle, chat_id: &str, ev: &super::AgentEvent) {
+    // Человек написал агенту — значит он проснулся: самое время отдать ночную
+    // сводку, если она копилась.
+    morning_check(app);
     match ev {
         // Джарвис отправил промпт в сессию — значит следить надо за ней.
         // Привязка отсюда, а не из гейта: гейт не знает, из какого чата пришёл
@@ -592,6 +1093,7 @@ pub(crate) fn observe(app: &AppHandle, chat_id: &str, ev: &super::AgentEvent) {
 
 /// Точка подписки: ход сессии закончен (ветка `stop` редьюсера).
 pub fn on_session_done(d: &Arc<Daemon>, session_id: &str, at: i64) {
+    morning_check(&d.app);
     let plan = chains().on_done(session_id, at);
     if plan.is_empty() {
         return;
@@ -610,6 +1112,7 @@ pub fn on_session_done(d: &Arc<Daemon>, session_id: &str, at: i64) {
 
 async fn run_step(d: &Arc<Daemon>, chat_id: &str, sid: &str, decision: Decision) {
     let app = d.app.clone();
+    let night = is_night(&app);
     let outcome = collect_outcome(d, sid).await;
     emit(
         &app,
@@ -655,11 +1158,65 @@ async fn run_step(d: &Arc<Daemon>, chat_id: &str, sid: &str, decision: Decision)
             );
         }
         Decision::Send(step) => {
+            // Зацикливание — отдельная проверка и только для авто-режима: в
+            // ручном каждый заход и так проходит через глаза человека.
+            if let Progress::Stuck(n) = chains().note_progress(chat_id, &progress_mark(&outcome), night)
+            {
+                emit(
+                    &app,
+                    chat_id,
+                    "stopped",
+                    json!({
+                        "reason": "stuck",
+                        "text": format!(
+                            "{n} захода подряд ничего не изменили — ни файлов, ни вердикта проверки. \
+                             Это карусель, а не работа; дальше нужен твой взгляд"
+                        ),
+                    }),
+                );
+                return;
+            }
             let prompt = formulate(&outcome, step).await;
+            // Необратимое ночью не делается ВОВСЕ. «Спросить некого» — не то же
+            // самое, что «можно»: заход целиком ложится в «ждёт тебя».
+            if night {
+                if let Some(kind) = irreversible(&prompt) {
+                    defer(&app, chat_id, sid, kind, &prompt);
+                    return;
+                }
+            }
             let _ = deliver(d, chat_id, sid, &prompt, step).await; // отказ уже сказан словами
         }
         Decision::Skip | Decision::Depth => {}
     }
+}
+
+/// Отложить необратимое до утра. Цепочка на этом встаёт: следующий её шаг — то
+/// самое действие, и обойти его, продолжая, нельзя.
+fn defer(app: &AppHandle, chat_id: &str, sid: &str, kind: &str, prompt: &str) {
+    let w = Waiting {
+        chat_id: chat_id.to_string(),
+        session_id: sid.to_string(),
+        at: now_ms(),
+        kind: kind.to_string(),
+        prompt: prompt.to_string(),
+    };
+    night_log().defer(w.clone());
+    chains().stop(chat_id);
+    crate::log::line(&format!("[chain] {chat_id}: ночью не делаю необратимое ({kind}) — отложено"));
+    emit(
+        app,
+        chat_id,
+        "deferred",
+        json!({
+            "sessionId": sid,
+            "reason": "irreversible",
+            "text": format!(
+                "Ночью необратимое не делаю: {kind}. Заход готов и ждёт тебя утром"
+            ),
+            "waiting": w,
+        }),
+    );
 }
 
 /// Отправка захода в сессию через ГЕЙТ, потребителем «панель»: заход — это
@@ -682,6 +1239,9 @@ pub(crate) async fn deliver(
     .await;
     if out.get("ok").and_then(Value::as_bool).unwrap_or(false) {
         chains().mark_sent(chat_id, step);
+        // Заход ушёл — значит утреннее «ждёт тебя» по этому чату отработано:
+        // висящая карточка после решения человека хуже, чем её отсутствие.
+        night_log().resolve(chat_id);
         emit(
             &app,
             chat_id,
@@ -763,6 +1323,9 @@ pub(crate) async fn collect_outcome(d: &Arc<Daemon>, sid: &str) -> Outcome {
 pub fn on_session_gone(d: &Arc<Daemon>, session_id: &str, why: &str) {
     for chat_id in chains().chats_of(session_id) {
         chains().stop(&chat_id);
+        // Отложенный заход адресован именно этой сессии — её больше нет, и
+        // «ждёт тебя» про неё утром только запутает.
+        night_log().resolve(&chat_id);
         emit(
             &d.app,
             &chat_id,
@@ -854,22 +1417,22 @@ mod tests {
     #[test]
     fn two_failures_of_one_kind_in_a_row_stop_the_chain() {
         let c = chain(Mode::Auto);
-        assert_eq!(c.on_fail("c1", "send"), FailAction::Note);
-        assert_eq!(c.on_fail("c1", "send"), FailAction::Stop);
+        assert_eq!(c.on_fail("c1", "send", false), FailAction::Note);
+        assert_eq!(c.on_fail("c1", "send", false), FailAction::Stop);
         assert!(!c.state("c1", Mode::Auto).active, "серия по одной причине — стоп");
 
         // разные причины подряд серией не считаются
         let c = chain(Mode::Auto);
-        assert_eq!(c.on_fail("c1", "send"), FailAction::Note);
-        assert_eq!(c.on_fail("c1", "stop-failure:rate_limit"), FailAction::Note);
-        assert_eq!(c.on_fail("c1", "send"), FailAction::Note);
+        assert_eq!(c.on_fail("c1", "send", false), FailAction::Note);
+        assert_eq!(c.on_fail("c1", "stop-failure:rate_limit", false), FailAction::Note);
+        assert_eq!(c.on_fail("c1", "send", false), FailAction::Note);
         assert!(c.state("c1", Mode::Auto).active);
 
         // удачный заход обнуляет серию
         let c = chain(Mode::Auto);
-        assert_eq!(c.on_fail("c1", "send"), FailAction::Note);
+        assert_eq!(c.on_fail("c1", "send", false), FailAction::Note);
         c.mark_sent("c1", 1);
-        assert_eq!(c.on_fail("c1", "send"), FailAction::Note, "серия сброшена успехом");
+        assert_eq!(c.on_fail("c1", "send", false), FailAction::Note, "серия сброшена успехом");
     }
 
     #[test]
@@ -951,18 +1514,18 @@ mod tests {
             "грант 'agent' не разрешает sessions.reply (control)",
             "Заход не ушёл: Агент не подтвердил получение — проверь терминал",
         ] {
-            let t = fail_text(reason, false);
+            let t = fail_text(reason, false, false);
             assert!(t.contains(reason), "причину переписали: {t}");
             assert!(!t.contains("останавливаю"), "одна неудача цепочку не рвёт: {t}");
         }
         // вторая подряд по той же причине — стоп, и об этом тоже словами
-        assert_eq!(c.on_fail("c1", "send"), FailAction::Note);
-        let stopped = c.on_fail("c1", "send") == FailAction::Stop;
-        let t = fail_text("tmux: пана мертва", stopped);
+        assert_eq!(c.on_fail("c1", "send", false), FailAction::Note);
+        let stopped = c.on_fail("c1", "send", false) == FailAction::Stop;
+        let t = fail_text("tmux: пана мертва", stopped, false);
         assert!(t.starts_with("tmux: пана мертва"), "{t}");
         assert!(t.contains("вторая неудача подряд"), "человек должен понять причину стопа: {t}");
         // перевод строки в чужой ошибке не должен ломать карточку
-        assert_eq!(fail_text("сбой\nвторая строка", false), "сбой вторая строка");
+        assert_eq!(fail_text("сбой\nвторая строка", false, false), "сбой вторая строка");
     }
 
     #[test]
@@ -989,5 +1552,236 @@ mod tests {
         let p = next_prompt(&o, 1);
         assert!(p.contains("Проверку в прошлом ходе не прогоняли"));
         assert!(p.len() > 60);
+    }
+
+    // ── ночь ──────────────────────────────────────────────────────────────
+
+    /// Главное правило ночи: смотреть некому, поэтому вторую попытку вслепую не
+    /// делаем — она стоит ровно столько же, сколько первая.
+    #[test]
+    fn at_night_the_first_failure_breaks_the_chain() {
+        let c = chain(Mode::Auto);
+        assert_eq!(c.on_fail("c1", "send", true), FailAction::Stop, "ночью хватает первой");
+        assert!(!c.state("c1", Mode::Auto).active);
+
+        // днём та же самая неудача цепочку не рвёт — рвёт вторая
+        let c = chain(Mode::Auto);
+        assert_eq!(c.on_fail("c1", "send", false), FailAction::Note);
+        assert!(c.state("c1", Mode::Auto).active, "днём человек рядом, одна неудача не повод");
+        assert_eq!(c.on_fail("c1", "send", false), FailAction::Stop);
+
+        // причина стопа доходит словами и объясняет, почему счёт другой
+        let t = fail_text("tmux: пана мертва", true, true);
+        assert!(t.starts_with("tmux: пана мертва"), "причину переписали: {t}");
+        assert!(t.contains("первая же неудача"), "человек должен понять ночной счёт: {t}");
+    }
+
+    /// Необратимое ночью не делается вовсе: заход не уходит, а ложится в «ждёт
+    /// тебя» целиком — утром человек отправляет его, ничего не переписывая.
+    #[test]
+    fn irreversible_at_night_waits_for_the_morning() {
+        for (text, kind) in [
+            ("прогони тесты и запушь в main", "пуш в main"),
+            ("git push --force origin dev", "пуш в main"),
+            ("смерджи ветку в основную", "слияние веток"),
+            ("gh pr merge 42", "слияние веток"),
+            ("подчисти: rm -rf /tmp/build", "удаление"),
+            ("удали ветку feature/x после проверки", "удаление"),
+            ("cargo publish и обнови теги", "публикация наружу"),
+            ("задеплой на прод", "публикация наружу"),
+            ("установи сборку человеку", "установка сборки"),
+        ] {
+            assert_eq!(irreversible(text), Some(kind), "не поймали необратимое: {text}");
+        }
+        // обратимое остаётся работой, а не поводом ждать до утра
+        for text in [
+            "почини красные тесты и прогони проверку",
+            "удали лишний импорт в src/a.rs",
+            "поправь maintainer в Cargo.toml",
+            "закоммить и открой PR",
+        ] {
+            assert_eq!(irreversible(text), None, "лишний запрет ночью: {text}");
+        }
+
+        // отложенное — структура, а не строка в логе: у него есть чат, сессия,
+        // причина и сам заход
+        let log = NightLog::new();
+        let w = Waiting {
+            chat_id: "c1".into(),
+            session_id: "sess-1234567890".into(),
+            at: 1,
+            kind: "пуш в main".into(),
+            prompt: "прогони тесты и запушь в main".into(),
+        };
+        log.defer(w.clone());
+        log.defer(w.clone()); // повтор того же захода второй карточки не плодит
+        assert_eq!(log.for_chat("c1"), vec![w.clone()]);
+        assert!(log.for_chat("c2").is_empty(), "чужому чату отложенное не показываем");
+        assert_eq!(log.resolve("c1"), 1, "человек разобрался — карточка снимается");
+        assert!(log.for_chat("c1").is_empty());
+
+        // и всё это действительно вшито в путь отправки: ночью проверка идёт ДО
+        // deliver, иначе необратимое проскочит по принципу «спросить некого»
+        let src = include_str!("chain.rs");
+        let body = src
+            .split("Decision::Send(step) => {")
+            .nth(1)
+            .and_then(|t| t.split("deliver(").next())
+            .expect("ветка отправки на месте");
+        assert!(body.contains("if night"), "ночь в ветке отправки не проверяется");
+        assert!(body.contains("irreversible(&prompt)"), "заход не проверен на необратимое");
+        assert!(body.contains("defer("), "необратимое не откладывается");
+    }
+
+    /// Зацикливание: цепочка, где каждый заход порождает следующий без
+    /// продвижения, — самый дорогой способ потратить ночь.
+    #[test]
+    fn a_chain_that_moves_nowhere_is_stopped() {
+        let red = |line: &str, files: &[&str]| {
+            let f = TurnFacts {
+                files: files
+                    .iter()
+                    .map(|p| FileTouch { path: (*p).into(), kind: "edited".into() })
+                    .collect(),
+                final_reply: line.into(),
+                ..Default::default()
+            };
+            progress_mark(&build_outcome("s1", "jarvis", "k", "работаю", Some(&f)))
+        };
+        let same = red("1 failed в tests::a", &["src/a.rs"]);
+
+        // ночью: два захода подряд без продвижения — стоп
+        let c = chain(Mode::Auto);
+        assert_eq!(c.note_progress("c1", &same, true), Progress::Moved, "первый сравнивать не с чем");
+        assert_eq!(c.note_progress("c1", &same, true), Progress::Stale(1));
+        assert_eq!(c.note_progress("c1", &same, true), Progress::Stuck(2));
+        assert!(!c.state("c1", Mode::Auto).active, "карусель обязана встать сама");
+
+        // днём запас на заход больше — человек рядом и увидит
+        let c = chain(Mode::Auto);
+        assert_eq!(c.note_progress("c1", &same, false), Progress::Moved);
+        assert_eq!(c.note_progress("c1", &same, false), Progress::Stale(1));
+        assert_eq!(c.note_progress("c1", &same, false), Progress::Stale(2));
+        assert_eq!(c.note_progress("c1", &same, false), Progress::Stuck(3));
+
+        // продвижение обнуляет счёт: красное стало зелёным — файлы те же, но мир
+        // изменился, и это ровно то, ради чего вердикт входит в отпечаток
+        let c = chain(Mode::Auto);
+        c.note_progress("c1", &same, true);
+        c.note_progress("c1", &same, true);
+        let green = red("test result: ok. 40 passed", &["src/a.rs"]);
+        assert_eq!(c.note_progress("c1", &green, true), Progress::Moved);
+        assert_eq!(c.note_progress("c1", &green, true), Progress::Stale(1), "счёт начат заново");
+
+        // тронули другой файл — тоже продвижение
+        assert_ne!(same, red("1 failed в tests::a", &["src/a.rs", "src/b.rs"]));
+        // и красных стало меньше — продвижение
+        assert_ne!(same, red("2 failed в tests::a", &["src/a.rs"]));
+        // а перефразированный ответ при том же счёте — НЕ продвижение: текст
+        // модели меняется сам по себе и признаком служить не может
+        assert_eq!(same, red("1 failed в tests::a — сейчас поправлю", &["src/a.rs"]));
+        // ход без единого следа тоже считается топтанием
+        assert_eq!(progress_mark(&build_outcome("s1", "j", "k", "думал", None)), "\u{1}-");
+    }
+
+    /// Тишина не съедает сигнал: ночью уведомления копятся, а утренняя сводка
+    /// перечисляет их все и отвечает на четыре вопроса.
+    #[test]
+    fn night_notices_pile_up_and_the_morning_digest_answers_four_questions() {
+        let log = NightLog::new();
+        assert!(log.drain().is_none(), "ночи не было — сводке взяться неоткуда");
+
+        log.hush("c1", "sent", "заход 1: почини красные тесты (сессия sess-123)");
+        log.hush("c1", "sent", "заход 2: прогони проверку (сессия sess-123)");
+        log.hush("c1", "failed", "Заход не ушёл: сессия не приняла заход");
+        log.hush("c2", "stopped", "tmux: пана мертва. Ночью цепочку рвёт первая же неудача");
+        log.hush("c1", "deferred", "Ночью необратимое не делаю: пуш в main");
+        log.defer(Waiting {
+            chat_id: "c1".into(),
+            session_id: "sess-1234567890".into(),
+            at: 1,
+            kind: "пуш в main".into(),
+            prompt: "прогони тесты и запушь в main".into(),
+        });
+
+        assert!(!log.is_empty(), "журнал знает, что копилось");
+        let st = log.drain().expect("за ночь накопилось");
+        assert!(log.is_empty(), "осушенный журнал пуст");
+        assert_eq!(st.notices.len(), 5, "ни одно уведомление не потеряно");
+        assert_eq!(st.waiting.len(), 1);
+        assert!(log.drain().is_none(), "сводка одна: второй раз то же не выкатываем");
+        assert_eq!(
+            log.for_chat("c1").len(),
+            1,
+            "«ждёт тебя» переживает сводку — его снимает решение человека, а не рассказ о нём"
+        );
+
+        let d = morning_digest(&st, Some("за ночь 1.20$ из дневного бюджета"));
+        for head in ["ЧТО СДЕЛАНО", "СКОЛЬКО ПОТРАЧЕНО", "ЧТО ВСТАЛО И ПОЧЕМУ", "ЧТО ЖДЁТ ТЕБЯ"] {
+            assert!(d.contains(head), "в сводке нет ответа на «{head}»:\n{d}");
+        }
+        for n in &st.notices {
+            assert!(d.contains(&n.text), "уведомление потеряно в сводке: {}\n{d}", n.text);
+        }
+        assert!(d.contains("заходов за ночь: 2"), "что сделано — числом:\n{d}");
+        assert!(d.contains("1.20$"), "расход из бюджета:\n{d}");
+        assert!(d.contains("пуш в main"), "отложенное обязано попасть в сводку:\n{d}");
+        assert!(d.contains("запушь в main"), "заход виден целиком — утром его отправлять:\n{d}");
+
+        // бюджет промолчал — сводка всё равно отвечает на все четыре вопроса
+        let d = morning_digest(&NightState::default(), None);
+        for head in ["ЧТО СДЕЛАНО", "СКОЛЬКО ПОТРАЧЕНО", "ЧТО ВСТАЛО И ПОЧЕМУ", "ЧТО ЖДЁТ ТЕБЯ"] {
+            assert!(d.contains(head), "пустая ночь не повод молчать про «{head}»:\n{d}");
+        }
+        assert!(d.contains("бюджет расход за ночь не назвал"), "молчание бюджета — тоже ответ:\n{d}");
+
+        // потолок журнала не теряет сигнал молча
+        let log = NightLog::new();
+        for i in 0..MAX_NOTICES + 3 {
+            log.hush("c1", "sent", &format!("заход {i}"));
+        }
+        let st = log.drain().expect("накопилось");
+        assert_eq!((st.notices.len(), st.dropped), (MAX_NOTICES, 3));
+        assert!(morning_digest(&st, None).contains("вытеснено потолком журнала"));
+    }
+
+    /// Ночная тишина устроена ровно так: копим и метим `quiet`, но карточку в
+    /// чат всё равно кладём — работа шла, и она обязана быть видна.
+    #[test]
+    fn night_is_asked_of_the_budget_and_not_invented_here() {
+        // Два определения ночи в двух местах — это система, которая ночью ведёт
+        // себя по-разному. Предикат один, и живёт он в бюджете.
+        let src = include_str!("chain.rs");
+        assert!(src.contains("crate::budget::is_night(&d)"),
+            "цепочка снова считает ночь сама");
+        let todo = format!("TO{}(budget)", "DO"); // не литералом: сторож ловил сам себя
+        assert!(!src.contains(&todo), "переходник к бюджету так и не сведён");
+        // Часов в коде цепочки быть не должно — границы ночи это настройка.
+        // Литералы собираем из кусков: иначе сторож споткнётся о собственный
+        // список (первая версия этого теста так и упала).
+        let colon = ":";
+        for h in ["23", "22", "07", "06"] {
+            let lit = format!("{h}{colon}00");
+            assert!(!src.contains(&lit), "в цепочке зашит час ночи: {lit}");
+        }
+    }
+
+    #[test]
+    fn the_night_is_quiet_but_not_blind() {
+        let src = include_str!("chain.rs");
+        let body = src
+            .split("fn emit(app: &AppHandle")
+            .nth(1)
+            .and_then(|t| t.split("app.emit(").next())
+            .expect("эмит на месте");
+        assert!(body.contains("night_log().hush("), "ночью уведомление не копится");
+        assert!(body.contains("\"quiet\": night"), "окну не сказано, что будить некого");
+        assert!(body.contains("is_night(app)"), "ночь в эмите не спрашивается");
+
+        // текст карточки, а не пересказ: утром восстановить его будет неоткуда
+        let t = notice_text("sent", &json!({ "step": 3, "prompt": "почини\nтесты", "sessionId": "sess-1234567890" }));
+        assert!(t.contains("заход 3") && t.contains("почини тесты"), "{t}");
+        assert!(t.contains("sess-123"), "у уведомления должна быть сессия: {t}");
+        assert_eq!(notice_text("stopped", &json!({ "text": "цепочка встала" })), "цепочка встала");
     }
 }

@@ -43,6 +43,24 @@ impl Limits {
     }
 }
 
+/// Состояние лимита ПЛЮС бюджет: доля недели и окна, времена сброса, норма в
+/// сутки, прогноз, ступень лестницы, резерв, момент получения чисел и признак
+/// несвежести — по каждому провайдеру.
+///
+/// Прежние поля не тронуты: на них смотрит панель. Новое лежит рядом
+/// отдельными ключами, и если чисел по провайдеру нет — ступень `unknown`
+/// С ПРИЧИНОЙ, а не отсутствующий ключ.
+pub fn state_json(d: &Arc<Daemon>) -> Value {
+    let mut v = serde_json::to_value(d.limits.state()).unwrap_or(Value::Null);
+    let budget = crate::budget::report(d);
+    if let (Some(obj), Some(b)) = (v.as_object_mut(), budget.as_object()) {
+        for (k, val) in b {
+            obj.insert(k.clone(), val.clone());
+        }
+    }
+    v
+}
+
 fn push_limit(d: &Arc<Daemon>) {
     windows::emit_to_panel(&d.app, "limit-state", &d.limits.state());
 }

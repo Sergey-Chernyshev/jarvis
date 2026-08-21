@@ -93,7 +93,7 @@ const CODEX_EVENTS: [(&str, &str); 8] = [
 ///
 /// Важно: таймер heartbeat запускается ТОЛЬКО если на событие повешен хук —
 /// то есть пульс появляется ровно потому, что мы его просим.
-const KIMI_EVENTS: [(&str, &str); 11] = [
+const KIMI_EVENTS: [(&str, &str); 12] = [
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "prompt"),
     ("PreToolUse", "pre-tool"),
@@ -101,6 +101,10 @@ const KIMI_EVENTS: [(&str, &str); 11] = [
     ("PermissionRequest", "permission"),
     ("Stop", "stop"),
     ("StopFailure", "stop-failure"),
+    // Прерывание хода человеком. По документации Kimi «Stop не срабатывает
+    // при прерывании, вместо него срабатывает это событие» — без Interrupt
+    // прерванный ход не давал НИКАКОГО сигнала о завершении.
+    ("Interrupt", "interrupt"),
     ("SessionEnd", "session-end"),
     ("SessionHeartbeat", "heartbeat"),
     ("SubagentStart", "subagent-start"),
@@ -3196,6 +3200,28 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), KIMI_USER_CFG, "конфиг не тронут");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kimi_asks_for_interrupt_and_claude_does_not() {
+        // У Kimi «Stop не срабатывает при прерывании, вместо него срабатывает
+        // Interrupt» — без него прерванный ход не давал НИКАКОГО сигнала о
+        // завершении, и наш же Esc для kimi проходил бесследно.
+        let kimi: Vec<&str> = KIMI_EVENTS.iter().map(|(e, _)| *e).collect();
+        assert!(kimi.contains(&"Interrupt"), "Kimi снова без Interrupt: {kimi:?}");
+        assert!(kimi.contains(&"Stop") && kimi.contains(&"StopFailure"),
+            "тройка завершения неполна: {kimi:?}");
+
+        // У Claude такого хука нет — попросить его значит прописать в конфиг
+        // событие, которого не существует.
+        let claude: Vec<&str> = EVENTS.iter().map(|(e, _)| *e).collect();
+        assert!(!claude.contains(&"Interrupt"), "Interrupt уехал в список Claude: {claude:?}");
+
+        // внутреннее имя одно на весь путь: конфиг → шим → редьюсер
+        let arg = KIMI_EVENTS.iter().find(|(e, _)| *e == "Interrupt").map(|(_, a)| *a);
+        assert_eq!(arg, Some("interrupt"));
+        assert!(include_str!("../daemon.rs").contains("\"interrupt\" =>"),
+            "редьюсер не разбирает interrupt — событие приходило бы в пустоту");
     }
 
     #[test]

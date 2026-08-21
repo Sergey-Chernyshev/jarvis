@@ -22,6 +22,55 @@ pub struct ChatItem {
     pub ts: i64,
 }
 
+/// Кусок сообщения с позиции `from` (в СИМВОЛАХ) длиной не больше `max_chars`
+/// (0 — без потолка) → (кусок, всего символов, смещение продолжения).
+///
+/// Символы, а не байты: смещение уезжает наружу курсором, и на кириллице
+/// байтовое пришлось бы объяснять.
+pub fn slice_chars(text: &str, from: usize, max_chars: usize) -> (String, usize, Option<usize>) {
+    let chars: Vec<char> = text.chars().collect();
+    let total = chars.len();
+    let from = from.min(total);
+    let end = if max_chars == 0 { total } else { from.saturating_add(max_chars).min(total) };
+    let piece: String = chars[from..end].iter().collect();
+    (piece, total, (end < total).then_some(end))
+}
+
+/// Усечение с ЯВНОЙ пометкой. Молчаливый обрыв хуже пустого ответа: пустой
+/// виден сразу, а обрезанный выглядит целым — читатель делает вывод по половине
+/// отчёта и докладывает с полной уверенностью.
+pub fn clip_marked(s: &str, max_chars: usize) -> String {
+    let (head, total, next) = slice_chars(s, 0, max_chars);
+    match next {
+        None => head,
+        Some(n) => format!("{head}\n\n[…обрезано {} симв. из {total}; целиком — chats.read]", total - n),
+    }
+}
+
+/// Отпечаток текста для курсора «дочитать»: позиция сообщения в ленте съезжает
+/// (лог дописывается, окно чтения едет), и без отпечатка курсор молча отдал бы
+/// хвост ЧУЖОГО сообщения. FNV-1a: хеш здесь не криптография, а сверка.
+pub fn text_fingerprint(s: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Курсор продолжения: `<индекс>@<смещение в символах>#<отпечаток>`.
+pub fn make_cursor(idx: usize, from: usize, text: &str) -> String {
+    format!("{idx}@{from}#{}", text_fingerprint(text))
+}
+
+/// Разбор курсора → (индекс, смещение, отпечаток). None — мусор.
+pub fn parse_cursor(s: &str) -> Option<(usize, usize, String)> {
+    let (pos, fp) = s.split_once('#')?;
+    let (idx, from) = pos.split_once('@')?;
+    Some((idx.parse().ok()?, from.parse().ok()?, fp.to_string()))
+}
+
 /// Хвост файла → массив распарсенных JSONL-строк.
 pub fn read_recent_entries(file: &Path, max_bytes: u64) -> Vec<Value> {
     read_recent_text(file, max_bytes).map_or_else(Vec::new, |t| entries_from_text(&t))
@@ -156,7 +205,9 @@ pub fn to_chat_items(entry: &Value) -> Vec<ChatItem> {
         let t = text.trim();
         // служебные вставки (<system-reminder>, <command-name>…) в чат не показываем
         if !t.is_empty() && !t.starts_with('<') {
-            items.push(ChatItem { role, kind: "text", text: ellipsize(t, 4000), ts });
+            // текст кладём ЦЕЛИКОМ: потолок на сообщение — дело потребителя
+            // (`chats.read` режет с пометкой и курсором), а не парсера
+            items.push(ChatItem { role, kind: "text", text: t.to_string(), ts });
         }
     };
 
@@ -272,7 +323,7 @@ pub fn final_reply_from(chain: Vec<Value>) -> Option<String> {
     if reply.is_empty() {
         None
     } else {
-        Some(ellipsize(reply, 6000))
+        Some(clip_marked(reply, 6000))
     }
 }
 
@@ -373,6 +424,26 @@ mod tests {
         let chain = chain_from_entries(entries);
         let uuids: Vec<&str> = chain.iter().map(|e| e["uuid"].as_str().unwrap()).collect();
         assert_eq!(uuids, vec!["a", "b", "c"]);
+    }
+
+    /// Финальный ответ длиннее потолка обязан НАЗВАТЬ обрыв: молча обрезанный
+    /// выглядит целым, и половина отчёта уходит человеку как весь отчёт.
+    #[test]
+    fn long_reply_says_that_it_was_cut() {
+        let chain = vec![
+            json!({"type":"user","uuid":"a","message":{"content":"давай"}}),
+            json!({"type":"assistant","uuid":"b","parentUuid":"a","message":{"content":[
+                {"type":"text","text": "я".repeat(6500)}
+            ]}}),
+        ];
+        let r = final_reply_from(chain).unwrap();
+        assert!(r.contains("обрезано 500 симв. из 6500"), "{}", &r[r.len() - 80..]);
+        // короткий ответ пометки не получает
+        assert_eq!(clip_marked("готово", 6000), "готово");
+        // курсор переживает круг: индекс, смещение и отпечаток на месте
+        let c = make_cursor(7, 4000, "текст");
+        assert_eq!(parse_cursor(&c), Some((7, 4000, text_fingerprint("текст"))));
+        assert_eq!(parse_cursor("мусор"), None);
     }
 
     #[test]

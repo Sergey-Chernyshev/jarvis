@@ -130,10 +130,11 @@ fn push_text(out: &mut Vec<ChatItem>, role: &'static str, text: &str, ts: i64) {
     if t.is_empty() || t.starts_with('<') {
         return;
     }
+    // текст ЦЕЛИКОМ — потолок на сообщение ставит потребитель (см. transcript.rs)
     out.push(ChatItem {
         role,
         kind: "text",
-        text: ellipsize(t, 4000),
+        text: t.to_string(),
         ts,
     });
 }
@@ -291,7 +292,7 @@ pub fn full_final_reply(entries: &[Value]) -> Option<String> {
     if reply.is_empty() {
         None
     } else {
-        Some(ellipsize(reply, 6000))
+        Some(crate::transcript::clip_marked(reply, 6000))
     }
 }
 

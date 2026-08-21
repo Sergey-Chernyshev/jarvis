@@ -1599,14 +1599,36 @@ impl Daemon {
     /// одноимённый файл этой машины. Поэтому ВСЁ, что разбирает транскрипт
     /// (мета, сводки, финальный ответ, карточки ходов), ходит сюда.
     pub(crate) async fn transcript_text(&self, s: &Session, max_bytes: u64) -> Option<String> {
+        self.transcript_text_skipped(s, max_bytes).await.map(|(t, _)| t)
+    }
+
+    /// То же + сколько байт ГОЛОВЫ осталось за окном чтения.
+    ///
+    /// Нужно `chats.read`: недочитанное начало обязано быть названо вслух, иначе
+    /// хвост выглядит целым разговором. Число приблизительное (обрезка по целым
+    /// строкам, lossy-UTF8) — это индикатор «есть что дочитать», не адрес.
+    pub(crate) async fn transcript_text_skipped(
+        &self,
+        s: &Session,
+        max_bytes: u64,
+    ) -> Option<(String, u64)> {
         let tr = s.transcript.as_deref()?;
         match &s.remote {
-            None => crate::transcript::read_recent_text(std::path::Path::new(tr), max_bytes),
+            None => {
+                let text = crate::transcript::read_recent_text(std::path::Path::new(tr), max_bytes)?;
+                let size = std::fs::metadata(tr).map(|m| m.len()).unwrap_or(0);
+                let skipped = size.saturating_sub(text.len() as u64);
+                Some((text, skipped))
+            }
             Some(name) => {
                 let node = self.remotes.node(name)?;
                 let client = node.client().ok()?;
                 match client.tail_text(tr, max_bytes).await {
-                    Ok(chunk) => chunk.map(|(text, _)| text),
+                    // `next` — байт за концом отданного куска: голова = next − длина
+                    Ok(chunk) => chunk.map(|(text, next)| {
+                        let skipped = next.saturating_sub(text.len() as u64);
+                        (text, skipped)
+                    }),
                     Err(e) => {
                         crate::log::line(&format!("[remote] {name}: транскрипт не прочитан — {e}"));
                         None

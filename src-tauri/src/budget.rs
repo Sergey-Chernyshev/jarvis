@@ -12,11 +12,16 @@
 //! — не ходим вовсе), отказы уважаются экспоненциальным откатом, число запросов
 //! за час считается и лежит в диагностике: ответ на «не заспамил ли» обязан
 //! быть числом, а не уверением.
+//!
+//! Расход появляется в числах провайдера ПОСЛЕ работы, поэтому одного кэша мало:
+//! двадцать сессий, начатых в одну секунду, читают один и тот же остаток и все
+//! проходят. Против этого — бронь (см. «бронь ожидаемого расхода»): гейт
+//! списывает ожидаемую стоимость СРАЗУ и возвращает её, если работа не началась.
 
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -348,6 +353,9 @@ struct Prov {
     night_base: Option<(i64, f64)>,
     /// Прежняя норма — чтобы падение сказать словами.
     prev_norm: Option<f64>,
+    /// Ожидаемый расход, списанный вперёд: работа разрешена, но в числа
+    /// провайдера ещё не доехала.
+    holds: Vec<Hold>,
 }
 
 /// Живые числа провайдера ровно как приехали.
@@ -405,6 +413,156 @@ impl Budget {
 pub fn budget() -> &'static Budget {
     static B: OnceLock<Budget> = OnceLock::new();
     B.get_or_init(Budget::new)
+}
+
+/* ================= бронь ожидаемого расхода ================= */
+
+/// Сколько живёт бронь, если её не вернули руками.
+///
+/// Ровно столько, сколько нужно НАСТОЯЩЕМУ расходу, чтобы доехать до чисел
+/// провайдера: ход идёт минуту-другую, опрос у порога — раз в две минуты,
+/// свежий запрос перед дорогой работой — минутной свежести. Держать дольше —
+/// считать один и тот же расход дважды (бюджет врёт вниз), снимать раньше —
+/// вернуть залп. Настройкой не делается сознательно: поле, которое можно
+/// выставить, рано или поздно выставят в ноль, и тормоза не станет.
+const HOLD_TTL_MS: i64 = 5 * 60_000;
+
+/// Ожидаемая стоимость одного захода дефолтной моделью (sonnet-класс), %
+/// недельного окна.
+///
+/// Точного числа не существует: провайдер отдаёт только агрегат недели, а
+/// «сколько процентов стоит ход» зависит от контекста, длины и тарифа. Порядок
+/// величины: ход с полным контекстом — сотые-десятые процента недельного окна,
+/// но бронь покрывает не один ход, а первые минуты работы (лиза), поэтому база
+/// взята С ЗАПАСОМ.
+///
+/// Промах вверх безопасен: лишняя бронь вернётся сама через лизу, а до тех пор
+/// лишь раньше времени скажет «стоп». Промах вниз возвращает залп — поэтому
+/// перекос сознательно в сторону дороже.
+const TURN_PCT: f64 = 0.5;
+
+/// Во сколько раз ход этой модели дороже дефолтного.
+///
+/// Веса — отношения из прайс-таблицы `usage::price` (opus/fable 15/75 против
+/// sonnet 3/15 — впятеро; haiku 1/5 — втрое дешевле; kimi 0.6/2.5 — впятеро
+/// дешевле; gpt-5/codex 1.25/10 — примерно вполовину). Здесь именно ВЕСА, а не
+/// доллары: доллары в проценты недельного окна всё равно не переводятся (окно
+/// подписки в долларах не выражено), а отношение переживает и смену тарифа, и
+/// приход новой модели. `usage.rs` — чужой файл, поэтому таблица зеркалится, а
+/// не импортируется; за расхождением следит тест `expected_cost_follows_the_price_table`.
+pub fn model_weight(model: &str) -> f64 {
+    let m = model.trim().to_lowercase();
+    match () {
+        _ if m.contains("opus") || m.contains("fable") => 5.0,
+        _ if m.contains("haiku") => 0.35,
+        _ if m.contains("gpt") || m.contains("codex") => 0.5,
+        _ if m.starts_with('k') || m.contains("kimi") || m.contains("moonshot") => 0.2,
+        _ => 1.0, // sonnet и всё незнакомое: незнакомую модель дешёвой не считаем
+    }
+}
+
+/// Ожидаемая стоимость работы, которую сейчас запускают, % недельного окна.
+/// Модель неизвестна — берём дефолтную модель провайдера: у kimi дефолт впятеро
+/// дешевле claude, и делать вид, что они стоят одинаково, значило бы врать.
+pub fn expected_pct(provider: &str, model: Option<&str>) -> f64 {
+    let w = match model.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => model_weight(m),
+        None if provider == KIMI => model_weight("k3"),
+        None => 1.0,
+    };
+    TURN_PCT * w
+}
+
+/// Одна бронь: сколько % недели придержали, до каких пор и подо что.
+#[derive(Debug, Clone)]
+struct Hold {
+    id: u64,
+    pct: f64,
+    until: i64,
+    what: String,
+}
+
+/// Списанная вперёд ожидаемая стоимость. Возвращается двумя способами: руками
+/// (`release` — работа не началась) и сама (лиза истекла: к тому моменту
+/// настоящий расход уже в числах провайдера).
+///
+/// `Drop` не возвращает НИЧЕГО намеренно: дроп — это не «работа не началась»,
+/// это «мы не знаем». Не знаем — держим до лизы; ошибка в эту сторону тормозит
+/// запуск, ошибка в другую возвращает залп.
+#[must_use = "бронь надо либо вернуть (release), либо осознанно оставить до лизы (in_flight)"]
+pub struct Reservation {
+    provider: &'static str,
+    id: u64,
+    pct: f64,
+}
+
+impl Reservation {
+    /// Бронь-пустышка: провайдера в бюджете нет (codex), держать нечего.
+    pub fn none() -> Self {
+        Reservation { provider: "", id: 0, pct: 0.0 }
+    }
+
+    pub fn pct(&self) -> f64 {
+        self.pct
+    }
+
+    /// Работа не началась (сессия не поднялась, отказали на пороге) — вернуть
+    /// немедленно. Не вернуть здесь значило бы «протечь» вниз: бюджет стал бы
+    /// врать в другую сторону и остановил бы работу, которой ничто не мешает.
+    pub fn release(self) {
+        if self.pct <= 0.0 {
+            return;
+        }
+        let mut provs = budget().provs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(p) = provs.get_mut(self.provider) {
+            p.holds.retain(|h| h.id != self.id);
+        }
+        crate::log::line(&format!(
+            "[budget] бронь {:.2}% {} возвращена: работа не началась",
+            self.pct, self.provider
+        ));
+    }
+
+    /// Работа пошла — бронь остаётся до лизы, расход доедет до чисел сам.
+    pub fn in_flight(self) {}
+}
+
+/// Списать ожидаемую стоимость вперёд. Просроченные брони заодно выметаем:
+/// отдельный сборщик для пяти записей — лишняя сущность.
+pub fn reserve(provider: &'static str, pct: f64, what: &str, now: i64) -> Reservation {
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let id = SEQ.fetch_add(1, Ordering::Relaxed);
+    let pct = pct.max(0.0);
+    let mut provs = budget().provs.lock().unwrap_or_else(|e| e.into_inner());
+    let p = provs.entry(provider).or_default();
+    p.holds.retain(|h| h.until > now);
+    p.holds.push(Hold { id, pct, until: now + HOLD_TTL_MS, what: crate::util::ellipsize(what, 80) });
+    Reservation { provider, id, pct }
+}
+
+/// Сколько сейчас придержано у провайдера и сколькими бронями.
+fn live_holds(p: &Prov, now: i64) -> (f64, usize) {
+    let live = p.holds.iter().filter(|h| h.until > now);
+    (live.clone().map(|h| h.pct).sum(), live.count())
+}
+
+/// То же снаружи (панель, тесты, диагностика).
+pub fn reserved(provider: &str, now: i64) -> (f64, usize) {
+    let provs = budget().provs.lock().unwrap_or_else(|e| e.into_inner());
+    provs.get(provider).map(|p| live_holds(p, now)).unwrap_or((0.0, 0))
+}
+
+/// Строкой — для лога и отказа: подо что именно держим.
+fn holds_note(p: &Prov, now: i64) -> Option<String> {
+    let (pct, n) = live_holds(p, now);
+    if pct <= 0.0 {
+        return None;
+    }
+    let last = p.holds.iter().filter(|h| h.until > now).next_back().map(|h| h.what.clone());
+    Some(format!(
+        "придержано {pct:.1}% ожидаемого расхода (броней: {n}{}) — вернётся, если работа не началась",
+        last.map(|w| format!(", последняя — {w}")).unwrap_or_default()
+    ))
 }
 
 /// Экспоненциальный откат: отказ уважаем, а не повторяем по кругу.
@@ -760,6 +918,9 @@ struct Snap {
     night_spent: Option<f64>,
     night_hit: bool,
     prev_norm: Option<f64>,
+    /// Списано вперёд под уже разрешённую работу и сколькими бронями.
+    held: f64,
+    holds_n: usize,
 }
 
 fn snapshot(provider: &'static str, c: &Cfg, now: i64) -> Snap {
@@ -780,10 +941,18 @@ fn snapshot(provider: &'static str, c: &Cfg, now: i64) -> Snap {
         night_spent: None,
         night_hit: false,
         prev_norm: st.and_then(|s| s.prev_norm),
+        held: st.map(|s| live_holds(s, now).0).unwrap_or(0.0),
+        holds_n: st.map(|s| live_holds(s, now).1).unwrap_or(0),
     };
     let (Some(st), Some(live)) = (st, st.and_then(|s| s.live)) else { return base };
 
     let remaining = (100.0 - live.week_used).max(0.0);
+    // План недели считаем по ЧЕСТНОМУ остатку — норма и резерв про неделю, а не
+    // про то, что кто-то только что запустил. А вот решение «пускать ли» — по
+    // остатку за вычетом броней: иначе двадцать одновременных запусков видят
+    // один и тот же остаток и проходят все.
+    let (held, holds_n) = live_holds(st, now);
+    let effective = (remaining - held).max(0.0);
     let p = plan(remaining, now, live.week_reset, c, provider == KIMI);
     let ttr = ((live.week_reset - now).max(0) as f64) / DAY_MS as f64;
     let elapsed = if live.week_len > 0 {
@@ -803,7 +972,12 @@ fn snapshot(provider: &'static str, c: &Cfg, now: i64) -> Snap {
     } else {
         "точек мало: темп пока не о чем".to_string()
     };
-    let (mut rung_v, mut reason) = rung(remaining, &p, rate, ttr, &why_no_rate);
+    let (mut rung_v, mut reason) = rung(effective, &p, rate, ttr, &why_no_rate);
+    // Число в причине («осталось столько-то») обязано сходиться с тем, что
+    // человек видит в панели: если разницу сделала бронь — так и сказать.
+    if let Some(note) = holds_note(st, now) {
+        reason.push_str(&format!(" · {note}"));
+    }
 
     // Ночной потолок — ВТОРОЙ, независимый ограничитель: может сработать раньше
     // дневной нормы, чтобы человек не проснулся с пустой неделей из-за одной
@@ -828,6 +1002,8 @@ fn snapshot(provider: &'static str, c: &Cfg, now: i64) -> Snap {
         age: now - live.at,
         night_spent,
         night_hit,
+        held,
+        holds_n,
         ..base
     }
 }
@@ -844,6 +1020,8 @@ pub fn report_one(provider: &'static str, c: &Cfg, now: i64) -> Value {
             "reason": s.reason,
             "stale": true,
             "err": s.err,
+            "reservedPct": s.held,
+            "reservedCount": s.holds_n,
             "bufferAvailable": false,
             "bufferReason": BUFFER_REASON,
         });
@@ -862,7 +1040,15 @@ pub fn report_one(provider: &'static str, c: &Cfg, now: i64) -> Value {
         "lastDayPct": p.last_day,
         "lastDayHours": p.last_day_hours,
         "reservePct": p.reserve,
+        // `usablePct` — рабочий бюджет НЕДЕЛИ (остаток минус резерв), он про
+        // план и броней не знает. `reservedPct` — сколько уже списано вперёд под
+        // разрешённую, но ещё не измеренную работу, `availablePct` — сколько
+        // можно занять прямо сейчас. Стена стоит по последнему.
         "usablePct": p.usable,
+        "reservedPct": s.held,
+        "reservedCount": s.holds_n,
+        "reservedTtlMs": HOLD_TTL_MS,
+        "availablePct": ((100.0 - live.week_used).max(0.0) - s.held - p.reserve).max(0.0),
         "ratePctDay": s.rate,
         "runwayDays": s.rate.filter(|r| *r > 0.0).map(|r| p.usable / r),
         "daysToReset": s.ttr,
@@ -1117,6 +1303,118 @@ mod tests {
         assert!(v["reason"].as_str().unwrap_or_default().contains("ночной потолок"), "{v}");
         assert_eq!(v["bufferAvailable"], json!(false));
         assert_eq!(v["bufferReason"], json!(BUFFER_REASON));
+    }
+
+    /// Двадцать запусков, начатых по одному и тому же остатку, НЕ проходят все:
+    /// гейт списывает ожидаемое сразу, и залп упирается в резерв. Раньше от
+    /// залпа спасал потолок одновременных — его сняли сознательно, ограничитель
+    /// остался один, и он про расход.
+    #[test]
+    fn a_burst_of_twenty_runs_into_the_reserve() {
+        let c = Cfg::default();
+        let now = now_ms();
+        // 12% остатка, сброс через трое суток: резерв ≈7%, занять можно ≈5%
+        install("проба-залп", Prov { live: Some(live_at(now, 88.0, now + 3 * DAY_MS)), ..Prov::default() });
+        let before = report_one("проба-залп", &c, now);
+        assert_eq!(before["rung"], json!("unknown"), "до залпа стены нет");
+
+        let mut passed = 0;
+        for _ in 0..20 {
+            // порядок ровно как в гейте: сначала списать ожидаемое, потом смотреть
+            let hold = reserve("проба-залп", expected_pct(CLAUDE, Some("sonnet")), "проба-запуск", now);
+            let v = report_one("проба-залп", &c, now);
+            if v["rung"] == json!("stop") {
+                hold.release(); // отказали — работа не началась
+            } else {
+                passed += 1;
+                hold.in_flight();
+            }
+        }
+        assert!(passed > 0, "первый запуск обязан проходить: остаток есть");
+        assert!(passed < 20, "залп прошёл целиком — тормоза нет");
+
+        // Отчёт показывает и придержанное, и доступное — иначе человек видит
+        // «осталось 12%» и необъяснимый отказ.
+        let after = report_one("проба-залп", &c, now);
+        assert_eq!(after["weekLeftPct"], json!(12.0), "остаток недели брони не трогают");
+        assert_eq!(after["reservedCount"].as_i64(), Some(passed as i64), "{after}");
+        assert!(after["reservedPct"].as_f64().unwrap_or(0.0) > 0.0, "брони не видно: {after}");
+        assert!(
+            after["availablePct"].as_f64().unwrap() < before["availablePct"].as_f64().unwrap(),
+            "доступное не уменьшилось: {after}"
+        );
+        assert!(
+            after["reason"].as_str().unwrap_or_default().contains("придержано"),
+            "про бронь в отчёте молчат: {after}"
+        );
+        // Стена встала ровно там, где кончилось доступное — с точностью до
+        // одного запуска. Не «меньше двадцати», а «сколько влезло».
+        let (held, avail0, one) = (
+            after["reservedPct"].as_f64().unwrap(),
+            before["availablePct"].as_f64().unwrap(),
+            expected_pct(CLAUDE, Some("sonnet")),
+        );
+        assert!(held <= avail0 + 1e-9, "заняли больше доступного: {held} против {avail0}");
+        assert!(held + one >= avail0 - 1e-9, "остановились раньше времени: {held} против {avail0}");
+        // Отказанная бронь возвращается, поэтому стена не «залипает»: она стоит
+        // ровно для СЛЕДУЮЩЕЙ попытки, а не навсегда.
+        let probe = reserve("проба-залп", expected_pct(CLAUDE, Some("sonnet")), "ещё один", now);
+        let wall = report_one("проба-залп", &c, now);
+        assert_eq!(wall["rung"], json!("stop"), "двадцать первый запуск прошёл: {wall}");
+        assert_eq!(wall["availablePct"], json!(0.0), "занять больше нечего");
+        // и «стоп» именно из-за брони, а не потому что кончилась неделя
+        assert!(wall["usablePct"].as_f64().unwrap_or(0.0) > 0.0, "рабочий бюджет недели ещё есть");
+        probe.release();
+    }
+
+    /// Бронь обязана вернуться, если сессия не поднялась: невозвращённая течёт
+    /// вниз и врёт в другую сторону — останавливает работу, которой ничто не
+    /// мешает. Второй возврат — сам, по лизе.
+    #[test]
+    fn a_reservation_comes_back_when_the_work_never_started() {
+        let now = now_ms();
+        install("проба-возврат", Prov::default());
+        let hold = reserve("проба-возврат", 3.0, "запуск сессии", now);
+        assert_eq!(hold.pct(), 3.0, "бронь знает, сколько держит");
+        assert_eq!(reserved("проба-возврат", now), (3.0, 1));
+        hold.release();
+        assert_eq!(reserved("проба-возврат", now), (0.0, 0), "бронь не вернулась");
+
+        // лиза: бронь, про которую забыли, уходит сама — к этому моменту
+        // настоящий расход уже в числах провайдера, и держать её значит считать
+        // его дважды
+        let old = reserve("проба-возврат", 3.0, "забытая", now - HOLD_TTL_MS - 1);
+        assert_eq!(reserved("проба-возврат", now), (0.0, 0), "лиза не истекла");
+        old.in_flight();
+        // а свежая — держится
+        reserve("проба-возврат", 2.0, "свежая", now).in_flight();
+        assert_eq!(reserved("проба-возврат", now), (2.0, 1));
+        assert_eq!(reserved("проба-возврат", now + HOLD_TTL_MS + 1), (0.0, 0), "лиза не вечна");
+    }
+
+    /// Ожидаемая стоимость — не константа на всех: opus дороже sonnet впятеро,
+    /// kimi впятеро дешевле. Веса зеркалят прайс-таблицу `usage::price`; если
+    /// та поехала — тест обязан упасть, а не тихо разойтись с ней.
+    #[test]
+    fn expected_cost_follows_the_price_table() {
+        assert!(model_weight("opus") > model_weight("sonnet"));
+        assert_eq!(model_weight("claude-opus-4-1"), 5.0, "имя модели длиннее ярлыка");
+        assert_eq!(model_weight("Fable"), 5.0, "у fable своего прайса нет — как opus");
+        assert!(model_weight("haiku") < 1.0);
+        assert_eq!(model_weight("что-то новое"), 1.0, "незнакомую модель дешёвой не считаем");
+        // модель не назвали — берём дефолт провайдера, а не «все стоят одинаково»
+        assert!(expected_pct(KIMI, None) < expected_pct(CLAUDE, None));
+        assert_eq!(expected_pct(CLAUDE, Some("opus")), expected_pct(CLAUDE, None) * 5.0);
+        assert_eq!(expected_pct(CLAUDE, Some("  ")), expected_pct(CLAUDE, None), "пустая строка — не модель");
+
+        // сторож расхождения: числа взяты отсюда, и молча они меняться не должны
+        let price = include_str!("usage.rs");
+        for pair in ["(15.0, 75.0)", "(3.0, 15.0)", "(1.0, 5.0)", "(0.6, 2.5)", "(1.25, 10.0)"] {
+            assert!(
+                price.contains(pair),
+                "прайс {pair} в usage.rs поменялся — пересчитай веса в model_weight"
+            );
+        }
     }
 
     /// Счётчик запросов за час: ответ на «не заспамил ли» — число.

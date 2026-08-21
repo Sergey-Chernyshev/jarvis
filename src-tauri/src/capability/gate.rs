@@ -7,9 +7,15 @@
 //! agent/plugin) → подтверждение side-effect, кроме поимённо авто-одобренных
 //! пользователем капабилити (без дедлайна: ждём человека) → исполнение
 //! (дедлайн 30с) → аудит каждого исхода.
+//!
+//! Аудит вопроса пишется ДВУМЯ строками: `asked` перед ожиданием и исход после.
+//! Одной строки по завершении мало — вопрос, убитый перезапуском демона, не
+//! оставлял следа вовсе.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -36,6 +42,16 @@ impl Default for GateConfig {
     }
 }
 
+/// Имя вопроса: миллисекунды плюс счётчик процесса. Не секрет и не nonce
+/// подтверждения (тот одноразовый и живёт в `PendingConfirms`) — только ключ,
+/// которым в журнале сходятся «спросили» и «чем кончилось». Время в имени
+/// нужно, чтобы строки переживших перезапуск процессов не сливались в одну пару.
+fn next_ask_id() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    format!("{ms:x}-{:x}", SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
 /// Прогнать вызов капабилити через все проверки и (при успехе) исполнить.
 #[allow(clippy::too_many_arguments)]
 pub async fn invoke<C>(
@@ -59,10 +75,16 @@ pub async fn invoke<C>(
             provenance: "?",
             outcome: "notfound".into(),
             ms: t0.elapsed().as_millis(),
+            ask: None,
         });
         return Err(GateError::NotFound(id.to_string()));
     };
     let meta = &entry.meta;
+
+    // Имя вопроса — только у тех вызовов, где вопрос действительно задавали: им
+    // сшиваются строка «спросили» и строка исхода. Отклонённым раньше и
+    // авто-одобренным сшивать нечего, и ключа в журнале у них нет.
+    let mut ask: Option<String> = None;
 
     // фабрика записи аудита с уже известными meta. Аргументы снимаем до инъекции
     // _consumer: в аудите потребитель и так пишется отдельным полем.
@@ -75,6 +97,7 @@ pub async fn invoke<C>(
         provenance: meta.provenance.as_str(),
         outcome,
         ms,
+        ask: None,
     };
 
     // 1. Грант по классу (+ поимённый denylist, напр. audit.query агенту).
@@ -120,12 +143,23 @@ pub async fn invoke<C>(
     //    если ответа не будет никогда). Молча пропускаем только то, что пользователь
     //    сам внёс в авто-одобрение гранта — поимённо, см. Grant::needs_confirm.
     if consumer.grant.needs_confirm(meta.id, meta.class) {
+        ask = Some(next_ask_id());
+        let paired = |outcome: String, ms: u128| AuditEntry { ask: ask.clone(), ..entry_for(outcome, ms) };
+        // Строка «спросили» — ДО ожидания, а не после. Аудит писался по
+        // завершении вызова, и вопрос, убитый перезапуском демона, не оставлял
+        // НИ ОДНОЙ строки: агент получал внятное «демон недоступен», человек —
+        // ничего. Теперь после перезапуска видно и что спрашивали, и что
+        // именно (аргументы тут же), а `asked` без парной строки исхода — это
+        // и есть «спросили и не дождались» (`audit::unanswered`).
+        audit.record(&paired("asked".into(), t0.elapsed().as_millis()));
         let outcome = confirmer.confirm(meta, &args).await;
         if !outcome.allows() {
-            audit.record(&entry_for(outcome.as_str().into(), t0.elapsed().as_millis()));
+            audit.record(&paired(outcome.as_str().into(), t0.elapsed().as_millis()));
             return Err(outcome.gate_error());
         }
     }
+    // Дальше исход — вторая строка той же пары, если вопрос задавали.
+    let entry_for = |outcome: String, ms: u128| AuditEntry { ask: ask.clone(), ..entry_for(outcome, ms) };
 
     // 4. Исполнение — с дедлайном (R3, fail-safe liveness; эффект at-least-once).
     match tokio::time::timeout(cfg.handler_timeout, (entry.handler)(ctx, args.clone())).await {
@@ -295,6 +329,124 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(audit.last().unwrap().outcome, "ok");
+    }
+
+    /// Confirmer, который ждёт снаружи: пока ответа нет, вызов висит на вопросе —
+    /// ровно то состояние, в котором демона и перезапускают.
+    struct Waiter(std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<bool>>>);
+    impl crate::capability::confirm::Confirmer for Waiter {
+        fn confirm<'a>(
+            &'a self,
+            _m: &'a CapabilityMeta,
+            _a: &'a Value,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = super::super::confirm::Outcome> + Send + 'a>>
+        {
+            // приёмник забираем ДО await: замок через ожидание не тащим
+            let rx = self.0.lock().unwrap().take();
+            Box::pin(async move {
+                match rx {
+                    Some(rx) => super::super::confirm::Outcome::decide(rx.await.ok(), true),
+                    None => super::super::confirm::Outcome::Expired,
+                }
+            })
+        }
+    }
+
+    fn confirmed_registry() -> Registry<()> {
+        let mut reg = Registry::new();
+        reg.register(
+            CapabilityMeta {
+                id: "sessions.spawn",
+                class: RiskClass::Control,
+                provenance: Provenance::Trusted,
+                description: "side-effect, спрашивает человека (тест)",
+                input_schema: json!({ "type": "object" }),
+            },
+            make_handler(|_: (), args| async move { Ok(args) }),
+        );
+        reg
+    }
+
+    /// Аудит писался по ЗАВЕРШЕНИИ вызова — и вопрос, убитый перезапуском
+    /// демона, не оставлял ни строки: агент получал внятное «демон недоступен»,
+    /// человек не получал ничего. Строка «спросили» обязана лечь в журнал ДО
+    /// ожидания и пережить смерть ожидания.
+    #[tokio::test]
+    async fn the_question_is_written_down_before_the_answer_and_outlives_the_wait() {
+        let reg = confirmed_registry();
+        let audit = MemAudit::new();
+        let c = Consumer::agent();
+        let (_tx, rx) = tokio::sync::oneshot::channel::<bool>();
+        let waiter = Waiter(std::sync::Mutex::new(Some(rx)));
+        let args = json!({ "agent": "claude", "name": "Сайдбар", "cwd": "/p", "task": "работай" });
+
+        {
+            let fut = invoke(
+                &reg, (), &c, "sessions.spawn", args,
+                &waiter, &audit, GateConfig::default(),
+            );
+            tokio::pin!(fut);
+            // прокручиваем до места, где вызов повис на вопросе
+            tokio::select! {
+                _ = &mut fut => panic!("вызов не имел права закончиться: ответа не было"),
+                _ = tokio::time::sleep(Duration::from_millis(30)) => {}
+            }
+            let asked = audit.last().expect("вопрос задан, а в журнале пусто");
+            assert_eq!(asked.outcome, "asked");
+            assert_eq!(asked.id, "sessions.spawn");
+            assert_eq!(asked.args["task"], "работай", "видно, что именно спрашивали");
+            assert!(asked.ask.is_some(), "вопросу нужно имя: по нему сходится пара");
+            // и вот тут демон умирает — будущее гейта дропается на ожидании
+        }
+        assert_eq!(audit.len(), 1, "смерть ожидания стёрла строку вопроса");
+        assert_eq!(audit.last().unwrap().outcome, "asked", "след остался, и он говорит «спросили»");
+    }
+
+    /// Ответ дошёл — в журнале пара: «спросили» и «чем кончилось», сшитые одним
+    /// именем. Одна строка без другой ничего не доказывает.
+    #[tokio::test]
+    async fn an_answered_question_leaves_a_matching_pair() {
+        let reg = confirmed_registry();
+        let audit = MemAudit::new();
+        let out = invoke(
+            &reg, (), &Consumer::agent(), "sessions.spawn", json!({ "task": "работай" }),
+            &AutoApprove, &audit, GateConfig::default(),
+        )
+        .await
+        .expect("подтверждённый вызов обязан исполниться");
+        assert_eq!(out.value["task"], "работай");
+        let rows = audit.entries.lock().unwrap().clone();
+        assert_eq!(rows.len(), 2, "пара строк: спросили и чем кончилось");
+        assert_eq!(rows[0].outcome, "asked");
+        assert_eq!(rows[1].outcome, "ok");
+        assert_eq!(rows[0].ask, rows[1].ask, "пара не сходится по имени вопроса");
+        assert!(rows[0].ask.is_some());
+        assert_ne!(next_ask_id(), next_ask_id(), "имена вопросов не повторяются");
+
+        // «спросили и не дождались» отличимо машиной, а не только глазами
+        let json_rows: Vec<Value> = rows.iter().map(|r| r.to_json()).collect();
+        assert!(crate::capability::audit::unanswered(&json_rows).is_empty(), "вопрос ответили");
+        assert_eq!(
+            crate::capability::audit::unanswered(&json_rows[..1]).len(),
+            1,
+            "убитое ожидание обязано находиться"
+        );
+    }
+
+    /// Вызов, который человека не спрашивает, лишней строки не пишет: `asked` —
+    /// про вопрос, а не про каждый вызов.
+    #[tokio::test]
+    async fn a_call_without_a_question_writes_one_line() {
+        let audit = MemAudit::new();
+        invoke(
+            &echo_registry(), (), &Consumer::custom("plugin:test", &[RiskClass::Read], ConfirmPolicy::Never),
+            "test.echo", json!({ "x": 1 }), &AutoApprove, &audit, GateConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit.last().unwrap().outcome, "ok");
+        assert!(audit.last().unwrap().ask.is_none(), "вопроса не было — имени тоже");
     }
 
     #[tokio::test]

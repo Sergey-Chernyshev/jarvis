@@ -1491,8 +1491,19 @@ pub fn budget_refusal(provider: &str, rep: &Value, bg: bool) -> Option<String> {
     }
     let num = |k: &str| p.get(k).and_then(Value::as_f64).unwrap_or(0.0);
     let reset = p.get("weekResetAt").and_then(Value::as_i64).unwrap_or(0);
+    // Списанное вперёд называем числом: иначе «осталось 20%» и отказ выглядят
+    // враньём, а человек не понимает, что стену сделал его же залп запусков.
+    let held = if num("reservedPct") > 0.0 {
+        format!(
+            " (из них {:.1}% придержано под уже разрешённую работу, броней: {})",
+            num("reservedPct"),
+            p.get("reservedCount").and_then(Value::as_i64).unwrap_or(0)
+        )
+    } else {
+        String::new()
+    };
     let mut out = format!(
-        "бюджет {provider}: {}. Осталось {:.1}% недели при резерве {:.1}%, сброс через {} — {}",
+        "бюджет {provider}: {}. Осталось {:.1}% недели{held} при резерве {:.1}%, сброс через {} — {}",
         p.get("reason").and_then(Value::as_str).unwrap_or("ступень без причины"),
         num("weekLeftPct"),
         num("reservePct"),
@@ -1519,18 +1530,51 @@ pub fn budget_refusal(provider: &str, rep: &Value, bg: bool) -> Option<String> {
     Some(out)
 }
 
-/// Обязательный свежий запрос перед дорогой работой — и отказ словами, если
-/// ступень говорит «стоп». Молча упереться в бюджет нельзя: числа и время
-/// сброса обязаны дойти и до агента, и до человека.
-pub async fn budget_gate(d: &Arc<Daemon>, agent: &str, bg: bool, why: &str) -> Result<(), String> {
+/// Обязательный свежий запрос перед дорогой работой, бронь ожидаемого расхода и
+/// отказ словами, если ступень говорит «стоп». Молча упереться в бюджет нельзя:
+/// числа и время сброса обязаны дойти и до агента, и до человека.
+///
+/// Ожидаемая стоимость списывается ДО проверки, а не после: между «посмотрел
+/// остаток» и «потратил» помещается сколько угодно других запусков — ровно
+/// поэтому залп и проходил целиком. Списав сначала, каждый вызывающий видит в
+/// остатке хотя бы себя, а брони копятся, а не теряются.
+///
+/// Бронь надо ВЕРНУТЬ, если работа так и не началась (`Reservation::release`) —
+/// иначе бюджет протечёт вниз и начнёт врать в другую сторону. Отказ здесь
+/// возвращает её сам.
+pub async fn budget_reserve(
+    d: &Arc<Daemon>,
+    agent: &str,
+    model: Option<&str>,
+    bg: bool,
+    why: &str,
+) -> Result<crate::budget::Reservation, String> {
     let Some(provider) = budget_provider(agent) else {
-        return Ok(());
+        // У codex подписки в бюджете нет — держать нечего и отказывать не за что.
+        return Ok(crate::budget::Reservation::none());
     };
     crate::budget::ensure_fresh(d, BUDGET_FRESH_MS, why).await;
+    let hold = crate::budget::reserve(
+        provider,
+        crate::budget::expected_pct(provider, model),
+        why,
+        now_ms(),
+    );
     match budget_refusal(provider, &crate::budget::report(d), bg) {
-        Some(text) => Err(text),
-        None => Ok(()),
+        Some(text) => {
+            hold.release(); // отказали — работа не началась, держать нечего
+            Err(text)
+        }
+        None => Ok(hold),
     }
+}
+
+/// Тот же гейт для вызывающих, которым нечего возвращать: ход уходит сразу и
+/// «не началось» у них не бывает. Сигнатуру знают чужие файлы — не менять.
+pub async fn budget_gate(d: &Arc<Daemon>, agent: &str, bg: bool, why: &str) -> Result<(), String> {
+    budget_reserve(d, agent, None, bg, why)
+        .await
+        .map(crate::budget::Reservation::in_flight)
 }
 
 /// Машины, на которых можно работать: эта плюс настроенные узлы.
@@ -5080,6 +5124,21 @@ mod turn_ipc_tests {
         assert!(e.contains("ночной потолок"), "{e}");
         assert!(e.contains("70.0"), "70% остатка — а всё равно стоп: {e}");
         assert!(e.contains(crate::budget::BUFFER_REASON), "буфер ночью недоступен: {e}");
+    }
+
+    /// Стену сделал залп собственных запусков — отказ обязан это сказать
+    /// числом: «осталось 20%» и молчаливый отказ выглядят враньём.
+    #[test]
+    fn a_wall_made_of_reservations_says_so() {
+        let mut rep = budget_rep("stop", "резерв начал расходоваться", 20.0, false);
+        rep["providers"]["claude"]["reservedPct"] = json!(6.5);
+        rep["providers"]["claude"]["reservedCount"] = json!(13);
+        let e = budget_refusal("claude", &rep, false).expect("стоп обязан отказать");
+        assert!(e.contains("6.5") && e.contains("13"), "про придержанное молчат: {e}");
+        assert!(e.contains("придержано"), "{e}");
+        // а без броней текст прежний — лишних скобок в обычном отказе нет
+        let plain = budget_refusal("claude", &budget_rep("stop", "резерв", 20.0, false), false).unwrap();
+        assert!(!plain.contains("придержано"), "{plain}");
     }
 
     /// Молчание добытчика — не стена: `unknown` работу не рвёт, а у codex своей

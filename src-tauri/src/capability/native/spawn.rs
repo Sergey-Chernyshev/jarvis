@@ -375,7 +375,19 @@ async fn spawn_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
     // обязаны быть свежими, а не пятиминутными из кэша. Сессий может быть
     // сколько угодно — единственная стена здесь эта, и она про деньги: ступень
     // «стоп» (в том числе от ночного потолка расхода) отказывает вот тут.
-    crate::ipc::budget_gate(&d, plan.agent.label(), false, "запуск сессии sessions.spawn").await?;
+    //
+    // Гейт списывает ОЖИДАЕМУЮ стоимость сразу: расход поднятой сессии доедет до
+    // чисел провайдера через минуты, а залп из двадцати запусков случается за
+    // секунду. Модель называем — opus стоит впятеро против sonnet, и бронь
+    // обязана это знать. Вернуть бронь — ниже, если сессия не поднимется.
+    let hold = crate::ipc::budget_reserve(
+        &d,
+        plan.agent.label(),
+        plan.model.as_deref(),
+        false,
+        "запуск сессии sessions.spawn",
+    )
+    .await?;
 
     // Талон заводим ДО запуска: он и есть тот id, который вернётся вызывающему.
     let ticket = d.spawns.open(&by, parent.clone(), &plan, now);
@@ -405,9 +417,14 @@ async fn spawn_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
 
     if res.get("ok").and_then(Value::as_bool) != Some(true) {
         // Терминал не открылся — талона не за что держать: сессии не будет.
+        // И бронь возвращаем тут же: расхода, под который её списали, не
+        // случится, а невозвращённая бронь врёт вниз ничуть не лучше, чем
+        // отсутствие брони врало вверх.
         d.spawns.give_up(&ticket);
+        hold.release();
         return Ok(res);
     }
+    hold.in_flight(); // сессия пошла — бронь доживает лизу и уступает место факту
     crate::log::line(&format!(
         "[spawn] {by} поднял «{}» ({}) в {} — талон {ticket}",
         plan.name,
@@ -687,11 +704,31 @@ mod tests {
             .nth(1)
             .and_then(|t| t.split("launch_core").next())
             .expect("хендлер запуска на месте");
-        assert!(body.contains("budget_gate("), "перед запуском бюджет не спрашивается");
+        assert!(body.contains("budget_reserve("), "перед запуском бюджет не спрашивается");
         assert!(
-            body.find("budget_gate(").unwrap() > body.find("preflight(").unwrap(),
+            body.find("budget_reserve(").unwrap() > body.find("preflight(").unwrap(),
             "гейт бюджета обязан идти после проверок: агента ещё не знают"
         );
+        // Гейт списывает ОЖИДАЕМЫЙ расход вперёд — залп из двадцати запусков
+        // иначе читает один и тот же остаток и проходит целиком. Модель ему
+        // называют: opus стоит впятеро против sonnet.
+        assert!(body.contains("plan.model.as_deref()"), "бронь не знает модель: {body}");
+    }
+
+    /// Сессия не поднялась — бронь возвращается тут же. Невозвращённая бронь
+    /// врёт вниз ничуть не лучше, чем её отсутствие врало вверх: остановит
+    /// работу, которой ничто не мешает.
+    #[test]
+    fn a_failed_launch_gives_the_reservation_back() {
+        let src = include_str!("spawn.rs");
+        let tail = src
+            .split("async fn spawn_handler")
+            .nth(1)
+            .and_then(|t| t.split("launch_core").nth(1))
+            .expect("хендлер запуска на месте");
+        let fail = tail.split("give_up(&ticket);").nth(1).expect("ветка неудачи на месте");
+        let fail = fail.split("return Ok(res);").next().unwrap_or_default();
+        assert!(fail.contains("hold.release()"), "бронь осталась висеть после неудачи: {fail}");
     }
 
     /// Потолка на ЧИСЛО одновременных сессий нет ни в одной форме — ни ключом

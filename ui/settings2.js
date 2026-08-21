@@ -880,7 +880,7 @@
     { pane: 'general', label: 'Основное', icon: 'settings', ic: 'gray', find: 'хоткей панель позиция автозапуск логи диагностика метрики' },
     { pane: 'look', label: 'Вид', icon: 'palette', ic: 'green', find: 'тема тёмная светлая краска цвет акцент масштаб плотность скругление окно накладка' },
     { pane: 'remotes', label: 'Удалённые', icon: 'server', ic: 'teal', find: 'узел vps ssh сервер удалённая машина' },
-    { pane: 'agents', label: 'Агенты', icon: 'terminal', ic: 'violet', find: 'claude codex kimi свой cli доверие подтверждение' },
+    { pane: 'agents', label: 'Агенты', icon: 'terminal', ic: 'violet', find: 'claude codex kimi свой cli доверие подтверждение разрешено без спроса права гранты автоодобрение подъём сессий spawn' },
     { pane: 'stt', label: 'Голосовой ввод', icon: 'mic', ic: 'blue', find: 'диктовка распознавание whisper qwen движок микрофон шумодав vad модели' },
     { pane: 'voice', label: 'Голос', icon: 'volume-2', ic: 'green', find: 'озвучка синтез silero диктор скорость без звука bluetooth' },
     { pane: 'wake', label: 'Пробуждение', icon: 'mic', ic: 'blue', find: 'hey jarvis wake word активация по фразе порог openwakeword' },
@@ -2661,27 +2661,100 @@
     paintRemoteWiz(box);
   }
 
-  /* Доверие агент-чату: поимённый список капабилити, которые гейт пропускает без
-   * карточки подтверждения (settings.grants.agent.autoApprove). Пусто — спрашиваем
-   * про всё, как раньше; тумблер ведает ровно одним id, остальное правится файлом. */
+  /* Разрешено без спроса: поимённый список капабилити, которые гейт пропускает
+   * без карточки подтверждения (settings.grants.agent.autoApprove).
+   *
+   * Тумблеров ровно два, и это не лень. Авто-одобрение снимает вопрос, а не
+   * добавляет прав, поэтому в переключатели попадает только обратимое и уже
+   * ограниченное вторым механизмом: запись в живую сессию и подъём новой (её
+   * держат sessionsSpawnMax и бюджет). Разложить остальные два десятка id
+   * чекбоксами — значит предложить раздать необратимое одним движением, ради
+   * чего гейт и писали. Правкой файла редкий id всё ещё добавляется: он виден
+   * в списке ниже и снимается кнопкой, а не поиском по settings.json. */
   const TRUST_REPLY = 'sessions.reply';
+  const TRUST_TOGGLES = [
+    { id: TRUST_REPLY, title: 'Писать в сессии без подтверждения',
+      desc: 'Промпт из чата уходит в сессию сразу, без карточки «разрешить». '
+        + 'Риск: текст, который агент где-то прочитал (письмо, страница, чужой репозиторий), '
+        + 'уйдёт промптом в сессию с доступом к твоим файлам. Остальные действия агент по-прежнему спрашивает.' },
+    { id: 'sessions.spawn', title: 'Поднимать сессии без подтверждения',
+      desc: 'Агент сам открывает новую сессию CLI (claude / kimi / codex) под задачу и сразу отдаёт ей первый промпт. '
+        + 'Риск: каждая сессия — это деньги и отдельный процесс с доступом к каталогу, который выбрал агент, а не ты.' },
+  ];
+  // Человеческие имена для списка: id из файла может быть любым — тогда покажем как есть.
+  const TRUST_LABELS = {
+    'sessions.reply': 'Писать в сессии',
+    'sessions.spawn': 'Поднимать новые сессии',
+    'sessions.close': 'Закрывать свои дочерние сессии',
+    'sessions.control': 'Управлять сессией (стоп, ответ на вопрос)',
+    'sessions.rename': 'Переименовывать сессии',
+    'settings.set': 'Менять настройки',
+    'entities.publish': 'Публиковать сущности',
+  };
+
   async function renderAgentTrust(pane) {
     const s = await safe(() => window.jarvis.getSettings(), {});
     const grants = s.grants || {};
-    const auto = ((grants.agent || {}).autoApprove) || [];
-    pane.appendChild(el('div.dsection', { text: 'Чат с агентом' }));
+    const raw = (grants.agent || {}).autoApprove;
+    const auto = Array.isArray(raw) ? raw.filter((x) => typeof x === 'string') : [];
+    const spawnMax = Number(s.sessionsSpawnMax) > 0 ? Number(s.sessionsSpawnMax) : 4;
+
+    // Отказ записи виден человеку: гейт закрывает ключ grants, и «не сохранилось»
+    // молча — это тумблер, который врёт про права до самого перезапуска.
+    const errLine = el('div.s2err.s2trust-err', { style: 'display:none;margin:-16px 2px 20px' }, [
+      el('span.s2err-ic', null, icon('alert-triangle')),
+      el('span.s2err-txt'),
+    ]);
+    async function writeAuto(next) {
+      errLine.style.display = 'none';
+      const agent = Object.assign({}, grants.agent, { autoApprove: next });
+      // settings мержит только верхний уровень — шлём весь объект grants целиком
+      const r = await safe(() => window.jarvis.setSettings({ grants: Object.assign({}, grants, { agent }) }), null);
+      if (!r || r.ok === false) {
+        errLine.querySelector('.s2err-txt').textContent = (r && r.error) || 'права не сохранились';
+        errLine.style.display = '';
+        return false;
+      }
+      reRenderPane('agents'); // список обязан совпасть с тем, что реально записалось
+      return true;
+    }
+
+    pane.appendChild(el('div.dsection', { text: 'Разрешено без спроса' }));
     const group = el('div.dgroup');
-    group.appendChild(drow('Писать в сессии без подтверждения',
-      'Промпт из чата уходит в сессию сразу, без карточки «разрешить». '
-      + 'Риск: текст, который агент где-то прочитал (письмо, страница, чужой репозиторий), '
-      + 'уйдёт промптом в сессию с доступом к твоим файлам. Остальные действия агент по-прежнему спрашивает.',
-      toggle(auto.indexOf(TRUST_REPLY) >= 0, (on) => {
-        const next = auto.filter((x) => x !== TRUST_REPLY).concat(on ? [TRUST_REPLY] : []);
-        const agent = Object.assign({}, grants.agent, { autoApprove: next });
-        // settings мержит только верхний уровень — шлём весь объект grants целиком
-        fire(() => window.jarvis.setSettings({ grants: Object.assign({}, grants, { agent }) }));
-      })));
+    for (const c of TRUST_TOGGLES) {
+      const tg = toggle(auto.indexOf(c.id) >= 0, async (on) => {
+        const next = auto.filter((x) => x !== c.id).concat(on ? [c.id] : []);
+        if (!(await writeAuto(next))) tg.checked = !on;
+      });
+      group.appendChild(drow(c.title, c.desc, tg));
+    }
+    group.appendChild(drow('Разрешение без спроса не означает разрешение молча',
+      'Потолок одновременных сессий — ' + spawnMax + ' (sessionsSpawnMax; агенту на запись закрыт): упрётся — получит отказ, а не карточку. '
+      + 'Бюджет и лестница порогов считаются перед каждым запуском, ночной потолок — отдельно и раньше дневного. '
+      + 'Каждый вызов виден строкой в чате агента и пишется в аудит и ~/.jarvis/jarvis.log. '
+      + 'Прав этот список не даёт: класс капабилити, поимённый запрет (аудит, микрофон) и security-ключи проверяются до него.',
+      []));
     pane.appendChild(group);
+    pane.appendChild(errLine); // отказ — рядом с тем, что его вызвало, а не в конце вкладки
+
+    pane.appendChild(el('div.dsection', { text: 'сейчас в списке' }));
+    const list = el('div.dgroup.s2trust-list');
+    if (!auto.length) {
+      list.appendChild(drow('Пока ничего', 'Каждое действие с последствиями агент спрашивает карточкой.', []));
+    }
+    for (const id of auto) {
+      list.appendChild(drow(TRUST_LABELS[id] || id,
+        TRUST_LABELS[id] ? id : id + ' — не из списка известных, добавлено правкой settings.json',
+        button('Убрать', () => writeAuto(auto.filter((x) => x !== id)), 'sm')));
+    }
+    // sessions.close карточки не просит и без списка (SELF_LIMITED в гейте) —
+    // молчать об этом нельзя: иначе «подъём разрешён, закрытие нет» читается как
+    // приглашение копить брошенные сессии.
+    list.appendChild(drow('Закрывать свои дочерние сессии — всегда',
+      'sessions.close спрашивать нечего: погасить можно только то, что агент поднял сам, '
+      + 'а разрешений там ровно столько, сколько уже дали на запуск. Твою и чужую сессию он не закроет — придёт отказ.',
+      []));
+    pane.appendChild(list);
   }
 
   /* 1d. Агенты (agents) — доверие агент-чату и свои CLI помимо claude и codex.

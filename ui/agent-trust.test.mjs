@@ -13,7 +13,7 @@ import { parseHTML } from 'linkedom';
 const read = (name) => readFileSync(new URL(name, import.meta.url), 'utf8');
 
 /** Панель настроек в живом DOM; calls — что уехало в мост. */
-async function boot(settings = {}) {
+async function boot(settings = {}, reply = { ok: true }) {
   const { window, document } = parseHTML('<html><body><div id="root"></div></body></html>');
   const calls = [];
   window.jarvis = {
@@ -21,7 +21,7 @@ async function boot(settings = {}) {
     getMeta: async () => ({ version: 'test' }),
     hotkeyBindings: async () => ({ ok: true, bindings: [] }),
     agentsList: async () => ({ ok: true, agents: [], presets: [] }),
-    setSettings: (patch) => { calls.push(['setSettings', patch]); return Promise.resolve({ ok: true }); },
+    setSettings: (patch) => { calls.push(['setSettings', patch]); return Promise.resolve(reply); },
   };
   for (const name of ['keys.js', 'settings2.js']) {
     const fn = new Function('window', 'document', 'globalThis', 'setTimeout', 'clearTimeout', read(name));
@@ -73,4 +73,101 @@ test('строка честно называет риск, а не «ускор�
   const desc = row.querySelector('.dd').textContent;
   assert.match(desc, /Риск/, 'риск не назван');
   assert.match(desc, /файл/, 'не сказано, куда уйдёт прочитанный агентом текст');
+});
+
+/* ── Подъём сессий без спроса ──────────────────────────────────────────── */
+
+const SPAWN = 'Поднимать сессии без подтверждения';
+const settle = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0)); };
+const patches = (calls) => calls.filter(([c]) => c === 'setSettings').map(([, p]) => p);
+
+test('тумблер подъёма сессий добавляет sessions.spawn рядом с уже разрешённым', async () => {
+  const { document, window, calls } = await boot({ grants: { agent: { autoApprove: ['sessions.reply'] } } });
+  const t = toggleFor(document, SPAWN);
+  assert.equal(t.checked, false, 'по умолчанию подъём со спросом');
+  t.checked = true;
+  t.dispatchEvent(new window.Event('change', { bubbles: true }));
+  assert.deepEqual(patches(calls)[0],
+    { grants: { agent: { autoApprove: ['sessions.reply', 'sessions.spawn'] } } });
+});
+
+test('тумблер подъёма отражает настройки и выключается обратно', async () => {
+  const { document, window, calls } = await boot({ grants: { agent: { autoApprove: ['sessions.spawn'] } } });
+  const t = toggleFor(document, SPAWN);
+  assert.equal(t.checked, true, 'разрешение из settings.json не отражено');
+  t.checked = false;
+  t.dispatchEvent(new window.Event('change', { bubbles: true }));
+  assert.deepEqual(patches(calls)[0], { grants: { agent: { autoApprove: [] } } });
+});
+
+/* Список — весь, а не только то, на что есть тумблер: id, дописанный в файл
+ * руками, иначе оставался бы невидимым разрешением. */
+test('список показывает всё разрешённое, включая id без тумблера', async () => {
+  const { document } = await boot({ grants: { agent: { autoApprove: ['sessions.reply', 'tasks.get'] } } });
+  const rows = [...document.querySelectorAll('#s2-pane-agents .s2trust-list .drow')];
+  const titles = rows.map((r) => (r.querySelector('.dt') || {}).textContent);
+  assert.equal(titles.includes('Писать в сессии'), true, 'разрешённое не показано: ' + titles.join(' | '));
+  assert.equal(titles.includes('tasks.get'), true, 'id из файла не виден в списке');
+  const text = document.querySelector('#s2-pane-agents .s2trust-list').textContent;
+  assert.match(text, /правкой settings\.json/, 'про происхождение чужого id не сказано');
+});
+
+test('пустой список говорит словами, а не пустотой', async () => {
+  const { document } = await boot({});
+  const text = document.querySelector('#s2-pane-agents .s2trust-list').textContent;
+  assert.match(text, /Пока ничего/, 'пустой список молчит');
+});
+
+test('снятие разрешения — одно нажатие «Убрать»', async () => {
+  const { document, window, calls } = await boot({
+    grants: { agent: { autoApprove: ['sessions.spawn', 'sessions.reply'] } },
+  });
+  const row = [...document.querySelectorAll('#s2-pane-agents .s2trust-list .drow')]
+    .find((r) => (r.querySelector('.dt') || {}).textContent === 'Поднимать новые сессии');
+  assert.ok(row, 'строки sessions.spawn нет в списке');
+  const btn = row.querySelector('button.btn');
+  assert.ok(btn, 'снять разрешение нечем');
+  btn.dispatchEvent(new window.Event('click', { bubbles: true }));
+  assert.deepEqual(patches(calls)[0], { grants: { agent: { autoApprove: ['sessions.reply'] } } });
+});
+
+/* Ключ grants закрыт гейтом, и отказ записи здесь — не абстракция: тумблер,
+ * который молча остался включённым, врёт про права до самого перезапуска. */
+test('отказ записи виден человеку, а тумблер возвращается назад', async () => {
+  const reason = 'Права не сохранены: нет доступа к ~/.jarvis/settings.json';
+  const { document, window } = await boot({}, { ok: false, error: reason });
+  const t = toggleFor(document, SPAWN);
+  t.checked = true;
+  t.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await settle();
+
+  const err = document.querySelector('#s2-pane-agents .s2trust-err');
+  assert.ok(err, 'места под отказ нет');
+  assert.equal(err.style.display, '', 'плашка отказа спрятана');
+  assert.equal(err.textContent.includes(reason), true, 'причина отказа проглочена: ' + err.textContent);
+  assert.equal(t.checked, false, 'тумблер остался включённым, хотя права не записались');
+});
+
+/* Разрешение без спроса — не разрешение молча: ограничители названы поимённо. */
+test('рядом с разрешением перечислено то, что остаётся в силе', async () => {
+  const { document } = await boot({ sessionsSpawnMax: 7 });
+  const text = document.querySelector('#s2-pane-agents').textContent;
+  assert.match(text, /sessionsSpawnMax/, 'про потолок одновременных сессий не сказано');
+  assert.match(text, /7/, 'потолок из настроек не показан');
+  assert.match(text, /Бюджет и лестница порогов/, 'про бюджет и пороги не сказано');
+  assert.match(text, /ночной потолок/, 'про ночные правила не сказано');
+  assert.match(text, /аудит/, 'про запись в лог не сказано');
+});
+
+/* sessions.close уже в SELF_LIMITED гейта: отдельный тумблер там не нужен, но
+ * молчать нельзя — иначе «поднимать можно, закрывать нет» читается как мусор. */
+test('закрытие своих дочерних сессий показано как разрешённое всегда', async () => {
+  const { document } = await boot({});
+  const titles = [...document.querySelectorAll('#s2-pane-agents .drow .dt')].map((n) => n.textContent);
+  assert.equal(titles.filter((t) => /Закрывать свои дочерние сессии/.test(t)).length, 1,
+    'про sessions.close не сказано: ' + titles.join(' | '));
+  const row = [...document.querySelectorAll('#s2-pane-agents .drow')]
+    .find((r) => /Закрывать свои дочерние сессии/.test((r.querySelector('.dt') || {}).textContent || ''));
+  assert.equal(row.querySelectorAll('input.toggle').length, 0, 'у sessions.close завёлся лишний тумблер');
+  assert.match(row.querySelector('.dd').textContent, /поднял сам/, 'причина «всегда» не объяснена');
 });

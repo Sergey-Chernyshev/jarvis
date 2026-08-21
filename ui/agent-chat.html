@@ -292,6 +292,14 @@
   .cbtn.no{ background: var(--accent-soft); color: var(--ink); box-shadow:none }
   .cbtn:hover{ filter: brightness(1.04) }
   .cresult{ margin-top:8px; font-size:12.5px; color: var(--ink-mute) }
+
+  /* Остановленный ход. Пришедшее остаётся в ленте — и помечено, иначе
+     оборванный ответ не отличить от полного; краска беды тут единственная
+     уместная, и она же у кнопки «стоп». Строка «факт · выход» одна на всё:
+     живая дочерняя сессия и остановленная цепочка обе кончаются действием */
+  .stopmark{ font-size:11.5px; color: var(--danger) }
+  .stoprow{ display:flex; align-items:center; gap:8px; margin-top:6px }
+  .stopname{ flex:1; min-width:0; font-size:13px; color: var(--ink-mute); overflow-wrap:anywhere }
   .hint{ color: var(--ink-faint); text-align:center; font-size:13px; margin:auto; line-height:1.7; max-width:340px }
 
   /* поле ответа — нижняя полоска панели */
@@ -315,6 +323,15 @@
   }
   #send:hover{ filter: brightness(1.06) }
   #send:disabled{ opacity:.45 }
+  /* «Стоп» встаёт рядом с отправкой ровно на время хода: клавиша не должна
+     быть единственным способом прервать работу */
+  .agstop{
+    flex:0 0 auto; width:44px; height:40px; border-radius: var(--r-card); border:0;
+    background: var(--danger); color: var(--on-accent); font-size:12px; cursor:default;
+    transition: filter var(--dur) ease;
+  }
+  .agstop[hidden]{ display:none }
+  .agstop:hover{ filter: brightness(1.06) }
 </style>
 </head>
 <body>

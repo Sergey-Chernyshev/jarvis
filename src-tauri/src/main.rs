@@ -267,6 +267,7 @@ fn main() {
             ipc::agent_chain_state,
             ipc::agent_chain_mode,
             ipc::agent_chain_stop,
+            ipc::agent_stop,
             ipc::agent_chain_watch,
             ipc::agent_chain_send,
             ipc::terminal_focus,

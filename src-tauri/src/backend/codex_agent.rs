@@ -8,7 +8,7 @@
 use serde_json::Value;
 use std::path::PathBuf;
 
-use crate::agent::AgentEvent;
+use crate::agent::{stop, AgentEvent};
 
 /// Итог разбора одной строки `codex exec --json`.
 #[derive(Debug, PartialEq)]
@@ -164,6 +164,9 @@ impl CodexCliHost {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
+            // Своя группа — чтобы «стоп» дошёл и до детей codex (jarvis-mcp):
+            // осиротев, они пережили бы ход.
+            .process_group(0)
             .spawn()
         {
             Ok(c) => c,
@@ -180,12 +183,28 @@ impl CodexCliHost {
         };
         let mut reader = BufReader::new(stdout).lines();
         let mut saved = crate::agent::chat_book(&self.app).session_of(&self.chat_id);
+        // Ручка остановки: без неё Esc снаружи до этого процесса не дотянется.
+        let gate = stop::StopGate::new(&self.chat_id);
         let mut finished = false; // дошло ли до Done/Failed
-        while let Ok(Some(line)) = reader.next_line().await {
+        loop {
+            let line = match stop::next_line(&mut reader, &gate).await {
+                stop::Next::Line(l) => l,
+                stop::Next::End => break,
+                // Человек нажал «стоп»: убиваем процесс с детьми и выходим
+                // молча — пометку в ленту ставит команда остановки.
+                stop::Next::Stopped => {
+                    stop::kill_tree(&mut child).await;
+                    crate::log::line(&format!(
+                        "[codex-agent] ход чата {} остановлен человеком",
+                        self.chat_id
+                    ));
+                    return;
+                }
+            };
             match classify_codex_line(&line) {
                 CodexLine::Kill(msg) => {
                     crate::log::line(&format!("[codex-agent] {msg}"));
-                    let _ = child.kill().await;
+                    stop::kill_tree(&mut child).await;
                     // Нарушение изоляции — тоже итог хода, и человек должен его
                     // увидеть: без события окно ждёт ответа, которого не будет.
                     self.fail(&msg);

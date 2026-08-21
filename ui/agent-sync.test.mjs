@@ -72,6 +72,7 @@ async function bootWindow(bus) {
         if (cmd === 'agent_history_hide') return AFTER_HIDE;
         if (cmd === 'agent_history_forget') return AFTER_FORGET;
         if (cmd === 'agent_chats_list' || cmd === 'agent_chat_open' || cmd === 'agent_history_unhide_all') return BOOK;
+        if (cmd === 'agent_stop') return { ok: true, stopped: true, chatId: (args || {}).chatId, children: [] };
         return { ok: true };
       },
     },
@@ -109,6 +110,9 @@ async function bootTab(bus) {
     agentHistoryUnhideAll: async () => rec('agent_history_unhide_all', undefined, BOOK),
     agentHistoryForget: async (sessionId) => rec('agent_history_forget', sessionId, AFTER_FORGET),
     agentSend: async () => ({ ok: true }),
+    agentStop: async (chatId) => rec('agent_stop', chatId, { ok: true, stopped: true, chatId, children: [] }),
+    agentChainState: async () => ({ ok: true, state: { active: false, mode: 'ask' } }),
+    agentChainMode: async () => ({ ok: true }),
     agentConfirm: async () => ({ ok: true }),
     onAgentEvent: (cb) => bus.listen('agent:event', (e) => cb(e.payload)),
     onAgentConfirm: (cb) => bus.listen('agent:confirm', (e) => cb(e.payload)),
@@ -273,6 +277,45 @@ test('занятый разговор помечен и во вкладке, и 
   await bus.emit('agent:event', { type: 'done', result: 'готово', chatId: 'c2' });
   for (const s of surfaces) {
     assert.equal(s.chats.querySelectorAll('.agchat.busy').length, 0, 'занятость висит на закончившем разговоре');
+  }
+});
+
+/* Остановка хода — тоже про оба входа. Разметки у вкладки и окна две, и кнопку
+ * «стоп» ставит код: нарисованная в одной из них, она оставила бы второй вход с
+ * единственной клавишей — а её ещё надо знать. */
+test('ход останавливают и во вкладке, и в окне — кнопкой и клавишей', async () => {
+  const bus = makeBus();
+  const surfaces = [await bootTab(bus), await bootWindow(bus)];
+  for (const s of surfaces) {
+    const btn = s.msgs.ownerDocument.querySelector('.agstop');
+    assert.ok(btn, 'кнопки «стоп» нет вовсе');
+    assert.equal(btn.hidden, true, 'кнопка обещает остановку, когда останавливать нечего');
+  }
+
+  await bus.emit('agent:event', { type: 'delta', text: 'половина ответа', chatId: 'c1' });
+  for (const s of surfaces) {
+    assert.equal(s.msgs.ownerDocument.querySelector('.agstop').hidden, false, 'мышью ход не остановить');
+  }
+
+  // во вкладке — клавишей (вкладка на экране: спрятанной ей Esc не адресован),
+  // в окне — кнопкой: оба способа обязаны кончаться одним и тем же
+  const tabDoc = surfaces[0].msgs.ownerDocument;
+  tabDoc.getElementById('agentPane').removeAttribute('hidden');
+  const esc = new surfaces[0].window.Event('keydown', { bubbles: true });
+  esc.key = 'Escape';
+  esc.preventDefault = () => {};
+  tabDoc.dispatchEvent(esc);
+  surfaces[1].msgs.ownerDocument.querySelector('.agstop')
+    .dispatchEvent(new surfaces[1].window.Event('click', { bubbles: true }));
+  await tick();
+  await tick();
+
+  for (const s of surfaces) {
+    assert.equal(s.did('agent_stop').length, 1, 'остановка не уехала ядру');
+    const doc = s.msgs.ownerDocument;
+    assert.equal(doc.querySelectorAll('.stopmark').length, 1, 'оборванный ответ не помечен');
+    assert.match(s.msgs.textContent, /половина ответа/, 'пришедшее стёрли вместе с ходом');
+    assert.equal(doc.querySelector('.agstop').hidden, true, 'кнопка осталась после конца хода');
   }
 });
 

@@ -13,6 +13,7 @@ use serde_json::Value;
 pub mod assistant;
 pub mod chain;
 pub mod history;
+pub mod stop;
 
 // ── Структуры событий ──────────────────────────────────────────────────────
 
@@ -31,6 +32,10 @@ pub enum AgentEvent {
     /// Агент не ответил: `--resume` в никуда, обрыв процесса, нарушенный инвариант.
     /// `lost_session` — прошлого разговора больше нет, сохранённый id пора забыть.
     Failed { message: String, lost_session: bool },
+    /// Ход оборван человеком. Пришедшее до этого мига остаётся в ленте — событие
+    /// только ставит на нём пометку и называет дочерние сессии, которые мы
+    /// намеренно не трогали: там идёт работа, за которую заплачено.
+    Stopped { by: String, children: Vec<stop::Child> },
     /// Неизвестный / неинтересный тип события — игнорируется.
     Other,
 }
@@ -907,6 +912,9 @@ impl ClaudeCliHost {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
+            // Своя группа процессов — чтобы «стоп» дошёл и до детей claude
+            // (jarvis-mcp и прочих): осиротев, они пережили бы ход.
+            .process_group(0)
             .spawn()
         {
             Ok(c) => c,
@@ -932,17 +940,33 @@ impl ClaudeCliHost {
         let mut saved = chat_book(&app).session_of(&self.chat_id);
         // Пока ход идёт, транскрипт нельзя удалять из-под хоста: он в него пишет.
         let mut mark = TurnMark::new(resume);
+        // Ручка остановки: без неё Esc снаружи до этого процесса не дотянется.
+        let gate = stop::StopGate::new(&self.chat_id);
         let mut finished = false; // дошло ли до Done/Failed
 
-        while let Ok(Some(line)) = reader.next_line().await {
+        loop {
+            let line = match stop::next_line(&mut reader, &gate).await {
+                stop::Next::Line(l) => l,
+                stop::Next::End => break,
+                // Человек нажал «стоп»: сначала убиваем процесс с детьми, потом
+                // выходим молча. Пометку в ленту ставит команда остановки, а
+                // «оборвался без ответа» здесь было бы враньём.
+                stop::Next::Stopped => {
+                    stop::kill_tree(&mut child).await;
+                    let id = &self.chat_id;
+                    crate::log::line(&format!("[agent] ход чата {id} остановлен человеком"));
+                    return;
+                }
+            };
             let parsed = parse_stream_line(&line);
             for ev in parsed {
                 // INV-TOOLS: проверяем первое Init-событие
                 if let AgentEvent::Init { ref tools, .. } = ev {
                     if let Err(msg) = inv_tools_ok(tools) {
                         crate::log::line(&format!("[agent] {msg}"));
-                        // Убиваем процесс (kill_on_drop = true; явный kill для надёжности)
-                        let _ = child.kill().await;
+                        // Убиваем процесс с детьми и дожидаемся трупа: одного
+                        // kill_on_drop мало — он не ждёт и не знает про группу.
+                        stop::kill_tree(&mut child).await;
                         self.fail(&msg);
                         return;
                     }
@@ -1776,7 +1800,36 @@ mod tests {
             AgentEvent::Done { result: "готово".into(), session_id: "s-1".into() },
             AgentEvent::Failed { message: "агент оборвался".into(), lost_session: true },
             AgentEvent::Failed { message: "claude не найден".into(), lost_session: false },
+            AgentEvent::Stopped {
+                by: "user".into(),
+                children: vec![stop::Child {
+                    id: "s-2".into(),
+                    name: "Сайдбар".into(),
+                    agent: "claude".into(),
+                }],
+            },
         ]
+    }
+
+    /// Пометка «остановлено вами» — обычное событие потока: та же метка чата, та
+    /// же форма. Окно кладёт её в ленту, ничего оттуда не стирая.
+    #[test]
+    fn the_stop_mark_is_an_ordinary_tagged_event() {
+        let ev = AgentEvent::Stopped {
+            by: "user".into(),
+            children: vec![stop::Child {
+                id: "s-2".into(),
+                name: "Сайдбар".into(),
+                agent: "kimi".into(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(TaggedEvent { chat_id: "c1", event: &ev }).unwrap(),
+            json!({
+                "type": "stopped", "by": "user", "chatId": "c1",
+                "children": [{ "id": "s-2", "name": "Сайдбар", "agent": "kimi" }],
+            })
+        );
     }
 
     #[test]

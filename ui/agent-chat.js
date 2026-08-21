@@ -127,6 +127,17 @@
     const { msgs, input, sendBtn, sub, tag, newBtn, chatsRow, extFind } = els;
     const hintTpl = msgs.querySelector('.hint').cloneNode(true);
 
+    /* «Стоп» для мыши — рядом с отправкой: клавиша не должна быть единственным
+     * способом прервать ход. Кнопку ставим кодом, а не разметкой: разметки у
+     * вкладки и окна две, и вторая копия разъехалась бы на первой же правке. */
+    const stopBtn = document.createElement('button');
+    stopBtn.className = 'agstop';
+    stopBtn.textContent = '■';
+    stopBtn.hidden = true;
+    stopBtn.title = 'Остановить ход · Esc';
+    stopBtn.addEventListener('click', () => stopTurn(here()));
+    if (sendBtn.parentElement) sendBtn.parentElement.insertBefore(stopBtn, sendBtn);
+
     let chats = []; // история разговоров: чаты из настроек плюс найденные на диске
     let hidden = 0; // спрятанных разговоров, чьи файлы ещё на диске
     let chatId = null; // открытый здесь чат — он же адресат следующей реплики
@@ -140,7 +151,12 @@
     const thread = (id) => {
       let t = threads.get(id);
       if (!t) {
-        t = { id, rows: [], busy: false, session: null, bubble: null, raw: '', tools: null, gen: 0, loaded: false };
+        // stopping — латч остановки (Esc жмут подряд, команда идёт одна),
+        // stopMark — ход этого разговора уже помечен остановленным.
+        t = {
+          id, rows: [], busy: false, session: null, bubble: null, raw: '', tools: null,
+          gen: 0, loaded: false, stopping: false, stopMark: false,
+        };
         threads.set(id, t);
       }
       return t;
@@ -288,6 +304,9 @@
       const t = here();
       sendBtn.disabled = t.busy;
       sendBtn.textContent = t.busy ? '…' : '⏎';
+      // Кнопки «стоп» нет, пока нечего останавливать: кнопка, которая ничего не
+      // прервёт, обещает остановку там, где её не было.
+      stopBtn.hidden = !t.busy;
       /* Со свёрнутой колонкой имя открытого чата больше негде прочесть, а знать,
        * куда уйдёт следующая реплика, обязательно. Развёрнутая колонка говорит
        * это подсветкой строки — тогда в шапке остаётся только состояние. */
@@ -296,6 +315,7 @@
     }
     function setBusy(t, v) {
       t.busy = v;
+      if (v) t.stopMark = false; // новый ход — и пометка об остановке снова возможна
       if (shown(t)) syncHead();
       renderChats(); // занятость соседа обязана быть видна: иначе о нём забудут
     }
@@ -821,6 +841,20 @@
     document.addEventListener('keydown', (e) => {
       if (!chatsRow || chatsRow.closest('[hidden]')) return; // вкладка не на экране
       if (e.key === 'Escape' && menu) { closeMenu(); return; }
+      /* Esc посреди хода — стоп, и только для ОТКРЫТОГО разговора: соседний
+       * пишет своё. Когда хода нет, клавишу не трогаем вовсе — пусть закрывает
+       * поиск и меню, как везде; сделать вид, что что-то остановлено, нельзя.
+       * Правка имени и поле поиска глушат событие у себя и сюда не доходят. */
+      if (e.key === 'Escape') {
+        if (!here().busy) return; // хода нет — Esc чужой, пусть закрывает поиск и вкладку
+        e.preventDefault();
+        /* Дальше по дереву Esc ловит панель и уводит из вкладки в список
+         * сессий (renderer.js). Уйти с экрана вместе с остановкой — значит не
+         * увидеть ни пометки, ни оставшихся сессий: одно нажатие делает одно. */
+        e.stopPropagation();
+        stopTurn(here());
+        return;
+      }
       // ⌘\ — тот же жест, что сворачивает боковую колонку в редакторах.
       // Встроенную в окно колонку он не трогает: сворачивать её нечем.
       if (e.key === '\\' && (e.metaKey || e.ctrlKey) && !e.altKey && !docked()) { e.preventDefault(); toggleSide(); }
@@ -1101,16 +1135,164 @@
       input.style.height = Math.min(120, input.scrollHeight) + 'px';
     });
 
+    /* ---------- остановка хода ----------
+     *
+     * «Esc останавливает работу Джарвиса». Рвётся ХОД одного разговора: поток
+     * помечен chatId, и соседний Джарвис пишет дальше как ни в чём не бывало.
+     *
+     * Пришедшее из ленты НЕ стираем: недописанный ответ — это работа, ради
+     * которой ход и останавливают; стереть её вместе с ходом значит наказать за
+     * нажатие. Оставляем и помечаем — иначе оборванный ответ не отличить от
+     * полного. Дочерние CLI не убиваем по той же причине: там своя работа, и
+     * закрывает их человек, кнопкой рядом.
+     *
+     * (Не путать с stop() в renameBox — та защёлка про двойное применение имени.) */
+    const STOPPED = 'остановлено вами';
+    const stopWord = (ev) => (ev && ev.by && ev.by !== 'user' ? 'остановлено: ' + ev.by : STOPPED);
+
+    /* Строка «что-то · действие»: ею говорим и про живую дочернюю сессию, и про
+     * остановленную цепочку — оба раза рядом с фактом стоит выход. */
+    function actRow(box, text, label, title, run) {
+      const row = el('stoprow');
+      const name = el('stopname', text);
+      row.appendChild(name);
+      const btn = el('agbtn', label);
+      btn.title = title;
+      btn.addEventListener('click', () => run(btn, name));
+      row.appendChild(btn);
+      box.appendChild(row);
+      return row;
+    }
+
+    /* Дочерние сессии живут дальше — так и говорим, называя их поимённо.
+     * Закрытие в два нажатия, как завершение сессии в списке (renderer.js,
+     * killSession): за кнопкой чужая работа, и промахнуться по ней нельзя. */
+    function showKids(t, kids) {
+      const box = el('bubble');
+      box.appendChild(el('stophead', 'Ход остановлен, а эти сессии продолжают работу:'));
+      for (const k of kids) {
+        const label = (k.name || k.id) + (k.agent ? ' · ' + k.agent : '');
+        actRow(box, label, 'Закрыть', 'Завершить сессию — работа в ней прервётся', async (btn, name) => {
+          if (btn.dataset.armed !== '1') {
+            btn.dataset.armed = '1';
+            btn.textContent = 'Точно закрыть?';
+            btn.classList.add('danger');
+            return;
+          }
+          let res;
+          try {
+            res = await api.kill(k.id);
+          } catch (e) {
+            addErr(t, 'Не удалось закрыть сессию: ' + errText(e));
+            return;
+          }
+          if (res && res.ok === false) { addErr(t, 'Не удалось закрыть сессию: ' + why(res)); return; }
+          btn.remove();
+          name.textContent = label + ' · закрыта';
+        });
+      }
+      addRow(t, 'note', box);
+    }
+
+    /* Цепочку гасит само ядро — тем же agent_stop: остановленный ход иначе через
+     * минуту сменился бы следующим, и Esc выглядел бы сломанным. Но молчать об
+     * этом нельзя — авто-продолжение человек включал сам. Спрашиваем ДО
+     * остановки: после неё срез уже пустой, и живую цепочку не отличить от той,
+     * которой не было. Своего мнения не сочиняем: не ответило ядро — молчим. */
+    async function chainAlive(t) {
+      if (!api.chainState) return false; // сборка без цепочек — говорить не о чем
+      let st;
+      try { st = await api.chainState(t.id); } catch { return false; }
+      const c = st && st.ok !== false ? st.state : null;
+      return !!c && (c.active || c.mode === 'auto');
+    }
+
+    // Цепочка встала — и рядом дорога назад: без неё «остановлено» читается как
+    // «выключено навсегда», а включал его человек одним нажатием.
+    function chainRow(t) {
+      const box = el('bubble');
+      actRow(box, 'Цепочка остановлена — сам продолжать не буду.', 'Продолжить цепочку',
+        'Вернуть авто-продолжение этому чату', async (btn, name) => {
+          let r;
+          try {
+            r = await api.chainMode(t.id, true);
+          } catch (e) {
+            addErr(t, 'Не удалось вернуть авто-продолжение: ' + errText(e));
+            return;
+          }
+          if (r && r.ok === false) { addErr(t, 'Не удалось вернуть авто-продолжение: ' + why(r)); return; }
+          btn.remove();
+          name.textContent = 'Цепочка снова продолжает сама.';
+        });
+      addRow(t, 'note', box);
+    }
+
+    /* Пометка на ленте. Зовут её двое — ответ команды и событие потока (ход
+     * могли остановить из соседнего окна), а ход один: латч не даёт написать об
+     * одной остановке дважды. */
+    function markStopped(t, ev) {
+      if (t.stopMark) return;
+      t.stopMark = true;
+      const was = near(t);
+      setBusy(t, false);
+      const row = t.bubble && t.bubble.parentElement;
+      if (row) {
+        grow(t.bubble, t.raw); // хвост дорисован тем же разбором, что и целый текст
+        row.appendChild(el('stopmark', stopWord(ev)));
+      } else {
+        // Сказать нечего — тогда словами ядра: это и есть та короткая строка,
+        // ради которой оно шлёт note. Над ответом она была бы второй пометкой.
+        addNote(t, (ev && ev.note) || 'Остановлено вами — сказать агент ничего не успел.');
+      }
+      t.bubble = null;
+      t.tools = null;
+      const kids = (ev && ev.children) || [];
+      if (kids.length) showKids(t, kids);
+      keepDown(was);
+    }
+
+    /* Esc и кнопка ведут в одну дверь: два способа не должны расходиться в
+     * поведении. Латч на разговор — Esc жмут подряд, а ход рвут один раз. */
+    async function stopTurn(t) {
+      if (!t.busy || t.stopping) return;
+      if (!api.stop) {
+        addErr(t, 'Остановить ход нечем: эта сборка Jarvis такого ещё не умеет — обнови.');
+        return;
+      }
+      t.stopping = true;
+      const chain = await chainAlive(t); // до остановки: ядро гасит цепочку вместе с ходом
+      let res;
+      try {
+        res = await api.stop(t.id);
+      } catch (e) {
+        addErr(t, 'Не удалось остановить ход: ' + errText(e));
+        t.stopping = false;
+        return;
+      }
+      t.stopping = false;
+      if (res && res.ok === false) { addErr(t, 'Не удалось остановить ход: ' + why(res)); return; }
+      /* `stopped:false` — хода не было. Это не отказ: показывать нечего, а
+       * «остановлено» за неслучившееся и есть та ложь, которой тут не место.
+       * Занятость снимаем: раз ядро говорит, что никто не пишет, — не пишет. */
+      if (res && res.stopped === false) setBusy(t, false);
+      else markStopped(t, res || {});
+      // Цепочку ядро оборвало в любом случае — и об этом говорим даже там, где
+      // хода не было: карусель заходов остановлена, а это видимая перемена.
+      if (chain) chainRow(t);
+    }
+
     /* Поток ответа агента. Событие адресовано ЧАТУ, а не окну: chatId в нагрузке
      * и решает, чья это лента, — потому и можно уйти во второй разговор, пока
      * первый пишет. Пометки нет — так шлёт только старый демон, у которого
      * поток и был один: отдаём открытому. */
+    const END = { done: 1, failed: 1, stopped: 1 }; // события конца хода
     api.onEvent((ev0) => {
       const ev = ev0 || {};
       const t = ev.chatId ? thread(ev.chatId) : here();
       // Пошёл поток — разговор занят, даже если реплику отправили в соседнем
       // окне: иначе там «думает…», а здесь тот же чат выглядит свободным.
-      if (!t.busy && ev.type !== 'done' && ev.type !== 'failed') setBusy(t, true);
+      // Концы хода (в том числе остановка) занятость, наоборот, не включают.
+      if (!t.busy && !END[ev.type]) setBusy(t, true);
       switch (ev.type) {
         case 'init':
           // агент инициализирован (ev.tools — гранто-фильтрованный набор)
@@ -1127,8 +1309,17 @@
         case 'tool_use':
           addTool(t, ev.name || '?');
           break;
+        /* Ход остановлен — в том числе из соседнего окна или кнопкой: лента
+         * обязана сказать это сама, а не ждать, пока человек догадается по
+         * замолчавшему пузырю. */
+        case 'stopped':
+          markStopped(t, ev);
+          break;
         case 'done':
           if (ev.session_id) t.session = ev.session_id;
+          /* Хвост остановленного хода. Пометка уже стоит, а финальный текст
+           * дорисовал бы ВТОРОЙ пузырь — копию того же оборванного ответа. */
+          if (t.stopMark) { setBusy(t, false); break; }
           // финальный текст, если дельт не было
           if (ev.result && (!t.bubble || !t.bubble.textContent)) paint(startBot(t), ev.result);
           // Дельты уже нарисованы дописыванием, и хвост в них дорисован тем же
@@ -1141,6 +1332,8 @@
         case 'failed':
           // Отказ агента — вслух. Тихо снять «думает…» значило бы соврать, что он ответил.
           setBusy(t, false);
+          // «Прервано» вслед за нашей же остановкой — не новость, а её эхо.
+          if (t.stopMark) break;
           t.bubble = null;
           addErr(t, ev.message || 'Агент не ответил и причины не назвал.');
           if (ev.lost_session) {
@@ -1300,6 +1493,12 @@
           unhideAll: () => j.agentHistoryUnhideAll(),
           forget: (sessionId) => j.agentHistoryForget(sessionId),
           send: (message, chatId, sessionId) => j.agentSend(message, chatId, sessionId),
+          // остановка хода и пауза авто-продолжения — по одному Esc
+          stop: (chatId) => j.agentStop(chatId),
+          chainState: (chatId) => j.agentChainState(chatId),
+          chainMode: (chatId, auto) => j.agentChainMode(chatId, auto),
+          // закрыть дочернюю сессию — той же командой, что и список сессий
+          kill: (sessionId) => j.killSession(sessionId),
           confirm: (nonce, approved) => j.agentConfirm(nonce, approved),
           confirmDone,
           onEvent: (cb) => j.onAgentEvent(cb),
@@ -1348,6 +1547,10 @@
         unhideAll: () => invoke('agent_history_unhide_all'),
         forget: (sessionId) => invoke('agent_history_forget', { sessionId }),
         send: (message, chatId, sessionId) => invoke('agent_send', { message, chatId, sessionId }),
+        stop: (chatId) => invoke('agent_stop', { chatId }),
+        chainState: (chatId) => invoke('agent_chain_state', { chatId }),
+        chainMode: (chatId, auto) => invoke('agent_chain_mode', { chatId, auto }),
+        kill: (sessionId) => invoke('session_kill', { sessionId }),
         confirm: (nonce, approved) => invoke('agent_confirm', { nonce, approved }),
         confirmDone,
         onEvent: (cb) => listen('agent:event', (e) => cb(e.payload)),

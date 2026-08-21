@@ -72,7 +72,7 @@ test('колонка разговоров одинаково размечена 
   for (const [where, css] of [['index.html', html], ['agent-chat.html', win]]) {
     /* Раскладка: колонка слева на всю высоту, переписка справа, граница
      * тянется мышью, свёрнутая колонка — рейка, а не пустота. */
-    for (const sel of ['.agwrap', '.agpane', '.agside', '.agside.off', '.aggrip', '.agrail', '.agfold']) {
+    for (const sel of ['.agwrap', '.agpane', '.agside', '.agside.off', '.aggrip', '.agrail', '.agfold', '.agstop', '.stopmark', '.stoprow', '.stopname']) {
       assert.ok(css.includes(sel), where + ': ' + sel + ' не стилизован — раскладка колонки разъехалась');
     }
     // Строка: имя, время, превью, размер, бейдж «с диска» и вход в действия

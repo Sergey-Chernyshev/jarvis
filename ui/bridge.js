@@ -133,6 +133,15 @@
     agentHistoryUnhideAll: () => invoke('agent_history_unhide_all'),
     agentHistoryForget: (sessionId) => invoke('agent_history_forget', { sessionId }),
     agentSend: (message, chatId, sessionId) => invoke('agent_send', { message, chatId, sessionId }),
+    // Остановка хода. Рвёт ТОЛЬКО названный чат: у соседей свои ходы, и Esc в
+    // одном разговоре не должен гасить второй. Дочерние CLI остаются жить —
+    // их список приезжает ответом (и событием `stopped`), закрывает человек.
+    agentStop: (chatId) => invoke('agent_stop', { chatId }),
+    // Авто-продолжение: срез и возврат. Цепочку Esc гасит через agent_stop —
+    // иначе остановленный ход через минуту сменился бы следующим; отсюда нужен
+    // только срез (была ли она жива) и дорога назад.
+    agentChainState: (chatId) => invoke('agent_chain_state', { chatId }),
+    agentChainMode: (chatId, auto) => invoke('agent_chain_mode', { chatId, auto }),
     agentConfirm: (nonce, approved) => invoke('agent_confirm', { nonce, approved }),
     onAgentEvent: (cb) => on('agent:event', cb),
     onAgentConfirm: (cb) => on('agent:confirm', cb),

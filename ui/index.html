@@ -1310,6 +1310,20 @@
   .agentchat .cbtn.yes { background: var(--accent); color: var(--on-accent); }
   .agentchat .cbtn.no { background: var(--accent-soft); color: var(--ink); }
   .agentchat .cresult { margin-top: 8px; font-size: 12.5px; color: var(--ink-mute); }
+  /* Остановленный ход: пришедшее остаётся в ленте — и помечено, иначе
+     оборванный ответ не отличить от полного. */
+  .agentchat .stopmark { font-size: 11.5px; color: var(--danger); }
+  .agentchat .stoprow { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .agentchat .stopname { flex: 1; min-width: 0; font-size: 13px; color: var(--ink-mute); overflow-wrap: anywhere; }
+  /* «Стоп» рядом с отправкой — ровно на время хода: клавиша не должна быть
+     единственным способом прервать работу. */
+  .agentchat .agstop {
+    flex: none; padding: 5px 10px; border: 0; border-radius: var(--r-pill);
+    font: 600 12px/1 var(--font);
+    background: var(--danger); color: var(--on-accent); cursor: default;
+  }
+  .agentchat .agstop[hidden] { display: none; }
+  .agentchat .agstop:hover { filter: brightness(1.06); }
 
   /* --- сводки ходов --- */
   .sumtoggle {

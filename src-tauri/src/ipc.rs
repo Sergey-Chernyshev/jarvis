@@ -3154,6 +3154,62 @@ pub fn agent_chain_stop(app: AppHandle, chat_id: Option<String>) -> Value {
     chain_changed(&app, &id)
 }
 
+/// Esc: остановить работу Джарвиса в ЭТОМ чате.
+///
+/// Останавливаем разом три вещи, иначе остановка получается на вид: сам ход
+/// (сигнал доходит до процесса CLI, и тот умирает вместе с детьми), цепочку
+/// авто-продолжения и режим «продолжать самому» — без последних двух
+/// остановленный ход через минуту сменился бы следующим, и карусель нечем было
+/// бы прервать. Соседние чаты не задеваются: реестр ходов разведён по `chatId`.
+///
+/// Дочерние сессии, поднятые через `sessions.spawn`, НЕ закрываем — там идёт
+/// работа, за которую заплачено; вместо этого называем их словами.
+///
+/// `stopped: false` — хода не было. Это не ошибка: Esc нажали вхолостую, и окну
+/// по этому полю понятно, что показывать нечего.
+#[tauri::command]
+pub fn agent_stop(app: AppHandle, chat_id: Option<String>) -> Value {
+    use crate::agent::stop;
+    let id = match chain_chat(&app, chat_id) {
+        Ok(id) => id,
+        Err(e) => return err(e),
+    };
+    let outcome = stop::request(&id);
+    // Цепочку рвём в любом случае: она крутится и без идущего хода. Логику не
+    // дублируем — зовём ту же команду, что и кнопка «стоп цепочки».
+    let chain = agent_chain_stop(app.clone(), Some(id.clone()));
+    if chain.get("ok").and_then(Value::as_bool) != Some(true) {
+        crate::log::line(&format!("[agent] стоп {id}: цепочка не оборвалась — {chain}"));
+    }
+
+    let d = Daemon::get(&app);
+    let chats: Vec<String> = crate::agent::chat_book(&app)
+        .chats
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
+    let children = stop::children_of(&d.spawns.snapshot(), &id, &chats, |sid| {
+        d.session(sid).is_some()
+    });
+    let stopped = outcome == stop::Outcome::Stopped;
+    if stopped {
+        // Пометка в ленту уходит тем же каналом, что и весь ход, — с меткой
+        // чата: без неё она легла бы в соседний разговор.
+        crate::agent::emit_event(
+            &app,
+            &id,
+            &crate::agent::AgentEvent::Stopped { by: "user".into(), children: children.clone() },
+        );
+    }
+    json!({
+        "ok": true,
+        "stopped": stopped,
+        "chatId": id,
+        "children": children,
+        "note": stop::note(outcome, &children),
+    })
+}
+
 /// Привязать чат к сессии вручную («следи за этой»). Обычно привязка возникает
 /// сама — когда Джарвис отправляет промпт в сессию из этого чата.
 #[tauri::command]

@@ -15,6 +15,7 @@ pub mod chain;
 pub mod context;
 pub mod drafts;
 pub mod history;
+pub mod journal;
 pub mod stop;
 
 // ── Структуры событий ──────────────────────────────────────────────────────

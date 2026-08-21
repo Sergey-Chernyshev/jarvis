@@ -70,7 +70,10 @@ fn concat_mod(rest: &str) -> String {
     format!("{}+{rest}", main_mod())
 }
 
-fn defaults() -> Value {
+/// Дефолты целиком. `pub(crate)` — чтобы владельцы блоков могли СВЕРИТЬ свои
+/// дефолты с тем, что тут написано (agent/chain.rs так проверяет потолки
+/// автономии): два похожих числа в двух местах расходятся молча.
+pub(crate) fn defaults() -> Value {
     json!({
         // Главный модификатор платформенный: на macOS это Command, на Linux —
         // Control. Super на Linux принадлежит окружению рабочего стола (в GNOME
@@ -112,6 +115,17 @@ fn defaults() -> Value {
             "nightFrom": "23:00",     // границы ночи — у человека они свои
             "nightTo": "08:00",
             "nightCapPct": 15.0,      // жёсткий ночной потолок за одну ночь
+        },
+        // Потолки автономных цепочек (agent/chain.rs), доллары. НЕ в
+        // SETTINGS_ALLOWLIST — по той же причине, что и budget: агент, вправе
+        // поднявший себе потолок, потолка не имеет. Числа те же, с которыми
+        // автономия начинала жить константами: владелец меняет режимы по
+        // ситуации, значит и потолки должен менять он, а не сборка.
+        "autonomy": {
+            "chatNightUsd": crate::agent::chain::CHAT_NIGHT_USD, // ночной потолок одного чата
+            "chatDayUsd": crate::agent::chain::CHAT_DAY_USD,     // его же дневная норма
+            "allNightUsd": crate::agent::chain::ALL_NIGHT_USD,   // ночной потолок всех автономных чатов
+            "allDayUsd": crate::agent::chain::ALL_DAY_USD,       // и он же на сутки
         },
         // Дописка человека к преамбуле главного агента (базовый текст —
         // agent::AGENT_SYSTEM_PROMPT). Пусто — агент получает только базу.

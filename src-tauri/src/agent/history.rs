@@ -229,16 +229,18 @@ pub fn display_name(human: Option<&str>, preview: &str) -> String {
 /// Скрытые разговоры (`ChatBook::hidden`) из хвоста выпадают: файл на месте,
 /// строки нет. Сколько их — говорит `hidden_count`.
 pub fn chats_json(book: &ChatBook, threads: &[Thread]) -> Value {
-    chats_json_at(book, threads, chain::visits(), crate::util::now_ms())
+    // Список рисуется без `AppHandle` (ipc его сюда не доносит), поэтому окно
+    // счёта строится по настройкам с диска — числа те же, что видит цепочка.
+    chats_json_at(book, threads, chain::visits(), &chain::window_of(None))
 }
 
-/// То же с явным журналом заходов и часами: тесты гоняют список без процессного
-/// реестра, иначе соседний тест дописывал бы им расход.
+/// То же с явным журналом заходов и окном счёта: тесты гоняют список без
+/// процессного реестра, иначе соседний тест дописывал бы им расход.
 pub fn chats_json_at(
     book: &ChatBook,
     threads: &[Thread],
     visits: &chain::Visits,
-    now: i64,
+    w: &chain::Window,
 ) -> Value {
     let thread_of = |sid: Option<&str>| sid.and_then(|s| threads.iter().find(|t| t.session_id == s));
 
@@ -257,7 +259,7 @@ pub fn chats_json_at(
                 i == book.current_index(),
                 thread_of(c.session_id.as_deref()),
                 auto,
-                auto.then(|| visits.spend(&c.id, now)),
+                auto.then(|| visits.spend(&c.id, w)),
             )
         })
         .collect();
@@ -577,7 +579,8 @@ mod tests {
             usd: Some(1.25),
         });
 
-        let list = chats_json_at(&book, &[], &v, now);
+        let w = chain::Window::rolling(now, chain::Caps::default());
+        let list = chats_json_at(&book, &[], &v, &w);
         assert_eq!(list[0]["auto"], json!(false), "спокойный чат помечен автономным");
         assert_eq!(list[0]["spend"], Value::Null, "расход считаем не всем подряд");
         assert_eq!(list[1]["auto"], json!(true), "автономный чат в списке неотличим");
@@ -588,7 +591,7 @@ mod tests {
         assert_eq!(list[1]["spend"]["allNightCap"], json!(chain::ALL_NIGHT_USD));
 
         // чисел нет — так и говорим: «0.00$» соврало бы точностью
-        let list = chats_json_at(&book, &[], &chain::Visits::new(), now);
+        let list = chats_json_at(&book, &[], &chain::Visits::new(), &w);
         assert_eq!(list[1]["auto"], json!(true), "значок автономии зависит от режима, а не от расхода");
         assert_eq!(list[1]["spend"]["known"], json!(false));
     }

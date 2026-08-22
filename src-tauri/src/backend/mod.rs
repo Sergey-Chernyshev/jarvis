@@ -271,7 +271,9 @@ impl Backend for ClaudeBackend {
         crate::util::friendly_model(id)
     }
     fn models(&self) -> &'static [(&'static str, &'static str)] {
-        &[("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]
+        // Порядок — это подсказка. Fable последней намеренно: по умолчанию её
+        // не берут, а первая строка списка однажды будет нажата не глядя.
+        &[("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"), ("fable", "Fable")]
     }
     fn effort_levels(&self) -> &'static [&'static str] {
         &["low", "medium", "high", "xhigh", "max"]

@@ -671,6 +671,10 @@
 #settings2 .s2-secret{width:100%;max-width:340px;background:var(--paper);border:0;box-shadow:inset 0 0 0 1.5px var(--line-strong);border-radius:9px;color:var(--ink);font:12.5px/1.3 var(--s2-mono,ui-monospace,monospace);padding:10px 12px;outline:none;transition:box-shadow .12s ease}
 #settings2 .s2-secret:focus{box-shadow:inset 0 0 0 1.5px var(--accent)}
 #settings2 .s2-secret::placeholder{color:var(--ink-faint)}
+/* Дописка к преамбуле — текст в несколько строк, а не значение в одну: поле
+   шире прочих и тянется вниз. Горизонтально не тянется: перенос читается, а
+   уехавшая вправо строка — нет. */
+#settings2 textarea.s2preamble{max-width:none;resize:vertical;min-height:96px;line-height:1.45;margin-top:8px}
 #settings2 .loadcap.err{color:var(--danger)}
 
 /* ── статус-точка: монохром + краска, как в списке сессий ────────────── */
@@ -2758,6 +2762,60 @@
       + 'а разрешений там ровно столько, сколько уже дали на запуск. Твою и чужую сессию он не закроет — придёт отказ.',
       []));
     pane.appendChild(list);
+    renderPreambleExtra(pane, s);
+  }
+
+  /* Личная дописка к инструкциям Джарвиса (`agentPreamble`).
+   *
+   * Зачем поле, а не правка файла. Ключ закрыт для агентов навсегда — агент,
+   * правящий собственные инструкции, это дыра того же класса, что нажатие
+   * собственной карточки подтверждения (`grant.rs`, allowlist deny-by-default;
+   * попытка положить туда текст уже отклонялась гейтом, и правильно). Значит
+   * написать сюда может только человек — и лезть за этим в JSON ему незачем.
+   *
+   * Дописка ДОБАВЛЯЕТСЯ к базовым инструкциям, заменить их нельзя: базовый
+   * текст живёт в коде (`agent/mod.rs`) и переживает чистые настройки,
+   * переустановку и новые чаты. Подпись говорит об этом прямо — иначе человек
+   * напишет сюда «инструкцию целиком» и будет считать, что остального нет. */
+  function renderPreambleExtra(pane, s) {
+    pane.appendChild(el('div.dsection', { text: 'Инструкции Джарвиса' }));
+    const g = el('div.dgroup');
+    const area = el('textarea.s2-secret.s2preamble', {
+      rows: '5', spellcheck: 'false',
+      placeholder: 'например: отчитывайся таблицей; в этом проекте не трогай каталог infra/',
+    });
+    area.value = typeof s.agentPreamble === 'string' ? s.agentPreamble : '';
+    const cap = el('span.loadcap', { style: 'display:none' });
+    const save = button('Сохранить', async (b) => {
+      const val = area.value.trim();
+      b.disabled = true; b.textContent = 'Сохраняю…';
+      cap.classList.remove('err'); cap.style.display = ''; cap.textContent = 'сохраняю…';
+      const r = await safe(() => window.jarvis.setSettings({ agentPreamble: val }), null);
+      b.disabled = false; b.textContent = 'Сохранить';
+      if (r && r.ok !== false) {
+        cap.classList.remove('err');
+        // Про «со следующего хода» молчать нельзя: преамбула уезжает при запуске
+        // хода, и человек, не увидевший изменений сразу, решит, что не сохранилось.
+        cap.textContent = val ? 'сохранено ✓ — подхватится со следующего хода' : 'очищено ✓';
+      } else {
+        cap.classList.add('err');
+        cap.textContent = (r && r.error) || 'не сохранилось';
+      }
+    }, 'sm primary');
+    g.appendChild(el('div.drow', null, [
+      el('div.grow', null, [
+        el('div.dt', { text: 'Личная дописка' }),
+        el('div.dd', {
+          text: 'Добавляется к базовым инструкциям, а не заменяет их. Базовые живут в коде приложения: '
+            + 'кто такой Джарвис, как выбирать исполнителя и модель, что читать как контекст, а что как команду, '
+            + 'как считать бюджет и чего не делать с твоим окном. Сюда пиши только своё — привычки, границы проекта, '
+            + 'формат отчёта. Агент это поле менять не может: свои инструкции он не правит.',
+        }),
+        area, cap,
+      ]),
+      el('div.dctl', null, [save]),
+    ]));
+    pane.appendChild(g);
   }
 
   /* 1d. Агенты (agents) — доверие агент-чату и свои CLI помимо claude и codex.

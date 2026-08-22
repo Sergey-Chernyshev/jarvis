@@ -233,3 +233,47 @@ test('идущая загрузка переживает перерисовку 
   assert.equal(back.length, 0, 'кнопка «Установить» вернулась поверх идущей загрузки');
   assert.ok(again.textContent.includes('Качаю…'), 'о идущей загрузке не сказано');
 });
+
+/* Личная дописка к преамбуле правится в панели, а не в JSON.
+ *
+ * Ключ agentPreamble закрыт для агентов навсегда (allowlist в grant.rs
+ * deny-by-default): агент, правящий собственные инструкции, — та же дыра, что
+ * нажатие собственной карточки подтверждения. Значит написать туда может только
+ * человек, и поле обязано быть в интерфейсе. */
+test('дописка к преамбуле: значение читается, сохраняется и подписана как ДОБАВКА', async () => {
+  const { doc, calls } = await boot({
+    getSettings: () => ({ agentPreamble: 'Отчитывайся таблицей.' }),
+    agentsList: { ok: true, agents: [], presets: [] },
+  });
+  const pane = await openPane(doc, 'agents');
+  const area = pane.querySelector('textarea.s2preamble');
+  assert.ok(area, 'поля дописки нет в настройках');
+  assert.equal(area.value, 'Отчитывайся таблицей.', 'уже написанное не показано — человек затрёт его вслепую');
+
+  // Подпись обязана говорить, что дописка ДОБАВЛЯЕТСЯ. Иначе человек напишет
+  // сюда «инструкцию целиком» и будет считать, что базовой больше нет.
+  const row = area.closest('.drow');
+  assert.match(row.textContent, /добавляется к базовым инструкциям/i);
+  assert.match(row.textContent, /не заменяет/i);
+
+  area.value = '  Не трогай infra/  ';
+  click(doc, [...row.querySelectorAll('button')].find((b) => b.textContent === 'Сохранить'));
+  await settle();
+  const saved = calls.filter((c) => c[0] === 'setSettings' && c[1] && 'agentPreamble' in c[1]).pop();
+  assert.ok(saved, 'сохранение не ушло в бэкенд');
+  assert.equal(saved[1].agentPreamble, 'Не трогай infra/', 'края не обрезаны');
+});
+
+test('дописка к преамбуле: отказ бэкенда виден, а не проглочен', async () => {
+  const { doc } = await boot({
+    getSettings: () => ({ agentPreamble: '' }),
+    agentsList: { ok: true, agents: [], presets: [] },
+    setSettings: () => ({ ok: false, error: 'настройки не записались' }),
+  });
+  const pane = await openPane(doc, 'agents');
+  const row = pane.querySelector('textarea.s2preamble').closest('.drow');
+  click(doc, [...row.querySelectorAll('button')].find((b) => b.textContent === 'Сохранить'));
+  await settle();
+  assert.match(row.textContent, /настройки не записались/, 'отказ проглочен — поле врёт про сохранённое');
+  assert.equal(row.querySelectorAll('.loadcap.err').length, 1, 'отказ не помечен как ошибка');
+});

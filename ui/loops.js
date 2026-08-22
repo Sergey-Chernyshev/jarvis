@@ -184,8 +184,9 @@
   let catalog = null;
   const FALLBACK_MODELS = {
     claude: [
-      { id: 'fable', label: 'Fable' }, { id: 'opus', label: 'Opus' },
-      { id: 'sonnet', label: 'Sonnet' }, { id: 'haiku', label: 'Haiku' },
+      // Fable последней — см. backend/mod.rs: по умолчанию её не берут.
+      { id: 'opus', label: 'Opus' }, { id: 'sonnet', label: 'Sonnet' },
+      { id: 'haiku', label: 'Haiku' }, { id: 'fable', label: 'Fable' },
     ],
     codex: [
       { id: 'gpt-5.5', label: 'GPT-5.5' }, { id: 'gpt-5-codex', label: 'Codex' },

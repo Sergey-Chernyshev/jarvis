@@ -17,8 +17,10 @@
   const BUILTIN = [
     {
       id: 'claude', title: 'Claude',
-      models: [{ id: 'fable', name: 'Fable' }, { id: 'opus', name: 'Opus' },
-        { id: 'sonnet', name: 'Sonnet' }, { id: 'haiku', name: 'Haiku' }],
+      // Порядок зеркалит backend/mod.rs: Fable последней — по умолчанию её не
+      // берут, а первая строка списка однажды будет нажата не глядя.
+      models: [{ id: 'opus', name: 'Opus' }, { id: 'sonnet', name: 'Sonnet' },
+        { id: 'haiku', name: 'Haiku' }, { id: 'fable', name: 'Fable' }],
       effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
       hasSeparateEffort: true, supportsCustomAnswer: true, present: true,
     },

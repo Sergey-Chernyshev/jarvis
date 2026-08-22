@@ -152,6 +152,8 @@
     // единственная дорога дальше. `text` — поправка человека; пусто значит
     // «уходит предложенное», и подменять его своей копией незачем.
     agentChainSend: (chatId, text) => invoke('agent_chain_send', { chatId, text }),
+    agentChainResume: (chatId) => invoke('agent_chain_resume', { chatId }),
+    agentChainStop: (chatId) => invoke('agent_chain_stop', { chatId }),
     // Свой канал цепочки: режим, заходы, расход и «ждёт тебя». Опрашивать это
     // командой на каждый ход значило бы узнавать про ночную работу с опозданием.
     onAgentChain: (cb) => on('agent:chain', cb),

@@ -332,6 +332,19 @@ pub struct Chat {
     /// модели, и об этом счётчик обязан сказать вслух.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_window: Option<u64>,
+    /// Чувствительный чат: деньги, прод, публикация наружу.
+    ///
+    /// Заведено по инциденту. Цепочка сочинила заход «заверши выполнение
+    /// скриптов» для сессии с боевыми ключами биржи, умеющей открывать и
+    /// закрывать позиции. В тот раз обошлось: человек в предыдущем сообщении
+    /// удачно запретил исполнение. Полагаться на удачную формулировку в
+    /// прошлом сообщении — не ограничитель.
+    ///
+    /// Старые настройки поля не знают: `default` = обычный чат. Умолчание
+    /// «обычный», а не «чувствительный», сознательно — иначе после обновления
+    /// все цепочки встанут, и человек снимет признак не разбираясь.
+    #[serde(default)]
+    pub sensitive: bool,
 }
 
 /// Список чатов и тот, что сейчас открыт. Инвариант: список непуст, `current` —
@@ -411,6 +424,7 @@ pub fn read_chats(settings: &Value) -> ChatBook {
             session_id: saved_chat_session(settings),
             chain: chain::Mode::default(),
             ctx_window: None,
+            sensitive: false,
         });
     }
     let current = block
@@ -490,6 +504,7 @@ impl ChatBook {
                 session_id: None,
                 chain: chain::Mode::default(),
                 ctx_window: None,
+            sensitive: false,
             });
         self.current = self.chats.len() - 1;
         Ok(id)

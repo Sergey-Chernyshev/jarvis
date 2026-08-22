@@ -649,6 +649,55 @@ mod tests {
         assert_eq!(c.files[0].note, "первая");
     }
 
+    /// РАССЛЕДОВАНИЕ (2026-08-22): живой транскрипт сессии Kimi
+    /// `session_49064f8e-2e91-444e-aa9a-c93ef8c94a2c` («Рекоменд·FWB·K3»),
+    /// репортовавшей человеку «Итог хода не собрался — транскрипт сессии не
+    /// прочитан» и застопорившейся. Гоняет ТОТ ЖЕ код, что и демон:
+    /// `Backend::find_transcript_by_sid` → `read_recent_text` (512К, тот же
+    /// потолок, что у `Daemon::turn_entries`) → `entries_from_text` →
+    /// `turns::segment`. Не трогает chain.rs. `#[ignore]`, потому что путь и
+    /// файл — на конкретной машине расследования, не воспроизводимы в CI.
+    #[test]
+    #[ignore]
+    fn investigate_kimi_session_49064f8e_live_transcript() {
+        const SID: &str = "session_49064f8e-2e91-444e-aa9a-c93ef8c94a2c";
+        let be = backend(Agent::Kimi);
+        let path = be
+            .find_transcript_by_sid(SID)
+            .expect("find_transcript_by_sid должен найти agents/main/wire.jsonl по sid");
+        eprintln!("транскрипт: {}", path.display());
+        let meta = std::fs::metadata(&path).expect("metadata файла");
+        eprintln!("размер файла: {} байт", meta.len());
+
+        // Тот же потолок, что и Daemon::turn_entries (512 * 1024).
+        let text = crate::transcript::read_recent_text(&path, 512 * 1024)
+            .expect("read_recent_text должен прочитать хвост файла");
+        eprintln!("прочитано текста: {} байт", text.len());
+
+        let entries = be.entries_from_text(&text);
+        eprintln!("записей (entries): {}", entries.len());
+
+        let (items, turns) = segment(be, &entries);
+        eprintln!("items в ленте: {}", items.len());
+        eprintln!("ходов (turns) всего: {}", turns.len());
+        let complete: Vec<&Turn> = turns.iter().filter(|t| t.span.complete).collect();
+        eprintln!("ходов complete=true: {}", complete.len());
+        for (i, t) in turns.iter().enumerate() {
+            eprintln!(
+                "  ход[{i}] key={} complete={} start={} end={} user_prompt={:?} final_reply_len={}",
+                t.span.key,
+                t.span.complete,
+                t.span.start,
+                t.span.end,
+                ellipsize(&t.user_prompt, 60),
+                t.facts.final_reply.len()
+            );
+        }
+        if let Some(last) = complete.last() {
+            eprintln!("хвост final_reply последнего complete-хода: {:?}", last.facts.final_reply);
+        }
+    }
+
     #[test]
     fn parse_card_drops_foreign_paths_and_empty_summary() {
         let out = r#"{"summary": "Ок.", "files": [{"path": "a.rs", "note": "x"}, {"path": "hallucinated.rs", "note": "y"}], "docs_digest": "", "commands": ""}"#;

@@ -717,10 +717,11 @@
       cap: 'потолок расхода',
       deferred: 'ждёт тебя',
       morning: 'ночная сводка',
+      paused: 'цепочка уступила',
     };
     /* Тон карточки. Оборванная цепочка, предупреждение и «решать тебе» — разные
      * вещи, и одна краска на все три сказала бы «сломалось» про ожидание. */
-    const CHAIN_TONE = { failed: 'warn', cap: 'warn', stopped: 'stop', deferred: 'wait', proposed: 'wait' };
+    const CHAIN_TONE = { failed: 'warn', cap: 'warn', stopped: 'stop', deferred: 'wait', proposed: 'wait', paused: 'wait' };
 
     /* Не задвоить. Событие приходит обоим окнам, а лента у чата одна: второй его
      * приход нарисовал бы вторую карточку про один и тот же заход. Узнаём по
@@ -758,8 +759,48 @@
         box.appendChild(el('chkind', label));
         window.JarvisMarkdown.renderChat(box.appendChild(el('bubble')), chainText(ev));
         if (ev.kind === 'proposed') proposeRow(t, box, ev);
+        if (ev.kind === 'paused') pauseRow(t, box);
       }
       addRow(t, 'chain ' + ev.kind, box);
+    }
+
+    /* Цепочка уступила сессию человеку и ждёт решения.
+     *
+     * Два выхода рядом с фактом, потому что оба нормальны: человек мог зайти
+     * на минуту и хотеть продолжения, а мог перехватить сессию насовсем.
+     * Карточка без выхода — это «почему-то больше не идёт», и разбираться в
+     * этом человеку пришлось бы самому. */
+    function pauseRow(t, box) {
+      const row = el('stoprow');
+      row.appendChild(el('stopname', 'Заход подождёт.'));
+      const go = el('agbtn', 'Продолжить цепочку');
+      go.title = 'Цепочка снова пойдёт сама после этого хода';
+      go.addEventListener('click', async () => {
+        if (!api.chainResume) {
+          addErr(t, 'Продолжить нечем: эта сборка Jarvis такого ещё не умеет — обнови.');
+          return;
+        }
+        let r;
+        try { r = await api.chainResume(t.id); }
+        catch (e) { addErr(t, 'Не удалось продолжить: ' + errText(e)); return; }
+        if (r && r.ok === false) { addErr(t, 'Не удалось продолжить: ' + why(r)); return; }
+        row.replaceChildren(el('stopname', 'Цепочка продолжена.'));
+      });
+      const off = el('agbtn', 'Отменить цепочку');
+      off.title = 'Сессия останется за тобой, сама цепочка больше не пойдёт';
+      off.addEventListener('click', async () => {
+        if (!api.chainStop) {
+          addErr(t, 'Отменить нечем: эта сборка Jarvis такого ещё не умеет — обнови.');
+          return;
+        }
+        let r;
+        try { r = await api.chainStop(t.id); }
+        catch (e) { addErr(t, 'Не удалось отменить: ' + errText(e)); return; }
+        if (r && r.ok === false) { addErr(t, 'Не удалось отменить: ' + why(r)); return; }
+        row.replaceChildren(el('stopname', 'Цепочка отменена.'));
+      });
+      row.append(go, off);
+      box.appendChild(row);
     }
 
     /* Предложенный заход ждёт кнопки — в этом весь ручной режим. Текст правится
@@ -2303,6 +2344,10 @@
            * Моста постарше может и не быть: тогда кнопка честно скажет, что
            * отправлять нечем, вместо тихой ошибки в консоли. */
           chainSend: j.agentChainSend && ((chatId, text) => j.agentChainSend(chatId, text)),
+          /* Выходы из паузы, которую поставила задача от человека. Моста
+           * постарше может не быть — кнопка тогда честно скажет об этом. */
+          chainResume: j.agentChainResume && ((chatId) => j.agentChainResume(chatId)),
+          chainStop: j.agentChainStop && ((chatId) => j.agentChainStop(chatId)),
           // Канала цепочки может не быть (старый мост) — тогда шапка живёт на
           // одних ответах команд, а не падает вместе со вкладкой.
           onChain: (cb) => j.onAgentChain && j.onAgentChain(cb),
@@ -2363,6 +2408,8 @@
         chainState: (chatId) => invoke('agent_chain_state', { chatId }),
         chainMode: (chatId, auto) => invoke('agent_chain_mode', { chatId, auto }),
         chainSend: (chatId, text) => invoke('agent_chain_send', { chatId, text }),
+        chainResume: (chatId) => invoke('agent_chain_resume', { chatId }),
+        chainStop: (chatId) => invoke('agent_chain_stop', { chatId }),
         onChain: (cb) => listen('agent:chain', (e) => cb(e.payload)),
         kill: (sessionId) => invoke('session_kill', { sessionId }),
         confirm: (nonce, approved, armed) => invoke('agent_confirm', { nonce, approved, armed }),

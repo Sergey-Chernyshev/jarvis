@@ -39,6 +39,7 @@ fn origin_of(args: &Value) -> crate::origin::Origin {
         Some("chain") => Origin::Chain {
             step: args.get("_step").and_then(Value::as_u64).unwrap_or(0) as u32,
             of: args.get("_of").and_then(Value::as_u64).unwrap_or(0) as u32,
+            sensitive: args.get("_sensitive").and_then(Value::as_bool).unwrap_or(false),
         },
         Some("revive") => Origin::Revive,
         // Панель без пометки — это человек нажал «отправить» своими руками.
@@ -77,6 +78,13 @@ pub fn register(reg: &mut DaemonRegistry) {
                     "[origin] в промпте для {sid} снято подделок пометки: {forged} (источник: {})",
                     origin.tag()
                 ));
+            }
+            // Промпт человека главнее захода цепочки: она уступает сессию и
+            // ждёт решения. Иначе в одну сессию пишут двое, не зная друг о
+            // друге, — и задача человека либо стоит в очереди за чужой темой,
+            // либо теряется. Это наблюдалось на живой работе дважды.
+            if origin.human_decided() {
+                crate::agent::chain::pause_for_human(&d, &sid);
             }
             Ok(ipc::reply_core(&d, sid, text).await)
         }),
@@ -167,7 +175,7 @@ mod tests {
         // Панель с пометкой — внутренний вызывающий: цепочка или оживление.
         assert_eq!(
             origin_of(&json!({ "_consumer": "panel", "_origin": "chain", "_step": 3, "_of": 10 })),
-            Origin::Chain { step: 3, of: 10 }
+            Origin::Chain { step: 3, of: 10, sensitive: false }
         );
         assert_eq!(
             origin_of(&json!({ "_consumer": "panel", "_origin": "revive" })),

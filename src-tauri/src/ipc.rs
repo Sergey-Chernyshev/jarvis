@@ -3251,6 +3251,25 @@ pub fn agent_chain_mode(app: AppHandle, chat_id: Option<String>, auto: bool) -> 
 /// Стоп рвёт ЦЕПОЧКУ, а не текущий ход: завершения сессии больше никого не
 /// разбудят, пока человек не включит режим снова. Режим тоже гасим — иначе
 /// первый же следующий заход агента тихо перезапустил бы цепочку.
+/// Вернуть цепочку в работу после паузы, которую поставила задача от человека.
+///
+/// Отдельная команда, а не «включить режим заново»: режим человек не менял, и
+/// трогать его тут значило бы чинить не то. Пауза — это состояние живой цепочки,
+/// и выходит она из него ровно одним решением.
+#[tauri::command]
+pub fn agent_chain_resume(app: AppHandle, chat_id: Option<String>) -> Value {
+    let id = match chain_chat(&app, chat_id) {
+        Ok(id) => id,
+        Err(e) => return err(e),
+    };
+    if !crate::agent::chain::chains().resume(&id) {
+        // Честный отказ: цепочки уже нет или она не на паузе. Молчаливое «ок»
+        // здесь означало бы кнопку, после которой ничего не происходит.
+        return err("продолжать нечего: цепочка не на паузе");
+    }
+    chain_changed(&app, &id)
+}
+
 #[tauri::command]
 pub fn agent_chain_stop(app: AppHandle, chat_id: Option<String>) -> Value {
     use crate::agent::chain::Mode;

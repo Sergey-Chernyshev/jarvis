@@ -294,3 +294,30 @@ test('режим «сам»: заход уходит без единой кно�
   // И до нажатия ядру ничего не ушло: предложение — это не отправка.
   assert.equal(s.did('agent_chain_send').length, 0, 'предложение уехало само');
 });
+
+/* Цепочка уступила сессию человеку. Дефект был конструктивный: в одну сессию
+ * писали двое — Джарвис по просьбе человека и механизм цепочки, — и ни один не
+ * знал о другом. Карточка обязана дать оба выхода: человек мог зайти на минуту,
+ * а мог перехватить сессию насовсем. */
+test('пауза цепочки видна карточкой и даёт оба выхода', async () => {
+  const s = await boot();
+  await s.chain(chain('paused', { sessionId: 's1' }));
+  const c = cards(s, 'paused');
+  assert.equal(c.length, 1, 'пауза не показана — цепочка «почему-то больше не идёт»');
+  const btns = [...c[0].querySelectorAll('.agbtn')].map((b) => b.textContent);
+  assert.deepEqual(btns, ['Продолжить цепочку', 'Отменить цепочку']);
+
+  await s.hit(c[0].querySelectorAll('.agbtn')[0]);
+  assert.equal(s.did('agent_chain_resume').length, 1, 'продолжение не уехало в ядро');
+  assert.match(c[0].textContent, /Цепочка продолжена/);
+});
+
+test('отмена цепочки из карточки паузы рвёт именно цепочку', async () => {
+  const s = await boot();
+  await s.chain(chain('paused', { sessionId: 's1' }));
+  const c = cards(s, 'paused')[0];
+  await s.hit(c.querySelectorAll('.agbtn')[1]);
+  assert.equal(s.did('agent_chain_stop').length, 1, 'отмена не уехала в ядро');
+  assert.equal(s.did('agent_chain_resume').length, 0, 'заодно продолжили');
+  assert.match(c.textContent, /Цепочка отменена/);
+});

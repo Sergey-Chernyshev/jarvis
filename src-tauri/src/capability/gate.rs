@@ -52,6 +52,47 @@ fn next_ask_id() -> String {
     format!("{ms:x}-{:x}", SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
+/// Принимать ли решение по карточке подтверждения.
+///
+/// Асимметрия намеренная и в ней весь смысл: признаков присутствия человека
+/// требует только СОГЛАСИЕ. Отказ проходит всегда — заперев «Отклонить», мы
+/// оставили бы человека наедине с карточкой, которую нечем закрыть, а
+/// подброшенный отказ стоит одного хода агента и ничего необратимого не делает.
+///
+/// `None` (старое окно, не приславшее признак) считается отсутствием признаков:
+/// умолчание у проверки безопасности бывает только строгим.
+pub fn decision_allowed(approved: bool, armed: Option<bool>) -> bool {
+    !approved || armed == Some(true)
+}
+
+/// Строка журнала о согласии, у которого нет признаков человека за клавишами
+/// (`ipc::agent_confirm`, аргумент `armed`).
+///
+/// Заводится отдельной записью, а не парой к `asked`, честно: имя вопроса
+/// (`ask`) знает гейт, а UI знает только nonce карточки — сшить их нечем.
+/// Поэтому nonce лежит в аргументах: по нему видно, к какой карточке относилась
+/// попытка, и не выдумывается пара, которой нет.
+pub fn unarmed_entry(nonce: &str) -> AuditEntry {
+    AuditEntry {
+        consumer: "panel".into(),
+        id: "capability.confirm".into(),
+        class: RiskClass::Admin.as_str(),
+        args: serde_json::json!({ "nonce": nonce }),
+        provenance: "trusted",
+        outcome: "denied:not-armed".into(),
+        ms: 0,
+        ask: None,
+    }
+}
+
+/// Записать такую попытку. Тихо отклонить согласие нельзя: для человека это
+/// «нажал и ничего», для агента — молчание, а для нас — потерянный след ровно
+/// того события, ради которого проверка и заведена.
+pub fn note_unarmed(sink: &dyn AuditSink, nonce: &str) {
+    sink.record(&unarmed_entry(nonce));
+    crate::log::line("[gate] согласие отклонено: нет признаков, что нажимал человек");
+}
+
 /// Прогнать вызов капабилити через все проверки и (при успехе) исполнить.
 #[allow(clippy::too_many_arguments)]
 pub async fn invoke<C>(
@@ -226,6 +267,35 @@ mod tests {
     use crate::capability::grant::ConfirmPolicy;
     use crate::capability::registry::{make_handler, Registry};
     use serde_json::json;
+
+    /// Согласие без признаков человека не проходит, а отказ проходит всегда.
+    /// Дыра была живой: проверяющий CLI слал синтетические клики в окно, где
+    /// работал человек, и такой клик способен нажать «Разрешить» — то есть
+    /// согласиться за него в том самом гейте, который спрашивает разрешение.
+    #[test]
+    fn consent_needs_signs_of_a_human_but_refusal_never_does() {
+        assert!(decision_allowed(true, Some(true)), "человеческое согласие не прошло");
+        assert!(!decision_allowed(true, Some(false)), "согласие прошло без признаков");
+        assert!(!decision_allowed(true, None), "умолчание оказалось нестрогим");
+        // Заперев отказ, мы оставили бы человека наедине с карточкой.
+        for armed in [Some(true), Some(false), None] {
+            assert!(decision_allowed(false, armed), "отказ не прошёл при armed={armed:?}");
+        }
+    }
+
+    /// Отклонённое согласие обязано оставить след: тихий отказ выглядит как
+    /// «нажал и ничего» — ровно тот класс вранья, который мы весь день чиним.
+    #[test]
+    fn a_refused_consent_is_written_down_with_the_card_it_belongs_to() {
+        let audit = MemAudit::new();
+        note_unarmed(&audit, "nonce-42");
+        let e = audit.last().expect("след не записан");
+        assert_eq!(e.outcome, "denied:not-armed");
+        assert_eq!(e.args["nonce"], "nonce-42", "по строке не найти карточку");
+        // Пары с «asked» тут нет и быть не может — UI знает nonce, а не имя
+        // вопроса. Выдуманная пара сломала бы поиск неотвеченных вопросов.
+        assert!(e.ask.is_none(), "выдумана пара к вопросу");
+    }
 
     /// Реестр с одной Read-капабилити, возвращающей свои args как есть.
     fn echo_registry() -> Registry<()> {

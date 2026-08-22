@@ -286,6 +286,14 @@ impl Backend for KimiBackend {
     fn final_reply(&self, entries: &[Value]) -> Option<String> {
         super::kimi_transcript::full_final_reply(entries)
     }
+    fn session_before_prompt(&self) -> bool {
+        // Kimi Code 0.38 сессию до первой реплики НЕ заводит и говорит об этом
+        // на своём же приветственном экране: «No session yet — one will be
+        // created on your first message», поле `Session:` пустое, хука
+        // `session-start` нет. Ждать его = ждать вечно (снято с живого лога:
+        // четыре подъёма подряд, ноль хуков, четыре таймаута по 90 с).
+        false
+    }
     fn supports_custom_answer(&self) -> bool {
         // Проверено на живом пикере Kimi Code 0.37: строка «Other» есть всегда
         // и стоит последней — выбираешь её, печатаешь ответ, Enter сохраняет.

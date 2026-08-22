@@ -457,9 +457,26 @@ async fn close_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
             Ok(res)
         }
         Target::Pending => {
+            // Талон мог оставить за собой живое окно: сессии Jarvis нет, а
+            // процесс CLI есть — так и накопились шесть брошенных. Имя окна
+            // талон знает (`launch::ready::window_of`), и здесь его гасить
+            // УМЕСТНО: это осознанное «закрой», а не таймер за спиной человека.
+            let orphan = crate::launch::ready::window_of(&ticket);
+            let killed = match &orphan {
+                Some(name) => crate::tmux::kill_session(name).await.is_ok(),
+                None => false,
+            };
             d.spawns.give_up(&ticket);
-            crate::log::line(&format!("[spawn] {by} снял талон {ticket} — сессия ещё не встала"));
+            crate::log::line(&format!(
+                "[spawn] {by} снял талон {ticket} — сессия ещё не встала; окно {}",
+                match (&orphan, killed) {
+                    (Some(n), true) => format!("«{n}» погашено"),
+                    (Some(n), false) => format!("«{n}» погасить не вышло"),
+                    (None, _) => "не заводилось".to_string(),
+                }
+            ));
             Ok(json!({ "ok": true, "state": "cancelled",
+                       "tmuxSession": orphan, "killed": killed,
                        "note": "сессия ещё не появлялась — снят талон запуска" }))
         }
     }

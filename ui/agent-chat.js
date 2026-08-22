@@ -52,6 +52,66 @@
   };
   const outcomeText = (o) => OUTCOME[o] || '⚠ чем кончилось — неизвестно, действие могло не выполниться';
 
+  /* ============ признаки того, что «Разрешить» нажал человек ============
+   *
+   * Проверяющий CLI слал синтетический ввод в живое окно, где человек в этот
+   * момент печатал. Дыра не в удобстве: подброшенный клик способен нажать
+   * «Разрешить» и согласиться за человека — обойти ровно тот гейт, через
+   * который агент и спрашивает разрешение.
+   *
+   * У человеческого нажатия есть то, чего у слепого клика нет: карточка успела
+   * пожить на экране, курсор к ней ЕХАЛ (а не возник в точке), окно было
+   * поднято не в это же мгновение. Ничего из этого не является доказательством
+   * по отдельности — вместе они отсекают именно слепой клик по координатам.
+   *
+   * Это заслон, а не замок: кто синтезирует ещё и движение курсора, пройдёт.
+   * Настоящий запрет стоит у источника — в шимах, которыми запускаются CLI.
+   * Здесь второй рубеж: для всего, что мимо шимов.
+   *
+   * Требуется только для СОГЛАСИЯ. Запертое «Отклонить» оставило бы человека
+   * наедине с карточкой, которую нечем закрыть (та же асимметрия — в
+   * `gate::decision_allowed`).
+   */
+  const ARM_MS = 700; // столько карточка живёт до первого принятого согласия
+  const ARM_SPOTS = 2; // столько РАЗНЫХ позиций курсора над ней: телепорт даёт одну
+
+  /* Когда окно стало активным. Ноль — неактивно; клик в неактивное окно как раз
+   * и есть почерк синтетики: она поднимает окно и жмёт в тот же момент. */
+  let focusedAt = typeof document !== 'undefined' && document.hasFocus && document.hasFocus() ? Date.now() : 0;
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('focus', () => { focusedAt = Date.now(); });
+    window.addEventListener('blur', () => { focusedAt = 0; });
+  }
+
+  /* Чистая функция: почему согласие не принято (null — принято). Отдельно от
+   * DOM, чтобы проверялась без окна — синтетические пробы в живом окне
+   * запрещены, и правило про них само обязано жить по этому правилу. */
+  const armWhy = (p, now, focused) => {
+    if (!p) return 'карточка не отслеживалась';
+    if (now - p.born < ARM_MS) return 'карточка только появилась';
+    if (p.spots.size < ARM_SPOTS) return 'курсор к кнопке не подводили';
+    if (!focused) return 'окно не активно';
+    if (now - focused < ARM_MS) return 'окно только что подняли';
+    return null;
+  };
+  /* Слежка за одной карточкой: рождение и разные позиции курсора над ней. */
+  const watchPresence = (node) => {
+    const p = { born: Date.now(), spots: new Set() };
+    const track = (e) => {
+      if (!e || typeof e.clientX !== 'number') return;
+      p.spots.add(Math.round(e.clientX) + ':' + Math.round(e.clientY));
+    };
+    if (node && node.addEventListener) {
+      node.addEventListener('pointermove', track);
+      node.addEventListener('mousemove', track);
+    }
+    return p;
+  };
+  // Наружу — для headless-прогона интерфейса (окно трогать нельзя).
+  if (typeof window !== 'undefined') {
+    window.JarvisConfirmArm = { armWhy, ARM_MS, ARM_SPOTS };
+  }
+
   /* Что просит агент — словами. Внутреннее имя команды («sessions.control»)
    * человеку не говорит, на что он соглашается, а решает он именно это. */
   const CMD = {
@@ -501,6 +561,8 @@
       const st = t.chain;
       const sw = chainNode(st);
       if (sw) sub.appendChild(sw);
+      const wait = waitNode(st);
+      if (wait) sub.appendChild(wait);
       const money = spendNode(st);
       if (money) sub.appendChild(money);
       const g = gauge(t.ctx);
@@ -509,6 +571,7 @@
       // стареют за ход, а застывшая карточка врёт ровно тем, против чего заведена.
       if (popKind === 'ctx' && node) { popOff(); ctxPop(node, g); }
       else if (popKind === 'chain' && money) { popOff(); chainPop(money, st); }
+      else if (popKind === 'wait' && wait) { popOff(); waitPop(wait, st.waiting); }
     }
 
     /* ---------- автономия чата: режим, расход, журнал заходов ---------- */
@@ -590,8 +653,11 @@
           + ' и ' + usd(s.day) + ' за сутки из ' + usd(s.dayCap) + '. Заходов за сутки: ' + s.visits + '.'
         : 'Расход по этому чату не посчитан: токены считает usage, а сравнить пока не с чем. Числа появятся со вторым заходом.');
       if (s.known) {
+        // Днём общий потолок предупреждает и заход пропускает (chain.rs, CapAction):
+        // обещать стоп там, где его нет, — обещать защиту, которой не будет.
         line('У всех автономных чатов вместе: ' + usd(s.allNight) + ' из ' + usd(s.allNightCap)
-          + ' за ночь. Общий потолок останавливает цепочку даже там, где этот чат в своих рамках.');
+          + ' за ночь. Ночью общий потолок останавливает цепочку даже там, где этот чат в своих'
+          + ' рамках; днём он предупреждает, а заход пропускает — решаешь ты.');
       }
       pop.appendChild(el('ctxsep'));
       const log = ((st && st.visits) || []).slice(-6).reverse();
@@ -604,6 +670,200 @@
       const r = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : null;
       if (r) { pop.style.top = Math.round(r.bottom + 6) + 'px'; pop.style.right = '12px'; }
       document.body.appendChild(pop);
+    }
+
+    /* «Ждёт тебя» — состояние, а не событие: отложенное ночью переживает и
+     * перезапуск, и уход в соседний чат. Карточка в ленте говорит про минуту,
+     * когда это случилось, а шапка — что решение до сих пор за тобой; источник у
+     * них один (ChainState.waiting), поэтому разъехаться им нечем. */
+    function waitNode(st) {
+      const w = (st && st.waiting) || [];
+      if (!w.length) return null;
+      const box = el('chainwait', '⏳ ждёт тебя · ' + w.length);
+      box.title = 'Ночью отложено необратимое: ' + w.map((x) => x.kind).join(', ')
+        + ' · заходы готовы, подробности по клику';
+      box.addEventListener('click', () => waitPop(box, w));
+      return box;
+    }
+
+    function waitPop(anchor, w) {
+      if (pop) { popOff(); return; }
+      pop = el('ctxpop');
+      popKind = 'wait';
+      pop.appendChild(el('ctxline',
+        'Ночью необратимое не делается вовсе — эти заходы готовы и ждут твоего решения.'));
+      for (const x of w || []) pop.appendChild(el('ctxline', '• ' + x.kind + ': ' + cut(one(x.prompt), 200)));
+      const r = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : null;
+      if (r) { pop.style.top = Math.round(r.bottom + 6) + 'px'; pop.style.right = '12px'; }
+      document.body.appendChild(pop);
+    }
+
+    /* ---------- цепочка в ленте: заход, отказ, отложенное, утренняя сводка ----------
+     *
+     * Событие цепочки — не только срез для шапки: в нём kind и текст, и это
+     * ЕДИНСТВЕННОЕ место, где человек узнаёт про ночную работу. Обработчик, из
+     * которого брали один state, выбрасывал заходы, отказы, отложенное и
+     * утреннюю сводку — то есть всю ночь целиком: она честно копилась на диске и
+     * не доходила до глаз.
+     *
+     * Карточка ложится в ленту ЧАТА, которому событие адресовано, а не в ту, что
+     * на экране: ночью работали несколько, и чужая работа в своём чате — та же
+     * тихая неправда, что и чужой ответ. */
+    const CHAIN_CARD = {
+      sent: 'заход ушёл',
+      proposed: 'заход предложен',
+      failed: 'заход не ушёл',
+      stopped: 'цепочка остановлена',
+      cap: 'потолок расхода',
+      deferred: 'ждёт тебя',
+      morning: 'ночная сводка',
+    };
+    /* Тон карточки. Оборванная цепочка, предупреждение и «решать тебе» — разные
+     * вещи, и одна краска на все три сказала бы «сломалось» про ожидание. */
+    const CHAIN_TONE = { failed: 'warn', cap: 'warn', stopped: 'stop', deferred: 'wait', proposed: 'wait' };
+
+    /* Не задвоить. Событие приходит обоим окнам, а лента у чата одна: второй его
+     * приход нарисовал бы вторую карточку про один и тот же заход. Узнаём по
+     * метке времени ядра; метки нет (демон постарше) — рисуем: потерять карточку
+     * хуже, чем показать её дважды. */
+    const chainSeen = new Set();
+    function chainOnce(ev) {
+      if (!ev.at) return true;
+      const key = ev.chatId + '|' + ev.kind + '|' + ev.at;
+      if (chainSeen.has(key)) return false;
+      chainSeen.add(key);
+      if (chainSeen.size > 500) chainSeen.delete(chainSeen.values().next().value);
+      return true;
+    }
+
+    /* Текст карточки. Имя поля у каждого вида своё — ядро называет вещи своими
+     * именами (`prompt` у захода, `digest` у сводки), и сводить их к одному ключу
+     * значило бы соврать, что это одно и то же. */
+    function chainText(ev) {
+      if (ev.kind === 'sent') return 'Заход ' + (ev.step || 0) + ': ' + (ev.prompt || '');
+      if (ev.kind === 'proposed') return ev.prompt || '';
+      // У отложенного текст объясняет, ПОЧЕМУ ночь его не тронула, а сам заход
+      // лежит рядом: утром человек решает по нему, а не по пересказу.
+      const w = ev.waiting || {};
+      return (ev.text || '') + (w.prompt ? '\n\n' + w.prompt : '');
+    }
+
+    function chainCard(ev) {
+      const label = CHAIN_CARD[ev.kind];
+      if (!label || !ev.chatId || !chainOnce(ev)) return;
+      const t = thread(ev.chatId);
+      const box = el('chbox ' + (CHAIN_TONE[ev.kind] || ev.kind));
+      if (ev.kind === 'morning') morningBox(box, ev);
+      else {
+        box.appendChild(el('chkind', label));
+        window.JarvisMarkdown.renderChat(box.appendChild(el('bubble')), chainText(ev));
+        if (ev.kind === 'proposed') proposeRow(t, box, ev);
+      }
+      addRow(t, 'chain ' + ev.kind, box);
+    }
+
+    /* Предложенный заход ждёт кнопки — в этом весь ручной режим. Текст правится
+     * на месте: ядро принимает поправку тем же вызовом (`text`), а гонять её
+     * через поле ввода значило бы отправить заход обычной репликой не туда. */
+    function proposeRow(t, box, ev) {
+      const area = document.createElement('textarea');
+      area.className = 'chedit';
+      area.value = ev.prompt || '';
+      area.addEventListener('keydown', (e) => e.stopPropagation()); // хоткеи панели не мешают править
+      box.appendChild(area);
+      actRow(box, 'Пойдёт, когда скажешь.', 'Отправить заход', 'Отправить этот заход в сессию',
+        async (btn, name) => {
+          if (!api.chainSend) {
+            addErr(t, 'Отправить заход нечем: эта сборка Jarvis такого ещё не умеет — обнови.');
+            return;
+          }
+          const text = area.value.trim();
+          if (!text) { addErr(t, 'Пустой заход отправлять некуда — впиши текст или останови цепочку.'); return; }
+          let r;
+          // Поправку шлём, только если правили: без неё уходит то, что ядро уже
+          // держит предложенным, — и подменить его своей копией незачем.
+          try { r = await api.chainSend(t.id, text === String(ev.prompt || '').trim() ? null : text); }
+          catch (e) { addErr(t, 'Заход не ушёл: ' + errText(e)); return; }
+          if (r && r.ok === false) { addErr(t, 'Заход не ушёл: ' + why(r)); return; }
+          btn.remove();
+          area.disabled = true;
+          name.textContent = 'Заход отправлен.';
+        });
+    }
+
+    /* Утренняя сводка — отчёт, а не реплика: пять разделов с фиксированными
+     * заголовками и полтора экрана текста. Вопрос у человека при этом один и
+     * дословный — «куда он ушёл, пока я спал», и ответ на него обязан читаться
+     * за десять секунд. Поэтому сверху строка чисел, а разделы сложены: раскрыты
+     * те два, ради которых сводку и открывают. Разметку внутри раздела рисует
+     * общий renderChat — своей у сводки нет и заводить её незачем. */
+    const DIGEST_HEAD = /^([А-ЯЁ][А-ЯЁ ,]*[А-ЯЁ])(\s*\([^)]*\))?:\s*(.*)$/;
+    const DIGEST_OPEN = /^(КУДА|ЧТО ЖДЁТ)/;
+
+    /* Разбор на разделы: заголовок — строка прописными до двоеточия. Незнакомый
+     * раздел станет таким же своим: ядро их дописывает (хвост «ещё за ночь» и
+     * есть такой), и пропасть новому нельзя. */
+    function digestParts(text) {
+      const out = { intro: '', foot: '', secs: [] };
+      let body = String(text == null ? '' : text).replace(/\s+$/, '');
+      /* Подвал — абзац после последней пустой строки, без пунктов: ядро ставит
+       * туда счёт непоказанного, и разделу «что ждёт тебя» он не принадлежит. */
+      const at = body.lastIndexOf('\n\n');
+      const tail = at < 0 ? '' : body.slice(at + 2).trim();
+      if (tail && !/^[•\-*]/.test(tail) && !DIGEST_HEAD.test(tail)) {
+        out.foot = tail;
+        body = body.slice(0, at);
+      }
+      const intro = [];
+      let cur = null;
+      for (const line of body.split('\n')) {
+        const h = line.match(DIGEST_HEAD);
+        if (h) { cur = { head: h[1] + (h[2] || ''), body: h[3] ? [h[3]] : [] }; out.secs.push(cur); }
+        else if (cur) cur.body.push(line);
+        else if (line.trim()) intro.push(line.trim());
+      }
+      out.intro = intro.join(' ');
+      return out;
+    }
+
+    /* Ответ за десять секунд: сколько заходов и в скольких чатах, во сколько
+     * обошлось, сколько встало и сколько ждёт решения. Числа берём из ночного
+     * среза, а не вычитываем из прозы: две правды об одной ночи разъедутся. */
+    function morningSum(night, secs) {
+      const md = window.JarvisMarkdown;
+      const notes = night.notices || [];
+      const count = (kinds) => notes.filter((n) => kinds.includes(n.kind)).length;
+      const sent = count(['sent']);
+      const stuck = count(['failed', 'stopped']);
+      const wait = (night.waiting || []).length;
+      const chats = new Set(notes.map((n) => n.chatId)).size;
+      const money = (secs.find((s) => /ПОТРАЧЕНО/.test(s.head)) || { body: [] }).body.join(' ').trim();
+      const row = el('chsum');
+      const chip = (s, cls) => { if (s) row.appendChild(el('chnum' + (cls ? ' ' + cls : ''), s)); };
+      chip(sent + ' ' + md.plural(sent, 'заход', 'захода', 'заходов'));
+      chip(chats ? 'в ' + chats + ' ' + md.plural(chats, 'чате', 'чатах', 'чатах') : '');
+      chip(money);
+      chip(stuck ? stuck + ' встало' : '', 'bad');
+      chip(wait ? wait + ' ждёт тебя' : '', 'wait');
+      return row;
+    }
+
+    function morningBox(box, ev) {
+      const md = window.JarvisMarkdown;
+      const d = digestParts(ev.digest == null ? ev.text : ev.digest);
+      if (d.intro) box.appendChild(el('chtitle', d.intro));
+      box.appendChild(morningSum(ev.night || {}, d.secs));
+      for (const s of d.secs) {
+        const sec = el('chsec' + (DIGEST_OPEN.test(s.head) ? ' open' : ''));
+        const head = el('chsechead');
+        head.appendChild(chevron()); // тот же шеврон, что у свёрнутой группы и Insight
+        head.appendChild(el('chsecname', s.head));
+        head.addEventListener('click', () => sec.classList.toggle('open'));
+        sec.appendChild(head);
+        md.renderChat(sec.appendChild(el('bubble')), s.body.join('\n').trim());
+        box.appendChild(sec);
+      }
+      if (d.foot) box.appendChild(el('chfoot', d.foot));
     }
 
     /* ---------- счётчик контекста в шапке ---------- */
@@ -640,7 +900,8 @@
      * глушение стоило бы закрытия там, где до document слушает кто-то ещё. */
     document.addEventListener('click', (e) => {
       const el0 = e && e.target;
-      if (el0 && el0.closest && (el0.closest('.ctx') || el0.closest('.ctxpop') || el0.closest('.chainspend'))) return;
+      if (el0 && el0.closest && (el0.closest('.ctx') || el0.closest('.ctxpop')
+        || el0.closest('.chainspend') || el0.closest('.chainwait'))) return;
       popOff();
     });
 
@@ -1781,9 +2042,14 @@
      * первый пишет. Пометки нет — так шлёт только старый демон, у которого
      * поток и был один: отдаём открытому. */
     /* Свой канал цепочки: заход ушёл, режим сменили в соседнем окне, цепочка
-     * встала о потолок. Срез приезжает целиком — шапке и строке списка остаётся
-     * его показать. */
-    if (api.onChain) api.onChain((ev) => applyChain(ev && ev.chatId, ev && ev.state));
+     * встала о потолок, утро принесло сводку. Срез идёт в шапку и строку списка,
+     * а kind с текстом — карточкой в ленту: без второго ночная работа видна
+     * только в файле журнала. */
+    if (api.onChain) api.onChain((ev0) => {
+      const ev = ev0 || {};
+      applyChain(ev.chatId, ev.state);
+      chainCard(ev);
+    });
 
     const END = { done: 1, failed: 1, stopped: 1 }; // события конца хода
     api.onEvent((ev0) => {
@@ -1883,6 +2149,11 @@
     api.onConfirm((c0) => {
       const c = c0 || {};
       const cd = c.card || {};
+      /* Один вопрос — одна карточка. Событие приходит и во вкладку, и в окно, а
+       * при переподписке (редок, но бывает) и дважды в одно окно: вторая
+       * карточка выглядела бы как второй вопрос, и человек соглашался бы дважды
+       * на одно действие. Ключ — nonce: он и так одноразовый в демоне. */
+      if (c.nonce && openCards.has(c.nonce)) return;
       /* Карточка меткой чата НЕ помечена: демон шлёт её из другого места, куда
        * chat_id не доходит, и при двух ходах в полёте угадать спросившего
        * нельзя. Не угадываем: вопрос ложится в ту ленту, на которую человек
@@ -1935,13 +2206,24 @@
           keepDown(was);
         },
       };
+      const presence = watchPresence(box);
       const decide = async (approved) => {
         if (card.sent || !openCards.has(c.nonce)) return; // повтор демону не нужен
+        /* Согласие — только с признаками человека за клавишами. Не принятое
+         * нажатие НЕ съедает карточку: она ждёт дальше, и человеку сказано,
+         * чего не хватило, — иначе это выглядит как «нажал, и ничего». */
+        const armed = approved ? armWhy(presence, Date.now(), focusedAt) === null : true;
+        if (approved && !armed) {
+          if (!line.parentElement) box.appendChild(line);
+          line.textContent =
+            'нажатие не принято: ' + armWhy(presence, Date.now(), focusedAt) + ' — нажмите ещё раз';
+          return;
+        }
         card.waiting();
         api.confirmDone(c.nonce); // соседнему окну: вопрос больше не ждёт нажатия
         let res;
         try {
-          res = await api.confirm(c.nonce, approved);
+          res = await api.confirm(c.nonce, approved, armed);
         } catch (e) {
           addErr(t, 'Решение не дошло до Jarvis: ' + errText(e));
           settle(c.nonce, 'expired');
@@ -2017,12 +2299,16 @@
           stop: (chatId) => j.agentStop(chatId),
           chainState: (chatId) => j.agentChainState(chatId),
           chainMode: (chatId, auto) => j.agentChainMode(chatId, auto),
+          /* Предложенный заход по кнопке; text — только если человек поправил.
+           * Моста постарше может и не быть: тогда кнопка честно скажет, что
+           * отправлять нечем, вместо тихой ошибки в консоли. */
+          chainSend: j.agentChainSend && ((chatId, text) => j.agentChainSend(chatId, text)),
           // Канала цепочки может не быть (старый мост) — тогда шапка живёт на
           // одних ответах команд, а не падает вместе со вкладкой.
           onChain: (cb) => j.onAgentChain && j.onAgentChain(cb),
           // закрыть дочернюю сессию — той же командой, что и список сессий
           kill: (sessionId) => j.killSession(sessionId),
-          confirm: (nonce, approved) => j.agentConfirm(nonce, approved),
+          confirm: (nonce, approved, armed) => j.agentConfirm(nonce, approved, armed),
           confirmDone,
           onEvent: (cb) => j.onAgentEvent(cb),
           onConfirm: (cb) => j.onAgentConfirm(cb),
@@ -2076,9 +2362,10 @@
         stop: (chatId) => invoke('agent_stop', { chatId }),
         chainState: (chatId) => invoke('agent_chain_state', { chatId }),
         chainMode: (chatId, auto) => invoke('agent_chain_mode', { chatId, auto }),
+        chainSend: (chatId, text) => invoke('agent_chain_send', { chatId, text }),
         onChain: (cb) => listen('agent:chain', (e) => cb(e.payload)),
         kill: (sessionId) => invoke('session_kill', { sessionId }),
-        confirm: (nonce, approved) => invoke('agent_confirm', { nonce, approved }),
+        confirm: (nonce, approved, armed) => invoke('agent_confirm', { nonce, approved, armed }),
         confirmDone,
         onEvent: (cb) => listen('agent:event', (e) => cb(e.payload)),
         onConfirm: (cb) => listen('agent:confirm', (e) => cb(e.payload)),

@@ -11,6 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parseHTML } from 'linkedom';
+import { humanPress, armCard } from './headless.mjs';
 
 const HERE = new URL('./', import.meta.url);
 const read = (name) => readFileSync(new URL(name, HERE), 'utf8');
@@ -113,6 +114,8 @@ async function bootTab(bus) {
     agentStop: async (chatId) => rec('agent_stop', chatId, { ok: true, stopped: true, chatId, children: [] }),
     agentChainState: async () => ({ ok: true, state: { active: false, mode: 'ask' } }),
     agentChainMode: async () => ({ ok: true }),
+    agentChainSend: async () => ({ ok: true }),
+    onAgentChain: (cb) => bus.listen('agent:chain', (e) => cb(e.payload)),
     agentConfirm: async () => ({ ok: true }),
     onAgentEvent: (cb) => bus.listen('agent:event', (e) => cb(e.payload)),
     onAgentConfirm: (cb) => bus.listen('agent:confirm', (e) => cb(e.payload)),
@@ -319,6 +322,25 @@ test('ход останавливают и во вкладке, и в окне �
   }
 });
 
+/* Ночная работа приходит обоим окнам одним событием, а лента у чата ОДНА:
+ * увидеть её обязаны оба, но нарисовать по одному разу. Ночь, показанная утром
+ * в двух экземплярах, врёт про число заходов ровно вдвое. */
+test('карточка цепочки приходит обоим окнам и не задваивается', async () => {
+  const bus = makeBus();
+  const surfaces = [await bootTab(bus), await bootWindow(bus)];
+  const ev = {
+    chatId: 'c1', kind: 'sent', at: 1700, step: 3, prompt: 'почини красные тесты',
+    state: { chatId: 'c1', active: true, mode: 'auto', waiting: [], visits: [], spend: { known: false } },
+  };
+  await bus.emit('agent:chain', ev);
+  await bus.emit('agent:chain', ev); // то же событие пришло второй раз
+
+  for (const s of surfaces) {
+    assert.equal(s.msgs.querySelectorAll('.msg.chain.sent').length, 1, 'заход задвоился либо потерялся');
+    assert.match(s.msgs.textContent, /почини красные тесты/, 'ночная работа не дошла до ленты');
+  }
+});
+
 test('решённая карточка снимается в обоих окнах, а не только там, где нажали', async () => {
   const bus = makeBus();
   const tab = await bootTab(bus);
@@ -328,8 +350,9 @@ test('решённая карточка снимается в обоих окн�
   const card = (s) => s.msgs.querySelector('.msg.confirm .cbox');
   assert.ok(card(tab) && card(win), 'вопрос пришёл не всем');
 
-  card(tab).querySelector('.cbtn.yes').dispatchEvent(new tab.window.Event('click', { bubbles: true }));
-  await tick();
+  /* Жмём как человек: согласие с почерком синтетики окно не примет — и
+   * правильно сделает. Правило одно на все тест-файлы, см. ui/headless.mjs. */
+  await humanPress(tab.window, card(tab), card(tab).querySelector('.cbtn.yes'));
 
   for (const s of [tab, win]) {
     // считаем кнопки, а не сравниваем узлы: неудачный assert над узлом linkedom
@@ -354,11 +377,15 @@ test('решённый вопрос уходит демону ровно оди�
   const win = await bootWindow(bus);
   await bus.emit('agent:confirm', CARD);
 
+  // признаки человека набираем до щелчков: иначе не пройдёт и первый, и тест
+  // про повтор проверял бы совсем другое
+  await armCard(win.window, win.msgs.querySelector('.msg.confirm .cbox'));
+
   const yes = win.msgs.querySelector('.cbtn.yes');
   yes.dispatchEvent(new win.window.Event('click', { bubbles: true }));
   yes.dispatchEvent(new win.window.Event('click', { bubbles: true })); // повтор по мёртвой карточке
   await tick();
 
   const asked = win.calls.filter(([c]) => c === 'agent_confirm');
-  assert.deepEqual(asked, [['agent_confirm', { nonce: 'n-1', approved: true }]]);
+  assert.deepEqual(asked, [['agent_confirm', { nonce: 'n-1', approved: true, armed: true }]]);
 });

@@ -778,6 +778,7 @@ mod tests {
             claude_shim: true,
             codex_shim: false,
             kimi_shim: false,
+            input_guard: false,
         };
         let mut status = Status {
             whisper_model: true,
@@ -828,6 +829,7 @@ mod tests {
             claude_shim: false,
             codex_shim: false,
             kimi_shim: false,
+            input_guard: false,
         };
         let done_job = InstallJobSnapshot {
             state: InstallJobState::Done,

@@ -309,19 +309,24 @@ pub async fn paste_slash(pane: &str, text: &str) -> Result<(), String> {
 }
 
 /// Метаданные живой паны для адопта осиротевших сессий при рестарте демона.
+///
+/// `created` — когда поднялась tmux-сессия паны, unix-секунды. Нужен там, где
+/// пану ищут ДО первого хука агента: по каталогу их в одном проекте бывает
+/// несколько, и отличить свежепоставленную от вчерашней больше нечем.
 #[derive(Debug, Clone)]
 pub struct PaneInfo {
     pub pane_id: String,
     pub session_name: String,
     pub cwd: String,
     pub pid: i64,
+    pub created: i64,
 }
 
-/// Живые паны сервера jarvis с метаданными (id, имя сессии, cwd, pid процесса
-/// паны). Семантика арм: `Ok(Some)` — успех, `Ok(None)` — tmux не установлен
-/// (реестр не трогаем), `Err` — ошибка/пустой сервер.
-/// Разделитель полей — таб: ни id, ни имя сессии, ни pid его не содержат, а путь
-/// идёт последним полем.
+/// Живые паны сервера jarvis с метаданными (id, имя сессии, pid процесса паны,
+/// время создания сессии, cwd). Семантика арм: `Ok(Some)` — успех, `Ok(None)` —
+/// tmux не установлен (реестр не трогаем), `Err` — ошибка/пустой сервер.
+/// Разделитель полей — таб: ни id, ни имя сессии, ни числа его не содержат, а
+/// путь идёт последним полем.
 pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
     let mut cmd = tokio::process::Command::new(tmux_bin());
     cmd.args([
@@ -330,7 +335,7 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{session_name}\t#{pane_pid}\t#{pane_current_path}",
+        "#{pane_id}\t#{session_name}\t#{pane_pid}\t#{session_created}\t#{pane_current_path}",
     ])
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
@@ -341,19 +346,21 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
             String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .filter_map(|line| {
-                    let mut it = line.splitn(4, '\t');
+                    let mut it = line.splitn(5, '\t');
                     let pane_id = it.next()?.trim();
                     if pane_id.is_empty() {
                         return None;
                     }
                     let session_name = it.next().unwrap_or("").trim().to_string();
                     let pid = it.next().unwrap_or("").trim().parse::<i64>().unwrap_or(0);
+                    let created = it.next().unwrap_or("").trim().parse::<i64>().unwrap_or(0);
                     let cwd = it.next().unwrap_or("").trim().to_string();
                     Some(PaneInfo {
                         pane_id: pane_id.to_string(),
                         session_name,
                         cwd,
                         pid,
+                        created,
                     })
                 })
                 .collect(),
@@ -361,6 +368,14 @@ pub async fn list_panes_meta() -> Result<Option<Vec<PaneInfo>>, ()> {
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         _ => Err(()),
     }
+}
+
+/// Закрыть tmux-сессию целиком по ИМЕНИ (а не пану по id).
+///
+/// Нужно там, где сессии Jarvis ещё нет и гасить нечего по id паны: подъём,
+/// не ставший сессией, знает только имя, которое дал шим (`<каталог><pid>`).
+pub async fn kill_session(name: &str) -> Result<(), String> {
+    tmux_j(&["kill-session", "-t", name]).await.map(|_| ())
 }
 
 /// Подписать tmux-окно заголовком сессии (терминал подписывает сам себя).

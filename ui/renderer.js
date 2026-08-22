@@ -2465,18 +2465,35 @@ function budgetLine(name, p, now) {
     return { name, text: 'чисел нет', pct: null, rung: 'unknown',
              title: p?.reason || 'опросчик ещё не ходил за числами' };
   }
-  const title = [p.reason, p.staleNote, p.normNote].filter(Boolean).join(' · ');
+  /* Число в футере — то, на котором принимаются решения.
+   *
+   * Раньше показывался голый остаток недели, а отказывал бюджет по другому
+   * числу: остаток минус резерв на последний день минус уже занятое под
+   * разрешённую работу. Человек видел «осталось 30%» и получал отказ — цифра,
+   * по которой нельзя предсказать поведение, хуже отсутствия цифры. Поэтому
+   * крупно идёт свободное, а из чего оно сложилось — в подсказке. */
+  const num = (v) => (typeof v === 'number' ? Math.round(v) : null);
+  const avail = num(p.availablePct);
+  const held = num(p.reservedPct) || 0;
+  const keep = num(p.reservePct) || 0;
+  const split =
+    avail === null || (held === 0 && keep === 0)
+      ? null
+      : `остаток ${pct}% = свободно ${avail}%` +
+        (keep ? ` + резерв на последний день ${keep}%` : '') +
+        (held ? ` + занято под уже разрешённое ${held}%` : '');
+  const title = [p.reason, split, p.staleNote, p.normNote].filter(Boolean).join(' · ');
   const reset = p.weekResetAt > now ? day(p.weekResetAt) : null;
   const runway = typeof p.runwayDays === 'number' ? p.runwayDays : null;
   if (runway === null) {
     // Прогноза нет (мёртвая зона, мало точек) — обещать день нельзя.
     return { name, text: reset ? `темпа пока нет, сброс ${reset}` : 'темпа пока нет',
-             pct, rung: p.rung, title };
+             pct, free: avail, rung: p.rung, title };
   }
   const enough = runway >= (p.daysToReset || 0);
   const until = day(now + runway * BUDGET_DAY_MS);
   const text = `хватит до ${until}, до сброса${reset ? ` (${reset})` : ''} ${enough ? 'дотянет' : 'не дотянет'}`;
-  return { name, text, pct, rung: p.rung, title };
+  return { name, text, pct, free: avail, rung: p.rung, title };
 }
 
 function takeBudget(l) {
@@ -2499,9 +2516,12 @@ function paintFooterBudget() {
     else if (l.rung === 'routine' || l.rung === 'warn') span.classList.add('is-warn');
     span.title = l.title ? `${l.name}: ${l.title}` : '';
     span.append(`${l.name} ${l.text}`);
-    if (l.pct !== null) {
+    // Свободное, а не голый остаток: по нему бюджет и отказывает. Разбивка —
+    // в подсказке, чтобы отказ при непустом остатке не выглядел произволом.
+    const shown = typeof l.free === 'number' ? l.free : l.pct;
+    if (shown !== null) {
       const small = document.createElement('small');
-      small.textContent = `${l.pct}%`;
+      small.textContent = `${shown}%`;
       span.append(' ', small);
     }
     footerBudgetEl.append(span);

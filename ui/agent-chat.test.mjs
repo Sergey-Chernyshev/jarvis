@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parseHTML } from 'linkedom';
+import { humanPress } from './headless.mjs';
 
 const HERE = new URL('./', import.meta.url);
 const read = (name) => readFileSync(new URL(name, HERE), 'utf8');
@@ -410,6 +411,10 @@ const ASK = (over = {}) => ({
   ...over,
 });
 const cbox = (doc) => doc.querySelector('.msg.confirm .cbox');
+/* «Разрешить» принимается только у нажатия с признаками человека за клавишами:
+ * подброшенный клик иначе согласился бы за него и обошёл сам гейт разрешений.
+ * Правило одно на все тест-файлы и живёт в ui/headless.mjs. */
+const press = (window, box, which = 'yes') => humanPress(window, box, box.querySelector('.cbtn.' + which));
 
 test('карточка называет действие словами, а не внутренним именем команды', async () => {
   const { doc, fire } = await boot();
@@ -441,10 +446,10 @@ test('правка настроек показывает, что из чего �
 /* Главное враньё: гейт истёк, пока карточка ждала, agent_confirm вернул
  * {ok:false} — а человеку писали «✓ разрешено» за действие, которого не было. */
 test('«Разрешить» по истёкшему вопросу не превращается в «разрешено»', async () => {
-  const { doc, hit, fire } = await boot({ sessionId: null }, { agent_confirm: () => ({ ok: false }) });
+  const { window, doc, fire } = await boot({ sessionId: null }, { agent_confirm: () => ({ ok: false }) });
   await fire('agent:confirm', ASK());
   const box = cbox(doc);
-  await hit(box.querySelector('.cbtn.yes'));
+  await press(window, box);
 
   assert.equal(box.querySelectorAll('.cbtn').length, 0, 'кнопки живы у решённого вопроса');
   assert.doesNotMatch(box.textContent, /разрешено/, 'обещано разрешение, которого демон не принял');
@@ -459,10 +464,10 @@ test('все четыре исхода демона названы своими 
     ['stale', /цель изменилась[\s\S]*не выполнено/, /отклонено|✓/],
   ];
   for (const [outcome, want, nope] of cases) {
-    const { doc, hit, fire } = await boot();
+    const { window, doc, fire } = await boot();
     await fire('agent:confirm', ASK());
     const box = cbox(doc);
-    await hit(box.querySelector('.cbtn.yes'));
+    await press(window, box);
     // до слова демона карточка ничего не обещает
     assert.doesNotMatch(box.textContent, /разрешено|отклонено/, outcome + ': исход объявлен раньше демона');
     await fire('agent:confirm-done', { nonce: 'n-1', approved: outcome === 'approved', outcome });
@@ -472,10 +477,10 @@ test('все четыре исхода демона названы своими 
 });
 
 test('исход, о котором это окно не знает, не выдаётся за согласие', async () => {
-  const { doc, hit, fire } = await boot();
+  const { window, doc, fire } = await boot();
   await fire('agent:confirm', ASK());
   const box = cbox(doc);
-  await hit(box.querySelector('.cbtn.yes'));
+  await press(window, box);
   await fire('agent:confirm-done', { nonce: 'n-1', approved: false, outcome: 'denied-by-policy' });
   assert.doesNotMatch(box.textContent, /✓/, 'неизвестный исход показан как разрешение');
   assert.match(box.textContent, /неизвестно/);

@@ -52,7 +52,14 @@ pub fn register(reg: &mut DaemonRegistry) {
                     Some(s) => serde_json::to_value(s).map_err(|e| e.to_string()),
                     None => Ok(super::spawn::pending_json(&rec)),
                 },
-                None => Err(format!("сессия не найдена: {sid}")),
+                // Талона нет — но он мог БЫТЬ и не стать сессией. Раньше это
+                // отвечало «не найдено», и агент до конца считал, что работа
+                // идёт: подъём проваливался в тишине. Теперь провал отвечает
+                // причиной, содержимым окна и тем, куда девать задачу.
+                None => match crate::launch::ready::stall_of(&sid) {
+                    Some(stall) => Err(stall.report()),
+                    None => Err(format!("сессия не найдена: {sid}")),
+                },
             }
         }),
     );

@@ -2603,7 +2603,7 @@ pub(crate) async fn launch_core(d: &Arc<Daemon>, req: LaunchReq) -> Value {
     if !machine.is_empty() && machine != "local" {
         let res = launch_on_node(d, &machine, &cwd, &agent, session_id.as_deref(), mode).await;
         if res.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-            deliver_task(d, &machine, &cwd, task, bind);
+            deliver_task(d, &machine, &cwd, &agent, task, bind);
         }
         return res;
     }
@@ -2666,7 +2666,7 @@ pub(crate) async fn launch_core(d: &Arc<Daemon>, req: LaunchReq) -> Value {
     let inner = crate::launch::inner_command(&cwd, &proxy, &agent_cmd, &path_dirs);
     match crate::launch::spawn(&terminal, &custom, &inner).await {
         Ok(()) => {
-            deliver_task(d, "", &cwd, task, bind);
+            deliver_task(d, "", &cwd, &agent, task, bind);
             ok()
         }
         Err(e) => err(e),
@@ -2675,90 +2675,25 @@ pub(crate) async fn launch_core(d: &Arc<Daemon>, req: LaunchReq) -> Value {
 
 /// Отдать задачу агенту, как только он встанет.
 ///
-/// Сессия появляется не в момент запуска, а когда агент дошлёт первый хук:
-/// терминал открывается, TUI поднимается, и всё это занимает секунды. Поэтому
-/// ждём её в фоне, а не заставляем человека сторожить список.
+/// Здесь остался только вызов: механика — в `launch::ready`. Причина не в
+/// размере, а в том, что порядков запуска ДВА и они несовместимы. Claude и
+/// Codex заводят сессию сами, и ждать её в реестре — правильно. Kimi сессию до
+/// первой реплики не заводит вовсе («No session yet — one will be created on
+/// your first message»), и прежнее ожидание было взаимной блокировкой: мы ждали
+/// сессию, чтобы отдать реплику, а сессии не было, пока не было реплики. Четыре
+/// подъёма подряд не встали ни разу, три задачи человека не были сделаны.
 ///
-/// Ждём ограниченно и молча сдаёмся: не встал за полторы минуты — значит
-/// что-то не так, и текст, вылетевший в неизвестно чей чат через пять минут,
-/// был бы хуже ненаписанного.
-///
-/// Этот же сторож доделывает `sessions.spawn` (`bind`): имя, модель и запись
-/// родителя ложатся на сессию тут, до первого промпта. Второго ожидателя не
-/// заводим — сессия появляется один раз, и сторожить её дважды незачем.
+/// `agent` добавлен сюда именно за этим: порядок запуска — свойство агента, а
+/// не наша догадка.
 fn deliver_task(
     d: &Arc<Daemon>,
     machine: &str,
     cwd: &str,
+    agent: &str,
     task: Option<String>,
     bind: Option<crate::capability::native::spawn::Bind>,
 ) {
-    let text = task.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-    if text.is_none() && bind.is_none() {
-        return;
-    }
-    let (d, machine, cwd) = (d.clone(), machine.to_string(), cwd.trim_end_matches('/').to_string());
-    let since = crate::util::now_ms();
-    tauri::async_runtime::spawn(async move {
-        for _ in 0..90 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let found = {
-                let sessions = d.sessions.lock().unwrap_or_else(|e| e.into_inner());
-                sessions
-                    .values()
-                    .filter(|s| {
-                        let same_host = if machine.is_empty() || machine == "local" {
-                            s.remote.is_none()
-                        } else {
-                            s.remote.as_deref() == Some(machine.as_str())
-                        };
-                        // Сессия ИМЕННО этого запуска: тот же каталог и
-                        // появилась после него. Иначе задача уехала бы в чужой
-                        // давно открытый чат того же проекта.
-                        same_host
-                            && s.cwd.as_deref().map(|c| c.trim_end_matches('/')) == Some(cwd.as_str())
-                            && s.created_at >= since
-                    })
-                    .max_by_key(|s| s.created_at)
-                    .and_then(|s| s.tmux_pane.clone().map(|p| (s.id.clone(), p)))
-            };
-            let Some((id, pane)) = found else { continue };
-            // Сперва идентичность (имя, родитель, модель), потом промпт: имя
-            // должно быть в списке к моменту, когда сессия начнёт работать.
-            if let Some(b) = &bind {
-                crate::capability::native::spawn::on_bound(&d, b, &id).await;
-            }
-            let Some(text) = &text else { return };
-            let sent = if machine.is_empty() || machine == "local" {
-                crate::tmux::reply(&pane, text).await
-            } else {
-                match d.remotes.node(&machine).and_then(|n| n.client().ok()) {
-                    Some(c) => c.reply(&pane, text).await,
-                    None => Err("узел пропал из настроек".into()),
-                }
-            };
-            match sent {
-                Ok(()) => crate::log::line(&format!("launch: задача уехала в {id}")),
-                Err(e) => crate::log::line(&format!("launch: задача не доехала: {e}")),
-            }
-            return;
-        }
-        // Причина, если знаем: «не встал» человек починить не может, а «ждёт
-        // подтверждения доверия к каталогу» — может, одним нажатием.
-        let why = bind
-            .as_ref()
-            .and_then(|b| d.spawns.find(&b.ticket))
-            .and_then(|s| crate::launch::stall_hint(&s.agent, &s.cwd));
-        crate::log::line(&match &why {
-            Some(w) => format!("launch: агент не встал за 90 с — {w}"),
-            None => "launch: агент не встал за 90 с — задачу не отдал".to_string(),
-        });
-        // Талон, не дождавшийся сессии, снимаем: иначе он навсегда останется в
-        // «сессии продолжают работу» после стопа — про сессию, которой нет.
-        if let Some(b) = &bind {
-            d.spawns.give_up(&b.ticket);
-        }
-    });
+    crate::launch::ready::deliver(d, machine, cwd, agent, task, bind);
 }
 
 /// Запуск на удалённой машине. Терминала там нет и открывать нечего: сессия
@@ -2834,9 +2769,33 @@ pub fn toast_click(app: AppHandle, session_id: Option<String>) {
 /// Решение пользователя по карточке подтверждения агента (R4). In-process —
 /// вызывается ТОЛЬКО из панели (на сокет не выставлено): агент не может сам себя
 /// одобрить.
+///
+/// `armed` — признаки того, что нажимал человек, а не подброшенный клик
+/// (карточка пожила на экране, курсор к ней ехал, окно не подняли только что;
+/// считает `ui/agent-chat.js`). Проверяющий CLI слал синтетический ввод в живое
+/// окно, а такой клик способен нажать «Разрешить» и согласиться за человека —
+/// обойти ровно тот гейт, через который агент и спрашивает разрешение.
+///
+/// Асимметрия намеренная: без признаков не проходит только СОГЛАСИЕ. Отказ
+/// принимается всегда — заблокировать «Отклонить» значит запереть человека
+/// наедине с карточкой, а подброшенный отказ в худшем случае стоит одного хода.
+///
+/// Это второй рубеж, а не замок: тот, кто синтезирует ещё и движение курсора,
+/// подделает и признаки. Настоящий запрет стоит у источника — в шимах, через
+/// которые запускаются CLI.
 #[tauri::command]
-pub fn agent_confirm(app: AppHandle, nonce: String, approved: bool) -> Value {
+pub fn agent_confirm(app: AppHandle, nonce: String, approved: bool, armed: Option<bool>) -> Value {
     let d = Daemon::get(&app);
+    if !crate::capability::gate::decision_allowed(approved, armed) {
+        // Громко: в журнал и в ответ. Тихо отклонённое согласие выглядело бы
+        // для человека как «нажал и ничего», а для агента — как молчание.
+        crate::capability::gate::note_unarmed(&crate::capability::audit::FileAudit, &nonce);
+        return json!({
+            "ok": false,
+            "code": "not-armed",
+            "error": "согласие не принято: нет признаков, что нажимал человек"
+        });
+    }
     let known = d.pending.resolve(&nonce, approved);
     json!({ "ok": known })
 }

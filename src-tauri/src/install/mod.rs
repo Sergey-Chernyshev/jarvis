@@ -31,6 +31,9 @@ use std::sync::OnceLock;
 const HOOK_SRC: &str = include_str!("../../../bin/jarvis-hook");
 const SHIM_SRC: &str = include_str!("../../../bin/agent-shim");
 const CUSTOM_SHIM_SRC: &str = include_str!("../../../bin/custom-shim");
+/// Страж синтетического ввода: ставится в тот же каталог шимов под именами
+/// инструментов ввода (osascript/cliclick/…) и отказывает в них агенту.
+const INPUT_GUARD_SRC: &str = include_str!("../../../bin/input-guard");
 const TMUX_CONF_SRC: &str = include_str!("../../../bin/jarvis-tmux.conf");
 const SILERO_SERVER_SRC: &str = include_str!("../../../bin/silero-server.py");
 /// STT-сайдкар (Qwen3-ASR MLX): Python-сервер для диктовки (инкр. 9, Phase 8).
@@ -2058,6 +2061,12 @@ pub struct IntegrationHealth {
     pub codex_shim: bool,
     /// Шим `kimi` установлен.
     pub kimi_shim: bool,
+    /// Страж синтетического ввода стоит (шим `osascript` в каталоге шимов).
+    ///
+    /// В `ok()` НЕ входит осознанно: без него интеграция работает, а вот
+    /// «неполная интеграция» ради этого поля заставила бы демон каждый старт
+    /// жаловаться на машинах, где ввода нет вовсе (Linux без xdotool).
+    pub input_guard: bool,
 }
 
 impl IntegrationHealth {
@@ -2096,6 +2105,11 @@ pub fn integration_health() -> IntegrationHealth {
         claude_shim: shim_dst().exists(),
         codex_shim: codex_shim_dst().exists(),
         kimi_shim: kimi_shim_dst().exists(),
+        // Проверяем по «всегда ставим»: если платформенного списка нет вовсе
+        // (Linux без найденных инструментов), стражу нечего охранять — и это
+        // не «не установлен», а «нечего перехватывать».
+        input_guard: GUARD_ALWAYS.is_empty()
+            || GUARD_ALWAYS.iter().all(|n| shims_dir().join(n).exists()),
     }
 }
 
@@ -2106,6 +2120,9 @@ pub fn integration_health() -> IntegrationHealth {
 /// смены dev↔prod профиля, из-за которого codex дёргал несуществующий бинарь.
 pub fn reconcile_hooks(progress: &Progress) {
     sync_hook_files(progress);
+    // Страж синтетического ввода — тоже самолечение: он защитный, и на машине
+    // с уже готовой интеграцией должен появиться сам, без повторного setup.
+    install_input_guard(progress);
     install_hooks_into(&settings_path(), "claude", &EVENTS, progress);
     if codex_found() {
         install_hooks_into(&codex_hooks_path(), "codex", &CODEX_EVENTS, progress);
@@ -2126,7 +2143,7 @@ pub fn repair(progress: &Progress) {
         "Интеграция",
         format!(
             "dir={} hook_bin={} claude_hooks={} codex={} codex_hooks={} codex_shim={} \
-             kimi={} kimi_hooks={} kimi_shim={} → {}",
+             kimi={} kimi_hooks={} kimi_shim={} input_guard={} → {}",
             h.jarvis_dir,
             h.hook_bin,
             h.claude_hooks_ok,
@@ -2136,6 +2153,7 @@ pub fn repair(progress: &Progress) {
             h.kimi_present,
             h.kimi_hooks_ok,
             h.kimi_shim,
+            h.input_guard,
             if h.ok() { "OK" } else { "НЕПОЛНО" },
         ),
     ));
@@ -2303,6 +2321,113 @@ fn sync_custom_shims_at(dir: &Path, agents: &[(String, String)]) {
     }
 }
 
+/* ================= страж синтетического ввода ================= */
+
+/// Инструменты, которые ставятся стражем ВСЕГДА (на своей платформе).
+///
+/// `cliclick` — тут даже если его нет на машине: его единственное назначение —
+/// синтетический ввод, и шим должен встретить агента, который решит доставить
+/// утилиту сам (`brew install cliclick`). `osascript` есть в любой macOS.
+#[cfg(target_os = "macos")]
+const GUARD_ALWAYS: &[&str] = &["osascript", "cliclick"];
+#[cfg(not(target_os = "macos"))]
+const GUARD_ALWAYS: &[&str] = &[];
+
+/// Инструменты, которые перехватываем, только если они реально стоят на машине.
+/// Выдумывать остальные нельзя: шим с именем несуществующей команды делает вид,
+/// что она есть, и ломает `command -v`-разведку чужих скриптов.
+const GUARD_IF_PRESENT: &[&str] = &[
+    "hs",      // Hammerspoon CLI: `hs -c 'hs.eventtap.keyStroke(…)'`
+    "xdotool", // X11
+    "ydotool", // Wayland (uinput)
+    "wtype",   // Wayland
+];
+
+/// Под какими именами ставить стража. Чистая функция от «что есть на машине» —
+/// проверяется тестом без обращения к PATH.
+fn input_guard_names(present: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = GUARD_ALWAYS.to_vec();
+    names.extend(GUARD_IF_PRESENT.iter().copied().filter(|n| present(n)));
+    names
+}
+
+/// Есть ли команда в PATH МИМО каталога шимов. Через шим спрашивать нельзя:
+/// он сам себя и найдёт, и любой инструмент окажется «установлен».
+fn found_outside_shims(name: &str) -> bool {
+    let shims = shims_dir().display().to_string();
+    let clean: Vec<String> = augmented_path()
+        .split(':')
+        .filter(|d| !d.is_empty() && *d != shims)
+        .map(String::from)
+        .collect();
+    Command::new("/bin/sh")
+        .args(["-c", &format!("command -v {name}")])
+        .env("PATH", clean.join(":"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Тело стража с запечённым текущим JARVIS_DIR — тот же приём, что в `shim_body`:
+/// в обычном терминале переменной нет, а dev-профиль живёт в ~/.jarvis-dev, и
+/// без подмены страж писал бы отказы в чужой журнал.
+fn input_guard_body() -> String {
+    INPUT_GUARD_SRC.replacen(
+        "JARVIS_DIR=\"${JARVIS_DIR:-$HOME/.jarvis}\"",
+        &format!("JARVIS_DIR=\"${{JARVIS_DIR:-{}}}\"", jarvis_dir().display()),
+        1,
+    )
+}
+
+/// Метка своих файлов стража — чтобы снос не трогал чужое в каталоге шимов.
+const INPUT_GUARD_MARK: &str = "# jarvis-input-guard";
+
+fn install_input_guard_at(dir: &Path, names: &[&str]) -> usize {
+    let _ = fs::create_dir_all(dir);
+    let body = input_guard_body();
+    names
+        .iter()
+        .filter(|n| write_if_changed(&dir.join(n), &body))
+        .count()
+}
+
+/// Поставить/обновить стража синтетического ввода.
+///
+/// Зовётся и из установки, и из `reconcile_hooks` (каждый старт демона): это
+/// защитный контроль, и на уже установленной машине он обязан появиться сам, а
+/// не ждать, пока человек повторно прогонит setup.
+pub fn install_input_guard(progress: &Progress) {
+    let names = input_guard_names(found_outside_shims);
+    if names.is_empty() {
+        return;
+    }
+    let changed = install_input_guard_at(&shims_dir(), &names);
+    // PATH-блок обычно пишет транспорт, но он пропускается без tmux — а страж
+    // без каталога в PATH бесполезен, поэтому просим блок и здесь.
+    ensure_path_block();
+    if changed > 0 {
+        progress(Step::done(
+            "Транспорт",
+            format!("страж синтетического ввода: {}", names.join(", ")),
+        ));
+    }
+}
+
+/// Снять стража (при удалении интеграции). Чужие файлы с теми же именами не
+/// трогаем — только свои, по метке.
+fn uninstall_input_guard() {
+    for name in GUARD_ALWAYS.iter().chain(GUARD_IF_PRESENT.iter()) {
+        let path = shims_dir().join(name);
+        let ours = fs::read_to_string(&path)
+            .is_ok_and(|t| t.lines().take(3).any(|l| l.contains(INPUT_GUARD_MARK)));
+        if ours {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
 /* ================= публичный API: status / install / uninstall ================= */
 
 /// Текущее «что установлено» из реального статуса — вход оркестратора `models_install`.
@@ -2410,6 +2535,15 @@ pub fn status_report() -> String {
     let live = live_tmux_sessions();
     if !live.is_empty() {
         out += &format!("  • живые сессии: {}\n", live.join(", "));
+    }
+    let guard = input_guard_names(found_outside_shims);
+    out += "Страж синтетического ввода:\n";
+    if guard.is_empty() {
+        out += "  • нечего перехватывать на этой платформе\n";
+    } else {
+        for name in &guard {
+            out += &format!("  {} {}\n", mark(shims_dir().join(name).exists()), name);
+        }
     }
     let engine = voice_engine();
     let yn = |b: bool| if b { "да" } else { "нет" };
@@ -2577,6 +2711,8 @@ pub fn install_core(progress: &Progress) -> IntegrationHealth {
     // --- Фаза «Транспорт» (шим claude + tmux.conf + PATH-блок) ---
     progress(Step::start("Транспорт"));
     install_tmux_transport(progress);
+    // Страж ввода — вне tmux-ветки: он нужен, даже если tmux не поставлен.
+    install_input_guard(progress);
 
     // медиа-адаптер для паузы чужого звука (мгновенно, тихо)
     install_mediaremote();
@@ -2631,6 +2767,30 @@ pub fn install(progress: &Progress, proxy: Option<&str>) {
     }
 }
 
+/// Дописать в rc-файлы блок «каталог шимов — ПЕРВЫМ в PATH». Идемпотентно.
+///
+/// Отдельной функцией, потому что нужна двум: транспорту (без шима агента tmux
+/// не увидит сессию) и стражу ввода (без первенства в PATH его просто обойдут,
+/// найдя /usr/bin/osascript). Порядок тут — не косметика, а всё условие работы.
+fn ensure_path_block() {
+    let shims = shims_dir().display().to_string();
+    for rc in rc_files() {
+        let existed = rc.exists();
+        let content = if existed {
+            fs::read_to_string(&rc).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let merged = merge_block(&content, &shims);
+        if merged != content {
+            if existed {
+                backup(&rc);
+            }
+            atomic_write(&rc, &merged);
+        }
+    }
+}
+
 fn install_tmux_transport(progress: &Progress) {
     if !tmux_found() {
         progress(Step::warn(
@@ -2650,22 +2810,7 @@ fn install_tmux_transport(progress: &Progress) {
     }
     fs::write(tmux_conf_dst(), TMUX_CONF_SRC).expect("запись tmux.conf");
 
-    let shims = shims_dir().display().to_string();
-    for rc in rc_files() {
-        let existed = rc.exists();
-        let content = if existed {
-            fs::read_to_string(&rc).unwrap_or_default()
-        } else {
-            String::new()
-        };
-        let merged = merge_block(&content, &shims);
-        if merged != content {
-            if existed {
-                backup(&rc);
-            }
-            atomic_write(&rc, &merged);
-        }
-    }
+    ensure_path_block();
     // Список агентов собираем, а не перечисляем тернарником: их уже трое.
     let mut names = vec!["claude"];
     if codex_found() {
@@ -2699,6 +2844,7 @@ pub fn uninstall(progress: &Progress) {
     ] {
         let _ = fs::remove_file(&f);
     }
+    uninstall_input_guard();
     let _ = fs::remove_dir(shims_dir());
     for rc in rc_files() {
         if !rc.exists() {
@@ -3339,6 +3485,7 @@ mod tests {
             claude_shim: false,
             codex_shim: false,
             kimi_shim: false,
+            input_guard: false,
         };
         assert!(!health.ok(), "без единого агента интеграция не готова");
         health.claude_present = true;
@@ -4236,5 +4383,426 @@ mod custom_shim_tests {
         assert!(CUSTOM_SHIM_SRC.contains("session-end"));
         assert!(CUSTOM_SHIM_SRC.contains("--jarvis-run"), "самоперезапуск внутри tmux пропал");
         assert!(CUSTOM_SHIM_SRC.contains("jarvis-hook"), "хуки должны идти общим транспортом");
+    }
+}
+
+/// Страж синтетического ввода: классификация скриптов и попадание в установку.
+///
+/// Тесты гоняют НАСТОЯЩИЙ встроенный скрипт через `/bin/sh`, а не его копию на
+/// Rust: логика классификации живёт в одном месте (шелл), и дублировать её ради
+/// тестируемости значило бы завести второй источник правды, который разъедется
+/// первым же правкой. Поэтому вокруг шима строится песочница: свой каталог
+/// шимов, свой «настоящий» бинарь-заглушка и свой JARVIS_DIR под аудит.
+#[cfg(test)]
+mod input_guard_tests {
+    use super::*;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    /// Исходник этого же модуля — «сторож» на то, что установка зовёт стража.
+    /// Файл на диске и есть источник правды, и никакой мок его не заменит.
+    const SELF_SRC: &str = include_str!("mod.rs");
+
+    struct Sandbox {
+        root: PathBuf,
+        shims: PathBuf,
+        real: PathBuf,
+        jarvis: PathBuf,
+    }
+
+    struct Run {
+        code: i32,
+        out: String,
+        err: String,
+    }
+
+    /// Свой каталог на тест: модуль собирается в ДВА бинаря (jarvis и
+    /// jarvis-setup), и одинаковые пути дали бы плавающие падения.
+    fn sandbox(tag: &str) -> Sandbox {
+        let root = std::env::temp_dir().join(format!(
+            "jarvis-guard-{tag}-{}-{}",
+            std::process::id(),
+            env!("CARGO_CRATE_NAME"),
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let sb = Sandbox {
+            shims: root.join("shims"),
+            real: root.join("real"),
+            jarvis: root.join("jarvis"),
+            root,
+        };
+        for d in [&sb.shims, &sb.real, &sb.jarvis] {
+            fs::create_dir_all(d).unwrap();
+        }
+        sb
+    }
+
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    impl Sandbox {
+        /// Поставить встроенный скрипт под нужными именами — ровно как установщик.
+        fn install(&self, names: &[&str]) {
+            install_input_guard_at(&self.shims, names);
+        }
+
+        /// Заглушка «настоящего» бинаря: печатает маркер и свои аргументы, а
+        /// потом переливает stdin — так виден и факт запуска, и то, что скрипт
+        /// со stdin дошёл до него целиком.
+        fn fake_real(&self, name: &str) {
+            let path = self.real.join(name);
+            write_executable(&path, "#!/bin/sh\necho REAL_RAN \"$@\"\ncat\n");
+        }
+
+        fn run(&self, name: &str, args: &[&str], stdin: Option<&str>) -> Run {
+            self.run_with_path(name, args, stdin, &[&self.shims, &self.real], &[])
+        }
+
+        fn run_with_path(
+            &self,
+            name: &str,
+            args: &[&str],
+            stdin: Option<&str>,
+            dirs: &[&PathBuf],
+            env: &[(&str, &str)],
+        ) -> Run {
+            let mut path: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+            // Скрипту нужны sed/tr/grep/cut/date/mktemp/ps — системные каталоги
+            // обязаны быть в PATH, иначе тест проверял бы отсутствие coreutils.
+            path.extend(["/usr/bin".into(), "/bin".into(), "/usr/sbin".into()]);
+            let mut cmd = Command::new(self.shims.join(name));
+            cmd.args(args)
+                .env("PATH", path.join(":"))
+                .env("JARVIS_DIR", &self.jarvis)
+                .env_remove("JARVIS_INPUT_GUARD")
+                .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+            let mut child = cmd.spawn().expect("шим не запустился");
+            if let Some(text) = stdin {
+                child.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+            }
+            let out = child.wait_with_output().unwrap();
+            Run {
+                code: out.status.code().unwrap_or(-1),
+                out: String::from_utf8_lossy(&out.stdout).into_owned(),
+                err: String::from_utf8_lossy(&out.stderr).into_owned(),
+            }
+        }
+
+        fn audit(&self) -> Vec<Value> {
+            fs::read_to_string(self.jarvis.join("audit.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .map(|l| serde_json::from_str(l).expect("строка аудита — не JSON"))
+                .collect()
+        }
+    }
+
+    fn assert_refused(r: &Run, why: &str) {
+        assert_ne!(r.code, 0, "отказ обязан быть ненулевым: {why}");
+        assert!(!r.out.contains("REAL_RAN"), "настоящий бинарь всё-таки запустился: {why}");
+        assert!(r.err.contains("ЗАПРЕЩЕНО"), "отказ не громкий: {}", r.err);
+    }
+
+    fn assert_passed(r: &Run, why: &str) {
+        assert_eq!(r.code, 0, "безобидный вызов не прошёл ({why}): {}", r.err);
+        assert!(r.out.contains("REAL_RAN"), "настоящий бинарь не позвали: {why}");
+    }
+
+    /* ---------- классификация: что считается вводом, а что нет ---------- */
+
+    #[test]
+    fn harmless_osascript_passes_through() {
+        let sb = sandbox("harmless");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        assert_passed(&sb.run("osascript", &["-e", "return 1+1"], None), "арифметика");
+        // Собственные вызовы Jarvis обязаны продолжать работать: громкость и
+        // перепись процессов через System Events — не ввод.
+        assert_passed(
+            &sb.run("osascript", &["-e", "set volume output volume 50"], None),
+            "громкость",
+        );
+        assert_passed(
+            &sb.run(
+                "osascript",
+                &["-e", "tell application \"System Events\" to get the unix id of every process whose background only is false"],
+                None,
+            ),
+            "System Events без глаголов ввода",
+        );
+        assert!(sb.audit().is_empty(), "пропуск не должен сорить в журнал");
+    }
+
+    #[test]
+    fn keystroke_is_refused() {
+        let sb = sandbox("keystroke");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        let r = sb.run(
+            "osascript",
+            &["-e", "tell application \"System Events\" to keystroke \"x\""],
+            None,
+        );
+        assert_refused(&r, "keystroke");
+        // Три законных пути обязаны быть в тексте: без них отказ бесполезен —
+        // агент не узнает, что делать вместо.
+        assert!(r.err.contains("headless"), "нет пути 1: {}", r.err);
+        assert!(r.err.contains("скриншот"), "нет пути 2: {}", r.err);
+        assert!(r.err.contains("человека нажать"), "нет пути 3: {}", r.err);
+    }
+
+    /// Многострочный скрипт: триггер не в первом `-e`, а в середине.
+    #[test]
+    fn multiline_script_is_scanned_whole() {
+        let sb = sandbox("multiline");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        let r = sb.run(
+            "osascript",
+            &[
+                "-e",
+                "tell application \"Jarvis\"",
+                "-e",
+                "  set frontmost to true",
+                "-e",
+                "end tell",
+            ],
+            None,
+        );
+        assert_refused(&r, "set frontmost во второй строке");
+        assert_eq!(sb.audit()[0]["args"]["match"], "set frontmost");
+    }
+
+    /// Скрипт файлом — третий способ доставки, наравне с -e и stdin.
+    #[test]
+    fn script_file_is_read_and_classified() {
+        let sb = sandbox("file");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        let script = sb.root.join("s.applescript");
+        fs::write(&script, "tell application \"Terminal\" to activate\n").unwrap();
+        assert_refused(
+            &sb.run("osascript", &[&script.display().to_string()], None),
+            "activate из файла",
+        );
+    }
+
+    /// stdin надо ВЫЧИТАТЬ (иначе не классифицируешь) и передать дальше целиком
+    /// (иначе безобидный скрипт получит пустой ввод и молча ничего не сделает).
+    #[test]
+    fn stdin_script_is_buffered_and_forwarded() {
+        let sb = sandbox("stdin-ok");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        let r = sb.run("osascript", &["-"], Some("return 2+2\n"));
+        assert_passed(&r, "скрипт со stdin");
+        assert!(r.out.contains("return 2+2"), "stdin не дошёл до бинаря: {}", r.out);
+    }
+
+    #[test]
+    fn stdin_script_with_click_is_refused() {
+        let sb = sandbox("stdin-deny");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        let r = sb.run(
+            "osascript",
+            &[],
+            Some("tell application \"System Events\"\n  click at {10, 20}\nend tell\n"),
+        );
+        // Без аргументов osascript тоже читает stdin — этот путь обязан ловиться.
+        assert_refused(&r, "click со stdin без явного `-`");
+    }
+
+    /// Слово-триггер внутри строкового литерала.
+    ///
+    /// Мы его ЛОВИМ — и это сознательный выбор, а не недосмотр. Отличить
+    /// инертную строку от вложенного скрипта (`run script "… keystroke …"`)
+    /// грепом нельзя, а цена ошибок разная: ложный отказ стоит переформулировки
+    /// и виден сразу, ложный пропуск — нажатой за человека кнопки подтверждения
+    /// и не виден вообще. Тест фиксирует именно это решение.
+    #[test]
+    fn trigger_word_inside_a_string_literal_is_refused_on_purpose() {
+        let sb = sandbox("literal");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        assert_refused(
+            &sb.run("osascript", &["-e", "display dialog \"нажми activate в меню\""], None),
+            "activate внутри литерала",
+        );
+        // Обратная сторона выбора: строка без триггеров проходит как обычно.
+        assert_passed(
+            &sb.run("osascript", &["-e", "display dialog \"готово\""], None),
+            "литерал без триггеров",
+        );
+    }
+
+    #[test]
+    fn cliclick_is_always_refused() {
+        let sb = sandbox("cliclick");
+        sb.install(&["cliclick"]);
+        sb.fake_real("cliclick");
+        for args in [vec!["c:100,200"], vec!["-V"], vec![]] {
+            assert_refused(&sb.run("cliclick", &args, None), "cliclick");
+        }
+    }
+
+    #[test]
+    fn hammerspoon_eventtap_is_refused_but_queries_pass() {
+        let sb = sandbox("hs");
+        sb.install(&["hs"]);
+        sb.fake_real("hs");
+        assert_refused(
+            &sb.run("hs", &["-c", "hs.eventtap.keyStroke({}, \"a\")"], None),
+            "eventtap",
+        );
+        assert_passed(
+            &sb.run("hs", &["-c", "print(hs.screen.mainScreen():name())"], None),
+            "запрос экрана",
+        );
+    }
+
+    /* ---------- поведение отказа: журнал, коды, живучесть ---------- */
+
+    /// Формат строки — тот же, что у гейта (capability::audit::AuditEntry).
+    /// Журнал один, и читает его одна капабилити: разъехавшийся формат означал
+    /// бы, что попытки ввода в `audit.query` просто не видно.
+    #[test]
+    fn refusal_is_recorded_in_the_gate_audit_format() {
+        let sb = sandbox("audit");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        sb.run("osascript", &["-e", "tell app \"X\" to activate"], None);
+        let rows = sb.audit();
+        assert_eq!(rows.len(), 1, "отказ обязан оставить ровно одну строку");
+        let r = &rows[0];
+        for key in ["ts", "consumer", "id", "class", "args", "provenance", "outcome", "ms"] {
+            assert!(r.get(key).is_some(), "в строке нет поля {key}: {r}");
+        }
+        assert_eq!(r["id"], "input.osascript");
+        assert_eq!(r["class"], "control");
+        assert_eq!(r["outcome"], "denied:synthetic-input");
+        assert!(r["ms"].is_number(), "ms должно быть числом, как у гейта");
+        assert_eq!(r["args"]["match"], "activate");
+        // Аргументы попытки — чтобы человек видел, ЧТО пытались нажать.
+        assert!(
+            r["args"]["argv"].as_array().is_some_and(|a| !a.is_empty()),
+            "argv потерялся: {r}"
+        );
+    }
+
+    /// Тумблер для человека в своём терминале существует, но он не тихий:
+    /// пропуск тоже попадает в журнал, иначе стал бы дырой без следов.
+    #[test]
+    fn human_bypass_still_leaves_a_trace() {
+        let sb = sandbox("bypass");
+        sb.install(&["osascript"]);
+        sb.fake_real("osascript");
+        let r = sb.run_with_path(
+            "osascript",
+            &["-e", "tell app \"X\" to activate"],
+            None,
+            &[&sb.shims, &sb.real],
+            &[("JARVIS_INPUT_GUARD", "off")],
+        );
+        assert_passed(&r, "тумблер off");
+        assert_eq!(sb.audit()[0]["outcome"], "bypass:synthetic-input");
+    }
+
+    /// Нет настоящего бинаря — шим обязан внятно сказать это и не звать себя.
+    /// `hs` берём потому, что его заведомо нет в /usr/bin: так проверяется
+    /// именно ненайденный бинарь, а не отсутствие coreutils.
+    #[test]
+    fn missing_real_binary_is_reported_not_looped() {
+        let sb = sandbox("norealbin");
+        sb.install(&["hs"]);
+        let r = sb.run_with_path("hs", &["-c", "print(1)"], None, &[&sb.shims], &[]);
+        assert_eq!(r.code, 127, "не найденный бинарь — это 127");
+        assert!(r.err.contains("не найден"), "молчаливый провал: {}", r.err);
+    }
+
+    /// Отказ не должен зависеть от наличия настоящего бинаря: «нечего звать» —
+    /// не повод пропустить попытку молча.
+    #[test]
+    fn refusal_works_without_the_real_binary() {
+        let sb = sandbox("denynoreal");
+        sb.install(&["osascript"]);
+        let r = sb.run_with_path("osascript", &["-e", "keystroke \"a\""], None, &[&sb.shims], &[]);
+        assert!(r.err.contains("ЗАПРЕЩЕНО"), "отказ пропал без бинаря: {}", r.err);
+        assert_eq!(sb.audit().len(), 1, "отказ без бинаря обязан попасть в журнал");
+    }
+
+    /* ---------- установка: страж действительно доезжает до диска ---------- */
+
+    #[test]
+    fn installer_writes_executable_guards_with_our_mark() {
+        let sb = sandbox("install");
+        sb.install(&["osascript", "cliclick"]);
+        for name in ["osascript", "cliclick"] {
+            let path = sb.shims.join(name);
+            let body = fs::read_to_string(&path).unwrap();
+            assert!(body.contains(INPUT_GUARD_MARK), "нет метки — снос не найдёт свой файл");
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_ne!(mode & 0o111, 0, "шим не исполняемый");
+        }
+        // Идемпотентность: второй проход ничего не переписывает.
+        assert_eq!(install_input_guard_at(&sb.shims, &["osascript"]), 0);
+    }
+
+    #[test]
+    fn guard_names_are_platform_honest() {
+        // Несуществующее не выдумываем: шим с именем отсутствующей команды врёт
+        // `command -v` и ломает чужие скрипты.
+        let none = input_guard_names(|_| false);
+        assert!(!none.contains(&"hs"), "hs поставлен без Hammerspoon на машине");
+        let all = input_guard_names(|_| true);
+        assert!(all.contains(&"hs"), "найденный hs обязан перехватываться");
+        if cfg!(target_os = "macos") {
+            assert!(none.contains(&"osascript") && none.contains(&"cliclick"));
+        }
+        // Снос обязан знать про КАЖДОЕ имя, которое умеет поставить установка,
+        // иначе после удаления интеграции в PATH останется мёртвый шим.
+        for name in all {
+            assert!(
+                GUARD_ALWAYS.contains(&name) || GUARD_IF_PRESENT.contains(&name),
+                "{name} ставится, но не сносится"
+            );
+        }
+    }
+
+    /// JARVIS_DIR запекается: dev-профиль (~/.jarvis-dev) обязан писать отказы
+    /// в свой журнал, а не в чужой.
+    #[test]
+    fn jarvis_dir_is_baked_into_the_guard() {
+        let body = input_guard_body();
+        assert!(!body.contains("${JARVIS_DIR:-$HOME/.jarvis}"), "дефолт не подменён");
+        assert!(body.contains(&jarvis_dir().display().to_string()));
+    }
+
+    /// Сторож на проводку: страж бесполезен, если установка его не зовёт.
+    /// Проверяем исходник модуля — источник правды тут именно он.
+    #[test]
+    fn install_and_reconcile_actually_call_the_guard() {
+        let calls = SELF_SRC.matches("install_input_guard(progress)").count();
+        assert!(
+            calls >= 2,
+            "страж обязан ставиться и из install_core, и из reconcile_hooks (нашли {calls})"
+        );
+        assert!(
+            SELF_SRC.contains("uninstall_input_guard();"),
+            "снос интеграции обязан уносить стража"
+        );
+        // Первенство в PATH — единственное условие работы стража.
+        assert!(
+            INPUT_GUARD_SRC.contains("# jarvis-input-guard"),
+            "метка стража пропала из скрипта"
+        );
     }
 }

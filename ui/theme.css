@@ -1029,3 +1029,48 @@ textarea.lp-ask-text { width: 100%; min-height: 66px; }
   color: var(--ink-faint); white-space: nowrap; font-variant-numeric: tabular-nums;
   -webkit-app-region: no-drag; }
 .chainspend:hover { color: var(--ink-mute); }
+/* Отложенное до утра стоит рядом с расходом и говорит краской предупреждения:
+   это не поломка, а решение, которого ждут от человека. */
+.chainwait { flex: none; cursor: pointer; font: 500 11.5px/1.6 var(--font);
+  color: var(--warn); white-space: nowrap; -webkit-app-region: no-drag; }
+.chainwait:hover { filter: brightness(1.08); }
+
+/* Карточки цепочки в ленте (agent-chat.js): заход, отказ, отложенное до утра и
+   утренняя сводка. Стили общие на два документа — как у шапки: разъедутся, и
+   ночная работа в одном из окон станет невидимой. */
+.msg.chain { align-self: stretch; align-items: stretch; max-width: 560px; }
+.chbox { width: 100%; padding: 14px 16px; border-radius: var(--r-card); background: var(--surface); }
+.chbox .bubble { white-space: normal; font-size: 13.5px; line-height: 1.6;
+  color: var(--ink-2); word-break: break-word; }
+.chkind { margin-bottom: 6px; font: 500 11.5px/1.2 var(--font); color: var(--ink-faint);
+  text-transform: uppercase; letter-spacing: .04em; }
+.chbox.warn .chkind { color: var(--warn); }
+.chbox.stop .chkind { color: var(--danger); }
+.chbox.wait .chkind { color: var(--accent-text); }
+/* Поправить предложенный заход — на месте: переписывать его в поле ввода значит
+   отправить обычной репликой не туда. */
+.chedit { width: 100%; margin-top: 8px; min-height: 62px; resize: vertical;
+  padding: 8px 10px; border: 0; outline: none; border-radius: var(--r-chip);
+  background: var(--paper); color: var(--ink); font: 400 13px/1.5 var(--font);
+  -webkit-user-select: text; user-select: text; }
+.chedit:focus { box-shadow: inset 0 0 0 1px var(--accent); }
+.chedit[disabled] { opacity: .6; }
+
+/* Утренняя сводка. Строка чисел сверху — ответ на «куда он ушёл, пока я спал»
+   за десять секунд; разделы под ней сложены, кроме тех двух, ради которых её и
+   открывают. Иначе пять разделов подряд читаются как простыня и не читаются. */
+.chtitle { margin-bottom: 8px; font: 600 14.5px/1.45 var(--font); color: var(--ink); }
+.chsum { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+.chnum { padding: 2px 8px; border-radius: var(--r-chip); background: var(--fill-1);
+  font: 500 12px/1.5 var(--font); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.chnum.bad { color: var(--danger); }
+.chnum.wait { color: var(--accent); background: var(--accent-soft); }
+.chsec { margin-top: 10px; }
+.chsechead { display: flex; align-items: center; gap: 6px; cursor: default; user-select: none;
+  font: 600 12.5px/1.5 var(--font); color: var(--ink-2); }
+.chsechead:hover { color: var(--ink); }
+.chsechead .agchev { color: var(--ink-faint); }
+.chsec.open .chsechead .agchev { transform: rotate(90deg); }
+.chsec .bubble { margin-top: 6px; }
+.chsec:not(.open) .bubble { display: none; }
+.chfoot { margin-top: 12px; font: 400 12px/1.5 var(--font); color: var(--ink-faint); }

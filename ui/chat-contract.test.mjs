@@ -192,3 +192,25 @@ test('автономия чата видна в шапке и не путает�
   assert.match(chat, /function chainPop\(/);
   assert.match(chat, /function spendNode\(/);
 });
+
+/* Ночная работа видна В ЛЕНТЕ, а не только в шапке: заходы, отказы, отложенное
+ * до утра и утренняя сводка. Стили у карточек тоже одни на два документа —
+ * второй копии тут заводить незачем, а разъедется она молча, и в одном из окон
+ * ночь снова станет невидимой. Утренняя сводка размечается общим renderChat:
+ * своей разметки у неё нет и заводить её нельзя. */
+test('карточки цепочки в ленте одни на вкладку и на окно', () => {
+  const theme = readFileSync(new URL('./theme.css', import.meta.url), 'utf8');
+  const chat = readFileSync(new URL('./agent-chat.js', import.meta.url), 'utf8');
+  for (const sel of ['.msg.chain', '.chbox', '.chkind', '.chedit', '.chsum', '.chnum', '.chsec', '.chfoot', '.chainwait']) {
+    assert.ok(theme.includes(sel), sel + ' не стилизован — ночную работу нечем показать');
+  }
+  const win = readFileSync(new URL('./agent-chat.html', import.meta.url), 'utf8');
+  for (const [where, css] of [['index.html', html], ['agent-chat.html', win]]) {
+    assert.ok(!css.includes('.chbox'), where + ': вторая копия стилей карточек — она и разъедется');
+  }
+  // Событие цепочки рисуется целиком: kind с текстом, а не один срез для шапки
+  assert.match(chat, /function chainCard\(/);
+  assert.match(chat, /function morningBox\(/);
+  assert.match(chat, /api\.chainSend\(/); // предложенный заход уходит кнопкой
+  assert.match(chat, /md\.renderChat\(sec\.appendChild/); // сводку размечает общий рендерер
+});

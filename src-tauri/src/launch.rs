@@ -11,6 +11,11 @@ use crate::util::shell_quote;
 use std::path::PathBuf;
 use std::process::Stdio;
 
+/// Вторая половина подъёма: дождаться готовности CLI, отдать задачу и громко
+/// провалиться, если сессия так и не встала. Отдельным модулем, потому что у
+/// агентов ДВА разных порядка запуска, и различать их — работа не на три строки.
+pub mod ready;
+
 /// Команда агента: новая сессия или `--resume`/`resume`, с dangerous-флагами при
 /// включённом «опасном режиме». Флаги сверены с `resumeCommand` в renderer.js:
 /// claude → `--dangerously-skip-permissions`, codex → `--dangerously-bypass-approvals-and-sandbox`.
@@ -302,8 +307,16 @@ mod imp {
         s.replace('\\', r"\\").replace('"', "\\\"").replace('\n', r"\n").replace('\r', r"\r")
     }
 
+    /// Абсолютный путь, а не имя в PATH — намеренно: в каталоге шимов лежит
+    /// страж синтетического ввода, который режет `activate`. Открытие терминала
+    /// человеком по кнопке «запустить» — не синтетический ввод агента, и
+    /// абсолютный путь разводит эти случаи, не давая агенту обходного тумблера.
+    /// Без этого в dev-сборке (демон наследует PATH терминала вместе с шимами)
+    /// запуск сессии перестал бы открывать окно вовсе.
+    const OSASCRIPT: &str = "/usr/bin/osascript";
+
     async fn osascript(args: &[String]) -> Result<(), String> {
-        let out = tokio::process::Command::new("osascript")
+        let out = tokio::process::Command::new(OSASCRIPT)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

@@ -2001,10 +2001,20 @@ pub(crate) async fn deliver(
     step: u32,
 ) -> Result<(), String> {
     let app = d.app.clone();
+    // Происхождение едет вместе с промптом и ставится транспортом (`origin.rs`).
+    // Инцидент: заход цепочки ушёл в торговую сессию с боевыми ключами биржи, а
+    // Джарвис, ведущий тот чат, объявил его подделкой и заподозрил постороннего —
+    // отличить сочинённое машиной от переданного по просьбе человека было нечем.
     let out = crate::ipc::via_gate_panel(
         d,
         "sessions.reply",
-        json!({ "session_id": sid, "text": prompt }),
+        json!({
+            "session_id": sid,
+            "text": prompt,
+            "_origin": "chain",
+            "_step": step,
+            "_of": MAX_STEPS,
+        }),
     )
     .await;
     if out.get("ok").and_then(Value::as_bool).unwrap_or(false) {

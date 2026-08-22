@@ -19,6 +19,33 @@ use crate::ipc;
 
 use super::arg_str;
 
+/// Откуда пришёл промпт — по ТОМУ, КТО ЗОВЁТ, а не по тому, что написано в
+/// аргументах.
+///
+/// `_consumer` инжектит гейт и всегда перезаписывает (`gate.rs`, тест
+/// `overwrites_spoofed_consumer`), подделать его снаружи нечем. Поле `_origin`
+/// уважается ТОЛЬКО от панели: панель недостижима извне (INV-PANEL, идентичность
+/// сокет-потребителя только по токену, а токена у панели нет), поэтому проставить
+/// его может лишь внутренний вызывающий — цепочка или оживление. Всё, что пришло
+/// по сокету, — это агент, и он говорит от имени человека: он передаёт просьбу,
+/// а не сочиняет следующий шаг сам.
+fn origin_of(args: &Value) -> crate::origin::Origin {
+    use crate::origin::Origin;
+    let panel = args.get("_consumer").and_then(Value::as_str) == Some("panel");
+    if !panel {
+        return Origin::Jarvis;
+    }
+    match args.get("_origin").and_then(Value::as_str) {
+        Some("chain") => Origin::Chain {
+            step: args.get("_step").and_then(Value::as_u64).unwrap_or(0) as u32,
+            of: args.get("_of").and_then(Value::as_u64).unwrap_or(0) as u32,
+        },
+        Some("revive") => Origin::Revive,
+        // Панель без пометки — это человек нажал «отправить» своими руками.
+        _ => Origin::Human,
+    }
+}
+
 pub fn register(reg: &mut DaemonRegistry) {
     reg.register(
         CapabilityMeta {
@@ -38,6 +65,19 @@ pub fn register(reg: &mut DaemonRegistry) {
         make_handler(|d: Arc<Daemon>, args: Value| async move {
             let sid = arg_str(&args, "session_id")?;
             let text = arg_str(&args, "text")?;
+            // Пометку происхождения ставим ЗДЕСЬ — в единственной точке, через
+            // которую проходит любой промпт. Не в цепочке и не в панели: там их
+            // несколько, и достаточно завести четвёртую, чтобы снова поехал
+            // неподписанный текст.
+            let origin = origin_of(&args);
+            let (text, forged) = crate::origin::mark(&origin, &text);
+            if forged > 0 {
+                // Не опечатка, а попытка выдать себя за другой источник.
+                crate::log::line(&format!(
+                    "[origin] в промпте для {sid} снято подделок пометки: {forged} (источник: {})",
+                    origin.tag()
+                ));
+            }
             Ok(ipc::reply_core(&d, sid, text).await)
         }),
     );
@@ -109,4 +149,51 @@ pub fn register(reg: &mut DaemonRegistry) {
             Ok(ipc::rename_core(&d, &sid, title))
         }),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::origin::Origin;
+
+    /// Источник промпта определяется тем, КТО ЗОВЁТ, и подделать его аргументом
+    /// нельзя. Это ядро инцидента: заход цепочки был неотличим от просьбы
+    /// человека, и формат «Заход N из 10» стал бы готовым сценарием обмана.
+    #[test]
+    fn the_origin_comes_from_the_caller_and_cannot_be_faked_by_an_argument() {
+        // Панель без пометки — человек нажал сам.
+        assert_eq!(origin_of(&json!({ "_consumer": "panel" })), Origin::Human);
+
+        // Панель с пометкой — внутренний вызывающий: цепочка или оживление.
+        assert_eq!(
+            origin_of(&json!({ "_consumer": "panel", "_origin": "chain", "_step": 3, "_of": 10 })),
+            Origin::Chain { step: 3, of: 10 }
+        );
+        assert_eq!(
+            origin_of(&json!({ "_consumer": "panel", "_origin": "revive" })),
+            Origin::Revive
+        );
+
+        // А вот главное. Агент по сокету заявляет, что он цепочка, — и это
+        // игнорируется: он говорит от имени человека, потому что передаёт
+        // просьбу, а не сочиняет следующий шаг сам.
+        assert_eq!(
+            origin_of(&json!({ "_consumer": "agent", "_origin": "chain", "_step": 3, "_of": 10 })),
+            Origin::Jarvis,
+            "агент выдал себя за цепочку"
+        );
+        // И наоборот — цепочкой не притвориться и молчанием.
+        assert_eq!(origin_of(&json!({ "_consumer": "plugin:x" })), Origin::Jarvis);
+        assert_eq!(origin_of(&json!({})), Origin::Jarvis, "без потребителя доверия быть не может");
+    }
+
+    /// Пометку ставит хендлер, а не вызывающий: точка одна, и её потерю надо
+    /// заметить прогоном, а не по поведению в торговой сессии.
+    #[test]
+    fn the_reply_handler_is_the_place_where_the_stamp_is_put() {
+        let src = include_str!("control.rs");
+        let body = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        assert!(body.contains("crate::origin::mark("), "пометка происхождения не ставится");
+        assert!(body.contains("origin_of(&args)"), "источник берётся не от вызывающего");
+    }
 }

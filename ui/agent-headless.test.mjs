@@ -145,11 +145,16 @@ test('черновик чистит только удавшаяся отправ
   await w.send();
   assert.equal(w.input.value, 'дорогой промпт', 'поле пусто, а сообщение не ушло — набирать заново');
   assert.equal(w.input.selectionStart, 4, 'текст вернули, а курсор нет');
+  /* И на диске тоже: поле переживёт только это окно, а черновик — перезапуск.
+   * Вернуть текст в поле, но стереть его из книжки — потерять его на закрытии. */
+  assert.equal(d.drafts.get('c1')?.text, 'дорогой промпт',
+    'черновик стёрт за неслучившуюся отправку — закроют окно, и текста нет');
 
   // и упавший мост — тоже не повод стирать
   d.sendResult = () => { throw new Error('мост умер'); };
   await w.send();
   assert.equal(w.input.value, 'дорогой промпт', 'исключение съело набранный текст');
+  assert.equal(d.drafts.get('c1')?.text, 'дорогой промпт', 'исключение стёрло черновик с диска');
 
   d.sendResult = (a) => ({ ok: true, chatId: a.chatId });
   await w.send();
@@ -392,16 +397,70 @@ test('отказать слепым кликом можно — иначе ка�
   assert.equal(cardOf(w.doc).querySelectorAll('.cbtn').length, 0, 'кнопки живы у отклонённого вопроса');
 });
 
-test('окна не хватает: поднятого прямо сейчас окна мало для согласия', async () => {
+/* Дальше — по одному недостающему признаку за раз. Иначе тест зелен по чужой
+ * причине: у слепого клика не хватает СРАЗУ ВСЕГО, и снятая проверка курсора
+ * осталась бы незамеченной за неактивным окном. Такие тесты уже ловили. */
+
+const moveOver = (w, box) => {
+  const { ARM_SPOTS } = w.arm();
+  for (let i = 0; i < ARM_SPOTS; i++) {
+    const e = new w.window.Event('mousemove', { bubbles: true });
+    e.clientX = 120 + i * 17;
+    e.clientY = 240 + i * 11;
+    box.dispatchEvent(e);
+  }
+};
+
+test('не хватает только курсора: щелчок без подведения не соглашается', async () => {
   const w = await mountAgentChat({ daemon: makeDaemon(['Джарвис']) });
   await w.confirm(ASK());
+  const { ARM_MS } = w.arm();
 
-  // окно подняли и в то же мгновение щёлкнули — почерк синтетики, а не человека
+  // окно активно и поднято давно, карточка пожила — но курсор в кнопке ВОЗНИК,
+  // а не приехал. Ровно почерк клика по координатам.
+  w.window.dispatchEvent(new w.window.Event('focus'));
+  await new Promise((r) => setTimeout(r, ARM_MS + 60));
+  await w.blindPress('yes');
+
+  assert.deepEqual(w.invoked('agent_confirm'), [],
+    'клик по координатам, без движения курсора, согласился за человека');
+  assert.match(cardOf(w.doc).querySelector('.cresult').textContent, /курсор к кнопке не подводили/,
+    'причина названа не та — человек не поймёт, что сделать');
+});
+
+test('не хватает только окна: щелчок в только что поднятое окно не соглашается', async () => {
+  const w = await mountAgentChat({ daemon: makeDaemon(['Джарвис']) });
+  await w.confirm(ASK());
+  const { ARM_MS } = w.arm();
+  const box = cardOf(w.doc);
+
+  // карточка пожила, курсор к ней ехал — не хватает ровно одного: окно подняли
+  // в то же мгновение, когда щёлкнули. Так делает синтетика, а не человек.
+  await new Promise((r) => setTimeout(r, ARM_MS + 60));
+  moveOver(w, box);
   w.window.dispatchEvent(new w.window.Event('focus'));
   await w.blindPress('yes');
 
   assert.deepEqual(w.invoked('agent_confirm'), [], 'клик в только что поднятое окно согласился за человека');
-  assert.match(cardOf(w.doc).querySelector('.cresult').textContent, /нажатие не принято/);
+  assert.match(box.querySelector('.cresult').textContent, /окно только что подняли/,
+    'причина названа не та — человек не поймёт, что сделать');
+});
+
+test('не хватает только возраста: щелчок по свежей карточке не соглашается', async () => {
+  const w = await mountAgentChat({ daemon: makeDaemon(['Джарвис']) });
+  // окно подняли заранее — к появлению карточки оно уже давно активно
+  w.window.dispatchEvent(new w.window.Event('focus'));
+  const { ARM_MS } = w.arm();
+  await new Promise((r) => setTimeout(r, ARM_MS + 60));
+
+  await w.confirm(ASK());
+  const box = cardOf(w.doc);
+  moveOver(w, box); // курсор даже ехал — но карточка только что возникла под ним
+  await w.blindPress('yes');
+
+  assert.deepEqual(w.invoked('agent_confirm'), [],
+    'согласие принято по карточке, которую человек не успел прочитать');
+  assert.match(box.querySelector('.cresult').textContent, /карточка только появилась/);
 });
 
 /* Само правило — чистая функция, и проверяется без всякого DOM: синтетические

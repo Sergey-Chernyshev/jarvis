@@ -3391,9 +3391,12 @@ pub async fn agent_chain_send(
     }
     let d = Daemon::get(&app);
     let step = chains.next_step(&id);
+    // Кнопка «отправить заход» будит ДЖАРВИСА, а не пишет в сессию напрямую.
+    // Диспетчер один: у чата есть задача человека, а у цепочки — только событие.
+    //
     // Отказ уже ушёл событием, но и ответ команды обязан быть честным: окно,
     // получившее ok на неудавшуюся отправку, нарисовало бы «заход пошёл».
-    match crate::agent::chain::deliver(&d, &id, &sid, &prompt, step).await {
+    match crate::agent::chain::wake(&d, &id, &sid, &prompt, step).await {
         Ok(()) => chain_ok(&app, &id),
         Err(e) => err(e),
     }

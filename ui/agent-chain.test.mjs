@@ -321,3 +321,29 @@ test('отмена цепочки из карточки паузы рвёт им
   assert.equal(s.did('agent_chain_resume').length, 0, 'заодно продолжили');
   assert.match(c.textContent, /Цепочка отменена/);
 });
+
+/* Причины остановки требуют разных действий: деньги — поднять потолок или ждать
+ * сброса, глубина — посмотреть работу, карусель — сменить задачу. Один заголовок
+ * на все три заставлял человека вычитывать причину из текста. */
+test('остановка называет причину заголовком, а не только текстом', async () => {
+  const s = await boot();
+  const cases = [
+    ['cap', /деньги/],
+    ['depth', /потолок заходов/],
+    ['stuck', /карусель/],
+    ['gone', /сессии больше нет/],
+  ];
+  // Метка времени у каждой своя: дедуп ядра ключуется по chatId|kind|at, и
+  // одинаковые метки он справедливо съест — на этом тест и споткнулся сначала.
+  for (const [i, [reason]] of cases.entries()) {
+    await s.chain(chain('stopped', { reason, text: 'подробности', at: 5000 + i }));
+  }
+  const heads = [...s.msgs.querySelectorAll('.msg.chain.stopped .chkind')].map((n) => n.textContent);
+  assert.equal(heads.length, 4, 'не все причины нарисованы');
+  for (const [i, [, re]] of cases.entries()) {
+    assert.match(heads[i], re, 'причина не видна в заголовке');
+  }
+  // Неизвестная причина не должна ронять карточку — заголовок общий.
+  await s.chain(chain('stopped', { reason: 'что-то новое', text: 'x', at: 9999 }));
+  assert.equal(s.msgs.querySelectorAll('.msg.chain.stopped').length, 5, 'карточка пропала');
+});

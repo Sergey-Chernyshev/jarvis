@@ -764,15 +764,34 @@ mod tests {
         let prompt = &am[..am.find("#[cfg(test)]").expect("тесты агента на месте")];
         // Преамбула агента — тоже источник потолка: фраза про лимит заставила бы
         // Джарвиса отказывать себе самому, ссылаясь на то, чего нет.
-        for (what, src) in [
-            ("spawn", spawn),
-            ("settings", include_str!("../../settings.rs")),
-            ("prompt", prompt),
-        ] {
+        // Тесты соседа режем, как и у остальных: там запретные слова стоят в
+        // утверждениях, которые их и запрещают. Сторож, читающий чужие тесты,
+        // ловит сам себя — сегодня это случилось трижды.
+        let settings_all = include_str!("../../settings.rs");
+        let settings = &settings_all[..settings_all
+            .find("#[cfg(test)]")
+            .expect("тесты настроек на месте")];
+        for (what, src) in [("spawn", spawn), ("prompt", prompt)] {
             for word in ["sessionsSpawnMax", "DEFAULT_MAX", "max_from_settings", "fn live("] {
                 assert!(!src.contains(word), "{what}: потолок сессий вернулся — «{word}»");
             }
         }
+        // В настройках слово встречается законно — миграция ВЫНОСИТ мёртвый ключ.
+        // Поэтому признак здесь не упоминание, а ЧТЕНИЕ: сторож, запрещающий
+        // слово, ловит сам себя (сегодня это случилось в третий раз) и заодно
+        // мешает прибраться.
+        for read in ["get(\"sessionsSpawnMax\")", "pointer(\"/sessionsSpawnMax\")"] {
+            assert!(!settings.contains(read), "settings: потолок сессий снова читается — «{read}»");
+        }
+        for word in ["DEFAULT_MAX", "max_from_settings"] {
+            assert!(!settings.contains(word), "settings: потолок сессий вернулся — «{word}»");
+        }
+        // И ключ обязан выноситься, а не просто не читаться: мёртвая ручка в
+        // конфиге уже привела к выводу «потолок вернулся».
+        assert!(
+            settings.contains("remove(\"sessionsSpawnMax\")"),
+            "мёртвый ключ перестал вычищаться миграцией"
+        );
         // и отказа «поднято N из M» тоже нет: счёт был нужен только под него
         assert!(!spawn.contains("поднято {} из"), "отказ по числу сессий вернулся");
     }

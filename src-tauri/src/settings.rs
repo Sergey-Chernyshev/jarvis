@@ -23,7 +23,7 @@ use crate::util::jarvis_dir;
 
 /// Текущая версия схемы settings.json. Поднимать при ЛОМАЮЩИХ изменениях формата
 /// (не при простом добавлении полей), добавляя шаг в `run_migrations`.
-pub const SCHEMA_VERSION: u64 = 1;
+pub const SCHEMA_VERSION: u64 = 2;
 
 pub struct Store {
     /// Разобранные настройки + отпечаток файла, с которого они прочитаны.
@@ -263,8 +263,18 @@ fn run_migrations(mut obj: Map<String, Value>, from: u64) -> Map<String, Value> 
         // формат уже совместим (дефолты домерживаются при загрузке).
         v = 1;
     }
-    // Шаблон следующего шага:
-    // if v < 2 { /* преобразование JSON */ v = 2; }
+    if v < 2 {
+        // 1 → 2: выносим мёртвый ключ `sessionsSpawnMax`.
+        //
+        // Потолок одновременных сессий удалён из кода по решению владельца, и
+        // сторож следит, чтобы он не вернулся. Но у тех, кто ставил приложение
+        // раньше, число осталось лежать в файле — его никто не читает, а
+        // выглядит оно как действующая настройка. Человек по нему уже сделал
+        // неверный вывод («потолок вернулся»), и это ровно та цена, которую
+        // берёт мёртвая ручка в конфиге.
+        obj.remove("sessionsSpawnMax");
+        v = 2;
+    }
     obj.insert("schemaVersion".into(), Value::from(v));
     obj
 }
@@ -549,6 +559,23 @@ mod migration_tests {
         assert_eq!(out.get("hotkey").and_then(Value::as_str), Some("Command+K"));
         assert_eq!(out.get("notifyDone").and_then(Value::as_bool), Some(false));
         assert_eq!(out.get("voice"), Some(&json!({ "tts": "silero" })));
+    }
+
+    /// Мёртвая ручка в конфиге дороже, чем кажется: человек прочитал
+    /// `sessionsSpawnMax: 4` и заключил, что удалённый потолок вернулся. Ключ
+    /// уносим, остальное — не трогаем: чужие поля миграция не выбрасывает.
+    #[test]
+    fn the_dead_spawn_ceiling_is_swept_out_and_nothing_else_is() {
+        let mut m = Map::new();
+        m.insert("schemaVersion".into(), Value::from(1u64));
+        m.insert("sessionsSpawnMax".into(), Value::from(4));
+        m.insert("hotkey".into(), Value::from("Command+K"));
+        m.insert("autonomy".into(), json!({ "chatDayUsd": 10.0 }));
+        let out = run_migrations(m, 1);
+        assert!(out.get("sessionsSpawnMax").is_none(), "мёртвый ключ остался в файле");
+        assert_eq!(out.get("hotkey").and_then(Value::as_str), Some("Command+K"));
+        assert_eq!(out.get("autonomy"), Some(&json!({ "chatDayUsd": 10.0 })));
+        assert_eq!(out.get("schemaVersion").and_then(Value::as_u64), Some(SCHEMA_VERSION));
     }
 
     #[test]

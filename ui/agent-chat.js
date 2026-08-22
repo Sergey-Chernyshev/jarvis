@@ -753,7 +753,18 @@
     }
 
     function chainCard(ev) {
-      const label = CHAIN_CARD[ev.kind];
+      /* Заголовок «цепочка остановлена» одинаков для всех причин, а причины
+       * требуют РАЗНЫХ действий: упёрлись в деньги — поднимать потолок или
+       * ждать сброса; упёрлись в глубину — смотреть работу; карусель — менять
+       * задачу. Причина есть в тексте карточки, но её надо видеть с первого
+       * взгляда, а не вычитывать. */
+      const STOP_WHY = {
+        cap: 'цепочка встала: деньги',
+        depth: 'цепочка встала: потолок заходов',
+        stuck: 'цепочка встала: карусель',
+        gone: 'цепочка оборвана: сессии больше нет',
+      };
+      const label = (ev.kind === 'stopped' && STOP_WHY[ev.reason]) || CHAIN_CARD[ev.kind];
       if (!label || !ev.chatId || !chainOnce(ev)) return;
       const t = thread(ev.chatId);
       const box = el('chbox ' + (CHAIN_TONE[ev.kind] || ev.kind));

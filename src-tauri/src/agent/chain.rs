@@ -1492,11 +1492,14 @@ pub fn morning_digest(st: &NightState, spent: Option<&str>, visits: &[Visit]) ->
         }
     };
 
-    let done = pick(&["sent"]);
+    // «finished» — тоже сделанная работа, просто её последнее слово не «заход
+    // ушёл», а «продолжать нечего»: в утреннем «что сделано» это тот же ответ
+    // на тот же вопрос, и второго раздела под него заводить незачем.
+    let done = pick(&["sent", "finished"]);
     let stuck = pick(&["failed", "stopped"]);
     // Всё, что не легло в разделы, идёт хвостом. Хвост нужен именно затем, чтобы
     // тишина не съедала сигнал: новый вид карточки не должен пропасть молча.
-    let known = ["sent", "failed", "stopped"];
+    let known = ["sent", "failed", "stopped", "finished"];
     let rest = st
         .notices
         .iter()
@@ -1813,7 +1816,7 @@ fn emit(app: &AppHandle, chat_id: &str, kind: &str, extra: Value) {
     // будить звуком и всплывашкой некого: уведомление копится до утра. Копим
     // только то, что человеку адресовано, — служебные срезы шапки в сводке лишние.
     let night = is_night(app);
-    if night && ["sent", "proposed", "failed", "stopped", "deferred"].contains(&kind) {
+    if night && ["sent", "proposed", "failed", "stopped", "deferred", "finished"].contains(&kind) {
         night_log().hush(chat_id, kind, &notice_text(kind, &extra));
     }
     let mut payload = json!({
@@ -1975,6 +1978,26 @@ async fn run_step(d: &Arc<Daemon>, chat_id: &str, sid: &str, decision: Decision)
             );
         }
         Decision::Send(step) => {
+            // Исчерпание — ДРУГАЯ проверка, чем Stuck ниже, и путать их нельзя.
+            // Stuck: несколько заходов подряд топчутся на одном месте — это
+            // карусель, сбой. Исчерпание: ОДИН ход сам расписался законченным —
+            // файлов не тронул, команд не запускал, вердикт проверки не новый,
+            // ответ читается как «готово». Это успех.
+            //
+            // Десять — потолок, а не план. Цепочка обязана уметь закончиться на
+            // третьем заходе словами «сделано, продолжать нечего», иначе она
+            // добивает клетки выдуманной работой — что и наблюдалось.
+            if chains().exhausted(chat_id, &outcome) {
+                let text = format!(
+                    "Сделано, продолжать нечего: заход не тронул файлов, не запустил команд, \
+                     вердикт проверки не новый ({}), а ответ агента читается как «готово»",
+                    outcome.tests.as_ref().map(|t| t.line.as_str()).unwrap_or("не гонялся")
+                );
+                note_visit(d, chat_id, sid, step, "finished", &outcome.reply, &outcome, night);
+                chains().stop(chat_id);
+                emit(&app, chat_id, "finished", json!({ "reason": "exhausted", "text": text }));
+                return;
+            }
             // Зацикливание — отдельная проверка и только для авто-режима: в
             // ручном каждый заход и так проходит через глаза человека.
             if let Progress::Stuck(n) = chains().note_progress(chat_id, &progress_mark(&outcome), night)
@@ -2689,6 +2712,117 @@ mod tests {
         assert_eq!(same, red("1 failed в tests::a — сейчас поправлю", &["src/a.rs"]));
         // ход без единого следа тоже считается топтанием
         assert_eq!(progress_mark(&build_outcome("s1", "j", "k", "думал", None)), "\u{1}-");
+    }
+
+    // ── исчерпание: «сделано, продолжать нечего» ────────────────────────────
+    //
+    // Это ДРУГОЙ вопрос, чем в тесте выше. Там — несколько заходов ПОДРЯД без
+    // единого следа (карусель, сбой, счётчик `stale`). Здесь — ОДИН ход, о
+    // котором сам агент сказал «готово», и в мире с прошлого раза ничего не
+    // изменилось: это успех, а не сбой, и оба исхода обязаны остаться разными.
+
+    /// Ровно тот заход из живого примера человека: файлов нет, команд нет,
+    /// тесты зелёные и те же, что были, ответ — «готово». Исчерпано.
+    #[test]
+    fn nothing_new_and_a_plain_done_is_exhausted() {
+        let facts = TurnFacts { final_reply: "test result: ok. 12 passed".into(), ..Default::default() };
+        let mut o = build_outcome("s1", "jarvis", "k", "прогнал проверку", Some(&facts));
+        o.reply = "Готово.".into();
+
+        let c = chain(Mode::Auto);
+        // Первый заход сравнивать не с чем — не хватает уверенности, что мир
+        // не изменился, а значит не исчерпано.
+        assert!(!c.exhausted("c1", &o), "первый ход исчерпанным не бывает — не с чем сравнить");
+        c.note_progress("c1", &progress_mark(&o), false);
+        // Второй такой же ход — вердикт не новый, файлов и команд нет, ответ
+        // читается как «готово».
+        assert!(c.exhausted("c1", &o), "живой пример человека обязан читаться как исчерпание");
+    }
+
+    /// Незакрытый вопрос или заявка на продолжение перевешивают любое «готово»
+    /// в том же ответе — ложная остановка стоит дороже, чем лишний заход.
+    #[test]
+    fn an_open_question_or_a_promise_to_continue_is_not_exhausted() {
+        let facts = TurnFacts { final_reply: "test result: ok. 12 passed".into(), ..Default::default() };
+        let mut o = build_outcome("s1", "jarvis", "k", "прогнал проверку", Some(&facts));
+        let c = chain(Mode::Auto);
+        c.note_progress("c1", &progress_mark(&o), false);
+
+        for reply in [
+            "Готово. Продолжать дальше?",
+            "Готово, но осталось поправить доку",
+            "Дальше нужно посмотреть на кеш",
+            "Не удалось починить последний тест",
+            "Работу не закончил — переключился на другое",
+        ] {
+            o.reply = reply.into();
+            assert!(!c.exhausted("c1", &o), "незакрытый вопрос принят за исчерпание: {reply}");
+        }
+    }
+
+    /// Тронутые файлы — уже сама по себе работа, даже если слова звучат как
+    /// «готово»: исчерпание не читает намерение агента раньше фактов хода.
+    #[test]
+    fn touched_files_are_never_exhausted_no_matter_the_words() {
+        let f = TurnFacts {
+            files: vec![FileTouch { path: "src/a.rs".into(), kind: "edited".into() }],
+            final_reply: "test result: ok. 12 passed".into(),
+            ..Default::default()
+        };
+        let mut o = build_outcome("s1", "jarvis", "k", "починил", Some(&f));
+        o.reply = "Готово.".into();
+        let c = chain(Mode::Auto);
+        c.note_progress("c1", &progress_mark(&o), false);
+        // Тот же список файлов во втором ходу — Stuck-детектор сказал бы
+        // «топчемся», а не исчерпание: файлы делают ход НЕ исчерпанным сами
+        // по себе, ещё до всякого сравнения с прошлым.
+        assert!(!c.exhausted("c1", &o), "тронутые файлы прочитаны как пустая работа");
+    }
+
+    /// Красные тесты не бывают исчерпанием ни при каких словах — самое дорогое
+    /// место для ложной остановки: работа не просто не закончена, она сломана.
+    #[test]
+    fn red_tests_are_never_exhausted_no_matter_the_words() {
+        let f = TurnFacts {
+            final_reply: "test result: FAILED. 9 passed; 1 failed".into(),
+            ..Default::default()
+        };
+        let mut o = build_outcome("s1", "jarvis", "k", "чинил", Some(&f));
+        o.reply = "Готово, всё сделано.".into();
+        let c = chain(Mode::Auto);
+        c.note_progress("c1", &progress_mark(&o), false);
+        assert!(!c.exhausted("c1", &o), "красные тесты прочитаны как исчерпание");
+    }
+
+    /// Исчерпание и Stuck — разные исходы одного и того же «ничего не тронул»:
+    /// повторный ход без единого следа и без слова «готово» обязан оставаться
+    /// каруселью (сбоем со счётчиком `stale`), а не тихо переобуться в
+    /// «сделано»: разводит их именно ответ агента — здесь нет ни файлов, ни
+    /// команд, ни красных тестов, но и явного «готово» тоже нет, и Stuck ловит
+    /// ровно такой, безмолвный застой, для которого exhausted не даёт добро.
+    #[test]
+    fn exhaustion_and_stuck_disagree_on_the_same_silent_repeat() {
+        let f = TurnFacts { final_reply: "сейчас поправлю".into(), ..Default::default() };
+        let o = build_outcome("s1", "jarvis", "k", "работаю", Some(&f));
+        let c = chain(Mode::Auto);
+        c.note_progress("c1", &progress_mark(&o), false);
+        assert!(!c.exhausted("c1", &o), "молчаливый застой без «готово» — не «сделано»");
+        assert_eq!(
+            c.note_progress("c1", &progress_mark(&o), false),
+            Progress::Stale(1),
+            "тот же самый ход — это Stuck-счётчик, а не исчерпание"
+        );
+    }
+
+    #[test]
+    fn reply_reads_as_done_is_a_pattern_match_not_understanding() {
+        assert!(reply_reads_as_done("готово"));
+        assert!(reply_reads_as_done("Сделано, можно закрывать"));
+        assert!(!reply_reads_as_done(""), "пустой ответ — не заявка на завершение");
+        assert!(!reply_reads_as_done("Готово?"), "вопрос перевешивает готово");
+        assert!(!reply_reads_as_done("Готово, осталось поправить README"));
+        assert!(!reply_reads_as_done("работу не закончил"), "отрицание не должно читаться как завершение");
+        assert!(!reply_reads_as_done("почитал код, разбираюсь"), "нет явного маркера — нет уверенности");
     }
 
     /// Тишина не съедает сигнал: ночью уведомления копятся, а утренняя сводка

@@ -1649,12 +1649,39 @@ impl Daemon {
     }
 
     /// Транскрипт сессии → (бэкенд, записи). None — сессии/файла нет.
+    ///
+    /// Гонка, из-за которой цепочка теряла итог предыдущего шага. На `"stop"`
+    /// разом пускаются независимые эффекты: `RefreshMeta` резолвит путь к
+    /// транскрипту (у kimi это ЕДИНСТВЕННЫЙ способ — хук пути не приносит) и
+    /// делает это в своей таске после дебаунса в 1500 мс, а `ChainDone` читает
+    /// транскрипт немедленно. На первом ходе свежей сессии `s.transcript` ещё
+    /// пуст, и чтение сдавалось до того, как дело доходило до файла: цепочка
+    /// получала «итог не собрался» и вставала.
+    ///
+    /// Поэтому пустой путь резолвим ЗДЕСЬ И СРАЗУ, тем же вызовом, что и
+    /// `refresh_meta`. Ждать чужую таску, чтобы прочитать файл, который лежит на
+    /// диске, — это ждать не файла, а расписания.
     pub(crate) async fn turn_entries(
         &self,
         sid: &str,
     ) -> Option<(&'static dyn crate::backend::Backend, Vec<Value>)> {
         let s = self.session(sid)?;
         let be = crate::backend::backend(crate::backend::Agent::from_opt(s.agent.as_deref()));
+        // У сессии с узла путь местным поиском не найти — там своя файловая
+        // система, и подстановка местного файла была бы хуже отсутствия.
+        if s.transcript.is_none() && s.remote.is_none() {
+            let path = be.find_transcript_by_sid(sid)?;
+            let text = crate::transcript::read_recent_text(&path, 512 * 1024)?;
+            let p = path.to_string_lossy().into_owned();
+            self.with_session(sid, |s| {
+                // Не затираем: пока мы читали, `refresh_meta` мог дорезолвить
+                // своё, и его значение ничем не хуже нашего.
+                if s.transcript.is_none() {
+                    s.transcript = Some(p);
+                }
+            });
+            return Some((be, be.entries_from_text(&text)));
+        }
         let text = self.transcript_text(&s, 512 * 1024).await?;
         Some((be, be.entries_from_text(&text)))
     }

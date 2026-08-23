@@ -8,6 +8,7 @@ use super::DaemonRegistry;
 mod audit_cap;
 mod chats;
 mod control;
+mod resume;
 mod entities_cap;
 mod metrics;
 mod notifications;
@@ -31,6 +32,7 @@ pub fn register_all(reg: &mut DaemonRegistry) {
     entities_cap::register(reg); // реестр сущностей плагинов (plugin-system, инкр. 1)
     // фаза 3 — control/settings
     control::register(reg); // sessions.reply, sessions.control
+    resume::register(reg); // sessions.resume, sessions.revivable
     spawn::register(reg); // sessions.spawn, sessions.close
     // settings.set регистрируется в settings_cap::register выше.
     // sessions.queue/interrupt — отдельная инфраструктура (см. план, отложено).

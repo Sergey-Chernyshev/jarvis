@@ -223,6 +223,13 @@ pub struct Session {
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary_at: Option<i64>,
+    /// Сессия поднята через `sessions.resume`, а не начата заново.
+    ///
+    /// Нужно в списке: «та самая сессия с прежней памятью» и «новая с похожим
+    /// именем» — разные вещи, и по одному имени их не различить. Старые записи
+    /// состояния поля не знают, `default` читается как «обычная».
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub revived: bool,
 
     /* ----- живая активность из tool-событий ----- */
     #[serde(skip_serializing_if = "Option::is_none")]

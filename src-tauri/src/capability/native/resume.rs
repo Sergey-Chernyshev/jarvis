@@ -52,8 +52,20 @@ const HOOK_POLL: Duration = Duration::from_millis(500);
 /// Перебираем всех: id мёртвой сессии приходит без пометки, чей он, а формат
 /// имени у kimi (`session_…`) и claude (голый uuid) различается не всегда.
 pub fn find_transcript(sid: &str) -> Option<(Agent, PathBuf)> {
+    // Сначала спрашиваем бэкенд: у kimi и codex поиск по id реализован и знает
+    // их раскладку лучше нас.
     for a in Agent::all().iter().copied() {
         if let Some(p) = backend(a).find_transcript_by_sid(sid) {
+            return Some((a, p));
+        }
+    }
+    // У claude этого поиска НЕТ — путь ему обычно приносит хук, а у мёртвой
+    // сессии хука нет. Поэтому добираем тем же перечислением, что кормит
+    // `sessions.revivable`: список и подъём обязаны видеть одно и то же.
+    // Живая проверка поймала ровно это расхождение — сессия была в списке и не
+    // находилась при оживлении.
+    for a in Agent::all().iter().copied() {
+        if let Some((_, p)) = transcripts_of(a).into_iter().find(|(id, _)| id == sid) {
             return Some((a, p));
         }
     }
@@ -443,6 +455,31 @@ mod tests {
                 assert!(why.contains("Создай каталог сам"), "не сказано, что делать");
             }
             other => panic!("создали дерево вслепую: {other:?}"),
+        }
+    }
+
+    /// Список и подъём обязаны видеть ОДНО И ТО ЖЕ.
+    ///
+    /// Расхождение поймала живая проверка: `sessions.revivable` показывал
+    /// claude-сессию, а `sessions.resume` отвечал «транскрипта нет». Причина —
+    /// у claude `find_transcript_by_sid` не реализован вовсе (путь приносит
+    /// хук, а у мёртвой сессии хука нет), и подъём искал не тем способом, каким
+    /// строился список.
+    #[test]
+    fn what_the_list_offers_is_what_resume_can_find() {
+        for a in Agent::all().iter().copied() {
+            let all = transcripts_of(a);
+            let Some((sid, path)) = all.into_iter().next() else {
+                continue; // этого агента на машине нет — проверять нечего
+            };
+            let found = find_transcript(&sid);
+            assert!(
+                found.is_some(),
+                "{}: сессия {sid} есть в списке, но подъём её не находит",
+                a.label()
+            );
+            let (_, p) = found.unwrap();
+            assert_eq!(p, path, "{}: список и подъём указывают на разные файлы", a.label());
         }
     }
 

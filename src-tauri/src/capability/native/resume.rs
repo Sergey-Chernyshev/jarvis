@@ -74,28 +74,104 @@ pub fn find_transcript(sid: &str) -> Option<(Agent, PathBuf)> {
 
 /// Родной рабочий каталог сессии из её транскрипта.
 ///
-/// Поле `cwd` пишут и claude, и kimi (проверено на живых файлах обоих). Берём
-/// его, а не разбираем имя каталога проекта: у claude оно закодировано
-/// неоднозначно — `-Users-x-FastWorkBot-server` это и `FastWorkBot/server`, и
-/// `FastWorkBot-server`, и угадывать тут нечем.
+/// Два разных случая, и второй стоил живого дефекта.
 ///
-/// Читаем ПОТОКОМ и с начала: `cwd` стоит в первых записях, а файл бывает в
+/// **claude** пишет `cwd` записью верхнего уровня — берём его и всё.
+///
+/// **kimi** верхнего `cwd` не пишет ВООБЩЕ: путь встречается только внутри
+/// записей (снимки инструментов, аргументы вызовов). Пока мы читали лишь
+/// верхний уровень, оживление kimi отказывало со словами «каталог не записан», и
+/// снаружи это выглядело как «капабилити сделана только под claude».
+///
+/// Поэтому для вложенного случая берём САМЫЙ ЧАСТЫЙ абсолютный путь и сверяем
+/// его с именем каталога сессии: kimi раскладывает их как
+/// `~/.kimi-code/sessions/wd_<имя>_<хэш>/…`, где `<имя>` — имя рабочей папки в
+/// нижнем регистре. Хэш обратимым не бывает, а вот ПРОВЕРИТЬ кандидата им можно
+/// — этого достаточно и это честнее, чем брать первый попавшийся путь: внутри
+/// транскрипта попадаются и чужие каталоги, в которых агент что-то запускал.
+///
+/// Имя каталога проекта у claude не разбираем: там оно закодировано
+/// неоднозначно — `-Users-x-FastWorkBot-server` это и `FastWorkBot/server`, и
+/// `FastWorkBot-server`.
+///
+/// Читаем ПОТОКОМ и с начала: путь стоит в первых записях, а файл бывает в
 /// десятки мегабайт.
 pub fn cwd_from_transcript(path: &Path) -> Option<String> {
     use std::io::{BufRead, BufReader};
     let f = std::fs::File::open(path).ok()?;
+    let mut deep: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for line in BufReader::new(f).lines().map_while(Result::ok).take(500) {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        // Верхний уровень — самый надёжный источник, дальше не ищем.
         if let Some(c) = v.get("cwd").and_then(Value::as_str) {
             let c = c.trim();
-            if !c.is_empty() {
+            if c.starts_with('/') {
                 return Some(c.to_string());
             }
         }
+        collect_cwd(&v, &mut deep);
     }
-    None
+    let want = kimi_dir_name(path);
+    let mut best: Vec<(String, usize)> = deep.into_iter().collect();
+    // Частота решает; при равенстве — короткий путь: он ближе к корню проекта,
+    // а вложенный подкаталог почти всегда след одной команды, а не сессии.
+    best.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.len().cmp(&b.0.len())));
+    best.into_iter()
+        .map(|(p, _)| p)
+        .find(|p| match &want {
+            // Имя каталога сессии знаем — кандидат обязан ему соответствовать.
+            Some(name) => base_name(p).eq_ignore_ascii_case(name),
+            // Не знаем (не kimi-раскладка) — сверять не с чем, берём частый.
+            None => true,
+        })
+}
+
+/// Все значения `cwd`-подобных полей на любой глубине — с подсчётом частоты.
+fn collect_cwd(v: &Value, out: &mut std::collections::HashMap<String, usize>) {
+    match v {
+        Value::Object(m) => {
+            for (k, val) in m {
+                if k == "cwd" || k == "workingDirectory" {
+                    if let Some(s) = val.as_str() {
+                        let s = s.trim();
+                        if s.starts_with('/') {
+                            *out.entry(s.to_string()).or_default() += 1;
+                            continue;
+                        }
+                    }
+                }
+                collect_cwd(val, out);
+            }
+        }
+        Value::Array(a) => {
+            for val in a {
+                collect_cwd(val, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Имя рабочей папки из раскладки kimi: `…/sessions/wd_<имя>_<хэш>/…` → `<имя>`.
+/// `None` — путь не из kimi-раскладки, сверять не с чем.
+pub fn kimi_dir_name(transcript: &Path) -> Option<String> {
+    let s = transcript.to_string_lossy();
+    let i = s.find("/sessions/wd_")? + "/sessions/wd_".len();
+    let rest = &s[i..];
+    let dir = rest.split('/').next()?;
+    // Хвост после последнего `_` — хэш; имя может само содержать дефисы и цифры.
+    let name = dir.rsplit_once('_')?.0;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Последний сегмент пути.
+fn base_name(p: &str) -> String {
+    Path::new(p)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Что делать с каталогом, которого нет.
@@ -245,9 +321,17 @@ async fn resume_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
     }
 
     // 4. Родной каталог. Из транскрипта, а не от человека.
-    let Some(cwd) = cwd_from_transcript(&path) else {
+    // Транскрипт — основной источник, реестр — запасной: у сессии-обрубка (пара
+    // записей, работы не было) пути нет нигде в файле, но демон мог записать его
+    // хуком и держать в состоянии.
+    let cwd = cwd_from_transcript(&path)
+        .or_else(|| d.session(&sid).and_then(|s| s.cwd.clone()));
+    let Some(cwd) = cwd.filter(|c| c.starts_with('/')) else {
         return Err(format!(
-            "в транскрипте «{}» не записан рабочий каталог — куда поднимать, неизвестно",
+            "рабочий каталог сессии «{sid}» не удалось установить: в транскрипте \
+             «{}» его нет, в реестре тоже. Поднимать вслепую нельзя — из чужого \
+             каталога kimi встанет на вопрос о доверии, а claude поднимет разговор \
+             про чужой проект",
             path.display()
         ));
     };
@@ -456,6 +540,45 @@ mod tests {
             }
             other => panic!("создали дерево вслепую: {other:?}"),
         }
+    }
+
+    /// Каталог kimi-сессии берётся из ВЛОЖЕННЫХ записей и сверяется с именем
+    /// каталога сессии.
+    ///
+    /// Живой дефект: у kimi поля `cwd` на верхнем уровне НЕТ вовсе, оно
+    /// встречается только внутри записей. Пока читали верхний уровень, оживление
+    /// kimi отказывало, и снаружи это выглядело как «сделано только под claude».
+    #[test]
+    fn a_kimi_working_dir_is_taken_from_nested_records_and_checked_by_the_dir_name() {
+        let root = std::env::temp_dir().join(format!("jarvis-kimi-cwd-{}", std::process::id()));
+        let sess = root.join("sessions").join("wd_fastworkbot_ff7e80bb2d68").join("session_x");
+        std::fs::create_dir_all(&sess).unwrap();
+        let f = sess.join("wire.jsonl");
+        // Верхнего cwd нет; внутри — свой каталог дважды и ЧУЖОЙ один раз:
+        // чужие пути в транскрипте попадаются, там агент что-то запускал.
+        std::fs::write(
+            &f,
+            "{\"type\":\"metadata\"}\n\
+             {\"tools\":[{\"args\":{\"cwd\":\"/Users/x/PycharmProjects/FastWorkBot\"}}]}\n\
+             {\"call\":{\"args\":{\"cwd\":\"/tmp/somewhere-else\"}}}\n\
+             {\"call\":{\"args\":{\"cwd\":\"/Users/x/PycharmProjects/FastWorkBot\"}}}\n",
+        )
+        .unwrap();
+        assert_eq!(kimi_dir_name(&f).as_deref(), Some("fastworkbot"));
+        assert_eq!(
+            cwd_from_transcript(&f).as_deref(),
+            Some("/Users/x/PycharmProjects/FastWorkBot"),
+            "взят чужой каталог или не взято ничего"
+        );
+
+        // Имя каталога сессии не совпало ни с одним кандидатом — молчать нельзя,
+        // но и гадать тоже: пусть вызывающий скажет об этом словами.
+        let odd = root.join("sessions").join("wd_othername_deadbeef1234").join("session_y");
+        std::fs::create_dir_all(&odd).unwrap();
+        let g = odd.join("wire.jsonl");
+        std::fs::write(&g, "{\"call\":{\"args\":{\"cwd\":\"/Users/x/Nope\"}}}\n").unwrap();
+        assert_eq!(cwd_from_transcript(&g), None, "подставили каталог не от той сессии");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Список и подъём обязаны видеть ОДНО И ТО ЖЕ.

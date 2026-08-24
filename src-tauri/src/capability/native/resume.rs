@@ -24,8 +24,9 @@
 //!    замер на живых файлах: 4.7 МБ несли 436 550 токенов, а 37.4 МБ — 310 579.
 //!    Поэтому решение принимается по токенам, а размер идёт справочно.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -44,6 +45,44 @@ use super::arg_str;
 const HOOK_WAIT: Duration = Duration::from_secs(60);
 /// Шаг опроса реестра. Чаще незачем — хук приходит не мгновенно.
 const HOOK_POLL: Duration = Duration::from_millis(500);
+
+/// Дедлайн гейта на весь вызов. Больше `HOOK_WAIT`, и в этом всё дело: общий
+/// дедлайн (30 с) обрубал вызов раньше, чем сессия успевала отметиться, и отдавал
+/// `failed:timeout` про сессию, которая как раз встала. Запас сверх ожидания —
+/// на проверку целостности и оценку транскрипта, они идут до запуска.
+const GATE_DEADLINE: Duration = Duration::from_secs(90);
+
+/* ================= пороги: чем цену держат вместо карточки ================= */
+
+/// Размер транскрипта, с которого оживление спрашивает человека даже при
+/// выданном гранте (мегабайты, ключ `resume.confirmMb`).
+///
+/// 20 МБ — не круглое число ради круглого: на этой машине из 1570 транскриптов
+/// claude такой порог перерастают четыре. То есть молча идёт всё обычное, а
+/// вопрос достаётся ровно тем сессиям, про которые человек и сам бы задумался.
+pub const CONFIRM_MB: f64 = 20.0;
+
+/// Цена первого хода, с которой оживление спрашивает даже при гранте (доллары,
+/// ключ `resume.confirmUsd`). Стена по деньгам — главная из двух: размер цену не
+/// предсказывает, а доллар за один ход уже заметен в недельном счёте.
+pub const CONFIRM_USD: f64 = 1.0;
+
+/// Порог «крупного» оживления ночью (ключ `resume.nightUsd`). Не догадка: при
+/// остатке недели около 30% и дневной норме порядка 8% один такой ход заметен в
+/// счёте, а решить, нужен ли он, ночью некому. Ночью это ОТКАЗ, а не вопрос —
+/// будить человека ради денег, которые подождут до утра, незачем.
+pub const NIGHT_USD: f64 = 3.0;
+
+/// Число из настроек с прежним умолчанием. Читаем на каждый вызов: человек
+/// правит порог ровно тогда, когда тот ему мешает.
+fn tune(d: &Arc<Daemon>, key: &str, default: f64) -> f64 {
+    d.settings
+        .load()
+        .pointer(&format!("/resume/{key}"))
+        .and_then(Value::as_f64)
+        .filter(|v| *v > 0.0)
+        .unwrap_or(default)
+}
 
 /* ================= где живёт сессия ================= */
 
@@ -94,13 +133,31 @@ pub fn find_transcript(sid: &str) -> Option<(Agent, PathBuf)> {
 /// неоднозначно — `-Users-x-FastWorkBot-server` это и `FastWorkBot/server`, и
 /// `FastWorkBot-server`.
 ///
+/// **Третий источник — ПРОЗА системного промпта**, и без него оживление
+/// отказывало каждой пятой kimi-сессии. Замер на живых файлах: из 37 транскриптов
+/// kimi каталог определялся у 30, а семь отказывали со словами «каталог не
+/// записан». Это оказались КОРОТКИЕ сессии (4–9 строк), где до вызова
+/// инструментов дело не дошло, — и путь в них есть ровно один раз, в тексте
+/// преамбулы: «The current working directory is `/Users/…/FastWorkBot`».
+/// Поля `cwd` в них нет вообще, ни на каком уровне.
+///
+/// Проза — источник последний по надёжности и последний по порядку: сверка с
+/// именем каталога сессии для неё обязательна так же, как для вложенных полей.
+///
 /// Читаем ПОТОКОМ и с начала: путь стоит в первых записях, а файл бывает в
 /// десятки мегабайт.
 pub fn cwd_from_transcript(path: &Path) -> Option<String> {
     use std::io::{BufRead, BufReader};
     let f = std::fs::File::open(path).ok()?;
     let mut deep: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut prose: Option<String> = None;
     for line in BufReader::new(f).lines().map_while(Result::ok).take(500) {
+        // Проза ищется по СЫРОЙ строке, до разбора: она лежит внутри текста
+        // сообщения, и добираться до неё обходом дерева значило бы просматривать
+        // каждую строку любой записи. Первое совпадение и есть преамбула.
+        if prose.is_none() {
+            prose = cwd_from_prose(&line);
+        }
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -114,18 +171,32 @@ pub fn cwd_from_transcript(path: &Path) -> Option<String> {
         collect_cwd(&v, &mut deep);
     }
     let want = kimi_dir_name(path);
+    let fits = |p: &String| match &want {
+        // Имя каталога сессии знаем — кандидат обязан ему соответствовать.
+        Some(name) => base_name(p).eq_ignore_ascii_case(name),
+        // Не знаем (не kimi-раскладка) — сверять не с чем, берём частый.
+        None => true,
+    };
     let mut best: Vec<(String, usize)> = deep.into_iter().collect();
     // Частота решает; при равенстве — короткий путь: он ближе к корню проекта,
     // а вложенный подкаталог почти всегда след одной команды, а не сессии.
     best.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.len().cmp(&b.0.len())));
     best.into_iter()
         .map(|(p, _)| p)
-        .find(|p| match &want {
-            // Имя каталога сессии знаем — кандидат обязан ему соответствовать.
-            Some(name) => base_name(p).eq_ignore_ascii_case(name),
-            // Не знаем (не kimi-раскладка) — сверять не с чем, берём частый.
-            None => true,
-        })
+        .find(&fits)
+        .or_else(|| prose.filter(fits))
+}
+
+/// Рабочий каталог из текста преамбулы kimi: «The current working directory is
+/// `/путь`». Берём то, что в обратных кавычках, — сам kimi так его и выделяет,
+/// а без кавычек хвост фразы не отличить от начала следующего предложения.
+fn cwd_from_prose(line: &str) -> Option<String> {
+    // Экранированные кавычки JSON тут не мешают: обратная кавычка не
+    // экранируется, а сам путь пробелов и кавычек не содержит.
+    let i = line.find("current working directory is `")? + "current working directory is `".len();
+    let rest = &line[i..];
+    let p = rest.split('`').next()?.trim();
+    (p.starts_with('/') && p.len() > 1).then(|| p.to_string())
 }
 
 /// Все значения `cwd`-подобных полей на любой глубине — с подсчётом частоты.
@@ -266,6 +337,101 @@ fn read_dirs(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/* ================= дедуп: одну нить поднимают один раз ================= */
+
+/// Сессии, оживление которых уже идёт. Ровно та же беда, что и с двумя
+/// `--resume` по одному транскрипту (см. шаг 1 хендлера), только между ними нет
+/// зазора, в который смотрит проверка «уже жива»: от запуска до первого хука
+/// проходят десятки секунд, и всё это время сессии в реестре ещё НЕТ. Два
+/// джарвиса, спросившие в один момент, оба увидели бы «мёртвая» и оба подняли.
+///
+/// Процессный, не дисковый: дедуп нужен между потребителями одного демона, а
+/// после перезапуска демона поднимать заново — нормально.
+fn reviving() -> &'static Mutex<HashSet<String>> {
+    static SET: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Занять сессию под оживление. `None` — её уже поднимает кто-то другой.
+///
+/// Возвращает RAII-сторож: место освобождается на ЛЮБОМ выходе, включая ранний
+/// `?` и дроп будущего при перезапуске демона. Без этого первая же неудача
+/// оставила бы сессию навсегда «оживляемой», и починить это можно было бы только
+/// перезапуском — ровно тот класс дефекта, что мы чиним весь день.
+fn claim(sid: &str) -> Option<Claim> {
+    reviving()
+        .lock()
+        .unwrap()
+        .insert(sid.to_string())
+        .then(|| Claim(sid.to_string()))
+}
+
+struct Claim(String);
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        reviving().lock().unwrap().remove(&self.0);
+    }
+}
+
+/* ================= карточка: что человек видит вместо id ================= */
+
+/// Карточка подтверждения оживления.
+///
+/// ОДНА функция на оба пути вопроса: гейт спрашивает её, когда гранта нет, а
+/// хендлер — когда грант есть, но транскрипт перерос порог. Разные карточки на
+/// один вопрос означали бы, что с грантом человек видит больше, чем без него.
+///
+/// Здесь НЕ зовётся `revive::assess`: он считает реплики полным проходом по
+/// файлу, а на 50 МБ это секунды, которые карточке ни к чему. Цена считается по
+/// хвосту — тем же способом, что и везде.
+pub fn confirm_card(d: &Arc<Daemon>, sid: &str, reason: Option<&str>) -> Value {
+    let Some((agent, path)) = find_transcript(sid) else {
+        return json!({ "kind": "revive", "sessionId": sid, "gone": true, "reason": reason });
+    };
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let a = revive::assess_light(&path);
+    let cost = revive::revive_cost(a.context_tokens, a.model.as_deref());
+    json!({
+        "kind": "revive",
+        "sessionId": sid,
+        "agent": agent.label(),
+        "label": d.session_label(sid),
+        "cwd": cwd_from_transcript(&path).as_deref().map(crate::util::short_home),
+        "contextTokens": a.context_tokens,
+        "bytes": bytes,
+        "cost": cost,
+        "lastAt": a.last_message_at,
+        // Зачем поднимают — единственное, чего из файла не узнать. Без этого
+        // человек решает про деньги, не зная, за что платит.
+        "reason": reason,
+    })
+}
+
+/// Перерос ли транскрипт пороги, за которыми спрашивают даже при гранте.
+/// Возвращает причину словами — её же увидит человек в карточке и в логе.
+/// Чистая: числа на входе, решение на выходе.
+pub fn beyond_grant(bytes: u64, usd: Option<f64>, max_mb: f64, max_usd: f64) -> Option<String> {
+    let mb = bytes as f64 / 1_048_576.0;
+    match usd {
+        // Цена известна и велика — это главная из двух причин, её и называем.
+        Some(u) if u >= max_usd => Some(format!(
+            "первый ход обойдётся примерно в ${u:.2} при пороге ${max_usd:.2}"
+        )),
+        // Цена неизвестна вовсе: в транскрипте нет ни одной записи с usage.
+        // Молча поднять «неизвестно за сколько» — то же самое, что поднять
+        // дорого: спрашиваем, если файл при этом ещё и крупный.
+        None if mb >= max_mb => Some(format!(
+            "транскрипт {mb:.1} МБ при пороге {max_mb:.0} МБ, а цену по нему \
+             определить не удалось — ни одной записи с расходом токенов"
+        )),
+        _ if mb >= max_mb => Some(format!(
+            "транскрипт {mb:.1} МБ при пороге {max_mb:.0} МБ"
+        )),
+        _ => None,
+    }
+}
+
 /* ================= оживление ================= */
 
 /// Ждём хук оживлённой сессии: успех — это появление её в реестре.
@@ -287,6 +453,21 @@ async fn wait_for_hook(d: &Arc<Daemon>, sid: &str) -> bool {
 async fn resume_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
     let sid = arg_str(&args, "id")?;
     let sid = sid.trim().to_string();
+    // Зачем поднимают. Обязательный: оживление больше не проходит через карточку,
+    // и строка в чате — единственное место, где человек узнаёт о нём. Строка без
+    // причины («оживлена 3e819d75-…») ответа «зачем?» не даёт, а именно этот
+    // вопрос он и задаст, увидев расход.
+    let why = args
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .ok_or(
+            "нужен аргумент 'reason' — зачем поднимаешь эту сессию, одной строкой. \
+             Оживление идёт без карточки подтверждения, и эта строка — всё, что \
+             человек увидит в чате о потраченных деньгах",
+        )?
+        .to_string();
 
     // 1. Живую вторую копией не поднимаем: два процесса на одном транскрипте
     //    испортят разговор обоим. Переключаться человеку и так есть чем.
@@ -299,6 +480,20 @@ async fn resume_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
             "note": "сессия уже жива — второй копии не поднимаю, переключись на существующую"
         }));
     }
+
+    // 1б. …и вторым ЗАХОДОМ тоже. Между запуском и первым хуком проходят десятки
+    //     секунд, и всё это время проверка выше видит «мёртвая»: два джарвиса,
+    //     спросившие одновременно, подняли бы оба. Сторож снимается сам на любом
+    //     выходе ниже, включая ранний отказ.
+    let Some(_claim) = claim(&sid) else {
+        return Ok(json!({
+            "ok": true,
+            "state": "already-reviving",
+            "sessionId": sid,
+            "note": "эту сессию прямо сейчас поднимает кто-то другой — второй раз не поднимаю. \
+                     Подожди полминуты и спроси sessions.get"
+        }));
+    };
 
     // 2. Транскрипт и агент.
     let Some((agent, path)) = find_transcript(&sid) else {
@@ -357,9 +552,24 @@ async fn resume_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
     }
 
     // 5. Цена и бюджет. Оживление — дорогой ход: первый запрос идёт по холодному
-    //    кэшу, весь контекст оплачивается как вход.
+    //    кэшу, весь контекст оплачивается как вход. Лестница проходится ДО
+    //    запуска: узнать про стену, когда терминал уже открыт и деньги
+    //    потрачены, — то же самое, что не узнать вовсе. Числа отказа (сколько
+    //    осталось, сколько придержано, когда сброс) собирает `budget_refusal`.
     let a = revive::assess(&path);
     let cost = revive::revive_cost(a.context_tokens, a.model.as_deref());
+    let usd = match &cost {
+        ReviveCost::Known { usd, .. } => Some(*usd),
+        // Вилка — берём ВЕРХНЮЮ границу: порог существует, чтобы не потратить
+        // лишнего, и ошибаться ему положено в сторону вопроса, а не траты.
+        ReviveCost::Range { usd_high, .. } => Some(*usd_high),
+        ReviveCost::Unknown => None,
+    };
+    // Отказ обязан назвать ТРИ числа, а не два: сколько осталось и когда сброс
+    // говорит лестница, а сколько стоит именно этот подъём — знаем только мы.
+    // Без третьего человеку (и агенту) нечем решить, ждать сброса или взять
+    // сессию поменьше: «не хватает» без цены не отличить от «не хватает на что
+    // угодно».
     let hold = crate::ipc::budget_reserve(
         &d,
         agent.label(),
@@ -367,18 +577,88 @@ async fn resume_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
         true,
         "оживление сессии",
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        format!(
+            "{e}. Само оживление стоит {}",
+            match &cost {
+                ReviveCost::Known { usd, model } => format!(
+                    "~${usd:.2} ({} токенов контекста, {model}) — первый ход идёт по холодному кэшу",
+                    a.context_tokens.unwrap_or(0)
+                ),
+                ReviveCost::Range { usd_low, usd_high } =>
+                    format!("${usd_low:.2}–${usd_high:.2}: модель в транскрипте не названа"),
+                ReviveCost::Unknown =>
+                    "неизвестно сколько: в транскрипте нет ни одной записи с расходом токенов".into(),
+            }
+        )
+    })?;
 
     // 6. Ночью крупное оживление не делается: цена высокая, а человека нет.
+    //    Здесь именно ОТКАЗ, а не вопрос: будить ради денег, которые подождут до
+    //    утра, незачем.
+    let night_usd = tune(&d, "nightUsd", NIGHT_USD);
     if crate::budget::is_night(&d) {
-        if let ReviveCost::Known { usd, .. } = &cost {
-            if *usd >= NIGHT_USD {
+        if usd.is_some_and(|u| u >= night_usd) {
+            hold.release();
+            return Err(format!(
+                "ночью крупные оживления не делаю: этот транскрипт поднимет \
+                 ~{} токенов контекста, это около ${:.2} за первый ход при ночном \
+                 пороге ${night_usd:.2}. Оживлю утром или разбуди меня явно",
+                a.context_tokens.unwrap_or(0),
+                usd.unwrap_or(0.0)
+            ));
+        }
+    }
+
+    // 6б. Порог, за которым спрашивают ДАЖЕ при выданном гранте.
+    //
+    //     Оживление вынесено в грант — джарвисы поднимают мёртвые сессии без
+    //     карточки, и это решение владельца. Но карточка была последним местом,
+    //     где человек видел цену, поэтому мелкое идёт молча, а крупное всё равно
+    //     спрашивает. Это не обход гейта: вопрос здесь только ДОБАВЛЯЕТСЯ, снять
+    //     его отсюда нельзя — если гейт уже спросил (гранта нет), человек ответил
+    //     раньше, и второй раз мы его не дёргаем.
+    if let Some(why_ask) = beyond_grant(
+        a.file_bytes,
+        usd,
+        tune(&d, "confirmMb", CONFIRM_MB),
+        tune(&d, "confirmUsd", CONFIRM_USD),
+    ) {
+        if crate::capability::grant::auto_approve_from_settings(&d.settings.load(), "agent")
+            .contains("sessions.resume")
+        {
+            let mut card = confirm_card(&d, &sid, Some(&why));
+            if let Some(o) = card.as_object_mut() {
+                o.insert("beyondGrant".into(), Value::String(why_ask.clone()));
+            }
+            let before = format!("{sid}|{:?}", Some(a.file_bytes));
+            let outcome = crate::capability::confirm_panel::ask(
+                &d,
+                "sessions.resume",
+                RiskClass::Control.as_str(),
+                Provenance::Trusted.as_str(),
+                card,
+                before,
+                || {
+                    let now = find_transcript(&sid)
+                        .and_then(|(_, p)| std::fs::metadata(p).ok())
+                        .map(|m| m.len());
+                    format!("{sid}|{now:?}")
+                },
+            )
+            .await;
+            crate::log::line(&format!(
+                "[resume] {sid}: спросили сверх гранта ({why_ask}) — {}",
+                outcome.as_str()
+            ));
+            if !outcome.allows() {
                 hold.release();
                 return Err(format!(
-                    "ночью крупные оживления не делаю: этот транскрипт поднимет \
-                     ~{} токенов контекста, это около ${usd:.2} за первый ход. \
-                     Оживлю утром или разбуди меня явно",
-                    a.context_tokens.unwrap_or(0)
+                    "оживление не подтверждено ({}): {why_ask}. Разрешение без спроса на \
+                     мелкие оживления не распространяется на крупные — порог правится в \
+                     settings.json, ключи resume.confirmMb и resume.confirmUsd",
+                    outcome.as_str()
                 ));
             }
         }
@@ -420,7 +700,13 @@ async fn resume_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
     // Имя сохраняем и помечаем оживление: в списке это должно читаться как
     // «та самая сессия», а не как новая с похожим названием.
     d.with_session(&sid, |s| s.revived = true);
-    crate::log::line(&format!("[resume] {sid} оживлена в {cwd}"));
+
+    // Строка в чате и в логе — обязательная часть решения «без подтверждения».
+    // Убрав карточку, мы убрали единственное место, где человек узнавал о
+    // расходе ДО него; значит он обязан узнать о нём ПОСЛЕ, и не из выписки
+    // провайдера через сутки. Что подняли, зачем и почём — одной строкой.
+    let label = d.session_label(&sid);
+    announce(&d, &sid, &label, agent.label(), &why, &cwd, &a, &cost, &notes);
 
     Ok(json!({
         "ok": true,
@@ -431,14 +717,62 @@ async fn resume_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
         "contextTokens": a.context_tokens,
         "cost": cost,
         "messages": a.message_count,
+        "reason": why,
         "notes": notes,
     }))
 }
 
-/// Порог «крупного» оживления ночью. Не догадка: при остатке недели около 30% и
-/// дневной норме порядка 8% один такой ход заметен в счёте, а решить, нужен ли
-/// он, ночью некому.
-const NIGHT_USD: f64 = 3.0;
+/// Сказать человеку, что и за что подняли, — в чат и в лог одним текстом.
+///
+/// «Сколько стоило по факту» здесь — токены контекста, снятые с ТОГО САМОГО
+/// транскрипта, который CLI сейчас прочитал: именно они уйдут во входе первого
+/// хода по холодному кэшу. Считать делту недельного остатка бессмысленно —
+/// расход доезжает до чисел провайдера через минуты, и сразу после хука она
+/// показала бы ноль. Врать нулём хуже, чем назвать то, что знаешь точно.
+#[allow(clippy::too_many_arguments)]
+fn announce(
+    d: &Arc<Daemon>,
+    sid: &str,
+    label: &str,
+    agent: &str,
+    why: &str,
+    cwd: &str,
+    a: &revive::Assessment,
+    cost: &ReviveCost,
+    notes: &[String],
+) {
+    let price = match cost {
+        ReviveCost::Known { usd, model } => format!("~${usd:.2} ({model})"),
+        ReviveCost::Range { usd_low, usd_high } => {
+            format!("${usd_low:.2}–${usd_high:.2}, модель в транскрипте не названа")
+        }
+        ReviveCost::Unknown => "цену определить не удалось — в транскрипте нет записей с расходом".into(),
+    };
+    let mut text = format!(
+        "Оживил «{label}» ({agent}) в {}. Зачем: {why}. \
+         Контекст {} токенов, {} реплик, {:.1} МБ — первый ход по холодному кэшу {price}.",
+        crate::util::short_home(cwd),
+        a.context_tokens.map(|t| t.to_string()).unwrap_or_else(|| "?".into()),
+        a.message_count,
+        a.file_bytes as f64 / 1_048_576.0,
+    );
+    for n in notes {
+        text.push_str("\n⚠ ");
+        text.push_str(n);
+    }
+    crate::log::line(&format!("[resume] {sid}: {}", crate::util::one_line(&text)));
+    // Канал тот же, что у карточек цепочки: они уже ложатся строкой в ленту
+    // чата, и заводить вторую дорогу к тому же месту незачем. Метка чата
+    // неизвестна — оживление приходит из капабилити, куда chat_id не доходит;
+    // `null` UI кладёт в ту ленту, на которую человек смотрит (так же, как
+    // карточку подтверждения).
+    let _ = tauri::Emitter::emit(
+        &d.app,
+        "agent:resumed",
+        json!({ "sessionId": sid, "label": label, "agent": agent,
+                "reason": why, "text": text, "at": crate::util::now_ms() }),
+    );
+}
 
 /* ================= что можно оживить ================= */
 
@@ -449,36 +783,69 @@ fn revivable_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
         .unwrap_or(20)
         .clamp(1, 100) as usize;
 
-    let mut rows: Vec<Value> = Vec::new();
+    // Сначала отбираем КОГО показывать, и только потом оцениваем — в таком
+    // порядке, а не в обратном.
+    //
+    // Обратный порядок был живым тупиком: оценка звалась на каждом транскрипте, а
+    // обрезка до `limit` шла после. На этой машине это 1570 файлов claude на
+    // 952 МБ плюс 246 kimi на 92 МБ, и `revive::assess` читает каждый ЦЕЛИКОМ
+    // (считает реплики). Дедлайн гейта — 30 секунд; список не собрался бы никогда,
+    // а выглядело бы это как «капабилити висит».
+    //
+    // Отбор идёт по mtime файла: свежесть транскрипта — это и есть время
+    // последней реплики, а метаданные не зависят от размера файла.
+    let mut cands: Vec<(Agent, String, PathBuf, i64)> = Vec::new();
     for a in Agent::all().iter().copied() {
         for (sid, path) in transcripts_of(a) {
             if d.session(&sid).is_some() {
                 continue; // живая — оживлять нечего
             }
-            let it = revive::assess(&path);
+            let mtime = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|dur| dur.as_millis() as i64)
+                .unwrap_or(0);
+            cands.push((a, sid, path, mtime));
+        }
+    }
+    // Сортируем по свежести: оживляют почти всегда недавнее.
+    cands.sort_by_key(|(_, _, _, mtime)| -mtime);
+    cands.truncate(limit);
+
+    let rows: Vec<Value> = cands
+        .into_iter()
+        .map(|(a, sid, path, mtime)| {
+            // Лёгкая оценка: реплики полным проходом не считаем — на список их
+            // не показывают, а стоят они всего файла целиком. Точное число
+            // отдаёт сам подъём, там оно уместно и там оно одно.
+            let it = revive::assess_light(&path);
             let cost = revive::revive_cost(it.context_tokens, it.model.as_deref());
-            rows.push(json!({
+            json!({
                 "id": sid,
                 "agent": a.label(),
                 "contextTokens": it.context_tokens,
                 "cost": cost,
-                "messages": it.message_count,
                 // Размер — справочно и НАМЕРЕННО не первым: он не предсказывает
                 // цену. Замер на живых файлах: 4.7 МБ несли больше контекста,
                 // чем 37.4 МБ.
                 "bytes": it.file_bytes,
-                "lastAt": it.last_message_at,
-            }));
-        }
-    }
-    // Сортируем по свежести: оживляют почти всегда недавнее.
-    rows.sort_by_key(|r| -(r.get("lastAt").and_then(Value::as_i64).unwrap_or(0)));
-    rows.truncate(limit);
-    Ok(json!({ "sessions": rows }))
+                // Время последней реплики из хвоста, а если его нет — mtime
+                // файла. Пустое поле сортировкой не отличить от древнего.
+                "lastAt": it.last_message_at.unwrap_or(mtime),
+            })
+        })
+        .collect();
+    let shown = rows.len();
+    Ok(json!({ "sessions": rows, "shown": shown }))
 }
 
 pub fn register(reg: &mut DaemonRegistry) {
-    reg.register(
+    // `register_slow`, а не `register`: успех оживления — это ПРИШЕДШИЙ ХУК
+    // сессии, а не запущенный процесс, и ждать его меньше, чем CLI поднимает
+    // разговор с диска, бессмысленно. Общий дедлайн гейта (30 с) обрубал вызов
+    // на полпути и отдавал `failed:timeout` про сессию, которая как раз встала.
+    reg.register_slow(
         CapabilityMeta {
             id: "sessions.resume",
             class: RiskClass::Control,
@@ -486,18 +853,24 @@ pub fn register(reg: &mut DaemonRegistry) {
             description: "Оживить УМЕРШУЮ сессию с её прежним контекстом: процесс поднимается заново, \
 разговор возвращается с диска. Зови, когда нужен контекст, которого нет в живых сессиях — \
 после перезагрузки, закрытого терминала, упавшего CLI. Рабочий каталог подставляется сам из \
-транскрипта, задавать его не надо. Живую сессию второй копией не поднимает — скажет, что она уже жива. \
-ДОРОГО: первый ход после оживления оплачивается как весь контекст сразу, поэтому вызов проходит \
-через бюджет, а ночью крупные оживления отклоняются. Что можно оживить и почём — sessions.revivable.",
+транскрипта, задавать его не надо. Живую сессию второй копией не поднимает — скажет, что она уже жива; \
+ту, что уже поднимает кто-то другой, тоже. ОБЯЗАТЕЛЬНО задай 'reason' — зачем поднимаешь: карточки \
+подтверждения у мелких оживлений нет, и эта строка единственная объяснит человеку в чате, за что \
+списаны деньги. ДОРОГО: первый ход после оживления оплачивается как весь контекст сразу, поэтому вызов \
+проходит через бюджет; крупные транскрипты спрашивают человека даже при выданном разрешении, \
+а ночью отклоняются. Что можно оживить и почём — sessions.revivable. \
+Возвращается ПОСЛЕ того, как сессия отметилась хуком: 'ok' здесь означает живую сессию, а не запуск.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "id мёртвой сессии" }
+                    "id": { "type": "string", "description": "id мёртвой сессии" },
+                    "reason": { "type": "string", "description": "зачем поднимаешь, одной строкой — человек увидит это в чате" }
                 },
-                "required": ["id"]
+                "required": ["id", "reason"]
             }),
         },
         make_handler(|d: Arc<Daemon>, args: Value| async move { resume_handler(d, args).await }),
+        GATE_DEADLINE,
     );
 
     reg.register(
@@ -581,6 +954,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Короткая kimi-сессия тоже оживает: путь берётся из ПРОЗЫ преамбулы.
+    ///
+    /// Поймано замером на живых файлах, а не рассуждением: из 37 транскриптов
+    /// kimi каталог определялся у 30, а семь отказывали со словами «каталог не
+    /// записан» — и это выглядело как «kimi иногда не оживляется». Семь оказались
+    /// КОРОТКИМИ сессиями (4–9 строк), где до вызова инструментов дело не дошло:
+    /// поля `cwd` в них нет вообще, ни на каком уровне, а путь есть ровно один
+    /// раз — в тексте системной преамбулы. После правки — 37 из 37.
+    #[test]
+    fn a_short_kimi_session_takes_its_dir_from_the_preamble_text() {
+        let root = std::env::temp_dir().join(format!("jarvis-kimi-prose-{}", std::process::id()));
+        let sess = root.join("sessions").join("wd_fastworkbot_ff7e80bb2d68").join("session_z");
+        std::fs::create_dir_all(&sess).unwrap();
+        let f = sess.join("wire.jsonl");
+        // Форма — с живого файла: ни одного `cwd`, путь только в тексте.
+        std::fs::write(
+            &f,
+            "{\"type\":\"meta\"}\n\
+             {\"role\":\"system\",\"content\":\"…instead of trusting this value.\\n\\n## Working Directory\\n\\nThe current working directory is `/Users/x/PycharmProjects/FastWorkBot`. This should be considered as the project root…\"}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cwd_from_transcript(&f).as_deref(),
+            Some("/Users/x/PycharmProjects/FastWorkBot"),
+            "короткая kimi-сессия снова отказывается оживать"
+        );
+
+        // Проза — источник ПОСЛЕДНИЙ: сверка с именем каталога сессии для неё
+        // обязательна так же, как для вложенных полей. Иначе преамбула, в
+        // которой упомянут чужой проект, увела бы подъём не туда.
+        let odd = root.join("sessions").join("wd_othername_deadbeef1234").join("session_w");
+        std::fs::create_dir_all(&odd).unwrap();
+        let g = odd.join("wire.jsonl");
+        std::fs::write(
+            &g,
+            "{\"content\":\"The current working directory is `/Users/x/Nope`.\"}\n",
+        )
+        .unwrap();
+        assert_eq!(cwd_from_transcript(&g), None, "проза протащила каталог не от той сессии");
+
+        // …и поле бьёт прозу, когда есть и то и другое: поле точнее.
+        let both = root.join("sessions").join("wd_fastworkbot_ff7e80bb2d68").join("session_v");
+        std::fs::create_dir_all(&both).unwrap();
+        let h = both.join("wire.jsonl");
+        std::fs::write(
+            &h,
+            "{\"content\":\"The current working directory is `/Users/x/Stale/FastWorkBot`.\"}\n\
+             {\"call\":{\"args\":{\"cwd\":\"/Users/x/PycharmProjects/FastWorkBot\"}}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cwd_from_transcript(&h).as_deref(),
+            Some("/Users/x/PycharmProjects/FastWorkBot"),
+            "проза перебила поле, хотя поле надёжнее"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Список и подъём обязаны видеть ОДНО И ТО ЖЕ.
     ///
     /// Расхождение поймала живая проверка: `sessions.revivable` показывал
@@ -604,6 +1035,147 @@ mod tests {
             let (_, p) = found.unwrap();
             assert_eq!(p, path, "{}: список и подъём указывают на разные файлы", a.label());
         }
+    }
+
+    /// Мелкое идёт молча, крупное спрашивает — даже когда грант выдан.
+    ///
+    /// Это цена решения «воскрешать без подтверждения»: карточка была последним
+    /// местом, где человек видел цену, и вместо неё цену держат два порога.
+    #[test]
+    fn small_revivals_go_quiet_and_big_ones_still_ask() {
+        let mb = |n: f64| (n * 1_048_576.0) as u64;
+        // обычная сессия: и мелкая, и дешёвая — вопроса нет
+        assert_eq!(beyond_grant(mb(3.0), Some(0.12), 20.0, 1.0), None);
+
+        // дорогая при скромном размере: решают ДЕНЬГИ, и названы они
+        let why = beyond_grant(mb(4.7), Some(2.40), 20.0, 1.0).expect("дорогое прошло молча");
+        assert!(why.contains("$2.40") && why.contains("$1.00"), "{why}");
+
+        // жирная по байтам при известной скромной цене — тоже вопрос: крупный
+        // файл это ещё и минуты подъёма, а не только деньги
+        let why = beyond_grant(mb(37.4), Some(0.31), 20.0, 1.0).expect("крупное прошло молча");
+        assert!(why.contains("37.4 МБ") && why.contains("20 МБ"), "{why}");
+
+        // цену определить не удалось, а файл крупный — молчать нельзя:
+        // «неизвестно за сколько» ничем не лучше, чем «дорого»
+        let why = beyond_grant(mb(25.0), None, 20.0, 1.0).expect("неизвестная цена прошла молча");
+        assert!(why.contains("определить не удалось"), "{why}");
+        // …а если он при этом мелкий — не дёргаем: у коротких сессий записи с
+        // расходом может не быть просто потому, что ходов было мало
+        assert_eq!(beyond_grant(mb(0.4), None, 20.0, 1.0), None);
+
+        // Порог из настроек, а не из константы: подняли — стало тихо.
+        assert_eq!(beyond_grant(mb(37.4), Some(0.31), 100.0, 10.0), None);
+    }
+
+    /// Отказ по бюджету называет ТРИ числа, а не два.
+    ///
+    /// Сколько осталось и когда сброс говорит лестница; сколько стоит ИМЕННО
+    /// этот подъём, знает только оживление. Без третьего числа отказ не отличим
+    /// от «не хватает на что угодно», и решить, ждать ли сброса или взять сессию
+    /// поменьше, нечем — а карточки, где это было видно, у оживления больше нет.
+    #[test]
+    fn a_budget_refusal_names_the_price_of_this_very_revival() {
+        let src = include_str!("resume.rs");
+        let body = src
+            .split("async fn resume_handler")
+            .nth(1)
+            .and_then(|t| t.split("launch_core").next())
+            .expect("хендлер подъёма на месте");
+        let refusal = body
+            .split("budget_reserve(")
+            .nth(1)
+            .and_then(|t| t.split("?;").next())
+            .expect("гейта бюджета в подъёме нет вовсе");
+        assert!(refusal.contains("map_err"), "отказ лестницы уходит как есть, без цены подъёма");
+        assert!(refusal.contains("ReviveCost::Unknown"), "неизвестная цена в отказе не названа");
+        assert!(
+            refusal.contains("холодному кэшу"),
+            "в отказе не сказано, почему первый ход стоит весь контекст"
+        );
+        // И лестница проходится ДО запуска: узнать про стену, когда терминал уже
+        // открыт и деньги потрачены, — то же самое, что не узнать вовсе.
+        assert!(
+            body.contains("budget_reserve("),
+            "бюджет перестал спрашиваться до подъёма"
+        );
+    }
+
+    /// Двое не воскрешают одну сессию одновременно.
+    ///
+    /// Проверки «уже жива» тут мало: от запуска до первого хука проходят десятки
+    /// секунд, и всё это время сессии в реестре НЕТ — два джарвиса, спросившие
+    /// разом, оба увидели бы «мёртвая» и оба подняли бы `--resume` по одной нити.
+    #[test]
+    fn two_jarvises_never_revive_the_same_session_at_once() {
+        let sid = format!("dedup-test-{}", std::process::id());
+        let first = claim(&sid).expect("первый заход обязан пройти");
+        assert!(claim(&sid).is_none(), "вторая копия подъёма прошла — разговор испорчен обоим");
+        // соседнюю сессию это не держит
+        let other = claim(&format!("{sid}-other")).expect("чужой sid заперт зря");
+
+        // Сторож снимается САМ, на любом выходе. Иначе первая же неудача
+        // оставила бы сессию навечно «оживляемой», и лечилось бы это только
+        // перезапуском демона.
+        drop(first);
+        let again = claim(&sid).expect("место не освободилось после выхода");
+        drop(again);
+        drop(other);
+        assert!(reviving().lock().unwrap().is_empty(), "реестр подъёмов подтекает");
+    }
+
+    /// Ожидание хука обязано умещаться в дедлайн гейта.
+    ///
+    /// Дефект был живым и тихим: общий дедлайн гейта — 30 с, а подъёма мы ждём
+    /// 60 с. Всё, что встаёт дольше тридцати секунд, получало `failed:timeout`
+    /// про сессию, которая как раз встала, — и бронь бюджета при этом не
+    /// возвращалась. Сторож здесь потому, что оба числа правятся по отдельности.
+    #[test]
+    fn the_gate_deadline_outlives_the_wait_for_the_hook() {
+        assert!(
+            GATE_DEADLINE > HOOK_WAIT,
+            "гейт (={:?}) обрубит подъём раньше, чем истечёт ожидание хука (={:?})",
+            GATE_DEADLINE,
+            HOOK_WAIT
+        );
+        assert!(
+            GATE_DEADLINE > crate::capability::GateConfig::default().handler_timeout,
+            "свой дедлайн не длиннее общего — тогда он не нужен вовсе"
+        );
+        // …и он действительно проставлен при регистрации, а не только объявлен.
+        // Режем по СЛЕДУЮЩЕЙ регистрации (`reg.register(`), а не по имени
+        // соседа: имя соседа стоит и в описании подъёма — «что можно оживить и
+        // почём», — и срез по нему обрубал бы блок раньше самой регистрации.
+        let src = include_str!("resume.rs");
+        let reg = src.split("pub fn register(").nth(1).expect("регистрация на месте");
+        let mine = reg.split("    reg.register(").next().unwrap_or_default();
+        assert!(mine.contains("reg.register_slow("), "sessions.resume снова на общем дедлайне");
+        assert!(mine.contains("GATE_DEADLINE,"), "дедлайн подъёма не назван при регистрации");
+    }
+
+    /// Список отбирает, ПОТОМ оценивает — и никогда наоборот.
+    ///
+    /// Обратный порядок был живым тупиком: `assess` читает транскрипт целиком, а
+    /// обрезка до `limit` шла после него. На машине владельца это 1570 файлов
+    /// claude на 952 МБ плюс 246 kimi на 92 МБ — при дедлайне гейта в 30 секунд
+    /// список не собрался бы никогда, и выглядело бы это как «капабилити висит».
+    #[test]
+    fn the_list_picks_first_and_weighs_after() {
+        let src = include_str!("resume.rs");
+        let body = src
+            .split("fn revivable_handler")
+            .nth(1)
+            .and_then(|t| t.split("#[cfg(test)]").next())
+            .expect("хендлер списка на месте");
+        // Ищем ВЫЗОВ, а не слово: слово стоит и в объяснении над кодом, ради
+        // которого этот сторож и написан, — и ловил бы сам себя.
+        let truncate = body.find(".truncate(limit)").expect("обрезки до limit нет вовсе");
+        let weigh = body.find("revive::assess_light(").expect("оценки нет вовсе");
+        assert!(truncate < weigh, "оценка снова идёт до обрезки — список читает все транскрипты");
+        assert!(
+            !body.contains("revive::assess(&"),
+            "в списке снова полная оценка: она считает реплики проходом по всему файлу"
+        );
     }
 
     /// Рабочий каталог берётся из транскрипта, а не из имени каталога проекта:

@@ -258,73 +258,96 @@ impl Confirmer for PanelConfirmer {
         args: &'a Value,
     ) -> Pin<Box<dyn Future<Output = Outcome> + Send + 'a>> {
         Box::pin(async move {
-            let nonce = gen_nonce();
             // снимок цели ДО ожидания (INV-CONFIRM-BIND)
             let before = target_fingerprint(&self.daemon, meta.id, args);
             let card = resolve_target(&self.daemon, meta.id, args);
-
-            // Гарантированная очистка записи на любом выходе (вкл. дроп будущего
-            // гейта) — и там же единственная точка, где UI узнаёт, что вопрос закрыт.
-            // Именно в Drop, а не после await: дроп будущего — это как раз исход,
-            // о котором иначе никто не сказал бы.
-            struct Guard<'g> {
-                pending: &'g PendingConfirms,
-                app: &'g AppHandle,
-                daemon: &'g Arc<Daemon>,
-                nonce: String,
-                outcome: std::cell::Cell<Outcome>,
-            }
-            impl Drop for Guard<'_> {
-                fn drop(&mut self) {
-                    self.pending.cancel(&self.nonce);
-                    // напоминание пережило бы вопрос и врало бы «жду решения»
-                    crate::windows::toast_remove(self.daemon, &reminder_id(&self.nonce));
-                    let o = self.outcome.get();
-                    let _ = self.app.emit(
-                        "agent:confirm-done",
-                        json!({ "nonce": self.nonce, "approved": o.allows(), "outcome": o.as_str() }),
-                    );
-                }
-            }
-            let guard = Guard {
-                pending: &self.pending,
-                app: &self.app,
-                daemon: &self.daemon,
-                nonce: nonce.clone(),
-                outcome: std::cell::Cell::new(Outcome::Expired),
-            };
-
-            let rx = self.pending.register(nonce.clone());
-            // глобально — карточку ловит окно чата агента (agent-chat), а не только панель
-            let _ = self.app.emit(
-                "agent:confirm",
-                json!({
-                    "nonce": nonce,
-                    "id": meta.id,
-                    "class": meta.class.as_str(),
-                    "provenance": meta.provenance.as_str(),
-                    "card": card,
-                }),
-            );
-
-            // Ждём человека без дедлайна: карточка не про безопасность в моменте,
-            // а про его решение. Перепроверка цели — и на ответе, и по дороге.
-            let outcome = await_decision(
-                rx,
-                POLL,
-                &before,
+            ask(
+                &self.daemon,
+                meta.id,
+                meta.class.as_str(),
+                meta.provenance.as_str(),
+                card,
+                before,
                 || target_fingerprint(&self.daemon, meta.id, args),
-                |waited| {
-                    if remind_due(waited) {
-                        remind(&self.daemon, &nonce, meta.id, waited);
-                    }
-                },
             )
-            .await;
-            guard.outcome.set(outcome);
-            outcome
+            .await
         })
     }
+}
+
+/// Задать вопрос человеку и дождаться решения — общая машинка карточки.
+///
+/// Ею пользуются двое, и это НЕ дублирование по недосмотру: гейт спрашивает то,
+/// что положено спрашивать по гранту, а хендлер — то, что переросло свой грант
+/// (см. `resume::ask_beyond_grant`). Оба обязаны выглядеть для человека
+/// одинаково: тот же нонс, та же карточка, та же проверка признаков человека при
+/// согласии. Второй реализации карточки в проекте нет и не будет — иначе одна из
+/// них рано или поздно разойдётся с проверкой `decision_allowed`.
+///
+/// `before` + `fingerprint` — INV-CONFIRM-BIND: разрешение действует на ту цель,
+/// которую человеку показали, а не на ту, что оказалась под рукой к моменту
+/// ответа.
+pub async fn ask(
+    d: &Arc<Daemon>,
+    id: &str,
+    class: &str,
+    provenance: &str,
+    card: Value,
+    before: String,
+    fingerprint: impl FnMut() -> String + Send,
+) -> Outcome {
+    let nonce = gen_nonce();
+
+    // Гарантированная очистка записи на любом выходе (вкл. дроп будущего
+    // гейта) — и там же единственная точка, где UI узнаёт, что вопрос закрыт.
+    // Именно в Drop, а не после await: дроп будущего — это как раз исход,
+    // о котором иначе никто не сказал бы.
+    struct Guard<'g> {
+        daemon: &'g Arc<Daemon>,
+        nonce: String,
+        outcome: std::cell::Cell<Outcome>,
+    }
+    impl Drop for Guard<'_> {
+        fn drop(&mut self) {
+            self.daemon.pending.cancel(&self.nonce);
+            // напоминание пережило бы вопрос и врало бы «жду решения»
+            crate::windows::toast_remove(self.daemon, &reminder_id(&self.nonce));
+            let o = self.outcome.get();
+            let _ = self.daemon.app.emit(
+                "agent:confirm-done",
+                json!({ "nonce": self.nonce, "approved": o.allows(), "outcome": o.as_str() }),
+            );
+        }
+    }
+    let guard = Guard {
+        daemon: d,
+        nonce: nonce.clone(),
+        outcome: std::cell::Cell::new(Outcome::Expired),
+    };
+
+    let rx = d.pending.register(nonce.clone());
+    // глобально — карточку ловит окно чата агента (agent-chat), а не только панель
+    let _ = d.app.emit(
+        "agent:confirm",
+        json!({
+            "nonce": nonce,
+            "id": id,
+            "class": class,
+            "provenance": provenance,
+            "card": card,
+        }),
+    );
+
+    // Ждём человека без дедлайна: карточка не про безопасность в моменте,
+    // а про его решение. Перепроверка цели — и на ответе, и по дороге.
+    let outcome = await_decision(rx, POLL, &before, fingerprint, |waited| {
+        if remind_due(waited) {
+            remind(d, &nonce, id, waited);
+        }
+    })
+    .await;
+    guard.outcome.set(outcome);
+    outcome
 }
 
 /// Стабильный id тоста-напоминания: одна карточка — одно напоминание, а не лента
@@ -384,6 +407,17 @@ pub fn resolve_target(d: &Arc<Daemon>, id: &str, args: &Value) -> Value {
             "parent": args.get("parent"),
             "isolate": args.get("isolate"),
         }),
+        // Оживление подтверждают по ЦЕНЕ, а не по id: «sessions.resume
+        // 3e819d75-…» человеку не говорит ничего, а решает он здесь про деньги.
+        // Карточку собирает сам resume — ОДНОЙ функцией на оба пути (вопрос от
+        // гейта, когда гранта нет, и вопрос от хендлера, когда грант есть, но
+        // транскрипт перерос порог). Разные карточки на один вопрос означали бы,
+        // что с грантом человек видит больше, чем без него.
+        "sessions.resume" => crate::capability::native::resume::confirm_card(
+            d,
+            args.get("id").and_then(Value::as_str).unwrap_or_default(),
+            args.get("reason").and_then(Value::as_str),
+        ),
         "settings.set" => json!({ "kind": "settings", "diff": settings_diff(d, args) }),
         _ => json!({ "kind": "other", "args": args }),
     }
@@ -409,6 +443,16 @@ pub fn target_fingerprint(d: &Arc<Daemon>, id: &str, args: &Value) -> String {
         "sessions.reply" | "sessions.control" => {
             let sid = args.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
             format!("{sid}|{}", d.session_label(sid))
+        }
+        // Цель оживления — транскрипт, а «уехать» он может ровно одним способом:
+        // изменившись в размере. Тогда числа, по которым человек соглашался,
+        // больше не те, что мы показали, — и согласие относится не к этому файлу.
+        "sessions.resume" => {
+            let sid = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let bytes = crate::capability::native::resume::find_transcript(sid)
+                .and_then(|(_, p)| std::fs::metadata(p).ok())
+                .map(|m| m.len());
+            format!("{sid}|{bytes:?}")
         }
         "settings.set" => {
             let cur = d.settings.load();

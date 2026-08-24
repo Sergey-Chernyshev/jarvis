@@ -9,7 +9,7 @@ members = ["node"]
 
 [package]
 name = "jarvis"
-version = "0.3.22"
+version = "0.3.23"
 description = "Menu-bar/tray mission control for Claude Code and Codex sessions (macOS, Linux)"
 license = "MIT"
 edition = "2021"

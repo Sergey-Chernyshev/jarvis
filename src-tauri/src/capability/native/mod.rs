@@ -8,7 +8,7 @@ use super::DaemonRegistry;
 mod audit_cap;
 mod chats;
 mod control;
-mod resume;
+pub mod resume;
 mod entities_cap;
 mod metrics;
 mod notifications;

@@ -1055,6 +1055,10 @@ textarea.lp-ask-text { width: 100%; min-height: 66px; }
 .chbox.warn .chkind { color: var(--warn); }
 .chbox.stop .chkind { color: var(--danger); }
 .chbox.wait .chkind { color: var(--accent-text); }
+/* Оживление — не тревога и не сбой: работа сделана, и цвет тревоги сказал бы
+   про неё «сломалось». Но и потеряться в ленте она не должна: это строка про
+   потраченные деньги, и единственная, которую человек про них увидит. */
+.chbox.revived .chkind { color: var(--accent-text); }
 /* Поправить предложенный заход — на месте: переписывать его в поле ввода значит
    отправить обычной репликой не туда. */
 .chedit { width: 100%; margin-top: 8px; min-height: 62px; resize: vertical;

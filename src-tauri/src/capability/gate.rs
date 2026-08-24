@@ -203,7 +203,12 @@ pub async fn invoke<C>(
     let entry_for = |outcome: String, ms: u128| AuditEntry { ask: ask.clone(), ..entry_for(outcome, ms) };
 
     // 4. Исполнение — с дедлайном (R3, fail-safe liveness; эффект at-least-once).
-    match tokio::time::timeout(cfg.handler_timeout, (entry.handler)(ctx, args.clone())).await {
+    //    Дедлайн общий, кроме тех капабилити, что назвали свой при регистрации
+    //    (`register_slow`). Общий здесь врал: `sessions.resume` ждёт хука
+    //    оживлённой сессии дольше 30 с, и обрубленный вызов отдавал
+    //    `failed:timeout` про сессию, которая как раз встала.
+    let deadline = entry.deadline.unwrap_or(cfg.handler_timeout);
+    match tokio::time::timeout(deadline, (entry.handler)(ctx, args.clone())).await {
         Err(_) => {
             audit.record(&entry_for("failed:timeout".into(), t0.elapsed().as_millis()));
             Err(GateError::Failed("timeout".into()))
@@ -517,6 +522,53 @@ mod tests {
         assert_eq!(audit.len(), 1);
         assert_eq!(audit.last().unwrap().outcome, "ok");
         assert!(audit.last().unwrap().ask.is_none(), "вопроса не было — имени тоже");
+    }
+
+    /// Капабилити, назвавшая свой дедлайн, живёт по нему, а соседи — по общему.
+    ///
+    /// Дефект был живым: `sessions.resume` ждёт хука оживлённой сессии дольше
+    /// общих тридцати секунд, и гейт обрубал вызов на полпути — агент получал
+    /// `failed:timeout` про сессию, которая как раз встала. Своё число обязано
+    /// действовать, но только на того, кто его назвал: «поднять общий дедлайн,
+    /// раз одному мало» сняло бы защиту со всех остальных.
+    #[tokio::test]
+    async fn a_capability_may_name_its_own_deadline_and_only_its_own() {
+        fn slow_meta(id: &'static str) -> CapabilityMeta {
+            CapabilityMeta {
+                id,
+                class: RiskClass::Read,
+                provenance: Provenance::Trusted,
+                description: "ждёт дольше общего дедлайна (тест)",
+                input_schema: json!({ "type": "object" }),
+            }
+        }
+        let handler = || {
+            make_handler(|_: (), _args| async move {
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                Ok(json!({ "ok": true }))
+            })
+        };
+        let mut reg = Registry::new();
+        reg.register_slow(slow_meta("slow.own"), handler(), Duration::from_millis(500));
+        reg.register(slow_meta("slow.common"), handler());
+
+        // общий дедлайн заведомо короче того, сколько работает хендлер
+        let cfg = GateConfig { handler_timeout: Duration::from_millis(10) };
+        let c = Consumer::custom("panel", &[RiskClass::Read], ConfirmPolicy::Never);
+
+        let audit = MemAudit::new();
+        let out = invoke(&reg, (), &c, "slow.own", json!({}), &AutoApprove, &audit, cfg)
+            .await
+            .expect("свой дедлайн не сработал — вызов обрубили общим");
+        assert_eq!(out.value["ok"], true);
+        assert_eq!(audit.last().unwrap().outcome, "ok");
+
+        // а сосед по реестру по-прежнему под общим: исключение не расползлось
+        let err = invoke(&reg, (), &c, "slow.common", json!({}), &AutoApprove, &audit, cfg)
+            .await
+            .expect_err("общий дедлайн перестал действовать на остальных");
+        assert!(matches!(err, GateError::Failed(ref e) if e == "timeout"), "{err:?}");
+        assert_eq!(audit.last().unwrap().outcome, "failed:timeout");
     }
 
     #[tokio::test]

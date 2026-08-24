@@ -162,6 +162,10 @@
     // Свой канал цепочки: режим, заходы, расход и «ждёт тебя». Опрашивать это
     // командой на каждый ход значило бы узнавать про ночную работу с опозданием.
     onAgentChain: (cb) => on('agent:chain', cb),
+    // Оживление мёртвой сессии — строкой в ленту. Карточки у мелких оживлений
+    // больше нет (они разрешены грантом), и это единственное место, где человек
+    // узнаёт о потраченных на них деньгах.
+    onAgentResumed: (cb) => on('agent:resumed', cb),
     agentConfirm: (nonce, approved, armed) => invoke('agent_confirm', { nonce, approved, armed }),
     onAgentEvent: (cb) => on('agent:event', cb),
     onAgentConfirm: (cb) => on('agent:confirm', cb),

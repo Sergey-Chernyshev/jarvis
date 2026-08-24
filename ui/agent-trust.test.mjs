@@ -100,6 +100,68 @@ test('тумблер подъёма отражает настройки и вы�
   assert.deepEqual(patches(calls)[0], { grants: { agent: { autoApprove: [] } } });
 });
 
+/* ── Оживление мёртвых сессий без спроса ───────────────────────────────── */
+
+const REVIVE = 'Оживлять мёртвые сессии без подтверждения';
+
+/* Решение владельца: «я хочу, чтобы без подтверждения джарвисы могли воскрешать
+ * сессии». Значит оживление обязано попасть в ТОТ ЖЕ механизм грантов, что
+ * reply и spawn, — тумблером, а не правкой файла и не константой в коде. */
+test('оживление разрешается тем же тумблером, что и остальные права агента', async () => {
+  const { document, window, calls } = await boot({ grants: { agent: { autoApprove: ['sessions.reply'] } } });
+  const t = toggleFor(document, REVIVE);
+  assert.equal(t.checked, false, 'по умолчанию оживление со спросом');
+  t.checked = true;
+  t.dispatchEvent(new window.Event('change', { bubbles: true }));
+  assert.deepEqual(patches(calls)[0],
+    { grants: { agent: { autoApprove: ['sessions.reply', 'sessions.resume'] } } });
+});
+
+test('тумблер оживления отражает настройки и снимается одним нажатием', async () => {
+  const { document, window, calls } = await boot({ grants: { agent: { autoApprove: ['sessions.resume'] } } });
+  assert.equal(toggleFor(document, REVIVE).checked, true, 'разрешение из settings.json не отражено');
+  const row = [...document.querySelectorAll('#s2-pane-agents .s2trust-list .drow')]
+    .find((r) => (r.querySelector('.dt') || {}).textContent === 'Оживлять мёртвые сессии');
+  assert.ok(row, 'оживления нет в списке разрешённого — снять его будет нечем');
+  row.querySelector('button.btn').dispatchEvent(new window.Event('click', { bubbles: true }));
+  assert.deepEqual(patches(calls)[0], { grants: { agent: { autoApprove: [] } } });
+});
+
+/* Карточка была последним местом, где человек видел цену оживления. Убрав её,
+ * мы обязаны сказать, что держит цену вместо неё, — и сказать числами. */
+test('порог оживления назван числами там же, где выдан грант', async () => {
+  const { document } = await boot({
+    grants: { agent: { autoApprove: ['sessions.resume'] } },
+    resume: { confirmMb: 35, confirmUsd: 2.5, nightUsd: 4 },
+  });
+  const text = document.querySelector('#s2-pane-agents').textContent;
+  assert.match(text, /35 МБ/, 'порог по размеру не показан');
+  assert.match(text, /\$2\.50/, 'порог по деньгам не показан');
+  assert.match(text, /\$4\.00/, 'ночной порог не показан');
+  assert.match(text, /resume\.confirmMb/, 'не сказано, где правится порог');
+});
+
+/* Риск у оживления свой и не такой, как у соседей: дешёвого случая нет вовсе —
+ * платится весь контекст сразу. Обещать «разрешил и забыл» здесь нельзя. */
+test('строка оживления честно говорит, что разрешение неполное', async () => {
+  const { document } = await boot({});
+  const row = [...document.querySelectorAll('#s2-pane-agents .drow')]
+    .find((r) => (r.querySelector('.dt') || {}).textContent === REVIVE);
+  const desc = row.querySelector('.dd').textContent;
+  assert.match(desc, /Риск/, 'риск не назван');
+  assert.match(desc, /холодному кэшу/, 'не сказано, почему первый ход дорогой');
+  assert.match(desc, /крупные транскрипты спрашивают/, 'обещано разрешение, которого нет');
+  assert.match(desc, /строкой в чат/, 'не сказано, где человек увидит расход');
+});
+
+/* Порог показывается только тому, кто грант выдал: без гранта спрашивается
+ * каждое оживление, и число, за которым «спросят всё равно», врало бы. */
+test('без гранта порог не обещают', async () => {
+  const { document } = await boot({});
+  assert.doesNotMatch(document.querySelector('#s2-pane-agents').textContent,
+    /Где у оживления проходит порог/, 'порог обещан там, где спрашивают и так каждое оживление');
+});
+
 /* Список — весь, а не только то, на что есть тумблер: id, дописанный в файл
  * руками, иначе оставался бы невидимым разрешением. */
 test('список показывает всё разрешённое, включая id без тумблера', async () => {

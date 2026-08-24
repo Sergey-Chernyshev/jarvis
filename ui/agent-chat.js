@@ -118,6 +118,8 @@
     'sessions.reply': 'ответить в сессию',
     'sessions.control': 'сменить модель сессии',
     'sessions.rename': 'переименовать чат',
+    'sessions.spawn': 'поднять новую сессию',
+    'sessions.resume': 'оживить мёртвую сессию',
     'settings.set': 'изменить настройки',
   };
   const cmdTitle = (id) => 'Агент хочет ' + (CMD[id] || 'выполнить команду «' + (id || '?') + '»');
@@ -131,6 +133,22 @@
     return String(m == null ? '' : m).trim() || RETRY;
   };
   const why = (res) => (res && res.error) || RETRY;
+
+  /* Цена оживления словами. Три состояния, и их НЕЛЬЗЯ сводить к одному числу:
+   * известная модель даёт точную цену, незнакомая — вилку по всем известным
+   * ставкам, а транскрипт без единой записи о расходе не даёт ничего. Подставить
+   * в последнем случае ноль или самую дешёвую ставку значило бы соврать в
+   * единственном месте, ради которого карточка и показывается. */
+  function priceText(c) {
+    if (!c || !c.kind) return 'цена неизвестна';
+    if (c.kind === 'known') return '≈$' + Number(c.usd || 0).toFixed(2) + ' за первый ход';
+    if (c.kind === 'range') {
+      return '$' + Number(c.usdLow || 0).toFixed(2) + '–$' + Number(c.usdHigh || 0).toFixed(2)
+        + ' за первый ход (модель в транскрипте не названа)';
+    }
+    return 'цену определить не удалось: в транскрипте нет записей о расходе';
+  }
+  const tokensText = (n) => (n >= 1000 ? Math.round(n / 1000) + 'k' : String(n));
 
   const cut = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
   const val = (v) => (v == null ? '—' : typeof v === 'object' ? JSON.stringify(v) : String(v));
@@ -2109,6 +2127,32 @@
       chainCard(ev);
     });
 
+    /* Оживление сессии — строкой в ленту.
+     *
+     * Это не украшение, а вторая половина решения «воскрешать без
+     * подтверждения». Карточка была последним местом, где человек видел цену
+     * ДО траты; убрав её, мы обязаны показать трату ПОСЛЕ — и не в выписке
+     * провайдера через сутки, а здесь и сразу. Что подняли, зачем и почём.
+     *
+     * Метки чата у события нет и быть не может: оживление приходит из
+     * капабилити, куда id чата не доходит, а при двух ходах в полёте угадать
+     * спросившего нельзя. Не угадываем — строка ложится в ту ленту, на которую
+     * человек сейчас смотрит, ровно как карточка подтверждения. */
+    const resumedSeen = new Set();
+    if (api.onResumed) api.onResumed((ev0) => {
+      const ev = ev0 || {};
+      if (!ev.text) return;
+      const key = (ev.sessionId || '') + '|' + (ev.at || '');
+      if (resumedSeen.has(key)) return; // событие приходит и во вкладку, и в окно
+      resumedSeen.add(key);
+      if (resumedSeen.size > 200) resumedSeen.delete(resumedSeen.values().next().value);
+      const t = here();
+      const box = el('chbox revived');
+      box.appendChild(el('chkind', 'сессия оживлена'));
+      window.JarvisMarkdown.renderChat(box.appendChild(el('bubble')), ev.text);
+      addRow(t, 'chain revived', box);
+    });
+
     const END = { done: 1, failed: 1, stopped: 1 }; // события конца хода
     api.onEvent((ev0) => {
       const ev = ev0 || {};
@@ -2229,6 +2273,25 @@
         if (cd.text) desc += ' · «' + cd.text + '»';
         if (cd.model) desc += ' · модель ' + cd.model;
         if (cd.effort) desc += ' · усилие ' + cd.effort;
+      } else if (cd.kind === 'revive') {
+        /* Оживление — единственное действие, где человек решает про ДЕНЬГИ, а
+         * не про доступ: контекст оплачивается целиком и сразу, по холодному
+         * кэшу. Поэтому цена стоит первой, а id сессии не показывается вовсе —
+         * он не отвечает ни на один вопрос, который тут задают. */
+        desc = cd.gone
+          ? 'транскрипта этой сессии на диске больше нет — оживлять нечего'
+          : [
+              priceText(cd.cost),
+              cd.contextTokens ? tokensText(cd.contextTokens) + ' контекста' : null,
+              cd.bytes ? (cd.bytes / 1048576).toFixed(1) + ' МБ' : null,
+              cd.label || null,
+              cd.cwd || null,
+            ].filter(Boolean).join(' · ');
+        if (cd.reason) desc += '\nЗачем: ' + cd.reason;
+        /* Почему спросили, хотя оживление разрешено без спроса. Без этой строки
+         * карточка выглядит как отказ разрешения работать: человек нажал
+         * тумблер, а его всё равно спрашивают, и он не знает почему. */
+        if (cd.beyondGrant) desc += '\nСпрашиваю, хотя оживление разрешено: ' + cd.beyondGrant;
       } else if (cd.kind === 'settings') {
         // Дифф демон уже посчитал — показываем, что из чего станет: список
         // ключей не отвечает на вопрос, с чем именно человек соглашается.
@@ -2368,6 +2431,7 @@
           // Канала цепочки может не быть (старый мост) — тогда шапка живёт на
           // одних ответах команд, а не падает вместе со вкладкой.
           onChain: (cb) => j.onAgentChain && j.onAgentChain(cb),
+          onResumed: (cb) => j.onAgentResumed && j.onAgentResumed(cb),
           // закрыть дочернюю сессию — той же командой, что и список сессий
           kill: (sessionId) => j.killSession(sessionId),
           confirm: (nonce, approved, armed) => j.agentConfirm(nonce, approved, armed),
@@ -2428,6 +2492,7 @@
         chainResume: (chatId) => invoke('agent_chain_resume', { chatId }),
         chainStop: (chatId) => invoke('agent_chain_stop', { chatId }),
         onChain: (cb) => listen('agent:chain', (e) => cb(e.payload)),
+        onResumed: (cb) => listen('agent:resumed', (e) => cb(e.payload)),
         kill: (sessionId) => invoke('session_kill', { sessionId }),
         confirm: (nonce, approved, armed) => invoke('agent_confirm', { nonce, approved, armed }),
         confirmDone,

@@ -23,7 +23,7 @@ use crate::util::jarvis_dir;
 
 /// Текущая версия схемы settings.json. Поднимать при ЛОМАЮЩИХ изменениях формата
 /// (не при простом добавлении полей), добавляя шаг в `run_migrations`.
-pub const SCHEMA_VERSION: u64 = 2;
+pub const SCHEMA_VERSION: u64 = 3;
 
 pub struct Store {
     /// Разобранные настройки + отпечаток файла, с которого они прочитаны.
@@ -275,6 +275,27 @@ fn run_migrations(mut obj: Map<String, Value>, from: u64) -> Map<String, Value> 
         obj.remove("sessionsSpawnMax");
         v = 2;
     }
+    if v < 3 {
+        // 2 → 3: выселяем токен подписки (`claude setup-token`). Им разрешено
+        // питать только сам Claude Code, а не стороннюю обвязку, поэтому режим
+        // «Подписка» из настроек убран целиком. Секрет вычищаем ИЗ ФАЙЛА, а не
+        // только из чтения: оставить чужой токен лежать на диске после того,
+        // как пользоваться им нельзя, — худший из вариантов.
+        //
+        // Отдельным шагом, а не вместе с предыдущим: у тех, кто уже обновился
+        // до второй версии, файл помечен ею — и слитый в неё шаг не выполнился
+        // бы никогда, оставив токен лежать на диске.
+        if let Some(Value::Object(svc)) = obj.get_mut("service") {
+            if svc.get("claudeAuthMode").and_then(Value::as_str) == Some("subscription") {
+                svc.remove("claudeAuthMode");
+                svc.remove("claudeSecret");
+                crate::log::line("[settings] режим «Подписка Claude» убран, токен стёрт");
+            }
+        }
+        v = 3;
+    }
+    // Шаблон следующего шага:
+    // if v < 4 { /* преобразование JSON */ v = 4; }
     obj.insert("schemaVersion".into(), Value::from(v));
     obj
 }

@@ -988,6 +988,14 @@ textarea.lp-ask-text { width: 100%; min-height: 66px; }
 .pl-add, .pl-presets { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .pl-start { position: absolute; top: -8px; left: 10px; padding: 1px 7px; border-radius: var(--r-chip);
   background: var(--accent); color: var(--on-accent, #fff); font: 600 10.5px/1.5 var(--font); }
+/* Шлюз (развилка, ветвление, слияние) ничего не делает — он направляет ход.
+   Карточка у него поэтому тише: полосой слева и приглушённым фоном, чтобы
+   взгляд по списку цеплялся за РАБОТУ, а между ней читал форму графа. */
+.pl-step.pl-gate { background: transparent; border: 1px dashed var(--line);
+  border-left: 3px solid var(--accent); padding-left: 10px; }
+.pl-bpmn { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding-top: 8px; border-top: 1px solid var(--line); }
+.pl-bpmn .lp-hint { flex-basis: 100%; }
 
 /* Счётчик контекста чата с Джарвисом (agent-chat.js): сколько разговор уже
    занял и сколько осталось до потолка. Правила общие: вкладка панели и окно из

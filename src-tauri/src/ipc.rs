@@ -1055,7 +1055,7 @@ pub fn file_open(app: AppHandle, session_id: String, path: String, reveal: bool)
 
 /// Открыть файл системным способом либо показать его в файловом менеджере.
 #[cfg(target_os = "macos")]
-fn open_path(p: &std::path::Path, reveal: bool) -> Result<(), String> {
+pub(crate) fn open_path(p: &std::path::Path, reveal: bool) -> Result<(), String> {
     let mut cmd = std::process::Command::new("open");
     if reveal {
         cmd.arg("-R"); // показать в Finder
@@ -1068,7 +1068,7 @@ fn open_path(p: &std::path::Path, reveal: bool) -> Result<(), String> {
 /// `org.freedesktop.FileManager1` (его понимают Nautilus, Dolphin, Nemo,
 /// Thunar), иначе просто открываем родительскую папку.
 #[cfg(not(target_os = "macos"))]
-fn open_path(p: &std::path::Path, reveal: bool) -> Result<(), String> {
+pub(crate) fn open_path(p: &std::path::Path, reveal: bool) -> Result<(), String> {
     use std::process::{Command, Stdio};
 
     let quiet = |c: &mut Command| {
@@ -1435,13 +1435,20 @@ pub fn app_relaunch(app: AppHandle) {
 #[tauri::command]
 pub fn plugins_status(app: AppHandle) -> Value {
     let d = Daemon::get(&app);
-    d.power.statuses(&d)
+    d.plugins.status_json(&d)
 }
 
 #[tauri::command]
 pub async fn plugins_cmd(app: AppHandle, id: String, cmd: String, args: Option<Value>) -> Value {
     let d = Daemon::get(&app);
-    crate::power::Power::cmd(&d, &id, &cmd, &args.unwrap_or(json!({}))).await
+    d.plugins.cmd(&d, &id, &cmd, args.unwrap_or(json!({}))).await
+}
+
+/// Записать настройку плагина по схеме его манифеста (вкладка «Плагины»).
+#[tauri::command]
+pub fn plugin_set(app: AppHandle, id: String, key: String, value: Value) -> Value {
+    let d = Daemon::get(&app);
+    d.plugins.set_setting(&d, &id, &key, value)
 }
 
 #[tauri::command]
@@ -1756,6 +1763,16 @@ fn remote_projects_to_history(machine: &str, list: Value) -> Value {
         .map(|p| {
             let cwd = p.get("cwd").and_then(Value::as_str).unwrap_or_default();
             let project = cwd.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("другое");
+            // Какой агент стоял за сессией — обязательное поле, а не украшение:
+            // панель отправляет его обратно в `session_launch`, и без него
+            // продолжение сессии с узла не запускалось вовсе (аргумент команды
+            // не разбирался). Узел старой версии его не шлёт — тогда claude:
+            // ничего другого он в оглавление и не кладёт.
+            let agent = p
+                .get("agent")
+                .and_then(Value::as_str)
+                .filter(|a| !a.is_empty())
+                .unwrap_or("claude");
             let sessions: Vec<Value> = p
                 .get("sessions")
                 .and_then(Value::as_array)
@@ -1770,6 +1787,7 @@ fn remote_projects_to_history(machine: &str, list: Value) -> Value {
                                 "agentId": id,
                                 "at": x.get("at").cloned().unwrap_or(Value::Null),
                                 "title": "",
+                                "agent": agent,
                                 "remote": machine,
                             })
                         })
@@ -1779,6 +1797,7 @@ fn remote_projects_to_history(machine: &str, list: Value) -> Value {
             json!({
                 "project": project,
                 "cwd": cwd,
+                "agent": agent,
                 "count": p.get("count").cloned().unwrap_or(json!(sessions.len())),
                 "lastAt": p.get("lastAt").cloned().unwrap_or(Value::Null),
                 "remote": machine,
@@ -2578,11 +2597,17 @@ pub(crate) async fn launch_core(d: &Arc<Daemon>, req: LaunchReq) -> Value {
         return err("Не указана директория проекта");
     }
     let machine = machine.unwrap_or_default();
+    let remote_host = !machine.is_empty() && machine != "local";
+    // `~` в пути раскрываем ЗДЕСЬ и только для этой машины: шелла на пути к
+    // create_dir_all нет, и без раскрытия «~/projects/app» заводит каталог с
+    // именем `~` рядом с рабочим. Путь на узле оставляем как набрали — его
+    // домашний каталог знает только сам узел (см. `expand_home` в node/http).
+    let cwd = if remote_host { cwd } else { crate::util::expand_home(&cwd) };
     let mode = crate::launch::Mode::parse(mode.as_deref().unwrap_or(""));
     // Песочница — только для НОВОЙ задачи: продолжение живёт там, где начиналось,
     // и переносить его в свежий worktree значило бы оторвать от своей работы.
     let cwd = if isolate.unwrap_or(false) && session_id.is_none() {
-        let host = if machine.is_empty() || machine == "local" {
+        let host = if !remote_host {
             Host::Local
         } else {
             match d.remotes.node(&machine) {
@@ -2600,7 +2625,7 @@ pub(crate) async fn launch_core(d: &Arc<Daemon>, req: LaunchReq) -> Value {
     } else {
         cwd
     };
-    if !machine.is_empty() && machine != "local" {
+    if remote_host {
         let res = launch_on_node(d, &machine, &cwd, &agent, session_id.as_deref(), mode).await;
         if res.get("ok").and_then(Value::as_bool).unwrap_or(false) {
             deliver_task(d, &machine, &cwd, &agent, task, bind);
@@ -2736,10 +2761,16 @@ async fn launch_on_node(
     let name = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("project");
     match client.launch(cwd, &cmd, name).await {
         Ok(()) => json!({ "ok": true, "channel": "node", "machine": machine }),
-        Err(e) => err(format!(
-            "{}\nЕсли не хватает tmux или агента — поставь их на той машине.",
-            ellipsize(&one_line(&e), 200)
-        )),
+        Err(e) => {
+            // Тильду раскрывает узел; узел до этой версии её не знал и отвечал
+            // «нужен абсолютный cwd». Догадка «обнови узел» дешевле часа поиска.
+            let hint = if cwd.starts_with('~') && e.contains("абсолютн") {
+                "\nПуть от ~ понимает только свежий узел — нажми «Переустановить» в строке узла."
+            } else {
+                "\nЕсли не хватает tmux или агента — поставь их на той машине."
+            };
+            err(format!("{}{hint}", ellipsize(&one_line(&e), 200)))
+        }
     }
 }
 
@@ -3803,7 +3834,11 @@ pub async fn service_test() -> Value {
     }
 }
 
-/* --- Аккаунт Claude: подключить подписку (OAuth-токен) или API-ключ --- */
+/* --- Аккаунт Claude: подключить API-ключ ---
+ *
+ * Режим один. Токен `claude setup-token` открывает ЛИЧНУЮ подписку, и питать им
+ * разрешено только сам Claude Code — сторонней обвязке нельзя, поэтому режим
+ * «Подписка» убран (см. `claude_bin::apply_claude_auth`). */
 
 /// Состояние подключения аккаунта Claude для раздела «Под капотом».
 #[tauri::command]
@@ -3822,21 +3857,26 @@ pub fn claude_auth_get(app: AppHandle) -> Value {
     };
     json!({
         "connected": connected,
-        "mode": cfg.claude_auth_mode, // "key" | "subscription" | ""
+        "mode": cfg.claude_auth_mode, // "key" | ""
         "hint": hint,
         "claudeBin": crate::claude_bin::resolve_claude_bin().is_some(),
     })
 }
 
 /// Подключить аккаунт Claude: валидируем крошечным `claude -p`, при успехе пишем
-/// в settings.json (0600) и обновляем процесс-конфиг. mode ∈ key|subscription.
+/// в settings.json (0600) и обновляем процесс-конфиг. mode — только `key`.
 #[tauri::command]
 pub async fn claude_auth_connect(app: AppHandle, mode: String, value: String) -> Value {
     let value = value.trim().to_string();
     if value.is_empty() {
-        return err("пустой ключ/токен");
+        return err("пустой ключ");
     }
-    if mode != "key" && mode != "subscription" {
+    // Панель этот режим больше не предлагает, но команда открыта наружу —
+    // отказываем явно, а не молча принимаем чужой токен подписки.
+    if mode == "subscription" {
+        return err("токен подписки подключать нельзя: им разрешено питать только сам Claude Code. Нужен API-ключ sk-ant-api…");
+    }
+    if mode != "key" {
         return err(format!("неизвестный режим: {mode}"));
     }
     if crate::claude_bin::resolve_claude_bin().is_none() {
@@ -3846,7 +3886,7 @@ pub async fn claude_auth_connect(app: AppHandle, mode: String, value: String) ->
         crate::claude_bin::validate_claude_auth(&mode, &value, std::time::Duration::from_secs(40))
             .await;
     if !valid {
-        return err("не сработало: проверь ключ/токен (или claude недоступен)");
+        return err("не сработало: проверь ключ (или claude недоступен)");
     }
     let d = Daemon::get(&app);
     let mut p = serde_json::Map::new();
@@ -5007,6 +5047,18 @@ mod turn_ipc_tests {
         assert_eq!(g["sessions"][0]["id"], "vps:abc");
         assert_eq!(g["sessions"][0]["agentId"], "abc");
         assert_eq!(g["sessions"][0]["title"], "", "заголовков с узла нет — не выдумываем");
+        // Без агента панель не смогла бы запустить продолжение: session_launch
+        // ждёт его строкой, а не «как-нибудь».
+        assert_eq!(g["agent"], "claude", "узел без поля agent — это claude");
+        assert_eq!(g["sessions"][0]["agent"], "claude");
+    }
+
+    #[test]
+    fn remote_projects_carry_the_agent_of_the_node() {
+        let listing = json!([{ "cwd": "/srv/x", "agent": "codex", "sessions": [{ "id": "s1" }] }]);
+        let got = remote_projects_to_history("vps", listing);
+        assert_eq!(got[0]["agent"], "codex");
+        assert_eq!(got[0]["sessions"][0]["agent"], "codex", "агент проекта наследуется сессией");
     }
 
     #[test]

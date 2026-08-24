@@ -32,15 +32,6 @@ const SUGGEST_GAP_MS: i64 = 60 * 60 * 1000; // подсказка не чаще 
 const GUARD_EVERY_MS: i64 = 60 * 1000;
 const WAKE_GAP_MS: i64 = 90 * 1000;
 
-/// Декларативный пункт меню трея от плагина.
-pub enum TrayItem {
-    Label { text: String },
-    Action { id: String, text: String },
-    Check { id: String, text: String, checked: bool, enabled: bool },
-    Submenu { text: String, items: Vec<TrayItem> },
-    Separator,
-}
-
 #[derive(Default)]
 struct Clam {
     /// Плагин «Крышка» включён (runtime-аналог p.active у Electron-хоста).
@@ -80,14 +71,14 @@ impl Power {
         }
     }
 
-    fn ka_settings(d: &Arc<Daemon>) -> Value {
+    pub(crate) fn ka_settings(d: &Arc<Daemon>) -> Value {
         d.settings.plugin(
             "keep-awake",
             json!({ "enabled": true, "auto": false, "keepDisplayOn": false }),
         )
     }
 
-    fn cs_settings(d: &Arc<Daemon>) -> Value {
+    pub(crate) fn cs_settings(d: &Arc<Daemon>) -> Value {
         d.settings.plugin(
             "clamshell",
             json!({ "enabled": true, "suggest": true, "autoArm": false, "batteryFloor": 15 }),
@@ -96,22 +87,49 @@ impl Power {
 
     /* ================= жизненный цикл ================= */
 
+    /// Что осталось от бывшего хоста: общий кэш процессов и отметка тика.
+    /// Включение самих способностей — дело плагинного хоста (`d.plugins.init`).
     pub fn init(d: &Arc<Daemon>) {
         let p = &d.power;
         p.last_tick_at.store(now_ms(), Ordering::SeqCst);
-
-        // Оба движка грузим ВСЕГДА. «Выключено» теперь = ассерт/флаг не держится,
-        // а не «плагин выгружен» — это убирает путаницу хост-слоя в настройках.
-        // Бонус для безопасности: activate_clamshell внутри запускает
-        // restore_after_restart, который снимает повисший с прошлой жизни
-        // disablesleep. Раньше он не вызывался, если режим был выключен, —
-        // и закрытие крышки оставалось залипшим, снять его было нечем.
-        Self::activate_keep_awake(d);
-        Self::activate_clamshell(d);
         Self::refresh_processes(d);
     }
 
-    fn activate_keep_awake(d: &Arc<Daemon>) {
+    /// Подстраховка на случай, когда «Крышка» выключена тумблером.
+    ///
+    /// Раньше оба движка поднимались на старте всегда, и снятие повисшего с
+    /// прошлой жизни `disablesleep` (`restore_after_restart`) шло заодно.
+    /// Теперь способность стартует, только если включена, — и выключенный
+    /// плагин оставил бы мак не спящим без единого способа это заметить.
+    /// Тихо снимаем флаг сами; шумный путь (с паролем) не трогаем — это уже
+    /// разговор с пользователем, а для него нужна включённая «Крышка».
+    pub fn sweep_stale_lid(d: &Arc<Daemon>) {
+        if d.power.clam.lock().unwrap().active {
+            return; // плагин включён — снимет сам, в restore_after_restart
+        }
+        if clamshell::read_marker().is_none() {
+            return;
+        }
+        let d = d.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = &d; // держим демона живым на время проверки
+            if clamshell::read_sleep_disabled().await != Some(true) {
+                clamshell::clear_marker();
+                return;
+            }
+            if clamshell::pmset_quiet(false).await {
+                clamshell::clear_marker();
+                println!("[jarvis:clamshell] снял повисший disablesleep (плагин выключен)");
+            } else {
+                println!(
+                    "[jarvis:clamshell] с прошлого запуска висит disablesleep, \
+                     а «Крышка» выключена — включи её, чтобы снять"
+                );
+            }
+        });
+    }
+
+    pub(crate) fn activate_keep_awake(d: &Arc<Daemon>) {
         let s = Self::ka_settings(d);
         let mut engine = Engine::new(
             IopmBlocker,
@@ -126,14 +144,14 @@ impl Power {
         handle_engine_events(d, events); // assertion взялась сразу → связка с «Крышкой»
     }
 
-    fn deactivate_keep_awake(d: &Arc<Daemon>) {
+    pub(crate) fn deactivate_keep_awake(d: &Arc<Daemon>) {
         if let Some(mut e) = d.power.engine.lock().unwrap().take() {
             e.dispose();
         }
         println!("[jarvis:keep-awake] выключен");
     }
 
-    fn activate_clamshell(d: &Arc<Daemon>) {
+    pub(crate) fn activate_clamshell(d: &Arc<Daemon>) {
         {
             let mut clam = d.power.clam.lock().unwrap();
             if clam.active {
@@ -152,7 +170,7 @@ impl Power {
         println!("[jarvis:clamshell] включён");
     }
 
-    fn deactivate_clamshell(d: &Arc<Daemon>) {
+    pub(crate) fn deactivate_clamshell(d: &Arc<Daemon>) {
         let armed = {
             let mut clam = d.power.clam.lock().unwrap();
             if !clam.active {
@@ -170,15 +188,7 @@ impl Power {
         println!("[jarvis:clamshell] выключен");
     }
 
-    /// Выход из приложения: снять assertion, вернуть disablesleep.
-    /// Квит не ждёт промисов — восстанавливаем синхронно и только тихо;
-    /// без sudoers ручной armed переживёт квит, его поднимет restoreAfterRestart.
-    pub fn dispose(d: &Arc<Daemon>) {
-        Self::deactivate_keep_awake(d);
-        Self::deactivate_clamshell(d);
-    }
-
-    fn ka_enabled(&self) -> bool {
+    pub(crate) fn ka_enabled(&self) -> bool {
         self.engine.lock().unwrap().is_some()
     }
 
@@ -231,85 +241,56 @@ impl Power {
         s
     }
 
-    pub fn statuses(&self, d: &Arc<Daemon>) -> Value {
+    /// Состояние «Не спать» для UI. `None` — способность выключена.
+    pub(crate) fn ka_status(&self, d: &Arc<Daemon>) -> Option<Value> {
         let now = now_ms();
-        let ka_status = {
-            let engine = self.engine.lock().unwrap();
-            engine.as_ref().map(|e| {
-                let mut st = e.state();
-                let line = keep_awake::status_line(&st, now);
-                let obj = st.as_object_mut().unwrap();
-                obj.insert("line".into(), line.map(Value::from).unwrap_or(Value::Null));
-                obj.insert(
-                    "keepDisplayOn".into(),
-                    Self::ka_settings(d)["keepDisplayOn"].clone(),
-                );
-                st
-            })
-        };
-        let cs_enabled = self.clam.lock().unwrap().active;
-        let cs_status = if cs_enabled {
-            let clam = self.clam.lock().unwrap();
-            let s = Self::cs_settings(d);
-            Some(json!({
-                "armed": clam.armed,
-                "armedBy": clam.armed_by,
-                "autoArm": s["autoArm"],
-                "suggest": s["suggest"],
-                "batteryFloor": s["batteryFloor"],
-                "sudoers": clamshell::sudoers_installed(),
-            }))
-        } else {
-            None
-        };
-        json!([
-            {
-                "id": "keep-awake",
-                "name": "Не спать",
-                "enabled": ka_status.is_some(),
-                "status": ka_status,
-            },
-            {
-                "id": "clamshell",
-                "name": "Крышка",
-                "enabled": cs_enabled,
-                "status": cs_status,
-            },
-        ])
+        let engine = self.engine.lock().unwrap();
+        engine.as_ref().map(|e| {
+            let mut st = e.state();
+            let line = keep_awake::status_line(&st, now);
+            let obj = st.as_object_mut().unwrap();
+            obj.insert("line".into(), line.map(Value::from).unwrap_or(Value::Null));
+            obj.insert("keepDisplayOn".into(), Self::ka_settings(d)["keepDisplayOn"].clone());
+            st
+        })
+    }
+
+    /// Состояние «Крышки» для UI. `None` — способность выключена.
+    pub(crate) fn cs_status(&self, d: &Arc<Daemon>) -> Option<Value> {
+        if !self.clam.lock().unwrap().active {
+            return None;
+        }
+        let clam = self.clam.lock().unwrap();
+        let s = Self::cs_settings(d);
+        Some(json!({
+            "armed": clam.armed,
+            "armedBy": clam.armed_by,
+            "autoArm": s["autoArm"],
+            "suggest": s["suggest"],
+            "batteryFloor": s["batteryFloor"],
+            "sudoers": clamshell::sudoers_installed(),
+        }))
+    }
+
+    /// Снимок состояния движка «Не спать» — плагину для секции трея.
+    pub(crate) fn ka_state(&self) -> Option<Value> {
+        self.engine.lock().unwrap().as_ref().map(|e| e.state())
+    }
+
+    /// Кандидаты «пока жив процесс» — плагину для подменю трея.
+    pub(crate) fn processes_snapshot(&self) -> Vec<(i64, String)> {
+        self.processes.lock().unwrap().clone()
+    }
+
+    /// (включена, взведена, усыпляет ли закрытие крышки) — плагину для трея.
+    pub(crate) fn clam_view(&self) -> (bool, bool, Option<bool>) {
+        let c = self.clam.lock().unwrap();
+        (c.active, c.armed, c.lid_causes_sleep)
     }
 
     /* ================= команды из панели и трея ================= */
 
-    pub async fn cmd(d: &Arc<Daemon>, id: &str, name: &str, args: &Value) -> Value {
-        if name == "_enable" {
-            let on = args.get("on").and_then(Value::as_bool).unwrap_or(false);
-            let mut patch = Map::new();
-            patch.insert("enabled".into(), Value::Bool(on));
-            d.settings.set_plugin(id, patch);
-            match (id, on) {
-                ("keep-awake", true) => {
-                    if !d.power.ka_enabled() {
-                        Self::activate_keep_awake(d);
-                    }
-                }
-                ("keep-awake", false) => Self::deactivate_keep_awake(d),
-                ("clamshell", true) => Self::activate_clamshell(d),
-                ("clamshell", false) => Self::deactivate_clamshell(d),
-                _ => return json!({ "ok": false, "error": "плагин не найден" }),
-            }
-            changed(d);
-            return json!({ "ok": true });
-        }
-        let res = match id {
-            "keep-awake" => Self::ka_cmd(d, name, args),
-            "clamshell" => Self::cs_cmd(d, name, args).await,
-            _ => json!({ "ok": false, "error": "плагин не найден" }),
-        };
-        changed(d);
-        res
-    }
-
-    fn ka_cmd(d: &Arc<Daemon>, name: &str, args: &Value) -> Value {
+    pub(crate) fn ka_cmd(d: &Arc<Daemon>, name: &str, args: &Value) -> Value {
         let now = now_ms();
         let events = {
             let mut guard = d.power.engine.lock().unwrap();
@@ -375,7 +356,7 @@ impl Power {
         json!({ "ok": true })
     }
 
-    async fn cs_cmd(d: &Arc<Daemon>, name: &str, args: &Value) -> Value {
+    pub(crate) async fn cs_cmd(d: &Arc<Daemon>, name: &str, args: &Value) -> Value {
         if !d.power.clam.lock().unwrap().active {
             return json!({ "ok": false, "error": "плагин выключен" });
         }
@@ -406,175 +387,6 @@ impl Power {
             }
             _ => json!({ "ok": false, "error": format!("неизвестная команда: {name}") }),
         }
-    }
-
-    /* ================= секции меню трея ================= */
-
-    pub fn tray_items(&self, d: &Arc<Daemon>) -> Vec<TrayItem> {
-        let now = now_ms();
-        let mut out = Vec::new();
-
-        if let Some(engine) = self.engine.lock().unwrap().as_ref() {
-            let st = engine.state();
-            let s = Self::ka_settings(d);
-            let line = keep_awake::status_line(&st, now);
-            out.push(TrayItem::Label {
-                text: match line {
-                    Some(l) => format!("☕ Не спать: {l}"),
-                    None => "☕ Не спать: выкл".into(),
-                },
-            });
-            out.push(TrayItem::Action { id: "ka:start-manual".into(), text: "Бессрочно".into() });
-            out.push(TrayItem::Submenu {
-                text: "На время".into(),
-                items: keep_awake::PRESETS_MIN
-                    .iter()
-                    .map(|m| TrayItem::Action {
-                        id: format!("ka:timer:{m}"),
-                        text: keep_awake::preset_label(*m),
-                    })
-                    .collect(),
-            });
-            let procs = self.processes.lock().unwrap().clone();
-            out.push(TrayItem::Submenu {
-                text: "Пока жив процесс".into(),
-                items: if procs.is_empty() {
-                    vec![TrayItem::Label { text: "процессы не нашлись".into() }]
-                } else {
-                    procs
-                        .iter()
-                        .take(24)
-                        .enumerate()
-                        .map(|(i, (_, label))| TrayItem::Action {
-                            id: format!("ka:proc:{i}"),
-                            text: label.clone(),
-                        })
-                        .collect()
-                },
-            });
-            if !st["manual"].is_null() {
-                out.push(TrayItem::Action { id: "ka:stop".into(), text: "Выключить ручной режим".into() });
-            }
-            out.push(TrayItem::Separator);
-            out.push(TrayItem::Check {
-                id: "ka:set-auto".into(),
-                text: "Пока агенты работают (авто)".into(),
-                checked: s["auto"].as_bool().unwrap_or(false),
-                enabled: true,
-            });
-            out.push(TrayItem::Check {
-                id: "ka:set-display".into(),
-                text: "Не гасить экран".into(),
-                checked: s["keepDisplayOn"].as_bool().unwrap_or(false),
-                enabled: true,
-            });
-        }
-
-        let cs_active = self.clam.lock().unwrap().active;
-        if cs_active {
-            let (armed, lid_causes_sleep) = {
-                let clam = self.clam.lock().unwrap();
-                (clam.armed, clam.lid_causes_sleep)
-            };
-            let s = Self::cs_settings(d);
-            let sudoers = clamshell::sudoers_installed();
-            if !out.is_empty() {
-                out.push(TrayItem::Separator);
-            }
-            out.push(TrayItem::Label {
-                text: if armed {
-                    "⌒ Крышка: мак не уснёт даже закрытой".into()
-                } else if lid_causes_sleep == Some(false) {
-                    "⌒ Крышка: закрытие сейчас не усыпляет".into()
-                } else {
-                    "⌒ Крышка: закроешь — уснёт".into()
-                },
-            });
-            out.push(TrayItem::Check {
-                id: "cs:toggle".into(),
-                text: "Closed-display mode".into(),
-                checked: armed,
-                enabled: true,
-            });
-            out.push(TrayItem::Check {
-                id: "cs:set-autoarm".into(),
-                text: if sudoers {
-                    "Авто при работе агентов".into()
-                } else {
-                    "Авто при работе агентов (нужен тихий режим)".into()
-                },
-                checked: s["autoArm"].as_bool().unwrap_or(false),
-                enabled: sudoers,
-            });
-            out.push(TrayItem::Check {
-                id: "cs:set-suggest".into(),
-                text: "Подсказывать после прерванного сна".into(),
-                checked: s["suggest"].as_bool().unwrap_or(false),
-                enabled: true,
-            });
-            if !sudoers {
-                out.push(TrayItem::Action {
-                    id: "cs:install-sudoers".into(),
-                    text: "Настроить тихий режим (sudoers)…".into(),
-                });
-            }
-        }
-        out
-    }
-
-    /// Клик по пункту меню трея из секций плагинов.
-    pub fn handle_menu(d: &Arc<Daemon>, id: &str) -> bool {
-        let d = d.clone();
-        let id = id.to_string();
-        let known = id.starts_with("ka:") || id.starts_with("cs:");
-        if !known {
-            return false;
-        }
-        tauri::async_runtime::spawn(async move {
-            let ka = Self::ka_settings(&d);
-            let cs = Self::cs_settings(&d);
-            let armed = d.power.clam.lock().unwrap().armed;
-            let (plugin, name, args): (&str, &str, Value) = match id.as_str() {
-                "ka:start-manual" => ("keep-awake", "start-manual", json!({})),
-                "ka:stop" => ("keep-awake", "stop", json!({})),
-                "ka:set-auto" => (
-                    "keep-awake", "set",
-                    json!({ "auto": !ka["auto"].as_bool().unwrap_or(false) }),
-                ),
-                "ka:set-display" => (
-                    "keep-awake", "set",
-                    json!({ "keepDisplayOn": !ka["keepDisplayOn"].as_bool().unwrap_or(false) }),
-                ),
-                "cs:toggle" => ("clamshell", if armed { "disarm" } else { "arm" }, json!({})),
-                "cs:set-autoarm" => (
-                    "clamshell", "set",
-                    json!({ "autoArm": !cs["autoArm"].as_bool().unwrap_or(false) }),
-                ),
-                "cs:set-suggest" => (
-                    "clamshell", "set",
-                    json!({ "suggest": !cs["suggest"].as_bool().unwrap_or(false) }),
-                ),
-                "cs:install-sudoers" => ("clamshell", "install-sudoers", json!({})),
-                other => {
-                    if let Some(min) = other.strip_prefix("ka:timer:") {
-                        ("keep-awake", "start-timer", json!({ "minutes": min.parse::<i64>().unwrap_or(15) }))
-                    } else if let Some(idx) = other.strip_prefix("ka:proc:") {
-                        let procs = d.power.processes.lock().unwrap().clone();
-                        match idx.parse::<usize>().ok().and_then(|i| procs.get(i).cloned()) {
-                            Some((pid, label)) => (
-                                "keep-awake", "start-process",
-                                json!({ "pid": pid, "label": label }),
-                            ),
-                            None => return,
-                        }
-                    } else {
-                        return;
-                    }
-                }
-            };
-            Power::cmd(&d, plugin, name, &args).await;
-        });
-        true
     }
 
     /* ================= секундный тик ================= */
@@ -658,7 +470,7 @@ fn working_count(list: &[Session]) -> usize {
 /// крышки мгновенно ре-армился бы peer_sync'ом).
 fn changed(d: &Arc<Daemon>) {
     crate::tray::update(d, &d.snapshot());
-    crate::windows::emit_to_panel(&d.app, "plugins", &d.power.statuses(d));
+    crate::windows::emit_to_panel(&d.app, "plugins", &d.plugins.status_json(d));
 }
 
 fn handle_engine_events(d: &Arc<Daemon>, events: Vec<Event>) {

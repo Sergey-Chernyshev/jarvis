@@ -654,6 +654,9 @@ mod tests {
             "подготовку каталога перестали звать перед запуском");
     }
 
+    // `imp` с этой функцией существует только на macOS: на Linux тест не
+    // компилировался ВООБЩЕ, унося с собой весь `cargo test`.
+    #[cfg(target_os = "macos")]
     #[test]
     fn applescript_escape_quotes_backslash_and_newlines() {
         assert_eq!(imp::applescript_escape(r#"a"b\c"#), r#"a\"b\\c"#);

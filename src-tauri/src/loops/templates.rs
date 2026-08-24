@@ -41,11 +41,94 @@ pub fn all() -> Vec<Template> {
             hint: "раз в неделю · выход: все шаги пройдены",
             build: docs,
         },
+        Template {
+            id: "parallel",
+            name: "параллельная правка",
+            hint: "две ветки одновременно · каждая в своём worktree · слияние в конце",
+            build: parallel,
+        },
     ]
 }
 
 pub fn build(id: &str) -> Option<Loop> {
     all().into_iter().find(|t| t.id == id).map(|t| (t.build)())
+}
+
+/// Пайплайн с настоящей параллелью — первый, который стоит увидеть целиком.
+///
+/// Чистый лист не подсказывает главного: что у веток бывают РАЗНЫЕ рабочие
+/// деревья и что их надо сводить обратно. Собранное руками ветвление без
+/// слияния — самая частая ошибка, и стоит она ночи работы, которая никуда не
+/// вольётся.
+fn parallel() -> Loop {
+    use super::pipeline::{Cond, Flow, Pipeline, Step, StepKind};
+    let node = Step::node;
+    let mut l = base("параллельная правка");
+    l.limits.iterations = 30;
+    l.pipeline = Some(Pipeline {
+        start: "план".into(),
+        steps: vec![
+            node(
+                "план",
+                StepKind::Agent {
+                    prompt: "Разбей задачу на две независимые части и опиши каждую. Файлов не трогай.".into(),
+                    model: String::new(),
+                },
+                vec![Flow::to("разойтись", Cond::Always)],
+            ),
+            node(
+                "разойтись",
+                StepKind::Fork,
+                vec![Flow::to("первая", Cond::Always), Flow::to("вторая", Cond::Always)],
+            ),
+            node(
+                "первая",
+                StepKind::Agent {
+                    prompt: "Сделай ПЕРВУЮ часть плана: ${план.вывод}. Второй не касайся.".into(),
+                    model: String::new(),
+                },
+                vec![Flow::to("свести", Cond::Always)],
+            ),
+            node(
+                "вторая",
+                StepKind::Agent {
+                    prompt: "Сделай ВТОРУЮ часть плана: ${план.вывод}. Первой не касайся.".into(),
+                    model: String::new(),
+                },
+                vec![Flow::to("свести", Cond::Always)],
+            ),
+            {
+                // Конфликт отдаём агенту: он видел контекст своих правок, мы нет.
+                let mut j = node("свести", StepKind::Join, vec![Flow::to("слилось", Cond::Always)]);
+                j.on_conflict = "agent".into();
+                j
+            },
+            // Выбор после слияния — отдельной развилкой, а не условиями на
+            // выходах шлюза: параллельный шлюз в BPMN не выбирает, и схема с
+            // условиями на его стрелках читалась бы в модельере как ещё одно
+            // ветвление.
+            node(
+                "слилось",
+                StepKind::Choice,
+                vec![Flow::to("тесты", Cond::Ok), Flow::to("", Cond::Always)],
+            ),
+            node(
+                "тесты",
+                StepKind::Shell { command: "cargo test".into() },
+                vec![Flow::to("починить", Cond::Fail), Flow::to("", Cond::Always)],
+            ),
+            node(
+                "починить",
+                StepKind::Agent {
+                    prompt: "После слияния веток тесты красные:\n${тесты.вывод}\nПочини причину, а не симптом.".into(),
+                    model: String::new(),
+                },
+                vec![Flow::to("тесты", Cond::Always)],
+            ),
+        ],
+        ..Default::default()
+    });
+    l
 }
 
 fn base(name: &str) -> Loop {
@@ -124,6 +207,25 @@ mod tests {
             l.sandbox.repo = "/repo".into();
             assert!(l.problems().is_empty(), "{} → {:?}", t.id, l.problems());
         }
+    }
+
+    /// Шаблон параллели существует ровно затем, чтобы показать полную форму:
+    /// ветвление, ветки и — обязательно — слияние. Без слияния он учил бы
+    /// ошибке, которая стоит ночи работы.
+    #[test]
+    fn the_parallel_template_shows_the_whole_shape() {
+        use super::super::pipeline::StepKind;
+        let l = build("parallel").unwrap();
+        let p = l.pipeline.as_ref().expect("шаблон параллели без пайплайна");
+        assert!(p.has_parallel());
+        let fork = p.steps.iter().find(|s| matches!(s.kind, StepKind::Fork)).unwrap();
+        assert_eq!(p.join_after(&fork.id).as_deref(), Some("свести"), "ветви никуда не сходятся");
+        assert_eq!(p.join_arity("свести"), 2);
+        // Правило конфликта — половина смысла шаблона: без него первая же
+        // пара веток, тронувших один файл, остановит прогон до утра.
+        assert_eq!(p.step("свести").unwrap().on_conflict, "agent");
+        // И отдельное дерево у него включено: иначе запустить его нельзя.
+        assert!(l.sandbox.worktree);
     }
 
     #[test]

@@ -9,6 +9,7 @@
 //! спорном решении, вмешательство на ходу. Автономность без двери — это не
 //! доверие, а надежда.
 
+pub mod bpmn; // пайплайн ↔ BPMN 2.0: файл, который открывает Camunda Modeler
 pub mod compose;
 pub mod engine;
 pub mod ipc;

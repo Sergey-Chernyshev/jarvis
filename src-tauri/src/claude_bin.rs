@@ -328,11 +328,12 @@ pub struct ServiceConfig {
     pub codex_model: String,
     /// Reasoning effort Codex: minimal|low|medium|high|xhigh (по умолчанию low).
     pub codex_effort: String,
-    /// Подключённый аккаунт Claude: ""|"key"|"subscription". Определяет, какую
-    /// переменную окружения впрыснуть в `claude` (ANTHROPIC_API_KEY vs
-    /// CLAUDE_CODE_OAUTH_TOKEN). Пусто → используется собственный логин CLI.
+    /// Подключённый аккаунт Claude: ""|"key". Пусто → используется собственный
+    /// логин CLI. Токен подписки (`claude setup-token`) сюда НЕ принимается: им
+    /// разрешено питать только сам Claude Code, а не чужую обвязку, — см.
+    /// `from_settings`, где старая запись `subscription` отбрасывается.
     pub claude_auth_mode: String,
-    /// Секрет аккаунта Claude (API-ключ sk-ant-api… или OAuth-токен подписки).
+    /// Секрет аккаунта Claude — только API-ключ `sk-ant-api…`.
     pub claude_secret: String,
     /// Egress-прокси для служебных вызовов (HTTP_PROXY+HTTPS_PROXY). Пусто →
     /// наследуется из env процесса. Codex ходит к OpenAI по HTTPS, и без явного
@@ -377,37 +378,55 @@ impl ServiceConfig {
             } else {
                 effort.into()
             },
-            claude_auth_mode: g("claudeAuthMode").to_string(),
-            claude_secret: g("claudeSecret").to_string(),
+            // Всё, кроме "key", читается как «аккаунт не подключён». Настройки
+            // с диска правит не только приложение (файл редактируют руками,
+            // старые версии писали сюда "subscription"), поэтому фильтр стоит
+            // здесь, а не только в миграции: секрет подписки не должен доехать
+            // до запуска агента ни одним путём.
+            claude_auth_mode: match g("claudeAuthMode") {
+                "key" => "key".to_string(),
+                _ => String::new(),
+            },
+            claude_secret: match g("claudeAuthMode") {
+                "key" => g("claudeSecret").to_string(),
+                _ => String::new(),
+            },
             proxy: g("proxy").to_string(),
         }
     }
 }
 
-/// Впрыснуть подключённую учётку Claude (из настроек) в команду `claude`. По
-/// исследованию Anthropic: API-ключ → ANTHROPIC_API_KEY (работает везде); OAuth-
-/// токен подписки (`claude setup-token`) → CLAUDE_CODE_OAUTH_TOKEN (только через
-/// CLI). Никогда не ставим обе сразу — API-ключ перебивает токен по приоритету,
-/// поэтому вторую переменную явно снимаем.
+/// Впрыснуть подключённую учётку Claude (из настроек) в команду `claude`:
+/// API-ключ → `ANTHROPIC_API_KEY`. Пусто — запускаем как есть, и агент
+/// пользуется собственным логином CLI.
+///
+/// Токена подписки здесь нет и не будет. `claude setup-token` выдаёт ключ к
+/// ЛИЧНОЙ подписке, и разрешено им питать только сам Claude Code; Jarvis —
+/// сторонняя обвязка вокруг агента, и подставлять туда чужой токен подписки
+/// значит нарушать условия Anthropic. Оплаченный API-ключ такого ограничения
+/// не несёт — он и остался.
+///
+/// Унаследованный из окружения `CLAUDE_CODE_OAUTH_TOKEN` мы НЕ трогаем без
+/// нужды: это логин самого человека для его же Claude Code. Снимаем только
+/// когда ставим ключ, иначе учётки спорили бы за приоритет.
 pub fn apply_claude_auth(cmd: &mut tokio::process::Command) {
     let cfg = service_config();
-    match cfg.claude_auth_mode.as_str() {
-        "key" if !cfg.claude_secret.is_empty() => {
-            cmd.env("ANTHROPIC_API_KEY", &cfg.claude_secret);
-            cmd.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
-        }
-        "subscription" if !cfg.claude_secret.is_empty() => {
-            cmd.env("CLAUDE_CODE_OAUTH_TOKEN", &cfg.claude_secret);
-            cmd.env_remove("ANTHROPIC_API_KEY");
-        }
-        _ => {}
+    if cfg.claude_auth_mode == "key" && !cfg.claude_secret.is_empty() {
+        cmd.env("ANTHROPIC_API_KEY", &cfg.claude_secret);
+        cmd.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
     }
 }
 
-/// Проверить учётку Claude крошечным `claude -p` (1 слово). true → ключ/токен
-/// валиден и `claude` доступен. Не зависит от глобального конфига — env ставим
-/// явно из переданных mode/secret (вызывается ДО сохранения настроек).
+/// Проверить учётку Claude крошечным `claude -p` (1 слово). true → ключ валиден
+/// и `claude` доступен. Не зависит от глобального конфига — env ставим явно из
+/// переданного ключа (вызывается ДО сохранения настроек).
+///
+/// Режим один — API-ключ: см. `apply_claude_auth`, почему токена подписки тут
+/// нет.
 pub async fn validate_claude_auth(mode: &str, secret: &str, timeout: Duration) -> bool {
+    if mode != "key" {
+        return false;
+    }
     let Some(bin) = resolve_claude_bin() else {
         return false;
     };
@@ -430,17 +449,8 @@ pub async fn validate_claude_auth(mode: &str, secret: &str, timeout: Duration) -
     .stdout(Stdio::piped())
     .stderr(Stdio::null())
     .kill_on_drop(true);
-    match mode {
-        "key" => {
-            cmd.env("ANTHROPIC_API_KEY", secret);
-            cmd.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
-        }
-        "subscription" => {
-            cmd.env("CLAUDE_CODE_OAUTH_TOKEN", secret);
-            cmd.env_remove("ANTHROPIC_API_KEY");
-        }
-        _ => return false,
-    }
+    cmd.env("ANTHROPIC_API_KEY", secret);
+    cmd.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
     let Ok(Ok(out)) = tokio::time::timeout(timeout, cmd.output()).await else {
         return false;
     };

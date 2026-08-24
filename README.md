@@ -37,6 +37,7 @@ Running several coding agents at once turns **you** into the bottleneck. Session
 - **↩️ Reply into any session** — type back into a session via tmux even if its window is minimized or on another Space; a `/` command palette included.
 - **⚙️ Remote control** — switch model (Opus / Sonnet / Haiku) and reasoning effort from the panel; answer multi-choice agent questions with native pickers.
 - **🛰 Remote sessions** — agents running on a VPS show up in the same list, over your own SSH; a thin node buffers events while the laptop sleeps ([docs/remote.md](docs/remote.md)).
+- **🔁 Loops and pipelines** — overnight routines the agent runs on its own, with an exit condition and hard walls. Bigger work is assembled as a graph: scout → edit → test, a fork into parallel branches (each in its own `git worktree`), a per-item fan-out over a list computed at runtime, and a join that merges them back. The graph exports to **BPMN 2.0**, is edited in **Camunda Modeler** and comes back without losses ([docs/pipelines.md](docs/pipelines.md)).
 - **📊 Usage, costs and limits** — token and cost tracking per model and project; when a session hits the usage limit, Jarvis shows when it resets and can auto-resume it.
 - **🗣 Jarvis speaks** — a local TTS voice reads out what a session did or what it's waiting for (Russian-first for now).
 - **🎤 "Hey Jarvis" voice assistant** *(experimental)* — say the wake word and talk to your sessions: route a reply by voice, ask what an agent did, control media/volume, ask a general question.
@@ -44,6 +45,7 @@ Running several coding agents at once turns **you** into the bottleneck. Session
 - **☕ Keep the Mac awake** — anti-sleep (a `caffeinate` equivalent) plus a guarded closed-lid mode for overnight runs.
 - **✅ Read-only task board** — live `TodoWrite` progress (done / in-progress / queued) per session.
 - **📦 Model manager** — download, delete and hot-swap the local TTS/STT/wake-word models from settings; guided first-run onboarding.
+- **🧩 Capabilities are plugins** — keep-awake, clamshell and whatever comes next all sit on one contract: a manifest declares settings, tray items and permissions, and the core renders the UI from it. Your own integrations run as separate processes in any language — [docs/plugins.md](docs/plugins.md).
 - **🔒 Event-driven & private** — built on the agents' own hooks (no screen scraping), everything runs locally, no telemetry, removable with one command.
 - **📟 Terminal and phone too** — the same fleet from a TUI ([jarvis-cli](https://github.com/arklual/jarvis-cli)) or from Android ([jarvis-mobile](https://github.com/arklual/jarvis-mobile)); see [the stack](#the-jarvis-stack).
 

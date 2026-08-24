@@ -290,7 +290,7 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
                 if crate::convo::confirm(d, "Выключить режим «не спать»?").await {
                     // "off" = мастер-выкл (set_auto(false)+stop_manual+persist), а не
                     // "stop" (чистит лишь ручной слот, авто-грант остаётся) — L1/VR-4.
-                    outcome_from_core(&crate::power::Power::cmd(d, "keep-awake", "off", &json!({})).await)
+                    outcome_from_core(&d.plugins.cmd(d, "keep-awake", "off", json!({})).await)
                 } else {
                     SkillOutcome::Cancelled
                 }
@@ -301,7 +301,7 @@ pub async fn dispatch(d: &Arc<Daemon>, action: &Action) -> SkillOutcome {
                 }
                 if crate::convo::confirm(d, &format!("Не давать маку уснуть {m} минут?")).await {
                     outcome_from_core(
-                        &crate::power::Power::cmd(d, "keep-awake", "start-timer", &json!({ "minutes": m })).await,
+                        &d.plugins.cmd(d, "keep-awake", "start-timer", json!({ "minutes": m })).await,
                     )
                 } else {
                     SkillOutcome::Cancelled

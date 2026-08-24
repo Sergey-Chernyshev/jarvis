@@ -9,6 +9,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+
+/* Конструктор пайплайна — отдельный модуль, и в приложении он приезжает
+ * глобалом. В песочнице теста его надо подать руками, иначе редактор графа
+ * молча не нарисуется и проверять будет нечего. */
+const JarvisPipeline = createRequire(import.meta.url)('./pipeline.js');
 
 /** DOM ровно в том объёме, который нужен модулю, — включая строгость настоящего. */
 function makeDom() {
@@ -93,7 +99,15 @@ async function loadLoops(state) {
     jarvis: {
       loopsGet: async () => ({ ok: true, ...state }),
       loopsDraft: async (t) => { calls.push(['draft', t]); return { ok: true, item: { id: '', name: '', agent: 'claude', exit: { gates: [], critic: { enabled: true, model: 'opus' } }, source: {}, sandbox: {}, memory: {}, schedule: { wake: 'manual' }, limits: {}, sampling: {} } }; },
-      loopsSave: async (item) => { calls.push(['save', item]); return { ok: true, id: 'a', problems: [] }; },
+      loopsSave: async (item) => {
+        calls.push(['save', item]);
+        // Мок ведёт себя как настоящий стор: сохранённый цикл появляется в
+        // состоянии. Иначе панель после сохранения искала бы несуществующий
+        // цикл — и проверялся бы не тот путь, что в жизни.
+        const saved = { ...item, id: item.id || 'a', run: null, problems: [] };
+        state.loops = [...(state.loops || []).filter((x) => x.id !== saved.id), saved];
+        return { ok: true, id: saved.id, problems: [] };
+      },
       loopsStart: async () => ({ ok: true }),
       loopsDiff: async () => ({ ok: true, diff: '' }),
       loopsCompose: async (text, item) => {
@@ -125,10 +139,17 @@ async function loadLoops(state) {
         ],
       }),
       onLoopsState: () => {},
+      loopsBpmnExport: async (id, path, open) => { calls.push(['bpmn-export', id, path, open]); return { ok: true, path: '/tmp/x.bpmn' }; },
+      loopsBpmnImport: async (id) => { calls.push(['bpmn-import', id]); return { ok: true, problems: [] }; },
+      loopsBpmnUnlink: async (id) => { calls.push(['bpmn-unlink', id]); return { ok: true }; },
     },
   };
-  const fn = new Function('document', 'window', `${src}; return window.initLoops;`);
-  const init = fn(document, window);
+  // Конструктор пайплайна берёт `document` глобалом — он отдельный модуль и
+  // про песочницу loops.js не знает. Подставляем ТОТ ЖЕ подставной документ,
+  // иначе граф рисовался бы в пустоту.
+  globalThis.document = document;
+  const fn = new Function('document', 'window', 'JarvisPipeline', `${src}; return window.initLoops;`);
+  const init = fn(document, window, JarvisPipeline);
   const root = document.createElement('div');
   init(root);
   // Первая отрисовка идёт с пустым состоянием, настоящее приезжает следом —
@@ -209,6 +230,37 @@ test('заготовка из каталога вставляется в ист�
   assert.ok(textOf(root).includes('возьмёт задачи у команды-источника'),
     'после выбора заготовки объяснение не пересчиталось');
   assert.ok(!find(root, (n) => n.classList.contains('lp-shade')).length, 'каталог не закрылся после выбора');
+});
+
+test('пайплайн: параллель рисуется шлюзами и честно описывается словами', async () => {
+  const { root, calls } = await loadLoops({ loops: [], templates: TEMPLATES });
+  root.querySelector('.lp-scratch').children.find((c) => c.textContent === 'Собрать с нуля').listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+
+  // Переключаемся в режим графа.
+  find(root, (n) => n.textContent === 'пайплайн')[0].listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(textOf(root).includes('Пайплайн пуст'), 'редактор графа не нарисовался');
+
+  // Параллель одной кнопкой — и она обязана появиться на экране целиком.
+  find(root, (n) => n.textContent === '∥ параллель')[0].listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  const text = textOf(root);
+  assert.ok(text.includes('ветвление') && text.includes('слияние'), `шлюзов не видно: ${text.slice(0, 200)}`);
+  assert.ok(text.includes('конфликт'), 'у слияния не спрашивается правило конфликта');
+
+  // Абзац «как это будет работать» обязан говорить про ГРАФ, а не про цель и
+  // гейты, которых у пайплайна нет.
+  assert.ok(text.includes('пройдёт пайплайн из'), `объяснение осталось про линейный цикл: ${text.slice(0, 300)}`);
+  assert.ok(text.includes('каждая в своём worktree'), 'про отдельные деревья веток не сказано');
+  assert.ok(!text.includes('источник задач пока пуст'), 'объяснение жалуется на поля, которых в пайплайне нет');
+
+  // И обмен с модельером на месте.
+  const out = find(root, (n) => n.textContent === 'Выгрузить в .bpmn')[0];
+  assert.ok(out, 'кнопки выгрузки в .bpmn нет');
+  out.listeners.click[0]();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(calls.some((c) => c[0] === 'bpmn-export'), 'выгрузка не дошла до моста');
 });
 
 test('гейт из каталога добавляется с именем и командой', async () => {

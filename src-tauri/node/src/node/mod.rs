@@ -22,6 +22,7 @@
 pub mod agent;
 pub mod files;
 pub mod http;
+pub mod live;
 pub mod projects;
 pub mod ring;
 pub mod tmux;

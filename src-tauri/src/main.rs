@@ -31,6 +31,7 @@ mod limits;
 mod log;
 mod loops; // режим «Циклы»: рутина, которую агент крутит сам — с концом и стенами
 mod platform; // окна, медиа, звук: платформенное за общим API (macos.rs / linux.rs)
+mod plugin; // плагинное ядро: «всё есть плагин» (спека 2026-08-19)
 mod metrics;
 mod model;
 mod onboarding;
@@ -189,6 +190,9 @@ fn main() {
             loops::ipc::loops_compose,
             loops::ipc::loops_save,
             loops::ipc::loops_remove,
+            loops::ipc::loops_bpmn_export,
+            loops::ipc::loops_bpmn_import,
+            loops::ipc::loops_bpmn_unlink,
             loops::ipc::loops_start,
             loops::ipc::loops_stop,
             loops::ipc::loops_intervene,
@@ -226,6 +230,7 @@ fn main() {
             ipc::app_relaunch,
             ipc::plugins_status,
             ipc::plugins_cmd,
+            ipc::plugin_set,
             ipc::usage_summary,
             ipc::limit_get,
             ipc::history_get,
@@ -401,9 +406,12 @@ fn main() {
             // unix-сокет — канал событий от хуков
             tauri::async_runtime::spawn(server::serve(d.clone()));
 
-            // плагины питания (Не спать, Крышка) — после трея:
-            // их changed() обновляет title
+            // Плагины — после трея: их статусы обновляют его заголовок.
+            // Сначала общий кэш процессов power (им пользуется трей «Не спать»),
+            // потом хост поднимает всё, что включено тумблером.
             power::Power::init(&d);
+            d.plugins.init(&d); // плагины: поднять всё, что включено
+            power::Power::sweep_stale_lid(&d); // выключенная «Крышка» — не повод не спать
 
             // Прогрев кэша размеров моделей в фоне: первое открытие настроек не
             // ждёт обхода venv (~21k файлов) — см. install::dir_size_cached.
@@ -517,7 +525,9 @@ fn main() {
                 // ssh-дети не должны пережить приложение: без этого туннели
                 // висят до конца сессии терминала и держат порты
                 d.remotes.stop_all_now();
-                power::Power::dispose(&d); // снять assertion, вернуть disablesleep
+                // Погасить плагины: «Не спать» снимет assertion, «Крышка» вернёт
+                // disablesleep, сайдкары получат SIGTERM и лишатся токенов.
+                d.plugins.dispose(&d);
                 d.voice.dispose(); // погасить Silero-сайдкар, если был поднят
                 d.stt.dispose(); // погасить Qwen3-MLX-сайдкар, если был поднят
                 d.wake.dispose(); // остановить wake-word consumer-поток

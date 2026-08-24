@@ -10,6 +10,7 @@
 //! | `POST /control` | `{pane, cmd}` → слэш-команда в пану |
 //! | `POST /keys` | `{pane, keys}` → план клавиш в пикер вопроса |
 //! | `GET /projects` | оглавление проектов машины (каталоги, сессии, время) |
+//! | `GET /agents?pids=` | живые агенты, паны `-L jarvis` и живость спрошенных pid |
 //! | `POST /launch` | `{cwd, cmd}` → создать каталог и поднять сессию в tmux |
 //! | `GET /screen?pane=` | видимый экран паны — «что там на самом деле» |
 //! | `GET /usage` | лимиты аккаунта: текст `claude /usage` как есть |
@@ -31,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::ring::{Recorded, Slice};
-use super::{agent, files, projects, tmux, Node};
+use super::{agent, files, live, projects, tmux, Node};
 
 /// Потолок long-poll. 25с, а не «до последнего»: SSH-туннель и NAT рвут
 /// молчащее соединение без предупреждения, и лучше отдать пустой ответ, чем
@@ -52,6 +53,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/keys", post(keys))
         .route("/kill", post(kill))
         .route("/projects", get(projects))
+        .route("/agents", get(agents))
         .route("/launch", post(launch))
         .route("/screen", get(screen))
         .route("/usage", get(usage))
@@ -207,6 +209,32 @@ async fn kill(body: Bytes) -> Response {
     tmux_result(tmux::kill(pane).await)
 }
 
+/// GET /agents?pids=1,2,3 — кто работает на этой машине ПРЯМО СЕЙЧАС.
+///
+/// Один ответ на три вопроса сверки, потому что все три задаются вместе, раз в
+/// полминуты, и делить их на три круга по ssh незачем:
+///   * `agents` — живые агенты: pid, пана, рабочий каталог, транскрипт;
+///   * `panes`  — паны `-L jarvis` (инвариант «одна пана — одна сессия»);
+///   * `alive`  — какие из спрошенных pid ещё живы.
+///
+/// Интерпретация — по-прежнему на ноуте: узел не знает ни статусов, ни того,
+/// какие сессии тот уже видел.
+async fn agents(req: Request) -> Response {
+    let q = params(req.uri().query());
+    let pids: Vec<i64> = q
+        .get("pids")
+        .map(|s| s.split(',').filter_map(|x| x.trim().parse::<i64>().ok()).collect())
+        .unwrap_or_default();
+    let s = live::snapshot(&super::home_dir(), &pids).await;
+    json_ok(&json!({
+        "agents": s.agents,
+        "panes": s.panes.iter().map(|p| p.pane.clone()).collect::<Vec<_>>(),
+        "alive": s.alive,
+        // tmux не установлен или сервер не поднят — состояние машины, а не сбой
+        "error": s.error,
+    }))
+}
+
 /// GET /projects — где на этой машине работали. Только оглавление: ноут сам
 /// решит, что показать и что из этого прочитать через `/file`.
 async fn projects() -> Response {
@@ -226,16 +254,38 @@ async fn launch(body: Bytes) -> Response {
     };
     let cwd = v.get("cwd").and_then(Value::as_str).unwrap_or_default().trim();
     let cmd = v.get("cmd").and_then(Value::as_str).unwrap_or_default().trim();
-    if !cwd.starts_with('/') || cmd.is_empty() {
-        return json_err(StatusCode::BAD_REQUEST, "нужен абсолютный cwd и непустая команда");
+    if cmd.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "нужен cwd и непустая команда");
     }
-    match tmux::launch(cwd, cmd, v.get("name").and_then(Value::as_str)).await {
+    // Тильду раскрывает узел, а не ноут: домашний каталог ЭТОЙ машины знает
+    // только он. Панель предлагает писать путь ровно так (`~/projects/…`), и
+    // отказ на нём означал, что новый проект на узле не заводится вовсе.
+    let Some(cwd) = expand_home(cwd, &super::home_dir()) else {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            "нужен абсолютный путь или путь от ~: относительный не от чего считать",
+        );
+    };
+    match tmux::launch(&cwd, cmd, v.get("name").and_then(Value::as_str)).await {
         // Пану возвращаем сразу: сессия агента ещё не зарегистрирована, и это
         // единственная ниточка, по которой запустивший может увидеть, что там
         // происходит, и ответить на первый вопрос.
         Ok((session, pane)) => json_ok(&json!({ "ok": true, "session": session, "pane": pane })),
         Err(msg) => json_err(StatusCode::BAD_GATEWAY, &msg),
     }
+}
+
+/// Путь запуска к абсолютному: `/…` как есть, `~` и `~/…` — от `$HOME`.
+/// Относительный отвергаем: рабочего каталога у узла нет, и «считать от того,
+/// откуда его запустил systemd» — значит завести проект неизвестно где.
+fn expand_home(cwd: &str, home: &std::path::Path) -> Option<String> {
+    if cwd.starts_with('/') {
+        return Some(cwd.to_string());
+    }
+    let rest = cwd.strip_prefix('~')?.trim_start_matches('/');
+    let home = home.to_string_lossy();
+    let home = home.trim_end_matches('/');
+    Some(if rest.is_empty() { home.to_string() } else { format!("{home}/{rest}") })
 }
 
 /// GET /usage — лимиты аккаунта. `?fresh=1` минует кэш.
@@ -408,5 +458,17 @@ mod tests {
         assert_eq!(pane_and(br#"{"pane":"%3","text":""}"#, "text"), None);
         assert_eq!(pane_and(br#"{"pane":"%3"}"#, "text"), None);
         assert_eq!(pane_and(b"not json", "text"), None);
+    }
+
+    #[test]
+    fn launch_path_accepts_tilde_and_rejects_relative() {
+        let home = std::path::Path::new("/home/bob");
+        assert_eq!(expand_home("/srv/x", home).as_deref(), Some("/srv/x"));
+        // ровно то, что панель предлагает набрать в «Новом проекте»
+        assert_eq!(expand_home("~/projects/app", home).as_deref(), Some("/home/bob/projects/app"));
+        assert_eq!(expand_home("~", home).as_deref(), Some("/home/bob"));
+        // рабочего каталога у узла нет — считать относительный путь не от чего
+        assert_eq!(expand_home("projects/app", home), None);
+        assert_eq!(expand_home("", home), None);
     }
 }

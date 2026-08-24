@@ -217,6 +217,152 @@ pub struct ReadinessSnapshot {
     pub job: InstallJobSnapshot,
 }
 
+/// Подпись строки Claude Code на экране «Интеграция».
+fn claude_detail(health: &install::IntegrationHealth) -> String {
+    if !health.claude_present {
+        return "CLI не найден в PATH".into();
+    }
+    if !health.hooks_elsewhere.is_empty() {
+        return format!("Хуки уведены другой копией Jarvis: {}", health.hooks_elsewhere);
+    }
+    if !health.claude_hooks_ok {
+        return "Хуки в ~/.claude/settings.json не совпадают с текущими".into();
+    }
+    if !health.hook_bin {
+        return "Нет бинаря хука — агент зовёт несуществующий файл".into();
+    }
+    "События и lifecycle hooks".into()
+}
+
+/// Почему установка не сошлась — словами, по которым можно действовать.
+///
+/// Берём ровно те поля, что решают `IntegrationHealth::ok()`, и ни одного
+/// лишнего: список причин, в котором есть неотносящееся к делу, читается как
+/// шум и перестаёт читаться вовсе.
+fn install_failure_reasons(health: &install::IntegrationHealth) -> Vec<String> {
+    let mut out = Vec::new();
+    if !health.hook_bin {
+        out.push(format!(
+            "Бинарь хука не встал: {}/bin/jarvis-hook. Без него агент зовёт несуществующий файл.",
+            health.jarvis_dir
+        ));
+    }
+    if !health.claude_present && !health.codex_present && !health.kimi_present {
+        out.push(
+            "Не найден ни один агентский CLI (claude, codex, kimi) — интеграции не с чем работать."
+                .into(),
+        );
+    }
+    if !health.hooks_elsewhere.is_empty() {
+        out.push(format!(
+            "Хуки зарегистрированы на другой каталог Jarvis ({}), а эта копия работает в {}. \
+                 События уходят туда. Переустанови интеграцию из ЭТОЙ сборки — она \
+                 перенацелит их на себя (обратно вернёт установка из той копии).",
+            health.hooks_elsewhere, health.jarvis_dir
+        ));
+    } else {
+        if health.claude_present && !health.claude_hooks_ok {
+            out.push("Хуки Claude Code в ~/.claude/settings.json не совпадают с текущими.".into());
+        }
+        if health.codex_present && !health.codex_hooks_ok {
+            out.push("Хуки Codex в ~/.codex/hooks.json не совпадают с текущими.".into());
+        }
+        if health.kimi_present && !health.kimi_hooks_ok {
+            out.push("Блок хуков Kimi в ~/.kimi-code/config.toml не совпадает с текущим.".into());
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod failure_reasons_tests {
+    use super::*;
+
+    fn health() -> install::IntegrationHealth {
+        install::IntegrationHealth {
+            jarvis_dir: "/home/u/.jarvis-dev".into(),
+            hook_bin: true,
+            socket: true,
+            claude_present: true,
+            claude_hooks_ok: true,
+            codex_present: false,
+            codex_hooks_ok: true,
+            kimi_present: false,
+            kimi_hooks_ok: true,
+            hooks_elsewhere: String::new(),
+            claude_shim: true,
+            codex_shim: false,
+            kimi_shim: false,
+            input_guard: true,
+        }
+    }
+
+    /// Ровно тот тупик, в который упирался человек: две копии приложения делят
+    /// один ~/.claude/settings.json, установка из одной уводит хуки на её
+    /// каталог — а отказ говорил лишь «не прошла итоговую проверку».
+    #[test]
+    fn hooks_stolen_by_another_copy_are_named_with_both_paths() {
+        let mut h = health();
+        h.claude_hooks_ok = false;
+        h.hooks_elsewhere = "/home/u/.jarvis".into();
+        assert!(!h.ok(), "такая установка не должна считаться готовой");
+
+        let why = install_failure_reasons(&h).join(" ");
+        assert!(why.contains("(/home/u/.jarvis)"), "не назван чужой каталог: {why}");
+        assert!(why.contains("/home/u/.jarvis-dev"), "не назван свой каталог: {why}");
+        assert!(why.contains("ЭТОЙ сборки"), "не сказано, что делать: {why}");
+        assert!(!why.contains("  "), "в сообщении слиплись пробелы переноса: {why}");
+        // И не сваливаем сверху общую фразу про «хуки не совпадают»: причина
+        // одна, а два объяснения подряд читаются как два разных отказа.
+        assert!(!why.contains("не совпадают с текущими"), "{why}");
+    }
+
+    #[test]
+    fn a_plain_mismatch_is_still_reported_plainly() {
+        let mut h = health();
+        h.claude_hooks_ok = false;
+        let why = install_failure_reasons(&h).join(" ");
+        assert!(why.contains("~/.claude/settings.json"), "{why}");
+        assert!(!why.contains("другой каталог"), "чужого каталога нет — не выдумываем: {why}");
+    }
+
+    #[test]
+    fn a_missing_agent_and_a_missing_hook_binary_are_named() {
+        let mut h = health();
+        h.claude_present = false;
+        h.hook_bin = false;
+        let why = install_failure_reasons(&h).join(" ");
+        assert!(why.contains("jarvis-hook"), "{why}");
+        assert!(why.contains("ни один агентский CLI"), "{why}");
+    }
+
+    /// Экран «Интеграция» — тот, на который ссылается отказ. Он обязан говорить
+    /// то же самое, а не «всё хорошо» рядом с сообщением об отказе.
+    #[test]
+    fn the_integration_screen_says_the_same_thing_as_the_refusal() {
+        let mut h = health();
+        h.claude_hooks_ok = false;
+        h.hooks_elsewhere = "/home/u/.jarvis".into();
+        assert_eq!(claude_detail(&h), "Хуки уведены другой копией Jarvis: /home/u/.jarvis");
+
+        h.hooks_elsewhere.clear();
+        assert!(claude_detail(&h).contains("не совпадают"), "{}", claude_detail(&h));
+
+        h.claude_hooks_ok = true;
+        assert_eq!(claude_detail(&h), "События и lifecycle hooks");
+
+        h.claude_present = false;
+        assert_eq!(claude_detail(&h), "CLI не найден в PATH");
+    }
+
+    /// Здоровой установке объяснять нечего — иначе список причин появлялся бы
+    /// там, где всё в порядке.
+    #[test]
+    fn a_healthy_install_has_nothing_to_explain() {
+        assert!(install_failure_reasons(&health()).is_empty());
+    }
+}
+
 fn build_readiness(
     health: install::IntegrationHealth,
     status: Status,
@@ -232,7 +378,20 @@ fn build_readiness(
         warnings.push("Hook binary отсутствует — запусти восстановление интеграции.".into());
     }
     if health.claude_present && !health.claude_hooks_ok {
-        warnings.push("Claude Code hooks требуют восстановления.".into());
+        // Разные болезни лечатся одинаково («переустанови»), но выглядят
+        // по-разному, и молчать о разнице нельзя: человек, увидевший «требуют
+        // восстановления» после того, как он только что восстанавливал, идёт
+        // искать поломку не там.
+        warnings.push(if health.hooks_elsewhere.is_empty() {
+            "Claude Code hooks требуют восстановления.".into()
+        } else {
+            format!(
+                "Хуки Claude Code зарегистрированы на другой каталог Jarvis ({}), а эта \
+                 копия работает в {}. События уходят туда — переустанови интеграцию \
+                 из ЭТОЙ сборки.",
+                health.hooks_elsewhere, health.jarvis_dir
+            )
+        });
     }
     if health.codex_present && !health.codex_hooks_ok {
         warnings.push("Codex hooks требуют восстановления или подтверждения доверия.".into());
@@ -254,11 +413,11 @@ fn build_readiness(
             health.claude_present && health.claude_hooks_ok && health.hook_bin,
             health.claude_present,
             health.claude_present,
-            if health.claude_present {
-                "События и lifecycle hooks"
-            } else {
-                "CLI не найден в PATH"
-            },
+            // Экран, на который ссылается отказ установки, обязан говорить то же
+            // самое, что и сам отказ. Раньше он показывал «События и lifecycle
+            // hooks» при уведённых хуках — то есть подтверждал, что всё хорошо,
+            // ровно там, куда человека послали искать причину.
+            &claude_detail(&health),
         )
         .action("Установить Claude Code или обновить PATH"),
         ReadinessItem::new(
@@ -417,9 +576,19 @@ pub fn onboarding_run(app: AppHandle, proxy: Option<String>) -> InstallJobSnapsh
                 );
             })
         }));
+        // Отказ обязан НАЗЫВАТЬ причину. «Не прошла итоговую проверку» плюс
+        // совет открыть вкладку «Интеграция» были тупиком вдвойне: вкладка
+        // считала чужой хук своим и показывала всё зелёным.
         let failures = match outcome {
             Ok(health) if health.ok() => Vec::new(),
-            Ok(_) => vec!["Core integration не прошла итоговую readiness-проверку".into()],
+            Ok(health) => {
+                let why = install_failure_reasons(&health);
+                if why.is_empty() {
+                    vec!["Core integration не прошла итоговую readiness-проверку".into()]
+                } else {
+                    why
+                }
+            }
             Err(_) => vec!["Core installer аварийно остановился; безопасно повтори установку".into()],
         };
         finish_job(failures);
@@ -775,7 +944,8 @@ mod tests {
             codex_hooks_ok: true,
             kimi_present: false,
             kimi_hooks_ok: true,
-            claude_shim: true,
+            hooks_elsewhere: String::new(),
+        claude_shim: true,
             codex_shim: false,
             kimi_shim: false,
             input_guard: false,
@@ -826,7 +996,8 @@ mod tests {
             codex_hooks_ok: true,
             kimi_present: false,
             kimi_hooks_ok: true,
-            claude_shim: false,
+            hooks_elsewhere: String::new(),
+        claude_shim: false,
             codex_shim: false,
             kimi_shim: false,
             input_guard: false,

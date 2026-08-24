@@ -2004,6 +2004,39 @@ fn group_has_cmd(group: &Value, cmd: &str) -> bool {
         })
 }
 
+/// Каталог Jarvis, на который смотрят НАШИ хуки в этом файле, если он не наш.
+///
+/// Две копии приложения (обычная и dev) делят один `~/.claude/settings.json`, и
+/// установка из одной перенацеливает хуки на её каталог. Для другой это значит,
+/// что события уходят в чужой сокет, то есть не приходят вовсе. Отличить это от
+/// «хуков нет» обязательно: лечится оно одним нажатием, а выглядит одинаково.
+///
+/// Пусто — либо наших хуков нет, либо они уже наши.
+fn foreign_hooks_dir(json: &Value, events: &[(&str, &str)]) -> String {
+    let mine = hook_dst().display().to_string();
+    for (event, _) in events {
+        let Some(groups) = json.pointer(&format!("/hooks/{event}")).and_then(Value::as_array) else {
+            continue;
+        };
+        for g in groups {
+            let Some(hooks) = g.get("hooks").and_then(Value::as_array) else { continue };
+            for h in hooks {
+                let Some(cmd) = h.get("command").and_then(Value::as_str) else { continue };
+                if !cmd.contains(MARKER) || cmd.starts_with(&mine) {
+                    continue;
+                }
+                // `<путь>/bin/jarvis-hook <агент> <событие>` → каталог Jarvis.
+                if let Some(bin) = cmd.split_whitespace().next() {
+                    if let Some(dir) = bin.strip_suffix(&format!("/{MARKER}")) {
+                        return dir.to_string();
+                    }
+                }
+            }
+        }
+    }
+    String::new()
+}
+
 /// Содержит ли группа УСТАРЕВШИЙ наш хук — наш по MARKER, но команда не совпадает
 /// с актуальной (другой путь/метка). Именно его нужно вылечить.
 fn group_has_stale_ours(group: &Value, want: &str) -> bool {
@@ -2061,6 +2094,12 @@ pub struct IntegrationHealth {
     pub codex_shim: bool,
     /// Шим `kimi` установлен.
     pub kimi_shim: bool,
+    /// Каталог Jarvis, на который смотрят наши хуки, если он ЧУЖОЙ (другая копия
+    /// приложения: обычная против dev). Пусто — хуки наши или их нет.
+    ///
+    /// Без этого поля «хуков нет» и «хуки уведены другой копией» выглядят
+    /// одинаково, а лечатся по-разному — и человек ходит по кругу.
+    pub hooks_elsewhere: String,
     /// Страж синтетического ввода стоит (шим `osascript` в каталоге шимов).
     ///
     /// В `ok()` НЕ входит осознанно: без него интеграция работает, а вот
@@ -2102,6 +2141,9 @@ pub fn integration_health() -> IntegrationHealth {
                 .map(|c| kimi_hooks_present(&c, &hb))
                 .unwrap_or(false)
         },
+        hooks_elsewhere: read_settings()
+            .map(|(_, json)| foreign_hooks_dir(&json, &EVENTS))
+            .unwrap_or_default(),
         claude_shim: shim_dst().exists(),
         codex_shim: codex_shim_dst().exists(),
         kimi_shim: kimi_shim_dst().exists(),
@@ -2578,8 +2620,19 @@ pub fn status_report() -> String {
     match read_settings() {
         Ok((true, json)) => {
             out += &format!("Settings: {}\n", settings_path().display());
+            let elsewhere = foreign_hooks_dir(&json, &EVENTS);
             for (event, _) in EVENTS {
-                out += &format!("  {} {event}\n", mark(event_installed(&json, event)));
+                // Хук, уведённый другой копией приложения, — это НЕ «установлен».
+                // События уходят в её сокет, то есть до нас не доходят вовсе.
+                let ours = event_installed(&json, event) && elsewhere.is_empty();
+                out += &format!("  {} {event}\n", mark(ours));
+            }
+            if !elsewhere.is_empty() {
+                out += &format!(
+                    "  ⚠ хуки зарегистрированы на другой каталог Jarvis: {elsewhere}
+     события уходят туда; переустанови интеграцию из ЭТОЙ сборки
+"
+                );
             }
         }
         Ok((false, _)) => {
@@ -3482,7 +3535,8 @@ mod tests {
             codex_hooks_ok: true,
             kimi_present: false,
             kimi_hooks_ok: true,
-            claude_shim: false,
+            hooks_elsewhere: String::new(),
+        claude_shim: false,
             codex_shim: false,
             kimi_shim: false,
             input_guard: false,

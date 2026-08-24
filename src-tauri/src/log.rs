@@ -17,6 +17,11 @@ use regex::Regex;
 const MAX_BYTES: u64 = 4 * 1024 * 1024; // при разрастании — ротация в .old
 static ENABLED: AtomicBool = AtomicBool::new(true);
 
+/// Включена ли диагностика (пишем ли в ~/.jarvis/jarvis.log).
+pub fn enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
+
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
 }

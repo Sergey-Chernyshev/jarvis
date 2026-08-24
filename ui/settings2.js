@@ -85,6 +85,11 @@
       ['path', { d: 'M12 17h.01' }],
     ],
     // lucide: palette — раздел «Вид» (тема и краска)
+    // lucide: blocks — вкладка «Плагины»
+    'blocks': [
+      ['rect', { width: '7', height: '7', x: '14', y: '3', rx: '1' }],
+      ['path', { d: 'M10 21V8a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H3' }],
+    ],
     'palette': [
       ['circle', { cx: 13.5, cy: 6.5, r: 0.5, fill: 'currentColor' }],
       ['circle', { cx: 17.5, cy: 10.5, r: 0.5, fill: 'currentColor' }],
@@ -841,6 +846,155 @@
     document.head.appendChild(style);
   }
 
+
+  /* ========================================================================
+   * Вкладка «Плагины». Ни одного упоминания конкретного плагина: список,
+   * настройки, права и команды рисуются из манифестов, которые отдал хост
+   * (спека 2026-08-19-everything-is-plugin-design.md §7).
+   * ====================================================================== */
+  const PLUG_STATUS = {
+    running: 'работает',
+    stopped: 'выключен',
+    error: 'ошибка',
+    incompatible: 'несовместим',
+  };
+
+  function fmtUptime(ms) {
+    const s = Math.max(0, Math.round((ms || 0) / 1000));
+    if (s < 60) return s + 'с';
+    const m = Math.round(s / 60);
+    if (m < 60) return m + 'м';
+    const h = Math.floor(m / 60);
+    return h + 'ч ' + (m % 60) + 'м';
+  }
+
+  // Контрол для одного поля схемы манифеста. Тип = уже существующий компонент.
+  function pluginField(p, spec, values) {
+    const cur = values && Object.prototype.hasOwnProperty.call(values, spec.key)
+      ? values[spec.key] : spec.default;
+    const save = (v) => fire(() => window.jarvis.pluginSet(p.id, spec.key, v));
+    switch (spec.type) {
+      case 'toggle':
+        return toggle(!!cur, save);
+      case 'segmented':
+        return segmented((spec.options || []).map((o) => ({ value: o.value, label: o.label })), cur, save);
+      case 'select':
+        return customSelect((spec.options || []).map((o) => ({ value: o.value, label: o.label })), cur, save).node;
+      case 'number': {
+        const inp = el('input.s2-secret', {
+          type: 'number', value: cur == null ? '' : String(cur),
+          style: 'width:96px;text-align:right',
+        });
+        if (spec.min != null) inp.setAttribute('min', String(spec.min));
+        if (spec.max != null) inp.setAttribute('max', String(spec.max));
+        inp.addEventListener('change', () => {
+          const n = Number(inp.value);
+          if (Number.isFinite(n)) save(n);
+        });
+        return inp;
+      }
+      default: {
+        const inp = el('input.s2-secret', {
+          type: 'text', value: cur == null ? '' : String(cur), autocomplete: 'off',
+        });
+        inp.addEventListener('change', () => save(inp.value));
+        return inp;
+      }
+    }
+  }
+
+  // Карточка одного плагина: шапка с тумблером, настройки, права, здоровье.
+  function pluginCard(p) {
+    const g = el('div.dgroup');
+    const health = p.health || {};
+    const st = PLUG_STATUS[health.status] || health.status || '—';
+    const kind = p.builtin ? 'встроенный' : 'внешний';
+    const head = [p.name, p.version ? 'v' + p.version : null, '·', kind, '·', st]
+      .filter(Boolean).join(' ');
+    g.appendChild(drow(head, p.description || '',
+      toggle(!!p.enabled, (on) => {
+        fire(() => window.jarvis.pluginCmd(p.id, '_enable', { on }));
+        setTimeout(() => reRenderPane('plugins'), 300);
+      })));
+
+    if (health.error) {
+      g.appendChild(drow('Не работает', String(health.error), [], { dot: 'red' }));
+    }
+
+    // Настройки: либо здесь по схеме, либо честная отсылка в свою вкладку.
+    const schema = Array.isArray(p.settingsSchema) ? p.settingsSchema : [];
+    const values = p.settingsValues || {};
+    if (p.pane) {
+      if (schema.length) {
+        const tab = (NAV.find((n) => n.pane === p.pane) || {}).label || p.pane;
+        g.appendChild(drow('Настройки', 'Живут во вкладке «' + tab + '».', []));
+      }
+    } else {
+      for (const spec of schema) {
+        // depends: поле показывается, только если другое поле включено
+        if (spec.depends && !values[spec.depends]) continue;
+        g.appendChild(drow(spec.title || spec.key, spec.hint || '', pluginField(p, spec, values)));
+      }
+    }
+
+    // Права: что плагин просит. Встроенный не просит ничего — он и есть ядро.
+    const classes = (p.capabilities || []).join(', ');
+    const uses = (p.uses || []).join(', ');
+    if (classes || uses) {
+      g.appendChild(drow('Права',
+        [classes ? 'классы: ' + classes : null, uses ? 'вызывает: ' + uses : null]
+          .filter(Boolean).join(' · '), []));
+    } else if (!p.builtin) {
+      g.appendChild(drow('Права', 'Ничего не просит.', []));
+    }
+
+    // Команды из манифеста — те, у которых есть подпись для человека.
+    const cmds = (p.commands || []).filter((c) => c && c.title);
+    if (cmds.length && p.enabled) {
+      g.appendChild(drow('Действия', '', cmds.map((c) => button(c.title, () => {
+        fire(() => window.jarvis.pluginCmd(p.id, c.name, c.args || {}));
+        setTimeout(() => reRenderPane('plugins'), 300);
+      }, 'sm'))));
+    }
+
+    // Здоровье: только у внешних — у встроенного нет ни pid, ни падений.
+    if (!p.builtin) {
+      const bits = [];
+      if (health.pid) bits.push('pid ' + health.pid);
+      if (health.uptimeMs) bits.push('живёт ' + fmtUptime(health.uptimeMs));
+      if (health.restarts) bits.push('перезапусков: ' + health.restarts);
+      g.appendChild(drow('Здоровье', bits.join(' · ') || 'не запущен',
+        button('Перезапустить', async () => {
+          await safe(() => window.jarvis.pluginCmd(p.id, '_enable', { on: false }), null);
+          await safe(() => window.jarvis.pluginCmd(p.id, '_enable', { on: true }), null);
+          reRenderPane('plugins');
+        }, 'sm')));
+    }
+    return g;
+  }
+
+  async function renderPlugins(pane) {
+    pane.appendChild(el('div.dtitle', { text: 'Плагины' }));
+    const _sk = skelGroup(3); pane.appendChild(_sk);
+    const plugins = await safe(() => window.jarvis.getPlugins(), []);
+    _sk.remove();
+    const list = Array.isArray(plugins) ? plugins : [];
+    if (!list.length) {
+      pane.appendChild(el('div.dgroup', null, [
+        drow('Пусто', 'Внешние плагины ставятся вручную в ~/.jarvis/plugins/<id>/.', []),
+      ]));
+      return;
+    }
+    pane.appendChild(el('div.dgroup', null, [
+      drow('Как это работает',
+        'Способности Jarvis — плагины. Встроенные живут в самом приложении и не '
+        + 'изолированы: «выключен» значит «не держит ресурс», а не «выгружен». '
+        + 'Внешние — отдельные процессы, ходят в ядро через гейт и получают '
+        + 'ровно те права, что просят в манифесте.', []),
+    ]));
+    for (const p of list) if (p && p.id) pane.appendChild(pluginCard(p));
+  }
+
   /* ========================================================================
    * Список вкладок сайдбара.
    * ====================================================================== */
@@ -856,6 +1010,7 @@
     { pane: 'awake', label: 'Бодрость', icon: 'coffee', ic: 'orange' },
     { pane: 'keys', label: 'Горячие клавиши', icon: 'keyboard', ic: 'violet' },
     { pane: 'launch', label: 'Запуск', icon: 'terminal', ic: 'green' },
+    { pane: 'plugins', label: 'Плагины', icon: 'blocks', ic: 'violet' },
     { sep: true },
     { pane: 'service', label: 'Под капотом', icon: 'cpu', ic: 'purple' },
     { pane: 'integration', label: 'Интеграция', icon: 'cable', ic: 'teal' },
@@ -1530,10 +1685,12 @@
   /* Под капотом (service) — serviceGet: бэкенд служебного LLM + модель Codex.
    * Служебный LLM = саммари чатов, заголовки, диктовка, голос-план (НЕ сами
    * сессии агента). Бэкенд: Авто (claude→codex) / Claude / Codex. */
-  /* Аккаунт Claude — подключить ПОДПИСКУ (claude setup-token → CLAUDE_CODE_OAUTH_TOKEN)
-   * или API-ключ (sk-ant-api…). Подключённая учётка впрыскивается в служебные вызовы
-   * claude. Дизайн — в общей системе настроек: сегмент-переключатель режима,
-   * контекстная подсказка, поле-пароль с валидацией, статус подключения. */
+  /* Аккаунт Claude — подключить API-ключ (sk-ant-api…). Он впрыскивается в
+   * служебные вызовы claude как ANTHROPIC_API_KEY.
+   *
+   * Режим один. Токен `claude setup-token` открывает личную ПОДПИСКУ, и питать
+   * им разрешено только сам Claude Code — сторонней обвязке вроде Jarvis нельзя,
+   * поэтому переключателя «Подписка» здесь нет и заводить его обратно не надо. */
   async function renderClaudeAccount(pane) {
     pane.appendChild(el('div.dsection', { text: 'Аккаунт Claude' }));
     const wrap = el('div.dgroup');
@@ -1547,7 +1704,7 @@
     }
 
     if (a.connected) {
-      const label = a.mode === 'subscription' ? 'Подписка Claude (Pro/Max)' : 'API-ключ Anthropic';
+      const label = 'API-ключ Anthropic';
       const sub = (a.hint ? a.hint + ' · ' : '') + 'служебные вызовы Claude идут через этот аккаунт';
       wrap.appendChild(drow(label, sub, el('span.sval.on', { text: 'подключён' })));
       wrap.appendChild(drow('Управление', 'Отключить и вернуться к собственному логину claude.',
@@ -1560,25 +1717,19 @@
     }
 
     // не подключён → поток подключения
-    let mode = 'key';
+    const mode = 'key';
     wrap.appendChild(drow('Подключить аккаунт',
       'Чтобы служебный LLM работал на твоём аккаунте Anthropic — даже без логина в claude CLI.',
-      segmented([
-        { value: 'key', label: 'API-ключ' },
-        { value: 'subscription', label: 'Подписка' },
-      ], mode, (m) => { mode = m; renderHint(); })));
+      []));
 
     const hintBox = el('div.dd', { style: 'padding:2px 16px 10px;line-height:1.5;max-width:none' });
-    function renderHint() {
-      hintBox.textContent = mode === 'key'
-        ? 'Создай ключ: platform.claude.com → Settings → API keys → Create key. Выглядит как sk-ant-api… Оплата — из предоплаченных кредитов (от $5).'
-        : 'Подписка Pro/Max: в терминале выполни  claude setup-token , авторизуйся в браузере и вставь напечатанный токен. Это твой ЛИЧНЫЙ аккаунт (не для общего/хостинга).';
-    }
-    renderHint();
+    hintBox.textContent = 'Создай ключ: platform.claude.com → Settings → API keys → Create key. '
+      + 'Выглядит как sk-ant-api… Оплата — из предоплаченных кредитов (от $5). '
+      + 'Токен от  claude setup-token  сюда не подойдёт: подпиской разрешено питать только сам Claude Code.';
     wrap.appendChild(hintBox);
 
     const input = el('input.s2-secret', {
-      type: 'password', placeholder: 'sk-ant-… или токен подписки',
+      type: 'password', placeholder: 'sk-ant-api…',
       autocomplete: 'off', spellcheck: 'false',
     });
     const cap = el('span.loadcap', { style: 'display:none' });
@@ -1702,7 +1853,7 @@
     ]));
     pane.appendChild(ng);
 
-    // 3. Аккаунт Claude — подписка (claude setup-token) или API-ключ
+    // 3. Аккаунт Claude — API-ключ (подписка запрещена, см. renderClaudeAccount)
     await renderClaudeAccount(pane);
 
     // 4. Codex (Python SDK): модель + effort + установка сайдкара
@@ -2638,6 +2789,7 @@
     awake: renderAwake,
     keys: renderKeys,
     launch: renderLaunch,
+    plugins: renderPlugins,
     service: renderService,
     integration: renderIntegration,
     about: renderAbout,

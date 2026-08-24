@@ -323,6 +323,16 @@
     return 'раз';
   };
 
+  /* «1 шаг · 2 шага · 5 шагов» — абзац «как это будет работать» читается
+     вслух, и «5 шага» ломает его сильнее, чем кажется. */
+  const plural = (n, one, few, many) => {
+    const d10 = n % 10, d100 = n % 100;
+    if (d100 >= 11 && d100 <= 14) return many;
+    if (d10 === 1) return one;
+    if (d10 >= 2 && d10 <= 4) return few;
+    return many;
+  };
+
   /**
    * Вся конфигурация — одним человеческим абзацем.
    *
@@ -365,6 +375,33 @@
       ? `Каждая ${d.sampling.every}-я итерация ждёт твоего взгляда.`
       : 'Выборочная проверка выключена — цикл покажет только итог.';
     const memory = d.memory.enabled ? ` Выводы каждой итерации лягут в ${d.memory.file || 'дневник'}.` : '';
+
+    /* У пайплайна другая середина: не «цель и гейты», а граф. Рассказывать про
+     * источник задач и критика, которых в нём нет, значило бы описывать чужой
+     * цикл — а этот абзац существует ровно затем, чтобы человек увидел, ЧТО
+     * произойдёт, и заметил расхождение до запуска. */
+    if (d.pipeline) {
+      const steps = d.pipeline.steps || [];
+      const gate = (s) => ['choice', 'fork', 'join'].includes(s.kind);
+      const work = steps.filter((s) => !gate(s)).length;
+      const forks = steps.filter((s) => s.kind === 'fork').length;
+      const first = steps.find((s) => s.id === d.pipeline.start) || steps[0];
+      const head = first ? `начиная с «${first.name || first.id}»` : '…первый шаг не задан';
+      const par = forks
+        ? ` Есть ${forks} ${plural(forks, 'ветвление', 'ветвления', 'ветвлений')}: ветки пойдут одновременно, `
+          + 'каждая в своём worktree, и сойдутся в слиянии.'
+        : '';
+      const asks = steps.some((s) => s.kind === 'human')
+        ? ' На шаге с вопросом прогон замрёт целиком и будет ждать тебя.'
+        : '';
+      const linked = (d.pipeline.bpmnFile || '').trim()
+        ? ' Граф связан с файлом .bpmn: правки из модельера подхватятся сами.'
+        : '';
+      return `${when} агент ${d.agent || 'claude'} пройдёт пайплайн из ${work} `
+        + `${plural(work, 'шага', 'шагов', 'шагов')} ${place}, ${head}.${par}${asks} `
+        + `Остановится сам, израсходовав ${walls || '…стен нет — так нельзя'}. ${sample}${linked}`;
+    }
+
     return `${when} агент ${d.agent || 'claude'} ${src}, сделает один шаг ${place}, ${gates}; ${critic}. ` +
       `Цикл завершится, когда всё будет зелёным ${streak} ${razWord(streak)} подряд, ` +
       `и остановится сам, израсходовав ${walls || '…стен нет — так нельзя'}. ${sample}${memory}`;
@@ -545,9 +582,62 @@
         return b;
       }));
 
+    /* Обмен пайплайна с модельером.
+     *
+     * Выгружать нечего, пока цикл не сохранён: файл связывается с ним по id, а
+     * у несохранённого его нет. Поэтому сначала сохраняем — молча, без
+     * вопросов: человек нажал «Открыть в модельере», а не «Сохранить», и
+     * лишний диалог здесь был бы препятствием на ровном месте. */
+    async function ensureSaved() {
+      if (l && l.id && !isNew) return l.id;
+      const res = await window.jarvis.loopsSave(d);
+      if (!res || !res.ok) { note((res && res.error) || 'не сохранилось', true); return null; }
+      d.id = res.id;
+      return res.id;
+    }
+
+    async function afterBpmn(id, msg, bad) {
+      draft = null;
+      open = { id, screen: 'builder' };
+      await pull();
+      render();
+      // Сообщение — ПОСЛЕ перерисовки: полоску заметок render собирает заново,
+      // и написанное до него стёрлось бы, ничего не сказав человеку.
+      note(msg, bad);
+    }
+
+    const bpmnActions = {
+      exportBpmn: async () => {
+        const id = await ensureSaved();
+        if (!id) return;
+        const res = await window.jarvis.loopsBpmnExport(id, null, true);
+        if (!res || !res.ok) { await afterBpmn(id, (res && res.error) || 'не выгрузилось', true); return; }
+        // Открыть файл могло и не выйти — .bpmn не всегда чем-то ассоциирован.
+        // Тогда путь всё равно называем: открыть его руками человек сумеет.
+        await afterBpmn(id, res.warning
+          ? `выгружено в ${res.path}, но открыть не вышло: ${res.warning}`
+          : `открываю ${res.path}`, !!res.warning);
+      },
+      importBpmn: async () => {
+        const id = await ensureSaved();
+        if (!id) return;
+        const res = await window.jarvis.loopsBpmnImport(id, null);
+        if (!res || !res.ok) { await afterBpmn(id, (res && res.error) || 'не забралось', true); return; }
+        const left = res.problems && res.problems.length;
+        await afterBpmn(id, left ? 'забрал, но граф не собран: ' + res.problems.join('; ') : 'забрал правку из файла', !!left);
+      },
+      unlinkBpmn: async () => {
+        const id = await ensureSaved();
+        if (!id) return;
+        await window.jarvis.loopsBpmnUnlink(id);
+        await afterBpmn(id, 'отвязал — за файлом больше не следим');
+      },
+    };
+
     const pipeBox = el('div.pl-editor');
     if (isPipe && typeof JarvisPipeline !== 'undefined') {
-      JarvisPipeline.renderTo(pipeBox, d.pipeline, () => refresh());
+      const hasBridge = typeof window.jarvis.loopsBpmnExport === 'function';
+      JarvisPipeline.renderTo(pipeBox, d.pipeline, () => refresh(), hasBridge ? bpmnActions : null);
     }
 
     const box = el('div.lp-builder',
@@ -892,6 +982,11 @@
         el('div.lp-row-sub', { text: t.hint }))));
 
     let body;
+    // Черновик мог исчезнуть между сохранением и перерисовкой: обработчики
+    // снимают его ДО того, как обновят состояние с демона. Рисовать «новый
+    // цикл» без черновика нечем, и попытка кончалась исключением, которое
+    // уносило весь экран режима.
+    if (open && open.screen === 'new' && !draft) open = null;
     if (open && open.screen === 'new') body = builder(draft, true);
     else if (!open) body = library();
     else {

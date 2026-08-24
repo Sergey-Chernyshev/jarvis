@@ -177,6 +177,9 @@ pub struct Daemon {
     pub caps: crate::capability::DaemonRegistry,
     /// Реестр сущностей плагинов (спека plugin-system §6.4): vm.*, agent.* …
     pub entities: crate::entities::EntityStore,
+    /// Хост плагинов (спека «всё есть плагин» §3): жизненный цикл, тумблеры,
+    /// статусы, вклады в трей и настройки — и встроенных, и внешних.
+    pub plugins: crate::plugin::Host,
     /// Токены потребителей сокета (R2): резолв token → Consumer (panel недостижим).
     pub tokens: crate::capability::tokens::TokenStore,
     /// Реестр ожидающих подтверждений агента (R4) — вне локов Daemon.
@@ -351,6 +354,7 @@ impl Daemon {
             voice,
             caps: crate::capability::build_registry(),
             entities: crate::entities::EntityStore::new(),
+            plugins: crate::plugin::build_host(),
             tokens: crate::capability::tokens::TokenStore::new(),
             pending: std::sync::Arc::new(crate::capability::confirm_panel::PendingConfirms::new()),
             stt,
@@ -402,7 +406,7 @@ impl Daemon {
         crate::ipc::set_select_hotkeys(self, list.iter().any(|s| s.question.is_some()));
         self.power.on_sessions(self, &list); // плагины первыми — бейджи к трею уже свежие
         windows::emit_to_panel(&self.app, "state", &list);
-        windows::emit_to_panel(&self.app, "plugins", &self.power.statuses(self));
+        windows::emit_to_panel(&self.app, "plugins", &self.plugins.status_json(self));
         crate::tray::update(self, &list);
         self.persist();
     }
@@ -2064,13 +2068,12 @@ impl Daemon {
     pub async fn reconcile_sessions(self: &std::sync::Arc<Self>) {
         // Сверка с живым tmux: удаляем сессии, чья пана умерла (жёстко убитый
         // терминал не шлёт SessionEnd); working без событий 15 минут — потеряна.
-        // Сессии заводятся ТОЛЬКО из хуков — здесь ничего не подхватываем.
         let alive: Option<std::collections::HashSet<String>> = match tmux::list_panes_meta().await {
             Ok(Some(panes)) => Some(panes.iter().map(|p| p.pane_id.clone()).collect()),
             Ok(None) => None, // tmux не установлен — реестр не трогаем
             Err(()) => Some(std::collections::HashSet::new()), // ошибка = сервер пуст
         };
-        let remote_alive = self.remote_panes().await;
+        let remote_alive = self.remote_live().await;
 
         let mut changed = false;
         {
@@ -2078,13 +2081,18 @@ impl Daemon {
             let now = now_ms();
             sessions.retain(|_, s| {
                 let dead = match &s.remote {
-                    // Сессия с узла: её pid — из таблицы процессов ТОЙ машины.
-                    // Локально он не значит ничего (а совпасть с чужим живым
-                    // процессом — вполне может), поэтому судим только по панам
-                    // узла. Узла нет в ответе — связи нет, судить не по чему.
+                    // Сессия с узла. Судим по процессу агента на ТОЙ машине —
+                    // ровно как локально, только живость pid спрашиваем у узла.
+                    //
+                    // Раньше здесь смотрели только на паны `-L jarvis`, и это
+                    // выселяло живые сессии: `$TMUX_PANE` хук берёт из ЛЮБОГО
+                    // tmux-сервера, а человек поднимает агента в своём обычном.
+                    // Пана `%3`, которой в `-L jarvis` нет, читалась как смерть
+                    // — раз в полминуты, круг за кругом.
+                    //
+                    // Узла нет в ответе — связи нет, судить не по чему.
                     Some(name) => match remote_alive.get(name) {
-                        Some(set) => (s.tmux_pane.as_ref())
-                            .is_some_and(|pane| !set.contains(pane)),
+                        Some(live) => remote_is_dead(s, live),
                         None => false,
                     },
                     // Жив ли claude? Главный критерий — его процесс (pid = $PPID
@@ -2121,44 +2129,110 @@ impl Daemon {
                 }
             }
         }
+        // Подбор — ПОСЛЕ уборки: сессия, которую мы только что выселили как
+        // мёртвую, не должна тут же вернуться подобранной.
+        let adopted = self.adopt_remote_agents(&remote_alive);
+        changed |= !adopted.is_empty();
+        for sid in adopted {
+            self.refresh_meta(sid); // заголовок, модель, статус — из транскрипта
+        }
         if changed {
             self.push();
         }
     }
 
-    /// Живые паны на каждом узле. Узлы, до которых нет связи, в карту НЕ
-    /// попадают: «не смог спросить» и «пан нет» — разные вещи, и путать их
-    /// значит выселять живые сессии на каждом моргании сети.
+    /// Что живо на каждом узле: паны `-L jarvis`, живые pid и найденные там
+    /// агенты. Узлы, до которых нет связи, в карту НЕ попадают: «не смог
+    /// спросить» и «никого нет» — разные вещи, и путать их значит выселять
+    /// живые сессии на каждом моргании сети.
     ///
     /// Узлы опрашиваем параллельно: один зависший VPS не должен задерживать
     /// сверку остальных дольше её же периода.
-    async fn remote_panes(&self) -> HashMap<String, HashSet<String>> {
+    async fn remote_live(&self) -> HashMap<String, RemoteLive> {
         let nodes = self.remotes.all();
         if nodes.is_empty() {
             return HashMap::new();
         }
+        // Про какие pid спрашивать — знаем только мы: это pid'ы сессий этого
+        // узла в нашем реестре.
+        let mut pids: HashMap<String, Vec<i64>> = HashMap::new();
+        for s in self.sessions.lock().unwrap().values() {
+            if let (Some(name), Some(pid)) = (s.remote.as_deref(), s.pid) {
+                if pid > 0 {
+                    pids.entry(name.to_string()).or_default().push(pid);
+                }
+            }
+        }
         let mut tasks = Vec::with_capacity(nodes.len());
         for node in nodes {
+            let want = pids.remove(&node.cfg.name).unwrap_or_default();
             tasks.push(tokio::spawn(async move {
-                let panes = node.client()?.panes().await?;
-                if !panes.error.is_empty() {
+                let client = node.client()?;
+                let name = node.cfg.name.clone();
+                match client.agents(&want).await {
+                    Ok(r) if r.error.is_empty() => Ok::<_, String>((
+                        name,
+                        RemoteLive {
+                            panes: r.panes.into_iter().collect(),
+                            alive: r.alive.into_iter().collect(),
+                            agents: r.agents,
+                            knows_pids: true,
+                        },
+                    )),
                     // tmux на той машине не установлен или сервер не поднят —
                     // это не пустой список пан, а отсутствие ответа
-                    return Err(panes.error);
+                    Ok(r) => Err(r.error),
+                    // Узел старее приложения: `/agents` он не знает. Живём как
+                    // раньше — по панам, без подбора.
+                    Err(_) => {
+                        let panes = client.panes().await?;
+                        if !panes.error.is_empty() {
+                            return Err(panes.error);
+                        }
+                        Ok((
+                            name,
+                            RemoteLive {
+                                panes: panes.panes.into_iter().map(|p| p.pane).collect(),
+                                alive: HashSet::new(),
+                                agents: Vec::new(),
+                                knows_pids: false,
+                            },
+                        ))
+                    }
                 }
-                Ok::<_, String>((
-                    node.cfg.name.clone(),
-                    panes.panes.into_iter().map(|p| p.pane).collect::<HashSet<_>>(),
-                ))
             }));
         }
         let mut out = HashMap::new();
         for t in tasks {
-            if let Ok(Ok((name, panes))) = t.await {
-                out.insert(name, panes);
+            if let Ok(Ok((name, live))) = t.await {
+                out.insert(name, live);
             }
         }
         out
+    }
+
+    /// Подобрать сессии, о которых хуков не приходило. Возвращает их ключи —
+    /// по ним потом дочитывается мета из транскрипта.
+    fn adopt_remote_agents(
+        self: &std::sync::Arc<Self>,
+        live: &HashMap<String, RemoteLive>,
+    ) -> Vec<String> {
+        let mut adopted = Vec::new();
+        let mut sessions = self.sessions.lock().unwrap();
+        let now = now_ms();
+        for (name, l) in live {
+            for s in adoption_plan(&sessions, name, &l.agents, now) {
+                crate::log::line(&format!(
+                    "[remote] {name}: подобрал сессию {} (pid {}, пана {})",
+                    ellipsize(&s.id, name.len() + 9),
+                    s.pid.unwrap_or(0),
+                    s.tmux_pane.as_deref().unwrap_or("—"),
+                ));
+                adopted.push(s.id.clone());
+                sessions.insert(s.id.clone(), s);
+            }
+        }
+        adopted
     }
 
     /* ================= диагностика / метрики ================= */
@@ -2625,6 +2699,19 @@ fn freeze_board(s: &mut Session) {
 
 /// Жив ли процесс с таким pid. `kill(pid, 0)`: 0 — жив; EPERM — жив, но чужой
 /// (всё равно существует); ESRCH — мёртв. Дёшево, без spawn. Используется в
+/// Снимок «что живо» на одном узле — ответ его `/agents`.
+struct RemoteLive {
+    /// Паны `-L jarvis` на той машине.
+    panes: HashSet<String>,
+    /// Живые pid из тех, про которые мы спрашивали.
+    alive: HashSet<i64>,
+    /// Агенты, найденные в таблице процессов той машины.
+    agents: Vec<crate::remote::RemoteAgent>,
+    /// Узел ответил на `/agents`, то есть про pid ему верить можно. У старого
+    /// узла этой ручки нет, и судить приходится по панам, как раньше.
+    knows_pids: bool,
+}
+
 /// reconcile для уборки сессий, чей claude завершился.
 fn pid_alive(pid: i64) -> bool {
     if pid <= 0 {
@@ -2641,6 +2728,81 @@ fn pid_alive(pid: i64) -> bool {
 /// `session-end` и был заменён новым в той же пане. Снимаем призраков, иначе
 /// ответ, адресованный призраку, уйдёт в живую сессию той же паны (мисроутинг).
 /// Возвращает id выселенных сессий — для лога и обновления UI.
+/// Мертва ли удалённая сессия по снимку узла.
+///
+/// Судим по ПРОЦЕССУ агента — ровно как локально, где главный критерий это pid
+/// (`$PPID` хука), а пана лишь запасной. Раньше у удалённой смотрели только на
+/// паны `-L jarvis`, и это выселяло живые сессии: `$TMUX_PANE` хук берёт из
+/// ЛЮБОГО tmux-сервера, а человек поднимает агента в своём обычном. Пана `%3`,
+/// которой в `-L jarvis` нет, читалась как смерть — раз в полминуты, круг за
+/// кругом.
+fn remote_is_dead(s: &Session, live: &RemoteLive) -> bool {
+    match s.pid {
+        Some(pid) if pid > 0 && live.knows_pids => !live.alive.contains(&pid),
+        // pid не знаем (или узел старый и про живость не отвечает) — остаётся
+        // пана, прежний критерий
+        _ => (s.tmux_pane.as_ref()).is_some_and(|pane| !live.panes.contains(pane)),
+    }
+}
+
+/// Каких агентов узла стоит завести в реестр.
+///
+/// Хуки берутся снапшотом на старте сессии: агент, поднятый на узле до
+/// установки узла (или просто руками, до перезапуска), не пришлёт ни одного
+/// события и в списке не появится никогда — хотя работает. Узел видит его в
+/// таблице процессов и умеет назвать транскрипт; всё остальное — статус,
+/// заголовок, модель — доберёт `refresh_meta` из этого транскрипта, тем же
+/// кодом, что и для сессии, заведённой хуком.
+///
+/// Ошибка подбора самолечится: первый же настоящий хук из этой паны выселит
+/// подобранную сессию (инвариант «одна пана — одна сессия», `evict_pane`).
+fn adoption_plan(
+    sessions: &HashMap<String, Session>,
+    remote: &str,
+    agents: &[crate::remote::RemoteAgent],
+    now: i64,
+) -> Vec<Session> {
+    let mut out: Vec<Session> = Vec::new();
+    for a in agents {
+        if a.session_id.is_empty() {
+            continue; // узел не связал процесс с транскриптом — гадать не будем
+        }
+        let key = format!("{remote}:{}", a.session_id);
+        if sessions.contains_key(&key) || out.iter().any(|s| s.id == key) {
+            continue;
+        }
+        // Этого агента мы уже знаем под другим id — по его процессу или по его
+        // пане. Вторая строка была бы двойником одной и той же работы.
+        let known = |s: &Session| {
+            s.remote.as_deref() == Some(remote)
+                && (s.pid == Some(a.pid)
+                    || (!a.pane.is_empty() && s.tmux_pane.as_deref() == Some(a.pane.as_str())))
+        };
+        if sessions.values().any(known) || out.iter().any(known) {
+            continue;
+        }
+        let mut s = Session::new(key, now);
+        s.remote = Some(remote.to_string());
+        s.agent = Some(a.agent.clone());
+        s.pid = Some(a.pid);
+        s.status = Status::Idle;
+        s.detail = "подобрана на узле — хуков не было".into();
+        if !a.cwd.is_empty() {
+            s.project = Some(basename(&a.cwd));
+            s.cwd = Some(a.cwd.clone());
+        }
+        if !a.pane.is_empty() {
+            s.tmux_pane = Some(a.pane.clone());
+            s.tmux_name = Some(a.session.clone());
+        }
+        if !a.transcript.is_empty() {
+            s.transcript = Some(a.transcript.clone());
+        }
+        out.push(s);
+    }
+    out
+}
+
 fn evict_pane(
     sessions: &mut HashMap<String, Session>,
     keep_sid: &str,
@@ -2699,6 +2861,91 @@ mod tests {
         let mut s = sess(id, Some(pane));
         s.remote = Some(node.to_string());
         s
+    }
+
+    fn agent_on(pid: i64, pane: &str, sid: &str) -> crate::remote::RemoteAgent {
+        crate::remote::RemoteAgent {
+            pid,
+            agent: "claude".into(),
+            cwd: "/srv/app".into(),
+            pane: pane.to_string(),
+            session: "work".into(),
+            session_id: sid.to_string(),
+            transcript: format!("/home/u/.claude/projects/-srv-app/{sid}.jsonl"),
+        }
+    }
+
+    fn live(panes: &[&str], alive: &[i64], agents: Vec<crate::remote::RemoteAgent>) -> RemoteLive {
+        RemoteLive {
+            panes: panes.iter().map(|p| (*p).to_string()).collect(),
+            alive: alive.iter().copied().collect(),
+            agents,
+            knows_pids: true,
+        }
+    }
+
+    /// Ровно та жалоба из жизни: агент на сервере поднят в ОБЫЧНОМ tmux, его
+    /// пана в `-L jarvis` не значится — и сверка выселяла живую сессию.
+    #[test]
+    fn a_live_agent_outside_the_jarvis_tmux_is_not_buried() {
+        let mut s = remote_sess("vps:abc", "%3", "vps");
+        s.pid = Some(4242);
+        // паны `%3` у `-L jarvis` нет, но процесс жив
+        assert!(!remote_is_dead(&s, &live(&["%1"], &[4242], vec![])));
+        // процесса нет — вот теперь мертва
+        assert!(remote_is_dead(&s, &live(&["%1"], &[], vec![])));
+        // pid неизвестен — судим по пане, как раньше
+        s.pid = None;
+        assert!(remote_is_dead(&s, &live(&["%1"], &[], vec![])));
+        assert!(!remote_is_dead(&s, &live(&["%3"], &[], vec![])));
+    }
+
+    #[test]
+    fn an_old_node_is_judged_by_panes_only() {
+        let mut s = remote_sess("vps:abc", "%3", "vps");
+        s.pid = Some(4242);
+        let mut old = live(&["%1"], &[], vec![]);
+        old.knows_pids = false; // узел без `/agents`: про pid он молчит
+        assert!(remote_is_dead(&s, &old), "прежний критерий обязан работать");
+    }
+
+    #[test]
+    fn adoption_picks_up_an_agent_nobody_hooked() {
+        let sessions = HashMap::new();
+        let plan = adoption_plan(&sessions, "vps", &[agent_on(4242, "%3", "abc")], 100);
+        assert_eq!(plan.len(), 1);
+        let s = &plan[0];
+        assert_eq!(s.id, "vps:abc", "ключ реестра — с префиксом узла");
+        assert_eq!(s.remote.as_deref(), Some("vps"));
+        assert_eq!(s.pid, Some(4242));
+        assert_eq!(s.tmux_pane.as_deref(), Some("%3"));
+        assert_eq!(s.project.as_deref(), Some("app"));
+        assert!(s.transcript.is_some(), "без транскрипта мету добирать не из чего");
+    }
+
+    #[test]
+    fn adoption_never_doubles_a_session_we_already_know() {
+        let mut sessions = HashMap::new();
+        let mut known = remote_sess("vps:abc", "%3", "vps");
+        known.pid = Some(4242);
+        sessions.insert(known.id.clone(), known);
+
+        // тот же id
+        assert!(adoption_plan(&sessions, "vps", &[agent_on(4242, "%3", "abc")], 100).is_empty());
+        // другой id, но тот же процесс — это она же (например, после /clear)
+        assert!(adoption_plan(&sessions, "vps", &[agent_on(4242, "%3", "def")], 100).is_empty());
+        // другой id и другой процесс, но пана занята
+        assert!(adoption_plan(&sessions, "vps", &[agent_on(77, "%3", "def")], 100).is_empty());
+        // чужой узел с теми же номерами — это другая машина
+        assert_eq!(adoption_plan(&sessions, "box", &[agent_on(4242, "%3", "abc")], 100).len(), 1);
+    }
+
+    #[test]
+    fn adoption_stays_silent_without_a_transcript() {
+        // Узел не связал процесс с транскриптом. Завести строку без чата и без
+        // заголовка можно, но это была бы догадка поверх догадки.
+        let a = agent_on(4242, "%3", "");
+        assert!(adoption_plan(&HashMap::new(), "vps", &[a], 100).is_empty());
     }
 
     #[test]

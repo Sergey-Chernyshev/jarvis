@@ -12,7 +12,8 @@ use tauri_plugin_autostart::ManagerExt;
 
 use crate::daemon::Daemon;
 use crate::model::{Session, Status};
-use crate::power::{Power, TrayItem};
+use crate::plugin::TrayItem;
+use crate::power::Power;
 use crate::windows;
 
 static MENU_SIGNATURE: OnceLock<Mutex<String>> = OnceLock::new();
@@ -100,7 +101,7 @@ fn refresh_menu(d: &Arc<Daemon>) {
 /// Сигнатура меню: всё, от чего зависит его содержимое.
 fn menu_signature(d: &Arc<Daemon>) -> String {
     let mut sig = String::new();
-    push_items_signature(&d.power.tray_items(d), &mut sig);
+    push_items_signature(&d.plugins.tray_items(d), &mut sig);
     sig.push_str(&format!("|login:{}", autostart_enabled(d)));
     sig.push_str(if d.voice.is_muted() { "|mute1" } else { "|mute0" });
     sig.push_str(if d.is_quiet() { "|q1" } else { "|q0" });
@@ -111,8 +112,8 @@ fn push_items_signature(items: &[TrayItem], sig: &mut String) {
     for item in items {
         match item {
             TrayItem::Label { text } => sig.push_str(&format!("L:{text};")),
-            TrayItem::Action { id, text } => sig.push_str(&format!("A:{id}:{text};")),
-            TrayItem::Check { id, text, checked, enabled } => {
+            TrayItem::Action { id, text, .. } => sig.push_str(&format!("A:{id}:{text};")),
+            TrayItem::Check { id, text, checked, enabled, .. } => {
                 sig.push_str(&format!("C:{id}:{text}:{checked}:{enabled};"))
             }
             TrayItem::Submenu { text, items } => {
@@ -136,7 +137,7 @@ fn build_menu(d: &Arc<Daemon>) -> tauri::Result<Menu<Wry>> {
     menu.append(&MenuItem::with_id(app, "agent-chat", "Чат с агентом…", true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "test-notify", "Тестовое уведомление", true, None::<&str>)?)?;
 
-    let plugin_items = d.power.tray_items(d);
+    let plugin_items = d.plugins.tray_items(d);
     if !plugin_items.is_empty() {
         menu.append(&PredefinedMenuItem::separator(app)?)?;
         append_items(d, &menu, &plugin_items)?;
@@ -167,10 +168,10 @@ fn append_items(d: &Arc<Daemon>, menu: &Menu<Wry>, items: &[TrayItem]) -> tauri:
             TrayItem::Label { text } => {
                 menu.append(&MenuItem::new(app, text, false, None::<&str>)?)?;
             }
-            TrayItem::Action { id, text } => {
+            TrayItem::Action { id, text, .. } => {
                 menu.append(&MenuItem::with_id(app, id, text, true, None::<&str>)?)?;
             }
-            TrayItem::Check { id, text, checked, enabled } => {
+            TrayItem::Check { id, text, checked, enabled, .. } => {
                 menu.append(&CheckMenuItem::with_id(app, id, text, *enabled, *checked, None::<&str>)?)?;
             }
             TrayItem::Submenu { text, items } => {
@@ -180,7 +181,7 @@ fn append_items(d: &Arc<Daemon>, menu: &Menu<Wry>, items: &[TrayItem]) -> tauri:
                         TrayItem::Label { text } => {
                             sub.append(&MenuItem::new(app, text, false, None::<&str>)?)?
                         }
-                        TrayItem::Action { id, text } => {
+                        TrayItem::Action { id, text, .. } => {
                             sub.append(&MenuItem::with_id(app, id, text, true, None::<&str>)?)?
                         }
                         _ => {}
@@ -228,7 +229,13 @@ fn on_menu(d: &Arc<Daemon>, id: &str) {
             d.app.exit(0); // уборка — в RunEvent::Exit
         }
         other => {
-            Power::handle_menu(d, other);
+            // Клик по пункту плагина: маршрут известен хосту, ядро не знает,
+            // что этот пункт значит, — пункт сам принёс команду и аргументы.
+            let Some((plugin, cmd, args)) = d.plugins.route_tray(other) else { return };
+            let d = d.clone();
+            tauri::async_runtime::spawn(async move {
+                d.plugins.cmd(&d, &plugin, &cmd, args).await;
+            });
         }
     }
 }

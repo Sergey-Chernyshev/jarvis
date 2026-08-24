@@ -30,6 +30,33 @@ pub fn home_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()))
 }
 
+/// Раскрыть `~` в пути, который набрал человек. Шелла на пути к `create_dir_all`
+/// нет, и без этого `~/projects/app` превращается в каталог с именем `~` рядом с
+/// рабочим — то есть проект заводится не там, где его просили.
+///
+/// Раскрывает ТОЛЬКО от домашнего каталога ЭТОЙ машины: путь на узле считает
+/// сам узел, он один знает свой `$HOME`.
+pub fn expand_home(path: &str) -> String {
+    let path = path.trim();
+    let Some(rest) = path.strip_prefix('~') else {
+        return path.to_string();
+    };
+    // `~user` — не наш случай: чужой домашний каталог мы не ищем и подменять
+    // его своим не имеем права.
+    if rest.starts_with(|c: char| c.is_alphanumeric()) {
+        return path.to_string();
+    }
+    let home = home_dir();
+    let home = home.to_string_lossy();
+    let home = home.trim_end_matches('/');
+    let rest = rest.trim_start_matches('/');
+    if rest.is_empty() {
+        home.to_string()
+    } else {
+        format!("{home}/{rest}")
+    }
+}
+
 /// Путь к unix-сокету демона (JARVIS_SOCK переопределяет — нужно тестам).
 pub fn sock_path() -> std::path::PathBuf {
     std::env::var("JARVIS_SOCK")
@@ -118,6 +145,18 @@ mod tests {
     #[test]
     fn one_line_collapses_whitespace() {
         assert_eq!(one_line("  a\n\tb   c "), "a b c");
+    }
+
+    #[test]
+    fn expand_home_handles_tilde_but_not_other_users() {
+        let home = home_dir();
+        let home = home.to_string_lossy().trim_end_matches('/').to_string();
+        assert_eq!(expand_home("~/projects/app"), format!("{home}/projects/app"));
+        assert_eq!(expand_home("~"), home);
+        assert_eq!(expand_home("/srv/x"), "/srv/x");
+        assert_eq!(expand_home("  /srv/x  "), "/srv/x");
+        // чужой домашний каталог не наше дело — оставляем как есть
+        assert_eq!(expand_home("~bob/x"), "~bob/x");
     }
 
     #[test]

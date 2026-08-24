@@ -95,6 +95,149 @@ pub async fn drop_sandbox(item: &Loop, dir: &Path) {
     let _ = shell(Path::new(&item.sandbox.repo), &cmd, Duration::from_secs(60)).await;
 }
 
+/* ======================= ветки параллели ======================= */
+
+/// Поднять рабочее место ветки: свой worktree на своей ветке от ЭТОГО состояния.
+///
+/// От `base` (а не от HEAD репозитория) принципиально: ветка отпочковывается от
+/// того, что уже сделали шаги до ветвления. Иначе параллельная ветка начинала
+/// бы работу с чистого листа и потом вливала бы поверх чужой работы конфликт
+/// на конфликте.
+pub async fn add_lane(repo: &Path, dir: &Path, branch: &str, base: &str) -> Result<(), String> {
+    if dir.exists() {
+        // Перезапуск приложения посреди прогона — переиспользуем. Но только
+        // убедившись, что это ТА ЖЕ ветка: каталог, занятый чужой дорожкой,
+        // молча принял бы чужую работу за свою.
+        let (_, head) = shell(dir, "git rev-parse --abbrev-ref HEAD", Duration::from_secs(30)).await;
+        if head.trim() == branch {
+            return Ok(());
+        }
+        return Err(format!(
+            "{} занят веткой «{}», а нужна «{branch}»",
+            dir.display(),
+            head.trim()
+        ));
+    }
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let cmd = format!(
+        "git worktree add -b {} {} {}",
+        crate::util::shell_quote(branch),
+        crate::util::shell_quote(&dir.to_string_lossy()),
+        crate::util::shell_quote(base)
+    );
+    let (code, out) = shell(repo, &cmd, Duration::from_secs(120)).await;
+    if code != 0 {
+        return Err(format!("git worktree: {}", tail(&out, 4)));
+    }
+    Ok(())
+}
+
+/// Где сейчас голова этого дерева.
+pub async fn head_sha(dir: &Path) -> Option<String> {
+    let (code, out) = shell(dir, "git rev-parse HEAD", Duration::from_secs(30)).await;
+    (code == 0).then(|| out.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Закоммитить всё, что агент наделал. `false` — коммитить было нечего.
+///
+/// Без коммита слияние веток невозможно в принципе: `git merge` сводит
+/// КОММИТЫ, а работа агента до этого момента живёт незакоммиченными файлами.
+pub async fn commit_all(dir: &Path, message: &str) -> Result<bool, String> {
+    let (_, status) = shell(dir, "git status --porcelain", Duration::from_secs(60)).await;
+    if status.trim().is_empty() {
+        return Ok(false);
+    }
+    let cmd = format!(
+        "git add -A && git -c user.name=Jarvis -c user.email=jarvis@local commit -q -m {}",
+        crate::util::shell_quote(message)
+    );
+    let (code, out) = shell(dir, &cmd, Duration::from_secs(120)).await;
+    if code != 0 {
+        return Err(format!("git commit: {}", tail(&out, 4)));
+    }
+    Ok(true)
+}
+
+/// Чем кончилось слияние ветки.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Merge {
+    /// Влилось.
+    Done,
+    /// Вливать было нечего — ветка не ушла вперёд.
+    Nothing,
+    /// Конфликт: вот файлы. Слияние ОТКАЧЕНО — дерево осталось рабочим.
+    Conflict(Vec<String>),
+    /// Git отказал по другой причине.
+    Failed(String),
+}
+
+/// Влить ветку в это дерево.
+///
+/// `strategy` — `ours` | `theirs` для `-X`: это не «выбрать сторону целиком», а
+/// «при конфликте В ФАЙЛЕ взять эту сторону». Разница важна: чужие
+/// неконфликтующие правки всё равно приезжают, и ветка не пропадает зря.
+///
+/// Конфликт НЕ откатывается здесь: дерево остаётся в состоянии merge с
+/// маркерами в файлах — ровно то, что нужно увидеть агенту, если разбирать
+/// конфликт поручено ему. Решает вызывающий: разобрать или откатить
+/// ([`abort_merge`]). Оставлять дерево так навсегда нельзя ни в коем случае —
+/// прогон в незавершённом слиянии не сможет сделать больше ничего.
+pub async fn merge_lane(dir: &Path, branch: &str, strategy: Option<&str>) -> Merge {
+    let x = match strategy {
+        Some(s) => format!("-X {s} "),
+        None => String::new(),
+    };
+    let cmd = format!(
+        "git -c user.name=Jarvis -c user.email=jarvis@local merge --no-ff {x}-m {} {}",
+        crate::util::shell_quote(&format!("слияние ветки {branch}")),
+        crate::util::shell_quote(branch)
+    );
+    let (code, out) = shell(dir, &cmd, Duration::from_secs(300)).await;
+    if code == 0 {
+        return if out.contains("Already up to date") || out.contains("Already up-to-date") {
+            Merge::Nothing
+        } else {
+            Merge::Done
+        };
+    }
+    let (_, conflicted) = shell(dir, "git diff --name-only --diff-filter=U", Duration::from_secs(60)).await;
+    let files: Vec<String> = conflicted.lines().map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
+    if files.is_empty() {
+        // Не конфликт, а отказ git по другой причине — дерево чинить нечем,
+        // но и бросать его в полусостоянии нельзя.
+        abort_merge(dir).await;
+        return Merge::Failed(tail(&out, 6));
+    }
+    Merge::Conflict(files)
+}
+
+/// Откатить незавершённое слияние — дерево возвращается рабочим.
+pub async fn abort_merge(dir: &Path) {
+    let _ = shell(dir, "git merge --abort", Duration::from_secs(60)).await;
+}
+
+/// Дозакрыть слияние после того, как конфликт разрешён (агентом или стратегией).
+pub async fn finish_merge(dir: &Path, message: &str) -> Result<(), String> {
+    let cmd = format!(
+        "git add -A && git -c user.name=Jarvis -c user.email=jarvis@local commit -q --no-edit -m {}",
+        crate::util::shell_quote(message)
+    );
+    let (code, out) = shell(dir, &cmd, Duration::from_secs(120)).await;
+    if code != 0 {
+        return Err(tail(&out, 4));
+    }
+    Ok(())
+}
+
+/// Убрать рабочее место ветки. Ветку НЕ трогаем: в ней работа, и «убрал за
+/// собой» здесь означало бы «стёр результат ночи».
+pub async fn remove_lane(repo: &Path, dir: &Path) {
+    let cmd = format!("git worktree remove --force {}", crate::util::shell_quote(&dir.to_string_lossy()));
+    let _ = shell(repo, &cmd, Duration::from_secs(60)).await;
+}
+
 /// Вызвать агента headless и разобрать ответ.
 ///
 /// `--output-format json` даёт не только текст, но и расход — без него

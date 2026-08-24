@@ -155,6 +155,111 @@ test('редактор рисует шаги, их переходы и кноп�
   assert.match(text, /старт/, 'первый шаг не помечен стартом');
 });
 
+test('параллель добавляется целиком: ветвление, ветки и слияние связаны', () => {
+  const P = api();
+  const p = { start: '', steps: [] };
+  P.addStep(p, 'agent', 'план');
+  const fork = P.addParallel(p, 2);
+
+  // Собранное руками ветвление без слияния теряет работу веток — поэтому
+  // кнопка обязана ставить всю тройку разом и связывать её.
+  const join = p.steps.find((s) => s.kind === 'join');
+  assert.ok(join, 'слияния нет');
+  assert.equal(fork.next.length, 2, 'ветвление без двух веток бессмысленно');
+  for (const f of fork.next) {
+    const branch = p.steps.find((s) => s.id === f.to);
+    assert.ok(branch, 'ветка потерялась');
+    assert.deepEqual(branch.next.map((x) => x.to), [join.id], 'ветка не ведёт в слияние');
+  }
+  // Прошлый последний шаг больше не конец: иначе ветвление недостижимо.
+  assert.equal(p.steps[0].next[0].to, fork.id);
+  assert.equal(join.onConflict, 'stop', 'умолчание — остановиться, а не выбрать сторону молча');
+});
+
+test('шлюзы рисуются иначе задач: ни промта, ни попыток', () => {
+  const P = api();
+  const host = globalThis.document.createElement('div');
+  const p = { start: '', steps: [] };
+  P.addStep(p, 'agent', 'правка');
+  P.addParallel(p, 2);
+  P.renderTo(host, p, () => {});
+  const text = textOf(host);
+  assert.match(text, /ветвление/);
+  assert.match(text, /слияние/);
+  assert.match(text, /ветки/, 'у ветвления переходы называются ветками');
+  assert.match(text, /конфликт/, 'у слияния должно спрашиваться правило конфликта');
+  assert.ok(P.isGate('fork') && P.isGate('join') && P.isGate('choice'));
+  assert.ok(!P.isGate('agent'));
+});
+
+test('«для каждого» — поле рабочего узла, и вместе с ним правило конфликта', () => {
+  const P = api();
+  const host = globalThis.document.createElement('div');
+  const p = { start: '', steps: [] };
+  const s = P.addStep(p, 'agent', 'починить');
+
+  // Пока списка нет — правило конфликта не спрашиваем: сливать нечего.
+  P.renderTo(host, p, () => {});
+  assert.match(textOf(host), /для каждого/);
+  assert.doesNotMatch(textOf(host), /конфликт веток/);
+
+  s.over = '${найти.вывод}';
+  P.renderTo(host, p, () => {});
+  const text = textOf(host);
+  assert.match(text, /конфликт веток/, 'узел «для каждого» сливает ветки — правило обязано быть');
+  assert.match(text, /в своём worktree/, 'не сказано главное: у каждого элемента своё дерево');
+
+  // У шлюза «для каждого» не бывает: он ничего не выполняет.
+  P.addParallel(p, 2);
+  P.renderTo(host, p, () => {});
+  const fork = p.steps.find((x) => x.kind === 'fork');
+  assert.ok(!('over' in fork), 'ветвлению приписали список');
+});
+
+test('заготовка «для каждого» собирает список на ходу и разводит его по веткам', () => {
+  const P = api();
+  const pr = P.presets().find((x) => x.id === 'для-каждого');
+  assert.ok(pr, 'заготовки нет');
+  const each = pr.pipeline.steps.find((s) => s.over);
+  assert.ok(each, 'в заготовке нет узла «для каждого»');
+  assert.match(each.over, /\$\{/, 'список должен быть выражением — он известен только на ходу');
+  assert.match(each.prompt, /\$\{элемент\}/, 'шаг не видит элемент, ради которого запущен');
+  assert.equal(each.onConflict, 'agent');
+});
+
+test('строка перехода читается и для выражения из Camunda', () => {
+  const P = api();
+  const p = { steps: [{ id: 'a', name: 'правка', kind: 'agent' }] };
+  assert.equal(P.flowLine(p, { to: 'a', cond: 'expr', text: "${verdict == 'ask'}" }), "если ${verdict == 'ask'} → правка");
+  assert.equal(P.flowLine(p, { to: '', cond: 'always' }), 'всегда → конец');
+});
+
+test('обмен с модельером виден только когда есть чем его делать', () => {
+  const P = api();
+  const host = globalThis.document.createElement('div');
+  const p = { start: '', steps: [] };
+  P.addStep(p, 'agent', 'правка');
+
+  // Без действий строки обмена нет вовсе: кнопка, которая ничего не делает,
+  // хуже отсутствующей.
+  P.renderTo(host, p, () => {});
+  assert.doesNotMatch(textOf(host), /BPMN/);
+
+  let exported = 0;
+  P.renderTo(host, p, () => {}, { exportBpmn: () => { exported += 1; } });
+  assert.match(textOf(host), /Выгрузить в \.bpmn/);
+  find(host, (n) => n.textContent === 'Выгрузить в .bpmn')[0].listeners.click[0]();
+  assert.equal(exported, 1);
+
+  // Связанный граф показывает путь и обе дороги обратно.
+  p.bpmnFile = '/home/me/.jarvis/pipelines/ночной.bpmn';
+  P.renderTo(host, p, () => {}, { exportBpmn: () => {} });
+  const text = textOf(host);
+  assert.match(text, /Открыть в модельере/);
+  assert.match(text, /Забрать из файла/);
+  assert.match(text, /ночной\.bpmn/, 'человек должен видеть, с каким файлом связан граф');
+});
+
 test('заготовка из редактора заменяет черновик целиком', () => {
   const P = api();
   const host = globalThis.document.createElement('div');

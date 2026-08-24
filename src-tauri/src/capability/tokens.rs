@@ -58,6 +58,36 @@ impl TokenStore {
         tok
     }
 
+    /// Выпустить (или перевыпустить) токен плагина с грантом из манифеста.
+    /// Каждое включение — новый токен: старый, утёкший из выключенного плагина,
+    /// после этого не работает.
+    pub fn issue_plugin(&self, id: &str, classes: &[RiskClass]) -> String {
+        let mut v = self.read();
+        let tok = gen_token();
+        let root = v.as_object_mut().expect("tokens.json — объект");
+        let plugins = root.entry("plugins").or_insert_with(|| json!({}));
+        if let Some(obj) = plugins.as_object_mut() {
+            let names: Vec<Value> =
+                classes.iter().map(|c| Value::from(c.as_str())).collect();
+            obj.insert(id.to_string(), json!({ "token": tok, "classes": names }));
+        }
+        self.write(&v);
+        tok
+    }
+
+    /// Отозвать токен плагина: грант перестаёт существовать вместе с ним.
+    pub fn revoke_plugin(&self, id: &str) {
+        let mut v = self.read();
+        let changed = v
+            .get_mut("plugins")
+            .and_then(|p| p.as_object_mut())
+            .map(|o| o.remove(id).is_some())
+            .unwrap_or(false);
+        if changed {
+            self.write(&v);
+        }
+    }
+
     /// Резолв токена в потребителя. Неизвестный/пустой → None. panel НИКОГДА.
     pub fn resolve(&self, token: &str) -> Option<Consumer> {
         if token.is_empty() {
@@ -139,6 +169,26 @@ mod tests {
         let s = TokenStore::at(tmp());
         let agent = s.ensure_agent_token();
         assert_ne!(s.resolve(&agent).unwrap().id, "panel");
+    }
+
+    #[test]
+    fn issued_plugin_token_resolves_and_revokes() {
+        let s = TokenStore::at(tmp());
+        s.ensure_agent_token();
+        let tok = s.issue_plugin("weather", &[RiskClass::Read, RiskClass::Control]);
+        let c = s.resolve(&tok).expect("выпущенный токен резолвится");
+        assert_eq!(c.id, "plugin:weather");
+        assert!(c.grant.allows(RiskClass::Control));
+        assert!(!c.grant.allows(RiskClass::Admin));
+
+        // перевыпуск обесценивает прежний токен
+        let tok2 = s.issue_plugin("weather", &[RiskClass::Read]);
+        assert_ne!(tok, tok2);
+        assert!(s.resolve(&tok).is_none(), "старый токен больше не действует");
+
+        s.revoke_plugin("weather");
+        assert!(s.resolve(&tok2).is_none(), "после отзыва грант не существует");
+        assert!(s.resolve(&s.ensure_agent_token()).is_some(), "агента не задели");
     }
 
     #[test]

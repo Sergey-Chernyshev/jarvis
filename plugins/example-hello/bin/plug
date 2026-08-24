@@ -1,0 +1,42 @@
+#!/bin/sh
+# Референсный внешний плагин Jarvis. Протокол — JSON-lines по трубе:
+# см. src-tauri/src/plugin/sidecar.rs и docs/plugins.md.
+#
+# Ядро даёт в окружении:
+#   JARVIS_SOCKET    — путь к ~/.jarvis/run.sock (туда ходят за капабилити)
+#   JARVIS_PLUGIN_ID — наш id
+#   JARVIS_TOKEN     — токен для заголовка x-jarvis-token на вызовах капабилити
+#   JARVIS_PROTOCOL  — версия протокола, которую ждёт ядро
+set -eu
+
+say() { printf '%s\n' "$1"; }
+
+# 1. Handshake. Без него ядро не считает плагин живым (таймаут 3с).
+say '{"event":"register","data":{"protocol":1,"pid":'"$$"'}}'
+
+# 2. Что показать в UI и в трее. Это push: ядро ничего не опрашивает.
+say '{"event":"status","data":{"здоров":true,"сказано":0}}'
+# Кадр — РОВНО одна строка: перенос внутри JSON ломает разбор.
+say '{"event":"tray","data":[{"type":"label","text":"👋 Пример: готов"},{"type":"action","id":"hi","text":"Поздороваться","cmd":"привет"}]}'
+say '{"event":"log","data":"поднялся, сокет: '"${JARVIS_SOCKET:-нет}"'"}'
+
+# 3. Цикл запросов. Одна строка = один запрос {"id":N,"method":…,"params":…}.
+said=0
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  case "$line" in
+    *'"method":"привет"'*)
+      said=$((said + 1))
+      say '{"event":"status","data":{"здоров":true,"сказано":'"$said"'}}'
+      say '{"id":'"$id"',"ok":true,"value":{"сказал":"привет"}}'
+      ;;
+    *'"method":"сломаться"'*)
+      # Надзор поднимет нас снова с backoff — это и есть проверка живучести.
+      say '{"id":'"$id"',"ok":true,"value":{"падаю":true}}'
+      exit 1
+      ;;
+    *)
+      say '{"id":'"$id"',"ok":false,"error":"не знаю такой команды"}'
+      ;;
+  esac
+done

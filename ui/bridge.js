@@ -108,6 +108,11 @@
     loopsReview: (id, n, accept, comment) => invoke('loops_review', { id, n, accept, comment }),
     loopsResume: (id, extraTokens) => invoke('loops_resume', { id, extraTokens }),
     loopsDiff: (id) => invoke('loops_diff', { id }),
+    /* Обмен пайплайна с Camunda Modeler. `open` — открыть файл системой сразу
+     * после выгрузки: чем на этой машине открывается .bpmn, знает она, а не мы. */
+    loopsBpmnExport: (id, path, open) => invoke('loops_bpmn_export', { id, path: path ?? null, open: !!open }),
+    loopsBpmnImport: (id, path) => invoke('loops_bpmn_import', { id, path: path ?? null }),
+    loopsBpmnUnlink: (id) => invoke('loops_bpmn_unlink', { id }),
     onLoopsState: (cb) => on('loops-state', cb),
 
     // тема/краска сменились в другом окне (демон рассылает всем)
@@ -153,7 +158,11 @@
     // а не общей настройки: разведать чужой код и переписать свой требуют
     // разного доверия
     launchSession: (cwd, agent, sessionId, machine, opts) => invoke('session_launch', {
-      cwd: cwd ?? null, agent, sessionId: sessionId ?? null, machine: machine ?? null,
+      // agent обязателен на той стороне: undefined исчезает при сериализации, и
+      // команда падает разбором аргументов — то есть глухим «не удалось
+      // запустить» без единого слова о причине. Строку истории могли собрать и
+      // без агента (оглавление узла его не всегда несёт) — держим умолчание тут.
+      cwd: cwd ?? null, agent: agent || 'claude', sessionId: sessionId ?? null, machine: machine ?? null,
       isolate: !!(opts && opts.isolate), mode: (opts && opts.mode) || 'ask',
       task: (opts && opts.task) || null,
       container: !!(opts && opts.container),
@@ -186,6 +195,8 @@
     onPlugins: (cb) => on('plugins', cb),
     getPlugins: () => invoke('plugins_status'),
     pluginCmd: (id, cmd, args) => invoke('plugins_cmd', { id, cmd, args: args ?? null }),
+    // запись одной настройки плагина по схеме его манифеста (вкладка «Плагины»)
+    pluginSet: (id, key, value) => invoke('plugin_set', { id, key, value }),
     getUsage: (period) => invoke('usage_summary', { period }),
     getLimit: () => invoke('limit_get'),
     onLimitState: (cb) => on('limit-state', cb),

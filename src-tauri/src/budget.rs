@@ -380,6 +380,35 @@ pub struct Budget {
     busy: AtomicBool,
 }
 
+/// Занятость опроса, которая СНИМАЕТСЯ САМА — на любом выходе, включая обрыв
+/// будущего.
+///
+/// Здесь был дефект, найденный живой проверкой: приложение показывало «лимиты
+/// недоступны», хотя прямые запросы к провайдерам проходили и давали числа.
+/// Причина — флаг занятости выставлялся вручную (`busy.swap(true)`) и снимался
+/// в конце функции. Между этими двумя точками стоит поход в сеть, и если
+/// будущее обрывалось (дедлайн гейта на `sessions.resume`/`sessions.spawn`,
+/// перезапуск, отмена хода), флаг оставался поднятым НАВСЕГДА. Дальше и
+/// опросчик, и все явные запросы видели «опрос уже идёт» и молча уходили —
+/// ступень бюджета застревала в `unknown` до перезапуска приложения.
+///
+/// Откат по отказам тут ни при чём: он ограничен часом и лечится сам.
+/// Незанятый флаг не лечился ничем.
+struct BusyGuard;
+
+impl BusyGuard {
+    /// `None` — опрос уже идёт, второй такой же только заспамит провайдера.
+    fn take() -> Option<Self> {
+        (!budget().busy.swap(true, Ordering::SeqCst)).then_some(BusyGuard)
+    }
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        budget().busy.store(false, Ordering::SeqCst);
+    }
+}
+
 impl Budget {
     fn new() -> Self {
         Self {
@@ -845,9 +874,11 @@ async fn poll_one(d: &Arc<Daemon>, provider: &'static str, now: i64) {
 /// запуск параллельных сессий) и при пересечении порога лестницы. Там цена
 /// ошибки высокая, и кэш «пятиминутной свежести» её не оправдывает.
 pub async fn ensure_fresh(d: &Arc<Daemon>, max_age_ms: i64, why: &str) {
-    if budget().busy.swap(true, Ordering::SeqCst) {
+    // Сторож, а не ручной флаг: обрыв этого будущего (дедлайн гейта, отмена
+    // хода, перезапуск) не должен оставлять опрос «занятым» навсегда.
+    let Some(_busy) = BusyGuard::take() else {
         return; // опрос уже идёт — второй такой же только заспамит
-    }
+    };
     let now = now_ms();
     let stale: Vec<&'static str> = [CLAUDE, KIMI]
         .into_iter()
@@ -863,7 +894,6 @@ pub async fn ensure_fresh(d: &Arc<Daemon>, max_age_ms: i64, why: &str) {
         crate::log::line(&format!("[budget] свежий запрос {p}: {why}"));
         poll_one(d, p, now_ms()).await;
     }
-    budget().busy.store(false, Ordering::SeqCst);
 }
 
 /// Единственный опросчик приложения. Такт короткий, решение о походе в сеть —
@@ -879,10 +909,10 @@ pub fn spawn_poller(d: &Arc<Daemon>) {
             let active = work_active(&d, now);
             let awake = app_awake(&d);
             // обязательный свежий запрос уже в полёте — второй только заспамит
-            if budget().busy.swap(true, Ordering::SeqCst) {
+            let Some(_busy) = BusyGuard::take() else {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 continue;
-            }
+            };
             for p in [CLAUDE, KIMI] {
                 let s = snapshot(p, &c, now);
                 if now < s.next_at {
@@ -895,7 +925,7 @@ pub fn spawn_poller(d: &Arc<Daemon>) {
                     poll_one(&d, p, now_ms()).await;
                 }
             }
-            budget().busy.store(false, Ordering::SeqCst);
+            drop(_busy); // спим уже незанятыми: такт длинный, держать флаг незачем
             tokio::time::sleep(Duration::from_secs(30)).await;
         }
     });
@@ -1484,6 +1514,31 @@ mod tests {
         assert_eq!(interval_ms(&c, Rung::Warn, false, false, false), Some(2 * 60_000), "у порога");
         assert_eq!(interval_ms(&c, Rung::Stop, false, false, false), Some(2 * 60_000), "у стены");
         assert_eq!(interval_ms(&c, Rung::Ok, false, false, true), Some(2 * 60_000), "чисел ещё нет");
+    }
+
+    /// Занятость опроса снимается САМА — иначе бюджет застревает в «unknown»
+    /// навсегда.
+    ///
+    /// Живой дефект: приложение показывало «лимиты недоступны», хотя прямые
+    /// запросы к провайдерам проходили и давали числа (claude 5ч 39% / неделя
+    /// 68%, kimi 26/100 и 61/100). Флаг занятости выставлялся руками и снимался
+    /// в конце функции, а между ними стоит поход в сеть. Обрыв будущего —
+    /// дедлайн гейта на `sessions.resume`/`sessions.spawn`, отмена хода,
+    /// перезапуск — оставлял флаг поднятым, и дальше КАЖДЫЙ опрос, и по
+    /// таймеру, и явный, видел «уже идёт» и молча уходил.
+    ///
+    /// Откат по отказам тут ни при чём: он ограничен часом и лечится сам.
+    /// Поднятый флаг не лечился ничем, кроме перезапуска приложения.
+    #[test]
+    fn a_dropped_poll_never_leaves_the_budget_wedged() {
+        budget().busy.store(false, Ordering::SeqCst);
+        {
+            let _g = BusyGuard::take().expect("свободный опрос обязан браться");
+            assert!(BusyGuard::take().is_none(), "второй опрос пошёл в сеть параллельно");
+        }
+        // вышли из области видимости — то же самое, что обрыв будущего
+        assert!(BusyGuard::take().is_some(), "флаг занятости остался поднятым навсегда");
+        budget().busy.store(false, Ordering::SeqCst);
     }
 
     /// Темп — по скользящему окну; берём худший из двух.

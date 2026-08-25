@@ -21,6 +21,8 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
+use crate::backend::Agent;
+
 /// Хвост транскрипта, который читаем ради оценки цены оживления. Последняя
 /// запись с `usage` почти всегда у самого конца файла (это же допущение уже
 /// делает `agent::context::for_chat` с 512 КБ) — гонять по диску весь файл
@@ -91,7 +93,7 @@ impl Integrity {
 /// приходится именно на последнюю строку, поэтому решение «оборван или нет»
 /// зависит ТОЛЬКО от разбора последней непустой строки — не от доли битых
 /// строк по всему файлу (это отдельный вопрос, см. [`Verdict::Corrupted`]).
-pub fn check_integrity(path: &Path) -> Integrity {
+pub fn check_integrity(agent: Agent, path: &Path) -> Integrity {
     let meta = match fs::metadata(path) {
         Ok(m) => m,
         Err(e) => return Integrity::empty(format!("файл не открывается ({e}) — считаем, что сессии нет")),
@@ -132,7 +134,7 @@ pub fn check_integrity(path: &Path) -> Integrity {
         match serde_json::from_str::<Value>(t) {
             Ok(v) => {
                 tail_ok = true;
-                if is_message(&v) {
+                if is_message(agent, &v) {
                     messages += 1;
                 }
             }
@@ -199,8 +201,36 @@ pub fn check_integrity(path: &Path) -> Integrity {
     }
 }
 
-fn is_message(v: &Value) -> bool {
-    matches!(v.get("type").and_then(Value::as_str), Some("user") | Some("assistant"))
+/// Реплика ли это — С УЧЁТОМ ДИАЛЕКТА CLI.
+///
+/// Здесь была самая дорогая ошибка этой капабилити, и стоила она не поломки, а
+/// ЛОЖНОГО СИГНАЛА О ПОТЕРЕ ДАННЫХ. Считалось, что реплика — это запись с
+/// `type: "user"|"assistant"`. Так пишет claude. Kimi не пишет таких записей
+/// ВООБЩЕ: у него `context.append_message`, `turn.prompt`, `turn.ended`.
+///
+/// Из-за этого целый транскрипт kimi на 1.9 МБ с 86 сообщениями и 38 промптами
+/// давал ноль реплик, и дальше по цепочке:
+///
+/// - `check_integrity` возвращал `NoMessages` — «оживлять нечего, разговора не
+///   было», то есть оживление kimi отказывало ДО запуска, на целом файле. Это и
+///   есть настоящая причина «claude поднимает, kimi нет»;
+/// - снаружи это выглядело как «файл сброшен, реплик нет», и полтора часа
+///   разбирались, не уничтожает ли наш же инструмент воскрешения то, ради чего
+///   его зовут. Не уничтожал: все 37 транскриптов были целы, ни один не менялся.
+///
+/// Отсюда правило: любой счётчик, который считает содержимое транскрипта,
+/// обязан знать, ЧЕЙ это транскрипт. Ноль реплик — слишком похоже на правду,
+/// чтобы его можно было получать по ошибке.
+fn is_message(agent: Agent, v: &Value) -> bool {
+    let t = v.get("type").and_then(Value::as_str).unwrap_or_default();
+    match agent {
+        // claude пишет реплику записью верхнего уровня с типом роли.
+        Agent::Claude | Agent::Codex => matches!(t, "user" | "assistant"),
+        // kimi ведёт «провод»: сообщение, доехавшее в контекст, — это
+        // `context.append_message`; `turn.prompt` — то же сообщение человека, и
+        // считать его вторым разом значит удвоить счёт.
+        Agent::Kimi => t == "context.append_message",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -239,8 +269,8 @@ pub struct Assessment {
 /// каталоге из полутора тысяч транскриптов — минуты. Перечислениям нужен
 /// [`assess_light`], а эта — только там, где число реплик действительно
 /// показывают человеку.
-pub fn assess(path: &Path) -> Assessment {
-    Assessment { message_count: count_messages(path), ..assess_light(path) }
+pub fn assess(agent: Agent, path: &Path) -> Assessment {
+    Assessment { message_count: count_messages(agent, path), ..assess_light(agent, path) }
 }
 
 /// То же, но БЕЗ числа реплик (оно остаётся нулём) — и без полного прохода по
@@ -250,7 +280,7 @@ pub fn assess(path: &Path) -> Assessment {
 /// и время последней реплики — из последних килобайт. Стоимость такой оценки не
 /// зависит от размера файла, поэтому её не жалко звать хоть на каждый транскрипт
 /// в каталоге.
-pub fn assess_light(path: &Path) -> Assessment {
+pub fn assess_light(agent: Agent, path: &Path) -> Assessment {
     let file_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
     // Токены/модель/время последней реплики — из ХВОСТА (см. ASSESS_TAIL_BYTES):
@@ -258,6 +288,9 @@ pub fn assess_light(path: &Path) -> Assessment {
     // заводим второй способ счёта.
     let tail = crate::transcript::read_recent_text(path, ASSESS_TAIL_BYTES).unwrap_or_default();
     let tail_entries = crate::transcript::entries_from_text(&tail);
+    if agent == Agent::Kimi {
+        return kimi_assess(file_bytes, &tail_entries);
+    }
     let last = crate::agent::context::last_usage(&tail_entries);
     let last_message_at = tail_entries.iter().rev().find_map(|e| {
         e.get("timestamp").and_then(Value::as_str).and_then(crate::transcript::parse_ts)
@@ -272,11 +305,76 @@ pub fn assess_light(path: &Path) -> Assessment {
     }
 }
 
+/// Оценка хвоста в диалекте kimi.
+///
+/// Каждое поле здесь называется у kimi иначе, и каждое несовпадение стоило
+/// отдельной жалобы:
+///
+/// - **время** — `time` (мс эпохи числом), а не `timestamp` (строка ISO). Пока
+///   читали `timestamp`, у ВСЕХ kimi-сессий свежесть выходила нулевой, они
+///   уезжали в самый низ сортировки, и `limit` срезал их целиком за
+///   claude-сессиями. Снаружи: «в списке оживляемых только claude»;
+/// - **токены** — `usage.record` с полями `inputOther` / `inputCacheRead` /
+///   `inputCacheCreation`, а не `usage.input_tokens` и соседи. Сумма та же по
+///   смыслу (весь вход, включая кэш), поэтому и здесь она считается так же;
+/// - **модель** — `kimi-code/k3`, и цену по ней спрашиваем у бэкенда kimi, а не
+///   claude: ставки различаются на порядок.
+///
+/// Запасной источник токенов — `token_counting.turn_recorded` / `.measured` с
+/// полем `tokens`: это прямой замер контекста, и он есть даже там, где записи
+/// об оплате ещё не было.
+fn kimi_assess(file_bytes: u64, tail: &[Value]) -> Assessment {
+    let num = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let mut context_tokens = None;
+    let mut model = None;
+    // Идём с конца: нужна ПОСЛЕДНЯЯ известная величина, а не первая.
+    for e in tail.iter().rev() {
+        let t = e.get("type").and_then(Value::as_str).unwrap_or_default();
+        if context_tokens.is_none() && t == "usage.record" {
+            if let Some(u) = e.get("usage") {
+                let sum = num(u, "inputOther") + num(u, "inputCacheRead") + num(u, "inputCacheCreation");
+                if sum > 0 {
+                    context_tokens = Some(sum);
+                    model = e.get("model").and_then(Value::as_str).map(str::to_string);
+                }
+            }
+        }
+        if context_tokens.is_none() && t.starts_with("token_counting.") {
+            let n = num(e, "tokens");
+            if n > 0 {
+                context_tokens = Some(n);
+            }
+        }
+        if model.is_none() && t == "llm.request" {
+            model = e.get("model").and_then(Value::as_str).map(str::to_string);
+        }
+        if context_tokens.is_some() && model.is_some() {
+            break;
+        }
+    }
+    // Время последней записи ЛЮБОГО типа: у kimi служебные записи идут вперемешку
+    // с сообщениями, и последняя из них — это и есть момент, когда сессия
+    // в последний раз подавала признаки жизни.
+    let last_message_at = tail
+        .iter()
+        .rev()
+        .find_map(|e| e.get("time").and_then(Value::as_i64))
+        .filter(|t| *t > 0);
+
+    Assessment {
+        context_tokens,
+        file_bytes,
+        last_message_at,
+        model: model.filter(|m| !m.is_empty()),
+        message_count: 0,
+    }
+}
+
 /// Число реплик за всю сессию: лёгкий потоковый проход по файлу, тип записи
 /// без остального разбора. Отдельно от `check_integrity`: оценке цены не
 /// нужна причина брака, только счётчик, и незачем гонять два прохода с одной
 /// и той же логикой построчного чтения ради разных полей одной структуры.
-fn count_messages(path: &Path) -> u64 {
+fn count_messages(agent: Agent, path: &Path) -> u64 {
     let Ok(file) = File::open(path) else { return 0 };
     let mut n = 0u64;
     // `.flatten()` тут — не срез до первой ошибки (как было бы с `map_while`),
@@ -288,7 +386,7 @@ fn count_messages(path: &Path) -> u64 {
             continue;
         }
         if let Ok(v) = serde_json::from_str::<Value>(t) {
-            if is_message(&v) {
+            if is_message(agent, &v) {
                 n += 1;
             }
         }
@@ -325,10 +423,10 @@ pub enum ReviveCost {
 ///
 /// `model` — сырой id из транскрипта (`Assessment::model`), не «человеческое»
 /// имя: сюда же кладём результат `Backend::friendly_model`.
-pub fn revive_cost(context_tokens: Option<u64>, model: Option<&str>) -> ReviveCost {
+pub fn revive_cost(agent: Agent, context_tokens: Option<u64>, model: Option<&str>) -> ReviveCost {
     let Some(tokens) = context_tokens else { return ReviveCost::Unknown };
 
-    let backend = crate::backend::backend(crate::backend::Agent::Claude);
+    let backend = crate::backend::backend(agent);
     let friendly = model.map(|m| backend.friendly_model(m));
     let known = friendly.as_deref().filter(|f| backend.models().iter().any(|(_, label)| label == f));
 
@@ -389,7 +487,7 @@ mod tests {
                 r#"{"type":"assistant","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":5}}}"#,
             ],
         );
-        let r = check_integrity(&p);
+        let r = check_integrity(Agent::Claude, &p);
         assert_eq!(r.verdict, Verdict::Ok, "{}", r.reason);
         assert_eq!(r.total_lines, 2);
         assert_eq!(r.bad_lines, 0);
@@ -409,7 +507,7 @@ mod tests {
         write!(f, r#"{{"type":"assistant","message":{{"model":"claude-sonnet-4-5","usage":{{"inp"#).unwrap();
         drop(f);
 
-        let r = check_integrity(&p);
+        let r = check_integrity(Agent::Claude, &p);
         assert_eq!(r.verdict, Verdict::Truncated, "{}", r.reason);
         assert_eq!(r.total_lines, 1175);
         assert_eq!(r.bad_lines, 1, "битая только последняя строка — остальные 1174 целы");
@@ -429,7 +527,7 @@ mod tests {
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         write_lines(&p, &refs);
 
-        let r = check_integrity(&p);
+        let r = check_integrity(Agent::Claude, &p);
         assert_eq!(r.verdict, Verdict::Corrupted, "{}", r.reason);
         assert_ne!(r.verdict, Verdict::Truncated);
         assert_eq!(r.bad_lines, 1);
@@ -451,7 +549,7 @@ mod tests {
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         write_lines(&p, &refs);
 
-        let r = check_integrity(&p);
+        let r = check_integrity(Agent::Claude, &p);
         assert_eq!(r.verdict, Verdict::Corrupted);
         assert_eq!(r.bad_lines, 10);
         assert!(r.reason.contains("систем"), "{}", r.reason);
@@ -461,7 +559,7 @@ mod tests {
     fn empty_file_is_not_ok() {
         let p = tmp("empty.jsonl");
         File::create(&p).unwrap();
-        let r = check_integrity(&p);
+        let r = check_integrity(Agent::Claude, &p);
         assert_eq!(r.verdict, Verdict::Empty, "{}", r.reason);
     }
 
@@ -477,7 +575,7 @@ mod tests {
                 r#"{"type":"summary","summary":"старая сводка"}"#,
             ],
         );
-        let r = check_integrity(&p);
+        let r = check_integrity(Agent::Claude, &p);
         assert_eq!(r.verdict, Verdict::NoMessages, "{}", r.reason);
         assert_ne!(r.verdict, Verdict::Empty, "разница между пустым файлом и файлом без сообщений обязана быть видна");
         assert_eq!(r.message_lines, 0);
@@ -487,7 +585,7 @@ mod tests {
     fn missing_file_is_reported_as_empty_not_as_a_crash() {
         let p = tmp("does-not-exist.jsonl");
         let _ = std::fs::remove_file(&p);
-        let r = check_integrity(&p);
+        let r = check_integrity(Agent::Claude, &p);
         assert_eq!(r.verdict, Verdict::Empty);
     }
 
@@ -516,8 +614,8 @@ mod tests {
         writeln!(f, r#"{{"type":"assistant","timestamp":"2026-08-21T09:00:00Z","message":{{"model":"claude-sonnet-4-5","usage":{{"input_tokens":79,"cache_creation_input_tokens":500,"cache_read_input_tokens":310000}}}}}}"#).unwrap();
         drop(f);
 
-        let a_small = assess(&small);
-        let a_big = assess(&big);
+        let a_small = assess(Agent::Claude, &small);
+        let a_big = assess(Agent::Claude, &big);
 
         assert_eq!(a_small.context_tokens, Some(436_550));
         assert_eq!(a_big.context_tokens, Some(310_579));
@@ -528,8 +626,8 @@ mod tests {
         );
 
         // И цена должна следовать за токенами, а не за байтами на диске.
-        let cost_small = revive_cost(a_small.context_tokens, a_small.model.as_deref());
-        let cost_big = revive_cost(a_big.context_tokens, a_big.model.as_deref());
+        let cost_small = revive_cost(Agent::Claude, a_small.context_tokens, a_small.model.as_deref());
+        let cost_big = revive_cost(Agent::Claude, a_big.context_tokens, a_big.model.as_deref());
         match (cost_small, cost_big) {
             (ReviveCost::Known { usd: s, .. }, ReviveCost::Known { usd: b, .. }) => {
                 assert!(s > b, "файл поменьше обязан оцениваться дороже: {s} против {b}");
@@ -548,7 +646,7 @@ mod tests {
                 r#"{"type":"user","message":{"role":"user","content":"привет"}}"#,
             ],
         );
-        let a = assess(&p);
+        let a = assess(Agent::Claude, &p);
         assert_eq!(a.context_tokens, None, "не ноль — отдельное состояние «не знаем»");
         assert_eq!(a.message_count, 1);
     }
@@ -562,7 +660,7 @@ mod tests {
             writeln!(f, r#"{{"type":"assistant","message":{{"model":"claude-sonnet-4-5","content":[]}}}}"#).unwrap();
         }
         drop(f);
-        let a = assess(&p);
+        let a = assess(Agent::Claude, &p);
         assert_eq!(a.message_count, 60);
     }
 
@@ -572,7 +670,7 @@ mod tests {
     fn known_model_prices_by_cold_cache_input_rate() {
         // Sonnet: $3/1M входа (см. ClaudeBackend::price) — холодный вход всего
         // контекста, никакой скидки за "было в cache_read".
-        let c = revive_cost(Some(1_000_000), Some("claude-sonnet-4-5"));
+        let c = revive_cost(Agent::Claude, Some(1_000_000), Some("claude-sonnet-4-5"));
         match c {
             ReviveCost::Known { usd, model } => {
                 assert_eq!(model, "Sonnet");
@@ -584,7 +682,7 @@ mod tests {
 
     #[test]
     fn unknown_model_returns_a_range_not_a_silently_cheap_guess() {
-        let c = revive_cost(Some(1_000_000), Some("some-future-model-xyz"));
+        let c = revive_cost(Agent::Claude, Some(1_000_000), Some("some-future-model-xyz"));
         match c {
             ReviveCost::Range { usd_low, usd_high } => {
                 assert!(usd_low > 0.0 && usd_high > usd_low, "вилка, а не одно число");
@@ -598,12 +696,12 @@ mod tests {
 
     #[test]
     fn no_model_at_all_still_returns_a_range() {
-        let c = revive_cost(Some(500_000), None);
+        let c = revive_cost(Agent::Claude, Some(500_000), None);
         assert!(matches!(c, ReviveCost::Range { .. }));
     }
 
     #[test]
     fn missing_tokens_means_unknown_not_zero_cost() {
-        assert_eq!(revive_cost(None, Some("claude-opus-4-8")), ReviveCost::Unknown);
+        assert_eq!(revive_cost(Agent::Claude, None, Some("claude-opus-4-8")), ReviveCost::Unknown);
     }
 }

@@ -390,8 +390,8 @@ pub fn confirm_card(d: &Arc<Daemon>, sid: &str, reason: Option<&str>) -> Value {
         return json!({ "kind": "revive", "sessionId": sid, "gone": true, "reason": reason });
     };
     let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    let a = revive::assess_light(&path);
-    let cost = revive::revive_cost(a.context_tokens, a.model.as_deref());
+    let a = revive::assess_light(agent, &path);
+    let cost = revive::revive_cost(agent, a.context_tokens, a.model.as_deref());
     json!({
         "kind": "revive",
         "sessionId": sid,
@@ -430,6 +430,58 @@ pub fn beyond_grant(bytes: u64, usd: Option<f64>, max_mb: f64, max_usd: f64) -> 
         )),
         _ => None,
     }
+}
+
+/* ================= копия перед подъёмом ================= */
+
+/// Отложить копию транскрипта рядом, прежде чем звать CLI.
+///
+/// Решение владельца, и оно правильное независимо от того, кто виноват:
+/// оживление — единственная наша операция, которая отдаёт чужому процессу файл
+/// с невосстановимой историей и говорит «сделай с ним что-нибудь». Копия стоит
+/// секунды диска, а разговор, которого больше нигде нет, — не стоит ничего,
+/// пока он есть, и бесконечно много, когда его не стало.
+///
+/// Сегодняшняя тревога («kimi обнуляет wire.jsonl при `-S`») не подтвердилась:
+/// все 37 транскриптов оказались целы, ни один не менялся, а «ноль реплик»
+/// оказался нашим же счётчиком, не знавшим диалекта kimi. Но проверка эта — про
+/// ПРОШЛОЕ. Про будущее поведение чужого CLI мы не знаем ничего, и узнавать это
+/// ценой единственной копии данных не станем.
+///
+/// Копия НЕ обязательна для подъёма: не легла — предупреждаем словами и идём
+/// дальше. Отказать в оживлении из-за нехватки места значило бы сделать
+/// страховку дороже страхуемого.
+fn backup_transcript(path: &Path, sid: &str) -> Result<PathBuf, String> {
+    backup_into(&crate::util::jarvis_dir().join("transcript-backups"), path, sid)
+}
+
+/// То же, но каталог назван снаружи, — чтобы тест копий не писал в живой
+/// `~/.jarvis` владельца. Проверка сохранности данных, которая сама лезет в
+/// чужие данные, — плохая шутка.
+fn backup_into(dir: &Path, path: &Path, sid: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("каталог копий не создался: {e}"))?;
+    // Имя несёт и сессию, и момент: одну сессию поднимают не по одному разу, и
+    // копия, затирающая предыдущую, защищает ровно от одной беды из двух.
+    //
+    // Миллисекунды для этого НЕ ХВАТАЕТ, и это поймал тест, а не рассуждение:
+    // два подъёма подряд укладываются в одну и ту же миллисекунду, и вторая
+    // копия молча ложилась поверх первой. Копия, затирающая копию, — худший вид
+    // резервной копии: она есть, ей верят, а прежнего состояния в ней уже нет.
+    let base = sid.replace(['/', '\\'], "_");
+    let stamp = crate::util::now_ms();
+    for n in 0..1000 {
+        let name = match n {
+            0 => format!("{base}-{stamp}.jsonl"),
+            n => format!("{base}-{stamp}-{n}.jsonl"),
+        };
+        let to = dir.join(name);
+        if to.exists() {
+            continue;
+        }
+        std::fs::copy(path, &to).map_err(|e| format!("копия не легла: {e}"))?;
+        return Ok(to);
+    }
+    Err("за одну миллисекунду набралась тысяча копий одной сессии — это не подъём, а цикл".into())
 }
 
 /* ================= оживление ================= */
@@ -506,7 +558,7 @@ async fn resume_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
     // 3. Целостность. `claude --resume` оживляет обрезанный файл МОЛЧА, до места
     //    обрыва (проверено живьём), поэтому проверяем мы, а не он: сессия с
     //    обрубленной памятью будет уверенно врать, и это хуже отказа.
-    let integrity = revive::check_integrity(&path);
+    let integrity = revive::check_integrity(agent, &path);
     if integrity.verdict != Verdict::Ok {
         return Err(format!(
             "транскрипт не годен к оживлению: {}. Файл: {}",
@@ -556,8 +608,8 @@ async fn resume_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
     //    запуска: узнать про стену, когда терминал уже открыт и деньги
     //    потрачены, — то же самое, что не узнать вовсе. Числа отказа (сколько
     //    осталось, сколько придержано, когда сброс) собирает `budget_refusal`.
-    let a = revive::assess(&path);
-    let cost = revive::revive_cost(a.context_tokens, a.model.as_deref());
+    let a = revive::assess(agent, &path);
+    let cost = revive::revive_cost(agent, a.context_tokens, a.model.as_deref());
     let usd = match &cost {
         ReviveCost::Known { usd, .. } => Some(*usd),
         // Вилка — берём ВЕРХНЮЮ границу: порог существует, чтобы не потратить
@@ -661,6 +713,24 @@ async fn resume_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
                     outcome.as_str()
                 ));
             }
+        }
+    }
+
+    // 6в. Копия транскрипта — ПЕРЕД тем, как отдать файл чужому процессу.
+    //     Последний рубеж: дальше историей распоряжаемся не мы.
+    match backup_transcript(&path, &sid) {
+        Ok(to) => crate::log::line(&format!(
+            "[resume] {sid}: копия транскрипта в {}",
+            to.display()
+        )),
+        Err(e) => {
+            // Не отказ: страховка не вправе стоить дороже страхуемого. Но и не
+            // молчание — человек должен знать, что подъём пошёл без сетки.
+            notes.push(format!(
+                "копию транскрипта сделать не вышло ({e}) — поднимаю без неё; \
+                 если разговор пропадёт, восстанавливать будет нечем"
+            ));
+            crate::log::line(&format!("[resume] {sid}: КОПИЯ НЕ СДЕЛАНА — {e}"));
         }
     }
 
@@ -819,8 +889,8 @@ fn revivable_handler(d: Arc<Daemon>, args: Value) -> Result<Value, String> {
             // Лёгкая оценка: реплики полным проходом не считаем — на список их
             // не показывают, а стоят они всего файла целиком. Точное число
             // отдаёт сам подъём, там оно уместно и там оно одно.
-            let it = revive::assess_light(&path);
-            let cost = revive::revive_cost(it.context_tokens, it.model.as_deref());
+            let it = revive::assess_light(a, &path);
+            let cost = revive::revive_cost(a, it.context_tokens, it.model.as_deref());
             json!({
                 "id": sid,
                 "agent": a.label(),
@@ -1010,6 +1080,108 @@ mod tests {
             "проза перебила поле, хотя поле надёжнее"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Целый транскрипт kimi не смеет читаться как пустой.
+    ///
+    /// Самая дорогая ошибка этой капабилити, и стоила она не поломки, а ложной
+    /// тревоги об уничтожении данных. Счётчик реплик знал только форму claude
+    /// (`type: user|assistant`), а kimi таких записей не пишет вовсе. Целый файл
+    /// на 1.9 МБ с 86 сообщениями давал НОЛЬ реплик, и дальше:
+    ///
+    /// - `check_integrity` возвращал `NoMessages` — «оживлять нечего, разговора
+    ///   не было». Это и есть настоящая причина «claude поднимает, kimi нет»:
+    ///   мы отказывали сами, на целом файле, ещё до запуска kimi;
+    /// - снаружи ноль читался как «файл сброшен», и полтора часа выяснялось, не
+    ///   стирает ли наш же инструмент воскрешения то, ради чего его зовут.
+    ///
+    /// Тест на СИНТЕТИКЕ, а не на живых файлах: живые кончаются, а свойство
+    /// «ноль реплик получается только у пустого разговора» обязано пережить и
+    /// чистую машину, и чужую.
+    #[test]
+    fn a_whole_kimi_transcript_is_never_read_as_empty() {
+        let dir = std::env::temp_dir().join(format!("jarvis-kimi-dialect-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("wire.jsonl");
+        // Форма — с живого файла владельца, слово в слово по именам полей.
+        std::fs::write(
+            &f,
+            "{\"type\":\"turn.prompt\",\"input\":[{\"type\":\"text\",\"text\":\"привет\"}],\"time\":1787267364253}\n\
+             {\"type\":\"context.append_message\",\"message\":{\"role\":\"user\"},\"time\":1787267364250}\n\
+             {\"type\":\"context.append_message\",\"message\":{\"role\":\"assistant\"},\"time\":1787267372000}\n\
+             {\"type\":\"usage.record\",\"model\":\"kimi-code/k3\",\"usage\":{\"inputOther\":5426,\"output\":39,\"inputCacheRead\":18944,\"inputCacheCreation\":0},\"time\":1787267372831}\n\
+             {\"type\":\"turn.ended\",\"turnId\":0,\"reason\":\"completed\",\"time\":1787267372880}\n",
+        )
+        .unwrap();
+
+        // 1. Годен к оживлению — а не «разговора не было».
+        let it = crate::revive::check_integrity(Agent::Kimi, &f);
+        assert_eq!(
+            it.verdict,
+            Verdict::Ok,
+            "целый kimi-транскрипт снова забракован: {}",
+            it.reason
+        );
+        assert_eq!(it.message_lines, 2, "реплики kimi снова не считаются");
+
+        // 2. Свежесть берётся из `time`, а не из `timestamp`. Без этого у ВСЕХ
+        //    kimi-сессий она нулевая, они уезжают в конец сортировки, и `limit`
+        //    срезает их целиком за claude-сессиями: «в списке только claude».
+        let a = crate::revive::assess(Agent::Kimi, &f);
+        assert_eq!(a.last_message_at, Some(1787267372880), "свежесть kimi снова нулевая");
+        assert_eq!(a.message_count, 2);
+
+        // 3. Токены — из полей kimi, и цена считается по прайсу kimi, а не claude.
+        assert_eq!(a.context_tokens, Some(5426 + 18944), "контекст kimi не посчитан");
+        assert_eq!(a.model.as_deref(), Some("kimi-code/k3"));
+        match crate::revive::revive_cost(Agent::Kimi, a.context_tokens, a.model.as_deref()) {
+            crate::revive::ReviveCost::Known { usd, model } => {
+                assert_eq!(model, "K3", "модель kimi не распознана: {model}");
+                assert!(usd > 0.0, "цена kimi вышла нулевой");
+            }
+            other => panic!("цена kimi посчиталась вилкой или никак: {other:?}"),
+        }
+
+        // 4. И ноль по-прежнему возможен — но только там, где разговора правда
+        //    не было. Иначе «пусто» перестанет что-либо значить.
+        let g = dir.join("service-only.jsonl");
+        std::fs::write(&g, "{\"type\":\"tools.update_store\",\"time\":1}\n").unwrap();
+        assert_eq!(crate::revive::check_integrity(Agent::Kimi, &g).verdict, Verdict::NoMessages);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Перед оживлением транскрипт копируется — до того, как файл уйдёт чужому
+    /// процессу.
+    ///
+    /// Копия не потому, что kimi уличён (не уличён: все 37 транскриптов целы, ни
+    /// один не менялся), а потому, что оживление — единственная наша операция,
+    /// отдающая невосстановимую историю чужому CLI со словами «сделай с ней
+    /// что-нибудь». Про прошлое мы теперь знаем, про будущее — нет.
+    #[test]
+    fn the_transcript_is_copied_before_anyone_else_touches_it() {
+        let dir = std::env::temp_dir().join(format!("jarvis-backup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("wire.jsonl");
+        std::fs::write(&f, "{\"type\":\"turn.prompt\"}\n").unwrap();
+        let box_ = dir.join("backups");
+        let to = backup_into(&box_, &f, "sid-1").expect("копия не легла");
+        assert!(to.is_file(), "копии нет на диске");
+        assert_eq!(std::fs::read(&f).unwrap(), std::fs::read(&to).unwrap(), "копия не совпала");
+        // Одну сессию поднимают не по одному разу, и два подъёма подряд
+        // укладываются в ОДНУ миллисекунду. Копия, затирающая копию, — худший
+        // вид резервной копии: она есть, ей верят, а прежнего состояния в ней
+        // уже нет. Тест поймал ровно это.
+        let again = backup_into(&box_, &f, "sid-1").expect("вторая копия не легла");
+        assert_ne!(to, again, "вторая копия затёрла первую");
+        assert!(to.is_file() && again.is_file(), "одна из копий исчезла");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // …и копия делается ДО запуска, а не после: после — это уже не копия.
+        let src = include_str!("resume.rs");
+        let body = src.split("async fn resume_handler").nth(1).expect("хендлер на месте");
+        let copy = body.find("backup_transcript(").expect("копии перед подъёмом нет вовсе");
+        let launch = body.find("launch_core(").expect("запуска нет");
+        assert!(copy < launch, "копия делается после того, как файл отдали CLI");
     }
 
     /// Список и подъём обязаны видеть ОДНО И ТО ЖЕ.

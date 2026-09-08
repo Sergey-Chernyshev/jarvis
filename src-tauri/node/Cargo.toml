@@ -1,6 +1,6 @@
 [package]
 name = "jarvis-node"
-version = "0.3.3"
+version = "1.0.0-beta.1"
 description = "Узел Jarvis на удалённой машине: принимает хуки агентов и отдаёт их ноуту через SSH"
 license = "MIT"
 edition = "2021"

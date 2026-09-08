@@ -1,6 +1,6 @@
 {
   "name": "jarvis-mvp",
-  "version": "0.3.3",
+  "version": "1.0.0-beta.1",
   "private": true,
   "description": "Menu-bar/tray mission control for Claude Code and Codex sessions: status panel, notifications, voice (Rust + Tauri). macOS and Linux.",
   "license": "MIT",

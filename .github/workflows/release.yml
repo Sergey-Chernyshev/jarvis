@@ -44,6 +44,18 @@ jobs:
       - name: Ensure cmake (whisper-native)
         run: cmake --version || brew install cmake
 
+      - name: Read release notes
+        id: notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test -f "docs/release/$RELEASE_TAG.md"
+          {
+            echo "body<<JARVIS_RELEASE_NOTES_END"
+            cat "docs/release/$RELEASE_TAG.md"
+            echo "JARVIS_RELEASE_NOTES_END"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build (ad-hoc sign), updater artifacts, release
         uses: tauri-apps/tauri-action@v1
         env:
@@ -57,8 +69,9 @@ jobs:
           args: --target aarch64-apple-darwin --features wakeword-ort,whisper-native,stt-vad
           tagName: ${{ github.ref_name }}
           releaseName: Jarvis ${{ github.ref_name }}
-          releaseDraft: false
-          prerelease: false
+          releaseDraft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          releaseBody: ${{ steps.notes.outputs.body }}
           uploadUpdaterJson: true
 
       - name: Attach standalone Linux nodes to the same release
@@ -69,6 +82,12 @@ jobs:
           files: |
             src-tauri/node-binaries/jarvis-node-*
             src-tauri/node-binaries/manifest.json
+
+      - name: Validate complete draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/publish-release.mjs "$RELEASE_TAG" --check
 
   # Build both static Linux nodes first. The app embeds these exact sources,
   # so onboarding works even before release assets become downloadable.
